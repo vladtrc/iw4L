@@ -55,9 +55,6 @@ executables. That holds for issues, pull requests and release assets alike.
 IW4L reads data from an installation each user already owns, and the project is
 not a distribution channel for it.
 
-## Development is AI-assisted
+## Written by an LLM
 
-Much of this codebase was written with AI assistance. The design decisions, the
-reviews and the claims made in `README.md` are the maintainer's. It is said here
-plainly so that neither the code's volume nor its uniformity is mistaken for
-something it is not.
+This whole project is written by an LLM.

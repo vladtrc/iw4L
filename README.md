@@ -14,8 +14,7 @@ IW4L is not affiliated with, endorsed by or supported by the rights holders of
 the original games. **No game assets are contained in this repository or in any
 IW4L release.** You supply your own legally obtained installation.
 
-Maintained by vladtrc. Development is AI-assisted; the design decisions,
-reviews and the published claims are the maintainer's.
+This whole project is written by an LLM.
 
 ## Scope
 
