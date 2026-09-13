@@ -2,7 +2,7 @@ use bevy::prelude::*;
 
 use crate::ModelLightingRequest;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct XModelSurfaceDraw {
     pub surface: u32,
     pub material: u32,

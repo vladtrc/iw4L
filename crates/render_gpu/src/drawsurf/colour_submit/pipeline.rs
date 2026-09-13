@@ -47,30 +47,30 @@ fn adapt_admitted_port(port: &crate::AdmittedExactPort) -> ExactColourPortGpu {
 }
 
 pub(super) fn init_or_update_pipeline(
-    extracted: Option<Res<ExtractedExactColour>>,
+    world: Option<Res<InstalledRenderWorld>>,
     mut pipeline: ResMut<ExactColourPipeline>,
 ) {
-    let Some(extracted) = extracted else {
+    let Some(world) = world else {
         return;
     };
-    if extracted.ports.is_empty() {
+    if world.ports.is_empty() {
         if !pipeline.ports.is_empty() {
             pipeline.ports.clear();
             pipeline.by_id.clear();
         }
         return;
     }
-    if pipeline.generation == extracted.generation && pipeline.ports.len() == extracted.ports.len()
-    {
+    if pipeline.generation == world.generation && pipeline.ports.len() == world.ports.len() {
         return;
     }
-    pipeline.ports = extracted.ports.iter().map(adapt_admitted_port).collect();
-    pipeline.generation = extracted.generation;
+    pipeline.ports = world.ports.iter().map(adapt_admitted_port).collect();
+    pipeline.generation = world.generation;
     pipeline.rebuild_index();
 }
 
 pub(super) fn kick_extracted_colour_pipelines(
-    extracted: Option<Res<ExtractedExactColour>>,
+    world: Option<Res<InstalledRenderWorld>>,
+    frame: Option<Res<PublishedRenderFrame>>,
     views: Query<(&ViewTarget, Option<&Msaa>), (With<Camera3d>, With<ViewUpscalingPipeline>)>,
     device: Res<RenderDevice>,
     mut registry: ResMut<ExactPipelineRegistry>,
@@ -85,8 +85,12 @@ pub(super) fn kick_extracted_colour_pipelines(
             request_exact_pipeline(&mut registry, &pipeline, &device, key);
         }
     }
+    let extracted = world
+        .as_deref()
+        .zip(frame.as_deref())
+        .map(|(world, frame)| ExtractedColourRefs::new(world, frame));
     kick_admitted_pipelines(
-        extracted.as_deref(),
+        extracted,
         &views,
         &device,
         &mut registry,
@@ -98,7 +102,7 @@ pub(super) fn kick_extracted_colour_pipelines(
 }
 
 pub(super) fn kick_admitted_pipelines(
-    extracted: Option<&ExtractedExactColour>,
+    extracted: Option<ExtractedColourRefs<'_>>,
     views: &Query<(&ViewTarget, Option<&Msaa>), (With<Camera3d>, With<ViewUpscalingPipeline>)>,
     device: &RenderDevice,
     registry: &mut ExactPipelineRegistry,
@@ -109,7 +113,7 @@ pub(super) fn kick_admitted_pipelines(
     let Some(extracted) = extracted else {
         return;
     };
-    if !extracted.warm_pipelines {
+    if !extracted.frame.warm_pipelines {
         return;
     }
 
@@ -125,8 +129,8 @@ pub(super) fn kick_admitted_pipelines(
             .map(|(target, msaa)| (target.main_texture_format(), msaa.map_or(1, Msaa::samples)))
             .collect()
     };
-    if kicked.generation != Some(extracted.generation) || kicked.views != view_sig {
-        if kicked.generation == Some(extracted.generation)
+    if kicked.generation != Some(extracted.world.generation) || kicked.views != view_sig {
+        if kicked.generation == Some(extracted.world.generation)
             && kicked.views == [crate::LENS_VIEW_SIGNATURE]
         {
             diag::warn!(
@@ -140,7 +144,7 @@ pub(super) fn kick_admitted_pipelines(
 
         kicked.current.clear();
         let mut scheduled = HashSet::new();
-        kicked.generation = Some(extracted.generation);
+        kicked.generation = Some(extracted.world.generation);
         kicked.views = view_sig.clone();
 
         for (main_format, samples) in view_sig {
@@ -172,9 +176,15 @@ pub(super) fn kick_admitted_pipelines(
                         };
                         if tech != 5 && port.vertex_type != PACKED_VERTEX_TYPE {
                             let used = if port.vertex_type == STATICMODELCACHE_VERTEX_TYPE {
-                                extracted.pipeline_smodel_materials.contains(&material.0)
+                                extracted
+                                    .frame
+                                    .pipeline_smodel_materials
+                                    .contains(&material.0)
                             } else {
-                                extracted.pipeline_world_materials.contains(&material.0)
+                                extracted
+                                    .frame
+                                    .pipeline_world_materials
+                                    .contains(&material.0)
                             };
                             if !used {
                                 continue;
@@ -213,7 +223,7 @@ pub(super) fn kick_admitted_pipelines(
         );
     }
     *warmup = WorldPipelineWarmup {
-        generation: extracted.world_generation,
+        generation: extracted.world.world_generation,
         initialized: true,
         total: kicked.current.len() as u32,
         ready: kicked

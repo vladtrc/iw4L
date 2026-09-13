@@ -48,10 +48,11 @@ pub use gpu_prepare::{
 
 pub use colour_submit::{
     CODE_TEXTURE_FLOATZ, CODE_TEXTURE_RESOLVED_POST_SUN, CODE_TEXTURE_SHADOWMAP_SPOT,
-    CODE_TEXTURE_SHADOWMAP_SUN, ExtractedExactColour, ExtractedStaticGeometry,
-    FocusedOwnerSubmitState, bind_group_layout_from_entries, cached_lighting_port_variant,
-    colour_ports_static, colour_world_smodel_static, dump_shader_program_names,
-    dump_sorted_material_names, emit_focused_owner_submit, vertex_layouts_from_contract,
+    CODE_TEXTURE_SHADOWMAP_SUN, ExtractedStaticGeometry, FocusedOwnerSubmitState,
+    InstalledRenderWorld, PublishedRenderFrame, RenderFrameData, RenderWorldData,
+    bind_group_layout_from_entries, cached_lighting_port_variant, colour_ports_static,
+    colour_world_smodel_static, dump_shader_program_names, dump_sorted_material_names,
+    emit_focused_owner_submit, vertex_layouts_from_contract,
 };
 pub(crate) use draw::register_drawsurf_render;
 pub use geometry_diagnostic::{ExtractedDiagnosticGeometry, geometry_diagnostic_enabled};

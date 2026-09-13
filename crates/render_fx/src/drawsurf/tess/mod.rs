@@ -25,3 +25,9 @@ pub(crate) fn reclaim_share<T>(share: &mut Option<Arc<Vec<T>>>, dst: &mut Vec<T>
 pub(crate) fn published_or_live<'a, T>(share: Option<&'a Arc<Vec<T>>>, live: &'a [T]) -> &'a [T] {
     share.map(|rows| rows.as_slice()).unwrap_or(live)
 }
+
+pub(crate) fn publish_index_ranges(
+    draws: impl IntoIterator<Item = (u32, u32)>,
+) -> Arc<Vec<(u32, u32)>> {
+    Arc::new(draws.into_iter().collect())
+}

@@ -29,7 +29,7 @@ pub use clip_store::ClipStore;
 pub use emit::{BobCycleTracker, emit_footstep_on_bob_wrap, emit_weapon_fire};
 pub use match_set::AudioReady;
 pub use messages::{
-    Footstep, LandSound, PlayAlias, SND_ENT_LOCAL, StopAlias, ViewmodelNotetracks, WeaponSound,
+    AliasCommand, Footstep, LandSound, PlayAlias, SND_ENT_LOCAL, ViewmodelNotetracks, WeaponSound,
     snd_ent_from_number,
 };
 pub use pcm::{LivePan, LoopingPcmAudio, PcmAudio, decode_audio_bytes};

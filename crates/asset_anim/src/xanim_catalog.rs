@@ -121,8 +121,8 @@ impl XAnimCatalog {
         }
     }
 
-    fn row(&self, key: &XAnimKey) -> Option<&CapturedXAnim> {
-        self.by_ns.get(&key.namespace)?.get(&key.name)
+    fn take_row(&mut self, key: &XAnimKey) -> Option<CapturedXAnim> {
+        self.by_ns.get_mut(&key.namespace)?.remove(&key.name)
     }
 
     fn has_key(&self, key: &XAnimKey) -> bool {
@@ -252,19 +252,20 @@ impl XAnimCatalog {
         None
     }
 
-    pub fn absorb(&mut self, local: XAnimCatalog) -> usize {
+    pub fn absorb(&mut self, mut local: XAnimCatalog) -> usize {
         self.capture_gaps = self.capture_gaps.saturating_add(local.capture_gaps);
         let saved_zone = self.capture_zone;
         let saved_ns = self.capture_ns;
         let mut added = 0;
-        for (i, key) in local.order.iter().enumerate() {
-            let Some(captured) = local.row(key).cloned() else {
+        let order = std::mem::take(&mut local.order);
+        for (i, key) in order.into_iter().enumerate() {
+            let Some(captured) = local.take_row(&key) else {
                 continue;
             };
-            let vacant = !self.has_key(key);
+            let vacant = !self.has_key(&key);
             self.capture_zone = local.zones.get(i).copied().unwrap_or(local.capture_zone);
             self.capture_ns = key.namespace;
-            self.retain(key.clone(), captured);
+            self.retain(key, captured);
             if vacant {
                 added += 1;
             }

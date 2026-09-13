@@ -1,6 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use asset_iw4::snd_attenuate;
 use assets::{
@@ -49,10 +48,16 @@ pub struct MapAmbientBooted(pub bool);
 #[derive(Resource, Default)]
 pub(crate) struct SoundBankLoadAttempted(pub bool);
 
+/// How long a sound bank walk may run before it is worth a line of its own.
+const SOUND_BANK_WALK_STALL: std::time::Duration = std::time::Duration::from_secs(20);
+
 #[derive(Resource)]
 pub(crate) struct SoundBankWalk {
+    load_key: frame::LocalLoadKey,
     zone: String,
     task: Task<SoundBankWalked>,
+    started: std::time::Instant,
+    stall_reported: bool,
 }
 
 struct SoundBankWalked {
@@ -64,36 +69,8 @@ struct SoundBankWalked {
 
 #[derive(Resource)]
 pub(crate) struct SoundBankNamespace {
-    zone: String,
-    namespace: AssetNamespace,
-}
-
-#[derive(Resource)]
-pub(crate) struct MapAmbientPrepare {
-    zone: String,
-    namespace: AssetNamespace,
-    task: Task<(HashMap<String, Option<PcmAudio>>, f32)>,
-}
-
-#[derive(Resource, Default)]
-pub(crate) struct PreparedMapAmbientPcm {
-    zone: String,
-    namespace: AssetNamespace,
-    by_alias: HashMap<String, Option<PcmAudio>>,
-}
-
-impl PreparedMapAmbientPcm {
-    pub(crate) fn namespace(&self) -> AssetNamespace {
-        self.namespace
-    }
-
-    pub(crate) fn zone(&self) -> &str {
-        &self.zone
-    }
-
-    pub(crate) fn alias_names(&self) -> impl Iterator<Item = &str> {
-        self.by_alias.keys().map(String::as_str)
-    }
+    pub(crate) zone: String,
+    pub(crate) namespace: AssetNamespace,
 }
 
 pub fn stop_map_ambient(commands: &mut Commands, ambient: &Query<Entity, With<MapAmbient>>) {
@@ -107,26 +84,29 @@ pub(crate) fn stop_map_ambient_on_match_torn_down(
     ambient: Query<Entity, With<MapAmbient>>,
     mut booted: ResMut<MapAmbientBooted>,
     mut attempted: ResMut<SoundBankLoadAttempted>,
-    mut prepared: ResMut<PreparedMapAmbientPcm>,
     mut epoch: ResMut<MatchEpoch>,
     walk: Option<Res<SoundBankWalk>>,
     accepted: Option<Res<assets::MatchLoadAccepted>>,
     mut commands: Commands,
 ) {
-    if torn.read().count() == 0 {
+    let retired: Vec<_> = torn.read().map(|fact| fact.world_generation).collect();
+    if retired.is_empty() {
         return;
     }
     epoch.bump();
     stop_map_ambient(&mut commands, &ambient);
     booted.0 = false;
-    *prepared = PreparedMapAmbientPcm::default();
     commands.remove_resource::<assets::CreateFxOneshotEmitters>();
-    commands.remove_resource::<MapAmbientPrepare>();
 
-    let walk_is_for_the_incoming_map = walk
-        .as_ref()
-        .zip(accepted.as_ref())
-        .is_some_and(|(walk, accepted)| walk.zone == accepted.zone);
+    let walk_is_for_the_incoming_map =
+        walk.as_ref()
+            .zip(accepted.as_ref())
+            .is_some_and(|(walk, accepted)| {
+                walk.load_key == accepted.load_key
+                    && !retired.contains(&frame::WorldGeneration::from_install(
+                        walk.load_key.local_load_request_id,
+                    ))
+            });
     if !walk_is_for_the_incoming_map {
         commands.remove_resource::<SoundBankWalk>();
         attempted.0 = false;
@@ -143,6 +123,7 @@ pub(crate) fn stop_map_ambient_on_match_torn_down(
 pub(crate) fn start_sound_bank_walk(
     mut attempted: ResMut<SoundBankLoadAttempted>,
     accepted: Option<Res<assets::MatchLoadAccepted>>,
+    abort: Option<Res<assets::MatchLoadAbort>>,
     identity: Option<Res<frame::LaunchIdentity>>,
     mut commands: Commands,
 ) {
@@ -152,6 +133,9 @@ pub(crate) fn start_sound_bank_walk(
     let Some(accepted) = accepted else {
         return;
     };
+    if abort.is_some_and(|abort| abort.0 == accepted.request_id) {
+        return;
+    }
     let Some(identity) = identity else {
         return;
     };
@@ -165,17 +149,29 @@ pub(crate) fn start_sound_bank_walk(
 
     let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
     let task = pool.spawn(async move {
+        // Each stage announces itself as it finishes: the walk holds AudioReady,
+        // the world spawn and the host's admission behind it, so a stage that
+        // never returns has to be readable from the log of the run it hung.
+        let started = std::time::Instant::now();
+        let stage = |what: &str, at: std::time::Instant| {
+            diag::info!(
+                Audio,
+                "audio: sound bank walk `{walked_zone}`: {what} at {:.0}ms",
+                at.elapsed().as_secs_f32() * 1000.0
+            );
+        };
         let loaded = load_mp_sound_bank(&games, &walked_zone);
-
+        stage("catalog", started);
         let mut trees = NamespaceTrees::discover(&games);
+        stage("namespace trees", started);
         if let Ok(zone) = assets::find_zone_file(&games, &walked_zone) {
             trees.adopt_zone(&zone.path);
         }
+        stage("zone anchor", started);
         let (indices, lines) = NamespaceSoundIwd::open(&trees);
+        stage("iwd archives", started);
         let map_ns = namespace_for_zone(&games, &walked_zone);
-        if let Ok(loaded) = loaded.as_ref() {
-            crate::map_doors::prepare(&loaded.catalog, map_ns, Some(&indices));
-        }
+        stage("done", started);
         SoundBankWalked {
             loaded,
             indices,
@@ -183,93 +179,20 @@ pub(crate) fn start_sound_bank_walk(
             namespace: map_ns,
         }
     });
-    commands.insert_resource(SoundBankWalk { zone, task });
-}
-
-pub(crate) fn start_map_ambient_prepare(
-    bank: Option<Res<SoundBank>>,
-    iwd: Option<Res<SoundIwd>>,
-    identity: Option<Res<frame::LaunchIdentity>>,
-    script_sound: Option<Res<assets::SessionMapScriptSound>>,
-    prepared_pcm: Res<PreparedMapAmbientPcm>,
-    prepare: Option<Res<MapAmbientPrepare>>,
-    namespace: Option<Res<SoundBankNamespace>>,
-    mut commands: Commands,
-) {
-    if prepare.is_some() {
-        return;
-    }
-    let (Some(bank), Some(iwd), Some(identity), Some(script_sound), Some(namespace)) =
-        (bank, iwd, identity, script_sound, namespace)
-    else {
-        return;
-    };
-    if identity.zone.is_empty() || namespace.zone != identity.zone {
-        return;
-    }
-    if prepared_pcm.zone == identity.zone {
-        return;
-    }
-    let ambient_alias = script_sound.0.ambient_alias.clone();
-    let catalog = Arc::clone(&bank.0);
-    let indices = Arc::clone(&iwd.0);
-    let map_ns = namespace.namespace;
-    let zone = identity.zone.clone();
-    let walked_zone = zone.clone();
-
-    let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
-    let task = pool.spawn(async move {
-        let started = Instant::now();
-        let mut aliases = HashSet::new();
-        if let Some(alias) = ambient_alias {
-            aliases.insert(alias);
-        }
-        for emitter in catalog.createfx_loop_sounds(map_ns, &walked_zone) {
-            aliases.insert(emitter.soundalias);
-        }
-        let mut prepared = HashMap::with_capacity(aliases.len());
-        for alias in aliases {
-            let pcm = resolve_alias_pcm(&catalog, Some(indices.as_ref()), map_ns, &alias);
-            prepared.insert(alias, pcm);
-        }
-        (prepared, started.elapsed().as_secs_f32() * 1000.0)
-    });
-    commands.insert_resource(MapAmbientPrepare {
+    commands.insert_resource(SoundBankWalk {
+        load_key: accepted.load_key,
         zone,
-        namespace: map_ns,
         task,
+        started: std::time::Instant::now(),
+        stall_reported: false,
     });
-}
-
-pub(crate) fn install_map_ambient_pcm(
-    prepare: Option<ResMut<MapAmbientPrepare>>,
-    mut prepared_pcm: ResMut<PreparedMapAmbientPcm>,
-    mut commands: Commands,
-) {
-    let Some(mut prepare) = prepare else {
-        return;
-    };
-    let Some((prepared, prepare_ms)) = future::block_on(future::poll_once(&mut prepare.task))
-    else {
-        return;
-    };
-    let ready = prepared.values().filter(|pcm| pcm.is_some()).count();
-    diag::info!(
-        Audio,
-        "audio: prepared map ambient PCM {ready}/{} for {} in {prepare_ms:.1}ms off the frame",
-        prepared.len(),
-        prepare.zone,
-    );
-    prepared_pcm.by_alias = prepared;
-    prepared_pcm.zone.clone_from(&prepare.zone);
-    prepared_pcm.namespace = prepare.namespace;
-    commands.remove_resource::<MapAmbientPrepare>();
 }
 
 pub(crate) fn install_sound_bank(
     mut walk: Option<ResMut<SoundBankWalk>>,
     identity: Option<Res<frame::LaunchIdentity>>,
     accepted: Option<Res<assets::MatchLoadAccepted>>,
+    abort: Option<Res<assets::MatchLoadAbort>>,
     mut epoch: ResMut<MatchEpoch>,
     mut commands: Commands,
 ) {
@@ -277,23 +200,47 @@ pub(crate) fn install_sound_bank(
         return;
     };
 
-    if identity
+    // `MatchLoadAccepted` is removed the moment the map walk returns, which is
+    // normally *before* this one does — its absence means the load finished,
+    // not that the session moved on, and dropping the bank on it loses the race
+    // to whichever walk is slower on the machine. Only a *different* accepted
+    // load supersedes this one.
+    let superseded = accepted
         .as_ref()
-        .is_some_and(|identity| identity.zone != walk.zone)
-    {
-        if accepted.is_some_and(|accepted| accepted.zone == walk.zone) {
-            return;
-        }
-
-        let zone = walk.zone.clone();
-        commands.remove_resource::<SoundBankWalk>();
+        .is_some_and(|accepted| accepted.load_key != walk.load_key);
+    if abort.is_some_and(|abort| abort.0 == walk.load_key.local_load_request_id) || superseded {
         diag::info!(
             Audio,
-            "audio: sound bank for `{zone}` dropped — the session moved on"
+            "audio: sound bank for `{}` dropped — the session moved on",
+            walk.zone
         );
+        commands.remove_resource::<SoundBankWalk>();
         return;
     }
+    // The load key above already says this walk belongs to the accepted load.
+    // `identity.zone` is a separate display spelling the session stamps on its
+    // own schedule, so gating the install on it means a bank that never
+    // installs when the two never converge — and a bank that never installs
+    // holds AudioReady, the world spawn, and with it the host's
+    // `HostWorldReady`, down forever with nothing said.
+    let identity_zone = identity.as_ref().map(|identity| identity.zone.as_str());
+    if let Some(zone) = identity_zone.filter(|zone| *zone != walk.zone) {
+        diag::warn!(
+            Audio,
+            "audio: launch identity says `{zone}` while the accepted load walked `{}` — installing on the load key",
+            walk.zone
+        );
+    }
     let Some(walked) = future::block_on(future::poll_once(&mut walk.task)) else {
+        if !walk.stall_reported && walk.started.elapsed() >= SOUND_BANK_WALK_STALL {
+            walk.stall_reported = true;
+            diag::warn!(
+                Audio,
+                "audio: sound bank walk for `{}` still running after {:.0}s — AudioReady, the world spawn and host admission all wait on it",
+                walk.zone,
+                walk.started.elapsed().as_secs_f32()
+            );
+        }
         return;
     };
     commands.remove_resource::<SoundBankWalk>();
@@ -321,6 +268,8 @@ pub(crate) fn install_sound_bank(
             let bank = Arc::new(loaded.catalog);
 
             commands.insert_resource(crate::ClipStore::start(Arc::clone(&bank), Some(iwd)));
+            commands.insert_resource(crate::clip_store::PendingStarts::default());
+            commands.insert_resource(crate::playback::SharedPlayAssets::default());
             commands.insert_resource(SoundBank(bank));
             diag::info!(
                 Audio,
@@ -349,7 +298,7 @@ pub(crate) fn boot_map_ambient_once(
     bank: Option<Res<SoundBank>>,
     identity: Option<Res<frame::LaunchIdentity>>,
     script_sound: Option<Res<assets::SessionMapScriptSound>>,
-    prepared: Res<PreparedMapAmbientPcm>,
+    namespace: Option<Res<SoundBankNamespace>>,
     epoch: Res<MatchEpoch>,
     clips: Option<Res<crate::ClipStore>>,
     ready: Res<crate::AudioReady>,
@@ -378,9 +327,9 @@ pub(crate) fn boot_map_ambient_once(
     if identity.zone.is_empty() {
         return;
     }
-    if prepared.zone != identity.zone {
+    let Some(namespace) = namespace.filter(|ns| ns.zone == identity.zone) else {
         return;
-    }
+    };
     let ambient_alias = script_sound
         .as_deref()
         .and_then(|facts| facts.0.ambient_alias.as_deref());
@@ -390,10 +339,9 @@ pub(crate) fn boot_map_ambient_once(
         &mut looping_assets,
         &mut shared,
         bank.0.as_ref(),
-        prepared.namespace,
+        namespace.namespace,
         &identity.zone,
         ambient_alias,
-        &prepared.by_alias,
         clips.as_deref(),
         epoch.0,
         &mut gaps,
@@ -416,13 +364,12 @@ fn start_map_ambient_prepared(
     map_ns: AssetNamespace,
     map_name: &str,
     ambient_alias: Option<&str>,
-    prepared: &HashMap<String, Option<PcmAudio>>,
     clips: Option<&crate::ClipStore>,
     epoch: u64,
     gaps: &mut MissingAliasGaps,
 ) {
     if let Some(alias) = ambient_alias {
-        if let Some(pcm) = pcm_for_map_alias(prepared, clips, bank, map_ns, alias) {
+        if let Some(pcm) = pcm_for_map_alias(clips, bank, map_ns, alias) {
             let handle = looping_assets.add(pcm.into_looping());
             let entity = crate::backend::spawn_loop(
                 commands,
@@ -455,8 +402,7 @@ fn start_map_ambient_prepared(
         let handle = if let Some(handle) = pcm_by_alias.get(&emitter.soundalias) {
             handle.clone()
         } else {
-            let Some(pcm) = pcm_for_map_alias(prepared, clips, bank, map_ns, &emitter.soundalias)
-            else {
+            let Some(pcm) = pcm_for_map_alias(clips, bank, map_ns, &emitter.soundalias) else {
                 gaps.record(&emitter.soundalias);
                 missed += 1;
                 continue;
@@ -633,34 +579,14 @@ pub fn update_map_emitter_gain(
 }
 
 fn pcm_for_map_alias(
-    prepared: &HashMap<String, Option<PcmAudio>>,
     clips: Option<&crate::ClipStore>,
     bank: &SoundCatalog,
     ns: AssetNamespace,
     alias: &str,
 ) -> Option<PcmAudio> {
-    if let Some(pcm) = prepared.get(alias).and_then(Option::as_ref).cloned() {
-        return Some(pcm);
-    }
     let clips = clips?;
     for key in crate::clip_store::clip_keys_for_alias(bank, ns, alias) {
         if let Some(Ok(pcm)) = clips.ready(&key) {
-            return Some(pcm);
-        }
-    }
-    None
-}
-
-pub(crate) fn resolve_alias_pcm(
-    bank: &SoundCatalog,
-    iwd: Option<&NamespaceSoundIwd>,
-    ns: AssetNamespace,
-    alias: &str,
-) -> Option<PcmAudio> {
-    for key in crate::clip_store::clip_keys_for_alias(bank, ns, alias) {
-        if let Ok(prepared) = crate::clip_store::prepare_clip_now(bank, iwd, &key)
-            && let Some(pcm) = prepared.into_audio()
-        {
             return Some(pcm);
         }
     }

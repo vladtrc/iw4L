@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use bevy::prelude::*;
 use frame::{
     AuthoritySet, GameEnded, GameWin, GlassDestroyed, MatchEndingReason as BusReason,
-    MatchEndingSoon, MatchEndingVerySoon, PrematchDone, RuntimeRole, SpawnedPlayerNotify,
+    MatchEndingSoon, MatchEndingVerySoon, PrematchDone, SpawnedPlayerNotify,
 };
 use killcam_iw4::log::Log;
 use killcam_iw4::task::Millis;
@@ -67,14 +67,7 @@ impl Default for ScriptMusicHost {
 pub(crate) fn register_script_music(app: &mut App) {
     frame::register_script_notify(app);
     app.init_resource::<ScriptMusicHost>();
-    let runs_authority = app
-        .world()
-        .get_resource::<RuntimeRole>()
-        .copied()
-        .is_some_and(RuntimeRole::runs_authority);
-    if !runs_authority {
-        return;
-    }
+
     app.add_systems(
         FixedUpdate,
         (bind_faction_prefixes, drain_level_notifies_to_music)

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
 
 use asset_iw4::size as sz;
 use asset_iw4::snd_alias::{
@@ -72,12 +71,6 @@ pub struct LoadedSoundPcm {
     pub zone: ZoneOwner,
 
     pub seek_table: Vec<u32>,
-
-    pub(crate) decoded_miles: Arc<OnceLock<Vec<u8>>>,
-
-    pub(crate) xwma_error: Arc<Mutex<Option<crate::XwmaDecodeError>>>,
-
-    pub(crate) playback_samples: OnceLock<Arc<[f32]>>,
 }
 
 impl LoadedSoundPcm {
@@ -101,9 +94,6 @@ impl LoadedSoundPcm {
             pcm,
             zone: ZoneOwner::default(),
             seek_table,
-            decoded_miles: Arc::default(),
-            xwma_error: Arc::default(),
-            playback_samples: OnceLock::new(),
         }
     }
 
@@ -115,122 +105,22 @@ impl LoadedSoundPcm {
         self.channels
     }
 
-    pub fn prepared_samples(&self) -> Option<Arc<[f32]>> {
-        self.playback_samples.get().cloned()
+    /// Source bytes are immutable. Decoded samples and failures belong to the
+    /// runtime ClipStore, never to this shared catalog entry.
+    pub fn encoded_bytes(&self) -> &[u8] {
+        &self.pcm
     }
 
-    pub fn set_playback_samples(&self, samples: Arc<[f32]>) {
-        let _ = self.playback_samples.set(samples);
+    pub fn format(&self) -> i32 {
+        self.format
     }
 
-    pub fn samples_f32(&self) -> Option<Arc<[f32]>> {
-        if let Some(samples) = self.playback_samples.get() {
-            return Some(Arc::clone(samples));
-        }
-        let (bits, bytes) = self.pcm_s16_bytes()?;
-        if bytes.is_empty() || !matches!(bits, 8 | 16) {
-            return None;
-        }
-        Some(Arc::clone(self.playback_samples.get_or_init(|| {
-            let channels = self.channels.max(1) as usize;
-            let out: Vec<f32> = match bits {
-                8 => bytes.iter().map(|&b| (b as f32 - 128.0) / 128.0).collect(),
-                16 => {
-                    let mut out = Vec::with_capacity(bytes.len() / 2);
-                    for chunk in bytes.chunks_exact(2) {
-                        let s = i16::from_le_bytes([chunk[0], chunk[1]]);
-                        out.push(s as f32 / 32768.0);
-                    }
-                    let n = out.len() / channels * channels;
-                    out.truncate(n);
-                    out
-                }
-                _ => unreachable!("validated PCM bit depth"),
-            };
-            out.into()
-        })))
+    pub fn bits(&self) -> i32 {
+        self.bits
     }
 
     pub fn is_t5_xwma(&self) -> bool {
         self.format == crate::sound_wma_t5::T5_WMA
-    }
-
-    pub fn t5_xwma_prepared(&self) -> bool {
-        self.is_t5_xwma() && self.decoded_miles.get().is_some_and(|pcm| !pcm.is_empty())
-    }
-
-    pub fn t5_xwma_error(&self) -> Option<crate::XwmaDecodeError> {
-        if !self.is_t5_xwma() || self.t5_xwma_prepared() {
-            return None;
-        }
-        self.xwma_error_lock().clone()
-    }
-
-    fn xwma_error_lock(&self) -> std::sync::MutexGuard<'_, Option<crate::XwmaDecodeError>> {
-        self.xwma_error
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-    }
-
-    pub fn prepare_t5_xwma(&self) -> core::result::Result<(), crate::XwmaDecodeError> {
-        if self.format == MSS_PCM {
-            return if self.pcm.is_empty() {
-                Err(crate::XwmaDecodeError::EmptyPcm)
-            } else {
-                Ok(())
-            };
-        }
-        if !self.is_t5_xwma() {
-            return Err(crate::XwmaDecodeError::Mux);
-        }
-        if self.t5_xwma_prepared() {
-            return Ok(());
-        }
-        if let Some(err) = self.xwma_error_lock().clone() {
-            return Err(err);
-        }
-        match crate::sound_wma_t5::decode_t5_xwma(
-            &self.pcm,
-            &self.seek_table,
-            self.channels.max(0) as u32,
-            self.rate,
-        ) {
-            Ok(pcm) => match self.decoded_miles.set(pcm) {
-                Ok(()) => {
-                    *self.xwma_error_lock() = None;
-                    Ok(())
-                }
-                Err(_) => {
-                    if self.t5_xwma_prepared() {
-                        Ok(())
-                    } else {
-                        Err(crate::XwmaDecodeError::EmptyPcm)
-                    }
-                }
-            },
-            Err(err) => {
-                *self.xwma_error_lock() = Some(err.clone());
-                Err(err)
-            }
-        }
-    }
-
-    fn pcm_s16_bytes(&self) -> Option<(i32, &[u8])> {
-        if self.format == MSS_PCM {
-            if self.pcm.is_empty() {
-                return None;
-            }
-            return Some((self.bits, &self.pcm));
-        }
-        if !self.is_t5_xwma() {
-            return None;
-        }
-        let decoded = self.decoded_miles.get()?;
-        if decoded.is_empty() {
-            None
-        } else {
-            Some((16, decoded.as_slice()))
-        }
     }
 }
 

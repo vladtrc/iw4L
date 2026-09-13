@@ -24,12 +24,6 @@ const SLEEP_MS: i32 = 200;
 #[derive(Resource, Clone, Default)]
 pub struct DynEntPhysClip(pub Option<Arc<ClipCollision>>);
 
-impl DynEntPhysClip {
-    pub fn from_clip(clip: Option<ClipCollision>) -> Self {
-        Self(clip.map(Arc::new))
-    }
-}
-
 #[derive(Resource, Default)]
 pub struct DynEntPhysWorld {
     last_time: Option<i32>,

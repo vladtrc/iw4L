@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use assets::{AssetEdge, OwnedTracerDef, TracerCatalog, TracerSpace};
+use assets::{AssetEdge, OwnedTracerDef, TracerDefinitions, TracerSpace};
 use bevy::prelude::*;
 use entity_iw4::{Trajectory, bg_evaluate_trajectory};
 use fx::{
@@ -14,7 +14,7 @@ use fx_iw4::{
 use crate::host::CombatFxDump;
 
 #[derive(Resource, Default)]
-pub struct PreparedTracers(pub TracerCatalog);
+pub struct PreparedTracers(pub TracerDefinitions);
 
 #[derive(Resource, Default)]
 pub struct TracerDrawGate {
@@ -88,7 +88,7 @@ pub enum TracerSpawnSkip {
 pub fn try_spawn_tracer(
     gate: &mut TracerDrawGate,
     world: &mut TracerWorld,
-    catalog: &TracerCatalog,
+    catalog: &TracerDefinitions,
     tracer: AssetEdge<TracerSpace>,
     source_id: u32,
     start: [f32; 3],

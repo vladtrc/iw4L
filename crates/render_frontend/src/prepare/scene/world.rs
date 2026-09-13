@@ -954,6 +954,7 @@ impl WorldScene {
 
 pub fn world_scene_from_draw(
     world: assets::PreparedWorld,
+    materials: assets::MatchMaterials,
     installed_owners: &[(assets::ScriptModelId, sim::AuthorityModelOwner)],
 ) -> Result<WorldScene, asset_world::SurfaceMaterialStampError> {
     let fx_glass = world.fx_glass;
@@ -978,6 +979,10 @@ pub fn world_scene_from_draw(
         world.dyn_ents.report_line(),
         dyn_ent_instances.len(),
     );
+    let assets::MatchMaterials {
+        population: mut global_materials,
+        map_ids,
+    } = materials;
     let Some(mut draw) = world.draw else {
         let mut empty = WorldScene::default();
         empty.fx_glass = fx_glass;
@@ -1002,23 +1007,20 @@ pub fn world_scene_from_draw(
         .map(|probe| probe.origin)
         .collect();
     let runtime_material_catalog =
-        crate::assemble::drawsurf::capture_runtime_catalog(&draw.global_materials);
-    let asset_ref = assets::AssetRefDumpCensus::from_catalog(&draw.global_materials);
+        crate::assemble::drawsurf::capture_runtime_catalog(&global_materials);
+    let asset_ref = assets::AssetRefDumpCensus::from_catalog(&global_materials);
 
-    let exact_material_images = draw
-        .global_materials
+    let exact_material_images = global_materials
         .images
         .iter_mut()
         .map(|image| image.decoded.take())
         .collect::<Vec<_>>();
-    let exact_material_names: Vec<String> = draw
-        .global_materials
+    let exact_material_names: Vec<String> = global_materials
         .images
         .iter()
         .map(|image| image.name.as_str().to_owned())
         .collect();
-    let builtin_gaps: Vec<String> = draw
-        .global_materials
+    let builtin_gaps: Vec<String> = global_materials
         .images
         .iter()
         .enumerate()
@@ -1048,8 +1050,7 @@ pub fn world_scene_from_draw(
         );
     }
     let undecoded_bound: Vec<String> = {
-        let slots: BTreeSet<usize> = draw
-            .global_materials
+        let slots: BTreeSet<usize> = global_materials
             .materials
             .iter()
             .flat_map(|material| material.textures.iter())
@@ -1064,7 +1065,7 @@ pub fn world_scene_from_draw(
                 {
                     return None;
                 }
-                let image = draw.global_materials.images.get(index)?;
+                let image = global_materials.images.get(index)?;
 
                 if !matches!(image.semantic, 2 | 3 | 5 | 8) {
                     return None;
@@ -1092,8 +1093,7 @@ pub fn world_scene_from_draw(
     }
 
     {
-        let mut bound: BTreeSet<usize> = draw
-            .global_materials
+        let mut bound: BTreeSet<usize> = global_materials
             .materials
             .iter()
             .flat_map(|material| material.textures.iter())
@@ -1114,7 +1114,7 @@ pub fn world_scene_from_draw(
                     .is_some_and(Option::is_some)
             })
             .filter_map(|index| {
-                let image = draw.global_materials.images.get(index)?;
+                let image = global_materials.images.get(index)?;
                 Some(format!(
                     "{index}:{} payload={} {}x{}x{} fmt={} map={} semantic={}",
                     image.name,
@@ -1141,8 +1141,7 @@ pub fn world_scene_from_draw(
         crate::assemble::drawsurf::CatalogBuildError::ShaderIdentityMissing { material, slot },
     ) = &runtime_material_catalog.sorted_materials
     {
-        let name = draw
-            .global_materials
+        let name = global_materials
             .materials
             .get(usize::from(material.0))
             .map(|material| material.name.as_str())
@@ -1157,7 +1156,7 @@ pub fn world_scene_from_draw(
         .surface_materials
         .iter()
         .copied()
-        .map(|local| remap_local_material(local, &draw.material_asset_ids))
+        .map(|local| remap_local_material(local, &map_ids))
         .collect::<Vec<_>>();
 
     let lightmaps: Vec<Option<WorldLightmap>> = match draw.lightmap {
@@ -1251,7 +1250,7 @@ pub fn world_scene_from_draw(
             WorldBatchGeometry {
                 mesh: batch.mesh,
                 packed_indices: batch.packed_indices,
-                material: remap_local_material(batch.material, &draw.material_asset_ids),
+                material: remap_local_material(batch.material, &map_ids),
                 lightmapped,
                 lightmap_index: batch.lightmap_index,
                 primary_light_index: batch.primary_light_index,
@@ -1269,7 +1268,7 @@ pub fn world_scene_from_draw(
             lod.into_iter()
                 .map(|surface| WorldStaticModelSurface {
                     mesh: surface.mesh,
-                    material: remap_local_material(surface.material, &draw.material_asset_ids),
+                    material: remap_local_material(surface.material, &map_ids),
                     packed_vertices: surface.packed_vertices,
                     xsurface_plus_1: surface.xsurface_plus_1,
                     xsurface_base_index: surface.xsurface_base_index,
@@ -1330,7 +1329,7 @@ pub fn world_scene_from_draw(
         .iter()
         .copied()
         .map(|local| {
-            remap_local_material(local, &draw.material_asset_ids)
+            remap_local_material(local, &map_ids)
                 .and_then(|id| runtime_material_catalog.derived(id))
                 .map(|material| material.sort_key)
                 .unwrap_or(0)
@@ -1364,8 +1363,7 @@ pub fn world_scene_from_draw(
         });
 
     let mut map_xmodel_scene_assets = world.map_xmodel_scene_assets;
-    let map_xmodel_materials =
-        map_xmodel_scene_assets.resolve_surface_materials(&draw.material_asset_ids);
+    let map_xmodel_materials = map_xmodel_scene_assets.resolve_surface_materials(&map_ids);
     diag::info!(
         World,
         "map xmodel surface materials: models={} surfaces={} bound={} unbound={} absent={}",

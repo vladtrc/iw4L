@@ -306,8 +306,7 @@ struct ProductBindPersist {
     compact_seen: HashMap<LogicalInputKey, u32>,
     compact_remap: Vec<u32>,
     compacted: bool,
-    last_draws: Vec<RetainedDrawItem>,
-    last_draw_tech: Vec<TechType>,
+    compact_tech: Vec<TechType>,
     last_mask: u64,
     last_has_codemesh: bool,
     last_world_pretess_id: u64,
@@ -320,8 +319,7 @@ impl ProductBindPersist {
     }
 
     fn remember_compacted(&mut self, product: &FrameProduct) {
-        self.last_draws.clone_from(&product.ordered_draws);
-        self.last_draw_tech.clone_from(&product.draw_tech);
+        self.compact_tech.clone_from(&product.draw_tech);
         self.last_mask = product.code_sampler_mask;
         self.last_has_codemesh = product.has_codemesh;
         self.last_world_pretess_id = product.world_pretess_id;
@@ -329,12 +327,12 @@ impl ProductBindPersist {
         self.compacted = true;
     }
 
-    fn restore_compacted(&self, product: &mut FrameProduct) -> bool {
-        if !self.compacted || self.last_draws.len() != self.last_draw_tech.len() {
+    fn restore_compacted(&self, product: &mut FrameProduct, previous: &FrameProduct) -> bool {
+        if !self.compacted || previous.ordered_draws.len() != self.compact_tech.len() {
             return false;
         }
-        product.ordered_draws.clone_from(&self.last_draws);
-        product.draw_tech.clone_from(&self.last_draw_tech);
+        product.ordered_draws.clone_from(&previous.ordered_draws);
+        product.draw_tech.clone_from(&self.compact_tech);
         product.code_sampler_mask = self.last_mask;
         product.has_codemesh = self.last_has_codemesh;
         product.world_pretess_id = self.last_world_pretess_id;
@@ -509,29 +507,26 @@ fn fill_vis_in_place(buf: &mut Vec<u8>, n: usize) {
 
 fn apply_payload_update(product: &mut FrameProduct, persist: &mut ProductBindPersist) -> bool {
     let merged_len = product.ordered_draws.len();
-    if persist.compacted
-        && persist.compact_remap.len() == merged_len
-        && persist.last_draws.len() == persist.last_draw_tech.len()
-    {
-        let expect = persist.last_draws.len();
+    if persist.compacted && persist.compact_remap.len() == merged_len {
+        let expect = persist.compact_tech.len();
         let mut filled = 0usize;
         for (input, &compact) in persist.compact_remap.iter().enumerate() {
             let slot = compact as usize;
             if slot != filled {
                 continue;
             }
-            let Some(src) = product.ordered_draws.get(input) else {
+            let Some(src) = product.ordered_draws.get(input).copied() else {
                 return false;
             };
-            let Some(dst) = persist.last_draws.get_mut(slot) else {
+            let Some(dst) = product.ordered_draws.get_mut(slot) else {
                 return false;
             };
-            *dst = *src;
+            *dst = src;
             filled += 1;
         }
         if filled == expect {
-            product.ordered_draws.clone_from(&persist.last_draws);
-            product.draw_tech.clone_from(&persist.last_draw_tech);
+            product.ordered_draws.truncate(persist.compact_tech.len());
+            product.draw_tech.clone_from(&persist.compact_tech);
             product.code_sampler_mask = persist.last_mask;
             product.has_codemesh = persist.last_has_codemesh;
             product.world_pretess_id = persist.last_world_pretess_id;
@@ -790,8 +785,8 @@ fn commit_compacted_payload(
     tech_type: TechType,
     target: ProductTarget,
 ) {
-    product.ordered_draws.clone_from(&persist.last_draws);
-    product.draw_tech.clone_from(&persist.last_draw_tech);
+    product.ordered_draws.truncate(persist.compact_tech.len());
+    product.draw_tech.clone_from(&persist.compact_tech);
     product.code_sampler_mask = persist.last_mask;
     product.has_codemesh = persist.last_has_codemesh;
     product.world_pretess_id = persist.last_world_pretess_id;
@@ -945,8 +940,6 @@ pub struct CameraProducts {
     emissive_persist: ProductBindPersist,
     light_persist: ProductBindPersist,
     last_fill: Option<CameraFillStamp>,
-    last_distortion: Vec<RetainedDrawItem>,
-    last_distortion_status: FrameProductStatus,
 }
 
 impl Default for CameraProducts {
@@ -960,8 +953,6 @@ impl Default for CameraProducts {
             emissive_persist: ProductBindPersist::default(),
             light_persist: ProductBindPersist::default(),
             last_fill: None,
-            last_distortion: Vec::new(),
-            last_distortion_status: FrameProductStatus::Missing(COLOUR_MISSING),
         }
     }
 }
@@ -1624,6 +1615,7 @@ pub(crate) fn execute_camera_products(
     gfx: Option<Res<crate::prepare::scene::gfx_scene::HostGfxScene>>,
     sun_present: Res<super::SunShadowMapPresent>,
     spot_lights: Res<super::SpotShadowMapLights>,
+    published: Res<RenderFrameProducts>,
     mut owner: ResMut<CameraProducts>,
 ) {
     let _post_execute = perf::Span::HostPostExecuteMs.enter();
@@ -1671,14 +1663,13 @@ pub(crate) fn execute_camera_products(
         emissive_persist,
         light_persist,
         last_fill,
-        last_distortion,
-        last_distortion_status,
     } = owner.as_mut();
     let payload_hold =
         last_fill.is_some_and(|prev| prev.composition_eq(stamp) && prev.payload_eq(stamp));
     if payload_hold
-        && colour_persist.restore_compacted(colour)
-        && emissive_persist.restore_compacted(emissive)
+        && colour_persist.restore_compacted(colour, published.product(FrameProductKind::Colour))
+        && emissive_persist
+            .restore_compacted(emissive, published.product(FrameProductKind::Emissive))
     {
         colour.generation_id = retained.generation_id;
         colour.list_digest = composition_digest;
@@ -1693,8 +1684,12 @@ pub(crate) fn execute_camera_products(
             target: ProductTarget::Core3dViewColour,
         };
         distortion.generation_id = inputs.catalog_generation;
-        distortion.ordered_draws.clone_from(last_distortion);
-        distortion.status = *last_distortion_status;
+        distortion.ordered_draws.clone_from(
+            &published
+                .product(FrameProductKind::Distortion)
+                .ordered_draws,
+        );
+        distortion.status = published.product(FrameProductKind::Distortion).status;
         fill_dlight_light(
             light,
             light_persist,
@@ -1751,18 +1746,20 @@ pub(crate) fn execute_camera_products(
         };
         let overlay_colour = reuse_compact
             && colour_persist.compacted
-            && colour_persist.last_draws.len() == colour_persist.last_draw_tech.len()
+            && colour_persist
+                .restore_compacted(colour, published.product(FrameProductKind::Colour))
             && overlay_compact_from_lanes(
-                &mut colour_persist.last_draws,
+                &mut colour.ordered_draws,
                 &colour_persist.compact_remap,
                 [static_colour, &xmodel_lane.colour, &fx_lane.colour],
                 colour_keep,
             );
         let overlay_emissive = reuse_compact
             && emissive_persist.compacted
-            && emissive_persist.last_draws.len() == emissive_persist.last_draw_tech.len()
+            && emissive_persist
+                .restore_compacted(emissive, published.product(FrameProductKind::Emissive))
             && overlay_compact_from_lanes(
-                &mut emissive_persist.last_draws,
+                &mut emissive.ordered_draws,
                 &emissive_persist.compact_remap,
                 [static_emissive, &xmodel_lane.emissive, &fx_lane.emissive],
                 emissive_keep,
@@ -1857,13 +1854,16 @@ pub(crate) fn execute_camera_products(
                 &xmodel_lane.distortion,
                 &fx_lane.distortion,
             ];
-            if reuse_compact
-                && overlay_filter_from_lanes(last_distortion, lanes, |draw| {
+            distortion.ordered_draws.clone_from(
+                &published
+                    .product(FrameProductKind::Distortion)
+                    .ordered_draws,
+            );
+            if !reuse_compact
+                || !overlay_filter_from_lanes(&mut distortion.ordered_draws, lanes, |draw| {
                     distortion_sort_keep(draw, sort_key)
                 })
             {
-                distortion.ordered_draws.clone_from(last_distortion);
-            } else {
                 merge_draw_lanes(&mut distortion.ordered_draws, lanes);
                 distortion
                     .ordered_draws
@@ -1883,8 +1883,6 @@ pub(crate) fn execute_camera_products(
                 FrameProductStatus::Missing(MissingProductCause::MissingDistortionSortKey);
         }
     }
-    last_distortion.clone_from(&distortion.ordered_draws);
-    *last_distortion_status = distortion.status;
     fill_dlight_light(
         light,
         light_persist,

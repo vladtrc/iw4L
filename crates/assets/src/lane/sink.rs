@@ -1540,8 +1540,8 @@ fn capture_tracer_named(
     if let Some(name) = tracer_material_name(s, materials, geometry) {
         tracers.bind_last_material(name);
     }
-    if let Some(alias) = tracer_material_alias(s, geometry) {
-        tracers.bind_last_material_alias(alias);
+    if tracer_material_alias(s, geometry).is_some() {
+        tracers.note_last_material_alias();
     }
     Ok(())
 }

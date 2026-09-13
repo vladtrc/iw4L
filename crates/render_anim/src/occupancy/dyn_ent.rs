@@ -585,11 +585,12 @@ fn append_dynent_draws(
     mut lighting_requests: ResMut<ModelLightingRequests>,
     product: Res<DynEntPoseProduct>,
     mut last_material_generation: Local<Option<render_material::MaterialGenerationId>>,
+    mut draws: Local<Vec<XModelSurfaceDraw>>,
+    mut owners: Local<Vec<DynEntOwnerDraw>>,
 ) {
     let atlas_ref = atlas.as_deref();
     if catalog.is_none() || atlas_ref.is_none() || !facts.spawned || tess.is_none() {
-        plan.owners.clear();
-        plan.draws.clear();
+        plan.publish_no_rows();
         return;
     }
     let catalog_changed = catalog.as_ref().is_some_and(|c| c.is_changed());
@@ -603,11 +604,14 @@ fn append_dynent_draws(
         || tess_changed
         || *last_material_generation != Some(material_generation);
     if catalog_reset {
+        let (revision, generation) = (plan.revision, plan.generation);
         *plan = DynEntDrawPlan::default();
+        plan.revision = revision;
+        plan.generation = generation;
         *last_material_generation = Some(material_generation);
     }
-    plan.owners.clear();
-    plan.draws.clear();
+    draws.clear();
+    owners.clear();
 
     let mut material_cache: HashMap<assets::MaterialIndex, SmodelPassMaterial> = HashMap::new();
     let mut drawn = 0u16;
@@ -695,12 +699,12 @@ fn append_dynent_draws(
         });
         let object_id = XMODEL_OBJECT_ID_DYNENT_BASE.saturating_add(drawn);
         drawn = drawn.saturating_add(1);
-        plan.owners.push(DynEntOwnerDraw {
+        owners.push(DynEntOwnerDraw {
             object_id,
             model: row.model.clone(),
         });
         for (surface, material) in surfaces_idx {
-            plan.draws.push(XModelSurfaceDraw {
+            draws.push(XModelSurfaceDraw {
                 surface,
                 material,
                 world_from_local: row.world_from_local,
@@ -718,10 +722,11 @@ fn append_dynent_draws(
             });
         }
     }
-    if !plan.draws.is_empty() {
+    if !draws.is_empty() {
         let topology =
             topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.vertices.len());
         let rev = plan.revision;
         plan.revision = stamp_plan_geometry(&mut plan.revisions, rev, topology);
     }
+    plan.publish_frame_rows(&mut draws, &mut owners);
 }

@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use assets::{CreateFxOneshot, FxCatalog, OwnedFxEffectDef};
+use assets::{CreateFxOneshot, FxDefinitions, OwnedFxEffectDef};
 use bevy::tasks::ComputeTaskPool;
 use fx::{
     FX_CATALOG_INDEX_NONE, FxBoltTarget, FxChildKind, FxCloudInstance, FxDrawElemContext,
@@ -91,7 +91,7 @@ pub struct FxElemInfoCache {
 }
 
 impl FxElemInfoCache {
-    pub fn sync(&mut self, catalog: &FxCatalog) {
+    pub fn sync(&mut self, catalog: &FxDefinitions) {
         let first = catalog.names().next().map(str::to_owned);
         if self.synced_len == catalog.len() && self.synced_first == first {
             return;
@@ -108,7 +108,11 @@ impl FxElemInfoCache {
         *self = Self::default();
     }
 
-    pub fn arc_for(&self, catalog: &FxCatalog, effect: &OwnedFxEffectDef) -> Arc<[FxElemDefInfo]> {
+    pub fn arc_for(
+        &self,
+        catalog: &FxDefinitions,
+        effect: &OwnedFxEffectDef,
+    ) -> Arc<[FxElemDefInfo]> {
         catalog
             .index_by_name(&effect.name)
             .and_then(|index| self.by_index.get(index).cloned())
@@ -129,7 +133,7 @@ fn def_info<'a>(effect: &OwnedFxEffectDef, elems: &'a [FxElemDefInfo]) -> FxEffe
 fn stamp_packed_lighting(
     host: &mut FxSystemHost,
     handle: u16,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     world: Option<&dyn FxScene>,
 ) {
     let Some(effect) = host.slot_for_handle(handle) else {
@@ -160,7 +164,7 @@ fn stamp_packed_lighting(
 
 fn stamp_play_lighting(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     world: Option<&dyn FxScene>,
     result: PlayResult,
 ) -> PlayResult {
@@ -234,7 +238,7 @@ fn apply_elem_lighting(
 
 pub fn boot_createfx_effects(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     emitters: &[CreateFxOneshot],
     msec_now: i32,
@@ -282,7 +286,7 @@ fn createfx_spawn_msec(msec_now: i32, delay_seconds: f32) -> i32 {
 
 pub fn play_named_oriented_in_world(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     def_name: &str,
     origin: [f32; 3],
@@ -297,7 +301,7 @@ pub fn play_named_oriented_in_world(
 
 pub fn play_named_bolted_in_world(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     def_name: &str,
     target: FxBoltTarget,
@@ -327,7 +331,7 @@ pub fn play_named_bolted_in_world(
 
 fn play_named_at(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     def_name: &str,
     origin: [f32; 3],
@@ -353,7 +357,7 @@ fn play_named_at(
 
 pub fn drain_spawn_runners(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     world: Option<&dyn FxScene>,
 ) {
@@ -412,7 +416,7 @@ pub fn drain_spawn_runners(
 
 fn play_def_at(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     effect: &OwnedFxEffectDef,
     origin: [f32; 3],
@@ -447,7 +451,7 @@ fn skip_runner(host: &mut FxSystemHost, req: &fx::PendingRunnerSpawn) {
 
 fn drain_spawn_side_effects(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     world: Option<&dyn FxScene>,
 ) {
@@ -457,7 +461,7 @@ fn drain_spawn_side_effects(
 
 pub fn drain_spawn_decals(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     world: Option<&dyn FxScene>,
 ) {
     const MAX_DRAIN: usize = 256;
@@ -473,7 +477,7 @@ pub fn drain_spawn_decals(
 
 fn record_spawn_decal(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     req: &fx::PendingDecalSpawn,
     world: Option<&dyn FxScene>,
 ) {
@@ -567,7 +571,7 @@ fn record_spawn_decal(
 }
 
 fn catalog_lookup<'a>(
-    catalog: &'a FxCatalog,
+    catalog: &'a FxDefinitions,
     index: u16,
     name: &str,
 ) -> Option<&'a OwnedFxEffectDef> {
@@ -579,7 +583,7 @@ fn catalog_lookup<'a>(
 }
 
 fn catalog_lookup_draw<'a>(
-    catalog: &'a FxCatalog,
+    catalog: &'a FxDefinitions,
     index: u16,
     name: &str,
     index_n: &Cell<u32>,
@@ -594,7 +598,7 @@ fn catalog_lookup_draw<'a>(
     }
 }
 
-fn catalog_index_of(catalog: &FxCatalog, name: &str) -> u16 {
+fn catalog_index_of(catalog: &FxDefinitions, name: &str) -> u16 {
     catalog
         .index_by_name(name)
         .and_then(|i| u16::try_from(i).ok())
@@ -608,7 +612,7 @@ struct CollideJobOut {
 }
 
 fn eval_pending_collide(
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     clip_world: Option<&SimWorld>,
     job: &PendingCollide,
 ) -> CollideJobOut {
@@ -678,7 +682,7 @@ fn collide_worker_count(jobs: usize) -> usize {
 }
 
 fn run_collide_jobs(
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     clip_world: Option<&SimWorld>,
     jobs: &[PendingCollide],
 ) -> (HashMap<u16, Option<FxElemMotionResult>>, Vec<u8>) {
@@ -718,7 +722,7 @@ fn run_collide_jobs(
 
 pub fn tick_fx_non_dependent(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     msec: i32,
     camera_origin: [f32; 3],
@@ -740,7 +744,7 @@ pub fn tick_fx_non_dependent(
 
 pub fn tick_fx_remaining(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     msec: i32,
     camera_origin: [f32; 3],
@@ -762,7 +766,7 @@ pub fn tick_fx_remaining(
 
 fn tick_fx_pass(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
     msec: i32,
     camera_origin: [f32; 3],
@@ -1007,7 +1011,7 @@ fn tick_fx_pass(
 
 pub fn build_fx_verts(
     host: &mut FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     cull: FxDrawCull<'_>,
     camera: [f32; 3],
 ) -> (FxGenerateVertsOut, FxVertsGaps) {
@@ -1460,7 +1464,7 @@ pub fn build_fx_verts(
 }
 
 fn evaluate_fx_model_instance(
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     ctx: FxDrawElemContext<'_>,
     catalog_index_n: &Cell<u32>,
     catalog_name_n: &Cell<u32>,

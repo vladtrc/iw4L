@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use asset_iw4::size as sz;
-use asset_material::MaterialCatalog;
+use asset_material::MaterialDefinitions;
 use fastfile_iw4::{Ptr, ZonePtr, ZoneStream};
 use fx_iw4::{
     FX_GLASS_DEF, FX_GLASS_GEOMETRY_DATA, FX_GLASS_INIT_PIECE_STATE, FX_GLASS_PIECE_PLACE,
@@ -171,7 +171,7 @@ impl FxGlassReset {
         Some((origin, axis[0], axis[1]))
     }
 
-    pub fn resolve_material_edges(&mut self, materials: &MaterialCatalog) {
+    pub fn resolve_material_edges(&mut self, materials: &MaterialDefinitions) {
         self.def_material_edges = self
             .def_materials
             .iter()
@@ -265,7 +265,7 @@ pub fn build_fx_glass_reset(stream: &ZoneStream<'_>) -> Option<FxGlassReset> {
 
 fn glass_material_edge(
     hint: &str,
-    materials: &MaterialCatalog,
+    materials: &MaterialDefinitions,
 ) -> crate::AssetEdge<crate::MaterialSpace> {
     if hint.is_empty() {
         return crate::AssetEdge::Absent;

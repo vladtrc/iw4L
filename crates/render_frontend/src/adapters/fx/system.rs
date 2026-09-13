@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use assets::{FxCatalog, OwnedFxVisual, PreparedWeapons, lookup_fx_color_image};
+use assets::{FxDefinitions, OwnedFxVisual, PreparedWeapons, lookup_fx_color_image};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use dpvs_iw4::pack_mark_mesh_draw_surf;
@@ -301,7 +301,7 @@ fn tick_fx_remaining_update(
 }
 
 #[derive(SystemParam)]
-struct FxPresentEnv<'w> {
+struct FxPresentEnv<'w, 's> {
     outdoor: Option<Res<'w, MapOutdoor>>,
     dlights: ResMut<'w, HostFxDlights>,
     post_lights: ResMut<'w, HostFxPostLights>,
@@ -309,6 +309,8 @@ struct FxPresentEnv<'w> {
     atlas: Option<Res<'w, WorldModelLightingAtlas>>,
     atpoint: Res<'w, render_scene::DynAtPointLookup>,
     lod_skinned: Res<'w, LodRampSkinnedDvar>,
+    /// This frame's fx model rebuild, before the plan publishes it.
+    staged_models: Local<'s, FxModelDrawPlan>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -433,7 +435,9 @@ fn commit_fx_transaction(
         _present_span,
     } = transaction;
     clear_fx_owned_plans(&mut plan, &mut spark_plan, &mut mark_plan);
-    model_plan.clear();
+    // The fx model rows are rebuilt from nothing every frame, so the rebuild
+    // goes to staging and `model_plan` only moves when the rows differ.
+    env.staged_models.clear();
     env.dlights.scene.clear();
     env.dlights.cap_full = 0;
     env.post_lights.queued.clear();
@@ -485,8 +489,9 @@ fn commit_fx_transaction(
         &runtime,
         lighting_cache.as_deref(),
         &mut lighting_requests,
-        &mut model_plan,
+        &mut env.staged_models,
     );
+    model_plan.publish_rebuild(&mut env.staged_models);
     for light in &out.omni_lights {
         match lighting_iw4::r_add_omni_light_to_scene_allows(
             world_present,
@@ -815,6 +820,7 @@ fn commit_fx_transaction(
         }
     }
     spark_plan.bump();
+    spark_plan.publish_share();
 
     plan.bump();
     plan.publish_share();
@@ -869,7 +875,7 @@ fn commit_fx_transaction(
             out.fountains.len(),
             out.skipped_spark_fountain,
             out.models.len(),
-            model_plan.draws.len(),
+            model_plan.draws().len(),
             out.skipped_model,
             model_plan.skipped_no_catalog,
             model_plan.skipped_no_pose,
@@ -1108,28 +1114,27 @@ fn fill_fx_model_plan(
             Vec3::from_array(instance.origin),
         );
         for (surface, material) in asset_surfaces {
-            plan.draws
-                .push(crate::assemble::drawsurf::tess::xmodel::XModelSurfaceDraw {
-                    surface,
-                    material,
-                    world_from_local,
-                    lighting_handle: 0,
-                    pending_lighting: Some(lighting),
-                    colour_refusal: None,
-                    object_id: instance.elem_handle,
-                    scene_light_index: 0,
-                    reflection_probe_index: 0,
-                    packed_lighting: None,
-                    is_scope: false,
-                    scene_entnum: None,
-                });
+            plan.push_draw(crate::assemble::drawsurf::tess::xmodel::XModelSurfaceDraw {
+                surface,
+                material,
+                world_from_local,
+                lighting_handle: 0,
+                pending_lighting: Some(lighting),
+                colour_refusal: None,
+                object_id: instance.elem_handle,
+                scene_light_index: 0,
+                reflection_probe_index: 0,
+                packed_lighting: None,
+                is_scope: false,
+                scene_entnum: None,
+            });
         }
     }
 }
 
 fn log_fx_near_camera(
     host: &FxSystemHost,
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     sprites: &[FxSpriteInstance],
     spark_clouds: &[FxSparkCloudInstance],
     batches: &HashMap<usize, Vec<&FxSpriteInstance>>,
@@ -1524,7 +1529,7 @@ fn log_fx_impact_census(
 fn log_fx_run_mode_census(
     host: &FxSystemHost,
     sprites: &[FxSpriteInstance],
-    catalog: &FxCatalog,
+    catalog: &FxDefinitions,
     cam: [f32; 3],
     radius: f32,
 ) {
@@ -1669,7 +1674,7 @@ fn count_fx_present_skip(cursor: &mut FxJournalCursor, cause: FxPresentSkip) {
     }
 }
 
-fn spark_elem_material(catalog: &FxCatalog, def_name: &str, def_index: u8) -> Option<String> {
+fn spark_elem_material(catalog: &FxDefinitions, def_name: &str, def_index: u8) -> Option<String> {
     let effect = catalog.get(def_name)?;
     let elem = effect.elems.get(def_index as usize)?;
     elem.visuals
@@ -1678,7 +1683,7 @@ fn spark_elem_material(catalog: &FxCatalog, def_name: &str, def_index: u8) -> Op
         .map(str::to_owned)
 }
 
-fn spark_elem_asset_id(catalog: &FxCatalog, def_name: &str, def_index: u8) -> Option<usize> {
+fn spark_elem_asset_id(catalog: &FxDefinitions, def_name: &str, def_index: u8) -> Option<usize> {
     let effect = catalog.get(def_name)?;
     let elem = effect.elems.get(def_index as usize)?;
     elem.visuals.iter().find_map(OwnedFxVisual::bound_index)

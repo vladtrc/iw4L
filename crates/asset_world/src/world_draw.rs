@@ -14,7 +14,7 @@ use dpvs_iw4::{
 use crate::world_mesh::{
     BoundsTable, WorldMeshError, WorldMeshStats, normalize_or_up, unpack_color, unpack_unit_vec,
 };
-use asset_material::{AuthoredMaterial, MaterialCatalog};
+use asset_material::{AuthoredMaterial, MaterialCatalog, MaterialDefinitions};
 use fastfile_iw4::{GfxWorldGeometry, Ptr, ZonePtr, ZoneStream};
 
 use crate::{SurfaceCastsSunShadow, WorldCapture, world_capture_from_casters};
@@ -349,12 +349,6 @@ pub struct WorldDraw {
 
     pub surface_materials: Vec<Option<usize>>,
 
-    pub materials: MaterialCatalog,
-
-    pub global_materials: MaterialCatalog,
-
-    pub material_asset_ids: Vec<Option<usize>>,
-
     pub primary_lights: Vec<WorldPrimaryLight>,
 
     pub light_defs: Vec<CapturedLightDef>,
@@ -617,7 +611,7 @@ pub fn build_world_draw(
     s: &ZoneStream<'_>,
     geometry: GfxWorldGeometry,
     materials: MaterialCatalog,
-) -> Result<WorldDraw, WorldMeshError> {
+) -> Result<(WorldDraw, MaterialCatalog), WorldMeshError> {
     let (Some(vertices), Some(indices)) = (geometry.vertices, geometry.indices) else {
         return Err(WorldMeshError::NoGeometry);
     };
@@ -806,57 +800,57 @@ pub fn build_world_draw(
     });
     let (brush_models, brush_model_bounds) = decode_brush_models(s, geometry)?;
 
-    Ok(WorldDraw {
-        sky_model: None,
-        batches,
-        lightmap,
-        stats,
-        retail_vertices: RetailWorldVertexPayload::Iw4(retail_vertices),
-        vertex_layer: Vec::new(),
-        surface_vertex_layer: Vec::new(),
-        surface_first_vertex: surface_draw_fields
-            .iter()
-            .map(|surface| surface.first_vertex)
-            .collect(),
-        surface_draw_fields,
-        positions,
-        normals,
-        tangents,
-        colors,
-        texture_uvs,
-        lightmap_uvs,
-        packed_indices,
-        surface_index_ranges,
-        surface_batch_ranges,
-        surface_lightmapped,
-        surface_lightmap_indices,
-        surface_reflection_probes,
-        surface_primary_lights,
-        sort_key_distortion: geometry.sort_key_distortion,
-        capture: world_capture_from_casters(surface_casts_sun_shadow),
-        brush_models,
-        brush_model_bounds,
-        surface_materials,
-        global_materials: MaterialCatalog::default(),
-        material_asset_ids: (0..materials.materials.len()).map(Some).collect(),
+    Ok((
+        WorldDraw {
+            sky_model: None,
+            batches,
+            lightmap,
+            stats,
+            retail_vertices: RetailWorldVertexPayload::Iw4(retail_vertices),
+            vertex_layer: Vec::new(),
+            surface_vertex_layer: Vec::new(),
+            surface_first_vertex: surface_draw_fields
+                .iter()
+                .map(|surface| surface.first_vertex)
+                .collect(),
+            surface_draw_fields,
+            positions,
+            normals,
+            tangents,
+            colors,
+            texture_uvs,
+            lightmap_uvs,
+            packed_indices,
+            surface_index_ranges,
+            surface_batch_ranges,
+            surface_lightmapped,
+            surface_lightmap_indices,
+            surface_reflection_probes,
+            surface_primary_lights,
+            sort_key_distortion: geometry.sort_key_distortion,
+            capture: world_capture_from_casters(surface_casts_sun_shadow),
+            brush_models,
+            brush_model_bounds,
+            surface_materials,
+            primary_lights,
+            light_defs,
+            sun_primary_light_count: geometry.sun_primary_light_count as u32,
+            light_region_hulls,
+            shadow_geometry,
+            reflection_probes,
+            dpvs,
+            outdoor_image_name,
+            outdoor_image: None,
+            outdoor_lookup: geometry.outdoor_lookup,
+            t5_sun_parse_exposure: None,
+            t5_sky_dynamic_intensity: None,
+            t5_sun_light: None,
+            t5_tree_scatter_intensity: None,
+            t5_tree_scatter_amount: None,
+            t5_exposure_volume_count: 0,
+        },
         materials,
-        primary_lights,
-        light_defs,
-        sun_primary_light_count: geometry.sun_primary_light_count as u32,
-        light_region_hulls,
-        shadow_geometry,
-        reflection_probes,
-        dpvs,
-        outdoor_image_name,
-        outdoor_image: None,
-        outdoor_lookup: geometry.outdoor_lookup,
-        t5_sun_parse_exposure: None,
-        t5_sky_dynamic_intensity: None,
-        t5_sun_light: None,
-        t5_tree_scatter_intensity: None,
-        t5_tree_scatter_amount: None,
-        t5_exposure_volume_count: 0,
-    })
+    ))
 }
 
 #[derive(Default)]
@@ -1423,7 +1417,11 @@ pub(crate) fn find_light_def<'a>(
     pick(map_defs).or_else(|| pick(common_defs))
 }
 
-pub fn resolve_primary_light_attenuation(draw: &mut WorldDraw, common_defs: &[CapturedLightDef]) {
+pub fn resolve_primary_light_attenuation(
+    draw: &mut WorldDraw,
+    materials: &MaterialDefinitions,
+    common_defs: &[CapturedLightDef],
+) {
     for i in 0..draw.primary_lights.len() {
         let Some(name) = draw.primary_lights[i].def_name.clone() else {
             continue;
@@ -1431,13 +1429,13 @@ pub fn resolve_primary_light_attenuation(draw: &mut WorldDraw, common_defs: &[Ca
         let Some(def) = find_light_def(&name, &draw.light_defs, common_defs).cloned() else {
             continue;
         };
-        apply_captured_def(&mut draw.primary_lights[i], &def, &draw.global_materials);
+        apply_captured_def(&mut draw.primary_lights[i], &def, materials);
     }
 }
 
 pub fn resolve_outdoor_image(
     world_ptr_name: Option<&str>,
-    catalog: &MaterialCatalog,
+    catalog: &MaterialDefinitions,
 ) -> (Option<usize>, &'static str) {
     if let Some(name) = world_ptr_name
         && let Some(index) = catalog.image_index_by_name(name)
@@ -1453,7 +1451,7 @@ pub fn resolve_outdoor_image(
 fn apply_captured_def(
     light: &mut WorldPrimaryLight,
     def: &CapturedLightDef,
-    catalog: &MaterialCatalog,
+    catalog: &MaterialDefinitions,
 ) {
     light.lmap_lookup_start = def.lmap_lookup_start;
     light.attenuation_sampler = def.attenuation_sampler;

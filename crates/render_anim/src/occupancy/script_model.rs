@@ -724,6 +724,8 @@ fn commit_script_model_draw_plan(
     mut focus: ResMut<RenderFocus>,
     mut lighting_requests: ResMut<ModelLightingRequests>,
     locals: ScriptModelTessLocals,
+    mut draws: Local<Vec<XModelSurfaceDraw>>,
+    mut owners: Local<Vec<ScriptModelOwnerDraw>>,
 ) {
     let ScriptModelTessLocals {
         mut last_material_generation,
@@ -736,18 +738,15 @@ fn commit_script_model_draw_plan(
         _marker: _,
     } = locals;
     if product.producer_unavailable {
-        plan.owners.clear();
-        plan.draws.clear();
+        plan.publish_no_rows();
         return;
     }
     if !facts.spawned {
-        plan.owners.clear();
-        plan.draws.clear();
+        plan.publish_no_rows();
         return;
     }
     let (Some(assets), Some(atlas), Some(tess)) = (assets, atlas, tess) else {
-        plan.owners.clear();
-        plan.draws.clear();
+        plan.publish_no_rows();
         return;
     };
 
@@ -758,12 +757,16 @@ fn commit_script_model_draw_plan(
         || tess.is_changed()
         || *last_material_generation != Some(material_generation);
     if catalog_reset {
+        let (revision, generation, revisions) = (plan.revision, plan.generation, plan.revisions);
         *plan = ScriptModelDrawPlan::default();
+        plan.revision = revision;
+        plan.generation = generation;
+        plan.revisions = revisions;
         material_cache.clear();
         *last_material_generation = Some(material_generation);
     }
-    plan.owners.clear();
-    plan.draws.clear();
+    draws.clear();
+    owners.clear();
     live_plan.clear();
     product_to_plan.clear();
     product_to_plan.resize(product.assets.len(), 0);
@@ -881,7 +884,7 @@ fn commit_script_model_draw_plan(
                 lookup_fallback: row.lookup_fallback,
             })
         });
-        let object_id = (plan.owners.len() as u16).saturating_add(0x200);
+        let object_id = (owners.len() as u16).saturating_add(0x200);
         if let Some(id) = row.focused_owner_id {
             focus.frame = Some(RenderFocusFrame {
                 owner_id: id,
@@ -897,13 +900,12 @@ fn commit_script_model_draw_plan(
                 planned_surfaces: u32::try_from(surface_count).unwrap_or(u32::MAX),
             });
         }
-        plan.owners.push(ScriptModelOwnerDraw {
+        owners.push(ScriptModelOwnerDraw {
             entity: row.entity,
             current_model: row.model.clone(),
             object_id,
         });
-        let ScriptModelDrawPlan { assets, draws, .. } = &mut *plan;
-        for &(surface, material) in &assets[asset_index].surfaces {
+        for &(surface, material) in &plan.assets[asset_index].surfaces {
             draws.push(XModelSurfaceDraw {
                 surface,
                 material,
@@ -922,6 +924,7 @@ fn commit_script_model_draw_plan(
             });
         }
     }
+    plan.publish_frame_rows(&mut draws, &mut owners);
 }
 
 fn append_or_overwrite_script_pose(

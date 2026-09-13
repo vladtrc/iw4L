@@ -1,7 +1,6 @@
 mod body_catalog;
 mod fpv_catalog;
 pub mod link;
-mod load_capture;
 mod model_kind;
 pub mod model_lighting;
 mod model_lod;
@@ -14,7 +13,6 @@ mod world_weapon_catalog;
 pub use asset_core::*;
 pub use body_catalog::*;
 pub use fpv_catalog::*;
-pub use load_capture::*;
 pub use model_kind::*;
 pub use model_lighting::*;
 pub use model_lod::*;

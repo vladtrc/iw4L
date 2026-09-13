@@ -6,7 +6,7 @@ use crate::asset_graph::{
     AssetEdge, AssetEdgeCensus, capture_xmodel_material_slots, stamp_xmodel_material_edges,
 };
 use crate::model_skel::{ModelSkel, capture_world_weapon_skel};
-use asset_material::MaterialCatalog;
+use asset_material::{MaterialCatalog, MaterialDefinitions};
 
 #[derive(Clone, Debug)]
 pub struct WorldWeaponEntry {
@@ -20,7 +20,7 @@ pub struct WorldWeaponEntry {
 impl WorldWeaponEntry {
     fn from_skel(skel: ModelSkel, materials: Option<&MaterialCatalog>) -> Self {
         let (material_names, material_edges) =
-            capture_xmodel_material_slots(&skel.surface_materials, materials);
+            capture_xmodel_material_slots(&skel.surface_materials, materials.map(|c| &**c));
         Self {
             skel,
             material_names,
@@ -28,7 +28,7 @@ impl WorldWeaponEntry {
         }
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialCatalog) {
+    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         stamp_xmodel_material_edges(
             &mut self.material_names,
             &mut self.material_edges,
@@ -169,25 +169,26 @@ impl WorldWeaponCatalog {
         self.entries.insert(name, entry);
     }
 
-    pub fn absorb(&mut self, other: Self) -> usize {
+    pub fn absorb(&mut self, mut other: Self) -> usize {
         let mut added = 0;
-        for (i, name) in other.order.iter().enumerate() {
-            if self.entries.contains_key(name) {
+        let order = std::mem::take(&mut other.order);
+        for (i, name) in order.into_iter().enumerate() {
+            if self.entries.contains_key(&name) {
                 continue;
             }
-            let Some(entry) = other.entries.get(name).cloned() else {
+            let Some(entry) = other.entries.remove(&name) else {
                 continue;
             };
             self.order.push(name.clone());
             self.zones
                 .push(other.zones.get(i).copied().unwrap_or(other.capture_zone));
-            self.entries.insert(name.clone(), entry);
+            self.entries.insert(name, entry);
             added += 1;
         }
         added
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialCatalog) {
+    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         for entry in self.entries.values_mut() {
             entry.resolve_materials(materials);
         }

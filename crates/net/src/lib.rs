@@ -165,7 +165,6 @@ pub use transport::reliable::{
     ActionVerdict, MAX_PENDING_RELIABLE, ReliableEventHub, ReliableEventQueue, ReliablePayload,
     ReliableRow, decode_reliable_payload, encode_reliable_payload,
 };
-pub use transport::udp_launch::{UdpLaunchIntent, handshake_hello_for_udp};
 pub use transport::udp_session::{CommittedAdmission, UdpAuthorityHub, UdpClientLink};
 pub use transport::udp_socket::{DEFAULT_RECV_BUDGET_PER_TICK, UdpDatagramSocket, UdpSendError};
 pub use transport::wire::{WireError, WireReader, WireWriter};

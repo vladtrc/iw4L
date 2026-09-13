@@ -13,7 +13,8 @@ use fx_iw4::{
 use crate::asset_graph::{
     AssetEdge, AssetEdgeCensus, AssetEdgeFromPtrs, AssetEdgeReason, ZoneOwner,
 };
-use crate::material_catalog::{MaterialCatalog, TS_2D, TS_COLOR_MAP};
+use crate::graph_support::AuthoredRef;
+use crate::material_catalog::{MaterialCatalog, MaterialDefinitions, TS_2D, TS_COLOR_MAP};
 
 #[inline]
 pub fn fx_material_bind_name(name: &str) -> &str {
@@ -105,15 +106,17 @@ pub enum OwnedFxVisual {
     Material {
         material: FxElemMaterial,
         hint: Option<String>,
-        slot: Option<fastfile_iw4::Ptr>,
-        alias: Option<fastfile_iw4::Ptr>,
+        /// Whether the zone authored this visual at all, and whether it reached
+        /// it through an alias. The zone pointers themselves stop at the walk:
+        /// nothing downstream ever dereferenced them, only asked whether they
+        /// were there, and a pointer into a closed zone is not an answer.
+        authored: AuthoredRef,
     },
 
     Mark {
         materials: [FxElemMaterial; 2],
         hints: [Option<String>; 2],
-        slots: [Option<fastfile_iw4::Ptr>; 2],
-        aliases: [Option<fastfile_iw4::Ptr>; 2],
+        authored: [AuthoredRef; 2],
     },
     Model {
         edge: FxElemModelEdge,
@@ -319,34 +322,50 @@ pub struct OwnedFxEffectDef {
     pub elems: Vec<OwnedFxElemDef>,
 }
 
+/// The effects a build finished with. There is no zone link map here and no
+/// half-captured name waiting for the slot it belongs to: the names are the
+/// answers, and a consumer holding this cannot resolve one more pointer.
 #[derive(Clone, Debug, Default)]
-pub struct FxCatalog {
+pub struct FxDefinitions {
     by_name: HashMap<String, usize>,
 
     defs: Vec<OwnedFxEffectDef>,
 
-    links: HashMap<fastfile_iw4::Ptr, FxLink>,
-
-    last_captured: Option<String>,
     order: Vec<String>,
     zones: Vec<ZoneOwner>,
     capture_zone: ZoneOwner,
     pub capture_gaps: usize,
 }
 
-#[derive(Clone, Debug)]
-enum FxLink {
-    Direct(String),
-    Alias(fastfile_iw4::Ptr),
+/// The build. `links` and `last_captured` belong to the walk, and `publish`
+/// leaves them behind with it.
+#[derive(Clone, Debug, Default)]
+pub struct FxCatalog {
+    published: FxDefinitions,
+
+    links: HashMap<fastfile_iw4::Ptr, FxLink>,
+    last_captured: Option<String>,
+}
+
+impl std::ops::Deref for FxCatalog {
+    type Target = FxDefinitions;
+
+    fn deref(&self) -> &Self::Target {
+        &self.published
+    }
+}
+
+impl std::ops::DerefMut for FxCatalog {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.published
+    }
 }
 
 impl FxCatalog {
-    pub fn len(&self) -> usize {
-        self.defs.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.defs.is_empty()
+    /// Ends the build: the effect definitions travel on, the zone pointer map
+    /// that produced them does not.
+    pub fn publish(self) -> FxDefinitions {
+        self.published
     }
 
     pub fn note_loaded(&mut self, slot: fastfile_iw4::Ptr, insert_slot: Option<fastfile_iw4::Ptr>) {
@@ -361,6 +380,213 @@ impl FxCatalog {
 
     pub fn note_alias(&mut self, slot: fastfile_iw4::Ptr, target: fastfile_iw4::Ptr) {
         self.links.insert(slot, FxLink::Alias(target));
+    }
+
+    pub fn absorb(&mut self, other: FxCatalog) {
+        let FxCatalog {
+            published:
+                FxDefinitions {
+                    defs,
+                    order,
+                    zones,
+                    capture_gaps,
+                    ..
+                },
+            links,
+            ..
+        } = other;
+        self.capture_gaps += capture_gaps;
+
+        self.links.extend(links);
+        for ((key, effect), zone) in order.into_iter().zip(defs).zip(zones) {
+            let saved = self.capture_zone;
+            self.capture_zone = zone;
+            self.insert_def(key, effect);
+            self.capture_zone = saved;
+        }
+    }
+
+    pub fn absorb_missing(&mut self, other: FxCatalog) {
+        let FxCatalog {
+            published:
+                FxDefinitions {
+                    defs,
+                    order,
+                    zones,
+                    capture_gaps,
+                    ..
+                },
+            ..
+        } = other;
+        self.capture_gaps += capture_gaps;
+        for ((key, effect), zone) in order.into_iter().zip(defs).zip(zones) {
+            if self.by_name.contains_key(&key) {
+                continue;
+            }
+            let saved = self.capture_zone;
+            self.capture_zone = zone;
+            self.insert_def(key, effect);
+            self.capture_zone = saved;
+        }
+    }
+
+    pub fn capture(
+        &mut self,
+        s: &ZoneStream<'_>,
+        geometry: FxEffectDefGeometry,
+        materials: &MaterialCatalog,
+        xmodel_names: &HashMap<Ptr, Ptr>,
+    ) -> Result<()> {
+        let Some(name_ptr) = geometry.name else {
+            self.capture_gaps += 1;
+            return Ok(());
+        };
+        let Ok(name) = s.cstr(name_ptr) else {
+            self.capture_gaps += 1;
+            return Ok(());
+        };
+        if name.is_empty() {
+            self.capture_gaps += 1;
+            return Ok(());
+        }
+        let Ok(header_raw) = s.slice_at(geometry.header, 0, s.layout(FX_EFFECT_DEF_SIZE, 40))
+        else {
+            self.capture_gaps += 1;
+            return Ok(());
+        };
+        let view = if s.wire_format() == fastfile_iw4::Iw4WireFormat::X64 {
+            Some(fx_iw4::FxEffectDefView {
+                flags: s.i32_at(geometry.header, 8)?,
+                msec_looping_life: s.i32_at(geometry.header, 16)?,
+                looping_count: geometry.looping_count,
+                one_shot_count: geometry.one_shot_count,
+                emission_count: geometry.emission_count,
+            })
+        } else {
+            fx_effect_def_view(header_raw)
+        };
+        let Some(view) = view else {
+            self.capture_gaps += 1;
+            return Ok(());
+        };
+        if view.looping_count != geometry.looping_count
+            || view.one_shot_count != geometry.one_shot_count
+            || view.emission_count != geometry.emission_count
+        {
+            self.capture_gaps += 1;
+            return Ok(());
+        }
+
+        let mut elems = Vec::with_capacity(geometry.elem_def_count);
+        if let Some(arr) = geometry.elem_defs {
+            for i in 0..geometry.elem_def_count {
+                let elem_ptr = arr.at(i * s.layout(sz::FX_ELEM_DEF, 288));
+                match capture_elem(s, elem_ptr, materials, xmodel_names) {
+                    Some(elem) => elems.push(elem),
+                    None => {
+                        self.capture_gaps += 1;
+                        return Ok(());
+                    }
+                }
+            }
+        } else if geometry.elem_def_count > 0 {
+            self.capture_gaps += 1;
+            return Ok(());
+        }
+
+        let key = ascii_lower(name);
+
+        self.last_captured = Some(name.to_owned());
+        self.insert_def(
+            key,
+            OwnedFxEffectDef {
+                name: name.to_owned(),
+                view,
+                header_raw: header_raw.to_vec(),
+                elems,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn capture_t5(
+        &mut self,
+        s: &fastfile_t5::ZoneStream<'_>,
+        geometry: fastfile_t5::FxEffectDefGeometry,
+        materials: &MaterialCatalog,
+    ) {
+        use fastfile_t5::size as sz_t5;
+        let Some(name_ptr) = geometry.name else {
+            self.capture_gaps += 1;
+            return;
+        };
+        let Ok(name) = s.cstr(name_ptr) else {
+            self.capture_gaps += 1;
+            return;
+        };
+        if name.is_empty() {
+            self.capture_gaps += 1;
+            return;
+        }
+        let Ok(t5_header) = s.slice_at(geometry.header, 0, sz_t5::FX_EFFECT_DEF) else {
+            self.capture_gaps += 1;
+            return;
+        };
+        if t5_header.len() < sz_t5::FX_EFFECT_DEF {
+            self.capture_gaps += 1;
+            return;
+        }
+        let Some(view) = leftover_t5_effect_view(t5_header) else {
+            self.capture_gaps += 1;
+            return;
+        };
+        if view.looping_count != geometry.looping_count
+            || view.one_shot_count != geometry.one_shot_count
+            || view.emission_count != geometry.emission_count
+        {
+            self.capture_gaps += 1;
+            return;
+        }
+
+        let mut elems = Vec::with_capacity(geometry.elem_def_count);
+        if let Some(arr) = geometry.elem_defs {
+            for i in 0..geometry.elem_def_count {
+                let elem_ptr = arr.at(i * sz_t5::FX_ELEM_DEF);
+                match leftover_capture_elem_t5(s, elem_ptr, materials) {
+                    Some(elem) => elems.push(elem),
+                    None => {
+                        self.capture_gaps += 1;
+                        return;
+                    }
+                }
+            }
+        } else if geometry.elem_def_count > 0 {
+            self.capture_gaps += 1;
+            return;
+        }
+
+        let key = ascii_lower(name);
+        self.last_captured = Some(name.to_owned());
+        self.insert_def(
+            key,
+            OwnedFxEffectDef {
+                name: name.to_owned(),
+                view,
+                header_raw: leftover_pack_iw4_effect_header(&view),
+                elems,
+            },
+        );
+    }
+
+    pub fn name_at_slot(&self, slot: fastfile_iw4::Ptr) -> Option<&str> {
+        let mut at = slot;
+        for _ in 0..8 {
+            match self.links.get(&at)? {
+                FxLink::Direct(name) => return Some(name.as_str()),
+                FxLink::Alias(next) => at = *next,
+            }
+        }
+        None
     }
 
     pub fn bind_named_slot(&mut self, slot: fastfile_iw4::Ptr, name: &str) {
@@ -384,16 +610,21 @@ impl FxCatalog {
         }
         self.links.insert(slot, FxLink::Direct(name.to_owned()));
     }
+}
 
-    pub fn name_at_slot(&self, slot: fastfile_iw4::Ptr) -> Option<&str> {
-        let mut at = slot;
-        for _ in 0..8 {
-            match self.links.get(&at)? {
-                FxLink::Direct(name) => return Some(name.as_str()),
-                FxLink::Alias(next) => at = *next,
-            }
-        }
-        None
+#[derive(Clone, Debug)]
+enum FxLink {
+    Direct(String),
+    Alias(fastfile_iw4::Ptr),
+}
+
+impl FxDefinitions {
+    pub fn len(&self) -> usize {
+        self.defs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.defs.is_empty()
     }
 
     pub fn get(&self, name: &str) -> Option<&OwnedFxEffectDef> {
@@ -471,47 +702,7 @@ impl FxCatalog {
         self.insert_def(key, def);
     }
 
-    pub fn absorb(&mut self, other: FxCatalog) {
-        let FxCatalog {
-            defs,
-            order,
-            zones,
-            links,
-            capture_gaps,
-            ..
-        } = other;
-        self.capture_gaps += capture_gaps;
-
-        self.links.extend(links);
-        for ((key, effect), zone) in order.into_iter().zip(defs).zip(zones) {
-            let saved = self.capture_zone;
-            self.capture_zone = zone;
-            self.insert_def(key, effect);
-            self.capture_zone = saved;
-        }
-    }
-
-    pub fn absorb_missing(&mut self, other: FxCatalog) {
-        let FxCatalog {
-            defs,
-            order,
-            zones,
-            capture_gaps,
-            ..
-        } = other;
-        self.capture_gaps += capture_gaps;
-        for ((key, effect), zone) in order.into_iter().zip(defs).zip(zones) {
-            if self.by_name.contains_key(&key) {
-                continue;
-            }
-            let saved = self.capture_zone;
-            self.capture_zone = zone;
-            self.insert_def(key, effect);
-            self.capture_zone = saved;
-        }
-    }
-
-    pub fn resolve_materials(&mut self, materials: &crate::MaterialCatalog) {
+    pub fn resolve_materials(&mut self, materials: &crate::MaterialDefinitions) {
         for effect in &mut self.defs {
             for elem in &mut effect.elems {
                 for vis in &mut elem.visuals {
@@ -519,21 +710,18 @@ impl FxCatalog {
                         OwnedFxVisual::Material {
                             material,
                             hint,
-                            slot,
-                            alias,
-                        } => remap_elem_material(material, hint, *slot, *alias, materials),
+                            authored,
+                        } => remap_elem_material(material, hint, *authored, materials),
                         OwnedFxVisual::Mark {
                             materials: mats,
                             hints,
-                            slots,
-                            aliases,
+                            authored,
                         } => {
                             for i in 0..2 {
                                 remap_elem_material(
                                     &mut mats[i],
                                     &mut hints[i],
-                                    slots[i],
-                                    aliases[i],
+                                    authored[i],
                                     materials,
                                 );
                             }
@@ -734,7 +922,7 @@ impl FxCatalog {
         self.unique_decal_mark_wc_hints().len()
     }
 
-    pub fn unique_decal_mark_decoded_color_count(&self, materials: &MaterialCatalog) -> usize {
+    pub fn unique_decal_mark_decoded_color_count(&self, materials: &MaterialDefinitions) -> usize {
         self.unique_decal_mark_hints()
             .into_iter()
             .filter(|(index, hint)| fx_elem_color_image(materials, Some(*index), hint).is_some())
@@ -743,7 +931,7 @@ impl FxCatalog {
 
     pub fn unique_decal_mark_decoded_miss_samples(
         &self,
-        materials: &MaterialCatalog,
+        materials: &MaterialDefinitions,
         cap: usize,
     ) -> Vec<String> {
         let mut out = Vec::new();
@@ -1022,154 +1210,6 @@ impl FxCatalog {
         }
         out
     }
-
-    pub fn capture(
-        &mut self,
-        s: &ZoneStream<'_>,
-        geometry: FxEffectDefGeometry,
-        materials: &MaterialCatalog,
-        xmodel_names: &HashMap<Ptr, Ptr>,
-    ) -> Result<()> {
-        let Some(name_ptr) = geometry.name else {
-            self.capture_gaps += 1;
-            return Ok(());
-        };
-        let Ok(name) = s.cstr(name_ptr) else {
-            self.capture_gaps += 1;
-            return Ok(());
-        };
-        if name.is_empty() {
-            self.capture_gaps += 1;
-            return Ok(());
-        }
-        let Ok(header_raw) = s.slice_at(geometry.header, 0, s.layout(FX_EFFECT_DEF_SIZE, 40))
-        else {
-            self.capture_gaps += 1;
-            return Ok(());
-        };
-        let view = if s.wire_format() == fastfile_iw4::Iw4WireFormat::X64 {
-            Some(fx_iw4::FxEffectDefView {
-                flags: s.i32_at(geometry.header, 8)?,
-                msec_looping_life: s.i32_at(geometry.header, 16)?,
-                looping_count: geometry.looping_count,
-                one_shot_count: geometry.one_shot_count,
-                emission_count: geometry.emission_count,
-            })
-        } else {
-            fx_effect_def_view(header_raw)
-        };
-        let Some(view) = view else {
-            self.capture_gaps += 1;
-            return Ok(());
-        };
-        if view.looping_count != geometry.looping_count
-            || view.one_shot_count != geometry.one_shot_count
-            || view.emission_count != geometry.emission_count
-        {
-            self.capture_gaps += 1;
-            return Ok(());
-        }
-
-        let mut elems = Vec::with_capacity(geometry.elem_def_count);
-        if let Some(arr) = geometry.elem_defs {
-            for i in 0..geometry.elem_def_count {
-                let elem_ptr = arr.at(i * s.layout(sz::FX_ELEM_DEF, 288));
-                match capture_elem(s, elem_ptr, materials, xmodel_names) {
-                    Some(elem) => elems.push(elem),
-                    None => {
-                        self.capture_gaps += 1;
-                        return Ok(());
-                    }
-                }
-            }
-        } else if geometry.elem_def_count > 0 {
-            self.capture_gaps += 1;
-            return Ok(());
-        }
-
-        let key = ascii_lower(name);
-
-        self.last_captured = Some(name.to_owned());
-        self.insert_def(
-            key,
-            OwnedFxEffectDef {
-                name: name.to_owned(),
-                view,
-                header_raw: header_raw.to_vec(),
-                elems,
-            },
-        );
-        Ok(())
-    }
-
-    pub fn capture_t5(
-        &mut self,
-        s: &fastfile_t5::ZoneStream<'_>,
-        geometry: fastfile_t5::FxEffectDefGeometry,
-        materials: &MaterialCatalog,
-    ) {
-        use fastfile_t5::size as sz_t5;
-        let Some(name_ptr) = geometry.name else {
-            self.capture_gaps += 1;
-            return;
-        };
-        let Ok(name) = s.cstr(name_ptr) else {
-            self.capture_gaps += 1;
-            return;
-        };
-        if name.is_empty() {
-            self.capture_gaps += 1;
-            return;
-        }
-        let Ok(t5_header) = s.slice_at(geometry.header, 0, sz_t5::FX_EFFECT_DEF) else {
-            self.capture_gaps += 1;
-            return;
-        };
-        if t5_header.len() < sz_t5::FX_EFFECT_DEF {
-            self.capture_gaps += 1;
-            return;
-        }
-        let Some(view) = leftover_t5_effect_view(t5_header) else {
-            self.capture_gaps += 1;
-            return;
-        };
-        if view.looping_count != geometry.looping_count
-            || view.one_shot_count != geometry.one_shot_count
-            || view.emission_count != geometry.emission_count
-        {
-            self.capture_gaps += 1;
-            return;
-        }
-
-        let mut elems = Vec::with_capacity(geometry.elem_def_count);
-        if let Some(arr) = geometry.elem_defs {
-            for i in 0..geometry.elem_def_count {
-                let elem_ptr = arr.at(i * sz_t5::FX_ELEM_DEF);
-                match leftover_capture_elem_t5(s, elem_ptr, materials) {
-                    Some(elem) => elems.push(elem),
-                    None => {
-                        self.capture_gaps += 1;
-                        return;
-                    }
-                }
-            }
-        } else if geometry.elem_def_count > 0 {
-            self.capture_gaps += 1;
-            return;
-        }
-
-        let key = ascii_lower(name);
-        self.last_captured = Some(name.to_owned());
-        self.insert_def(
-            key,
-            OwnedFxEffectDef {
-                name: name.to_owned(),
-                view,
-                header_raw: leftover_pack_iw4_effect_header(&view),
-                elems,
-            },
-        );
-    }
 }
 
 impl AssetLinkSink for FxCatalog {
@@ -1397,8 +1437,7 @@ fn capture_visuals(
                     .map(|_| OwnedFxVisual::Material {
                         material: FxElemMaterial::unresolved_for(Some(vis), None),
                         hint: Some(kind.to_string()),
-                        slot: Some(vis),
-                        alias: None,
+                        authored: AuthoredRef::from_ptrs(Some(vis), None),
                     })
                     .collect();
             };
@@ -1540,17 +1579,15 @@ fn resolve_material_visual(
     OwnedFxVisual::Material {
         material: FxElemMaterial::unresolved_for(Some(slot), alias),
         hint: name,
-        slot: Some(slot),
-        alias,
+        authored: AuthoredRef::from_ptrs(Some(slot), alias),
     }
 }
 
 fn remap_elem_material(
     material: &mut FxElemMaterial,
     hint: &mut Option<String>,
-    slot: Option<Ptr>,
-    alias: Option<Ptr>,
-    materials: &crate::MaterialCatalog,
+    authored: AuthoredRef,
+    materials: &crate::MaterialDefinitions,
 ) {
     let index = hint
         .as_deref()
@@ -1566,7 +1603,7 @@ fn remap_elem_material(
         }
         *material = FxElemMaterial::bind(index, materials.zone_of(index.order()));
     } else {
-        *material = FxElemMaterial::unresolved_for(slot, alias);
+        *material = authored.unresolved();
     }
 }
 
@@ -1575,23 +1612,21 @@ fn mark_pair(a: OwnedFxVisual, b: OwnedFxVisual) -> OwnedFxVisual {
         OwnedFxVisual::Material {
             material,
             hint,
-            slot,
-            alias,
-        } => (material, hint, slot, alias),
-        _ => (FxElemMaterial::Absent, None, None, None),
+            authored,
+        } => (material, hint, authored),
+        _ => (FxElemMaterial::Absent, None, AuthoredRef::default()),
     };
-    let (m0, h0, s0, a0) = peel(a);
-    let (m1, h1, s1, a1) = peel(b);
+    let (m0, h0, v0) = peel(a);
+    let (m1, h1, v1) = peel(b);
     OwnedFxVisual::Mark {
         materials: [m0, m1],
         hints: [h0, h1],
-        slots: [s0, s1],
-        aliases: [a0, a1],
+        authored: [v0, v1],
     }
 }
 
 fn fx_elem_color_image(
-    materials: &MaterialCatalog,
+    materials: &MaterialDefinitions,
     mat_i: Option<usize>,
     authored_name: &str,
 ) -> Option<bevy::prelude::Image> {
@@ -1617,7 +1652,7 @@ pub fn fx_color_image_for_name(
         .or_else(|| fx_elem_color_image(materials, Some(index.order()), bind))
 }
 
-fn material_has_decoded_color(materials: &MaterialCatalog, mat_i: usize) -> bool {
+fn material_has_decoded_color(materials: &MaterialDefinitions, mat_i: usize) -> bool {
     let Some(mat) = materials.materials.get(mat_i) else {
         return false;
     };
@@ -1637,7 +1672,7 @@ fn material_has_decoded_color(materials: &MaterialCatalog, mat_i: usize) -> bool
         .is_some_and(|img| img.decoded.is_some())
 }
 
-pub fn fx_color_decoded_in_catalog(materials: &MaterialCatalog, authored_name: &str) -> bool {
+pub fn fx_color_decoded_in_catalog(materials: &MaterialDefinitions, authored_name: &str) -> bool {
     let bind = fx_material_bind_name(authored_name);
     if bind.is_empty() {
         return false;
@@ -1649,7 +1684,7 @@ pub fn fx_color_decoded_in_catalog(materials: &MaterialCatalog, authored_name: &
 }
 
 fn material_decoded_color(
-    materials: &MaterialCatalog,
+    materials: &MaterialDefinitions,
     mat_i: usize,
 ) -> Option<bevy::prelude::Image> {
     let mat = materials.materials.get(mat_i)?;
@@ -2123,8 +2158,7 @@ fn leftover_capture_visuals_t5(
                     .map(|_| OwnedFxVisual::Material {
                         material: FxElemMaterial::unresolved_for(Some(vis_iw4), None),
                         hint: Some(kind.to_string()),
-                        slot: Some(vis_iw4),
-                        alias: None,
+                        authored: AuthoredRef::from_ptrs(Some(vis_iw4), None),
                     })
                     .collect();
             };
@@ -2216,7 +2250,6 @@ fn leftover_resolve_material_t5(
     OwnedFxVisual::Material {
         material: FxElemMaterial::unresolved_for(Some(slot_iw4), alias),
         hint: name,
-        slot: Some(slot_iw4),
-        alias,
+        authored: AuthoredRef::from_ptrs(Some(slot_iw4), alias),
     }
 }

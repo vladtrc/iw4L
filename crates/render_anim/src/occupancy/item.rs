@@ -316,16 +316,22 @@ fn append_item_draws(
     mut lighting_requests: ResMut<ModelLightingRequests>,
     mut last_material_generation: Local<Option<render_material::MaterialGenerationId>>,
     mut material_cache: Local<HashMap<String, SmodelPassMaterial>>,
+    mut draws: Local<Vec<XModelSurfaceDraw>>,
+    mut owners: Local<Vec<ItemOwnerDraw>>,
 ) {
-    plan.owners.clear();
-    plan.draws.clear();
+    draws.clear();
+    owners.clear();
     let catalog = world_weapons
         .as_ref()
         .map(|prepared| &prepared.0)
         .filter(|c| !c.is_empty());
     let atlas_ref = atlas.as_deref();
     if catalog.is_none() || atlas_ref.is_none() || !facts.spawned || tess.is_none() {
+        let (revision, generation) = (plan.revision, plan.generation);
         *plan = ItemDrawPlan::default();
+        plan.revision = revision;
+        plan.generation = generation;
+        plan.publish_no_rows();
         material_cache.clear();
         *last_material_generation = None;
         return;
@@ -406,13 +412,12 @@ fn append_item_draws(
             lookup_fallback,
         }));
         let object_id = XMODEL_OBJECT_ID_ITEM_BASE.saturating_add(row.index as u16);
-        plan.owners.push(ItemOwnerDraw {
+        owners.push(ItemOwnerDraw {
             object_id,
             model: row.name.clone(),
         });
         let world_from_local = item_world_from_local(row.origin, row.angles);
-        let ItemDrawPlan { assets, draws, .. } = &mut *plan;
-        for &(surface, material) in &assets[asset_index].surfaces {
+        for &(surface, material) in &plan.assets[asset_index].surfaces {
             draws.push(XModelSurfaceDraw {
                 surface,
                 material,
@@ -430,12 +435,13 @@ fn append_item_draws(
         }
         perf::item(entity_iw4::ET_ITEM, None, None, Some("posed"));
     }
-    if !plan.draws.is_empty() {
+    if !draws.is_empty() {
         let topology =
             topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.vertices.len());
         let rev = plan.revision;
         plan.revision = stamp_plan_geometry(&mut plan.revisions, rev, topology);
     }
+    plan.publish_frame_rows(&mut draws, &mut owners);
 }
 
 fn evaluate_origin(es: &entity_iw4::EntityState, at_time: i32) -> [f32; 3] {

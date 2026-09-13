@@ -43,6 +43,8 @@ pub struct FxParticleCloudPlan {
     pub tmpl_first_r2: f32,
 
     pub tmpl_holdrand: u32,
+
+    pub range_share: Option<Arc<Vec<(u32, u32)>>>,
 }
 
 impl Default for FxParticleCloudPlan {
@@ -64,6 +66,7 @@ impl Default for FxParticleCloudPlan {
             tmpl_first_xyz: built.first_xyz,
             tmpl_first_r2: built.first_r2,
             tmpl_holdrand: built.holdrand,
+            range_share: None,
         }
     }
 }
@@ -72,6 +75,7 @@ impl FxParticleCloudPlan {
     pub fn clear_draws(&mut self) {
         self.materials.clear();
         self.draws.clear();
+        self.range_share = None;
         self.miss_material = 0;
         self.custom_live = 0;
 
@@ -85,6 +89,14 @@ impl FxParticleCloudPlan {
 
     pub fn bump(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+    }
+
+    pub fn publish_share(&mut self) {
+        self.range_share = Some(super::publish_index_ranges(
+            self.draws
+                .iter()
+                .map(|draw| (draw.index_start, draw.index_count)),
+        ));
     }
 
     pub fn begin_material_draw(

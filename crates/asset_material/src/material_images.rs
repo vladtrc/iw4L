@@ -19,7 +19,7 @@ use bevy::tasks::{ComputeTaskPool, TaskPool};
 use crate::material_catalog::TS_2D;
 use crate::progress::LoadStage;
 use crate::{
-    AuthoredImage, MaterialCatalog, TS_COLOR_MAP, TS_FUNCTION, TS_NORMAL_MAP, TS_WATER_MAP,
+    AuthoredImage, MaterialDefinitions, TS_COLOR_MAP, TS_FUNCTION, TS_NORMAL_MAP, TS_WATER_MAP,
 };
 
 struct DecodedMips {
@@ -242,7 +242,7 @@ fn texture_semantic_decodes_as_normal(semantic: u8) -> Option<bool> {
 
 pub fn decode_material_color_maps(
     zone_ff: &Path,
-    catalog: &mut MaterialCatalog,
+    catalog: &mut MaterialDefinitions,
     stage: &LoadStage,
 ) -> Result<MaterialImageStats, String> {
     let main = game_main_for_zone(zone_ff)?;
@@ -278,7 +278,7 @@ pub fn decode_material_color_maps(
     Ok(stats)
 }
 
-fn requested_color_map_slots(catalog: &MaterialCatalog) -> Vec<ImageRequest> {
+fn requested_color_map_slots(catalog: &MaterialDefinitions) -> Vec<ImageRequest> {
     let mut requested = vec![None; catalog.images.len()];
     for material in &catalog.materials {
         let alpha_test = catalog
@@ -328,7 +328,7 @@ fn requested_color_map_slots(catalog: &MaterialCatalog) -> Vec<ImageRequest> {
 
 pub fn decode_color_or_2d_for_names(
     zone_ff: &Path,
-    catalog: &mut MaterialCatalog,
+    catalog: &mut MaterialDefinitions,
     names: impl IntoIterator<Item = impl AsRef<str>>,
     stage: &LoadStage,
 ) -> Result<usize, String> {
@@ -352,7 +352,7 @@ pub fn decode_color_or_2d_for_names(
 }
 
 fn requested_named_2d_slots(
-    catalog: &MaterialCatalog,
+    catalog: &MaterialDefinitions,
     names: impl IntoIterator<Item = impl AsRef<str>>,
 ) -> Vec<ImageRequest> {
     let wanted: std::collections::HashSet<String> = names
@@ -405,7 +405,7 @@ fn requested_named_2d_slots(
 
 pub fn decode_catalog_images_from_iwd(
     zone_ff: &Path,
-    catalog: &mut MaterialCatalog,
+    catalog: &mut MaterialDefinitions,
     images: impl IntoIterator<Item = (usize, u8)>,
     stage: &LoadStage,
 ) -> Result<usize, String> {
@@ -442,7 +442,7 @@ pub fn decode_catalog_images_from_iwd(
     Ok(n)
 }
 
-pub fn decode_in_zone_builtin_images(catalog: &mut MaterialCatalog) -> usize {
+pub fn decode_in_zone_builtin_images(catalog: &mut MaterialDefinitions) -> usize {
     let mut decoded = 0usize;
     for image in &mut catalog.images {
         if image.decoded.is_some() || image.payload.is_empty() || image.map_type != 3 {
@@ -931,14 +931,14 @@ pub fn cpu_image_census<'a>(images: impl IntoIterator<Item = &'a Image>) -> (u64
 }
 
 pub fn census_image_working_set(
-    catalog: &MaterialCatalog,
+    catalog: &MaterialDefinitions,
     world_materials: impl IntoIterator<Item = usize>,
     smodel_materials: impl IntoIterator<Item = usize>,
     fpv_materials: impl IntoIterator<Item = usize>,
     fx_materials: impl IntoIterator<Item = usize>,
 ) -> ImageWorkingSet {
     fn bound_images(
-        catalog: &MaterialCatalog,
+        catalog: &MaterialDefinitions,
         mats: impl IntoIterator<Item = usize>,
     ) -> (u64, u64) {
         let mut seen = HashSet::new();
@@ -1707,7 +1707,7 @@ impl ImageDemandPlan {
 }
 
 impl DecodedImageBatch {
-    pub fn apply(self, catalog: &mut MaterialCatalog) -> (usize, usize, usize) {
+    pub fn apply(self, catalog: &mut MaterialDefinitions) -> (usize, usize, usize) {
         let Some(id) = self.plan else {
             return (0, 0, 0);
         };
@@ -1756,7 +1756,7 @@ impl DecodedImageBatch {
 
 pub fn plan_material_color_maps(
     zone_ff: &Path,
-    catalog: &mut MaterialCatalog,
+    catalog: &mut MaterialDefinitions,
     stage: &LoadStage,
 ) -> (MaterialImageStats, ImageDemandPlan) {
     let mut plan = ImageDemandPlan::new(zone_ff);
@@ -1767,7 +1767,7 @@ pub fn plan_material_color_maps(
 }
 
 fn claim(
-    catalog: &mut MaterialCatalog,
+    catalog: &mut MaterialDefinitions,
     plan: &mut ImageDemandPlan,
     requested: Vec<ImageRequest>,
 ) -> Vec<ImageRequest> {
@@ -1791,7 +1791,7 @@ fn claim(
 
 pub fn plan_color_or_2d_for_names(
     plan: &mut ImageDemandPlan,
-    catalog: &mut MaterialCatalog,
+    catalog: &mut MaterialDefinitions,
     names: impl IntoIterator<Item = impl AsRef<str>>,
     stage: &LoadStage,
 ) -> usize {
@@ -1801,7 +1801,7 @@ pub fn plan_color_or_2d_for_names(
 }
 
 fn decode_inline(
-    catalog: &mut MaterialCatalog,
+    catalog: &mut MaterialDefinitions,
     work: &[ImageRequest],
     stage: &LoadStage,
 ) -> MaterialImageStats {

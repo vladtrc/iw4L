@@ -4,10 +4,10 @@ use bevy::tasks::{TaskPool, TaskPoolBuilder};
 
 use crate::{
     BodyMeshCatalog, ClipCollision, FpvMeshCatalog, FxCatalog, IntermissionView, LocalizeCatalog,
-    MP_LOCALIZED_ZONES, MaterialCatalog, PreparedGaps, PreparedMap, PreparedSpawn, WeaponRegistry,
-    WorldDraw, WorldWeaponCatalog, XAnimCatalog, find_common_mp_for_envelope,
-    find_common_mp_for_zone, find_runtime_common_mp, find_runtime_zone, find_zone_file_version,
-    find_zone_for_tree, games_root_from_env,
+    MP_LOCALIZED_ZONES, MaterialCatalog, PreparedGaps, PreparedMap, WeaponRegistry, WorldDraw,
+    WorldWeaponCatalog, XAnimCatalog, find_common_mp_for_envelope, find_common_mp_for_zone,
+    find_runtime_common_mp, find_runtime_zone, find_zone_file_version, find_zone_for_tree,
+    games_root_from_env,
     lane::{LoadedWorld, lane},
     lane_capability::PreparedCapability,
     load_localize_catalog_in_lane,
@@ -196,17 +196,6 @@ pub struct PreparedWorld {
     pub impact_fx: Option<crate::OwnedFxImpactTable>,
     pub reflection_probe_images: Vec<Option<bevy::prelude::Image>>,
     pub intermission_view: Option<IntermissionView>,
-    pub minimap_corners: Option<crate::MinimapCorners>,
-
-    pub north_yaw: Option<f32>,
-
-    pub compass: crate::MapCompassDeclaration,
-
-    pub script_sound: crate::MapScriptSoundFacts,
-
-    pub t5_teamset: Option<String>,
-
-    pub team_icons: crate::TeamIcons,
 
     pub exp_fog: Option<crate::ExpFog>,
 
@@ -223,6 +212,12 @@ pub struct PreparedWorld {
 #[derive(Default)]
 pub struct PreparedMatch {
     pub world: PreparedWorld,
+
+    /// The effects the match installs. Published out of the world's build
+    /// catalog once the donors are absorbed, so what reaches the runtime has no
+    /// zone link map to resolve one more pointer with.
+    pub fx: crate::FxDefinitions,
+    pub materials: crate::MatchMaterials,
     pub clip: Option<ClipCollision>,
     pub weapons: WeaponRegistry,
     pub fpv_meshes: FpvMeshCatalog,
@@ -233,7 +228,7 @@ pub struct PreparedMatch {
     pub xanims: XAnimCatalog,
     pub player_anim_sources: crate::PlayerAnimSources,
 
-    pub tracers: crate::TracerCatalog,
+    pub tracers: crate::TracerDefinitions,
 
     pub strings: LocalizeCatalog,
     pub report: Vec<String>,
@@ -244,16 +239,21 @@ pub struct PreparedMatch {
     pub pen_table_loaded: bool,
 
     pub xmodel_walk: crate::PreparedXModelWalkCensus,
+}
 
-    pub s1_common_arenas: Option<crate::ZoneMemory>,
-    pub s1_map_arenas: Option<crate::ZoneMemory>,
+/// What a match walk produced. A canceled walk has no prepared match at all —
+/// it is not an empty one, and nothing downstream has to tell the two apart by
+/// looking at how little arrived.
+pub enum MatchLoadOutcome {
+    Ready(PreparedMatch),
+    Canceled,
 }
 
 pub async fn load_prepared_match(
     zone_ff: Result<PathBuf, String>,
     common_mp: Result<PathBuf, String>,
     progress: LoadProgress,
-) -> PreparedMatch {
+) -> MatchLoadOutcome {
     let zone_name = zone_ff
         .as_ref()
         .ok()
@@ -360,6 +360,13 @@ pub async fn load_prepared_match(
     };
 
     let (material_seed, mut common_report) = startup_walk.await;
+    if progress.is_canceled() {
+        diag::info!(
+            World,
+            "match walk: canceled after the startup materials — load retargeted"
+        );
+        return MatchLoadOutcome::Canceled;
+    }
     let startup_count = material_seed.materials.len();
 
     let t5_weapon_walk = {
@@ -418,18 +425,19 @@ pub async fn load_prepared_match(
     let mut common_pen_loaded = false;
     let mut common_tracers = crate::TracerCatalog::default();
     let mut xmodel_walk = crate::PreparedXModelWalkCensus::default();
-    let mut s1_common_arenas = None;
+    let mut s1_common_bytes = 0;
     let mut teamset_icons = std::collections::HashMap::new();
     let mut common_film_visions = std::collections::BTreeMap::new();
     let mut common_plan = None;
 
-    let common_opened = match common_open.await {
-        opened if !progress.is_canceled() => opened,
-        _ => {
-            common_report.push("canceled: common_mp walk skipped — load retargeted".into());
-            None
-        }
-    };
+    let common_opened = common_open.await;
+    if progress.is_canceled() {
+        diag::info!(
+            World,
+            "match walk: canceled before the common_mp walk — load retargeted"
+        );
+        return MatchLoadOutcome::Canceled;
+    }
 
     let (
         mut weapons,
@@ -442,7 +450,6 @@ pub async fn load_prepared_match(
         common_fx_models,
         common_impact,
         material_seed,
-        common_techsets,
         mut common_walk_report,
     ) = match common_opened {
         Some((path, Ok(image))) => {
@@ -456,7 +463,7 @@ pub async fn load_prepared_match(
             common_pen_loaded = census.pen_table_loaded;
             common_tracers = census.tracers;
             xmodel_walk = census.xmodel_walk;
-            s1_common_arenas = census.s1_common_arenas;
+            s1_common_bytes = census.s1_common_bytes;
             teamset_icons = census.teamset_icons;
             common_film_visions = census.film_visions;
             (
@@ -470,7 +477,6 @@ pub async fn load_prepared_match(
                 census.fx_models,
                 census.impact_fx,
                 census.material_population,
-                census.technique_sets,
                 census.report,
             )
         }
@@ -485,7 +491,6 @@ pub async fn load_prepared_match(
             crate::FxModelCatalog::default(),
             None,
             material_seed,
-            Vec::new(),
             vec![format!("common_mp models: open zone: {error}")],
         ),
         None => (
@@ -499,7 +504,6 @@ pub async fn load_prepared_match(
             crate::FxModelCatalog::default(),
             None,
             material_seed,
-            Vec::new(),
             Vec::new(),
         ),
     };
@@ -588,13 +592,15 @@ pub async fn load_prepared_match(
         fpv_meshes.len()
     ));
 
-    let opened_map = match map_open.await {
-        Ok(opened) if progress.is_canceled() => {
-            drop(opened);
-            Err("canceled: map walk skipped — load retargeted".to_owned())
-        }
-        other => other,
-    };
+    let opened_map = map_open.await;
+    if progress.is_canceled() {
+        drop(opened_map);
+        diag::info!(
+            World,
+            "match walk: canceled before the map walk — load retargeted"
+        );
+        return MatchLoadOutcome::Canceled;
+    }
     let (loaded, map_namespace) = match opened_map {
         Ok((path, image)) => {
             let game = image.game;
@@ -604,7 +610,6 @@ pub async fn load_prepared_match(
                     &image,
                     &progress,
                     shared_surfaces,
-                    &common_techsets,
                     material_seed,
                     &mut common_film_visions,
                 ),
@@ -626,101 +631,34 @@ pub async fn load_prepared_match(
     };
 
     let LoadedWorld {
-        world:
-            asset_world::WorldLoadCapture {
-                draw,
-                collision: clip,
-                spawns: dm_spawns,
-                static_model_meshes,
-                static_model_instances,
-                map_xmodel_scene_assets,
-                script_model_instances,
-                script_brush_models,
-                map_use_triggers,
-                flag_descriptors,
-                dyn_ents,
-                smodel_lighting_samples,
-                light_grid,
-                fx_glass,
-                reflection_probe_images,
-                intermission_view,
-                minimap_corners,
-                north_yaw,
-                compass,
-                exp_fog,
-                film_vision,
-                createart_name,
-                min,
-                max,
-                world_bounds,
-                policy,
-            },
-        models:
-            asset_model::ModelLoadCapture {
-                mut bodies,
-                fpv_meshes: map_fpv,
-            },
-        anim: asset_anim::AnimLoadCapture { xanims: map_xanims },
-        audio: asset_audio::AudioLoadCapture { script_sound },
-        game:
-            asset_game::GameLoadCapture {
-                fx,
-                fx_models,
-                impact_fx,
-                t5_teamset,
-                team_icons,
-            },
-        transport: asset_transport::MapTransportCapture { s1_map_arenas },
+        mut world,
+        mut materials,
+        collision: clip,
+        spawns: dm_spawns,
+        mut bodies,
+        fpv_meshes: map_fpv,
+        xanims: map_xanims,
+        mut facts,
+        arena_bytes: s1_map_bytes,
         mut report,
         gaps,
     } = loaded;
-    let mut map_xmodel_scene_assets = map_xmodel_scene_assets;
-    map_xmodel_scene_assets.absorb_captured(common_scene_models);
-    let mut world = PreparedWorld {
-        draw,
-        static_model_meshes,
-        static_model_instances,
-        map_xmodel_scene_assets,
-        script_model_instances,
-        script_brush_models,
-        map_use_triggers,
-        flag_descriptors,
-        dyn_ents,
-        smodel_lighting_samples,
-        light_grid,
-        fx,
-        fx_models,
-        fx_glass,
-        impact_fx,
-        reflection_probe_images,
-        intermission_view,
-        minimap_corners,
-        north_yaw,
-        compass,
-        script_sound,
-        t5_teamset,
-        team_icons,
-        exp_fog,
-        film_vision,
-        createart_name,
-        min,
-        max,
-        world_bounds,
-        policy,
-    };
+    world
+        .map_xmodel_scene_assets
+        .absorb_captured(common_scene_models);
     report.append(&mut common_report);
 
-    if world.team_icons.allies.is_none() && world.team_icons.axis.is_none() {
-        if let Some(name) = world.t5_teamset.as_ref() {
+    if facts.team_icons.allies.is_none() && facts.team_icons.axis.is_none() {
+        if let Some(name) = facts.t5_teamset.as_ref() {
             if let Some(icons) = teamset_icons.get(name) {
-                world.team_icons = icons.clone();
+                facts.team_icons = icons.clone();
             }
         }
     }
     match (
-        world.t5_teamset.as_deref(),
-        world.team_icons.allies.as_deref(),
-        world.team_icons.axis.as_deref(),
+        facts.t5_teamset.as_deref(),
+        facts.team_icons.allies.as_deref(),
+        facts.team_icons.axis.as_deref(),
     ) {
         (Some(ts), Some(a), Some(x)) => {
             report.push(format!("team icons: teamset={ts} allies={a} axis={x}"));
@@ -733,16 +671,8 @@ pub async fn load_prepared_match(
         _ => {}
     }
 
-    let s1_common_bytes = s1_common_arenas
-        .as_ref()
-        .map(crate::ZoneMemory::total_bytes)
-        .unwrap_or(0);
-    let s1_map_bytes = s1_map_arenas
-        .as_ref()
-        .map(crate::ZoneMemory::total_bytes)
-        .unwrap_or(0);
     report.push(format!(
-        "s1 pool kept: common={s1_common_bytes} map={s1_map_bytes} total={} rss={}",
+        "s1 pool walked: common={s1_common_bytes} map={s1_map_bytes} total={} rss={}",
         s1_common_bytes.saturating_add(s1_map_bytes),
         crate::process_resident_bytes().unwrap_or(0),
     ));
@@ -764,11 +694,14 @@ pub async fn load_prepared_match(
     ));
     player_anim_sources.bind_leaves(&xanims);
     report.push(player_anim_sources.bind_report_line());
-    for gap in &gaps {
-        if let Some(addr) = gap.addr {
-            report.push(format!("lane gap [{}]: {}", addr, gap.reason));
-        }
-    }
+    let gap_lines: Vec<String> = gaps
+        .iter()
+        .map(|gap| match gap.addr {
+            Some(addr) => format!("lane gap [{addr}]: {}", gap.reason),
+            None => format!("lane gap: {}", gap.reason),
+        })
+        .collect();
+    report.extend(gap_lines.iter().cloned());
     report.extend(bodies.report_lines());
     let map_fpv_n = map_fpv.len();
     let map_fpv_added = fpv_meshes.absorb(map_fpv);
@@ -789,83 +722,79 @@ pub async fn load_prepared_match(
         fpv_meshes.len()
     ));
 
-    if let Some(ref mut draw) = world.draw {
-        let before_unrouted = draw.materials.unrouted_material_count();
-        let absorbed = draw.materials.absorb_technique_set_tables(&common_techsets);
-        let promoted = draw.materials.promote_iw5_fallback_tables();
-        let t5_alias_map = draw.materials.absorb_t5_feature_token_donors();
-        let stub_routed = draw.materials.reroute_stub_materials();
-        let after_unrouted = draw.materials.unrouted_material_count();
-        let takes_ml = draw
-            .materials
-            .materials
-            .iter()
-            .filter(|m| draw.materials.takes_model_lighting(m) == Some(true))
-            .count();
-        let t5_fb = draw
-            .materials
-            .technique_set_facts()
-            .iter()
-            .filter(|facts| facts.t5_fallback_table.is_some())
-            .count();
-        report.push(format!(
-            "material route: absorbed_techsets={absorbed} iw5_promoted={promoted} \
+    let before_unrouted = materials.unrouted_material_count();
+    let promoted = materials.promote_iw5_fallback_tables();
+    let t5_alias_map = materials.absorb_t5_feature_token_donors();
+    let stub_routed = materials.reroute_stub_materials();
+    let after_unrouted = materials.unrouted_material_count();
+    let takes_ml = materials
+        .materials
+        .iter()
+        .filter(|m| materials.takes_model_lighting(m) == Some(true))
+        .count();
+    let t5_fb = materials
+        .technique_set_facts()
+        .iter()
+        .filter(|facts| facts.t5_fallback_table.is_some())
+        .count();
+    report.push(format!(
+        "material route: iw5_promoted={promoted} \
              t5_tech_alias={t5_alias_map} t5_fallback={t5_fb} stub_routed={stub_routed} \
              unrouted {before_unrouted}→{after_unrouted}; takes_model_lighting={takes_ml}"
-        ));
+    ));
 
-        let map_reuse_mat = draw.materials.link_reused_materials;
-        let map_reuse_img = draw.materials.link_reused_images;
-        let pool_mat = draw.materials.materials.len();
-        let pool_img = draw.materials.images.len();
-        report.push(format!(
+    let map_reuse_mat = materials.link_reused_materials;
+    let map_reuse_img = materials.link_reused_images;
+    let pool_mat = materials.materials.len();
+    let pool_img = materials.images.len();
+    report.push(format!(
             "s2 pool: seed_mat={seed_mat} seed_img={seed_img} common_reuse_mat={common_reuse_mat} common_reuse_img={common_reuse_img} map_reuse_mat={map_reuse_mat} map_reuse_img={map_reuse_img} pool_mat={pool_mat} pool_img={pool_img}"
         ));
-        let map_new = pool_mat.saturating_sub(seed_mat);
+    let map_new = pool_mat.saturating_sub(seed_mat);
 
-        let mut global = std::mem::take(&mut draw.materials);
-        let provisional_map_ids: Vec<usize> = (0..global.materials.len()).collect();
+    let mut global = materials;
+    let provisional_map_ids: Vec<usize> = (0..global.materials.len()).collect();
 
-        let iw5_linked = global.absorb_asset_population_host_materials_win(iw5_materials);
-        report.push(format!(
-            "iw5 leftover materials: donor={iw5_mat_n} linked={} pool={}",
-            iw5_linked.len(),
-            global.materials.len(),
-        ));
-        let promoted = global.promote_iw5_fallback_tables();
-        let t5_alias = global.absorb_t5_feature_token_donors();
-        global.reroute_stub_materials();
-        let mat_refs = global.material_ref_census();
-        let img_refs = global.image_ref_census();
-        let shader_refs = global.shader_ref_census();
-        let decl_refs = global.vertex_decl_ref_census();
-        report.push(format!(
+    let iw5_linked = global.absorb_asset_population_host_materials_win(iw5_materials);
+    report.push(format!(
+        "iw5 leftover materials: donor={iw5_mat_n} linked={} pool={}",
+        iw5_linked.len(),
+        global.materials.len(),
+    ));
+    let promoted = global.promote_iw5_fallback_tables();
+    let t5_alias = global.absorb_t5_feature_token_donors();
+    global.reroute_stub_materials();
+    let mat_refs = global.material_ref_census();
+    let img_refs = global.image_ref_census();
+    let shader_refs = global.shader_ref_census();
+    let decl_refs = global.vertex_decl_ref_census();
+    report.push(format!(
             "asset_ref before finalize: materials n={} real={} reference={}; images n={} real={} reference={}; shaders n={} real={} reference={}; decls n={} real={} reference={}",
             mat_refs.n, mat_refs.real, mat_refs.reference,
             img_refs.n, img_refs.real, img_refs.reference,
             shader_refs.n, shader_refs.real, shader_refs.reference,
             decl_refs.n, decl_refs.real, decl_refs.reference,
         ));
-        let finalized_ids = global.finalize_asset_population();
-        let map_ids = provisional_map_ids
-            .into_iter()
-            .map(|id| finalized_ids.get(id).copied().flatten())
-            .collect::<Vec<_>>();
-        let t5_fb = global
-            .technique_set_facts()
-            .iter()
-            .filter(|facts| facts.t5_fallback_table.is_some())
-            .count();
-        report.push(format!(
+    let (mut global, finalized_ids) = global.publish();
+    let map_ids = provisional_map_ids
+        .into_iter()
+        .map(|id| finalized_ids.get(id).copied().flatten())
+        .collect::<Vec<_>>();
+    let t5_fb = global
+        .technique_set_facts()
+        .iter()
+        .filter(|facts| facts.t5_fallback_table.is_some())
+        .count();
+    report.push(format!(
             "material generation: startup={startup_count} t5={t5_mat_count} t5_reuse={t5_reuse_mat} foreign={foreign_count} common_pool={seed_mat} map_new={map_new} pooled={pool_mat} global={} common_reuse={common_reuse_mat} map_reuse={map_reuse_mat} unresolved_aliases={} iw5_promoted={promoted} t5_tech_alias={t5_alias} t5_fallback={t5_fb}",
             global.materials.len(),
             finalized_ids.iter().filter(|id| id.is_none()).count(),
         ));
-        let mat_refs = global.material_ref_census();
-        let img_refs = global.image_ref_census();
-        let shader_refs = global.shader_ref_census();
-        let decl_refs = global.vertex_decl_ref_census();
-        report.push(format!(
+    let mat_refs = global.material_ref_census();
+    let img_refs = global.image_ref_census();
+    let shader_refs = global.shader_ref_census();
+    let decl_refs = global.vertex_decl_ref_census();
+    report.push(format!(
             "asset_ref after finalize: materials n={} real={} reference={}; images n={} real={} reference={}; shaders n={} real={} reference={}; decls n={} real={} reference={}",
             mat_refs.n, mat_refs.real, mat_refs.reference,
             img_refs.n, img_refs.real, img_refs.reference,
@@ -873,87 +802,63 @@ pub async fn load_prepared_match(
             decl_refs.n, decl_refs.real, decl_refs.reference,
         ));
 
-        let map_memory = draw.materials.image_memory();
-        let global_memory = global.image_memory();
-        report.push(map_memory.report_row("image memory map pool"));
-        report.push(global_memory.report_row("image memory global generation"));
-        report.push(format!(
-            "image memory after absorb: map+global={:.1}MiB for {} distinct global slots (map decoded should be 0)",
-            (map_memory.total_bytes() + global_memory.total_bytes()) as f64 / (1024.0 * 1024.0),
-            global_memory.images,
-        ));
-        report.push(format!(
-            "map pool husk: bytes={} materials={} images={} decoded={}",
-            map_memory.total_bytes(),
-            draw.materials.materials.len(),
-            map_memory.images,
-            map_memory.decoded_images,
-        ));
-        report.push(format!(
-            "canonical materials after absorb: n={} images={} decoded={}",
-            global.materials.len(),
-            global_memory.images,
-            global_memory.decoded_images,
-        ));
+    let global_memory = global.image_memory();
+    report.push(global_memory.report_row("image memory global generation"));
+    report.push(format!(
+        "canonical materials after absorb: n={} images={} decoded={}",
+        global.materials.len(),
+        global_memory.images,
+        global_memory.decoded_images,
+    ));
+    let shader_census = global.shader_source_census();
+    report.push(format!(
+        "shader source corpus: programs={} unresolved_aliases={} byteless={}",
+        shader_census.programs, shader_census.unresolved_aliases, shader_census.byteless,
+    ));
+    let decl_streams = global.vertex_decl_stream_census();
+    report.push(format!(
+        "vertex decls: n={} stream0={} ppcc0t0t0nn n={} streams={}",
+        decl_streams.n,
+        decl_streams.stream0,
+        decl_streams.ppcc_n,
+        decl_streams
+            .ppcc_stream_count
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "missing".into()),
+    ));
 
-        let _ = std::mem::take(&mut draw.materials);
+    for pending in [t5_images, foreign_images, bundle_images, common_images]
+        .into_iter()
+        .flatten()
+    {
+        let (label, batch) = pending.await;
+        let requested = batch.stats.requested;
+        let missing = batch.stats.missing;
+        let unsupported = batch.stats.unsupported;
+        let first_gap = batch.stats.first_gap.clone();
+        let (filled, already, lost) = batch.apply(&mut global);
         report.push(format!(
-            "map pool after drop: materials={} images={}",
-            draw.materials.materials.len(),
-            draw.materials.images.len(),
-        ));
-        let shader_census = global.shader_source_census();
-        report.push(format!(
-            "shader source corpus: programs={} unresolved_aliases={} byteless={}",
-            shader_census.programs, shader_census.unresolved_aliases, shader_census.byteless,
-        ));
-        let decl_streams = global.vertex_decl_stream_census();
-        report.push(format!(
-            "vertex decls: n={} stream0={} ppcc0t0t0nn n={} streams={}",
-            decl_streams.n,
-            decl_streams.stream0,
-            decl_streams.ppcc_n,
-            decl_streams
-                .ppcc_stream_count
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "missing".into()),
-        ));
-
-        for pending in [t5_images, foreign_images, bundle_images, common_images]
-            .into_iter()
-            .flatten()
-        {
-            let (label, batch) = pending.await;
-            let requested = batch.stats.requested;
-            let missing = batch.stats.missing;
-            let unsupported = batch.stats.unsupported;
-            let first_gap = batch.stats.first_gap.clone();
-            let (filled, already, lost) = batch.apply(&mut global);
-            report.push(format!(
                 "{label} claimed images: {filled}/{requested} into the merged pool ({already} already decoded by an earlier source, {missing} missing, {unsupported} unsupported, {lost} claimed rows dropped by the merge)"
             ));
-            if let Some(gap) = first_gap {
-                report.push(format!("{label} claimed image gap: {gap}"));
-            }
+        if let Some(gap) = first_gap {
+            report.push(format!("{label} claimed image gap: {gap}"));
         }
+    }
 
-        if let Ok(path) = &zone_ff {
-            let stage = progress.stage("decoding merged material images");
-            match crate::decode_material_color_maps(path, &mut global, &stage) {
-                Ok(stats) => report.push(format!(
-                    "merged material images: {}/{} decoded, {} missing, {} unsupported",
-                    stats.decoded, stats.requested, stats.missing, stats.unsupported
-                )),
-                Err(error) => report.push(format!("merged material images gap: {error}")),
-            }
+    if let Ok(path) = &zone_ff {
+        let stage = progress.stage("decoding merged material images");
+        match crate::decode_material_color_maps(path, &mut global, &stage) {
+            Ok(stats) => report.push(format!(
+                "merged material images: {}/{} decoded, {} missing, {} unsupported",
+                stats.decoded, stats.requested, stats.missing, stats.unsupported
+            )),
+            Err(error) => report.push(format!("merged material images gap: {error}")),
         }
-        draw.global_materials = global;
-        draw.material_asset_ids = map_ids;
-        crate::resolve_primary_light_attenuation(draw, &common_light_defs);
-        let (ordinal, source) = crate::resolve_outdoor_image(
-            draw.outdoor_image_name.as_deref(),
-            &draw.global_materials,
-        );
+    }
+    if let Some(draw) = world.draw.as_mut() {
+        crate::resolve_primary_light_attenuation(draw, &global, &common_light_defs);
+        let (ordinal, source) =
+            crate::resolve_outdoor_image(draw.outdoor_image_name.as_deref(), &global);
         draw.outdoor_image = ordinal;
         if source == "$outdoor" && draw.outdoor_image_name.is_none() {
             draw.outdoor_image_name = Some("$outdoor".into());
@@ -1017,7 +922,7 @@ pub async fn load_prepared_match(
             let stage = progress.stage("decoding light attenuation images");
             match crate::decode_catalog_images_from_iwd(
                 path,
-                &mut draw.global_materials,
+                &mut global,
                 requested,
                 &stage,
             ) {
@@ -1028,47 +933,46 @@ pub async fn load_prepared_match(
             }
         }
 
-        crate::resolve_primary_light_attenuation(draw, &common_light_defs);
-        let builtins = crate::decode_in_zone_builtin_images(&mut draw.global_materials);
-        if builtins != 0 {
-            report.push(format!(
-                "in-zone builtin images: decoded {builtins} leftover $ 2D loadDefs after absorb"
-            ));
-        }
-        if let Ok(path) = &zone_ff {
-            let stage = progress.stage("decoding tracer beam images");
-            match crate::material_images::decode_color_or_2d_for_names(
-                path,
-                &mut draw.global_materials,
-                common_tracers.named_materials(),
-                &stage,
-            ) {
-                Ok(n) => report.push(format!(
-                    "tracer beam images after absorb: {n} TS_COLOR_MAP/TS_2D decoded"
-                )),
-                Err(error) => report.push(format!("tracer beam images after absorb: {error}")),
-            }
-        }
-        let unique: std::collections::BTreeSet<String> = common_tracers
-            .named_materials()
-            .map(str::to_owned)
-            .collect();
-        for name in &unique {
-            let bind = crate::fx_material_bind_name(name);
-            let twins: Vec<&str> = draw
-                .global_materials
-                .materials
-                .iter()
-                .filter(|m| m.name.as_str() == bind)
-                .map(|m| m.name.as_str())
-                .collect();
-            report.push(format!("tracer material `{name}` global twins={twins:?}"));
-        }
+        crate::resolve_primary_light_attenuation(draw, &global, &common_light_defs);
+    }
+    let builtins = crate::decode_in_zone_builtin_images(&mut global);
+    if builtins != 0 {
         report.push(format!(
-            "tracer color maps after absorb: Bound into global ({} unique names; no clone sidecar)",
-            unique.len()
+            "in-zone builtin images: decoded {builtins} leftover $ 2D loadDefs after absorb"
         ));
     }
+    if let Ok(path) = &zone_ff {
+        let stage = progress.stage("decoding tracer beam images");
+        match crate::material_images::decode_color_or_2d_for_names(
+            path,
+            &mut global,
+            common_tracers.named_materials(),
+            &stage,
+        ) {
+            Ok(n) => report.push(format!(
+                "tracer beam images after absorb: {n} TS_COLOR_MAP/TS_2D decoded"
+            )),
+            Err(error) => report.push(format!("tracer beam images after absorb: {error}")),
+        }
+    }
+    let unique: std::collections::BTreeSet<String> = common_tracers
+        .named_materials()
+        .map(str::to_owned)
+        .collect();
+    for name in &unique {
+        let bind = crate::fx_material_bind_name(name);
+        let twins: Vec<&str> = global
+            .materials
+            .iter()
+            .filter(|m| m.name.as_str() == bind)
+            .map(|m| m.name.as_str())
+            .collect();
+        report.push(format!("tracer material `{name}` global twins={twins:?}"));
+    }
+    report.push(format!(
+        "tracer color maps after absorb: Bound into global ({} unique names; no clone sidecar)",
+        unique.len()
+    ));
 
     world.fx.absorb(common_fx);
     let common_fx_model_n = common_fx_models.len();
@@ -1099,7 +1003,8 @@ pub async fn load_prepared_match(
         "weapon projectile FX after absorb: bound={} unresolved={} absent={}",
         projectile_fx.bound, projectile_fx.unresolved, projectile_fx.absent,
     ));
-    if let Some(ref materials) = world.draw.as_ref().map(|d| &d.global_materials) {
+    {
+        let materials = &global;
         let fx_model_materials = world.fx_models.resolve_materials(materials);
         report.push(format!(
             "FX model materialHandles after absorb: bound={} unresolved={} absent={}",
@@ -1218,13 +1123,13 @@ pub async fn load_prepared_match(
         "fx color maps handoff: n=0 bytes=0 (Bound GPU bind at spawn; no CPU clone sidecar; stub_aliases=0)"
             .into(),
     );
-    if let Some(ref mut draw) = world.draw {
+    {
         let missing: Vec<String> = world
             .fx
             .unique_bound_hints()
             .into_iter()
             .chain(world.fx.unique_decal_mark_hints())
-            .filter(|(_, hint)| !crate::fx_color_decoded_in_catalog(&draw.global_materials, hint))
+            .filter(|(_, hint)| !crate::fx_color_decoded_in_catalog(&global, hint))
             .map(|(_, hint)| hint.to_owned())
             .collect();
         if !missing.is_empty() {
@@ -1232,7 +1137,7 @@ pub async fn load_prepared_match(
                 let stage = progress.stage("decoding fx elem 2d images");
                 match crate::material_images::decode_color_or_2d_for_names(
                     path,
-                    &mut draw.global_materials,
+                    &mut global,
                     missing.iter(),
                     &stage,
                 ) {
@@ -1247,7 +1152,7 @@ pub async fn load_prepared_match(
             .fx
             .unique_bound_hints()
             .into_iter()
-            .filter(|(_, hint)| !crate::fx_color_decoded_in_catalog(&draw.global_materials, hint))
+            .filter(|(_, hint)| !crate::fx_color_decoded_in_catalog(&global, hint))
             .map(|(index, hint)| (index, hint.to_owned()))
             .collect();
         if !nocolor.is_empty() {
@@ -1271,7 +1176,7 @@ pub async fn load_prepared_match(
                 }
             ));
             for (index, hint) in &other {
-                let Some(mat) = draw.global_materials.materials.get(*index) else {
+                let Some(mat) = global.materials.get(*index) else {
                     report.push(format!(
                         "fx elem Bound `{index}:{hint}` has no global material row"
                     ));
@@ -1280,7 +1185,7 @@ pub async fn load_prepared_match(
                 let sem: Vec<u8> = mat.textures.iter().map(|t| t.semantic).collect();
                 let decoded = mat.textures.iter().any(|t| {
                     t.image
-                        .and_then(|i| draw.global_materials.images.get(i))
+                        .and_then(|i| global.images.get(i))
                         .is_some_and(|img| img.decoded.is_some())
                 });
                 report.push(format!(
@@ -1321,34 +1226,16 @@ pub async fn load_prepared_match(
     let prepared_map = PreparedMap {
         zone: zone_name,
         namespace: map_namespace,
-        spawns: dm_spawns
-            .iter()
-            .map(|spawn| PreparedSpawn {
-                classname: spawn.classname.clone(),
-                origin: spawn.origin,
-                angles: spawn.angles,
-                script_linkto: spawn.script_linkto.clone(),
-            })
-            .collect(),
-        minimap_corners: world.minimap_corners,
-        north_yaw: world.north_yaw,
-        compass: world.compass.clone(),
-        script_sound: world.script_sound.clone(),
-        team_icons: world.team_icons.clone(),
-        gaps: PreparedGaps {
-            lines: report
-                .iter()
-                .filter(|line| line.contains("gap"))
-                .cloned()
-                .collect(),
-        },
+        spawns: dm_spawns,
+        facts,
+        gaps: PreparedGaps { lines: gap_lines },
     };
-    if world.minimap_corners.is_some() {
+    if prepared_map.facts.minimap_corners.is_some() {
         report.push("compass: minimap_corner pair from MapEnts".into());
     } else {
         report.push("compass gap: minimap_corner missing — no world-to-map frame".into());
     }
-    match world.north_yaw {
+    match prepared_map.facts.north_yaw {
         Some(yaw) => report.push(format!("compass: worldspawn northyaw {yaw}")),
         None => {
             report.push("compass gap: worldspawn has no northyaw — map is drawn north-up".into())
@@ -1368,17 +1255,13 @@ pub async fn load_prepared_match(
     if let Some(draw) = world.draw.as_ref() {
         let world_mats = draw.batches.iter().filter_map(|batch| {
             let local = batch.material?;
-            draw.material_asset_ids
-                .get(local)
-                .copied()
-                .flatten()
-                .or(Some(local))
+            map_ids.get(local).copied().flatten().or(Some(local))
         });
 
         let smodel_mats = world.static_model_meshes.iter().flat_map(|mesh| {
             mesh.lod_surfaces.iter().flatten().filter_map(|surface| {
                 let local = surface.material?;
-                draw.material_asset_ids.get(local).copied().flatten()
+                map_ids.get(local).copied().flatten()
             })
         });
         let fpv_mats = fpv_meshes.bound_material_indices();
@@ -1400,7 +1283,7 @@ pub async fn load_prepared_match(
                     .filter_map(|def| def.material.bound_index()),
             );
         let mut set = crate::material_images::census_image_working_set(
-            &draw.global_materials,
+            &global,
             world_mats,
             smodel_mats,
             fpv_mats,
@@ -1450,8 +1333,14 @@ pub async fn load_prepared_match(
     }
     report.extend(progress.timing_report());
 
-    PreparedMatch {
+    let fx = std::mem::take(&mut world.fx).publish();
+    MatchLoadOutcome::Ready(PreparedMatch {
+        fx,
         world,
+        materials: crate::MatchMaterials {
+            population: global,
+            map_ids,
+        },
         clip,
         weapons,
         fpv_meshes,
@@ -1460,16 +1349,14 @@ pub async fn load_prepared_match(
         projectile_meshes,
         xanims,
         player_anim_sources,
-        tracers: common_tracers,
+        tracers: common_tracers.publish(),
         strings,
         report,
         prepared_map,
         pen_table: common_pen_table,
         pen_table_loaded: common_pen_loaded,
         xmodel_walk,
-        s1_common_arenas,
-        s1_map_arenas,
-    }
+    })
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1762,6 +1649,10 @@ fn capture_common_zone(
     progress: &LoadProgress,
     report: &mut Vec<String>,
 ) -> Option<crate::lane::CommonCensus> {
+    if progress.is_canceled() {
+        report.push(format!("{report_label}: canceled before the walk started"));
+        return None;
+    }
     let stage = progress.stage(stage_label);
     let opened = open_zone_shared(donor);
     drop(stage);

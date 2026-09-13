@@ -749,6 +749,17 @@ impl UdpAuthorityHub {
             let Some(client_u32) = self.connections.resolve(conn, 0).ok() else {
                 continue;
             };
+            // Do not capture a bootstrap while the peer is loading content. The
+            // snapshot's clock starts when admission is ready to send it.
+            if let (Some(lane), PeerTarget::Relay(member)) = (&self.bootstrap, target)
+                && !lane
+                    .host_map_ready
+                    .lock()
+                    .expect("bootstrap readiness poisoned")
+                    .contains(&member)
+            {
+                continue;
+            }
             let client = ClientId(client_u32);
             let peer = self
                 .replication

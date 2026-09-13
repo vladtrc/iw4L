@@ -400,16 +400,18 @@ impl AuthorityLoadHold {
 
 pub fn authority_should_tick(
     role: Res<RuntimeRole>,
-    world: Res<AuthorityWorld>,
+    world: Option<Res<AuthorityWorld>>,
     hold: Option<Res<AuthorityLoadHold>>,
 ) -> bool {
-    role.runs_authority() && world.0.clip_brush_count() > 0 && !hold.is_some_and(|h| h.0)
+    role.runs_authority()
+        && world.is_some_and(|world| world.0.clip_brush_count() > 0)
+        && !hold.is_some_and(|h| h.0)
 }
 
 fn reset_authority_on_match_torn_down(
     mut torn: MessageReader<MatchTornDown>,
     mut clock: ResMut<AuthorityClock>,
-    mut world: ResMut<AuthorityWorld>,
+    mut world: Option<ResMut<AuthorityWorld>>,
     mut loopback: Option<ResMut<ListenLoopback>>,
     mut archive: Option<ResMut<FrameArchive>>,
     mut end_game: ResMut<crate::policy::end_game::PendingEndGameTail>,
@@ -437,7 +439,9 @@ fn reset_authority_on_match_torn_down(
     server_tick.0 = None;
 
     *end_game = crate::policy::end_game::PendingEndGameTail::default();
-    world.0.shutdown_game();
+    if let Some(world) = world.as_mut() {
+        world.0.shutdown_game();
+    }
     if let Some(loopback) = loopback.as_mut() {
         loopback.reset();
     }
@@ -445,8 +449,10 @@ fn reset_authority_on_match_torn_down(
         archive.clear();
     }
     perf::sim_hold(
-        i64::from(world.0.is_running()),
-        world.0.script_mover_count() as i64,
+        i64::from(world.as_ref().is_some_and(|world| world.0.is_running())),
+        world
+            .as_ref()
+            .map_or(0, |world| world.0.script_mover_count() as i64),
         loopback.as_ref().map(|l| l.pending() as i64).unwrap_or(0),
     );
 }
@@ -1418,8 +1424,10 @@ pub fn authority_bookkeeping(
 
 pub fn register_listen_runtime(app: &mut App) {
     register_script_notify(app);
-    app.init_resource::<AuthorityWorld>()
-        .init_resource::<AuthorityInputGate>()
+    if *app.world().resource::<RuntimeRole>() != RuntimeRole::Client {
+        app.init_resource::<AuthorityWorld>();
+    }
+    app.init_resource::<AuthorityInputGate>()
         .init_resource::<AuthorityLoadHold>()
         .init_resource::<AuthorityPhaseTrace>()
         .init_resource::<PendingAuthorityInput>()
@@ -1447,7 +1455,7 @@ pub fn register_listen_runtime(app: &mut App) {
         .init_resource::<LastAuthorityRoster>()
         .init_resource::<PendingConnectionFaults>();
     let role = *app.world().resource::<RuntimeRole>();
-    if role == RuntimeRole::Listen || role == RuntimeRole::Replay {
+    if role != RuntimeRole::Dedicated {
         app.init_resource::<PendingScriptEntityNotifies>()
             .add_systems(
                 FixedUpdate,

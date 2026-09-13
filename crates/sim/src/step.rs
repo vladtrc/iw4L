@@ -400,8 +400,13 @@ fn run_players_system(ecs: &mut World) {
     world.enter_kernel_phase(crate::gentity::KernelPhase::RunPlayers);
 
     let allow_move = world.phase() == MatchPhase::Playing;
-    let cmodel_models = world.clip_cmodels().models.clone();
-    let (mut brushes, mut bsp, mut mesh) = world.take_clip_map();
+    let content = world.content();
+    let cmodel_models = &content.clip_cmodels().models;
+    let (brushes, bsp, mesh) = (
+        content.clip_brushes(),
+        content.clip_bsp(),
+        content.clip_mesh(),
+    );
     let original_buttons = world.old_buttons_mut().clone();
     let original_angles = world.old_cmd_angles_mut().clone();
     let mut consumed = Vec::new();
@@ -548,7 +553,6 @@ fn run_players_system(ecs: &mut World) {
             world.set_pmove_walking(*id, walking);
             world.link_player_area(*id, linked_bounds);
 
-            world.restore_clip_map(brushes, bsp, mesh);
             let shots = advance_weapon_command(&mut world, tick, *id, cmd, delta.min(200));
             for shot in shots {
                 crate::missile::fire_accepted_shot(&mut world, tick, &shot);
@@ -569,10 +573,8 @@ fn run_players_system(ecs: &mut World) {
             crate::equipment::phase_offhand(&mut world, tick, &[(*id, cmd)]);
             world.set_old_cmd(*id, cmd.buttons, cmd.angles);
             consumed.push((*id, cmd));
-            (brushes, bsp, mesh) = world.take_clip_map();
         }
     }
-    world.restore_clip_map(brushes, bsp, mesh);
 
     *world.old_buttons_mut() = original_buttons;
     *world.old_cmd_angles_mut() = original_angles;

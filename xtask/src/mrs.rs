@@ -198,6 +198,10 @@ fn new_mr(root: &Path, name: &str) -> Res<()> {
     println!("    ship:  cargo xtask mr ship {name}     # from the repo root, after git commit:");
     println!("           rebase → rustfmt touched .rs + commit → FF → rm clone");
     println!("           do none of those by hand; fix only what ship refuses on, then rerun");
+    println!("    before ship: read git diff origin/master...HEAD — probes, throwaway tests and");
+    println!(
+        "           debug prints come out of the tree first (CONTEXT.md, \"Before shipping\")"
+    );
     Ok(())
 }
 
@@ -327,6 +331,13 @@ fn make_executable(_path: &Path) -> Res<()> {
 
 /// Rebase → rustfmt → fast-forward → delete, in that order, refusing rather
 /// than repairing. A refusal leaves the clone exactly where it was.
+///
+/// What it does **not** check is whether the branch still carries its
+/// scaffolding — a probe, a test that asserts only that the code ran, a
+/// leftover `dbg!`. No grep tells those apart from the real thing (`probe` is a
+/// lighting term in half this tree), so the rule lives in `CONTEXT.md`
+/// ("Before shipping") and is the agent's own last step: read the branch diff
+/// and take the disposable half back out before running this.
 fn ship(root: &Path, name: &str) -> Res<()> {
     require_repo(root)?;
     let clone = root.join(MRS_DIR).join(name);

@@ -65,12 +65,14 @@ pub struct GfxMarkMeshPlan {
     pub skip_why: Option<&'static str>,
     pub packed_share: Option<Arc<Vec<[u8; GFX_WORLD_VERTEX]>>>,
     pub index_share: Option<Arc<Vec<u16>>>,
+    pub range_share: Option<Arc<Vec<(u32, u32)>>>,
 }
 
 impl GfxMarkMeshPlan {
     pub fn clear(&mut self) {
         super::reclaim_share(&mut self.packed_share, &mut self.vertices);
         super::reclaim_share(&mut self.index_share, &mut self.indices);
+        self.range_share = None;
         self.materials.clear();
         self.draws.clear();
         self.skip_why = None;
@@ -83,6 +85,11 @@ impl GfxMarkMeshPlan {
     pub fn publish_share(&mut self) {
         self.packed_share = Some(super::steal_into_share(&mut self.vertices));
         self.index_share = Some(super::steal_into_share(&mut self.indices));
+        self.range_share = Some(super::publish_index_ranges(
+            self.draws
+                .iter()
+                .map(|draw| (draw.index_start, draw.index_count)),
+        ));
     }
 
     pub fn packed_rows(&self) -> &[[u8; GFX_WORLD_VERTEX]] {

@@ -71,6 +71,8 @@ pub(crate) fn restore_frontend_bank_on_disconnect(
                 diag::warn!(Audio, "audio: frontend {line}");
             }
             let bank = Arc::new(loaded.catalog);
+            commands.insert_resource(crate::clip_store::PendingStarts::default());
+            commands.insert_resource(crate::playback::SharedPlayAssets::default());
             commands.insert_resource(SoundBank(Arc::clone(&bank)));
             diag::info!(Audio, "audio: frontend sound bank ready");
             Some(bank)

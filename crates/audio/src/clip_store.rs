@@ -23,6 +23,7 @@ pub(crate) enum ClipKey {
 pub(crate) enum ClipError {
     Decode,
     Read,
+    QueueClosed,
 }
 
 #[derive(Clone, Debug)]
@@ -41,7 +42,6 @@ impl PreparedPcm {
 #[derive(Resource)]
 pub struct ClipStore {
     bank: Arc<SoundCatalog>,
-    iwd: Option<Arc<NamespaceSoundIwd>>,
     tx: Sender<ClipKey>,
     queued: HashSet<ClipKey>,
     outcomes: Arc<Mutex<HashMap<ClipKey, Result<PreparedPcm, ClipError>>>>,
@@ -59,6 +59,7 @@ impl ClipStore {
         let (tx, rx) = channel::<ClipKey>();
         let rx = Arc::new(Mutex::new(rx));
         let outcomes = Arc::new(Mutex::new(HashMap::new()));
+        let mut started_workers = 0;
         for slot in 0..workers {
             let rx = Arc::clone(&rx);
             let bank = Arc::clone(&bank);
@@ -82,17 +83,17 @@ impl ClipStore {
                         guard.insert(key, result);
                     }
                 });
-            if let Err(e) = spawned {
-                diag::warn!(Audio, "audio: clip prep worker {slot} not started ({e})");
+            match spawned {
+                Ok(_) => started_workers += 1,
+                Err(e) => diag::warn!(Audio, "audio: clip prep worker {slot} not started ({e})"),
             }
         }
         Self {
             bank,
-            iwd,
             tx,
             queued: HashSet::new(),
             outcomes,
-            workers,
+            workers: started_workers,
             match_live: false,
             late_prepares: 0,
         }
@@ -132,53 +133,21 @@ impl ClipStore {
         if self.ready(&key).is_some() {
             return false;
         }
-        if !needs_worker(&self.bank, &key) {
-            self.note_late(&key);
-            let result = prepare_clip_now(&self.bank, self.iwd.as_deref(), &key);
-            let mut guard = self
-                .outcomes
+        if !self.queued.insert(key.clone()) {
+            return false;
+        }
+        self.note_late(&key);
+        if self.tx.send(key.clone()).is_err() {
+            self.outcomes
                 .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            guard.insert(key, result);
-            return false;
-        }
-        if !self.queued.insert(key.clone()) {
-            return false;
-        }
-        self.note_late(&key);
-        if self.tx.send(key.clone()).is_err() {
-            self.queued.remove(&key);
-            return false;
-        }
-        true
-    }
-
-    pub(crate) fn request_off_frame(&mut self, key: ClipKey) -> bool {
-        if self.ready(&key).is_some() {
-            return false;
-        }
-        if !self.queued.insert(key.clone()) {
-            return false;
-        }
-        self.note_late(&key);
-        if self.tx.send(key.clone()).is_err() {
-            self.queued.remove(&key);
+                .unwrap_or_else(|poison| poison.into_inner())
+                .insert(key, Err(ClipError::QueueClosed));
             return false;
         }
         true
     }
 
     pub(crate) fn ready(&self, key: &ClipKey) -> Option<Result<PcmAudio, ClipError>> {
-        if let ClipKey::Loaded(index) = key
-            && let Some(sound) = self.bank.pcm_at(*index)
-        {
-            if let Some(pcm) = PcmAudio::from_loaded(sound) {
-                return Some(Ok(pcm));
-            }
-            if sound.t5_xwma_error().is_some() {
-                return Some(Err(ClipError::Decode));
-            }
-        }
         let guard = self
             .outcomes
             .lock()
@@ -220,8 +189,20 @@ impl PendingStarts {
         self.entries.push(pending);
     }
 
-    pub fn cancel_alias(&mut self, alias: &str) {
-        self.entries.retain(|e| e.alias != alias);
+    pub fn cancel_alias(
+        &mut self,
+        namespace: AssetNamespace,
+        alias: &str,
+        snd_ent: Option<u32>,
+        epoch: u64,
+    ) {
+        self.entries.retain(|e| {
+            !(e.namespace == namespace
+                && e.alias == alias
+                && e.snd_ent == snd_ent
+                && e.epoch == epoch
+                && e.class.scope() == crate::backend::AudioScope::Match)
+        });
     }
 
     pub fn clear(&mut self) {
@@ -304,16 +285,7 @@ pub(crate) fn clip_key_for_variant(
         .map(|(sns, dir, name)| ClipKey::Streamed { ns: sns, dir, name })
 }
 
-fn needs_worker(bank: &SoundCatalog, key: &ClipKey) -> bool {
-    match key {
-        ClipKey::Streamed { .. } => true,
-        ClipKey::Loaded(index) => bank
-            .pcm_at(*index)
-            .is_some_and(|sound| sound.is_t5_xwma() || sound.t5_adpcm_bytes().is_some()),
-    }
-}
-
-pub(crate) fn prepare_clip_now(
+fn prepare_clip_now(
     bank: &SoundCatalog,
     iwd: Option<&NamespaceSoundIwd>,
     key: &ClipKey,
@@ -330,14 +302,6 @@ pub(crate) fn prepare_clip_now(
 }
 
 fn prepare_loaded(sound: &assets::LoadedSoundPcm) -> Result<PreparedPcm, ClipError> {
-    if let Some(samples) = sound.prepared_samples() {
-        let channels = u16::try_from(sound.channels().max(1)).map_err(|_| ClipError::Decode)?;
-        return Ok(PreparedPcm {
-            samples,
-            channels,
-            sample_rate: sound.rate.max(1),
-        });
-    }
     if let Some(bytes) = sound.t5_adpcm_bytes() {
         let channels = u16::try_from(sound.channels().max(1)).map_err(|_| ClipError::Decode)?;
         let pcm = crate::pcm::t5_stream::decode_adpcm(
@@ -347,17 +311,41 @@ fn prepare_loaded(sound: &assets::LoadedSoundPcm) -> Result<PreparedPcm, ClipErr
             u32::from(channels),
         )
         .ok_or(ClipError::Decode)?;
-        sound.set_playback_samples(Arc::clone(pcm.samples()));
         return Ok(PreparedPcm {
             samples: Arc::clone(pcm.samples()),
             channels: pcm.channel_count(),
             sample_rate: pcm.rate(),
         });
     }
-    if sound.is_t5_xwma() {
-        sound.prepare_t5_xwma().map_err(|_| ClipError::Decode)?;
+    let decoded;
+    let (bits, bytes) = if sound.is_t5_xwma() {
+        decoded = assets::decode_t5_xwma(
+            sound.encoded_bytes(),
+            &sound.seek_table,
+            sound.channels().max(0) as u32,
+            sound.rate,
+        )
+        .map_err(|_| ClipError::Decode)?;
+        (16, decoded.as_slice())
+    } else if sound.format() == 1 {
+        (sound.bits(), sound.encoded_bytes())
+    } else {
+        return Err(ClipError::Decode);
+    };
+    let mut samples: Vec<f32> = match bits {
+        8 => bytes.iter().map(|&b| (b as f32 - 128.0) / 128.0).collect(),
+        16 => bytes
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+            .collect(),
+        _ => return Err(ClipError::Decode),
+    };
+    let channels = sound.channels().max(1) as usize;
+    samples.truncate(samples.len() / channels * channels);
+    if samples.is_empty() {
+        return Err(ClipError::Decode);
     }
-    let samples = sound.samples_f32().ok_or(ClipError::Decode)?;
+    let samples = samples.into();
     let channels = u16::try_from(sound.channels().max(1)).map_err(|_| ClipError::Decode)?;
     Ok(PreparedPcm {
         samples,
@@ -407,4 +395,215 @@ fn prepare_streamed(
         channels: pcm.channel_count(),
         sample_rate: pcm.rate(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assets::{
+        AssetEdge, AssetEdgeReason, CapturedAlias, CapturedSound, LoadedSoundPcm, MSS_PCM, ZoneGame,
+    };
+
+    const FIRE_BYTES: [u8; 6] = [0x00, 0x80, 0x00, 0x00, 0xff, 0x7f];
+    const TAIL_BYTES: [u8; 4] = [0x00, 0x40, 0x00, 0xc0];
+
+    fn loaded(
+        name: &str,
+        game: ZoneGame,
+        format: i32,
+        channels: i32,
+        bytes: &[u8],
+    ) -> LoadedSoundPcm {
+        let mut pcm =
+            LoadedSoundPcm::captured(name, format, 48000, channels, bytes.to_vec(), Vec::new());
+        pcm.game = game;
+        pcm
+    }
+
+    fn row(loaded_name: &str, secondary: Option<&str>) -> CapturedAlias {
+        CapturedAlias {
+            loaded_name: Some(loaded_name.to_owned()),
+            secondary: secondary.map(str::to_owned),
+            file_type: Some(1),
+            // What the walk leaves behind: a name and no row yet. Binding it is
+            // `resolve_loaded_edges`' job, and this test asks it to do it.
+            loaded: AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
+            ..CapturedAlias::default()
+        }
+    }
+
+    fn sound(name: &str, rows: Vec<CapturedAlias>) -> CapturedSound {
+        CapturedSound {
+            name: name.to_owned(),
+            aliases: rows,
+            ..CapturedSound::default()
+        }
+    }
+
+    /// A host zone and a donor zone that both call a sound `weapon_fire` and
+    /// both ship a clip called `weap_fire`, absorbed the way a match load
+    /// absorbs common_mp into the map.
+    fn two_namespace_bank() -> SoundCatalog {
+        let mut host = SoundCatalog::default();
+        host.set_capture_game(ZoneGame::Iw4);
+        host.ingest_loaded(loaded("weap_fire", ZoneGame::Iw4, MSS_PCM, 1, &FIRE_BYTES));
+        host.ingest_loaded(loaded("weap_tail", ZoneGame::Iw4, MSS_PCM, 2, &TAIL_BYTES));
+        host.ingest_loaded(loaded("weap_broken", ZoneGame::Iw4, 99, 1, &FIRE_BYTES));
+        host.ingest_sound(sound(
+            "weapon_fire",
+            vec![
+                row("weap_fire", Some("weapon_tail")),
+                // Same clip again: a second variant of one alias must not
+                // queue the same decode twice.
+                row("weap_fire", None),
+                row("weap_broken", None),
+            ],
+        ));
+        host.ingest_sound(sound("weapon_tail", vec![row("weap_tail", None)]));
+
+        let mut donor = SoundCatalog::default();
+        donor.set_capture_game(ZoneGame::T5);
+        donor.ingest_loaded(loaded("weap_fire", ZoneGame::T5, MSS_PCM, 1, &TAIL_BYTES));
+        donor.ingest_sound(sound("weapon_fire", vec![row("weap_fire", None)]));
+
+        host.absorb(donor);
+        host
+    }
+
+    fn settle(store: &ClipStore, key: &ClipKey) -> Result<PcmAudio, ClipError> {
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(outcome) = store.ready(key) {
+                return outcome;
+            }
+            assert!(Instant::now() < deadline, "clip {key:?} never settled");
+            std::thread::yield_now();
+        }
+    }
+
+    /// One alias, carried end to end: captured by two zones, absorbed into one
+    /// bank, bound to its rows, walked into clip keys, decoded by the prep
+    /// workers, and finally cancelled. Every stage has to agree on which clip
+    /// `iw4:weapon_fire` means — the namespace, the variant and the alias chain
+    /// are the same identity in all of them, and a donor zone that ships a
+    /// same-named clip may not be reachable through the host's alias.
+    #[test]
+    fn one_alias_keeps_its_identity_from_capture_through_decode_to_cancel() {
+        let bank = two_namespace_bank();
+
+        // The two zones' clips live side by side, each reachable only in its
+        // own namespace.
+        assert_eq!(
+            bank.loaded_index_in(AssetNamespace::Iw4, "weap_fire"),
+            Some(0)
+        );
+        assert_eq!(
+            bank.loaded_index_in(AssetNamespace::T5, "weap_fire"),
+            Some(3)
+        );
+
+        // `resolve_loaded_edges` bound every alias row that named a clip.
+        let census = bank.loaded_edge_census();
+        assert_eq!((census.n, census.bound, census.unresolved), (5, 5, 0));
+
+        // The alias walk: variant order, the secondary chain inlined after the
+        // row that named it, and no key twice.
+        let keys = clip_keys_for_alias(&bank, AssetNamespace::Iw4, "weapon_fire");
+        assert_eq!(
+            keys,
+            vec![ClipKey::Loaded(0), ClipKey::Loaded(1), ClipKey::Loaded(2)]
+        );
+        assert_eq!(
+            clip_keys_for_alias(&bank, AssetNamespace::T5, "weapon_fire"),
+            vec![ClipKey::Loaded(3)]
+        );
+
+        let bank = Arc::new(bank);
+        let mut store = ClipStore::start(Arc::clone(&bank), None);
+        assert!(store.workers() >= 1);
+
+        // Requesting the alias queues each distinct clip exactly once.
+        assert_eq!(store.request_alias(AssetNamespace::Iw4, "weapon_fire"), 3);
+        assert_eq!(store.request_alias(AssetNamespace::Iw4, "weapon_fire"), 0);
+
+        // 16-bit LE PCM, converted to float and nothing else.
+        let fire = settle(&store, &keys[0]).expect("fire decodes");
+        assert_eq!(&**fire.samples(), &[-1.0, 0.0, 32767.0 / 32768.0]);
+        assert_eq!((fire.channel_count(), fire.rate()), (1, 48000));
+        let tail = settle(&store, &keys[1]).expect("tail decodes");
+        assert_eq!(&**tail.samples(), &[0.5, -0.5]);
+        assert_eq!(tail.channel_count(), 2);
+
+        // A clip the workers could not decode fails once and stays failed: it
+        // is neither retried nor left pending for a caller to wait on forever.
+        assert!(matches!(settle(&store, &keys[2]), Err(ClipError::Decode)));
+        assert!(!store.request(keys[2].clone()));
+        assert_eq!(store.request_alias(AssetNamespace::Iw4, "weapon_fire"), 0);
+        assert_eq!(store.outcomes.lock().unwrap().len(), 3);
+
+        // Decoding is the store's; the shared bank still holds exactly the
+        // bytes the zone shipped.
+        assert_eq!(bank.pcm_at(0).unwrap().encoded_bytes(), &FIRE_BYTES);
+        assert_eq!(bank.pcm_at(3).unwrap().encoded_bytes(), &TAIL_BYTES);
+
+        // A queue whose receiver is gone is the same kind of terminal: the
+        // request fails, records why, and does not leave the key pending.
+        let (tx, rx) = channel();
+        drop(rx);
+        let mut closed = ClipStore {
+            bank: Arc::clone(&bank),
+            tx,
+            queued: HashSet::new(),
+            outcomes: Arc::default(),
+            workers: 0,
+            match_live: false,
+            late_prepares: 0,
+        };
+        assert!(!closed.request(keys[0].clone()));
+        assert!(matches!(
+            closed.ready(&keys[0]),
+            Some(Err(ClipError::QueueClosed))
+        ));
+        assert!(!closed.request(keys[0].clone()));
+        assert_eq!(closed.outcomes.lock().unwrap().len(), 1);
+
+        // Stop is scoped by the same identity the walk used: namespace, sound
+        // entity and match epoch. Everything outside that scope survives.
+        let pending = |namespace, snd_ent, epoch, clip: &ClipKey| PendingOneshot {
+            namespace,
+            alias: "weapon_fire".into(),
+            variant: 0,
+            volume: 0.5,
+            pitch: 1.1,
+            origin_inches: None,
+            snd_ent,
+            clip: clip.clone(),
+            layer: None,
+            class: SoundClass::World,
+            epoch,
+            deadline: deadline_for(SoundClass::World),
+        };
+        let mut starts = PendingStarts::default();
+        for entry in [
+            pending(AssetNamespace::Iw4, Some(1), 3, &keys[0]),
+            pending(AssetNamespace::Iw4, Some(2), 3, &keys[0]),
+            pending(AssetNamespace::T5, Some(1), 3, &ClipKey::Loaded(3)),
+            pending(AssetNamespace::Iw4, Some(1), 4, &keys[0]),
+        ] {
+            starts.push_oneshot(entry);
+        }
+        starts.cancel_alias(AssetNamespace::Iw4, "weapon_fire", Some(1), 3);
+        assert_eq!(
+            starts
+                .entries
+                .iter()
+                .map(|e| (e.namespace, e.snd_ent, e.epoch))
+                .collect::<Vec<_>>(),
+            vec![
+                (AssetNamespace::Iw4, Some(2), 3),
+                (AssetNamespace::T5, Some(1), 3),
+                (AssetNamespace::Iw4, Some(1), 4),
+            ]
+        );
+    }
 }

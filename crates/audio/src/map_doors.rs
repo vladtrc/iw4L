@@ -1,8 +1,8 @@
 use crate::ambient::{MapAmbient, MapEmitter};
-use crate::clip_store::{ClipStore, clip_keys_for_alias, prepare_clip_now};
+use crate::clip_store::{ClipStore, clip_keys_for_alias};
 use crate::pcm::PcmAudio;
 use crate::playback::{MissingAliasGaps, SharedPlayAssets, SoundBank};
-use assets::{AssetNamespace, NamespaceSoundIwd};
+use assets::AssetNamespace;
 use bevy::prelude::*;
 use net::PresentedSnapshot;
 
@@ -120,21 +120,4 @@ pub(crate) fn update(
         },
         Transform::from_translation(Vec3::from_array(origin_inches)),
     ));
-}
-
-pub(crate) fn prepare(
-    bank: &assets::SoundCatalog,
-    ns: AssetNamespace,
-    iwd: Option<&NamespaceSoundIwd>,
-) {
-    for alias in RADIATION_DOOR_ALIASES {
-        for key in clip_keys_for_alias(bank, ns, alias) {
-            if let Err(error) = prepare_clip_now(bank, iwd, &key) {
-                diag::warn!(
-                    Audio,
-                    "audio: door alias `{alias}` preparation failed: {error:?}"
-                );
-            }
-        }
-    }
 }

@@ -14,9 +14,9 @@ pub struct OwnedTracerDef {
 
     pub material_hint: Option<String>,
 
-    pub material_slot: Option<Ptr>,
-
-    pub material_alias: Option<Ptr>,
+    /// Whether the zone named a material for this tracer, and whether it did so
+    /// through an alias. The pointers that answered it stop at the walk.
+    pub material_authored: crate::AuthoredRef,
     pub draw_interval: u32,
     pub speed: f32,
     pub beam_length: f32,
@@ -54,34 +54,40 @@ enum TracerLink {
     Alias(Ptr),
 }
 
+/// The tracers a build finished with: named, material-bound, and with no zone
+/// link map to resolve one more pointer against.
 #[derive(Clone, Debug, Default)]
-pub struct TracerCatalog {
+pub struct TracerDefinitions {
     by_name: HashMap<String, OwnedTracerDef>,
-    links: HashMap<Ptr, TracerLink>,
-    last_captured: Option<String>,
     order: Vec<String>,
     zones: Vec<ZoneOwner>,
     capture_zone: ZoneOwner,
     pub capture_gaps: usize,
 }
 
+/// The build, holding the definitions plus what the walk needs to add to them.
+#[derive(Clone, Debug, Default)]
+pub struct TracerCatalog {
+    published: TracerDefinitions,
+    links: HashMap<Ptr, TracerLink>,
+    last_captured: Option<String>,
+}
+
+impl std::ops::Deref for TracerCatalog {
+    type Target = TracerDefinitions;
+
+    fn deref(&self) -> &Self::Target {
+        &self.published
+    }
+}
+
+impl std::ops::DerefMut for TracerCatalog {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.published
+    }
+}
+
 impl TracerCatalog {
-    pub fn len(&self) -> usize {
-        self.by_name.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
-    }
-
-    pub fn get(&self, name: &str) -> Option<&OwnedTracerDef> {
-        self.by_name.get(name)
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.order.iter().map(String::as_str)
-    }
-
     pub fn note_loaded(&mut self, slot: Ptr, insert_slot: Option<Ptr>) {
         let Some(name) = self.last_captured.take() else {
             return;
@@ -111,27 +117,90 @@ impl TracerCatalog {
         if name.is_empty() {
             return;
         }
-        let Some(key) = self.last_captured.as_ref() else {
+        let Some(key) = self.last_captured.clone() else {
             return;
         };
-        if let Some(def) = self.by_name.get_mut(key) {
+        if let Some(def) = self.by_name.get_mut(&key) {
             def.material_hint = Some(name);
         }
     }
 
-    pub fn bind_last_material_alias(&mut self, alias: Ptr) {
-        let Some(key) = self.last_captured.as_ref() else {
+    /// The zone reached this tracer's material through an alias. Which pointer
+    /// it was does not survive the walk; that it was one does.
+    pub fn note_last_material_alias(&mut self) {
+        let Some(key) = self.last_captured.clone() else {
             return;
         };
-        if let Some(def) = self.by_name.get_mut(key) {
-            def.material_alias = Some(alias);
+        if let Some(def) = self.by_name.get_mut(&key) {
+            def.material_authored.alias = true;
             if !def.material.is_bound() {
-                def.material = TracerMaterial::unresolved_for(def.material_slot, Some(alias));
+                def.material = def.material_authored.unresolved();
             }
         }
     }
 
-    pub fn resolve_materials(&mut self, materials: &crate::MaterialCatalog) {
+    pub fn capture(&mut self, s: &ZoneStream<'_>, geometry: TracerDefGeometry) -> Result<()> {
+        let name = match geometry.name {
+            Some(ptr) => s.cstr(ptr).unwrap_or("").to_owned(),
+            None => String::new(),
+        };
+        if name.is_empty() {
+            self.capture_gaps += 1;
+            self.last_captured = None;
+            return Ok(());
+        }
+        self.last_captured = Some(name.clone());
+        self.retain_order(name.clone());
+        let captured_name = geometry.material_name.and_then(|ptr| {
+            s.cstr(ptr)
+                .ok()
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned)
+        });
+        let material = TracerMaterial::from_capture(geometry.material_slot, None);
+        self.by_name.insert(
+            name.clone(),
+            OwnedTracerDef {
+                name,
+                material,
+                material_hint: captured_name,
+                material_authored: crate::AuthoredRef::from_ptrs(geometry.material_slot, None),
+                draw_interval: geometry.draw_interval,
+                speed: geometry.speed,
+                beam_length: geometry.beam_length,
+                beam_width: geometry.beam_width,
+                screw_radius: geometry.screw_radius,
+                screw_dist: geometry.screw_dist,
+                colors: geometry.colors,
+            },
+        );
+        Ok(())
+    }
+
+    /// Ends the build: the tracer definitions travel on without the link map.
+    pub fn publish(self) -> TracerDefinitions {
+        self.published
+    }
+}
+
+impl TracerDefinitions {
+    pub fn len(&self) -> usize {
+        self.by_name.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&OwnedTracerDef> {
+        self.by_name.get(name)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.order.iter().map(String::as_str)
+    }
+
+    pub fn resolve_materials(&mut self, materials: &crate::MaterialDefinitions) {
         for def in self.by_name.values_mut() {
             let index = def
                 .material_hint
@@ -148,8 +217,7 @@ impl TracerCatalog {
                 }
                 def.material = TracerMaterial::bind(index, materials.zone_of(index.order()));
             } else {
-                def.material =
-                    TracerMaterial::unresolved_for(def.material_slot, def.material_alias);
+                def.material = def.material_authored.unresolved();
             }
         }
     }
@@ -211,44 +279,5 @@ impl TracerCatalog {
             .values()
             .filter(|def| def.material.is_unresolved())
             .count()
-    }
-
-    pub fn capture(&mut self, s: &ZoneStream<'_>, geometry: TracerDefGeometry) -> Result<()> {
-        let name = match geometry.name {
-            Some(ptr) => s.cstr(ptr).unwrap_or("").to_owned(),
-            None => String::new(),
-        };
-        if name.is_empty() {
-            self.capture_gaps += 1;
-            self.last_captured = None;
-            return Ok(());
-        }
-        self.last_captured = Some(name.clone());
-        self.retain_order(name.clone());
-        let captured_name = geometry.material_name.and_then(|ptr| {
-            s.cstr(ptr)
-                .ok()
-                .filter(|n| !n.is_empty())
-                .map(str::to_owned)
-        });
-        let material = TracerMaterial::from_capture(geometry.material_slot, None);
-        self.by_name.insert(
-            name.clone(),
-            OwnedTracerDef {
-                name,
-                material,
-                material_hint: captured_name,
-                material_slot: geometry.material_slot,
-                material_alias: None,
-                draw_interval: geometry.draw_interval,
-                speed: geometry.speed,
-                beam_length: geometry.beam_length,
-                beam_width: geometry.beam_width,
-                screw_radius: geometry.screw_radius,
-                screw_dist: geometry.screw_dist,
-                colors: geometry.colors,
-            },
-        );
-        Ok(())
     }
 }

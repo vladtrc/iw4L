@@ -45,4 +45,5 @@ pub fn publish_empty_fx_owned_plans(
     plan.bump();
     plan.publish_share();
     spark.bump();
+    spark.publish_share();
 }

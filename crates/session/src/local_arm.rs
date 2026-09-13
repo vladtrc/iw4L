@@ -16,6 +16,7 @@ pub fn arm_local_from_presented(
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
     has_world: Option<Res<HasWorld>>,
+    signon: Res<SignonState>,
     mut armed: ResMut<LocalSpawnArmed>,
     mut screen: ResMut<AppScreen>,
     mut sim_cam: ResMut<SimCamera>,
@@ -27,7 +28,12 @@ pub fn arm_local_from_presented(
         return;
     }
 
-    if !has_world.is_some_and(|world| world.0) {
+    if !has_world.is_some_and(|world| world.0)
+        || (role
+            .as_ref()
+            .is_some_and(|role| **role != RuntimeRole::Replay)
+            && !signon.may_select_class())
+    {
         return;
     }
     let Some(ps) = presented.alive_player(local.0) else {

@@ -392,6 +392,7 @@ pub fn drive_map_loaded(
     defer: Option<bevy::prelude::Res<DeferHostWorldReady>>,
     mut sent: bevy::prelude::Local<Option<(u64, u32)>>,
     mut deferred: bevy::prelude::Local<bool>,
+    mut withheld: bevy::prelude::Local<bool>,
 ) {
     let Some(bridge) = bridge else {
         return;
@@ -468,8 +469,23 @@ pub fn drive_map_loaded(
                     classes: descriptor.classes,
                 },
             ) else {
+                // The world is on screen but the report is still held back:
+                // say which gate holds it, or the client sits in LoadingMap
+                // with nothing in the log to read.
+                if installed && !*withheld {
+                    *withheld = true;
+                    diag::info!(
+                        Net,
+                        "map loaded withheld: epoch={epoch} belongs={belongs} installed_key={:?} live={:?}",
+                        admission
+                            .as_ref()
+                            .and_then(|admission| admission.core.installed()),
+                        live,
+                    );
+                }
                 return;
             };
+            *withheld = false;
             let key = (bridge.incarnation(), epoch);
             if *sent == Some(key) {
                 return;
@@ -481,6 +497,14 @@ pub fn drive_map_loaded(
                     weapons: ready.weapons,
                     classes: ready.classes,
                 },
+            );
+            diag::info!(
+                Net,
+                "map loaded reported epoch={} map={:016x} weapons={:016x} classes={:016x} — the host owes a bootstrap offer",
+                ready.epoch,
+                ready.map,
+                ready.weapons,
+                ready.classes
             );
             *sent = Some(key);
         }
@@ -500,9 +524,7 @@ pub fn drive_match_boundary(
     let mut end_match = false;
     let mut torn_key = frame::MatchKey::NONE;
     for fact in torn.read() {
-        if !crate::session_core::match_key_boundary_applies(fact.match_key, live_key)
-            && !crate::session_core::match_boundary_applies(fact.match_epoch, live_epoch)
-        {
+        if !crate::session_core::match_key_boundary_applies(fact.match_key, live_key) {
             diag::info!(
                 Net,
                 "session-transition {}",

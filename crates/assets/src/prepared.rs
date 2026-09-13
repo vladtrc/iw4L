@@ -6,12 +6,17 @@ use crate::{
     xanim_catalog::XAnimCatalog,
 };
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct PreparedSpawn {
-    pub classname: String,
-    pub origin: [f32; 3],
-    pub angles: [f32; 3],
-    pub script_linkto: String,
+/// The one material population a prepared match owns, and the map-zone-local
+/// index space that resolves into it.
+///
+/// Geometry keeps references — local material indices and, after the merge,
+/// nothing else. The pool itself is never nested inside an optional product.
+#[derive(Default)]
+pub struct MatchMaterials {
+    pub population: crate::MaterialDefinitions,
+
+    /// map-zone-local material index -> row in `population`
+    pub map_ids: Vec<Option<usize>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -19,13 +24,10 @@ pub struct PreparedGaps {
     pub lines: Vec<String>,
 }
 
+/// What the map itself declares about the match, captured once by the lane and
+/// moved from there to its single owner in [`PreparedMap`].
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PreparedMap {
-    pub zone: String,
-
-    pub namespace: Option<crate::AssetNamespace>,
-    pub spawns: Vec<PreparedSpawn>,
-
+pub struct MapFacts {
     pub minimap_corners: Option<crate::MinimapCorners>,
 
     pub north_yaw: Option<f32>,
@@ -35,6 +37,18 @@ pub struct PreparedMap {
     pub script_sound: crate::MapScriptSoundFacts,
 
     pub team_icons: crate::TeamIcons,
+
+    pub t5_teamset: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PreparedMap {
+    pub zone: String,
+
+    pub namespace: Option<crate::AssetNamespace>,
+    pub spawns: Vec<crate::SpawnPoint>,
+
+    pub facts: MapFacts,
     pub gaps: PreparedGaps,
 }
 

@@ -9,7 +9,7 @@ use crate::{
     model_kind,
     model_skel::{ModelSkel, capture_untyped_skel},
 };
-use asset_material::MaterialCatalog;
+use asset_material::{MaterialCatalog, MaterialDefinitions};
 
 #[derive(Clone, Debug)]
 pub struct ProjectileMeshEntry {
@@ -21,7 +21,7 @@ pub struct ProjectileMeshEntry {
 impl ProjectileMeshEntry {
     fn from_skel(skel: ModelSkel, materials: Option<&MaterialCatalog>) -> Self {
         let (material_names, material_edges) =
-            capture_xmodel_material_slots(&skel.surface_materials, materials);
+            capture_xmodel_material_slots(&skel.surface_materials, materials.map(|c| &**c));
         Self {
             skel,
             material_names,
@@ -29,7 +29,7 @@ impl ProjectileMeshEntry {
         }
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialCatalog) {
+    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         stamp_xmodel_material_edges(
             &mut self.material_names,
             &mut self.material_edges,
@@ -170,7 +170,7 @@ impl ProjectileMeshCatalog {
         );
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialCatalog) {
+    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         for entry in self.entries.values_mut() {
             entry.resolve_materials(materials);
         }

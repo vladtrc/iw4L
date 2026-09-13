@@ -6,9 +6,7 @@ use render_frontend::prepare::scene::world::WorldScene;
 
 use crate::LiveWorldIdentity;
 
-pub fn drive_class_select_screen(
-    mut screen: ResMut<AppScreen>,
-    mut loading: Option<ResMut<LoadingScreen>>,
+pub fn update_admission(
     mut signon: ResMut<SignonState>,
     mut admission: ResMut<ClientAdmission>,
     role: Res<RuntimeRole>,
@@ -32,7 +30,6 @@ pub fn drive_class_select_screen(
     admission
         .core
         .apply_local_authority_ready(authority_ready && world_installed);
-    let failed = signon.phase.is_failed();
     let admitted = match *role {
         RuntimeRole::Client => admission.core.class_select_allowed(),
         RuntimeRole::Listen | RuntimeRole::Dedicated => admission.core.local_class_select_allowed(),
@@ -46,7 +43,17 @@ pub fn drive_class_select_screen(
             signon.phase
         );
     }
-    if failed {
+}
+
+pub fn drive_class_select_screen(
+    mut screen: ResMut<AppScreen>,
+    mut loading: Option<ResMut<LoadingScreen>>,
+    signon: Res<SignonState>,
+    has_world: Option<Res<HasWorld>>,
+) {
+    let world_installed = has_world.is_some_and(|world| world.0);
+    let admitted = signon.may_select_class();
+    if signon.phase.is_failed() {
         if let Some(loading) = loading.as_deref_mut()
             && let SignonPhase::Failed(reason) = &signon.phase
         {
@@ -68,5 +75,11 @@ pub fn drive_class_select_screen(
 }
 
 pub fn register_admission(app: &mut App) {
-    app.add_systems(Update, drive_class_select_screen.in_set(ClientSet::Ui));
+    app.add_systems(
+        Update,
+        update_admission
+            .in_set(ClientSet::Present)
+            .before(crate::local_arm::arm_local_from_presented),
+    )
+    .add_systems(Update, drive_class_select_screen.in_set(ClientSet::Ui));
 }

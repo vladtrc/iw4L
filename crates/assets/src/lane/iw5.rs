@@ -43,7 +43,7 @@ impl Iw5Lane {
     ];
 
     fn stamp_map_tree_team_icons(path: &Path, loaded: &mut LoadedWorld) {
-        if loaded.game.team_icons.allies.is_some() || loaded.game.team_icons.axis.is_some() {
+        if loaded.facts.team_icons.allies.is_some() || loaded.facts.team_icons.axis.is_some() {
             return;
         }
         match crate::find_zone_for_tree(path, "code_post_gfx_mp") {
@@ -51,12 +51,12 @@ impl Iw5Lane {
                 let (arena, table) = crate::load_iw5_team_icon_sources(&found.path);
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 if let Some(table) = table.as_ref() {
-                    loaded.game.team_icons =
+                    loaded.facts.team_icons =
                         crate::team_icons_for_zone(table, arena.as_deref(), stem);
                 }
                 match (
-                    loaded.game.team_icons.allies.as_deref(),
-                    loaded.game.team_icons.axis.as_deref(),
+                    loaded.facts.team_icons.allies.as_deref(),
+                    loaded.facts.team_icons.axis.as_deref(),
                 ) {
                     (Some(a), Some(x)) => loaded.report.push(format!(
                         "team icons: iw5 arena allies={a} axis={x} zone={stem}"
@@ -93,7 +93,6 @@ impl ZoneLane for Iw5Lane {
         image: &ZoneImage,
         progress: &LoadProgress,
         _shared_surfaces: asset_model::SharedXModelSurfaces,
-        common_techsets: &[crate::TechniqueSetFacts],
         material_seed: crate::MaterialCatalog,
         _common_film_visions: &mut std::collections::BTreeMap<
             String,
@@ -144,6 +143,7 @@ impl ZoneLane for Iw5Lane {
         drop(stage);
         let stage = progress.stage("walking IW5 map assets");
         let mut sink = ZoneWalkSink::default();
+        let seeded_techsets = material_seed.technique_set_facts().to_vec();
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(crate::AssetNamespace::Iw5);
@@ -190,7 +190,7 @@ impl ZoneLane for Iw5Lane {
         let compass = std::mem::take(&mut sink.compass).resolve(&sink.materials);
         report.push(format!("compass: {:?}", compass));
         let mut materials = sink.materials;
-        let absorbed = materials.absorb_technique_set_tables(common_techsets);
+        let absorbed = materials.absorb_technique_set_tables(&seeded_techsets);
         let promoted = materials.promote_iw5_fallback_tables();
         let stub_routed = materials.reroute_stub_materials();
         report.push(format!(
@@ -229,11 +229,11 @@ impl ZoneLane for Iw5Lane {
                     ));
                     report.push(format!(
                         "clip mesh extracted: verts={} tris={} nodes={} leaves={} aabb={} cmodels={} smodels={}",
-                        clip.verts.len(),
-                        clip.tri_indices.len() / 3,
+                        clip.mesh.verts.len(),
+                        clip.mesh.tri_indices.len() / 3,
                         clip.nodes.len(),
                         clip.leaves.len(),
-                        clip.aabb_trees.len(),
+                        clip.mesh.aabb_trees.len(),
                         clip.cmodels.len(),
                         clip.static_models.len()
                     ));
@@ -257,26 +257,26 @@ impl ZoneLane for Iw5Lane {
             let dm_spawns = dm_spawn_points_iw5(&stream);
             return Self::finish_loaded(
                 path,
-                LoadedWorld::from_prepared_parts(
-                    PreparedWorld {
+                LoadedWorld {
+                    world: PreparedWorld {
                         exp_fog,
                         createart_name,
                         policy: WorldDrawPolicy::iw5(),
                         ..Default::default()
                     },
-                    clip,
-                    dm_spawns,
-                    BodyMeshCatalog::default(),
+                    collision: clip,
+                    spawns: dm_spawns,
+                    bodies: BodyMeshCatalog::default(),
                     fpv_meshes,
-                    XAnimCatalog::default(),
+                    xanims: XAnimCatalog::default(),
                     report,
-                    vec![LaneGap {
+                    gaps: vec![LaneGap {
                         capability: PreparedCapability::PreparedWorld,
                         reason: "no GfxWorld retained — nothing to draw".into(),
                         addr: Some("assets::lane::iw5::load_world/no_gfx_world"),
                     }],
-                    None,
-                ),
+                    ..Default::default()
+                },
             );
         };
         report.push(format!(
@@ -299,7 +299,7 @@ impl ZoneLane for Iw5Lane {
         }
 
         match build_iw5_world_draw(&stream, geometry, materials) {
-            Ok(draw) => {
+            Ok((draw, map_materials)) => {
                 let map_models = super::build_iw5_static_model_draw(&stream, geometry, map_xmodels);
                 if let Some(error) = map_models.static_error.as_ref() {
                     report.push(format!("static models: {error}"));
@@ -362,7 +362,7 @@ impl ZoneLane for Iw5Lane {
                 ));
                 report.push(format!(
                     "materials in draw: {}; primary lights: {}; named_defs={}; recorded_light_defs={}",
-                    draw.materials.materials.len(),
+                    map_materials.materials.len(),
                     draw.primary_lights.len(),
                     draw.primary_lights
                         .iter()
@@ -400,7 +400,7 @@ impl ZoneLane for Iw5Lane {
                     .iter()
                     .map(|probe| {
                         probe.image.and_then(|image| {
-                            draw.materials.images.get(image).and_then(|source| {
+                            map_materials.images.get(image).and_then(|source| {
                                 match decode_reflection_probe_cubemap(source) {
                                     Ok(image) => Some(image),
                                     Err(error) => {
@@ -556,8 +556,9 @@ impl ZoneLane for Iw5Lane {
                 report.push(format!("map xanims: {}", map_xanims.len()));
                 Self::finish_loaded(
                     path,
-                    LoadedWorld::from_prepared_parts(
-                        PreparedWorld {
+                    LoadedWorld {
+                        materials: map_materials,
+                        world: PreparedWorld {
                             min: draw.stats.min,
                             max: draw.stats.max,
                             draw: Some(draw),
@@ -569,26 +570,28 @@ impl ZoneLane for Iw5Lane {
                             map_use_triggers,
                             flag_descriptors,
                             intermission_view,
-                            minimap_corners,
                             light_grid,
                             reflection_probe_images,
-                            north_yaw,
-                            compass,
                             exp_fog,
                             createart_name,
                             policy: WorldDrawPolicy::iw5(),
                             smodel_lighting_samples,
                             ..Default::default()
                         },
-                        clip,
-                        dm_spawns,
+                        collision: clip,
+                        spawns: dm_spawns,
                         bodies,
                         fpv_meshes,
-                        map_xanims,
+                        xanims: map_xanims,
+                        facts: crate::MapFacts {
+                            minimap_corners,
+                            north_yaw,
+                            compass,
+                            ..Default::default()
+                        },
                         report,
-                        Vec::new(),
-                        None,
-                    ),
+                        ..Default::default()
+                    },
                 )
             }
             Err(e) => {
@@ -596,26 +599,26 @@ impl ZoneLane for Iw5Lane {
                 let dm_spawns = dm_spawn_points_iw5(&stream);
                 Self::finish_loaded(
                     path,
-                    LoadedWorld::from_prepared_parts(
-                        PreparedWorld {
+                    LoadedWorld {
+                        world: PreparedWorld {
                             exp_fog,
                             createart_name,
                             policy: WorldDrawPolicy::iw5(),
                             ..Default::default()
                         },
-                        clip,
-                        dm_spawns,
+                        collision: clip,
+                        spawns: dm_spawns,
                         bodies,
                         fpv_meshes,
-                        map_xanims,
+                        xanims: map_xanims,
                         report,
-                        vec![LaneGap {
+                        gaps: vec![LaneGap {
                             capability: PreparedCapability::PreparedWorld,
                             reason: format!("world draw: {e}"),
                             addr: Some("assets::lane::iw5::load_world/world_mesh"),
                         }],
-                        None,
-                    ),
+                        ..Default::default()
+                    },
                 )
             }
         }
@@ -709,7 +712,6 @@ impl ZoneLane for Iw5Lane {
             sink.light_def_bodies,
             light_defs.len()
         ));
-        let technique_sets = sink.materials.technique_set_facts().to_vec();
         let mut materials = sink.materials;
 
         let mut pending_images = None;
@@ -731,7 +733,6 @@ impl ZoneLane for Iw5Lane {
             weapons,
             cac_tables: sink.stats_tables.into_values().collect(),
             material_population: materials,
-            technique_sets,
             fpv: sink.fpv_meshes,
             world_weapons: sink.world_weapons,
             xanims: sink.xanims,

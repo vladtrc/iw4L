@@ -4,7 +4,7 @@ use assets::AssetNamespace;
 
 pub const SND_ENT_LOCAL: u32 = 0;
 
-#[derive(Message, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct PlayAlias {
     pub namespace: AssetNamespace,
     pub alias: String,
@@ -15,8 +15,13 @@ pub struct PlayAlias {
 }
 
 #[derive(Message, Clone, Debug)]
-pub struct StopAlias {
-    pub alias: String,
+pub enum AliasCommand {
+    Play(PlayAlias),
+    Stop {
+        namespace: AssetNamespace,
+        alias: String,
+        snd_ent: Option<u32>,
+    },
 }
 
 #[derive(Message, Clone, Debug)]

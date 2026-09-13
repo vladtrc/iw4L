@@ -259,6 +259,9 @@ logs:
 #                         only commits code; none of those steps are done by
 #                         hand. Refuses uncommitted WIP, rebase conflict, dirty
 #                         root — and then the clone stays on disk.
+#                         Read `git diff origin/master...HEAD` before running
+#                         it: probes, throwaway tests and debug prints come back
+#                         out of the tree first. CONTEXT.md, "Before shipping".
 #   make mr ls            the clones on disk and whose move each one is
 #   make mr fmt FILES='crates/foo/src/a.rs'   rustfmt exactly those paths.
 #                         Empty / dir / non-rs refuse: `cargo fmt --all`

@@ -524,7 +524,7 @@ fn draw_postfx(
     gpu: Res<ExactPostFxGpu>,
     extracted: Res<ExtractedPostFx>,
     floatz: Res<super::floatz::ExactFloatZResolve>,
-    colour: Res<super::colour_submit::ExtractedExactColour>,
+    colour_frame: Res<super::PublishedRenderFrame>,
     cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -534,7 +534,7 @@ fn draw_postfx(
     mut texture_cache: Local<PostFxTextureCache>,
     mut submitted: Local<Option<(u64, bool, UVec2)>>,
 ) {
-    let products = &colour.frame_products;
+    let products = &colour_frame.frame_products;
     let (target, view) = view.into_inner();
     let Some(targets) = gpu.targets.as_ref() else {
         return;

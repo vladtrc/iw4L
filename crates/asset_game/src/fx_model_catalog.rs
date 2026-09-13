@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use asset_material::MaterialDefinitions;
 use fastfile_iw4::{ScriptStrings, ZoneStream};
 
 use crate::{
@@ -30,7 +31,7 @@ impl FxModelEntry {
         }
     }
 
-    fn resolve_materials(&mut self, materials: &MaterialCatalog) {
+    fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         stamp_xmodel_material_edges(
             &mut self.material_names,
             &mut self.material_edges,
@@ -113,7 +114,7 @@ impl FxModelCatalog {
         self.entries.retain(|name, _| hints.contains(name));
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialCatalog) -> AssetEdgeCensus {
+    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) -> AssetEdgeCensus {
         let mut census = AssetEdgeCensus::default();
         for entry in self.entries.values_mut() {
             entry.resolve_materials(materials);

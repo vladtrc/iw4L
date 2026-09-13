@@ -1,7 +1,7 @@
 use asset_anim::{ClipScheduler, ClipSchedulerError, XAnimCatalog};
 use asset_audio::{SoundCatalog, game_nested_string_assignment};
 use asset_core::*;
-use asset_material::{MaterialCatalog, decode_ui_image};
+use asset_material::{MaterialCatalog, MaterialDefinitions, decode_ui_image};
 use asset_model::{
     FpvMeshCatalog, ModelSkel, ProjectileMeshCatalog, WorldWeaponCatalog, WorldWeaponEntry,
     capture_xmodel_skel,
@@ -18,7 +18,6 @@ mod fx_catalog;
 mod fx_model_catalog;
 mod graph_support;
 mod impact_fx_catalog;
-mod load_capture;
 mod localize;
 mod menu_catalog;
 mod penetration;
@@ -32,8 +31,8 @@ pub use attachment_hide::*;
 pub use cac_stats::*;
 pub use fx_catalog::*;
 pub use fx_model_catalog::*;
+pub use graph_support::AuthoredRef;
 pub use impact_fx_catalog::*;
-pub use load_capture::*;
 pub use localize::*;
 pub use menu_catalog::*;
 pub use penetration::*;

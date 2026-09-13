@@ -9,7 +9,7 @@ use crate::model_skel::{
     ModelSkel, capture_body_skel, capture_body_skel_iw5, capture_body_skel_t5,
 };
 use crate::soldiers::{SoldierKits, body_has_tp_attach_bones, is_body_model, soldier_kits};
-use asset_material::MaterialCatalog;
+use asset_material::{MaterialCatalog, MaterialDefinitions};
 
 pub const BODY_SPINE_BONES: &[&str] = &[
     "torso_stabilizer",
@@ -32,7 +32,7 @@ pub struct BodyMeshEntry {
 impl BodyMeshEntry {
     fn from_skel(skel: ModelSkel, materials: Option<&MaterialCatalog>) -> Self {
         let (material_names, material_edges) =
-            capture_xmodel_material_slots(&skel.surface_materials, materials);
+            capture_xmodel_material_slots(&skel.surface_materials, materials.map(|c| &**c));
         Self {
             skel,
             material_names,
@@ -40,7 +40,7 @@ impl BodyMeshEntry {
         }
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialCatalog) {
+    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         stamp_xmodel_material_edges(
             &mut self.material_names,
             &mut self.material_edges,
@@ -244,7 +244,7 @@ impl BodyMeshCatalog {
         self.insert_entry(skel.name.clone(), BodyMeshEntry::from_skel(skel, materials));
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialCatalog) {
+    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         for entry in self.entries.values_mut() {
             entry.resolve_materials(materials);
         }

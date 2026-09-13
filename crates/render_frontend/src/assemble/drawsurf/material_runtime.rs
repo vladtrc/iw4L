@@ -557,7 +557,7 @@ fn original_remap_resolution() -> RemapResolution {
     RemapResolution::SelfSet
 }
 
-fn source_generation_id(source: &assets::MaterialCatalog) -> MaterialGenerationId {
+fn source_generation_id(source: &assets::MaterialDefinitions) -> MaterialGenerationId {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     for material in &source.materials {
         for byte in material.name.as_str().as_bytes() {
@@ -601,7 +601,7 @@ struct ComparatorRecord {
 }
 
 fn shader_name<'a>(
-    source: &'a assets::MaterialCatalog,
+    source: &'a assets::MaterialDefinitions,
     material: MaterialAssetId,
     slot: u8,
     reference: &assets::OwnedShaderRef,
@@ -614,7 +614,7 @@ fn shader_name<'a>(
 }
 
 fn comparator_pass_key(
-    source: &assets::MaterialCatalog,
+    source: &assets::MaterialDefinitions,
     material: &assets::AuthoredMaterial,
     asset_id: MaterialAssetId,
     slot: u8,
@@ -714,7 +714,7 @@ fn comparator_pass_key(
 }
 
 fn leftover_x_token_aliased(
-    source: &assets::MaterialCatalog,
+    source: &assets::MaterialDefinitions,
     material: &assets::AuthoredMaterial,
 ) -> bool {
     if material.namespace != assets::AssetNamespace::T5 {
@@ -729,7 +729,7 @@ fn leftover_x_token_aliased(
 }
 
 fn comparator_record(
-    source: &assets::MaterialCatalog,
+    source: &assets::MaterialDefinitions,
     index: usize,
 ) -> Result<ComparatorRecord, CatalogBuildError> {
     let asset_id = MaterialAssetId(
@@ -1032,7 +1032,7 @@ fn skip_tech_label(counts: &BTreeMap<String, u32>) -> Option<String> {
 }
 
 fn build_sorted_material_table(
-    source: &assets::MaterialCatalog,
+    source: &assets::MaterialDefinitions,
 ) -> Result<
     (
         Vec<MaterialAssetId>,
@@ -1136,7 +1136,7 @@ fn build_sorted_material_table(
     ))
 }
 
-pub fn capture_runtime_catalog(source: &assets::MaterialCatalog) -> RuntimeMaterialCatalog {
+pub fn capture_runtime_catalog(source: &assets::MaterialDefinitions) -> RuntimeMaterialCatalog {
     let mut technique_sets = Vec::new();
     let mut vertex_decls = Vec::<(u32, RuntimeVertexDecl)>::new();
     for facts in source.technique_set_facts() {
@@ -1374,7 +1374,7 @@ pub fn capture_runtime_catalog(source: &assets::MaterialCatalog) -> RuntimeMater
                         .packed
                     });
             let [uv_anim, falloff_parms, falloff_begin, falloff_end] =
-                assets::MaterialCatalog::material_animation(material);
+                assets::MaterialDefinitions::material_animation(material);
             RuntimeMaterial {
                 asset_id,
                 name: material.name.to_string(),
@@ -1547,7 +1547,7 @@ pub fn capture_runtime_catalog(source: &assets::MaterialCatalog) -> RuntimeMater
     }
 }
 
-fn remaining_unknown_arg_n(source: &assets::MaterialCatalog) -> u32 {
+fn remaining_unknown_arg_n(source: &assets::MaterialDefinitions) -> u32 {
     let mut n = 0u32;
     for facts in source.technique_set_facts() {
         for table in facts

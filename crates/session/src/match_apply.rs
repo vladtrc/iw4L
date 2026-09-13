@@ -1,7 +1,7 @@
 use assets::{
     ClipCollision, DestructibleDeathHint, LoadingScreen, MatchLoadAbort, MatchType10SoundHints,
-    PreparedDestructibleDeath, PreparedFpvMeshes, PreparedMatchReady, PreparedSpawn,
-    PreparedWeapons, PreparedXAnims, WeaponRegistry, stamp_destructible_death_edges,
+    PreparedDestructibleDeath, PreparedFpvMeshes, PreparedMatchReady, PreparedWeapons,
+    PreparedXAnims, SpawnPoint, WeaponRegistry, stamp_destructible_death_edges,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -308,23 +308,20 @@ impl MatchInstallConsole<'_> {
 
 #[derive(SystemParam)]
 pub struct MatchInstallAuthority<'w> {
-    world: ResMut<'w, AuthorityWorld>,
-    input_gate: ResMut<'w, AuthorityInputGate>,
-    load_hold: ResMut<'w, AuthorityLoadHold>,
+    role: Res<'w, frame::RuntimeRole>,
+    prediction: Option<Res<'w, net::ClientPredictionState>>,
+    input_gate: Res<'w, AuthorityInputGate>,
 }
 
 #[derive(SystemParam)]
 pub struct MatchInstallPresentation<'w> {
-    scene: ResMut<'w, WorldScene>,
     probe: Option<ResMut<'w, LaunchReport>>,
-    camera: ResMut<'w, SimCamera>,
-    class_handoff: ResMut<'w, ClassSelectHandoff>,
+    camera: Res<'w, SimCamera>,
 }
 
 #[derive(SystemParam)]
 pub struct MatchInstallOccupancy<'w> {
     has_world: ResMut<'w, HasWorld>,
-    generation: ResMut<'w, WorldGeneration>,
 }
 
 pub fn apply_prepared_match(
@@ -335,7 +332,7 @@ pub fn apply_prepared_match(
     presentation: MatchInstallPresentation,
     occupancy: MatchInstallOccupancy,
     mode_selection: Option<Res<sim::HostGameModeSelection>>,
-    mut installed: MessageWriter<MatchInstalled>,
+    mut failed: MessageWriter<frame::MapLoadFailed>,
 ) {
     let PreparedMatchSource {
         mut ready,
@@ -350,27 +347,21 @@ pub fn apply_prepared_match(
         mut install_stage,
     } = source;
     let MatchInstallAuthority {
-        world: mut sim,
-        mut input_gate,
-        mut load_hold,
+        role,
+        prediction,
+        input_gate,
     } = authority;
     let MatchInstallPresentation {
-        mut scene,
         mut probe,
-        camera: mut sim_cam,
-        mut class_handoff,
+        camera: sim_cam,
     } = presentation;
-    let MatchInstallOccupancy {
-        mut has_world,
-        generation: mut world_generation,
-    } = occupancy;
+    let MatchInstallOccupancy { mut has_world } = occupancy;
     let stale_key = !ready.load_key.match_key.is_none()
         && bridge.as_ref().is_none_or(|bridge| {
             let state = bridge.state();
             !state.in_match()
                 || state.identity().match_key() != ready.load_key.match_key
-                || (ready.load_key.incarnation != 0
-                    && ready.load_key.incarnation != bridge.incarnation())
+                || ready.load_key.incarnation != bridge.incarnation()
         });
     if !swap.accepts_install(ready.request_id)
         || stale_key
@@ -402,10 +393,6 @@ pub fn apply_prepared_match(
         );
         return;
     }
-    let Some(probe) = probe.as_deref_mut() else {
-        return;
-    };
-
     if loading.is_some() && install_stage.is_none() {
         if let Some(loading) = loading.as_deref_mut() {
             *install_stage = Some(loading.progress.stage("installing match"));
@@ -424,6 +411,508 @@ pub fn apply_prepared_match(
     let mut prepared = std::mem::take(&mut ready.prepared);
     commands.remove_resource::<PreparedMatchReady>();
 
+    let world_report = std::mem::take(&mut prepared.report);
+    log_world_report(&world_report);
+
+    let plan = match preflight_match_install(
+        prepared,
+        &zone,
+        mode_selection.as_deref(),
+        catalog.as_deref(),
+        identity.as_deref(),
+    ) {
+        Ok(plan) => plan,
+        Err(refusal) => {
+            if let Some(probe) = probe.as_deref_mut() {
+                if let Some(gap) = refusal.sim_gap {
+                    probe.sim_gap = gap;
+                }
+                probe.world_report = world_report;
+            }
+            *has_world = HasWorld(false);
+            if let Some(loading) = loading.as_deref_mut() {
+                loading.fail(refusal.error.clone());
+            }
+            failed.write(frame::MapLoadFailed {
+                request_id,
+                load_key,
+                zone,
+                error: refusal.error,
+            });
+            console.release_startup();
+            return;
+        }
+    };
+    let prepared_install = (|| -> Result<bevy::ecs::world::CommandQueue, InstallRefusal> {
+        let mut install = bevy::ecs::world::CommandQueue::default();
+        let MatchInstallPlan {
+            kind,
+            scene: loaded_scene,
+            weapons,
+            fpv_meshes,
+            bodies,
+            world_weapons,
+            projectile_meshes,
+            xmodel_walk,
+            xanims,
+            death,
+            player_anim_sources,
+            mut prepared_map,
+            strings,
+            clip,
+            pen_table,
+            pen_table_loaded,
+            tracers,
+            fx_catalog,
+            type10,
+            fx_models,
+            impact_fx,
+            authority_models,
+            animated,
+            model_spawns,
+            map_doors,
+            map_use_triggers,
+            flag_descriptors,
+            objective_visuals,
+            objective_flags,
+            objective_attackers,
+        } = plan;
+        let spawn_count = prepared_map.spawns.len();
+
+        let facts = std::mem::take(&mut prepared_map.facts);
+        stage_resource(
+            &mut install,
+            assets::SessionCompass {
+                corners: facts.minimap_corners,
+                north_yaw: facts.north_yaw,
+                declaration: facts.compass,
+            },
+        );
+        stage_resource(
+            &mut install,
+            assets::SessionMapScriptSound(facts.script_sound),
+        );
+        stage_resource(&mut install, assets::SessionTeamIcons(facts.team_icons));
+        stage_resource(&mut install, assets::PreparedLocalizedStrings(strings));
+        stage_resource(&mut install, fx_catalog);
+        stage_resource(&mut install, type10);
+        stage_resource(&mut install, fx_models);
+        stage_resource(&mut install, impact_fx);
+        stage_resource(&mut install, tracers);
+
+        let mut scene = loaded_scene;
+        let mut sim_cam = *sim_cam;
+        let mut input_gate = *input_gate;
+        let mut content = sim::SimContentBuilder::default();
+        let mut sim = sim::SimWorld::new();
+        content.set_weapon_def_scales(weapons.0.scales_table());
+        let combat = combat_table::from_registry(&weapons.0);
+        content.set_weapon_combat_table(combat.clone());
+        content.set_bullet_pen_facts(combat_table::pen_from_registry(&weapons.0));
+        content.set_penetration_table(pen_table);
+        content.set_pen_table_loaded(pen_table_loaded);
+        content.set_player_kit_collisions(
+            player_kit_collision(&bodies.0, false),
+            player_kit_collision(&bodies.0, true),
+        );
+        if let Some(Ok(tree)) = player_anim_sources.compiled() {
+            if let Ok(definition) = tree
+                .to_runtime_definition(|_, name| xanims.0.clip(assets::AssetNamespace::Iw4, name))
+            {
+                let names = tree.nodes().iter().map(|node| node.name.clone()).collect();
+                content.set_player_anim_tree(Some(definition), names);
+            }
+        }
+        content.set_mantle_xanims(sim::MantleXAnimBind::from_clips(|fast, i| {
+            let name = sim::MantleXAnimBind::clip_name(fast, i)?;
+            xanims
+                .0
+                .clip(assets::AssetNamespace::Iw4, name)
+                .map(|clip| (*clip).clone())
+        }));
+        content.set_weapon_script_names(weapons.0.script_names_table());
+        install_team_voice_prefixes(&mut content, catalog.as_deref(), identity.as_deref(), &zone);
+        let equipment = combat_table::equipment_from_registry(&weapons.0);
+        content.set_equipment_runtime_table(equipment.clone());
+        let mut primary = Vec::new();
+        let mut secondary = Vec::new();
+        let mut lethal = Vec::new();
+        let mut tactical = Vec::new();
+        let mut excluded = Vec::new();
+        let loadout_rows = weapons.0.loadout_catalog();
+        let mut attachment_variants = std::collections::HashMap::<u32, Vec<String>>::new();
+        for row in &loadout_rows {
+            if let assets::LoadoutCatalogKind::AttachmentVariant { base_id } = row.kind {
+                attachment_variants
+                    .entry(base_id)
+                    .or_default()
+                    .push(row.key.to_string());
+            }
+        }
+        for variants in attachment_variants.values_mut() {
+            variants.sort();
+            variants.dedup();
+        }
+        for row in loadout_rows {
+            let offer = CacWeaponOffer {
+                key: row.key.to_string(),
+                item_group: row.item_group.clone(),
+                attachment_variants: attachment_variants.remove(&row.id).unwrap_or_default(),
+            };
+            let key = offer.key.clone();
+            match row.kind {
+                assets::LoadoutCatalogKind::Primary => primary.push(offer),
+                assets::LoadoutCatalogKind::Secondary => secondary.push(offer),
+                assets::LoadoutCatalogKind::Equipment { offhand_class } => {
+                    match assets::cac_offhand_bucket(offhand_class) {
+                        Some(assets::CacOffhandBucket::Lethal) => lethal.push(offer),
+                        Some(assets::CacOffhandBucket::Tactical) => tactical.push(offer),
+                        None => excluded.push((
+                            key,
+                            format!("unsupported retail offhandClass {offhand_class}"),
+                        )),
+                    }
+                }
+                assets::LoadoutCatalogKind::AttachmentVariant { base_id } => excluded.push((
+                    key,
+                    format!(
+                        "attachment variant of {} (available through typed CAC attachment picker)",
+                        weapons.0.name_of(base_id)
+                    ),
+                )),
+                assets::LoadoutCatalogKind::NonPlayer => excluded.push((
+                    key,
+                    "not structurally player/create-a-class eligible".to_owned(),
+                )),
+            }
+        }
+        stage_resource(&mut install, fpv_meshes);
+        stage_resource(&mut install, bodies);
+        stage_resource(&mut install, world_weapons);
+        stage_resource(&mut install, projectile_meshes);
+        stage_resource(&mut install, xmodel_walk);
+        if let Some(Ok(parsed)) = player_anim_sources.parsed_script() {
+            let tree = player_anim_sources
+                .compiled()
+                .and_then(|c| c.as_ref().ok())
+                .map(|t| t.as_ref());
+            let slots = map_anim_items(&parsed.slots, tree, &xanims.0);
+            let events = map_event_items(&parsed.events, tree, &xanims.0);
+            content.set_player_anim_script(Some(sim::PlayerAnimScript::from_tables(slots, events)));
+        }
+        stage_resource(&mut install, xanims);
+        stage_resource(&mut install, death);
+        stage_resource(&mut install, player_anim_sources);
+        input_gate.cmds_enabled = false;
+
+        let clip = clip.map(|mut clip| InstalledClip {
+            static_models: std::mem::take(&mut clip.static_models),
+            shared: Arc::new(clip),
+        });
+        stage_resource(&mut install, DynEntPhysWorld::default());
+        stage_resource(
+            &mut install,
+            DynEntPhysClip(clip.as_ref().map(|clip| Arc::clone(&clip.shared))),
+        );
+        let (sim_gap, lock_reasons, bot_class_ids) = install_clip_and_player(
+            &mut sim,
+            content,
+            clip,
+            authority_models,
+            scene.intermission_view.map(|view| sim::AuthoredSpawnPoint {
+                classname: gamemode_iw4::playerlogic::MP_GLOBAL_INTERMISSION.to_owned(),
+                origin: view.origin,
+                angles: view.angles,
+                script_linkto: String::new(),
+            }),
+            &prepared_map.spawns,
+            &weapons.0,
+            &combat,
+            &equipment,
+            &mut sim_cam,
+            &mut input_gate,
+            host_classes.as_deref(),
+            kind,
+            &map_use_triggers,
+            &flag_descriptors,
+        )?;
+        sim.objectives.flag_models = objective_flags;
+        sim.objectives.attackers = objective_attackers;
+        let defenders = sim.objectives.defenders();
+        for site in &mut sim.objectives.bombs {
+            site.view.owner = defenders;
+        }
+        for (source, intact, destroyed) in objective_visuals {
+            if let Some(site) = sim
+                .objectives
+                .bombs
+                .iter_mut()
+                .find(|b| b.view.model_source == source)
+            {
+                site.intact_sources = intact;
+                site.destroyed_sources = destroyed;
+            }
+        }
+        stage_resource(
+            &mut install,
+            bots::BotClassPool {
+                ready: true,
+                ids: bot_class_ids,
+            },
+        );
+
+        let load_hold = AuthorityLoadHold(sim.clip_brush_count() > 0);
+        if let Some(glass) = scene.fx_glass.as_ref() {
+            let panes = (0..glass.piece_places.len())
+                .filter_map(|i| {
+                    let (origin, axis_s, axis_t) = glass.pane_basis(i)?;
+                    Some((
+                        i as u32,
+                        sim::GlassPaneBasis {
+                            origin,
+                            axis_s,
+                            axis_t,
+                        },
+                    ))
+                })
+                .collect();
+            sim.world_objects_mut().install_glass_panes(panes);
+        }
+        sim.start_script_model_play_anims(animated.rows);
+        spawn_script_model_movers(&mut sim, &model_spawns);
+        if let Some(doors) = map_doors {
+            crate::map_doors::install(&mut sim, doors).map_err(|error| {
+                InstallRefusal::new(format!("Door installation refused: {error:?}"))
+            })?;
+        }
+        stamp_script_mover_numbers(&mut scene, &sim);
+        if animated.started > 0 || animated.missing_table > 0 {
+            diag::info!(
+                World,
+                "animated_model ScriptModelPlayAnim: {} looping leaves, {} without anim_prop_models row",
+                animated.started,
+                animated.missing_table
+            );
+        }
+        if animated.toy_started > 0 || animated.toy_missing > 0 {
+            diag::info!(
+                World,
+                "toy_fan ScriptModelPlayAnim: {} looping leaves (state-0 mpAnim), {} without idle clip",
+                animated.toy_started,
+                animated.toy_missing
+            );
+        }
+        if !model_spawns.is_empty() {
+            diag::info!(
+                World,
+                "script_model G_Spawn: {} ET_SCRIPTMOVER from {}",
+                sim.script_mover_count(),
+                sim::gentity_spawn_base()
+            );
+        }
+
+        let class_handoff = ClassSelectHandoff {
+            pending: !scene.batches.is_empty(),
+            primary,
+            secondary,
+            lethal,
+            tactical,
+            excluded,
+            lock_reasons,
+        };
+
+        let manifest = SessionContentManifest::build(
+            &prepared_map,
+            &weapons.0,
+            &combat,
+            &equipment,
+            sim.content_digest(),
+        )
+        .map_err(|error| InstallRefusal::new(format!("Invalid content manifest: {error:?}")))?;
+        stage_resource(&mut install, weapons);
+
+        let components = sim.content_components();
+        diag::info!(
+            Sim,
+            "session manifest: ruleset=iw4 map={:?} weapons={} digest={:016x} \
+         gameplay={:016x} c_map={:016x} c_models={:016x} c_weapons={:016x} c_classes={:016x}",
+            manifest.map,
+            manifest.weapons.len(),
+            manifest.digest,
+            sim.content_digest(),
+            components.map,
+            components.models,
+            components.weapons,
+            components.classes
+        );
+        match manifest.match_descriptor(components) {
+            Some(descriptor) => {
+                diag::info!(
+                    Sim,
+                    "match descriptor: map={:016x} weapons={:016x} classes={:016x}",
+                    descriptor.map,
+                    descriptor.weapons,
+                    descriptor.classes
+                );
+                stage_resource(&mut install, descriptor);
+            }
+            None => return Err(InstallRefusal::new("Required match descriptor is missing")),
+        }
+        stage_resource(&mut install, manifest);
+
+        diag::info!(
+            World,
+            "match preparation: {:.1}ms on the main thread (scene handoff, sim boot, catalogs)",
+            install_started.elapsed().as_secs_f32() * 1000.0
+        );
+        if role.runs_authority() || *role == frame::RuntimeRole::Replay {
+            if let Some(prediction) = prediction.as_ref() {
+                let mut state = net::ClientPrediction::new(prediction.0.local());
+                state.arm_from_content(&sim);
+                stage_resource(&mut install, net::ClientPredictionState(state));
+            }
+            stage_resource(&mut install, AuthorityWorld(sim));
+        } else if let Some(prediction) = prediction.as_ref() {
+            install.push(|world: &mut World| {
+                world.remove_resource::<AuthorityWorld>();
+            });
+            let mut state = net::ClientPrediction::new(prediction.0.local());
+            state.install_world(sim);
+            stage_resource(&mut install, net::ClientPredictionState(state));
+        } else {
+            return Err(InstallRefusal::new(
+                "No simulation owner for this execution mode",
+            ));
+        }
+        sim_cam.freeze_fly = true;
+        stage_resource(&mut install, scene);
+        stage_resource(&mut install, sim_cam);
+        stage_resource(&mut install, input_gate);
+        stage_resource(&mut install, load_hold);
+        stage_resource(&mut install, class_handoff);
+        stage_resource(&mut install, crate::LiveWorldIdentity { load_key });
+        stage_resource(&mut install, HasWorld(true));
+        stage_resource(&mut install, WorldGeneration::from_install(request_id));
+        let installed_zone = zone.clone();
+        install.push(move |world: &mut World| {
+            if let Some(mut probe) = world.get_resource_mut::<LaunchReport>() {
+                probe.sim_gap = sim_gap;
+                probe.world_report = world_report;
+            }
+            diag::info!(Sim, "match: {} ({}) — world installed ({} dm spawn points); class select waits for admission", kind.display_name(), kind.token(), spawn_count);
+            perf::match_installed(&installed_zone, 1);
+            world.write_message(MatchInstalled {
+                request_id,
+                load_key,
+                zone: installed_zone,
+                spawn_count,
+            });
+        });
+
+        Ok(install)
+    })();
+    match prepared_install {
+        Ok(mut install) => {
+            commands.queue(move |world: &mut World| {
+                let accepts = world
+                    .resource::<crate::SessionSwapRequest>()
+                    .accepts_install(request_id);
+                let same_match = load_key.match_key.is_none()
+                    || world
+                        .get_resource::<net::MasterBridge>()
+                        .is_some_and(|bridge| {
+                            bridge.state().in_match()
+                                && bridge.state().identity().match_key() == load_key.match_key
+                                && bridge.incarnation() == load_key.incarnation
+                        });
+                if accepts && same_match {
+                    install.apply(world);
+                }
+            });
+        }
+        Err(refusal) => {
+            if let Some(loading) = loading.as_deref_mut() {
+                loading.fail(refusal.error.clone());
+            }
+            failed.write(frame::MapLoadFailed {
+                request_id,
+                load_key,
+                zone,
+                error: refusal.error,
+            });
+        }
+    }
+    console.release_startup();
+}
+
+/// Everything the install publishes, assembled while a refusal is still free.
+///
+/// The plan exists so publication cannot start before the checks are done: the
+/// commit half of `apply_prepared_match` has nothing to install until preflight
+/// hands one over.
+struct MatchInstallPlan {
+    kind: gamemode_iw4::GameModeKind,
+    scene: WorldScene,
+    weapons: PreparedWeapons,
+    fpv_meshes: PreparedFpvMeshes,
+    bodies: assets::PreparedBodies,
+    world_weapons: assets::PreparedWorldWeapons,
+    projectile_meshes: assets::PreparedProjectileMeshes,
+    xmodel_walk: assets::PreparedXModelWalkCensus,
+    xanims: PreparedXAnims,
+    death: PreparedDestructibleDeath,
+    player_anim_sources: assets::PlayerAnimSources,
+    prepared_map: assets::PreparedMap,
+    strings: assets::LocalizeCatalog,
+    clip: Option<ClipCollision>,
+    pen_table: sim::PenetrationDepthTable,
+    pen_table_loaded: bool,
+    tracers: PreparedTracers,
+    fx_catalog: PreparedFxCatalog,
+    type10: MatchType10SoundHints,
+    fx_models: PreparedFxModels,
+    impact_fx: PreparedImpactFx,
+    authority_models: AuthorityEntityModelInstall,
+    animated: AnimatedPropAnims,
+    model_spawns: Vec<(sim::ScriptModelId, [f32; 3], [f32; 3])>,
+    map_doors: Option<sim::MapDoors>,
+    map_use_triggers: Vec<assets::MapUseTrigger>,
+    flag_descriptors: Vec<assets::FlagDescriptor>,
+    objective_visuals: Vec<(u32, Vec<u32>, Vec<u32>)>,
+    objective_flags: [String; 3],
+    objective_attackers: gamemode_iw4::Team,
+}
+
+/// A refusal of the whole request: the loading screen shows `error`, the swap
+/// completes on it, and nothing of the match has been published.
+struct InstallRefusal {
+    error: String,
+    sim_gap: Option<&'static str>,
+}
+
+impl InstallRefusal {
+    fn new(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            sim_gap: None,
+        }
+    }
+
+    fn with_gap(error: impl Into<String>, gap: &'static str) -> Self {
+        Self {
+            error: error.into(),
+            sim_gap: Some(gap),
+        }
+    }
+}
+
+fn preflight_match_install(
+    mut prepared: assets::PreparedMatch,
+    zone: &str,
+    mode_selection: Option<&sim::HostGameModeSelection>,
+    catalog: Option<&assets::MenuCatalog>,
+    identity: Option<&LaunchIdentity>,
+) -> Result<MatchInstallPlan, InstallRefusal> {
     let weapons = PreparedWeapons(prepared.weapons);
     let fpv_meshes = PreparedFpvMeshes(prepared.fpv_meshes);
     let bodies = assets::PreparedBodies(prepared.bodies);
@@ -439,53 +928,31 @@ pub fn apply_prepared_match(
     log_destructible_death_assets(&death);
     let player_anim_sources = prepared.player_anim_sources;
     let prepared_map = prepared.prepared_map;
-    let spawn_count = prepared_map.spawns.len();
-    commands.insert_resource(assets::SessionCompass {
-        corners: prepared_map.minimap_corners,
-        north_yaw: prepared_map.north_yaw,
-        declaration: prepared_map.compass.clone(),
-    });
-    commands.insert_resource(assets::SessionMapScriptSound(
-        prepared_map.script_sound.clone(),
-    ));
-    commands.insert_resource(assets::SessionTeamIcons(prepared_map.team_icons.clone()));
-    commands.insert_resource(assets::PreparedLocalizedStrings(std::mem::take(
-        &mut prepared.strings,
-    )));
-    let kind = match match_kind(mode_selection.as_deref()) {
+    let strings = std::mem::take(&mut prepared.strings);
+    let kind = match match_kind(mode_selection) {
         Ok(kind) => kind,
         Err(gap) => {
-            probe.sim_gap = gap;
             diag::info!(Sim, "match install refused: {gap}");
-            *has_world = HasWorld(false);
-            if let Some(loading) = loading.as_deref_mut() {
-                loading.fail(gap);
-            }
-            console.release_startup();
-            return;
+            return Err(InstallRefusal::with_gap(gap, gap));
         }
     };
     apply_gameobjects_main(&mut prepared.world, kind);
     let flag_descriptors = std::mem::take(&mut prepared.world.flag_descriptors);
     let map_use_triggers = std::mem::take(&mut prepared.world.map_use_triggers);
-    let map_doors = crate::map_doors::prepare(&zone, &prepared.world, &map_use_triggers)
-        .expect("authored Radiation door bindings");
+    let map_doors = crate::map_doors::prepare(zone, &prepared.world, &map_use_triggers)
+        .map_err(|error| InstallRefusal::new(format!("Door preparation refused: {error:?}")))?;
     let objective_setup: Result<_, String> = (|| {
         let visuals = crate::objectives::prepare(&mut prepared.world, &map_use_triggers, kind)?;
         let mut flags = [String::new(), String::new(), String::new()];
         let mut attackers = gamemode_iw4::Team::Allies;
         if kind == gamemode_iw4::GameModeKind::Domination {
-            let catalog = catalog.as_deref().ok_or("DOM faction catalog missing")?;
+            let catalog = catalog.ok_or("DOM faction catalog missing")?;
             let arena = catalog
                 .rawfile_text("mp/basemaps.arena")
                 .map(str::to_owned)
-                .or_else(|| {
-                    identity
-                        .as_deref()
-                        .and_then(|id| assets::read_basemaps_arena(&id.games_root))
-                })
+                .or_else(|| identity.and_then(|id| assets::read_basemaps_arena(&id.games_root)))
                 .ok_or("DOM arena faction definitions missing")?;
-            flags = crate::objectives::flag_models(catalog, &arena, &zone)?;
+            flags = crate::objectives::flag_models(catalog, &arena, zone)?;
             for model in &flags {
                 if !matches!(
                     prepared.world.map_xmodel_scene_assets.get_name(model),
@@ -496,7 +963,7 @@ pub fn apply_prepared_match(
             }
         }
         if kind == gamemode_iw4::GameModeKind::Demolition {
-            attackers = match prepared_map.script_sound.attackers.as_deref() {
+            attackers = match prepared_map.facts.script_sound.attackers.as_deref() {
                 Some("axis") => gamemode_iw4::Team::Axis,
                 Some("allies") => gamemode_iw4::Team::Allies,
                 _ => return Err("DD map script must declare game[attackers]".into()),
@@ -507,21 +974,18 @@ pub fn apply_prepared_match(
     let (objective_visuals, objective_flags, objective_attackers) = match objective_setup {
         Ok(setup) => setup,
         Err(error) => {
-            probe.sim_gap = "objective mode content unavailable";
             diag::info!(Sim, "objective match refused: {error}");
-            *has_world = HasWorld(false);
-            if let Some(loading) = loading.as_deref_mut() {
-                loading.fail(error);
-            }
-            console.release_startup();
-            return;
+            return Err(InstallRefusal::with_gap(
+                error,
+                "objective mode content unavailable",
+            ));
         }
     };
     let authority_models = authority_entity_model_install(&prepared.world);
     let animated =
         collect_animated_prop_anims(&prepared.world.script_model_instances, &mut xanims.0);
     let model_spawns = script_model_spawns(&prepared.world.script_model_instances);
-    let fx_catalog = PreparedFxCatalog(std::mem::take(&mut prepared.world.fx));
+    let fx_catalog = PreparedFxCatalog(std::mem::take(&mut prepared.fx));
     let type10 = MatchType10SoundHints(
         fx_catalog
             .0
@@ -534,322 +998,59 @@ pub fn apply_prepared_match(
     log_destructible_fx_assets(&fx_catalog);
     let impact_fx = PreparedImpactFx(std::mem::take(&mut prepared.world.impact_fx));
     let tracers = PreparedTracers(std::mem::take(&mut prepared.tracers));
-    let loaded_scene =
-        match world_scene_from_draw(prepared.world, &authority_models.installed_owners) {
-            Ok(scene) => scene,
-            Err(error) => {
-                let gap = format!("match install refused: {error}");
-                diag::info!(World, "{gap}");
-                *has_world = HasWorld(false);
-                if let Some(loading) = loading.as_deref_mut() {
-                    loading.fail(gap);
-                }
-                console.release_startup();
-                return;
-            }
-        };
-    commands.insert_resource(fx_catalog);
-    commands.insert_resource(type10);
-    commands.insert_resource(fx_models);
-    commands.insert_resource(impact_fx);
-    commands.insert_resource(tracers);
-
-    *scene = loaded_scene;
-    sim.0.set_weapon_def_scales(weapons.0.scales_table());
-    let combat = combat_table::from_registry(&weapons.0);
-    sim.0.set_weapon_combat_table(combat.clone());
-    sim.0
-        .set_bullet_pen_facts(combat_table::pen_from_registry(&weapons.0));
-    sim.0.set_penetration_table(prepared.pen_table);
-    sim.0.set_pen_table_loaded(prepared.pen_table_loaded);
-    sim.0.set_player_kit_collisions(
-        player_kit_collision(&bodies.0, false),
-        player_kit_collision(&bodies.0, true),
-    );
-    if let Some(Ok(tree)) = player_anim_sources.compiled() {
-        if let Ok(definition) =
-            tree.to_runtime_definition(|_, name| xanims.0.clip(assets::AssetNamespace::Iw4, name))
-        {
-            let names = tree.nodes().iter().map(|node| node.name.clone()).collect();
-            sim.0.set_player_anim_tree(Some(definition), names);
+    let scene = match world_scene_from_draw(
+        prepared.world,
+        prepared.materials,
+        &authority_models.installed_owners,
+    ) {
+        Ok(scene) => scene,
+        Err(error) => {
+            let gap = format!("match install refused: {error}");
+            diag::info!(World, "{gap}");
+            return Err(InstallRefusal::new(gap));
         }
-    }
-    sim.0
-        .set_mantle_xanims(sim::MantleXAnimBind::from_clips(|fast, i| {
-            let name = sim::MantleXAnimBind::clip_name(fast, i)?;
-            xanims
-                .0
-                .clip(assets::AssetNamespace::Iw4, name)
-                .map(|clip| (*clip).clone())
-        }));
-    sim.0
-        .set_weapon_script_names(weapons.0.script_names_table());
-    install_team_voice_prefixes(&mut sim.0, catalog.as_deref(), identity.as_deref(), &zone);
-    let equipment = combat_table::equipment_from_registry(&weapons.0);
-    sim.0.set_equipment_runtime_table(equipment.clone());
-    let weapon_reg = weapons.0.clone();
-    let mut primary = Vec::new();
-    let mut secondary = Vec::new();
-    let mut lethal = Vec::new();
-    let mut tactical = Vec::new();
-    let mut excluded = Vec::new();
-    let loadout_rows = weapon_reg.loadout_catalog();
-    let mut attachment_variants = std::collections::HashMap::<u32, Vec<String>>::new();
-    for row in &loadout_rows {
-        if let assets::LoadoutCatalogKind::AttachmentVariant { base_id } = row.kind {
-            attachment_variants
-                .entry(base_id)
-                .or_default()
-                .push(row.key.to_string());
-        }
-    }
-    for variants in attachment_variants.values_mut() {
-        variants.sort();
-        variants.dedup();
-    }
-    for row in loadout_rows {
-        let offer = CacWeaponOffer {
-            key: row.key.to_string(),
-            item_group: row.item_group.clone(),
-            attachment_variants: attachment_variants.remove(&row.id).unwrap_or_default(),
-        };
-        let key = offer.key.clone();
-        match row.kind {
-            assets::LoadoutCatalogKind::Primary => primary.push(offer),
-            assets::LoadoutCatalogKind::Secondary => secondary.push(offer),
-            assets::LoadoutCatalogKind::Equipment { offhand_class } => {
-                match assets::cac_offhand_bucket(offhand_class) {
-                    Some(assets::CacOffhandBucket::Lethal) => lethal.push(offer),
-                    Some(assets::CacOffhandBucket::Tactical) => tactical.push(offer),
-                    None => excluded.push((
-                        key,
-                        format!("unsupported retail offhandClass {offhand_class}"),
-                    )),
-                }
-            }
-            assets::LoadoutCatalogKind::AttachmentVariant { base_id } => excluded.push((
-                key,
-                format!(
-                    "attachment variant of {} (available through typed CAC attachment picker)",
-                    weapon_reg.name_of(base_id)
-                ),
-            )),
-            assets::LoadoutCatalogKind::NonPlayer => excluded.push((
-                key,
-                "not structurally player/create-a-class eligible".to_owned(),
-            )),
-        }
-    }
-    commands.insert_resource(weapons);
-    commands.insert_resource(fpv_meshes);
-    commands.insert_resource(bodies);
-    commands.insert_resource(world_weapons);
-    commands.insert_resource(projectile_meshes);
-    commands.insert_resource(xmodel_walk);
-    if let Some(Ok(parsed)) = player_anim_sources.parsed_script() {
-        let tree = player_anim_sources
-            .compiled()
-            .and_then(|c| c.as_ref().ok())
-            .map(|t| t.as_ref());
-        let slots = map_anim_items(&parsed.slots, tree, &xanims.0);
-        let events = map_event_items(&parsed.events, tree, &xanims.0);
-        sim.0
-            .set_player_anim_script(Some(sim::PlayerAnimScript::from_tables(slots, events)));
-    }
-    commands.insert_resource(xanims);
-    commands.insert_resource(death);
-    commands.insert_resource(player_anim_sources);
-    input_gate.cmds_enabled = false;
-
-    probe.world_report = prepared.report;
-    log_world_report(&probe.world_report);
-    let clip_for_dynent = prepared.clip.clone();
-    commands.insert_resource(DynEntPhysWorld::default());
-    commands.insert_resource(DynEntPhysClip::from_clip(clip_for_dynent));
-    let (sim_gap, lock_reasons, bot_class_ids) = install_clip_and_player(
-        &mut sim.0,
-        prepared.clip,
-        authority_models,
-        scene.intermission_view.map(|view| sim::AuthoredSpawnPoint {
-            classname: gamemode_iw4::playerlogic::MP_GLOBAL_INTERMISSION.to_owned(),
-            origin: view.origin,
-            angles: view.angles,
-            script_linkto: String::new(),
-        }),
-        &prepared_map.spawns,
-        &weapon_reg,
-        &combat,
-        &equipment,
-        &mut sim_cam,
-        &mut input_gate,
-        host_classes.as_deref(),
-        kind,
-        &map_use_triggers,
-        &flag_descriptors,
-    );
-    sim.0.objectives.flag_models = objective_flags;
-    sim.0.objectives.attackers = objective_attackers;
-    let defenders = sim.0.objectives.defenders();
-    for site in &mut sim.0.objectives.bombs {
-        site.view.owner = defenders;
-    }
-    for (source, intact, destroyed) in objective_visuals {
-        if let Some(site) = sim
-            .0
-            .objectives
-            .bombs
-            .iter_mut()
-            .find(|b| b.view.model_source == source)
-        {
-            site.intact_sources = intact;
-            site.destroyed_sources = destroyed;
-        }
-    }
-    commands.insert_resource(bots::BotClassPool {
-        ready: true,
-        ids: bot_class_ids,
-    });
-
-    load_hold.0 = sim.0.clip_brush_count() > 0;
-    if let Some(glass) = scene.fx_glass.as_ref() {
-        let panes = (0..glass.piece_places.len())
-            .filter_map(|i| {
-                let (origin, axis_s, axis_t) = glass.pane_basis(i)?;
-                Some((
-                    i as u32,
-                    sim::GlassPaneBasis {
-                        origin,
-                        axis_s,
-                        axis_t,
-                    },
-                ))
-            })
-            .collect();
-        sim.0.world_objects_mut().install_glass_panes(panes);
-    }
-    sim.0.start_script_model_play_anims(animated.rows);
-    spawn_script_model_movers(&mut sim.0, &model_spawns);
-    if let Some(doors) = map_doors {
-        crate::map_doors::install(&mut sim.0, doors).expect("Radiation switch clip bounds");
-    }
-    stamp_script_mover_numbers(&mut scene, &sim.0);
-    if animated.started > 0 || animated.missing_table > 0 {
-        diag::info!(
-            World,
-            "animated_model ScriptModelPlayAnim: {} looping leaves, {} without anim_prop_models row",
-            animated.started,
-            animated.missing_table
-        );
-    }
-    if animated.toy_started > 0 || animated.toy_missing > 0 {
-        diag::info!(
-            World,
-            "toy_fan ScriptModelPlayAnim: {} looping leaves (state-0 mpAnim), {} without idle clip",
-            animated.toy_started,
-            animated.toy_missing
-        );
-    }
-    if !model_spawns.is_empty() {
-        diag::info!(
-            World,
-            "script_model G_Spawn: {} ET_SCRIPTMOVER from {}",
-            sim.0.script_mover_count(),
-            sim::gentity_spawn_base()
-        );
-    }
-    probe.sim_gap = sim_gap;
-    *class_handoff = ClassSelectHandoff {
-        pending: !scene.batches.is_empty(),
-        primary,
-        secondary,
-        lethal,
-        tactical,
-        excluded,
-        lock_reasons,
     };
-
-    let manifest = SessionContentManifest::build(
-        &prepared_map,
-        &weapon_reg,
-        &combat,
-        &equipment,
-        sim.0.content_digest(),
-    )
-    .expect("installed weapon registry must have unique durable source keys");
-
-    let components = sim.0.content_components();
-    diag::info!(
-        Sim,
-        "session manifest: ruleset=iw4 map={:?} weapons={} digest={:016x} \
-         gameplay={:016x} c_map={:016x} c_models={:016x} c_weapons={:016x} c_classes={:016x}",
-        manifest.map,
-        manifest.weapons.len(),
-        manifest.digest,
-        sim.0.content_digest(),
-        components.map,
-        components.models,
-        components.weapons,
-        components.classes
-    );
-    match manifest.match_descriptor(components) {
-        Some(descriptor) => {
-            diag::info!(
-                Sim,
-                "match descriptor: map={:016x} weapons={:016x} classes={:016x}",
-                descriptor.map,
-                descriptor.weapons,
-                descriptor.classes
-            );
-            commands.insert_resource(descriptor);
-        }
-        None => {
-            diag::error!(
-                Sim,
-                "session install has no match descriptor (map unverified); remote join will not arm"
-            );
-        }
-    }
-    commands.insert_resource(manifest);
-
-    diag::info!(
-        World,
-        "match install: {:.1}ms on the main thread (scene handoff, sim boot, catalogs)",
-        install_started.elapsed().as_secs_f32() * 1000.0
-    );
-    let drawable = !scene.batches.is_empty();
-    perf::match_installed(&zone, i64::from(drawable));
-    installed.write(MatchInstalled {
-        request_id,
-        load_key,
-        zone,
-        spawn_count,
-        drawable,
-    });
-    commands.insert_resource(crate::LiveWorldIdentity { load_key });
-
-    *has_world = HasWorld(drawable);
-    *world_generation = WorldGeneration::from_install(request_id);
-
-    if drawable {
-        sim_cam.freeze_fly = true;
-        diag::info!(
-            Sim,
-            "match: {} ({}) — world installed ({} dm spawn points); class select waits for admission",
-            kind.display_name(),
-            kind.token(),
-            spawn_count
-        );
-    } else {
+    if scene.batches.is_empty() {
         diag::error!(
             World,
             "map load failed: no drawable world; see world report in the game log"
         );
-        if let Some(loading) = loading.as_deref_mut() {
-            loading.fail("No drawable world. See world report in the game log.");
-        }
+        return Err(InstallRefusal::new(
+            "No drawable world. See world report in the game log.",
+        ));
     }
-
-    console.release_startup();
+    Ok(MatchInstallPlan {
+        kind,
+        scene,
+        weapons,
+        fpv_meshes,
+        bodies,
+        world_weapons,
+        projectile_meshes,
+        xmodel_walk,
+        xanims,
+        death,
+        player_anim_sources,
+        prepared_map,
+        strings,
+        clip: prepared.clip,
+        pen_table: prepared.pen_table,
+        pen_table_loaded: prepared.pen_table_loaded,
+        tracers,
+        fx_catalog,
+        type10,
+        fx_models,
+        impact_fx,
+        authority_models,
+        animated,
+        model_spawns,
+        map_doors,
+        map_use_triggers,
+        flag_descriptors,
+        objective_visuals,
+        objective_flags,
+        objective_attackers,
+    })
 }
 
 pub fn install_script_model_id(content: assets::ScriptModelId) -> sim::ScriptModelId {
@@ -1305,12 +1506,20 @@ fn authority_entity_model_install(world: &assets::PreparedWorld) -> AuthorityEnt
     }
 }
 
+/// What the two runtime owners of the map collision are given: one immutable
+/// backing they share, and the static models only the sim traces against.
+struct InstalledClip {
+    shared: Arc<ClipCollision>,
+    static_models: Vec<assets::ClipPlacedStaticModel>,
+}
+
 fn install_clip_and_player(
     sim: &mut sim::SimWorld,
-    clip: Option<ClipCollision>,
+    mut content: sim::SimContentBuilder,
+    clip: Option<InstalledClip>,
     authority_models: AuthorityEntityModelInstall,
     intermission_view: Option<sim::AuthoredSpawnPoint>,
-    spawns_in: &[PreparedSpawn],
+    spawns_in: &[SpawnPoint],
     weapons: &WeaponRegistry,
     combat: &[sim::WeaponCombatFacts],
     equipment: &[sim::EquipmentRuntimeFacts],
@@ -1320,7 +1529,80 @@ fn install_clip_and_player(
     kind: gamemode_iw4::GameModeKind,
     map_use_triggers: &[assets::MapUseTrigger],
     flag_descriptors: &[assets::FlagDescriptor],
-) -> (&'static str, Vec<Option<String>>, Vec<sim::ClassId>) {
+) -> Result<(&'static str, Vec<Option<String>>, Vec<sim::ClassId>), InstallRefusal> {
+    let clip = clip.ok_or_else(|| InstallRefusal::new("Required collision geometry is missing"))?;
+    let InstalledClip {
+        shared: clip,
+        static_models,
+    } = clip;
+    let count = clip.brushes.len();
+    let node_count = clip.nodes.len();
+    let leaf_count = clip.leaves.len();
+    let vert_count = clip.mesh.verts.len();
+    let tri_count = clip.mesh.tri_count();
+    let smodel_count = static_models.len();
+    let brushes: Vec<sim::SimBrush> = clip
+        .brushes
+        .iter()
+        .map(|brush| sim::SimBrush {
+            planes: brush.planes.clone(),
+            contents: brush.contents,
+            plane_surface_flags: brush.plane_surface_flags.clone(),
+            glass_encoded: brush.glass_encoded,
+        })
+        .collect();
+    if count == 0 && tri_count == 0 {
+        return Err(InstallRefusal::new("Required collision geometry is empty"));
+    }
+    let bsp = sim::SimClipBsp {
+        nodes: clip
+            .nodes
+            .iter()
+            .map(|n| sim::ClipNode {
+                plane: n.plane,
+                children: n.children,
+            })
+            .collect(),
+        leaves: clip
+            .leaves
+            .iter()
+            .map(|l| sim::ClipLeaf {
+                first_brush: l.first_brush,
+                num_brushes: l.num_brushes,
+                first_coll_aabb_index: l.first_coll_aabb_index,
+                coll_aabb_count: l.coll_aabb_count,
+            })
+            .collect(),
+        leafbrushes: clip.leafbrushes.clone(),
+    };
+    let mesh = sim::SimClipMesh {
+        tables: Arc::clone(&clip.mesh),
+        static_models: static_models
+            .into_iter()
+            .map(|sm| sim::SimStaticModel {
+                index: sm.index,
+                name: sm.name,
+                model: sm.model,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let cmodel_count = clip.cmodels.len();
+    let cmodels = sim::SimClipCmodels {
+        models: clip
+            .cmodels
+            .iter()
+            .map(|c| sim::ClipCmodel {
+                mins: c.mins,
+                maxs: c.maxs,
+                radius: c.radius,
+                first_brush: c.first_brush,
+                num_brushes: c.num_brushes,
+            })
+            .collect(),
+    };
+    content.set_clip_map(brushes, bsp, mesh, cmodels);
+    sim.install_content(content.finish());
     sim.world_objects_mut()
         .install_vehicle_destructibles(authority_models.vehicles);
     sim.world_objects_mut()
@@ -1352,95 +1634,6 @@ fn install_clip_and_player(
         authority_models.standalone_brush_links,
     );
 
-    let Some(clip) = clip else {
-        diag::info!(
-            Sim,
-            "spawn: no clip brushes — leaving fly camera in control"
-        );
-        return (
-            "clipmap brushes not retained — fly camera only; sim::step not driving the eye",
-            Vec::new(),
-            Vec::new(),
-        );
-    };
-    let count = clip.brushes.len();
-    let node_count = clip.nodes.len();
-    let leaf_count = clip.leaves.len();
-    let vert_count = clip.verts.len();
-    let tri_count = clip.tri_indices.len() / 3;
-    let smodel_count = clip.static_models.len();
-    let mut brushes: Vec<sim::SimBrush> = clip
-        .brushes
-        .into_iter()
-        .map(|brush| sim::SimBrush {
-            planes: brush.planes,
-            contents: brush.contents,
-            plane_surface_flags: brush.plane_surface_flags,
-            glass_encoded: brush.glass_encoded,
-        })
-        .collect();
-    if let Some(floor) = synthetic_spawn_floor(spawns_in, tri_count, count) {
-        diag::info!(
-            Sim,
-            "spawn: synthetic floor under authored DM feet (no mesh tris / sparse brushes)"
-        );
-        brushes.push(floor);
-    }
-    let bsp = sim::SimClipBsp {
-        nodes: clip
-            .nodes
-            .into_iter()
-            .map(|n| sim::ClipNode {
-                plane: n.plane,
-                children: n.children,
-            })
-            .collect(),
-        leaves: clip
-            .leaves
-            .into_iter()
-            .map(|l| sim::ClipLeaf {
-                first_brush: l.first_brush,
-                num_brushes: l.num_brushes,
-                first_coll_aabb_index: l.first_coll_aabb_index,
-                coll_aabb_count: l.coll_aabb_count,
-            })
-            .collect(),
-        leafbrushes: clip.leafbrushes,
-    };
-    let mesh = sim::SimClipMesh {
-        verts: clip.verts,
-        tri_indices: clip.tri_indices,
-        tri_surface_flags: clip.tri_surface_flags,
-        tri_content_flags: clip.tri_content_flags,
-        aabb_trees: clip.aabb_trees,
-        partitions: clip.partitions,
-        aabb_roots: clip.aabb_roots,
-        static_models: clip
-            .static_models
-            .into_iter()
-            .map(|sm| sim::SimStaticModel {
-                index: sm.index,
-                name: sm.name,
-                model: sm.model,
-            })
-            .collect(),
-        ..Default::default()
-    };
-    let cmodel_count = clip.cmodels.len();
-    let cmodels = sim::SimClipCmodels {
-        models: clip
-            .cmodels
-            .into_iter()
-            .map(|c| sim::ClipCmodel {
-                mins: c.mins,
-                maxs: c.maxs,
-                radius: c.radius,
-                first_brush: c.first_brush,
-                num_brushes: c.num_brushes,
-            })
-            .collect(),
-    };
-    sim.set_clip_map(brushes, bsp, mesh, cmodels);
     diag::info!(
         Sim,
         "spawn: {} clip brushes, {} BSP nodes / {} leaves, {} verts / {} tris, {} cmodels, {} smodels",
@@ -1533,11 +1726,9 @@ fn install_clip_and_player(
         ..Default::default()
     }) {
         diag::info!(Sim, "bootstrap: {err}");
-        return (
-            "MatchBootstrap refused — class/spawn path unavailable",
-            lock_reasons,
-            Vec::new(),
-        );
+        return Err(InstallRefusal::new(format!(
+            "MatchBootstrap refused: {err}"
+        )));
     }
 
     if kind == gamemode_iw4::GameModeKind::Domination {
@@ -1548,17 +1739,16 @@ fn install_clip_and_player(
             }
             Err(err) => {
                 diag::info!(Sim, "dom flags refused: {err:?}");
-                return (
-                    "dom.gsc onStartGameType flag bootstrap refused",
-                    lock_reasons,
-                    bot_class_ids,
-                );
+                return Err(InstallRefusal::new(format!(
+                    "DOM flag bootstrap refused: {err:?}"
+                )));
             }
         }
     }
 
-    crate::objectives::install(sim, weapons, map_use_triggers, kind)
-        .expect("authored objective bindings");
+    crate::objectives::install(sim, weapons, map_use_triggers, kind).map_err(|error| {
+        InstallRefusal::new(format!("Objective installation refused: {error:?}"))
+    })?;
 
     sim_cam.enabled = false;
     input_gate.cmds_enabled = false;
@@ -1576,57 +1766,7 @@ fn install_clip_and_player(
     } else {
         "player awaits SelectClass; Equip ack enables sim camera (no authored intermission)"
     };
-    (gap, lock_reasons, bot_class_ids)
-}
-
-fn synthetic_spawn_floor(
-    spawns: &[PreparedSpawn],
-    mesh_tri_count: usize,
-    brush_count: usize,
-) -> Option<sim::SimBrush> {
-    if spawns.is_empty() {
-        return None;
-    }
-    if std::env::var_os("IW4L_NO_SYNTH_FLOOR").is_some_and(|v| v != "0") {
-        diag::info!(
-            Sim,
-            "spawn: IW4L_NO_SYNTH_FLOOR set — no synthetic slab (author geometry only)"
-        );
-        return None;
-    }
-    if mesh_tri_count > 0 || brush_count >= 8 {
-        diag::info!(
-            Sim,
-            "spawn: author clip present (mesh_tris={mesh_tri_count} brushes={brush_count}) — no synthetic slab"
-        );
-        return None;
-    }
-    let mut min = [f32::INFINITY; 3];
-    let mut max = [f32::NEG_INFINITY; 3];
-    for s in spawns {
-        for i in 0..3 {
-            min[i] = min[i].min(s.origin[i]);
-            max[i] = max[i].max(s.origin[i]);
-        }
-    }
-    let pad = 2048.0_f32;
-    let top = min[2] - 1.0;
-    let bottom = top - 16.0;
-    let mins = [min[0] - pad, min[1] - pad, bottom];
-    let maxs = [max[0] + pad, max[1] + pad, top];
-    Some(sim::SimBrush {
-        planes: vec![
-            [1.0, 0.0, 0.0, maxs[0]],
-            [-1.0, 0.0, 0.0, -mins[0]],
-            [0.0, 1.0, 0.0, maxs[1]],
-            [0.0, -1.0, 0.0, -mins[1]],
-            [0.0, 0.0, 1.0, maxs[2]],
-            [0.0, 0.0, -1.0, -mins[2]],
-        ],
-        contents: sim::CONTENTS_SOLID,
-        plane_surface_flags: vec![0; 6],
-        glass_encoded: 0,
-    })
+    Ok((gap, lock_reasons, bot_class_ids))
 }
 
 pub(crate) fn bootstrap_class_rows(
@@ -1652,7 +1792,7 @@ pub(crate) fn bootstrap_class_rows(
 }
 
 fn install_team_voice_prefixes(
-    world: &mut sim::SimWorld,
+    world: &mut sim::SimContentBuilder,
     catalog: Option<&assets::MenuCatalog>,
     identity: Option<&LaunchIdentity>,
     zone: &str,
@@ -1719,4 +1859,10 @@ pub fn register_match_apply_systems(app: &mut App) {
                 .run_if(resource_exists::<PreparedMatchReady>)
                 .in_set(ClientSet::Load),
         );
+}
+
+fn stage_resource<T: Resource>(queue: &mut bevy::ecs::world::CommandQueue, resource: T) {
+    queue.push(move |world: &mut World| {
+        world.insert_resource(resource);
+    });
 }

@@ -133,7 +133,7 @@ fn play_pending_fx_sounds(
     catalog: Option<Res<PreparedFxCatalog>>,
     bank: Option<Res<audio::SoundBank>>,
     clock: Res<CgFrameClock>,
-    mut output: MessageWriter<audio::PlayAlias>,
+    mut output: MessageWriter<audio::AliasCommand>,
 ) {
     let Some(catalog) = catalog else {
         return;
@@ -172,13 +172,13 @@ fn play_pending_fx_sounds(
             });
             continue;
         };
-        output.write(audio::PlayAlias {
+        output.write(audio::AliasCommand::Play(audio::PlayAlias {
             namespace: bank.0.namespace_of_alias(index),
             alias: alias.to_owned(),
             fallback: None,
             origin_inches: Some(req.origin),
             snd_ent: Some(fx_iw4::FX_ENTITYNUM_WORLD),
-        });
+        }));
     }
 }
 

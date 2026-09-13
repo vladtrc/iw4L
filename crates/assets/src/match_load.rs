@@ -6,7 +6,7 @@ use frame::{ClientSet, LaunchIdentity, MapLoadApproved, MapLoadFailed};
 
 use crate::loading_screen::LoadingScreen;
 use crate::progress::LoadProgress;
-use crate::session_load::{PreparedMatch, load_prepared_match};
+use crate::session_load::{MatchLoadOutcome, PreparedMatch, load_prepared_match};
 
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MatchLoadBusy(pub bool);
@@ -27,7 +27,7 @@ pub struct MatchLoadRequest {
 
 #[derive(Resource)]
 struct MatchLoadTask {
-    task: Task<PreparedMatchReady>,
+    task: Task<Option<PreparedMatchReady>>,
     request_id: u64,
     progress: LoadProgress,
 }
@@ -35,6 +35,7 @@ struct MatchLoadTask {
 #[derive(Resource, Clone, Debug)]
 pub struct MatchLoadAccepted {
     pub request_id: u64,
+    pub load_key: frame::LocalLoadKey,
     pub zone: String,
 }
 
@@ -89,16 +90,20 @@ fn start_match_load(
 
     let task = crate::session_load::load_pool().spawn(async move {
         drop(kickoff);
-        PreparedMatchReady {
-            request_id,
-            load_key,
-            zone,
-            prepared: load_prepared_match(zone_ff, common_mp, progress).await,
+        match load_prepared_match(zone_ff, common_mp, progress).await {
+            MatchLoadOutcome::Ready(prepared) => Some(PreparedMatchReady {
+                request_id,
+                load_key,
+                zone,
+                prepared,
+            }),
+            MatchLoadOutcome::Canceled => None,
         }
     });
     inflight.0 = true;
     commands.insert_resource(MatchLoadAccepted {
         request_id,
+        load_key,
         zone: zone_accepted,
     });
     commands.insert_resource(MatchLoadTask {
@@ -192,12 +197,20 @@ fn poll_match_load(
             task.request_id
         );
     }
-    let Some(ready) = future::block_on(future::poll_once(&mut task.task)) else {
+    let Some(outcome) = future::block_on(future::poll_once(&mut task.task)) else {
         return;
     };
+    let request_id = task.request_id;
     inflight.0 = false;
     commands.remove_resource::<MatchLoadTask>();
     commands.remove_resource::<MatchLoadAccepted>();
+    let Some(ready) = outcome else {
+        diag::info!(
+            World,
+            "match load: walk request #{request_id} returned canceled — nothing prepared"
+        );
+        return;
+    };
     if abort.is_some_and(|abort| abort.0 == ready.request_id) {
         diag::info!(
             World,

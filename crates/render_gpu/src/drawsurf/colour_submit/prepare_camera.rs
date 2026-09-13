@@ -12,7 +12,9 @@ pub(super) fn prepare_camera_colour(
         ),
         With<Camera3d>,
     >,
-    extracted: Res<ExtractedExactColour>,
+    world: Res<InstalledRenderWorld>,
+    frame: Res<PublishedRenderFrame>,
+    installed: Res<InstalledColourPass>,
     geometry: Res<ExactColourGeometry>,
     pipeline: Res<ExactColourPipeline>,
     registry: Res<ExactPipelineRegistry>,
@@ -30,13 +32,8 @@ pub(super) fn prepare_camera_colour(
         mut floatz_pipelines,
         dof,
         mut resolved_scene,
-        mut shadowmap,
         mut scratch,
         mut texture_table,
-        mut shadow_table,
-        mut shadow_arena,
-        mut spot_arena,
-        mut static_draws,
         (mut cam, mut pretess),
     ): (
         ResMut<RuntimeUploadedImageRegistry>,
@@ -47,86 +44,26 @@ pub(super) fn prepare_camera_colour(
         ResMut<SpecializedRenderPipelines<ExactFloatZResolve>>,
         Res<super::super::postfx::ExtractedPostFx>,
         ResMut<super::super::resolved_scene::ResolvedScene>,
-        ResMut<ShadowmapSunGpu>,
         ResMut<ColourSubmitScratch>,
         ResMut<SceneTextureTables>,
-        ResMut<ShadowTextureTable>,
-        ResMut<ShadowmapSunArena>,
-        ResMut<ShadowmapSpotArena>,
-        ResMut<ResidentShadowStaticDraws>,
         (ResMut<CameraPrepareState>, ResMut<CameraWorldPretess>),
     ),
-    mut spotmap: ResMut<ShadowmapSpotGpu>,
 ) {
-    let products = &extracted.frame_products;
+    let extracted = ExtractedColourRefs::new(&world, &frame);
+    let products = &extracted.frame.frame_products;
     *cam = CameraPrepareState::default();
     let census_on = perf::enabled();
     if census_on {
         reset_exact_colour_census(&mut census);
     }
     census.submitted_keys.clear();
-
-    let Some(shared) = install_shared_colour_resources(SharedColourInstall {
-        products: &products,
-        extracted: &extracted,
-        pipeline: pipeline.as_ref(),
-        device: &device,
-        uploaded: &mut uploaded,
-        binding_cache: &mut binding_cache,
-        constant_arena: &mut constant_arena,
-        texture_table: &mut texture_table,
-        shadow_table: &mut shadow_table,
-        scratch: &mut scratch,
-        shadow_arena: &mut shadow_arena,
-        spot_arena: &mut spot_arena,
-        shadowmap: &mut shadowmap,
-        spotmap: &mut spotmap,
-    }) else {
+    if !installed.ready {
+        return;
+    }
+    let Some(sampler_table) = extracted.world.sampler_table.as_ref() else {
         return;
     };
-
-    let SharedColourResources {
-        sampler_table,
-        sun_shadow_view_ready,
-        spot_shadow_view_ready: _spot_shadow_view_ready,
-    } = shared;
-    let mut sun_exec = std::mem::take(&mut scratch.sun_exec);
-    let mut spot_exec = std::mem::take(&mut scratch.spot_exec);
-    scratch.sun_prepared = prepare_shadowmap_sun(
-        &products,
-        &extracted,
-        &geometry,
-        pipeline.as_ref(),
-        &registry,
-        &device,
-        &queue,
-        &mut uploaded,
-        &mut binding_cache,
-        &mut shadow_table,
-        &mut shadow_arena,
-        &mut shadowmap,
-        &mut static_draws,
-        sampler_table,
-        &mut sun_exec,
-    );
-    scratch.spot_prepared = prepare_shadowmap_spot(
-        &products,
-        &extracted,
-        &geometry,
-        pipeline.as_ref(),
-        &registry,
-        &device,
-        &queue,
-        &uploaded,
-        &mut binding_cache,
-        &mut shadow_table,
-        &mut spot_arena,
-        &mut spotmap,
-        sampler_table,
-        &mut spot_exec,
-    );
-    scratch.sun_exec = sun_exec;
-    scratch.spot_exec = spot_exec;
+    let sun_shadow_view_ready = installed.sun_shadow_view_ready;
     let colour = products.0.product(FrameProductKind::Colour);
     let light = products.0.product(FrameProductKind::Light);
     let emissive = products.0.product(FrameProductKind::Emissive);
@@ -155,10 +92,9 @@ pub(super) fn prepare_camera_colour(
     let mut pipeline_not_ready = 0u32;
     let mut last_refusal: Option<GpuSubmitRefusal> = None;
 
-    let mut submit_refusals = BTreeMap::<(&'static str, &'static str), u32>::new();
+    let mut submit_refusals = DrawRefusalCensus::new(census_on);
 
     let mut exec_refused = 0u32;
-    let mut exec_refusals = BTreeMap::<(&'static str, &'static str), u32>::new();
     let mut unsupported_state = UnsupportedStateCensus::default();
     let mut bsp_submit_refused_surfaces = [0u32; 4];
     let mut pnr_smodel_mats = BTreeMap::<String, u32>::new();
@@ -219,19 +155,18 @@ pub(super) fn prepare_camera_colour(
             depth.view(),
             samples,
             floatz::znear_from_clip_from_view(extracted_view.clip_from_view).unwrap_or(0.0),
-            extracted.exec_frame.viewmodel_near,
+            extracted.frame.exec_frame.viewmodel_near,
         );
     } else {
         floatz::forget_blit(&mut floatz);
     }
 
-    open_colour_table_epoch(
+    open_scene_table_epoch(
         &mut binding_cache,
         &mut texture_table,
-        None,
         &mut scratch,
         &uploaded,
-        extracted.generation,
+        extracted.world.generation,
     );
 
     scratch.clear();
@@ -375,11 +310,11 @@ pub(super) fn prepare_camera_colour(
     let mut executor = std::mem::take(&mut scratch.executor);
     let mut world_exec_ready_keys = std::mem::take(&mut scratch.world_exec_ready_keys);
     executor.begin_list();
-    let exec_frame = &extracted.exec_frame;
-    let exec_view = exec_tables(&extracted)
+    let exec_frame = &extracted.frame.exec_frame;
+    let exec_view = exec_tables(extracted)
         .map(|(catalog, prepared)| MaterialExecView::camera(catalog, prepared, exec_frame));
     let mut exact_prepare = ExactPrepare {
-        extracted: &extracted,
+        extracted,
         geometry: &geometry,
         pretess: Some(&pretess),
         pipeline_res: pipeline.as_ref(),
@@ -452,7 +387,7 @@ pub(super) fn prepare_camera_colour(
         let executed = exec_view.map_or(
             Err(MaterialRefusal::StaleMaterialGeneration {
                 retained: colour.generation_id,
-                current: extracted.generation,
+                current: extracted.world.generation,
             }),
             |view| {
                 let vertex_type = MaterialRunExecutor::vertex_type(view, item, tech);
@@ -465,15 +400,13 @@ pub(super) fn prepare_camera_colour(
             Ok(()) => executor.execution(),
             Err(ref cause) => {
                 exec_refused = exec_refused.saturating_add(1);
-                if let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
+                if census_on && let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
                     let lane = bsp_kind_index(kind);
                     bsp_submit_refused_surfaces[lane] =
                         bsp_submit_refused_surfaces[lane].saturating_add(1);
                 }
-                *exec_refusals
-                    .entry(exec_refusal_row(&item.kind, item.key, cause))
-                    .or_default() += 1;
-                if let MaterialRefusal::UnsupportedState { fields, .. } = cause {
+                submit_refusals.note_exec(&item.kind, item.key, cause);
+                if census_on && let MaterialRefusal::UnsupportedState { fields, .. } = cause {
                     unsupported_state.note(super::super::state::UnsupportedStateFields {
                         unknown_blend_factor: fields.unknown_blend_factor,
                         unknown_blend_operation: fields.unknown_blend_operation,
@@ -521,17 +454,12 @@ pub(super) fn prepare_camera_colour(
                 product: FrameProductKind::SunShadow,
             };
             refused_draws = refused_draws.saturating_add(1);
-            if let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
+            if census_on && let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
                 let lane = bsp_kind_index(kind);
                 bsp_submit_refused_surfaces[lane] =
                     bsp_submit_refused_surfaces[lane].saturating_add(1);
             }
-            *submit_refusals
-                .entry((
-                    submit_refusal_family(&item.kind, viewmodel),
-                    submit_refusal_class(&cause),
-                ))
-                .or_default() += 1;
+            submit_refusals.note_submit(&item.kind, viewmodel, &cause);
             last_refusal = Some(cause);
             continue;
         }
@@ -540,17 +468,12 @@ pub(super) fn prepare_camera_colour(
                 product: FrameProductKind::SpotShadow,
             };
             refused_draws = refused_draws.saturating_add(1);
-            if let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
+            if census_on && let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
                 let lane = bsp_kind_index(kind);
                 bsp_submit_refused_surfaces[lane] =
                     bsp_submit_refused_surfaces[lane].saturating_add(1);
             }
-            *submit_refusals
-                .entry((
-                    submit_refusal_family(&item.kind, viewmodel),
-                    submit_refusal_class(&cause),
-                ))
-                .or_default() += 1;
+            submit_refusals.note_submit(&item.kind, viewmodel, &cause);
             last_refusal = Some(cause);
             continue;
         }
@@ -620,15 +543,14 @@ pub(super) fn prepare_camera_colour(
                         dest.truncate(dest_start);
                         prepared_hits = prepared_hits.saturating_sub(1);
                         refused_draws = refused_draws.saturating_add(1);
-                        *submit_refusals
-                            .entry((
-                                submit_refusal_family(&item.kind, viewmodel),
-                                last_refusal
-                                    .as_ref()
-                                    .map(submit_refusal_class)
-                                    .unwrap_or("WorldPretessSpanBeyondLimit"),
-                            ))
-                            .or_default() += 1;
+                        submit_refusals.note_submit_class(
+                            submit_refusal_family(&item.kind, viewmodel),
+                            last_refusal
+                                .as_ref()
+                                .map(submit_refusal_class)
+                                .unwrap_or("WorldPretessSpanBeyondLimit"),
+                            1,
+                        );
                         continue;
                     }
                 }
@@ -641,17 +563,12 @@ pub(super) fn prepare_camera_colour(
             }
             Err(cause) => {
                 refused_draws = refused_draws.saturating_add(1);
-                if let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
+                if census_on && let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
                     let lane = bsp_kind_index(kind);
                     bsp_submit_refused_surfaces[lane] =
                         bsp_submit_refused_surfaces[lane].saturating_add(1);
                 }
-                *submit_refusals
-                    .entry((
-                        submit_refusal_family(&item.kind, viewmodel),
-                        submit_refusal_class(&cause),
-                    ))
-                    .or_default() += 1;
+                submit_refusals.note_submit(&item.kind, viewmodel, &cause);
                 if matches!(cause, GpuSubmitRefusal::PipelineNotReady) {
                     pipeline_not_ready = pipeline_not_ready.saturating_add(1);
                 }
@@ -661,7 +578,7 @@ pub(super) fn prepare_camera_colour(
                         viewmodel,
                         item.key,
                         execution,
-                        &extracted,
+                        extracted,
                         &mut pnr_smodel_mats,
                         &mut pnr_world_mats,
                         &mut pnr_smodel_ps,
@@ -677,6 +594,7 @@ pub(super) fn prepare_camera_colour(
                 {
                     let ordinal = world_material_sorted(item.key);
                     let name = extracted
+                        .world
                         .sorted_material_names
                         .get(usize::from(ordinal))
                         .cloned()
@@ -715,9 +633,11 @@ pub(super) fn prepare_camera_colour(
         refused_draws = refused_draws.saturating_add(u32::try_from(viewmodel_held).unwrap_or(0));
         pipeline_not_ready =
             pipeline_not_ready.saturating_add(u32::try_from(viewmodel_held).unwrap_or(0));
-        *submit_refusals
-            .entry(("xmodel/fpv", "PipelineNotReady"))
-            .or_default() += u32::try_from(viewmodel_held).unwrap_or(0);
+        submit_refusals.note_submit_class(
+            "xmodel/fpv",
+            "PipelineNotReady",
+            u32::try_from(viewmodel_held).unwrap_or(0),
+        );
         last_refusal = Some(GpuSubmitRefusal::PipelineNotReady);
     }
     if census_on {
@@ -744,8 +664,8 @@ pub(super) fn prepare_camera_colour(
         }
         let smodel_ib_skip = smodel_cache_gpu.write_dynamic_indices(
             &queue,
-            extracted.smodel_pretess_indices.as_slice(),
-            extracted.smodel_index_layout_revision,
+            extracted.world.smodel_pretess_indices.as_slice(),
+            extracted.world.smodel_index_layout_revision,
         );
         perf::Counter::SmodelIbSkip.emit(f64::from(u8::from(smodel_ib_skip)));
     }
@@ -760,9 +680,9 @@ pub(super) fn prepare_camera_colour(
     cam.refused_draws = refused_draws;
     cam.pipeline_not_ready = pipeline_not_ready;
     cam.last_refusal = last_refusal;
-    cam.submit_refusals = submit_refusals;
+    cam.submit_refusals = submit_refusals.submit;
     cam.exec_refused = exec_refused;
-    cam.exec_refusals = exec_refusals;
+    cam.exec_refusals = submit_refusals.exec;
     cam.unsupported_state = unsupported_state;
     cam.bsp_submit_refused_surfaces = bsp_submit_refused_surfaces;
     cam.pnr_smodel_mats = pnr_smodel_mats;
@@ -800,13 +720,144 @@ pub(super) fn prepare_camera_colour(
     scratch.pack_plan = Some(pack_plan);
 }
 
+#[derive(Resource, Default)]
+pub(super) struct InstalledColourPass {
+    ready: bool,
+    sun_shadow_view_ready: bool,
+}
+
+pub(super) fn prepare_shadow_passes(
+    world: Res<InstalledRenderWorld>,
+    frame: Res<PublishedRenderFrame>,
+    installed: Res<InstalledColourPass>,
+    geometry: Res<ExactColourGeometry>,
+    pipeline: Res<ExactColourPipeline>,
+    registry: Res<ExactPipelineRegistry>,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+    (
+        uploaded,
+        mut binding_cache,
+        mut shadow_table,
+        mut shadow_arena,
+        mut spot_arena,
+        mut static_draws,
+        mut shadowmap,
+        mut spotmap,
+        mut scratch,
+    ): (
+        Res<RuntimeUploadedImageRegistry>,
+        ResMut<ExactShadowBindingCache>,
+        ResMut<ShadowTextureTable>,
+        ResMut<ShadowmapSunArena>,
+        ResMut<ShadowmapSpotArena>,
+        ResMut<ResidentShadowStaticDraws>,
+        ResMut<ShadowmapSunGpu>,
+        ResMut<ShadowmapSpotGpu>,
+        ResMut<ColourSubmitScratch>,
+    ),
+) {
+    if !installed.ready {
+        return;
+    }
+    let Some(sampler_table) = world.sampler_table.as_ref() else {
+        return;
+    };
+    let extracted = ExtractedColourRefs::new(&world, &frame);
+    let products = &extracted.frame.frame_products;
+    let mut sun_exec = std::mem::take(&mut scratch.sun_exec);
+    let mut spot_exec = std::mem::take(&mut scratch.spot_exec);
+    scratch.sun_prepared = prepare_shadowmap_sun(
+        products,
+        extracted,
+        &geometry,
+        pipeline.as_ref(),
+        &registry,
+        &device,
+        &queue,
+        &uploaded,
+        &mut binding_cache,
+        &mut shadow_table,
+        &mut shadow_arena,
+        &mut shadowmap,
+        &mut static_draws,
+        sampler_table,
+        &mut sun_exec,
+    );
+    scratch.spot_prepared = prepare_shadowmap_spot(
+        products,
+        extracted,
+        &geometry,
+        pipeline.as_ref(),
+        &registry,
+        &device,
+        &queue,
+        &uploaded,
+        &mut binding_cache,
+        &mut shadow_table,
+        &mut spot_arena,
+        &mut spotmap,
+        sampler_table,
+        &mut spot_exec,
+    );
+    scratch.sun_exec = sun_exec;
+    scratch.spot_exec = spot_exec;
+}
+
+pub(super) fn install_shared_colour_pass(
+    world: Res<InstalledRenderWorld>,
+    frame: Res<PublishedRenderFrame>,
+    pipeline: Res<ExactColourPipeline>,
+    device: Res<RenderDevice>,
+    mut uploaded: ResMut<RuntimeUploadedImageRegistry>,
+    mut binding_cache: ResMut<ExactColourBindingCache>,
+    mut shadow_binding: ResMut<ExactShadowBindingCache>,
+    mut constant_arena: ResMut<ExactConstantArena>,
+    mut texture_table: ResMut<SceneTextureTables>,
+    mut shadow_table: ResMut<ShadowTextureTable>,
+    mut scratch: ResMut<ColourSubmitScratch>,
+    mut shadow_arena: ResMut<ShadowmapSunArena>,
+    mut spot_arena: ResMut<ShadowmapSpotArena>,
+    mut shadowmap: ResMut<ShadowmapSunGpu>,
+    mut spotmap: ResMut<ShadowmapSpotGpu>,
+    mut installed: ResMut<InstalledColourPass>,
+) {
+    *installed = InstalledColourPass::default();
+    let extracted = ExtractedColourRefs::new(&world, &frame);
+    let products = &extracted.frame.frame_products;
+    let Some(shared) = install_shared_colour_resources(SharedColourInstall {
+        products,
+        extracted,
+        pipeline: pipeline.as_ref(),
+        device: &device,
+        uploaded: &mut uploaded,
+        binding_cache: &mut binding_cache,
+        shadow_binding: &mut shadow_binding,
+        constant_arena: &mut constant_arena,
+        texture_table: &mut texture_table,
+        shadow_table: &mut shadow_table,
+        scratch: &mut scratch,
+        shadow_arena: &mut shadow_arena,
+        spot_arena: &mut spot_arena,
+        shadowmap: &mut shadowmap,
+        spotmap: &mut spotmap,
+    }) else {
+        return;
+    };
+    *installed = InstalledColourPass {
+        ready: true,
+        sun_shadow_view_ready: shared.sun_shadow_view_ready,
+    };
+}
+
 struct SharedColourInstall<'a, 'r> {
     products: &'r ExtractedRenderFrameProducts,
-    extracted: &'r ExtractedExactColour,
+    extracted: ExtractedColourRefs<'r>,
     pipeline: &'r ExactColourPipeline,
     device: &'r RenderDevice,
     uploaded: &'a mut RuntimeUploadedImageRegistry,
     binding_cache: &'a mut ExactColourBindingCache,
+    shadow_binding: &'a mut ExactShadowBindingCache,
     constant_arena: &'a mut ExactConstantArena,
     texture_table: &'a mut SceneTextureTables,
     shadow_table: &'a mut ShadowTextureTable,
@@ -818,16 +869,14 @@ struct SharedColourInstall<'a, 'r> {
 }
 
 #[derive(Clone, Copy)]
-struct SharedColourResources<'a> {
-    sampler_table: &'a RetailSamplerTable,
+struct SharedColourResources {
     sun_shadow_view_ready: bool,
-    spot_shadow_view_ready: bool,
 }
 
-fn install_shared_colour_resources<'r>(
-    install: SharedColourInstall<'_, 'r>,
-) -> Option<SharedColourResources<'r>> {
-    let generation = install.extracted.generation;
+fn install_shared_colour_resources(
+    install: SharedColourInstall<'_, '_>,
+) -> Option<SharedColourResources> {
+    let generation = install.extracted.world.generation;
     if install.constant_arena.generation != generation {
         install.constant_arena.generation = generation;
         install.constant_arena.gpu.bind_group = None;
@@ -835,7 +884,7 @@ fn install_shared_colour_resources<'r>(
     if install.pipeline.ports.is_empty() {
         return None;
     }
-    let sampler_table = install.extracted.sampler_table.as_ref()?;
+    let _sampler_table = install.extracted.world.sampler_table.as_ref()?;
     if install.shadow_arena.generation != generation {
         install.shadow_arena.generation = generation;
         for gpu in &mut install.shadow_arena.gpu {
@@ -852,24 +901,28 @@ fn install_shared_colour_resources<'r>(
         install.shadowmap,
         install.device,
     );
-    let spot_shadow_view_ready = publish_this_frame_spot_shadow_views(
+    let _spot_shadow_view_ready = publish_this_frame_spot_shadow_views(
         install.products,
         install.uploaded,
         install.spotmap,
         install.device,
     );
 
-    open_colour_table_epoch(
+    open_scene_table_epoch(
         install.binding_cache,
         install.texture_table,
-        Some(install.shadow_table),
+        install.scratch,
+        install.uploaded,
+        generation,
+    );
+    open_shadow_table_epoch(
+        install.shadow_binding,
+        install.shadow_table,
         install.scratch,
         install.uploaded,
         generation,
     );
     Some(SharedColourResources {
-        sampler_table,
         sun_shadow_view_ready,
-        spot_shadow_view_ready,
     })
 }

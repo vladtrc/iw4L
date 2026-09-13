@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use assets::FxCatalog;
+use assets::FxDefinitions;
 use bevy::prelude::*;
 use fx::FxSystemHost;
 use fx_iw4::FxPostLight;
@@ -8,7 +8,7 @@ use fx_iw4::FxPostLight;
 use crate::present::FxElemInfoCache;
 
 #[derive(Resource, Default)]
-pub struct PreparedFxCatalog(pub FxCatalog);
+pub struct PreparedFxCatalog(pub FxDefinitions);
 
 #[derive(Resource, Default)]
 pub struct PreparedFxModels(pub assets::FxModelCatalog);

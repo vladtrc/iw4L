@@ -264,6 +264,7 @@ pub enum HostMatchEvent {
         now_ms: u64,
     },
     BootstrapPrepared {
+        match_key: MatchKey,
         member: MemberId,
         bootstrap_id: u32,
         connection_id: Option<u64>,
@@ -381,6 +382,7 @@ impl TransitionIds {
                 member,
                 bootstrap_id,
                 connection_id,
+                ..
             } => Self {
                 member: Some(*member),
                 bootstrap_id: Some(*bootstrap_id),
@@ -581,11 +583,20 @@ impl HostMatchCore {
             }
 
             HostMatchEvent::BootstrapPrepared {
+                match_key,
                 member,
                 bootstrap_id,
                 connection_id,
             } => {
-                let peer = self.peers.entry(member).or_default();
+                if match_key != self.match_key
+                    || match_key.is_none()
+                    || !matches!(self.phase, MatchPhase::Loading | MatchPhase::Running)
+                {
+                    return self.reject(&ids, before, "stale bootstrap completion");
+                }
+                let Some(peer) = self.peers.get_mut(&member) else {
+                    return self.reject(&ids, before, "bootstrap for unknown peer");
+                };
                 if matches!(
                     peer.phase,
                     PeerPhase::Admitted { .. } | PeerPhase::Failed | PeerPhase::Cancelled
@@ -603,42 +614,43 @@ impl HostMatchCore {
                 bootstrap_id,
                 connection_id,
             } => {
-                let Some(peer) = self.peers.get_mut(&member) else {
+                // The event carries no match key, so the peer's phase is the
+                // whole guard — which means nothing may be written before it
+                // has passed. A retired match's completion used to land its
+                // connection id on the live peer on its way to being refused.
+                let Some(phase) = self.peers.get(&member).map(|peer| peer.phase) else {
                     return self.reject(&ids, before, "applied unknown peer");
                 };
-                if connection_id.is_some() {
-                    peer.connection_id = connection_id;
-                }
-                match peer.phase {
+                let repeat = match phase {
                     PeerPhase::Syncing {
                         bootstrap_id: pending,
-                    } if pending == bootstrap_id => {
-                        peer.phase = PeerPhase::Admitted { bootstrap_id };
-                        self.finish(
-                            &ids,
-                            before,
-                            "enter committed",
-                            vec![HostMatchEffect::Enter {
-                                member,
-                                bootstrap_id,
-                                match_key: self.match_key,
-                            }],
-                        )
-                    }
+                    } if pending == bootstrap_id => false,
                     PeerPhase::Admitted {
                         bootstrap_id: pending,
-                    } if pending == bootstrap_id => self.finish(
-                        &ids,
-                        before,
-                        "duplicate applied repeats enter",
-                        vec![HostMatchEffect::Enter {
-                            member,
-                            bootstrap_id,
-                            match_key: self.match_key,
-                        }],
-                    ),
-                    _ => self.reject(&ids, before, "applied mismatch"),
+                    } if pending == bootstrap_id => true,
+                    _ => return self.reject(&ids, before, "applied mismatch"),
+                };
+                let match_key = self.match_key;
+                if let Some(peer) = self.peers.get_mut(&member) {
+                    if connection_id.is_some() {
+                        peer.connection_id = connection_id;
+                    }
+                    peer.phase = PeerPhase::Admitted { bootstrap_id };
                 }
+                self.finish(
+                    &ids,
+                    before,
+                    if repeat {
+                        "duplicate applied repeats enter"
+                    } else {
+                        "enter committed"
+                    },
+                    vec![HostMatchEffect::Enter {
+                        member,
+                        bootstrap_id,
+                        match_key,
+                    }],
+                )
             }
             HostMatchEvent::MatchEnded { match_key } => {
                 if !match_key_boundary_applies(match_key, self.match_key)
@@ -1009,7 +1021,9 @@ impl ClientMatchCore {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionEvent {
     AuthoritativeState {
-        revision: u32,
+        session_id: [u8; 16],
+        member: MemberId,
+        revision: u64,
         match_epoch: u32,
         in_match: bool,
         start_nonce: u32,
@@ -1051,7 +1065,7 @@ pub struct SessionApply {
 #[derive(Clone, Debug)]
 pub struct SessionCore {
     session_open: bool,
-    applied_state: Option<(u32, u32)>,
+    applied_state: Option<(u32, u64)>,
     view: SessionView,
     match_phase: MatchPhase,
     session_id: [u8; 16],
@@ -1082,10 +1096,12 @@ impl SessionCore {
         self.match_phase
     }
 
-    pub fn set_identity(&mut self, session_id: [u8; 16], incarnation: u64, member: MemberId) {
-        self.session_id = session_id;
-        self.incarnation = incarnation;
-        self.local_member = Some(member);
+    pub fn for_connection(session_id: [u8; 16], incarnation: u64) -> Self {
+        Self {
+            session_id,
+            incarnation,
+            ..Self::default()
+        }
     }
 
     pub fn apply(&mut self, event: SessionEvent) -> SessionApply {
@@ -1096,6 +1112,8 @@ impl SessionCore {
         }
         match event {
             SessionEvent::AuthoritativeState {
+                session_id,
+                member,
                 revision,
                 match_epoch,
                 in_match,
@@ -1105,9 +1123,27 @@ impl SessionCore {
                 members,
                 skip_votes,
             } => {
+                if session_id == [0; 16]
+                    || (self.session_id != [0; 16] && self.session_id != session_id)
+                    || member.0 == [0; 16]
+                    || self.local_member.is_some_and(|local| local != member)
+                    || start_nonce != match_epoch
+                    || (in_match && match_epoch == 0)
+                {
+                    return self.finish(
+                        before,
+                        event_label,
+                        false,
+                        None,
+                        "state identity mismatch",
+                    );
+                }
                 if !state_is_newer(self.applied_state, revision, match_epoch) {
                     return self.finish(before, event_label, false, None, "stale state");
                 }
+                let same_match = self.view.in_match && self.view.start_nonce == match_epoch;
+                self.session_id = session_id;
+                self.local_member = Some(member);
                 self.applied_state = Some((match_epoch, revision));
                 self.view = SessionView {
                     map,
@@ -1118,7 +1154,7 @@ impl SessionCore {
                     in_match,
                 };
                 self.match_phase = if in_match {
-                    if self.match_phase == MatchPhase::Running {
+                    if same_match && self.match_phase == MatchPhase::Running {
                         MatchPhase::Running
                     } else {
                         MatchPhase::Loading
@@ -1210,14 +1246,297 @@ fn event_label(event: &SessionEvent) -> &'static str {
     }
 }
 
-pub fn state_is_newer(applied: Option<(u32, u32)>, revision: u32, epoch: u32) -> bool {
+pub fn state_is_newer(applied: Option<(u32, u64)>, revision: u64, epoch: u32) -> bool {
     match applied {
         None => true,
         Some((prev_epoch, _)) if epoch != prev_epoch => {
             epoch.wrapping_sub(prev_epoch) < (1_u32 << 31)
         }
         Some((_, prev_rev)) => {
-            revision != prev_rev && revision.wrapping_sub(prev_rev) < (1_u32 << 31)
+            revision != prev_rev && revision.wrapping_sub(prev_rev) < (1_u64 << 63)
         }
+    }
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+
+    const SESSION: [u8; 16] = [1; 16];
+
+    fn member() -> MemberId {
+        MemberId([2; 16])
+    }
+
+    fn world(epoch: u32) -> HostWorldReady {
+        HostWorldReady {
+            epoch,
+            map: 0xa,
+            weapons: 0xb,
+            classes: 0xc,
+        }
+    }
+
+    fn state(epoch: u32, revision: u64) -> SessionEvent {
+        SessionEvent::AuthoritativeState {
+            session_id: SESSION,
+            member: member(),
+            revision,
+            match_epoch: epoch,
+            in_match: true,
+            start_nonce: epoch,
+            map: "mp_rust".into(),
+            mode: "dm".into(),
+            members: vec![member()],
+            skip_votes: 0,
+        }
+    }
+
+    fn admission(match_key: MatchKey) -> AdmissionKey {
+        AdmissionKey {
+            match_key,
+            member_id: member().0,
+            connection_id: 9,
+            bootstrap_id: 7,
+        }
+    }
+
+    /// Everything about the host's admission that a stale event could move.
+    fn host_snapshot(
+        host: &HostMatchCore,
+    ) -> (
+        MatchKey,
+        MatchPhase,
+        bool,
+        Option<HostWorldReady>,
+        Option<PeerAdmission>,
+    ) {
+        (
+            host.match_key(),
+            host.phase(),
+            host.authority_ready(),
+            host.host_world(),
+            host.peer(member()).cloned(),
+        )
+    }
+
+    /// Everything about the client's that one could.
+    fn client_snapshot(
+        session: &SessionCore,
+        client: &ClientMatchCore,
+    ) -> (
+        MatchPhase,
+        SessionView,
+        MatchKey,
+        Option<LocalLoadKey>,
+        bool,
+    ) {
+        (
+            session.match_phase(),
+            session.view().clone(),
+            client.match_key(),
+            client.installed(),
+            client.class_select_allowed(),
+        )
+    }
+
+    /// The three cores that decide, independently and from different messages,
+    /// whether a player is in a match: the host's admission, the client's view
+    /// of the session, and the client's own load. A replacement match has to
+    /// retire all three, and nothing the retired match says afterwards — a
+    /// bootstrap that completed late, a teardown, a load that finished — may
+    /// move any of them. Before the session identity travelled whole, a late
+    /// bootstrap could create a peer in the match that replaced it.
+    #[test]
+    fn a_replacement_match_retires_all_three_cores_and_the_old_one_can_no_longer_move_them() {
+        let first = MatchKey::new(SESSION, 4);
+        let second = MatchKey::new(SESSION, 5);
+
+        // --- the host admits the member into match 4, effect by effect.
+        let mut host = HostMatchCore::default();
+        assert!(
+            host.apply(HostMatchEvent::Start {
+                match_key: first,
+                now_ms: 0,
+            })
+            .accepted
+        );
+        assert_eq!(host.phase(), MatchPhase::Loading);
+
+        let ready = host.apply(HostMatchEvent::AuthorityReady {
+            ready: world(4),
+            now_ms: 1,
+        });
+        assert!(ready.accepted);
+        assert!(ready.effects.is_empty(), "no peer has loaded yet");
+        assert_eq!(host.phase(), MatchPhase::Running);
+
+        let loaded = host.apply(HostMatchEvent::MapLoaded {
+            member: member(),
+            loaded: world(4),
+            now_ms: 2,
+        });
+        assert_eq!(
+            loaded.effects,
+            vec![HostMatchEffect::FlushBootstraps { member: member() }]
+        );
+
+        assert!(
+            host.apply(HostMatchEvent::BootstrapPrepared {
+                match_key: first,
+                member: member(),
+                bootstrap_id: 7,
+                connection_id: Some(9),
+            })
+            .accepted
+        );
+        assert_eq!(
+            host.peer(member()).unwrap().phase,
+            PeerPhase::Syncing { bootstrap_id: 7 }
+        );
+
+        let entered = host.apply(HostMatchEvent::Applied {
+            member: member(),
+            bootstrap_id: 7,
+            connection_id: Some(9),
+        });
+        assert_eq!(
+            entered.effects,
+            vec![HostMatchEffect::Enter {
+                member: member(),
+                bootstrap_id: 7,
+                match_key: first,
+            }]
+        );
+        assert_eq!(
+            host.peer(member()).unwrap().phase,
+            PeerPhase::Admitted { bootstrap_id: 7 }
+        );
+
+        // --- the same match, as the client's two cores see it.
+        let mut session = SessionCore::for_connection(SESSION, 5);
+        assert!(session.apply(state(4, 1)).changed);
+        assert_eq!(session.match_phase(), MatchPhase::Loading);
+        assert_eq!(
+            session
+                .apply(SessionEvent::EnterMatch {
+                    epoch: 4,
+                    bootstrap_id: 7,
+                })
+                .enter_bootstrap,
+            Some(7)
+        );
+        assert_eq!(session.match_phase(), MatchPhase::Running);
+
+        let mut client = ClientMatchCore::default();
+        client.apply_start(first);
+        let load = LocalLoadKey::from_request(11, first, 5);
+        client.apply_install(load);
+        client.apply_presentation(load);
+        assert!(client.apply_adopted(admission(first)).is_some());
+        assert!(client.apply_enter(admission(first)).is_some());
+        assert!(client.class_select_allowed());
+
+        // --- match 5 replaces it everywhere.
+        assert!(
+            host.apply(HostMatchEvent::Start {
+                match_key: second,
+                now_ms: 10,
+            })
+            .accepted
+        );
+        assert!(session.apply(state(5, 2)).changed);
+        client.apply_start(second);
+
+        // The client is loading again, and holds nothing from match 4.
+        assert_eq!(session.match_phase(), MatchPhase::Loading);
+        assert_eq!(client.match_key(), second);
+        assert_eq!(client.installed(), None);
+        assert!(!client.class_select_allowed());
+        // The host kept no peer either: admission is per match.
+        assert_eq!(host.phase(), MatchPhase::Loading);
+        assert!(host.peer(member()).is_none());
+        assert!(!host.authority_ready());
+
+        // The member loads match 5 as well, so the host has a live peer again.
+        // That is the only state in which the stale events below are dangerous:
+        // with no peer they are refused for want of one, and the checks that
+        // matter never run.
+        assert!(
+            host.apply(HostMatchEvent::AuthorityReady {
+                ready: world(5),
+                now_ms: 11,
+            })
+            .accepted
+        );
+        assert_eq!(
+            host.apply(HostMatchEvent::MapLoaded {
+                member: member(),
+                loaded: world(5),
+                now_ms: 12,
+            })
+            .effects,
+            vec![HostMatchEffect::FlushBootstraps { member: member() }]
+        );
+        assert_eq!(host.peer(member()).unwrap().phase, PeerPhase::Waiting);
+
+        // --- everything match 4 still has in flight, replayed. Not one of it
+        // is allowed to touch a core, and the rejections say so out loud.
+        let host_before = host_snapshot(&host);
+        let client_before = client_snapshot(&session, &client);
+
+        for stale in [
+            HostMatchEvent::BootstrapPrepared {
+                match_key: first,
+                member: member(),
+                bootstrap_id: 7,
+                connection_id: Some(9),
+            },
+            HostMatchEvent::Applied {
+                member: member(),
+                bootstrap_id: 7,
+                connection_id: Some(9),
+            },
+            HostMatchEvent::MapLoaded {
+                member: member(),
+                loaded: world(4),
+                now_ms: 11,
+            },
+            HostMatchEvent::AuthorityReady {
+                ready: world(4),
+                now_ms: 11,
+            },
+            HostMatchEvent::MatchEnded { match_key: first },
+        ] {
+            let apply = host.apply(stale);
+            assert!(!apply.accepted, "match 4 moved the host: {apply:?}");
+            assert!(
+                apply.effects.is_empty(),
+                "match 4 produced {:?}",
+                apply.effects
+            );
+            assert_eq!(host_snapshot(&host), host_before);
+        }
+
+        // The client's side of the same: a load that finished for match 4, the
+        // admission it was granted there, and the state message that carried it.
+        client.apply_install(load);
+        client.apply_presentation(load);
+        assert_eq!(client.apply_adopted(admission(first)), None);
+        assert_eq!(client.apply_enter(admission(first)), None);
+        assert!(!session.apply(state(4, 3)).changed);
+        assert!(
+            !session
+                .apply(SessionEvent::EnterMatch {
+                    epoch: 4,
+                    bootstrap_id: 7
+                })
+                .changed
+        );
+        assert_eq!(client_snapshot(&session, &client), client_before);
+
+        // And the boundary helper the three of them share agrees.
+        assert!(!match_key_boundary_applies(first, second));
+        assert!(match_key_boundary_applies(second, second));
     }
 }

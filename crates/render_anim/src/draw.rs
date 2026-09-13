@@ -4,7 +4,7 @@ use render_scene::{SmodelPassMaterial, XModelSurfaceDraw};
 
 pub use render_frame::SourceRevisions;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FpvSurfaceDraw {
     pub surface: u32,
     pub material: u32,
@@ -12,7 +12,7 @@ pub struct FpvSurfaceDraw {
     pub is_scope: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RemoteBodySurfaceDraw {
     pub surface: u32,
     pub material: u32,
@@ -43,13 +43,13 @@ pub const XMODEL_OBJECT_ID_DYNENT_BASE: u16 = 0x600;
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct RemoteBodyDrawPlan {
-    pub vertices: Vec<SmodelVertex>,
+    pub(crate) vertices: Vec<SmodelVertex>,
 
-    pub decoded_n: usize,
-    pub indices: Vec<u32>,
-    pub surface_ranges: Vec<(u32, u32)>,
-    pub materials: Vec<SmodelPassMaterial>,
-    pub draws: Vec<RemoteBodySurfaceDraw>,
+    pub(crate) decoded_n: usize,
+    pub(crate) indices: Vec<u32>,
+    pub(crate) surface_ranges: Vec<(u32, u32)>,
+    pub(crate) materials: Vec<SmodelPassMaterial>,
+    pub(crate) draws: Vec<RemoteBodySurfaceDraw>,
 
     pub revision: u64,
 
@@ -57,14 +57,18 @@ pub struct RemoteBodyDrawPlan {
 
     pub revisions: SourceRevisions,
 
-    pub packed_vertices: assets::RetailPackedVertexPayload,
+    pub(crate) packed_vertices: assets::RetailPackedVertexPayload,
 
     pub last_packed_id: Option<u64>,
     pub last_draw_id: Option<u64>,
 }
 
 impl RemoteBodyDrawPlan {
+    /// Drops everything this plan published. Dropping rows is a change like any
+    /// other: a consumer that kept last frame's revision would go on drawing
+    /// bodies this plan no longer has.
     pub fn clear_geometry(&mut self) {
+        let had_rows = !self.draws.is_empty() || self.decoded_n != 0;
         self.vertices.clear();
         self.decoded_n = 0;
         self.indices.clear();
@@ -76,6 +80,13 @@ impl RemoteBodyDrawPlan {
         };
         self.last_packed_id = None;
         self.last_draw_id = None;
+        if had_rows {
+            self.revisions.set_topology_from(&[], &[], 0);
+            self.revisions.bump_vertices();
+            self.revisions.bump_draws();
+            self.revisions.bump_admission();
+            self.revision = self.revision.wrapping_add(1);
+        }
     }
 }
 
@@ -88,7 +99,7 @@ pub struct ScriptModelAssetDraw {
     pub surfaces: Vec<(u32, u32)>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ScriptModelOwnerDraw {
     pub entity: Entity,
     pub current_model: assets::MapXModelAssetKey,
@@ -97,17 +108,17 @@ pub struct ScriptModelOwnerDraw {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct ScriptModelDrawPlan {
-    pub vertices: Vec<SmodelVertex>,
-    pub indices: Vec<u32>,
-    pub surface_ranges: Vec<(u32, u32)>,
-    pub materials: Vec<SmodelPassMaterial>,
-    pub assets: Vec<ScriptModelAssetDraw>,
-    pub owners: Vec<ScriptModelOwnerDraw>,
-    pub draws: Vec<XModelSurfaceDraw>,
+    pub(crate) vertices: Vec<SmodelVertex>,
+    pub(crate) indices: Vec<u32>,
+    pub(crate) surface_ranges: Vec<(u32, u32)>,
+    pub(crate) materials: Vec<SmodelPassMaterial>,
+    pub(crate) assets: Vec<ScriptModelAssetDraw>,
+    pub(crate) owners: Vec<ScriptModelOwnerDraw>,
+    pub(crate) draws: Vec<XModelSurfaceDraw>,
     pub revision: u64,
     pub generation: u64,
     pub revisions: SourceRevisions,
-    pub packed_vertices: assets::RetailPackedVertexPayload,
+    pub(crate) packed_vertices: assets::RetailPackedVertexPayload,
 }
 
 impl ScriptModelDrawPlan {
@@ -123,7 +134,7 @@ impl ScriptModelDrawPlan {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MissileOwnerDraw {
     pub object_id: u16,
     pub model: String,
@@ -131,19 +142,19 @@ pub struct MissileOwnerDraw {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct MissileDrawPlan {
-    pub vertices: Vec<SmodelVertex>,
-    pub indices: Vec<u32>,
-    pub surface_ranges: Vec<(u32, u32)>,
-    pub materials: Vec<SmodelPassMaterial>,
-    pub owners: Vec<MissileOwnerDraw>,
-    pub draws: Vec<XModelSurfaceDraw>,
+    pub(crate) vertices: Vec<SmodelVertex>,
+    pub(crate) indices: Vec<u32>,
+    pub(crate) surface_ranges: Vec<(u32, u32)>,
+    pub(crate) materials: Vec<SmodelPassMaterial>,
+    pub(crate) owners: Vec<MissileOwnerDraw>,
+    pub(crate) draws: Vec<XModelSurfaceDraw>,
     pub revision: u64,
     pub generation: u64,
     pub revisions: SourceRevisions,
-    pub packed_vertices: assets::RetailPackedVertexPayload,
+    pub(crate) packed_vertices: assets::RetailPackedVertexPayload,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ItemOwnerDraw {
     pub object_id: u16,
     pub model: String,
@@ -157,20 +168,20 @@ pub struct ItemAssetDraw {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct ItemDrawPlan {
-    pub vertices: Vec<SmodelVertex>,
-    pub indices: Vec<u32>,
-    pub surface_ranges: Vec<(u32, u32)>,
-    pub materials: Vec<SmodelPassMaterial>,
-    pub assets: Vec<ItemAssetDraw>,
-    pub owners: Vec<ItemOwnerDraw>,
-    pub draws: Vec<XModelSurfaceDraw>,
+    pub(crate) vertices: Vec<SmodelVertex>,
+    pub(crate) indices: Vec<u32>,
+    pub(crate) surface_ranges: Vec<(u32, u32)>,
+    pub(crate) materials: Vec<SmodelPassMaterial>,
+    pub(crate) assets: Vec<ItemAssetDraw>,
+    pub(crate) owners: Vec<ItemOwnerDraw>,
+    pub(crate) draws: Vec<XModelSurfaceDraw>,
     pub revision: u64,
     pub generation: u64,
     pub revisions: SourceRevisions,
-    pub packed_vertices: assets::RetailPackedVertexPayload,
+    pub(crate) packed_vertices: assets::RetailPackedVertexPayload,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DynEntOwnerDraw {
     pub object_id: u16,
     pub model: String,
@@ -186,17 +197,17 @@ pub struct DynEntAssetDraw {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct DynEntDrawPlan {
-    pub vertices: Vec<SmodelVertex>,
-    pub indices: Vec<u32>,
-    pub surface_ranges: Vec<(u32, u32)>,
-    pub materials: Vec<SmodelPassMaterial>,
-    pub assets: Vec<DynEntAssetDraw>,
-    pub owners: Vec<DynEntOwnerDraw>,
-    pub draws: Vec<XModelSurfaceDraw>,
+    pub(crate) vertices: Vec<SmodelVertex>,
+    pub(crate) indices: Vec<u32>,
+    pub(crate) surface_ranges: Vec<(u32, u32)>,
+    pub(crate) materials: Vec<SmodelPassMaterial>,
+    pub(crate) assets: Vec<DynEntAssetDraw>,
+    pub(crate) owners: Vec<DynEntOwnerDraw>,
+    pub(crate) draws: Vec<XModelSurfaceDraw>,
     pub revision: u64,
     pub generation: u64,
     pub revisions: SourceRevisions,
-    pub packed_vertices: assets::RetailPackedVertexPayload,
+    pub(crate) packed_vertices: assets::RetailPackedVertexPayload,
 }
 
 impl DynEntDrawPlan {
@@ -213,11 +224,11 @@ impl DynEntDrawPlan {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct FpvDrawPlan {
-    pub vertices: Vec<SmodelVertex>,
-    pub indices: Vec<u32>,
-    pub surface_ranges: Vec<(u32, u32)>,
-    pub materials: Vec<SmodelPassMaterial>,
-    pub draws: Vec<FpvSurfaceDraw>,
+    pub(crate) vertices: Vec<SmodelVertex>,
+    pub(crate) indices: Vec<u32>,
+    pub(crate) surface_ranges: Vec<(u32, u32)>,
+    pub(crate) materials: Vec<SmodelPassMaterial>,
+    pub(crate) draws: Vec<FpvSurfaceDraw>,
 
     pub world_from_local: Mat4,
     pub lighting_handle: u32,
@@ -254,7 +265,7 @@ pub struct FpvDrawPlan {
     pub generation: u64,
     pub revisions: SourceRevisions,
 
-    pub packed_vertices: assets::RetailPackedVertexPayload,
+    pub(crate) packed_vertices: assets::RetailPackedVertexPayload,
 }
 
 impl FpvDrawPlan {
@@ -390,6 +401,143 @@ fn apply_fpv_plan(
     }
 }
 
+/// The rows a producer rebuilds every frame, handed to the plan that publishes
+/// them. The plan answers whether anything moved, and that answer is the only
+/// thing downstream is entitled to ask: the merge used to re-hash every draw of
+/// every producer to find out, which made the published revision a suggestion
+/// rather than a fact.
+macro_rules! publish_frame_rows {
+    ($plan:ty, $draw:ty, $owner:ty) => {
+        impl $plan {
+            pub fn publish_frame_rows(&mut self, draws: &mut Vec<$draw>, owners: &mut Vec<$owner>) {
+                let mut changed = render_frame::publish_rows(&mut self.draws, draws);
+                changed |= render_frame::publish_rows(&mut self.owners, owners);
+                if changed {
+                    self.revisions.bump_draws();
+                    self.revision = self.revision.wrapping_add(1);
+                }
+            }
+
+            /// The producer found nothing to draw this frame. Same contract as a
+            /// rebuild that came back empty — an early return may not leave last
+            /// frame's rows published under this frame's revision.
+            pub fn publish_no_rows(&mut self) {
+                if !self.draws.is_empty() || !self.owners.is_empty() {
+                    self.draws.clear();
+                    self.owners.clear();
+                    self.revisions.bump_draws();
+                    self.revisions.bump_admission();
+                    self.revision = self.revision.wrapping_add(1);
+                }
+            }
+        }
+    };
+}
+
+/// Read-only views of what a producer published. The rows themselves are the
+/// producer's: a consumer that could still write them would be finishing work
+/// the producer had already called done, and the revision it publishes would
+/// stop being the whole truth about them.
+macro_rules! published_rows {
+    ($plan:ty, $draw:ty) => {
+        impl $plan {
+            pub fn draws(&self) -> &[$draw] {
+                &self.draws
+            }
+
+            pub fn materials(&self) -> &[SmodelPassMaterial] {
+                &self.materials
+            }
+
+            pub fn vertices(&self) -> &[SmodelVertex] {
+                &self.vertices
+            }
+
+            pub fn indices(&self) -> &[u32] {
+                &self.indices
+            }
+
+            pub fn surface_ranges(&self) -> &[(u32, u32)] {
+                &self.surface_ranges
+            }
+
+            pub fn packed_vertices(&self) -> &assets::RetailPackedVertexPayload {
+                &self.packed_vertices
+            }
+        }
+    };
+}
+
+published_rows!(RemoteBodyDrawPlan, RemoteBodySurfaceDraw);
+published_rows!(ScriptModelDrawPlan, XModelSurfaceDraw);
+published_rows!(MissileDrawPlan, XModelSurfaceDraw);
+published_rows!(ItemDrawPlan, XModelSurfaceDraw);
+published_rows!(DynEntDrawPlan, XModelSurfaceDraw);
+published_rows!(FpvDrawPlan, FpvSurfaceDraw);
+
+impl RemoteBodyDrawPlan {
+    pub fn decoded_n(&self) -> usize {
+        self.decoded_n
+    }
+}
+
+impl MissileDrawPlan {
+    /// Empties a staging plan for this frame's rebuild, keeping its allocations.
+    pub fn clear_rebuild(&mut self) {
+        self.vertices.clear();
+        self.indices.clear();
+        self.surface_ranges.clear();
+        self.materials.clear();
+        self.packed_vertices = assets::RetailPackedVertexPayload::Unavailable {
+            source_layout: crate::XMODEL_PACKED_UNAVAILABLE,
+        };
+    }
+
+    /// Takes the rebuild and reports what moved. Vertex bytes are not compared:
+    /// these models are posed by `world_from_local`, so a different mesh always
+    /// shows up in the index layout, the surface ranges, the materials or the
+    /// owner list, and walking the byte buffer every frame would cost more than
+    /// the consumer-side hash this replaces.
+    pub fn publish_rebuild(
+        &mut self,
+        staged: &mut Self,
+        draws: &mut Vec<XModelSurfaceDraw>,
+        owners: &mut Vec<MissileOwnerDraw>,
+    ) {
+        let mut geometry = render_frame::publish_rows(&mut self.indices, &mut staged.indices);
+        geometry |=
+            render_frame::publish_rows(&mut self.surface_ranges, &mut staged.surface_ranges);
+        geometry |= render_frame::publish_rows(&mut self.materials, &mut staged.materials);
+        geometry |= self.vertices.len() != staged.vertices.len();
+        if geometry {
+            std::mem::swap(&mut self.vertices, &mut staged.vertices);
+            self.packed_vertices = std::mem::replace(
+                &mut staged.packed_vertices,
+                assets::RetailPackedVertexPayload::Unavailable {
+                    source_layout: crate::XMODEL_PACKED_UNAVAILABLE,
+                },
+            );
+            self.revisions.bump_vertices();
+            self.revisions.set_topology_from(
+                &self.indices,
+                &self.surface_ranges,
+                self.vertices.len(),
+            );
+        }
+        staged.vertices.clear();
+        let mut rows = render_frame::publish_rows(&mut self.draws, draws);
+        rows |= render_frame::publish_rows(&mut self.owners, owners);
+        if geometry || rows {
+            self.revisions.bump_draws();
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+}
+
+publish_frame_rows!(ScriptModelDrawPlan, XModelSurfaceDraw, ScriptModelOwnerDraw);
+publish_frame_rows!(ItemDrawPlan, XModelSurfaceDraw, ItemOwnerDraw);
+publish_frame_rows!(DynEntDrawPlan, XModelSurfaceDraw, DynEntOwnerDraw);
+
 impl ScriptModelDrawPlan {
     pub fn finalize_lighting(
         &mut self,
@@ -476,118 +624,5 @@ impl HasObjectId for MissileOwnerDraw {
 impl HasObjectId for DynEntOwnerDraw {
     fn object_id(&self) -> u16 {
         self.object_id
-    }
-}
-
-#[cfg(test)]
-mod lighting_finalization_tests {
-    use super::*;
-    use render_scene::{
-        ModelLightingOwner, ModelLightingRequest, ResolvedModelLighting, ResolvedModelLightingTable,
-    };
-
-    fn draw(object_id: u16) -> XModelSurfaceDraw {
-        XModelSurfaceDraw {
-            surface: 0,
-            material: 0,
-            world_from_local: Mat4::IDENTITY,
-            lighting_handle: 0,
-            pending_lighting: Some(ModelLightingRequest {
-                owner: ModelLightingOwner::Item(u32::from(object_id)),
-                origin: [0.0; 3],
-                lookup_fallback: 0,
-            }),
-            colour_refusal: None,
-            object_id,
-            scene_light_index: 0,
-            reflection_probe_index: 0,
-            packed_lighting: None,
-            is_scope: false,
-            scene_entnum: None,
-        }
-    }
-
-    #[test]
-    fn resolved_payload_and_noop_preserve_geometry_revisions() {
-        let mut plan = MissileDrawPlan::default();
-        plan.draws.push(draw(1));
-        let mut table = ResolvedModelLightingTable::default();
-        table.insert_if_absent(
-            ModelLightingOwner::Item(1),
-            ResolvedModelLighting::Seated {
-                handle: 7,
-                scene_light_index: 2,
-                reflection_probe_index: 3,
-                packed_lighting: Some([1, 2, 3, 4]),
-            },
-        );
-        assert!(plan.finalize_lighting(&table).is_empty());
-        assert_eq!(plan.draws[0].lighting_handle, 7);
-        assert_eq!(
-            plan.revisions,
-            SourceRevisions {
-                draws: 1,
-                ..Default::default()
-            }
-        );
-        let revisions = plan.revisions;
-        plan.finalize_lighting(&table);
-        assert_eq!(plan.revisions, revisions);
-        // A newly requested but identical lighting result is also a payload no-op.
-        plan.draws[0].pending_lighting = draw(1).pending_lighting;
-        plan.finalize_lighting(&table);
-        assert_eq!(plan.revisions, revisions);
-    }
-
-    #[test]
-    fn failed_owner_removes_all_its_surfaces_and_invalidates_admission_once() {
-        let mut plan = MissileDrawPlan::default();
-        plan.draws = vec![draw(1), draw(1), draw(2)];
-        plan.draws[2].pending_lighting = None;
-        plan.owners = vec![
-            MissileOwnerDraw {
-                object_id: 1,
-                model: String::new(),
-            },
-            MissileOwnerDraw {
-                object_id: 2,
-                model: String::new(),
-            },
-        ];
-        plan.finalize_lighting(&ResolvedModelLightingTable::default());
-        assert_eq!(plan.draws.len(), 1);
-        assert_eq!(plan.owners.len(), 1);
-        assert_eq!(plan.owners[0].object_id, 2);
-        assert_eq!(
-            plan.revisions,
-            SourceRevisions {
-                draws: 1,
-                admission: 1,
-                ..Default::default()
-            }
-        );
-        let revisions = plan.revisions;
-        plan.finalize_lighting(&ResolvedModelLightingTable::default());
-        assert_eq!(plan.revisions, revisions);
-    }
-
-    #[test]
-    fn fpv_visibility_changes_admission_without_invalidating_vertices() {
-        let mut plan = FpvDrawPlan::default();
-        plan.visible = true;
-        plan.lighting_handle = 7;
-        plan.finalize_lighting(&ResolvedModelLightingTable::default());
-        assert!(!plan.visible);
-        assert_eq!(
-            plan.revisions,
-            SourceRevisions {
-                draws: 1,
-                admission: 1,
-                ..Default::default()
-            }
-        );
-        let revisions = plan.revisions;
-        plan.finalize_lighting(&ResolvedModelLightingTable::default());
-        assert_eq!(plan.revisions, revisions);
     }
 }

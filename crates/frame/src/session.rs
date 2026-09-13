@@ -194,8 +194,6 @@ pub struct MatchInstalled {
     pub zone: String,
 
     pub spawn_count: usize,
-
-    pub drawable: bool,
 }
 
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]

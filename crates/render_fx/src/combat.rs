@@ -19,7 +19,7 @@ pub const IDENTITY_AXIS: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0
 
 pub fn try_play_weapon_fx_at_origin(
     host: &mut FxSystemHost,
-    catalog: &assets::FxCatalog,
+    catalog: &assets::FxDefinitions,
     cache: &mut FxElemInfoCache,
     name: Option<&str>,
     origin: [f32; 3],
@@ -42,7 +42,7 @@ pub fn try_play_weapon_fx_at_origin(
 
 pub fn try_play_weapon_fx_bolted(
     host: &mut FxSystemHost,
-    catalog: &assets::FxCatalog,
+    catalog: &assets::FxDefinitions,
     cache: &mut FxElemInfoCache,
     name: Option<&str>,
     target: Option<fx::FxBoltTarget>,
@@ -64,7 +64,7 @@ pub fn try_play_weapon_fx_bolted(
 
 pub fn play_shell_eject(
     host: &mut FxSystemHost,
-    catalog: &assets::FxCatalog,
+    catalog: &assets::FxDefinitions,
     cache: &mut FxElemInfoCache,
     combat_fx: Option<&assets::WeaponCombatFx>,
     player_view: bool,

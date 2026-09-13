@@ -18,10 +18,10 @@ use crate::ambient::SoundIwd;
 use crate::backend::MatchEpoch;
 use crate::clip_store::{
     ClipError, ClipKey, ClipStore, PendingOneshot, PendingStarts, clip_key_for_variant,
-    clip_keys_for_alias, deadline_for, prepare_clip_now,
+    clip_keys_for_alias, deadline_for,
 };
 use crate::messages::{
-    Footstep, LandSound, PlayAlias, SND_ENT_LOCAL, StopAlias, ViewmodelNotetracks, WeaponSound,
+    AliasCommand, Footstep, LandSound, PlayAlias, SND_ENT_LOCAL, ViewmodelNotetracks, WeaponSound,
 };
 use crate::pcm::{LoopingPcmAudio, PcmAudio};
 use crate::space::{distance_inches, transform_inches};
@@ -69,7 +69,9 @@ impl Default for SoundPickState {
 }
 
 #[derive(Component)]
-pub struct LocalAliasPlayback {
+pub struct AliasPlayback {
+    pub namespace: AssetNamespace,
+    pub snd_ent: Option<u32>,
     pub alias: String,
 }
 
@@ -141,13 +143,11 @@ impl Plugin for PlayerSoundPlugin {
             .init_resource::<VoiceOccupancy>()
             .init_resource::<crate::ambient::MapAmbientBooted>()
             .init_resource::<crate::ambient::SoundBankLoadAttempted>()
-            .init_resource::<crate::ambient::PreparedMapAmbientPcm>()
             .init_resource::<crate::BobCycleTracker>()
             .init_resource::<WeaponSoundStamp>()
             .add_audio_source::<PcmAudio>()
             .add_audio_source::<LoopingPcmAudio>()
-            .add_message::<PlayAlias>()
-            .add_message::<StopAlias>()
+            .add_message::<AliasCommand>()
             .add_message::<Footstep>()
             .add_message::<WeaponSound>()
             .add_message::<ViewmodelNotetracks>()
@@ -163,17 +163,15 @@ impl Plugin for PlayerSoundPlugin {
                         .before(play_weapon_sound_messages)
                         .before(play_land_sound_messages),
                     drain_pending_oneshots
-                        .before(play_alias_messages)
+                        .after(play_alias_messages)
                         .before(play_footstep_messages)
                         .before(play_weapon_sound_messages)
                         .before(play_land_sound_messages),
                     apply_svc_local_sound
                         .before(play_alias_messages)
-                        .before(stop_alias_messages)
                         .run_if(resource_exists::<LastAdoptedSnapshot>),
                     crate::shellshock::update_shellshock_tinnitus.before(play_alias_messages),
                     play_alias_messages.after(FxSoundPublished),
-                    stop_alias_messages,
                     play_footstep_messages,
                     crate::entity_events::play_viewmodel_notetrack_messages
                         .before(play_weapon_sound_messages),
@@ -191,10 +189,6 @@ impl Plugin for PlayerSoundPlugin {
                     crate::ambient::start_sound_bank_walk
                         .after(crate::ambient::stop_map_ambient_on_match_torn_down),
                     crate::ambient::install_sound_bank.after(crate::ambient::start_sound_bank_walk),
-                    crate::ambient::start_map_ambient_prepare
-                        .after(crate::ambient::install_sound_bank),
-                    crate::ambient::install_map_ambient_pcm
-                        .after(crate::ambient::start_map_ambient_prepare),
                     stamp_weapon_sound_edges.after(crate::ambient::install_sound_bank),
                     crate::ambient::stop_map_ambient_on_match_torn_down.after(SessionSwapApplied),
                     reset_clip_prep_on_match_torn_down,
@@ -280,8 +274,7 @@ fn snd_update_all_channels(
 fn apply_svc_local_sound(
     mut cmds: MessageReader<SvcLocalSound>,
     adopted: Res<LastAdoptedSnapshot>,
-    mut play: MessageWriter<PlayAlias>,
-    mut stop: MessageWriter<StopAlias>,
+    mut play: MessageWriter<crate::AliasCommand>,
 ) {
     for cmd in cmds.read() {
         let Some(alias) = adopted.sound_alias_name(cmd.index).map(str::to_owned) else {
@@ -293,21 +286,25 @@ fn apply_svc_local_sound(
             continue;
         };
         if cmd.stop {
-            stop.write(StopAlias { alias });
+            play.write(AliasCommand::Stop {
+                namespace: AssetNamespace::Iw4,
+                alias,
+                snd_ent: Some(SND_ENT_LOCAL),
+            });
         } else {
-            play.write(PlayAlias {
+            play.write(crate::AliasCommand::Play(PlayAlias {
                 namespace: AssetNamespace::Iw4,
                 alias,
                 fallback: None,
                 origin_inches: None,
                 snd_ent: Some(SND_ENT_LOCAL),
-            });
+            }));
         }
     }
 }
 
 fn play_alias_messages(
-    mut events: MessageReader<PlayAlias>,
+    mut events: MessageReader<AliasCommand>,
     mut commands: Commands,
     mut pcm_assets: ResMut<Assets<PcmAudio>>,
     mut shared: ResMut<SharedPlayAssets>,
@@ -322,13 +319,45 @@ fn play_alias_messages(
     epoch: Res<MatchEpoch>,
     listeners: Query<&Transform, With<AmbientListener>>,
 ) {
-    let Some(bank) = bank else {
-        drop_without_bank(events.read().map(|e| e.alias.as_str()), &mut decisions);
-        return;
-    };
     let pose = listener_pose(&listeners);
     let iwd = iwd.as_deref().map(|s| s.0.as_ref());
-    for event in events.read() {
+    for command in events.read() {
+        let event = match command {
+            AliasCommand::Play(event) => event,
+            AliasCommand::Stop {
+                namespace,
+                alias,
+                snd_ent,
+            } => {
+                pending.cancel_alias(*namespace, alias, *snd_ent, epoch.0);
+                let (namespace, alias, snd_ent, epoch) =
+                    (*namespace, alias.clone(), *snd_ent, epoch.0);
+                // Ordered after prior spawns, including ones queued by Play in
+                // this same message batch; a later Play remains a new voice.
+                commands.queue(move |world: &mut World| {
+                    let entities: Vec<_> = world
+                        .query::<(Entity, &AliasPlayback, &crate::backend::Voice)>()
+                        .iter(world)
+                        .filter(|(_, tag, voice)| {
+                            tag.namespace == namespace
+                                && tag.alias == alias
+                                && tag.snd_ent == snd_ent
+                                && voice.epoch == epoch
+                                && voice.scope == crate::backend::AudioScope::Match
+                        })
+                        .map(|(entity, _, _)| entity)
+                        .collect();
+                    for entity in entities {
+                        world.despawn(entity);
+                    }
+                });
+                continue;
+            }
+        };
+        let Some(bank) = bank.as_ref() else {
+            drop_without_bank(std::iter::once(event.alias.as_str()), &mut decisions);
+            continue;
+        };
         let outcome = play_alias_oneshot(
             &mut commands,
             &mut pcm_assets,
@@ -375,22 +404,6 @@ fn play_alias_messages(
             },
             &mut gaps,
         );
-    }
-}
-
-fn stop_alias_messages(
-    mut events: MessageReader<StopAlias>,
-    mut commands: Commands,
-    mut pending: ResMut<PendingStarts>,
-    playing: Query<(Entity, &LocalAliasPlayback)>,
-) {
-    for event in events.read() {
-        pending.cancel_alias(&event.alias);
-        for (entity, tag) in playing.iter() {
-            if tag.alias == event.alias {
-                crate::backend::stop(&mut commands, entity);
-            }
-        }
     }
 }
 
@@ -951,7 +964,6 @@ fn play_alias_oneshot_at(
     };
     let pcm = match take_or_pending_clip(
         bank,
-        iwd,
         clips.as_deref_mut(),
         pending,
         clip.clone(),
@@ -1013,7 +1025,6 @@ enum ClipTake {
 
 fn take_or_pending_clip(
     bank: &SoundCatalog,
-    iwd: Option<&NamespaceSoundIwd>,
     clips: Option<&mut ClipStore>,
     pending: &mut PendingStarts,
     clip: ClipKey,
@@ -1037,7 +1048,7 @@ fn take_or_pending_clip(
         }
         match store.ready(&clip) {
             Some(Ok(pcm)) => ClipTake::Ready(pcm),
-            Some(Err(ClipError::Decode | ClipError::Read)) => {
+            Some(Err(ClipError::Decode | ClipError::Read | ClipError::QueueClosed)) => {
                 ClipTake::Failed(StartFailure::DecodeFailed)
             }
             None => {
@@ -1059,13 +1070,7 @@ fn take_or_pending_clip(
             }
         }
     } else {
-        match prepare_clip_now(bank, iwd, &clip) {
-            Ok(prepared) => prepared
-                .into_audio()
-                .map(ClipTake::Ready)
-                .unwrap_or(ClipTake::Failed(StartFailure::NoPcm)),
-            Err(_) => ClipTake::Failed(StartFailure::DecodeFailed),
-        }
+        ClipTake::Failed(StartFailure::NoPcm)
     }
 }
 
@@ -1164,6 +1169,11 @@ fn submit_prepared_oneshot(
             );
             {
                 let mut spawned = commands.entity(entity);
+                spawned.insert(AliasPlayback {
+                    namespace,
+                    snd_ent,
+                    alias: alias.to_owned(),
+                });
                 spawned.insert(Channel3d {
                     origin_inches: pos,
                     dist_min: row.dist_min,
@@ -1200,7 +1210,9 @@ fn submit_prepared_oneshot(
             );
             {
                 let mut spawned = commands.entity(entity);
-                spawned.insert(LocalAliasPlayback {
+                spawned.insert(AliasPlayback {
+                    namespace,
+                    snd_ent,
                     alias: alias.to_owned(),
                 });
                 if let Some(lease) = lease {

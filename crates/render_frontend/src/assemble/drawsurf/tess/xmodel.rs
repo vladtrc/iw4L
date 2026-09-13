@@ -196,7 +196,6 @@ struct XModelMergeStamp {
     fpv_drawgun: Option<i32>,
     fpv_colour: bool,
     sky_eye: Option<[u32; 3]>,
-    draw_meta: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,48 +317,27 @@ fn xmodel_merge_stamp(
     scene: Option<&crate::GfxScene>,
     sky: Option<(&super::sky::SkyModelDrawPlan, Vec3)>,
 ) -> XModelMergeStamp {
+    // The one thing still read out of the producers' rows here is which scene
+    // entity each draw belongs to, because whether that entity is admitted this
+    // frame is the scene's answer, not the producer's — a frame input, not a
+    // guess at whether the payload changed. The payload fingerprint that used
+    // to sit next to it is gone: `vertices`, `draws` and `topology` below are
+    // the producers' own published verdicts now.
     let mut occupancy = DefaultHasher::new();
     fpv_scene_colour(fpv, scene).hash(&mut occupancy);
-    for draw in &bodies.draws {
+    for draw in bodies.draws() {
         scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
     }
-    for draw in &scripts.draws {
+    for draw in scripts.draws() {
         scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
     }
-    for draw in &missiles.draws {
+    for draw in missiles.draws() {
         scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
     }
-    for draw in &items.draws {
+    for draw in items.draws() {
         scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
     }
-    let mut draw_meta = DefaultHasher::new();
-    write_body_draws(&mut draw_meta, bodies);
-    write_fpv_draws(&mut draw_meta, fpv);
-    write_xmodel_draws(&mut draw_meta, &scripts.draws);
-    write_xmodel_draws(&mut draw_meta, &missiles.draws);
-    write_xmodel_draws(&mut draw_meta, &items.draws);
-    write_xmodel_draws(&mut draw_meta, &fx_models.draws);
-    write_xmodel_draws(&mut draw_meta, &dynents.draws);
-    write_materials(&mut draw_meta, &bodies.materials);
-    write_materials(&mut draw_meta, &fpv.materials);
-    write_materials(&mut draw_meta, &scripts.materials);
-    write_materials(&mut draw_meta, &missiles.materials);
-    write_materials(&mut draw_meta, &items.materials);
-    write_materials(&mut draw_meta, &fx_models.materials);
-    write_materials(&mut draw_meta, &dynents.materials);
-    packed_row_count(&bodies.packed_vertices).hash(&mut draw_meta);
-    packed_row_count(&fpv.packed_vertices).hash(&mut draw_meta);
-    packed_row_count(&scripts.packed_vertices).hash(&mut draw_meta);
-    packed_row_count(&missiles.packed_vertices).hash(&mut draw_meta);
-    packed_row_count(&items.packed_vertices).hash(&mut draw_meta);
-    packed_row_count(&fx_models.packed_vertices).hash(&mut draw_meta);
-    packed_row_count(&dynents.packed_vertices).hash(&mut draw_meta);
     let sky_eye = sky.map(|(_, eye)| [eye.x.to_bits(), eye.y.to_bits(), eye.z.to_bits()]);
-    if let Some((sky, _)) = sky {
-        write_xmodel_draws(&mut draw_meta, &sky.draws);
-        write_materials(&mut draw_meta, &sky.geometry.materials);
-        packed_row_count(&sky.geometry.packed_vertices).hash(&mut draw_meta);
-    }
     let (generation, topology, admission, vertices, draws, producer_revision) = producer_keys(
         fpv,
         bodies,
@@ -388,76 +366,12 @@ fn xmodel_merge_stamp(
         fpv_drawgun: fpv.drawgun,
         fpv_colour: fpv_scene_colour(fpv, scene),
         sky_eye,
-        draw_meta: draw_meta.finish(),
     }
 }
 
 fn mat4_bits(m: Mat4) -> [u32; 16] {
     let cols = m.to_cols_array();
     std::array::from_fn(|i| cols[i].to_bits())
-}
-
-fn write_mat4(hasher: &mut impl Hasher, m: Mat4) {
-    mat4_bits(m).hash(hasher);
-}
-
-fn write_materials(hasher: &mut impl Hasher, materials: &[SmodelPassMaterial]) {
-    materials.len().hash(hasher);
-    for material in materials {
-        material.sort_key.hash(hasher);
-        material.material_sorted_index.hash(hasher);
-        material.model_lighting_required.hash(hasher);
-    }
-}
-
-fn write_fpv_draws(hasher: &mut impl Hasher, fpv: &FpvDrawPlan) {
-    fpv.draws.len().hash(hasher);
-    for draw in &fpv.draws {
-        draw.surface.hash(hasher);
-        draw.material.hash(hasher);
-        draw.is_scope.hash(hasher);
-    }
-}
-
-fn write_body_draws(hasher: &mut impl Hasher, bodies: &RemoteBodyDrawPlan) {
-    bodies.draws.len().hash(hasher);
-    for draw in &bodies.draws {
-        draw.surface.hash(hasher);
-        draw.material.hash(hasher);
-        write_mat4(hasher, draw.world_from_local);
-        draw.lighting_handle.hash(hasher);
-        draw.scene_light_index.hash(hasher);
-        draw.reflection_probe_index.hash(hasher);
-        draw.scene_entnum.hash(hasher);
-    }
-}
-
-fn write_xmodel_draws(hasher: &mut impl Hasher, draws: &[XModelSurfaceDraw]) {
-    draws.len().hash(hasher);
-    for draw in draws {
-        draw.surface.hash(hasher);
-        draw.material.hash(hasher);
-        write_mat4(hasher, draw.world_from_local);
-        draw.lighting_handle.hash(hasher);
-        draw.colour_refusal.is_some().hash(hasher);
-        draw.object_id.hash(hasher);
-        draw.scene_light_index.hash(hasher);
-        draw.reflection_probe_index.hash(hasher);
-        draw.packed_lighting.hash(hasher);
-        draw.is_scope.hash(hasher);
-        draw.scene_entnum.hash(hasher);
-        match draw.pending_lighting {
-            None => 0u8.hash(hasher),
-            Some(req) => {
-                1u8.hash(hasher);
-                req.owner.hash(hasher);
-                for f in req.origin {
-                    f.to_bits().hash(hasher);
-                }
-                req.lookup_fallback.hash(hasher);
-            }
-        }
-    }
 }
 
 pub fn merge_xmodel_draw_plan(
@@ -549,23 +463,23 @@ pub fn merge_xmodel_draw_plan(
     merged.concat_layout = true;
 
     packed.reserve(
-        packed_row_count(&bodies.packed_vertices)
-            + packed_row_count(&fpv.packed_vertices)
-            + packed_row_count(&scripts.packed_vertices)
-            + packed_row_count(&missiles.packed_vertices)
-            + packed_row_count(&items.packed_vertices)
-            + packed_row_count(&fx_models.packed_vertices)
-            + packed_row_count(&dynents.packed_vertices),
+        packed_row_count(bodies.packed_vertices())
+            + packed_row_count(fpv.packed_vertices())
+            + packed_row_count(scripts.packed_vertices())
+            + packed_row_count(missiles.packed_vertices())
+            + packed_row_count(items.packed_vertices())
+            + packed_row_count(fx_models.packed_vertices())
+            + packed_row_count(dynents.packed_vertices()),
     );
     let mut packed_ok = true;
     let append_started = Instant::now();
     let mut next_body_object = XMODEL_OBJECT_ID_BODY_BASE;
     let (fx_draws, fx_object_id_exhausted) = dense_fx_object_ids(
-        &fx_models.draws,
+        fx_models.draws(),
         merged
             .draws
             .iter()
-            .chain(dynents.draws.iter())
+            .chain(dynents.draws().iter())
             .map(|draw| draw.object_id)
             .max(),
     );
@@ -574,12 +488,12 @@ pub fn merge_xmodel_draw_plan(
         merged,
         &mut packed,
         &mut packed_ok,
-        bodies.decoded_n,
-        &bodies.indices,
-        &bodies.surface_ranges,
-        &bodies.materials,
-        &bodies.packed_vertices,
-        bodies.draws.iter().filter_map(|d| {
+        bodies.decoded_n(),
+        bodies.indices(),
+        bodies.surface_ranges(),
+        bodies.materials(),
+        bodies.packed_vertices(),
+        bodies.draws().iter().filter_map(|d| {
             scene_ent_admitted(scene, d.scene_entnum).then(|| {
                 let object_id = next_body_object;
                 next_body_object = next_body_object.saturating_add(1);
@@ -607,12 +521,12 @@ pub fn merge_xmodel_draw_plan(
             merged,
             &mut packed,
             &mut packed_ok,
-            fpv.vertices.len(),
-            &fpv.indices,
-            &fpv.surface_ranges,
-            &fpv.materials,
-            &fpv.packed_vertices,
-            fpv.draws.iter().map(|d| XModelSurfaceDraw {
+            fpv.vertices().len(),
+            fpv.indices(),
+            fpv.surface_ranges(),
+            fpv.materials(),
+            fpv.packed_vertices(),
+            fpv.draws().iter().map(|d| XModelSurfaceDraw {
                 surface: d.surface,
                 material: d.material,
                 world_from_local: fpv.world_from_local,
@@ -633,13 +547,13 @@ pub fn merge_xmodel_draw_plan(
         merged,
         &mut packed,
         &mut packed_ok,
-        scripts.vertices.len(),
-        &scripts.indices,
-        &scripts.surface_ranges,
-        &scripts.materials,
-        &scripts.packed_vertices,
+        scripts.vertices().len(),
+        scripts.indices(),
+        scripts.surface_ranges(),
+        scripts.materials(),
+        scripts.packed_vertices(),
         scripts
-            .draws
+            .draws()
             .iter()
             .copied()
             .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
@@ -649,13 +563,13 @@ pub fn merge_xmodel_draw_plan(
         merged,
         &mut packed,
         &mut packed_ok,
-        missiles.vertices.len(),
-        &missiles.indices,
-        &missiles.surface_ranges,
-        &missiles.materials,
-        &missiles.packed_vertices,
+        missiles.vertices().len(),
+        missiles.indices(),
+        missiles.surface_ranges(),
+        missiles.materials(),
+        missiles.packed_vertices(),
         missiles
-            .draws
+            .draws()
             .iter()
             .copied()
             .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
@@ -665,13 +579,13 @@ pub fn merge_xmodel_draw_plan(
         merged,
         &mut packed,
         &mut packed_ok,
-        items.vertices.len(),
-        &items.indices,
-        &items.surface_ranges,
-        &items.materials,
-        &items.packed_vertices,
+        items.vertices().len(),
+        items.indices(),
+        items.surface_ranges(),
+        items.materials(),
+        items.packed_vertices(),
         items
-            .draws
+            .draws()
             .iter()
             .copied()
             .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
@@ -680,23 +594,23 @@ pub fn merge_xmodel_draw_plan(
         merged,
         &mut packed,
         &mut packed_ok,
-        fx_models.vertices.len(),
-        &fx_models.indices,
-        &fx_models.surface_ranges,
-        &fx_models.materials,
-        &fx_models.packed_vertices,
+        fx_models.vertices().len(),
+        fx_models.indices(),
+        fx_models.surface_ranges(),
+        fx_models.materials(),
+        fx_models.packed_vertices(),
         fx_draws,
     );
     append_admitted_source(
         merged,
         &mut packed,
         &mut packed_ok,
-        dynents.vertices.len(),
-        &dynents.indices,
-        &dynents.surface_ranges,
-        &dynents.materials,
-        &dynents.packed_vertices,
-        dynents.draws.iter().copied(),
+        dynents.vertices().len(),
+        dynents.indices(),
+        dynents.surface_ranges(),
+        dynents.materials(),
+        dynents.packed_vertices(),
+        dynents.draws().iter().copied(),
     );
     if let Some((sky, eye)) = sky {
         append_admitted_source(
@@ -782,8 +696,11 @@ fn dense_fx_object_ids(
 }
 
 fn concat_draws_changed(prev: XModelMergeStamp, stamp: &XModelMergeStamp) -> bool {
+    // `vertices` is in here because a producer that changed its material list
+    // bumps that revision, and the concat refresh rebuilds the merged material
+    // list along with the draws.
     prev.draws != stamp.draws
-        || prev.draw_meta != stamp.draw_meta
+        || prev.vertices != stamp.vertices
         || prev.fpv_world != stamp.fpv_world
         || prev.fpv_lighting != stamp.fpv_lighting
         || prev.fpv_scene_light != stamp.fpv_scene_light
@@ -816,51 +733,51 @@ fn concat_packed_owners<'a>(
         ConcatPackedOwner {
             admit: ADMIT_BODY,
             rev_i: 1,
-            payload: &bodies.packed_vertices,
-            decoded_n: bodies.decoded_n,
+            payload: bodies.packed_vertices(),
+            decoded_n: bodies.decoded_n(),
         },
         ConcatPackedOwner {
             admit: ADMIT_FPV,
             rev_i: 0,
-            payload: &fpv.packed_vertices,
-            decoded_n: fpv.vertices.len(),
+            payload: fpv.packed_vertices(),
+            decoded_n: fpv.vertices().len(),
         },
         ConcatPackedOwner {
             admit: ADMIT_SCRIPT,
             rev_i: 2,
-            payload: &scripts.packed_vertices,
-            decoded_n: scripts.vertices.len(),
+            payload: scripts.packed_vertices(),
+            decoded_n: scripts.vertices().len(),
         },
         ConcatPackedOwner {
             admit: ADMIT_MISSILE,
             rev_i: 3,
-            payload: &missiles.packed_vertices,
-            decoded_n: missiles.vertices.len(),
+            payload: missiles.packed_vertices(),
+            decoded_n: missiles.vertices().len(),
         },
         ConcatPackedOwner {
             admit: ADMIT_ITEM,
             rev_i: 4,
-            payload: &items.packed_vertices,
-            decoded_n: items.vertices.len(),
+            payload: items.packed_vertices(),
+            decoded_n: items.vertices().len(),
         },
         ConcatPackedOwner {
             admit: ADMIT_FX,
             rev_i: 5,
-            payload: &fx_models.packed_vertices,
-            decoded_n: fx_models.vertices.len(),
+            payload: fx_models.packed_vertices(),
+            decoded_n: fx_models.vertices().len(),
         },
         ConcatPackedOwner {
             admit: ADMIT_DYNENT,
             rev_i: 6,
-            payload: &dynents.packed_vertices,
-            decoded_n: dynents.vertices.len(),
+            payload: dynents.packed_vertices(),
+            decoded_n: dynents.vertices().len(),
         },
         ConcatPackedOwner {
             admit: ADMIT_SKY,
             rev_i: 7,
             payload: sky_geom
                 .map(|g| &g.packed_vertices)
-                .unwrap_or(&bodies.packed_vertices),
+                .unwrap_or(bodies.packed_vertices()),
             decoded_n: sky_geom.map(|g| g.vertices.len()).unwrap_or(0),
         },
     ]
@@ -992,16 +909,16 @@ fn refresh_concat_draws(
     let mut range_base = 0u32;
     let mut next_body_object = XMODEL_OBJECT_ID_BODY_BASE;
     let (fx_draws, fx_object_id_exhausted) = dense_fx_object_ids(
-        &fx_models.draws,
-        dynents.draws.iter().map(|draw| draw.object_id).max(),
+        fx_models.draws(),
+        dynents.draws().iter().map(|draw| draw.object_id).max(),
     );
     merged.fx_object_id_exhausted = fx_object_id_exhausted;
     append_concat_owner_draws(
         merged,
         &mut range_base,
-        bodies.surface_ranges.len(),
-        &bodies.materials,
-        bodies.draws.iter().filter_map(|d| {
+        bodies.surface_ranges().len(),
+        bodies.materials(),
+        bodies.draws().iter().filter_map(|d| {
             scene_ent_admitted(scene, d.scene_entnum).then(|| {
                 let object_id = next_body_object;
                 next_body_object = next_body_object.saturating_add(1);
@@ -1026,9 +943,9 @@ fn refresh_concat_draws(
         append_concat_owner_draws(
             merged,
             &mut range_base,
-            fpv.surface_ranges.len(),
-            &fpv.materials,
-            fpv.draws.iter().map(|d| XModelSurfaceDraw {
+            fpv.surface_ranges().len(),
+            fpv.materials(),
+            fpv.draws().iter().map(|d| XModelSurfaceDraw {
                 surface: d.surface,
                 material: d.material,
                 world_from_local: fpv.world_from_local,
@@ -1047,10 +964,10 @@ fn refresh_concat_draws(
     append_concat_owner_draws(
         merged,
         &mut range_base,
-        scripts.surface_ranges.len(),
-        &scripts.materials,
+        scripts.surface_ranges().len(),
+        scripts.materials(),
         scripts
-            .draws
+            .draws()
             .iter()
             .copied()
             .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
@@ -1058,10 +975,10 @@ fn refresh_concat_draws(
     append_concat_owner_draws(
         merged,
         &mut range_base,
-        missiles.surface_ranges.len(),
-        &missiles.materials,
+        missiles.surface_ranges().len(),
+        missiles.materials(),
         missiles
-            .draws
+            .draws()
             .iter()
             .copied()
             .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
@@ -1069,10 +986,10 @@ fn refresh_concat_draws(
     append_concat_owner_draws(
         merged,
         &mut range_base,
-        items.surface_ranges.len(),
-        &items.materials,
+        items.surface_ranges().len(),
+        items.materials(),
         items
-            .draws
+            .draws()
             .iter()
             .copied()
             .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
@@ -1080,16 +997,16 @@ fn refresh_concat_draws(
     append_concat_owner_draws(
         merged,
         &mut range_base,
-        fx_models.surface_ranges.len(),
-        &fx_models.materials,
+        fx_models.surface_ranges().len(),
+        fx_models.materials(),
         fx_draws,
     );
     append_concat_owner_draws(
         merged,
         &mut range_base,
-        dynents.surface_ranges.len(),
-        &dynents.materials,
-        dynents.draws.iter().copied(),
+        dynents.surface_ranges().len(),
+        dynents.materials(),
+        dynents.draws().iter().copied(),
     );
     if let Some((sky, eye)) = sky {
         append_concat_owner_draws(
@@ -1118,7 +1035,7 @@ fn admitted_mask(
 ) -> u8 {
     let mut admitted = 0u8;
     if bodies
-        .draws
+        .draws()
         .iter()
         .any(|d| scene_ent_admitted(scene, d.scene_entnum))
     {
@@ -1128,30 +1045,30 @@ fn admitted_mask(
         admitted |= ADMIT_FPV;
     }
     if scripts
-        .draws
+        .draws()
         .iter()
         .any(|d| scene_ent_admitted(scene, d.scene_entnum))
     {
         admitted |= ADMIT_SCRIPT;
     }
     if missiles
-        .draws
+        .draws()
         .iter()
         .any(|d| scene_ent_admitted(scene, d.scene_entnum))
     {
         admitted |= ADMIT_MISSILE;
     }
     if items
-        .draws
+        .draws()
         .iter()
         .any(|d| scene_ent_admitted(scene, d.scene_entnum))
     {
         admitted |= ADMIT_ITEM;
     }
-    if !fx_models.draws.is_empty() {
+    if !fx_models.draws().is_empty() {
         admitted |= ADMIT_FX;
     }
-    if !dynents.draws.is_empty() {
+    if !dynents.draws().is_empty() {
         admitted |= ADMIT_DYNENT;
     }
     if sky.is_some() {
@@ -1464,7 +1381,7 @@ pub(crate) fn apply_resolved_xmodel_lighting(
             frame.outcome = "lighting_failed";
             frame.lighting_handle = None;
         } else if let Some(handle) = script
-            .draws
+            .draws()
             .iter()
             .find(|draw| draw.object_id == object_id)
             .map(|draw| draw.lighting_handle)
@@ -1479,4 +1396,255 @@ pub(crate) fn apply_resolved_fx_model_lighting(
     mut plan: ResMut<FxModelDrawPlan>,
 ) {
     plan.finalize_lighting(&resolved);
+}
+
+#[cfg(test)]
+mod producer_revision_tests {
+    use super::*;
+    use render_scene::model_lighting::{
+        ModelLightingOwner, ModelLightingRequest, ResolvedModelLighting, ResolvedModelLightingTable,
+    };
+
+    /// Slot order of `producer_keys`, and therefore of every array in the
+    /// stamp. A producer that moved must move its own slot and no other.
+    const FPV: usize = 0;
+    const BODIES: usize = 1;
+    const SCRIPTS: usize = 2;
+    const MISSILES: usize = 3;
+    const ITEMS: usize = 4;
+    const FX_MODELS: usize = 5;
+    const DYNENTS: usize = 6;
+
+    fn draw(object_id: u16, at: Vec3) -> XModelSurfaceDraw {
+        XModelSurfaceDraw {
+            surface: 0,
+            material: 0,
+            world_from_local: Mat4::from_translation(at),
+            lighting_handle: 0,
+            pending_lighting: Some(ModelLightingRequest {
+                owner: ModelLightingOwner::Item(u32::from(object_id)),
+                origin: [0.0; 3],
+                lookup_fallback: 0,
+            }),
+            colour_refusal: None,
+            object_id,
+            scene_light_index: 0,
+            reflection_probe_index: 0,
+            packed_lighting: None,
+            is_scope: false,
+            scene_entnum: None,
+        }
+    }
+
+    /// The seven plans the merge reads, driven only through the publishing API
+    /// their owners use — never by writing their rows.
+    #[derive(Default)]
+    struct Producers {
+        fpv: FpvDrawPlan,
+        bodies: RemoteBodyDrawPlan,
+        scripts: ScriptModelDrawPlan,
+        missiles: MissileDrawPlan,
+        items: ItemDrawPlan,
+        fx_models: FxModelDrawPlan,
+        dynents: DynEntDrawPlan,
+    }
+
+    impl Producers {
+        /// What the merge itself asks of them each frame.
+        fn stamp(&self) -> XModelMergeStamp {
+            xmodel_merge_stamp(
+                &self.fpv,
+                &self.bodies,
+                &self.scripts,
+                &self.missiles,
+                &self.items,
+                &self.fx_models,
+                &self.dynents,
+                None,
+                None,
+            )
+        }
+
+        /// One frame's rebuild of every row-publishing producer, at `at`.
+        fn rebuild_all_at(&mut self, at: Vec3) {
+            let (mut draws, mut owners) = (
+                vec![draw(1, at)],
+                vec![ItemOwnerDraw {
+                    object_id: 1,
+                    model: "rpg".into(),
+                }],
+            );
+            self.items.publish_frame_rows(&mut draws, &mut owners);
+
+            let (mut draws, mut owners) = (
+                vec![draw(2, at)],
+                vec![DynEntOwnerDraw {
+                    object_id: 2,
+                    model: "door".into(),
+                }],
+            );
+            self.dynents.publish_frame_rows(&mut draws, &mut owners);
+
+            let (mut draws, mut owners) = (vec![draw(3, at)], Vec::new());
+            self.scripts.publish_frame_rows(&mut draws, &mut owners);
+
+            let mut staged = MissileDrawPlan::default();
+            let (mut draws, mut owners) = (
+                vec![draw(4, at)],
+                vec![MissileOwnerDraw {
+                    object_id: 4,
+                    model: "rocket".into(),
+                }],
+            );
+            self.missiles
+                .publish_rebuild(&mut staged, &mut draws, &mut owners);
+
+            let mut staged = FxModelDrawPlan::default();
+            staged.push_draw(draw(5, at));
+            self.fx_models.publish_rebuild(&mut staged);
+        }
+    }
+
+    fn moved_slots(before: &XModelMergeStamp, after: &XModelMergeStamp) -> Vec<usize> {
+        (0..8)
+            .filter(|&i| {
+                before.draws[i] != after.draws[i]
+                    || before.vertices[i] != after.vertices[i]
+                    || before.topology.admission[i] != after.topology.admission[i]
+                    || before.producer_revision[i] != after.producer_revision[i]
+            })
+            .collect()
+    }
+
+    fn seated(handle: u32) -> ResolvedModelLighting {
+        ResolvedModelLighting::Seated {
+            handle,
+            scene_light_index: 2,
+            reflection_probe_index: 3,
+            packed_lighting: Some([1, 2, 3, 4]),
+        }
+    }
+
+    /// The merge used to re-hash every draw, material and vertex count of all
+    /// seven producers each frame, because what they published was not the
+    /// truth: some restarted their revisions from zero, some bumped on a
+    /// rebuild that changed nothing, some dropped every row without telling
+    /// anyone. This drives the producers through their own publishing API and
+    /// asks the consumer that replaced those hashes — the merge stamp — whether
+    /// it can still tell a frame that moved from one that did not, and which
+    /// producer it was.
+    #[test]
+    fn the_merge_stamp_moves_for_exactly_the_producers_whose_rows_moved() {
+        let mut plans = Producers::default();
+        let empty = plans.stamp();
+
+        plans.rebuild_all_at(Vec3::ZERO);
+        let published = plans.stamp();
+        assert_ne!(published, empty);
+        assert_eq!(
+            moved_slots(&empty, &published),
+            vec![SCRIPTS, MISSILES, ITEMS, FX_MODELS, DYNENTS]
+        );
+        assert_eq!(plans.items.draws().len(), 1);
+
+        // An identical rebuild is not a change, and must not look like one:
+        // this is the claim that let the merge stop re-hashing the rows.
+        plans.rebuild_all_at(Vec3::ZERO);
+        assert_eq!(plans.stamp(), published);
+        assert!(!concat_draws_changed(published, &plans.stamp()));
+
+        // Moving one row is — and it moves that producer's slot alone.
+        plans.rebuild_all_at(Vec3::ZERO);
+        let mut draws = vec![draw(1, Vec3::X)];
+        let mut owners = vec![ItemOwnerDraw {
+            object_id: 1,
+            model: "rpg".into(),
+        }];
+        plans.items.publish_frame_rows(&mut draws, &mut owners);
+        let moved = plans.stamp();
+        assert_eq!(moved_slots(&published, &moved), vec![ITEMS]);
+        assert!(concat_draws_changed(published, &moved));
+        assert_eq!(
+            plans.items.draws()[0].world_from_local,
+            Mat4::from_translation(Vec3::X)
+        );
+
+        // Dropping rows is a change too: a producer with nothing to draw may
+        // not leave last frame's rows standing under last frame's revision.
+        plans.items.publish_no_rows();
+        let dropped = plans.stamp();
+        assert!(plans.items.draws().is_empty());
+        assert_eq!(moved_slots(&moved, &dropped), vec![ITEMS]);
+        assert!(concat_draws_changed(moved, &dropped));
+        // And having dropped them, saying so again is not.
+        plans.items.publish_no_rows();
+        assert_eq!(plans.stamp(), dropped);
+
+        // Same contract for the geometry-owning producers.
+        plans.bodies.clear_geometry();
+        assert_eq!(
+            plans.stamp(),
+            dropped,
+            "a body plan with no rows had none to drop"
+        );
+        plans
+            .missiles
+            .finalize_lighting(&ResolvedModelLightingTable::default());
+        let failed = plans.stamp();
+        assert!(
+            plans.missiles.draws().is_empty(),
+            "unresolved lighting removes the owner"
+        );
+        assert_eq!(moved_slots(&dropped, &failed), vec![MISSILES]);
+        // Once, not once per frame it stays failed.
+        plans
+            .missiles
+            .finalize_lighting(&ResolvedModelLightingTable::default());
+        assert_eq!(plans.stamp(), failed);
+
+        // A resolved payload rewrites the rows, so the draws revision moves —
+        // but it touches neither the vertices nor the index layout the merge
+        // concatenates, and it is not an admission change.
+        let mut resolved = ResolvedModelLightingTable::default();
+        resolved.insert_if_absent(ModelLightingOwner::Item(3), seated(7));
+        plans.scripts.finalize_lighting(&resolved);
+        let lit = plans.stamp();
+        assert_eq!(plans.scripts.draws()[0].lighting_handle, 7);
+        assert_eq!(moved_slots(&failed, &lit), vec![SCRIPTS]);
+        assert_ne!(lit.draws[SCRIPTS], failed.draws[SCRIPTS]);
+        assert_eq!(lit.vertices[SCRIPTS], failed.vertices[SCRIPTS]);
+        assert_eq!(
+            lit.topology.topology[SCRIPTS],
+            failed.topology.topology[SCRIPTS]
+        );
+        assert_eq!(
+            lit.topology.admission[SCRIPTS],
+            failed.topology.admission[SCRIPTS]
+        );
+        // The same resolved table again is a no-op: the request was consumed.
+        plans.scripts.finalize_lighting(&resolved);
+        assert_eq!(plans.stamp(), lit);
+
+        // The viewmodel is admission, not vertices: hiding it must reach the
+        // merge, and must not invalidate a vertex buffer.
+        plans.fpv.visible = true;
+        plans.fpv.lighting_handle = 7;
+        plans
+            .fpv
+            .finalize_lighting(&ResolvedModelLightingTable::default());
+        let hidden = plans.stamp();
+        assert!(!plans.fpv.visible);
+        assert_eq!(moved_slots(&lit, &hidden), vec![FPV]);
+        assert_eq!(hidden.vertices[FPV], lit.vertices[FPV]);
+        assert_ne!(hidden.topology.admission[FPV], lit.topology.admission[FPV]);
+        assert!(concat_draws_changed(lit, &hidden));
+        plans
+            .fpv
+            .finalize_lighting(&ResolvedModelLightingTable::default());
+        assert_eq!(plans.stamp(), hidden);
+
+        // Nothing above ever touched the body plan, and the merge agrees.
+        assert_eq!(hidden.producer_revision[BODIES], 0);
+        assert_eq!(hidden.draws[BODIES], 0);
+    }
 }

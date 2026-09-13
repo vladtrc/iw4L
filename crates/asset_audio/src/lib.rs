@@ -1,6 +1,5 @@
 mod createfx;
 mod ent_channel;
-mod load_capture;
 mod map_script_sound;
 mod sound_catalog;
 mod sound_load;
@@ -12,7 +11,6 @@ pub use asset_core::*;
 pub use asset_transport::*;
 pub use createfx::*;
 pub use ent_channel::*;
-pub use load_capture::*;
 pub use map_script_sound::*;
 pub use sound_catalog::*;
 pub use sound_load::*;

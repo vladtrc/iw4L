@@ -489,7 +489,7 @@ fn draw_geometry_diagnostic(
         &ViewUniformOffset,
         &DiagnosticViewBindGroup,
     )>,
-    colour: Res<super::colour_submit::ExtractedExactColour>,
+    colour_frame: Res<super::PublishedRenderFrame>,
     geometry: Res<DiagnosticGeometry>,
     cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
@@ -500,7 +500,7 @@ fn draw_geometry_diagnostic(
     slot: Option<Res<SharedRenderStagesSlot>>,
     mut scratch: Local<DiagnosticDrawScratch>,
 ) {
-    let products = &colour.frame_products;
+    let products = &colour_frame.frame_products;
     if extracted
         .as_ref()
         .is_some_and(|extracted| extracted.overlay_gpu_wait)

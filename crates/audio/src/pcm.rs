@@ -4,7 +4,6 @@ pub(crate) mod t5_stream;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::{num::NonZero, sync::Arc, time::Duration};
 
-use assets::LoadedSoundPcm;
 use bevy::{
     audio::{ChannelCount, Decodable, PlaybackSettings, SampleRate, Source, Volume},
     prelude::*,
@@ -82,12 +81,6 @@ impl PcmAudio {
             sample_rate,
             live_pan: None,
         })
-    }
-
-    pub fn from_loaded(sound: &LoadedSoundPcm) -> Option<Self> {
-        let samples = sound.prepared_samples()?;
-        let channels = u16::try_from(sound.channels().max(1)).ok()?;
-        Self::from_prepared(samples, channels, sound.rate.max(1))
     }
 
     pub(crate) fn samples(&self) -> &Arc<[f32]> {

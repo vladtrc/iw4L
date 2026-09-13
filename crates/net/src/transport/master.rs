@@ -32,7 +32,7 @@ use crate::transport::bootstrap::{
     BootstrapAck, BootstrapLane, BootstrapMessage, decode_bootstrap, epoch_applies,
 };
 use crate::transport::fragment::{Fragmenter, Reassembler};
-use crate::transport::udp_launch::handshake_hello_for_udp;
+use crate::transport::protocol::{ContentFingerprint, HandshakeHello, MatchDescriptor};
 use crate::transport::udp_session::{RelayMailbox, UdpAuthorityHub, UdpClientLink};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -88,9 +88,6 @@ const IO_DEADLINE: Duration = Duration::from_secs(8);
 const LEAVE_DRAIN: Duration = Duration::from_millis(500);
 const QUEUE_POLL: Duration = Duration::from_millis(5);
 const WATCHDOG_INTERVAL: Duration = Duration::from_secs(1);
-const MAX_HELD_BOOTSTRAP_JOBS: usize = MAX_CONCURRENT_BOOTSTRAP as usize;
-const MAX_HELD_BOOTSTRAP_BYTES: usize =
-    MAX_BOOTSTRAP_STREAM_BYTES * MAX_CONCURRENT_BOOTSTRAP as usize;
 
 fn blocking_runtime() -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
@@ -252,16 +249,17 @@ fn forget_relay_member(
     member_id: MemberId,
     members: &mut HashSet<MemberId>,
     skip_voters: &mut HashSet<MemberId>,
-    map_ready: &mut HashSet<MemberId>,
-    held_bootstraps: &mut HashMap<MemberId, Vec<Vec<u8>>>,
+    map_ready: &Mutex<HashSet<MemberId>>,
     facts: &Mutex<Vec<MasterLifecycleFact>>,
 ) -> bool {
     if !members.remove(&member_id) {
         return false;
     }
     skip_voters.remove(&member_id);
-    map_ready.remove(&member_id);
-    held_bootstraps.remove(&member_id);
+    map_ready
+        .lock()
+        .expect("bootstrap readiness poisoned")
+        .remove(&member_id);
     push_fact(facts, MasterLifecycleFact::MemberLeft { member_id });
     true
 }
@@ -744,7 +742,8 @@ impl MasterMatchStart {
 pub fn arm_master_bridge(
     intent: Res<MasterLaunchIntent>,
     role: Res<crate::RuntimeRole>,
-    authority: Res<AuthorityWorld>,
+    authority: Option<Res<AuthorityWorld>>,
+    prediction: Option<Res<crate::ClientPredictionState>>,
     descriptor: Option<Res<crate::MatchDescriptor>>,
     bridge: Option<Res<MasterBridge>>,
     udp_hub: Option<Res<UdpAuthorityHub>>,
@@ -755,10 +754,14 @@ pub fn arm_master_bridge(
         let Some(descriptor) = descriptor.as_deref() else {
             return;
         };
-        if !authority.0.has_world_clip() {
+        let world = authority
+            .as_ref()
+            .map(|authority| &authority.0)
+            .or_else(|| prediction.as_ref().map(|prediction| prediction.0.world()));
+        if world.is_none_or(|world| !world.has_world_clip()) {
             return;
         }
-        let Some(mut hello) = handshake_hello_for_udp(Some(&authority), Some(descriptor)) else {
+        let Some(mut hello) = handshake_for_match(world, Some(descriptor)) else {
             return;
         };
         hello.limits.max_packet_bytes = RELAY_PACKET_BYTES as u32;
@@ -1270,15 +1273,10 @@ pub fn register_master_bridge(app: &mut App) {
                 .after(frame::SessionSwapApplied),
         )
         .add_systems(Update, observe_master_bridge.in_set(crate::ClientSet::Diag));
-    if app
-        .world()
-        .resource::<crate::RuntimeRole>()
-        .runs_authority()
     {
         app.add_systems(
             FixedUpdate,
-            crate::transport::udp_launch::refresh_udp_authority_hello
-                .in_set(crate::AuthoritySet::Advance),
+            refresh_relay_authority_hello.in_set(crate::AuthoritySet::Advance),
         );
         app.add_systems(
             FixedUpdate,
@@ -1415,8 +1413,7 @@ fn apply_host(core: &mut HostMatchCore, event: HostMatchEvent) -> HostMatchApply
 
 fn execute_host_match_effects(
     effects: Vec<HostMatchEffect>,
-    map_ready: &mut HashSet<MemberId>,
-    held: &mut HashMap<MemberId, Vec<Vec<u8>>>,
+    map_ready: &Mutex<HashSet<MemberId>>,
     facts: &Mutex<Vec<MasterLifecycleFact>>,
     control_tx: &tokio::sync::mpsc::Sender<ControlFrame>,
     request_id: &mut u64,
@@ -1442,8 +1439,10 @@ fn execute_host_match_effects(
                 )?;
             }
             HostMatchEffect::PublishEnd { match_key } => {
-                map_ready.clear();
-                held.clear();
+                map_ready
+                    .lock()
+                    .expect("bootstrap readiness poisoned")
+                    .clear();
                 enqueue_control(
                     control_tx,
                     ControlFrame::Request(ControlRequest {
@@ -1457,7 +1456,10 @@ fn execute_host_match_effects(
                 )?;
             }
             HostMatchEffect::FlushBootstraps { member } => {
-                map_ready.insert(member);
+                map_ready
+                    .lock()
+                    .expect("bootstrap readiness poisoned")
+                    .insert(member);
             }
             HostMatchEffect::Enter { .. } => {}
             HostMatchEffect::CancelPeer {
@@ -1465,8 +1467,10 @@ fn execute_host_match_effects(
                 reason,
                 match_key,
             } => {
-                map_ready.remove(&member);
-                held.remove(&member);
+                map_ready
+                    .lock()
+                    .expect("bootstrap readiness poisoned")
+                    .remove(&member);
                 push_fact(
                     facts,
                     MasterLifecycleFact::AdmissionFailed {
@@ -1612,7 +1616,9 @@ async fn session_main(
         is_host,
     ));
     let (bootstrap_jobs, bootstrap_rx) =
-        tokio::sync::mpsc::channel::<(MemberId, Vec<u8>)>(MAX_CONCURRENT_BOOTSTRAP as usize);
+        tokio::sync::mpsc::channel::<(frame::MatchKey, MemberId, Vec<u8>)>(
+            MAX_CONCURRENT_BOOTSTRAP as usize,
+        );
     let (prepared_tx, mut prepared_rx) =
         tokio::sync::mpsc::channel::<HostMatchEvent>(MAX_CONCURRENT_BOOTSTRAP as usize);
     children.spawn(bootstrap_egress(
@@ -1647,12 +1653,11 @@ async fn session_main(
     };
     enqueue_control(&control_tx, ControlFrame::Request(first), role)?;
 
-    let mut session = SessionCore::default();
+    let mut session = SessionCore::for_connection(identity.room_id.0, identity.attempt_id);
     let mut host_match = HostMatchCore::default();
     let mut members: HashSet<MemberId> = HashSet::new();
     let mut skip_voters: HashSet<MemberId> = HashSet::new();
-    let mut map_ready: HashSet<MemberId> = HashSet::new();
-    let mut held_bootstraps: HashMap<MemberId, Vec<Vec<u8>>> = HashMap::new();
+    let map_ready = &bootstrap.host_map_ready;
     let mut last_view: Option<RoomView> = None;
     let mut started_epoch = 0_u32;
     let mut leave_request: Option<u64> = None;
@@ -1668,14 +1673,14 @@ async fn session_main(
         }
         if !closing
             && let Err(error) = pump_local_queues(
+                identity.match_key(),
                 &bootstrap,
                 &control_tx,
                 &bootstrap_jobs,
                 role,
                 is_host,
                 &mut request_id,
-                &map_ready,
-                &mut held_bootstraps,
+                map_ready,
             )
         {
             break Err(error);
@@ -1721,8 +1726,7 @@ async fn session_main(
                 &mut request_id,
                 &facts,
                 &mut host_match,
-                &mut map_ready,
-                &mut held_bootstraps,
+                map_ready,
                 role,
                 is_host,
                 closing,
@@ -1761,8 +1765,7 @@ async fn session_main(
                 let applied = apply_host(&mut host_match, event);
                 if let Err(error) = execute_host_match_effects(
                     applied.effects,
-                    &mut map_ready,
-                    &mut held_bootstraps,
+                    map_ready,
                     &facts,
                     &control_tx,
                     &mut request_id,
@@ -1776,8 +1779,7 @@ async fn session_main(
                     let tick = apply_host(&mut host_match, HostMatchEvent::Tick { now_ms: now_ms() });
                     if let Err(error) = execute_host_match_effects(
                         tick.effects,
-                        &mut map_ready,
-                        &mut held_bootstraps,
+                        map_ready,
                         &facts,
                         &control_tx,
                         &mut request_id,
@@ -1820,8 +1822,7 @@ async fn session_main(
                             &mut identity,
                             &mut members,
                             &mut skip_voters,
-                            &mut map_ready,
-                            &mut held_bootstraps,
+                            map_ready,
                             &mut last_view,
                             &mut started_epoch,
                             is_host,
@@ -1984,10 +1985,16 @@ fn publish_room_view(
     }
 }
 
-fn apply_authoritative_view(session: &mut SessionCore, view: &RoomView, skip_votes: u8) {
-    let revision = u32::try_from(view.revision).unwrap_or(u32::MAX);
+fn apply_authoritative_view(
+    session: &mut SessionCore,
+    view: &RoomView,
+    member: MemberId,
+    skip_votes: u8,
+) -> bool {
     let applied = session.apply(SessionEvent::AuthoritativeState {
-        revision,
+        session_id: view.room_id.0,
+        member,
+        revision: view.revision,
         match_epoch: view.epoch,
         in_match: view.phase.in_match(),
         start_nonce: view.epoch,
@@ -1999,6 +2006,7 @@ fn apply_authoritative_view(session: &mut SessionCore, view: &RoomView, skip_vot
     if applied.changed {
         diag::info!(Net, "session-transition {}", applied.transition);
     }
+    applied.changed
 }
 
 fn sync_membership_facts(
@@ -2006,8 +2014,7 @@ fn sync_membership_facts(
     view: &RoomView,
     members: &mut HashSet<MemberId>,
     skip_voters: &mut HashSet<MemberId>,
-    map_ready: &mut HashSet<MemberId>,
-    held_bootstraps: &mut HashMap<MemberId, Vec<Vec<u8>>>,
+    map_ready: &Mutex<HashSet<MemberId>>,
     facts: &Mutex<Vec<MasterLifecycleFact>>,
 ) {
     let previous_members: HashSet<MemberId> = previous
@@ -2016,14 +2023,7 @@ fn sync_membership_facts(
     let next: HashSet<MemberId> = view.members.iter().copied().collect();
 
     for member_id in previous_members.difference(&next) {
-        forget_relay_member(
-            *member_id,
-            members,
-            skip_voters,
-            map_ready,
-            held_bootstraps,
-            facts,
-        );
+        forget_relay_member(*member_id, members, skip_voters, map_ready, facts);
     }
     *members = next;
 }
@@ -2035,8 +2035,7 @@ fn handle_command(
     request_id: &mut u64,
     facts: &Mutex<Vec<MasterLifecycleFact>>,
     host_match: &mut HostMatchCore,
-    map_ready: &mut HashSet<MemberId>,
-    held: &mut HashMap<MemberId, Vec<Vec<u8>>>,
+    map_ready: &Mutex<HashSet<MemberId>>,
     role: &'static str,
     is_host: bool,
     closing: bool,
@@ -2122,7 +2121,6 @@ fn handle_command(
                 execute_host_match_effects(
                     applied.effects,
                     map_ready,
-                    held,
                     facts,
                     control_tx,
                     request_id,
@@ -2172,7 +2170,6 @@ fn handle_command(
             execute_host_match_effects(
                 applied.effects,
                 map_ready,
-                held,
                 facts,
                 control_tx,
                 request_id,
@@ -2192,7 +2189,6 @@ fn handle_command(
             execute_host_match_effects(
                 applied.effects,
                 map_ready,
-                held,
                 facts,
                 control_tx,
                 request_id,
@@ -2210,7 +2206,6 @@ fn handle_command(
             execute_host_match_effects(
                 applied.effects,
                 map_ready,
-                held,
                 facts,
                 control_tx,
                 request_id,
@@ -2239,7 +2234,6 @@ fn handle_command(
             execute_host_match_effects(
                 applied.effects,
                 map_ready,
-                held,
                 facts,
                 control_tx,
                 request_id,
@@ -2307,8 +2301,7 @@ fn handle_frame(
     identity: &mut SessionIdentity,
     members: &mut HashSet<MemberId>,
     skip_voters: &mut HashSet<MemberId>,
-    map_ready: &mut HashSet<MemberId>,
-    held_bootstraps: &mut HashMap<MemberId, Vec<Vec<u8>>>,
+    map_ready: &Mutex<HashSet<MemberId>>,
     last_view: &mut Option<RoomView>,
     started_epoch: &mut u32,
     is_host: bool,
@@ -2326,22 +2319,42 @@ fn handle_frame(
             role,
             "service sent a request on the client stream",
         )),
-        ControlFrame::Response(response) => apply_response(
-            response,
-            state,
-            facts,
-            session,
-            identity,
-            members,
-            skip_voters,
-            map_ready,
-            held_bootstraps,
-            last_view,
-            is_host,
-            role,
-        ),
+        ControlFrame::Response(response) => {
+            let (view, member) = match response.body {
+                ResponseBody::RoomCreated { member_id, view }
+                | ResponseBody::RoomJoined { member_id, view } => (view, member_id),
+                ResponseBody::RoomUpdated { view } => (view, identity.member_id),
+                ResponseBody::Error(error) => {
+                    return Err(TransportFault::new("control_rpc", role, error.to_string()));
+                }
+                ResponseBody::RoomLeft
+                | ResponseBody::Ack
+                | ResponseBody::Status(_)
+                | ResponseBody::RoomList { .. } => return Ok(()),
+            };
+            apply_room_view(
+                view,
+                member,
+                state,
+                facts,
+                control_tx,
+                request_id,
+                bootstrap,
+                session,
+                host_match,
+                identity,
+                members,
+                skip_voters,
+                map_ready,
+                last_view,
+                started_epoch,
+                is_host,
+                role,
+            )
+        }
         ControlFrame::RoomView(view) => apply_room_view(
             view,
+            identity.member_id,
             state,
             facts,
             control_tx,
@@ -2353,7 +2366,6 @@ fn handle_frame(
             members,
             skip_voters,
             map_ready,
-            held_bootstraps,
             last_view,
             started_epoch,
             is_host,
@@ -2364,8 +2376,10 @@ fn handle_frame(
             epoch,
             reason,
         } => {
-            identity.room_id = room_id;
-            identity.epoch = epoch;
+            if room_id != identity.room_id || epoch != identity.epoch {
+                return Ok(());
+            }
+            session.apply(SessionEvent::CloseSession);
             push_fact(facts, MasterLifecycleFact::SessionClosed { reason });
             publish_closed(state, *identity, reason);
             Ok(())
@@ -2380,7 +2394,6 @@ fn handle_frame(
             identity,
             skip_voters,
             map_ready,
-            held_bootstraps,
             bootstrap,
             is_host,
             role,
@@ -2390,81 +2403,9 @@ fn handle_frame(
     }
 }
 
-fn apply_response(
-    response: ControlResponse,
-    state: &Mutex<MasterBridgeState>,
-    facts: &Mutex<Vec<MasterLifecycleFact>>,
-    session: &mut SessionCore,
-    identity: &mut SessionIdentity,
-    members: &mut HashSet<MemberId>,
-    skip_voters: &mut HashSet<MemberId>,
-    map_ready: &mut HashSet<MemberId>,
-    held_bootstraps: &mut HashMap<MemberId, Vec<Vec<u8>>>,
-    last_view: &mut Option<RoomView>,
-    is_host: bool,
-    role: &'static str,
-) -> std::result::Result<(), TransportFault> {
-    match response.body {
-        ResponseBody::RoomCreated { member_id, view }
-        | ResponseBody::RoomJoined { member_id, view } => {
-            identity.room_id = view.room_id;
-            identity.member_id = member_id;
-            identity.epoch = view.epoch;
-            session.set_identity(view.room_id.0, 0, member_id);
-            sync_membership_facts(
-                last_view.as_ref(),
-                &view,
-                members,
-                skip_voters,
-                map_ready,
-                held_bootstraps,
-                facts,
-            );
-            apply_authoritative_view(session, &view, u8::try_from(skip_voters.len()).unwrap_or(0));
-            publish_room_view(
-                state,
-                *identity,
-                &view,
-                u8::try_from(skip_voters.len()).unwrap_or(0),
-                is_host,
-                member_id,
-            );
-            *last_view = Some(view);
-            Ok(())
-        }
-        ResponseBody::RoomUpdated { view } => {
-            identity.epoch = view.epoch;
-            sync_membership_facts(
-                last_view.as_ref(),
-                &view,
-                members,
-                skip_voters,
-                map_ready,
-                held_bootstraps,
-                facts,
-            );
-            apply_authoritative_view(session, &view, u8::try_from(skip_voters.len()).unwrap_or(0));
-            publish_room_view(
-                state,
-                *identity,
-                &view,
-                u8::try_from(skip_voters.len()).unwrap_or(0),
-                is_host,
-                identity.member_id,
-            );
-            *last_view = Some(view);
-            Ok(())
-        }
-        ResponseBody::RoomLeft | ResponseBody::Ack | ResponseBody::Status(_) => Ok(()),
-        ResponseBody::RoomList { .. } => Ok(()),
-        ResponseBody::Error(error) => {
-            Err(TransportFault::new("control_rpc", role, error.to_string()))
-        }
-    }
-}
-
 fn apply_room_view(
     view: RoomView,
+    local_member: MemberId,
     state: &Mutex<MasterBridgeState>,
     facts: &Mutex<Vec<MasterLifecycleFact>>,
     control_tx: &tokio::sync::mpsc::Sender<ControlFrame>,
@@ -2475,13 +2416,20 @@ fn apply_room_view(
     identity: &mut SessionIdentity,
     members: &mut HashSet<MemberId>,
     skip_voters: &mut HashSet<MemberId>,
-    map_ready: &mut HashSet<MemberId>,
-    held_bootstraps: &mut HashMap<MemberId, Vec<Vec<u8>>>,
+    map_ready: &Mutex<HashSet<MemberId>>,
     last_view: &mut Option<RoomView>,
     started_epoch: &mut u32,
     is_host: bool,
     role: &'static str,
 ) -> std::result::Result<(), TransportFault> {
+    // Acceptance owns the first mutation. Rejected views cannot touch bridge
+    // identity, membership, bootstrap atomics, admission, or UI projection.
+    let skip_votes =
+        u8::try_from(skip_voters.iter().filter(|id| view.contains(**id)).count()).unwrap_or(0);
+    if !apply_authoritative_view(session, &view, local_member, skip_votes) {
+        return Ok(());
+    }
+    identity.member_id = local_member;
     identity.room_id = view.room_id;
     identity.epoch = view.epoch;
     sync_membership_facts(
@@ -2490,10 +2438,8 @@ fn apply_room_view(
         members,
         skip_voters,
         map_ready,
-        held_bootstraps,
         facts,
     );
-    apply_authoritative_view(session, &view, u8::try_from(skip_voters.len()).unwrap_or(0));
     if is_host && view.phase.in_match() && view.epoch != 0 && *started_epoch != view.epoch {
         let applied = apply_host(
             host_match,
@@ -2505,7 +2451,6 @@ fn apply_room_view(
         execute_host_match_effects(
             applied.effects,
             map_ready,
-            held_bootstraps,
             facts,
             control_tx,
             request_id,
@@ -2523,7 +2468,6 @@ fn apply_room_view(
         execute_host_match_effects(
             applied.effects,
             map_ready,
-            held_bootstraps,
             facts,
             control_tx,
             request_id,
@@ -2554,8 +2498,7 @@ fn apply_peer_event(
     host_match: &mut HostMatchCore,
     identity: &SessionIdentity,
     skip_voters: &mut HashSet<MemberId>,
-    map_ready: &mut HashSet<MemberId>,
-    held_bootstraps: &mut HashMap<MemberId, Vec<Vec<u8>>>,
+    map_ready: &Mutex<HashSet<MemberId>>,
     bootstrap: &BootstrapLane,
     is_host: bool,
     role: &'static str,
@@ -2584,7 +2527,6 @@ fn apply_peer_event(
             execute_host_match_effects(
                 applied.effects,
                 map_ready,
-                held_bootstraps,
                 facts,
                 control_tx,
                 request_id,
@@ -2612,10 +2554,22 @@ fn apply_peer_event(
                         now_ms: now_ms(),
                     },
                 );
+                // A peer that reported its map and drew no effect is a peer
+                // that will wait out the match in the loading screen. Name the
+                // gate that owes it an offer.
+                if applied.effects.is_empty() {
+                    diag::warn!(
+                        Net,
+                        "peer map loaded admits nothing: epoch={epoch} host_phase={:?} host_match={:?} host_world={:?} peer={:?} — no bootstrap offer will follow",
+                        host_match.phase(),
+                        host_match.match_key(),
+                        host_match.host_world(),
+                        host_match.peer(member_id).map(|peer| peer.phase),
+                    );
+                }
                 execute_host_match_effects(
                     applied.effects,
                     map_ready,
-                    held_bootstraps,
                     facts,
                     control_tx,
                     request_id,
@@ -2687,39 +2641,18 @@ fn apply_peer_event(
     Ok(())
 }
 
-fn queue_host_offer(
-    jobs: &tokio::sync::mpsc::Sender<(MemberId, Vec<u8>)>,
-    member: MemberId,
-    bytes: Vec<u8>,
-    held: &mut HashMap<MemberId, Vec<Vec<u8>>>,
-    map_ready: &HashSet<MemberId>,
-    role: &'static str,
-) -> std::result::Result<(), TransportFault> {
-    if map_ready.contains(&member) {
-        return enqueue_bootstrap_job(jobs, member, bytes, role);
-    }
-    let job_count = held.values().map(Vec::len).sum::<usize>();
-    let held_bytes = held.values().flatten().map(Vec::len).sum::<usize>();
-    if job_count >= MAX_HELD_BOOTSTRAP_JOBS
-        || held_bytes.saturating_add(bytes.len()) > MAX_HELD_BOOTSTRAP_BYTES
-    {
-        return Err(TransportFault::new(
-            "bootstrap_hold",
-            role,
-            "bootstrap queue overload",
-        ));
-    }
-    held.entry(member).or_default().push(bytes);
-    Ok(())
-}
-
 fn enqueue_bootstrap_job(
-    jobs: &tokio::sync::mpsc::Sender<(MemberId, Vec<u8>)>,
+    match_key: frame::MatchKey,
+    jobs: &tokio::sync::mpsc::Sender<(frame::MatchKey, MemberId, Vec<u8>)>,
     member: MemberId,
     bytes: Vec<u8>,
     role: &'static str,
 ) -> std::result::Result<(), TransportFault> {
-    classify_try_send(jobs.try_send((member, bytes)), "bootstrap_job").map_err(|loss| {
+    if !matches!(decode_bootstrap(&bytes), Ok(Some(BootstrapMessage::Offer { epoch, .. })) if !match_key.is_none() && epoch == match_key.match_epoch)
+    {
+        return Ok(());
+    }
+    classify_try_send(jobs.try_send((match_key, member, bytes)), "bootstrap_job").map_err(|loss| {
         TransportFault::new(
             match loss {
                 QueueLoss::Full { operation } | QueueLoss::Closed { operation } => operation,
@@ -2731,33 +2664,37 @@ fn enqueue_bootstrap_job(
 }
 
 fn pump_local_queues(
+    match_key: frame::MatchKey,
     bootstrap: &BootstrapLane,
     control_tx: &tokio::sync::mpsc::Sender<ControlFrame>,
-    jobs: &tokio::sync::mpsc::Sender<(MemberId, Vec<u8>)>,
+    jobs: &tokio::sync::mpsc::Sender<(frame::MatchKey, MemberId, Vec<u8>)>,
     role: &'static str,
     is_host: bool,
     request_id: &mut u64,
-    map_ready: &HashSet<MemberId>,
-    held: &mut HashMap<MemberId, Vec<Vec<u8>>>,
+    map_ready: &Mutex<HashSet<MemberId>>,
 ) -> std::result::Result<(), TransportFault> {
-    if is_host {
-        let ready: Vec<MemberId> = held
-            .keys()
-            .copied()
-            .filter(|member| map_ready.contains(member))
-            .collect();
-        for member in ready {
-            for bytes in held.remove(&member).unwrap_or_default() {
-                enqueue_bootstrap_job(jobs, member, bytes, role)?;
-            }
-        }
-    }
     for (peer, bytes) in bootstrap.take_to_worker() {
         if is_host {
             let Some(member) = peer else {
                 continue;
             };
-            queue_host_offer(jobs, member, bytes, held, map_ready, role)?;
+            if map_ready
+                .lock()
+                .expect("bootstrap readiness poisoned")
+                .contains(&member)
+            {
+                enqueue_bootstrap_job(match_key, jobs, member, bytes, role)?;
+            } else {
+                // The capture side already refuses to snapshot a peer that has
+                // not reported its map, so reaching here means the readiness
+                // was dropped between the two — the peer would otherwise wait
+                // out the whole match with nothing said.
+                diag::warn!(
+                    Net,
+                    "bootstrap offer dropped for a peer that is not map-ready ({} bytes)",
+                    bytes.len()
+                );
+            }
             continue;
         }
         match decode_bootstrap(&bytes) {
@@ -2793,7 +2730,7 @@ fn pump_local_queues(
 
 async fn bootstrap_egress(
     connection: quinn::Connection,
-    mut jobs: tokio::sync::mpsc::Receiver<(MemberId, Vec<u8>)>,
+    mut jobs: tokio::sync::mpsc::Receiver<(frame::MatchKey, MemberId, Vec<u8>)>,
     prepared: tokio::sync::mpsc::Sender<HostMatchEvent>,
     cancel: CancellationToken,
     role: &'static str,
@@ -2802,7 +2739,7 @@ async fn bootstrap_egress(
         tokio::select! {
             _ = cancel.cancelled() => return Ok(()),
             job = jobs.recv() => {
-                let Some((member, bytes)) = job else {
+                let Some((match_key, member, bytes)) = job else {
                     return Ok(());
                 };
                 send_bootstrap_stream(&connection, member, &bytes, &cancel, role).await?;
@@ -2814,6 +2751,7 @@ async fn bootstrap_egress(
                 {
                     classify_try_send(
                         prepared.try_send(HostMatchEvent::BootstrapPrepared {
+                            match_key,
                             member,
                             bootstrap_id,
                             connection_id: Some(conn.0),
@@ -3175,4 +3113,209 @@ fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
         return Err(format!("{} contains no certificates", path.display()).into());
     }
     Ok(certs)
+}
+
+#[cfg(test)]
+mod acceptance_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_room_view_has_no_domain_effects() {
+        let member = MemberId([2; 16]);
+        let view = RoomView {
+            room_id: AdvertId([1; 16]),
+            name: "room".into(),
+            host: member,
+            members: vec![member],
+            map: "mp_rust".into(),
+            mode: "dm".into(),
+            joinable: true,
+            revision: u64::from(u32::MAX) + 10,
+            epoch: 7,
+            phase: master_protocol::RoomPhase::Loading,
+            max_players: 8,
+            requires: ContentFlags(1),
+        };
+        let mut identity = SessionIdentity::unassigned(1);
+        let state = Mutex::new(MasterBridgeState::Connecting { identity });
+        let facts = Mutex::new(Vec::new());
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let bootstrap = BootstrapLane::new();
+        let mut session = SessionCore::default();
+        let mut host = HostMatchCore::default();
+        let mut members = HashSet::new();
+        let mut voters = HashSet::new();
+        let ready = &bootstrap.host_map_ready;
+        let mut last = None;
+        let mut started = 0;
+        let mut request = 1;
+        apply_room_view(
+            view.clone(),
+            member,
+            &state,
+            &facts,
+            &tx,
+            &mut request,
+            &bootstrap,
+            &mut session,
+            &mut host,
+            &mut identity,
+            &mut members,
+            &mut voters,
+            ready,
+            &mut last,
+            &mut started,
+            true,
+            "test",
+        )
+        .unwrap();
+        voters.insert(member);
+        ready.lock().unwrap().insert(member);
+        let before = (
+            identity,
+            state.lock().unwrap().clone(),
+            session.view().clone(),
+            members.clone(),
+            voters.clone(),
+            ready.lock().unwrap().clone(),
+            last.clone(),
+            (
+                started,
+                request,
+                bootstrap.epoch(),
+                host.match_key(),
+                host.phase(),
+            ),
+        );
+        let mut old = view.clone();
+        old.revision -= 1;
+        old.members.clear();
+        let mut foreign = view.clone();
+        foreign.room_id = AdvertId([9; 16]);
+        foreign.epoch += 1;
+        foreign.members.clear();
+        for rejected in [old, foreign, view.clone()] {
+            apply_room_view(
+                rejected,
+                member,
+                &state,
+                &facts,
+                &tx,
+                &mut request,
+                &bootstrap,
+                &mut session,
+                &mut host,
+                &mut identity,
+                &mut members,
+                &mut voters,
+                ready,
+                &mut last,
+                &mut started,
+                true,
+                "test",
+            )
+            .unwrap();
+            let after = (
+                identity,
+                state.lock().unwrap().clone(),
+                session.view().clone(),
+                members.clone(),
+                voters.clone(),
+                ready.lock().unwrap().clone(),
+                last.clone(),
+                (
+                    started,
+                    request,
+                    bootstrap.epoch(),
+                    host.match_key(),
+                    host.phase(),
+                ),
+            );
+            assert!(before == after);
+            assert!(facts.lock().unwrap().is_empty());
+            assert!(rx.try_recv().is_err());
+        }
+        let mut newer = view;
+        newer.revision += 1;
+        newer.name = "updated".into();
+        apply_room_view(
+            newer.clone(),
+            member,
+            &state,
+            &facts,
+            &tx,
+            &mut request,
+            &bootstrap,
+            &mut session,
+            &mut host,
+            &mut identity,
+            &mut members,
+            &mut voters,
+            ready,
+            &mut last,
+            &mut started,
+            true,
+            "test",
+        )
+        .unwrap();
+        assert_eq!(last, Some(newer));
+    }
+}
+
+fn handshake_for_match(
+    world: Option<&sim::SimWorld>,
+    descriptor: Option<&MatchDescriptor>,
+) -> Option<HandshakeHello> {
+    let descriptor = descriptor?;
+    let mut content = ContentFingerprint {
+        map: descriptor.map,
+        weapons: descriptor.weapons,
+        classes: descriptor.classes,
+        gameplay: 0,
+        models: 0,
+    };
+    if let Some(world) = world.filter(|world| world.has_world_clip()) {
+        let live = ContentFingerprint::from_world(world);
+        content.gameplay = live.gameplay;
+        content.models = live.models;
+    }
+    Some(HandshakeHello::current(content))
+}
+
+fn refresh_relay_authority_hello(
+    hub: Option<ResMut<UdpAuthorityHub>>,
+    authority: Option<Res<AuthorityWorld>>,
+    descriptor: Option<Res<MatchDescriptor>>,
+) {
+    let Some(mut hub) = hub else {
+        return;
+    };
+    let Some(descriptor) = descriptor.as_deref() else {
+        return;
+    };
+    let Some(authority) = authority else {
+        return;
+    };
+    let Some(hello) = handshake_for_match(Some(&authority.0), Some(descriptor)) else {
+        return;
+    };
+    let content = hello.content;
+    if hub.hello.content == content {
+        return;
+    }
+    let was = hub.hello.content;
+
+    if (was.map, was.weapons, was.classes) != (content.map, content.weapons, content.classes) {
+        diag::info!(
+            Net,
+            "udp authority content now map={:016x} weapons={:016x} classes={:016x} (was {:016x} / {:016x} / {:016x})",
+            content.map,
+            content.weapons,
+            content.classes,
+            was.map,
+            was.weapons,
+            was.classes
+        );
+    }
+    hub.hello.content = content;
 }

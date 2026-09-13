@@ -320,12 +320,15 @@ pub fn listen_prediction_needs_content(pred: &ClientPrediction, authority: &sim:
 
 pub fn arm_listen_prediction(
     role: Res<RuntimeRole>,
-    authority: Res<AuthorityWorld>,
+    authority: Option<Res<AuthorityWorld>>,
     mut prediction: ResMut<ClientPredictionState>,
 ) {
     if !matches!(*role, RuntimeRole::Listen | RuntimeRole::Client) {
         return;
     }
+    let Some(authority) = authority else {
+        return;
+    };
     if !listen_prediction_needs_content(&prediction.0, &authority.0) {
         return;
     }
@@ -903,7 +906,7 @@ pub fn predict_local_move(
     if *role != RuntimeRole::Replay {
         let _tick = clock.tick(time.delta_secs() * 1000.0);
     }
-    if !gate.cmds_enabled || !prediction.0.is_armed() || !template.ready {
+    if !gate.cmds_enabled || !prediction.0.is_armed() || !template.ready || !cg_clock.started() {
         return;
     }
 

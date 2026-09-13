@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use dpvs_iw4::{xmodel_get_lod_for_dist, xmodel_lod_camera_dist, xmodel_lod_scaled_dists};
 use render_material::RuntimeMaterialCatalog;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SmodelPassMaterial {
     pub model_lighting_required: bool,
     pub color: Option<Handle<Image>>,

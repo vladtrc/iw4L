@@ -268,9 +268,14 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         .iter()
         .map(|capabilities| capabilities.trace_geom())
         .collect();
-    let cmodels = world.clip_cmodels().clone();
+    let content = world.content();
+    let cmodels = content.clip_cmodels();
     let players = world.alive_collision_poses();
-    let (brushes, bsp, mesh) = world.take_clip_map();
+    let (brushes, bsp, mesh) = (
+        content.clip_brushes(),
+        content.clip_bsp(),
+        content.clip_mesh(),
+    );
     let time = level_time_ms(tick);
     let start = projectile.origin;
     let end = projectile.origin_at(time);
@@ -469,7 +474,7 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
             surface_flags: None,
         });
     }
-    world.restore_clip_map(brushes, bsp, mesh);
+
     if detonated.is_empty() {
         if let Some(row) = world.projectile_mut_by_number(entnum) {
             *row = projectile;

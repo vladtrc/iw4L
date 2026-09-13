@@ -1,9 +1,9 @@
 use asset_core::{AssetEdge, AssetEdgeReason, MaterialSpace, WalkLocalMaterialIndex};
-use asset_material::MaterialCatalog;
+use asset_material::MaterialDefinitions;
 
 pub fn capture_xmodel_material_slots(
     authored: &[Option<WalkLocalMaterialIndex>],
-    materials: Option<&MaterialCatalog>,
+    materials: Option<&MaterialDefinitions>,
 ) -> (Vec<Option<String>>, Vec<AssetEdge<MaterialSpace>>) {
     let names = authored
         .iter()
@@ -44,7 +44,7 @@ pub fn stamp_xmodel_material_edges(
     names: &mut [Option<String>],
     edges: &mut Vec<AssetEdge<MaterialSpace>>,
     authored: &[Option<WalkLocalMaterialIndex>],
-    materials: &MaterialCatalog,
+    materials: &MaterialDefinitions,
 ) {
     let n = names.len().max(authored.len());
     edges.resize(n, AssetEdge::Absent);

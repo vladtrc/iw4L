@@ -87,7 +87,7 @@ pub fn build_t5_world_draw(
     s: &ZoneStream<'_>,
     geometry: GfxWorldGeometry,
     materials: MaterialCatalog,
-) -> Result<WorldDraw, WorldMeshError> {
+) -> Result<(WorldDraw, MaterialCatalog), WorldMeshError> {
     let Some(vertices) = geometry.vertices else {
         return Err(WorldMeshError::NoGeometry);
     };
@@ -404,81 +404,81 @@ pub fn build_t5_world_draw(
         })
         .transpose()?;
 
-    Ok(WorldDraw {
-        sky_model: None,
-        t5_sun_light,
-        batches,
-        lightmap,
-        stats,
-        retail_vertices: RetailWorldVertexPayload::T5(retail_vertices),
-        vertex_layer,
-        surface_vertex_layer,
-        surface_first_vertex,
-        surface_draw_fields,
-        positions,
-        normals,
-        tangents,
-        colors,
-        texture_uvs,
-        lightmap_uvs,
-        packed_indices,
-        surface_index_ranges,
-        surface_batch_ranges,
-        surface_lightmapped,
-        surface_lightmap_indices,
-        surface_reflection_probes,
-        surface_primary_lights,
-        sort_key_distortion: None,
-        capture: world_capture_from_casters(surface_casts_sun_shadow),
-        brush_models: Vec::new(),
-        brush_model_bounds: Vec::new(),
-        surface_materials,
-        global_materials: MaterialCatalog::default(),
-        material_asset_ids: (0..materials.materials.len()).map(Some).collect(),
-        materials,
-        primary_lights,
-        light_defs: s
-            .light_defs()
-            .iter()
-            .filter_map(|def| {
-                Some(crate::world_draw::CapturedLightDef {
-                    name: crate::AssetRef::decode(s.cstr(def.name?).ok()?),
-                    attenuation_image_name: def
-                        .attenuation_image_name
-                        .and_then(|p| s.cstr(p).ok())
-                        .map(str::to_owned),
-                    attenuation_width: def.attenuation_width,
-                    attenuation_sampler: def.attenuation_sampler,
-                    lmap_lookup_start: def.lmap_lookup_start,
+    Ok((
+        WorldDraw {
+            sky_model: None,
+            t5_sun_light,
+            batches,
+            lightmap,
+            stats,
+            retail_vertices: RetailWorldVertexPayload::T5(retail_vertices),
+            vertex_layer,
+            surface_vertex_layer,
+            surface_first_vertex,
+            surface_draw_fields,
+            positions,
+            normals,
+            tangents,
+            colors,
+            texture_uvs,
+            lightmap_uvs,
+            packed_indices,
+            surface_index_ranges,
+            surface_batch_ranges,
+            surface_lightmapped,
+            surface_lightmap_indices,
+            surface_reflection_probes,
+            surface_primary_lights,
+            sort_key_distortion: None,
+            capture: world_capture_from_casters(surface_casts_sun_shadow),
+            brush_models: Vec::new(),
+            brush_model_bounds: Vec::new(),
+            surface_materials,
+            primary_lights,
+            light_defs: s
+                .light_defs()
+                .iter()
+                .filter_map(|def| {
+                    Some(crate::world_draw::CapturedLightDef {
+                        name: crate::AssetRef::decode(s.cstr(def.name?).ok()?),
+                        attenuation_image_name: def
+                            .attenuation_image_name
+                            .and_then(|p| s.cstr(p).ok())
+                            .map(str::to_owned),
+                        attenuation_width: def.attenuation_width,
+                        attenuation_sampler: def.attenuation_sampler,
+                        lmap_lookup_start: def.lmap_lookup_start,
+                    })
                 })
-            })
-            .collect(),
-        sun_primary_light_count: geometry.sun_primary_light_index as u32,
-        light_region_hulls: None,
-        shadow_geometry: Vec::new(),
-        reflection_probes,
-        dpvs,
-        outdoor_image_name: None,
-        outdoor_image: None,
-        outdoor_lookup: [0; 16],
-        t5_sky_dynamic_intensity: geometry
-            .sky_dynamic_intensity_bits
-            .map(|v| v.map(f32::from_bits))
-            .filter(|v| v.iter().all(|f| f.is_finite())),
-        t5_sun_parse_exposure: geometry
-            .sun_parse_exposure_bits
-            .map(f32::from_bits)
-            .filter(|v| v.is_finite()),
-        t5_tree_scatter_intensity: geometry
-            .sun_parse_tree_scatter_intensity_bits
-            .map(f32::from_bits)
-            .filter(|v| v.is_finite()),
-        t5_tree_scatter_amount: geometry
-            .sun_parse_tree_scatter_amount_bits
-            .map(f32::from_bits)
-            .filter(|v| v.is_finite()),
-        t5_exposure_volume_count: geometry.exposure_volume_count as u32,
-    })
+                .collect(),
+            sun_primary_light_count: geometry.sun_primary_light_index as u32,
+            light_region_hulls: None,
+            shadow_geometry: Vec::new(),
+            reflection_probes,
+            dpvs,
+            outdoor_image_name: None,
+            outdoor_image: None,
+            outdoor_lookup: [0; 16],
+            t5_sky_dynamic_intensity: geometry
+                .sky_dynamic_intensity_bits
+                .map(|v| v.map(f32::from_bits))
+                .filter(|v| v.iter().all(|f| f.is_finite())),
+            t5_sun_parse_exposure: geometry
+                .sun_parse_exposure_bits
+                .map(f32::from_bits)
+                .filter(|v| v.is_finite()),
+            t5_tree_scatter_intensity: geometry
+                .sun_parse_tree_scatter_intensity_bits
+                .map(f32::from_bits)
+                .filter(|v| v.is_finite()),
+            t5_tree_scatter_amount: geometry
+                .sun_parse_tree_scatter_amount_bits
+                .map(f32::from_bits)
+                .filter(|v| v.is_finite()),
+            t5_exposure_volume_count: geometry.exposure_volume_count as u32,
+        },
+        materials,
+    ))
 }
 
 const T5_MATERIAL_GAME_FLAG_SKY: u8 = 8;
@@ -487,7 +487,7 @@ pub fn build_t5_world_mesh(
     s: &ZoneStream<'_>,
     geometry: GfxWorldGeometry,
 ) -> Result<(Mesh, WorldMeshStats), WorldMeshError> {
-    let draw = build_t5_world_draw(s, geometry, MaterialCatalog::default())?;
+    let (draw, _) = build_t5_world_draw(s, geometry, MaterialCatalog::default())?;
     let Some(batch) = draw.batches.into_iter().next() else {
         return Err(WorldMeshError::NoGeometry);
     };

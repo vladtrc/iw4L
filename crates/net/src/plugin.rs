@@ -47,7 +47,7 @@ impl Plugin for NetPlugin {
             .init_resource::<LocalPresentClient>()
             .init_resource::<crate::MasterMatchStart>()
             .init_resource::<crate::client::presented::CgViewweaponAim>();
-        if self.role.runs_authority() || self.role == RuntimeRole::Replay {
+        {
             configure_authority_sets(app);
             app.init_resource::<AuthorityClock>()
                 .init_resource::<ClientCommandInbox>()
@@ -67,8 +67,7 @@ impl Plugin for NetPlugin {
             app.init_resource::<ListenLoopback>();
             app.init_resource::<crate::authority::runtime::AuthorityInputGate>();
             if self.role == RuntimeRole::Client {
-                app.init_resource::<crate::authority::runtime::AuthorityWorld>()
-                    .init_resource::<crate::authority::runtime::AuthorityLoadHold>()
+                app.init_resource::<crate::authority::runtime::AuthorityLoadHold>()
                     .init_resource::<crate::authority::inbox::AuthorityClock>();
             }
             if !self.role.runs_authority() {
@@ -80,12 +79,7 @@ impl Plugin for NetPlugin {
             crate::client::entity_event_dispatch::register_entity_event_dispatch(app);
         }
 
-        if self.role == RuntimeRole::Listen
-            || self.role == RuntimeRole::Dedicated
-            || self.role == RuntimeRole::Replay
-        {
-            crate::authority::runtime::register_listen_runtime(app);
-        }
+        crate::authority::runtime::register_listen_runtime(app);
         if self.role == RuntimeRole::Listen
             || self.role == RuntimeRole::Client
             || self.role == RuntimeRole::Replay
@@ -98,7 +92,12 @@ impl Plugin for NetPlugin {
         if master_enabled {
             crate::transport::master::register_master_bridge(app);
         } else {
-            crate::transport::udp_launch::register_udp_launch(app);
+            app.add_systems(
+                Update,
+                crate::signon::drive_match_boundary
+                    .in_set(crate::ClientSet::Load)
+                    .after(frame::SessionSwapApplied),
+            );
         }
         crate::observe::register(app);
         app.insert_resource(crate::DeferHostWorldReady::from_env())

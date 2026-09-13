@@ -113,65 +113,121 @@ pub struct ExtractedStaticGeometry {
     pub smodel_cached_vertices: Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
 }
 
+/// Installed world and material resources. Longer-lived than a colour frame:
+/// static geometry, ports, catalog and prepared tables stay here.
 #[derive(Resource, Clone, Debug, Default)]
-pub struct ExtractedExactColour {
-    pub frame_products: ExtractedRenderFrameProducts,
+pub struct InstalledRenderWorld(Arc<RenderWorldData>);
+
+impl InstalledRenderWorld {
+    pub fn new(data: RenderWorldData) -> Self {
+        Self(Arc::new(data))
+    }
+}
+
+impl std::ops::Deref for InstalledRenderWorld {
+    type Target = RenderWorldData;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// Consumed by publication; no mutable access through an installed handle.
+#[derive(Clone, Debug, Default)]
+pub struct RenderWorldData {
     pub generation: MaterialGenerationId,
     pub world_generation: frame::WorldGeneration,
     pub smc_revision: Option<u64>,
+    pub ports: Arc<Vec<super::AdmittedExactPort>>,
+    pub static_geometry: Arc<ExtractedStaticGeometry>,
+    pub smodel_pretess_indices: std::sync::Arc<Vec<u16>>,
+    pub smodel_index_layout_revision: u64,
+    pub smc_index_baked: Arc<Vec<u16>>,
+    pub sampler_table: Option<RetailSamplerTable>,
+    pub image_handles: super::gpu_resources::RuntimeImageHandles,
+    pub catalog: Option<Arc<RuntimeMaterialCatalog>>,
+    pub prepared: Option<Arc<PreparedMaterialTable>>,
+    pub sorted_material_names: Arc<Vec<String>>,
+    pub shader_program_names: Arc<Vec<Option<String>>>,
+}
 
+/// Commands and changed data of the current frame. Names the installed world by
+/// generation instead of carrying world/material tables again.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct PublishedRenderFrame {
+    world: InstalledRenderWorld,
+    data: Arc<RenderFrameData>,
+}
+
+impl PublishedRenderFrame {
+    pub fn seal(world: InstalledRenderWorld, data: RenderFrameData) -> Self {
+        assert_eq!(world.generation, data.generation);
+        assert_eq!(world.world_generation, data.world_generation);
+        Self {
+            world,
+            data: Arc::new(data),
+        }
+    }
+    pub fn world(&self) -> &InstalledRenderWorld {
+        &self.world
+    }
+}
+
+impl std::ops::Deref for PublishedRenderFrame {
+    type Target = RenderFrameData;
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RenderFrameData {
+    pub frame_products: ExtractedRenderFrameProducts,
+    pub generation: MaterialGenerationId,
+    pub world_generation: frame::WorldGeneration,
     pub sun_shadow: Option<SunShadowForcedFrame>,
-
     pub warm_pipelines: bool,
     pub pipeline_world_materials: Arc<std::collections::HashSet<u16>>,
     pub pipeline_smodel_materials: Arc<std::collections::HashSet<u16>>,
-
-    pub ports: Vec<super::AdmittedExactPort>,
-    pub static_geometry: ExtractedStaticGeometry,
-
-    pub smodel_pretess_indices: std::sync::Arc<Vec<u16>>,
-
-    pub smodel_index_layout_revision: u64,
     pub smc_vb_patches: Vec<(lighting_iw4::SmcPatchLock, Vec<u8>)>,
     pub smc_ib_patches: Vec<(u32, Vec<u8>)>,
-    pub smc_index_baked: Vec<u16>,
     pub xmodel_vertices: Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>,
     pub xmodel_indices: Arc<Vec<u32>>,
     pub xmodel_surface_ranges: Arc<Vec<(u32, u32)>>,
     pub xmodel_vertex_refusal: Option<render_frame::RetailPackedVertexRefusal>,
     pub fx_vertices: Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>,
     pub fx_indices: Arc<Vec<u32>>,
-    pub fx_surface_ranges: Vec<(u32, u32)>,
+    pub fx_surface_ranges: Arc<Vec<(u32, u32)>>,
     pub fx_vertex_refusal: Option<render_frame::RetailPackedVertexRefusal>,
     pub fx_revision: u64,
     pub xmodel_revision: u64,
-
     pub xmodel_topology_revision: u64,
-
     pub xmodel_packed_segments: render_frame::PackedSegments,
     pub particle_cloud_vertices: Arc<Vec<[u8; fx_iw4::GFX_POS_TEX_VERTEX_STRIDE]>>,
     pub particle_cloud_indices: Arc<Vec<u32>>,
-    pub particle_cloud_surface_ranges: Vec<(u32, u32)>,
+    pub particle_cloud_surface_ranges: Arc<Vec<(u32, u32)>>,
     pub mark_mesh_vertices: Arc<Vec<[u8; asset_iw4::size::GFX_WORLD_VERTEX]>>,
     pub mark_mesh_indices: Arc<Vec<u16>>,
-    pub mark_mesh_surface_ranges: Vec<(u32, u32)>,
+    pub mark_mesh_surface_ranges: Arc<Vec<(u32, u32)>>,
     pub mark_mesh_revision: u64,
     pub glass_mesh_vertices: Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>,
     pub glass_mesh_indices: Arc<Vec<u32>>,
-    pub glass_mesh_surface_ranges: Vec<(u32, u32)>,
+    pub glass_mesh_surface_ranges: Arc<Vec<(u32, u32)>>,
     pub glass_mesh_revision: u64,
     pub glass_mesh_vertex_refusal: Option<render_frame::RetailPackedVertexRefusal>,
-    pub sampler_table: Option<RetailSamplerTable>,
-    pub image_handles: super::gpu_resources::RuntimeImageHandles,
-
-    pub catalog: Option<Arc<RuntimeMaterialCatalog>>,
-    pub prepared: Option<Arc<PreparedMaterialTable>>,
-
     pub exec_frame: MaterialExecFrame,
+}
 
-    pub sorted_material_names: Vec<String>,
+/// Borrowed view of the two extract resources. Frame does not own world tables.
+#[derive(Clone, Copy)]
+struct ExtractedColourRefs<'a> {
+    world: &'a InstalledRenderWorld,
+    frame: &'a PublishedRenderFrame,
+}
 
-    pub shader_program_names: Vec<Option<String>>,
+impl<'a> ExtractedColourRefs<'a> {
+    fn new(world: &'a InstalledRenderWorld, frame: &'a PublishedRenderFrame) -> Self {
+        Self { world, frame }
+    }
 }
 
 mod geometry;
@@ -262,12 +318,15 @@ struct ExactColourPortGpu {
 #[derive(Resource, Default)]
 struct ExactColourBindingCache {
     generation: MaterialGenerationId,
-
     views_revision: u64,
-
     textures: [HashMap<BoundTextureKey, Arc<[u32]>>; 4],
+}
 
-    shadow_textures: HashMap<BoundTextureKey, Arc<[u32]>>,
+#[derive(Resource, Default)]
+struct ExactShadowBindingCache {
+    generation: MaterialGenerationId,
+    views_revision: u64,
+    textures: HashMap<BoundTextureKey, Arc<[u32]>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -277,18 +336,40 @@ struct BoundTextureKey {
 }
 
 impl ExactColourBindingCache {
-    fn clear_textures(&mut self) {
+    fn open_epoch(&mut self, generation: MaterialGenerationId, views_revision: u64) {
+        if self.generation == generation && self.views_revision == views_revision {
+            return;
+        }
+        self.generation = generation;
+        self.views_revision = views_revision;
         for slots in &mut self.textures {
             slots.clear();
         }
-        self.shadow_textures.clear();
+    }
+
+    fn interned_n(&self) -> usize {
+        self.textures.iter().map(HashMap::len).sum()
     }
 }
 
-fn open_colour_table_epoch(
+impl ExactShadowBindingCache {
+    fn open_epoch(&mut self, generation: MaterialGenerationId, views_revision: u64) {
+        if self.generation == generation && self.views_revision == views_revision {
+            return;
+        }
+        self.generation = generation;
+        self.views_revision = views_revision;
+        self.textures.clear();
+    }
+
+    fn clear_textures(&mut self) {
+        self.textures.clear();
+    }
+}
+
+fn open_scene_table_epoch(
     binding_cache: &mut ExactColourBindingCache,
     scene_tables: &mut SceneTextureTables,
-    shadow_table: Option<&mut ShadowTextureTable>,
     scratch: &mut ColourSubmitScratch,
     uploaded: &RuntimeUploadedImageRegistry,
     generation: MaterialGenerationId,
@@ -301,18 +382,23 @@ fn open_colour_table_epoch(
         table.open_epoch(epoch);
     }
     scratch.prepared_scene_epoch = epoch;
-    if let Some(shadow_table) = shadow_table {
-        shadow_table.open_epoch(epoch);
-        scratch.prepared_shadow_epoch = epoch;
-    }
+    binding_cache.open_epoch(generation, uploaded.views_revision());
+}
 
-    let views_revision = uploaded.views_revision();
-    if binding_cache.generation == generation && binding_cache.views_revision == views_revision {
-        return;
-    }
-    binding_cache.generation = generation;
-    binding_cache.views_revision = views_revision;
-    binding_cache.clear_textures();
+fn open_shadow_table_epoch(
+    binding_cache: &mut ExactShadowBindingCache,
+    shadow_table: &mut ShadowTextureTable,
+    scratch: &mut ColourSubmitScratch,
+    uploaded: &RuntimeUploadedImageRegistry,
+    generation: MaterialGenerationId,
+) {
+    let epoch = TableEpoch {
+        generation,
+        replaced_revision: uploaded.replaced_revision(),
+    };
+    shadow_table.open_epoch(epoch);
+    scratch.prepared_shadow_epoch = epoch;
+    binding_cache.open_epoch(generation, uploaded.views_revision());
 }
 
 #[derive(Resource, Default)]
@@ -1055,11 +1141,11 @@ fn reset_exact_colour_census(census: &mut ExactColourSubmitCensus) {
 }
 
 fn exec_tables(
-    extracted: &ExtractedExactColour,
+    extracted: ExtractedColourRefs<'_>,
 ) -> Option<(&RuntimeMaterialCatalog, &PreparedMaterialTable)> {
     Some((
-        extracted.catalog.as_deref()?,
-        extracted.prepared.as_deref()?,
+        extracted.world.catalog.as_deref()?,
+        extracted.world.prepared.as_deref()?,
     ))
 }
 
@@ -1789,7 +1875,7 @@ fn world_pretess_dest_ib(
 }
 
 fn smodel_pretess_submit_refusal(
-    extracted: &ExtractedExactColour,
+    extracted: ExtractedColourRefs<'_>,
     placement: u32,
     cache_index: u16,
     range: SmodelPretessRange,
@@ -1797,7 +1883,7 @@ fn smodel_pretess_submit_refusal(
     if cache_index == 0 {
         return Err(GpuSubmitRefusal::SmodelCacheIndexEmpty { placement });
     }
-    if !extracted.smc_index_baked.contains(&cache_index) {
+    if !extracted.world.smc_index_baked.contains(&cache_index) {
         return Err(GpuSubmitRefusal::SmodelCacheIndicesMissing { cache_index });
     }
     let end = range
@@ -1806,7 +1892,7 @@ fn smodel_pretess_submit_refusal(
         .and_then(|end| usize::try_from(end).ok());
     if range.count == 0
         || range.count % 3 != 0
-        || end.is_none_or(|end| end > extracted.smodel_pretess_indices.len())
+        || end.is_none_or(|end| end > extracted.world.smodel_pretess_indices.len())
     {
         return Err(GpuSubmitRefusal::SmodelCacheIndicesMissing { cache_index });
     }
@@ -1959,6 +2045,60 @@ fn exec_refusal_row(
     )
 }
 
+struct DrawRefusalCensus {
+    on: bool,
+    submit: BTreeMap<(&'static str, &'static str), u32>,
+    exec: BTreeMap<(&'static str, &'static str), u32>,
+}
+
+impl DrawRefusalCensus {
+    fn new(on: bool) -> Self {
+        Self {
+            on,
+            submit: BTreeMap::new(),
+            exec: BTreeMap::new(),
+        }
+    }
+
+    fn taking(
+        on: bool,
+        submit: BTreeMap<(&'static str, &'static str), u32>,
+        exec: BTreeMap<(&'static str, &'static str), u32>,
+    ) -> Self {
+        Self { on, submit, exec }
+    }
+
+    fn note_exec(&mut self, kind: &RetainedDrawKind, key: u64, cause: &MaterialRefusal) {
+        if !self.on {
+            return;
+        }
+        *self
+            .exec
+            .entry(exec_refusal_row(kind, key, cause))
+            .or_default() += 1;
+    }
+
+    fn note_submit(&mut self, kind: &RetainedDrawKind, viewmodel: bool, cause: &GpuSubmitRefusal) {
+        if !self.on {
+            return;
+        }
+        *self
+            .submit
+            .entry((
+                submit_refusal_family(kind, viewmodel),
+                submit_refusal_class(cause),
+            ))
+            .or_default() += 1;
+    }
+
+    fn note_submit_class(&mut self, family: &'static str, class: &'static str, n: u32) {
+        if !self.on || n == 0 {
+            return;
+        }
+        *self.submit.entry((family, class)).or_default() += n;
+    }
+}
+
 fn material_refusal_class(cause: &MaterialRefusal) -> &'static str {
     match cause {
         MaterialRefusal::SortedMaterialTableMissing { .. } => "SortedMaterialTableMissing",
@@ -2059,7 +2199,7 @@ fn record_pipeline_not_ready(
     viewmodel: bool,
     key: u64,
     execution: &MaterialExecution,
-    extracted: &ExtractedExactColour,
+    extracted: ExtractedColourRefs<'_>,
     smodel_mats: &mut BTreeMap<String, u32>,
     world_mats: &mut BTreeMap<String, u32>,
     smodel_ps: &mut BTreeMap<String, u32>,
@@ -2071,6 +2211,7 @@ fn record_pipeline_not_ready(
     let family = submit_refusal_family(kind, viewmodel);
     let ordinal = world_material_sorted(key);
     let name = extracted
+        .world
         .sorted_material_names
         .get(usize::from(ordinal))
         .cloned()
@@ -2079,6 +2220,7 @@ fn record_pipeline_not_ready(
         .pass(0)
         .map(|pass| {
             extracted
+                .world
                 .shader_program_names
                 .get(pass.shader_pair.pixel.asset_slot as usize)
                 .and_then(|slot| slot.clone())
@@ -2272,8 +2414,8 @@ impl ExactPrepare<'_> {
             .resolve_uploaded_texture_binds(
                 executable,
                 surface,
-                &self.extracted.image_handles,
-                self.extracted.generation,
+                &self.extracted.world.image_handles,
+                self.extracted.world.generation,
                 self.uploaded,
                 self.sampler_table,
                 self.spot_shadow_select,
@@ -2323,7 +2465,7 @@ enum PrepareTextureTables<'a> {
 }
 
 struct ExactPrepare<'a> {
-    extracted: &'a ExtractedExactColour,
+    extracted: ExtractedColourRefs<'a>,
     geometry: &'a ExactColourGeometry,
 
     pretess: Option<&'a CameraWorldPretess>,
@@ -4310,14 +4452,14 @@ fn world_shadow_zone_span(start: u32, count: u32, src_index_n: usize) -> Option<
 
 fn prepare_shadowmap_spot(
     products: &ExtractedRenderFrameProducts,
-    extracted: &ExtractedExactColour,
+    extracted: ExtractedColourRefs<'_>,
     geometry: &ExactColourGeometry,
     pipeline_res: &ExactColourPipeline,
     registry: &ExactPipelineRegistry,
     device: &RenderDevice,
     queue: &RenderQueue,
     uploaded: &RuntimeUploadedImageRegistry,
-    binding_cache: &mut ExactColourBindingCache,
+    binding_cache: &mut ExactShadowBindingCache,
     texture_table: &mut ExactTextureTable,
     shadow_arena: &mut ShadowmapSpotArena,
     shadowmap: &mut ShadowmapSpotGpu,
@@ -4330,7 +4472,7 @@ fn prepare_shadowmap_spot(
     } = shadow_exec;
     shadow_exec_executor.begin_list();
     let shadow_exec_view = exec_tables(extracted).map(|(catalog, prepared_table)| {
-        MaterialExecView::camera(catalog, prepared_table, &extracted.exec_frame)
+        MaterialExecView::camera(catalog, prepared_table, &extracted.frame.exec_frame)
     });
     let spot = products.0.product(FrameProductKind::SpotShadow);
     if spot.ordered_draws.is_empty() || spot.spot_slots.is_empty() {
@@ -4360,7 +4502,7 @@ fn prepare_shadowmap_spot(
         spot_shadow_select: None,
         sampler_table,
         textures: PrepareTextureTables::Shadow {
-            slots: &mut binding_cache.shadow_textures,
+            slots: &mut binding_cache.textures,
             table: texture_table,
         },
         arena: None,
@@ -4467,7 +4609,7 @@ fn prepare_shadowmap_spot(
                 let hit_start = entry.index_byte_offset / 2;
                 let hit_count = u32::from(entry.tri_count).saturating_mul(3);
                 match emit_local_xmodel_shadow_flush(
-                    &extracted.xmodel_indices,
+                    &extracted.frame.xmodel_indices,
                     hit_start,
                     hit_count,
                     &mut xmodel_stream,
@@ -4530,7 +4672,7 @@ fn prepare_shadowmap_spot(
                 let hit_start = entry.index_byte_offset / 2;
                 let hit_count = u32::from(entry.tri_count).saturating_mul(3);
                 match emit_local_smodel_shadow_flush(
-                    &extracted.static_geometry.smodel_indices,
+                    &extracted.world.static_geometry.smodel_indices,
                     hit_start,
                     hit_count,
                     &mut smodel_stream,
@@ -4708,14 +4850,14 @@ fn record_shadowmap_spot(
 
 fn prepare_shadowmap_sun(
     products: &ExtractedRenderFrameProducts,
-    extracted: &ExtractedExactColour,
+    extracted: ExtractedColourRefs<'_>,
     geometry: &ExactColourGeometry,
     pipeline_res: &ExactColourPipeline,
     registry: &ExactPipelineRegistry,
     device: &RenderDevice,
     queue: &RenderQueue,
-    uploaded: &mut RuntimeUploadedImageRegistry,
-    binding_cache: &mut ExactColourBindingCache,
+    uploaded: &RuntimeUploadedImageRegistry,
+    binding_cache: &mut ExactShadowBindingCache,
     texture_table: &mut ExactTextureTable,
     shadow_arena: &mut ShadowmapSunArena,
     shadowmap: &mut ShadowmapSunGpu,
@@ -4740,7 +4882,7 @@ fn prepare_shadowmap_sun(
     if r_draw_sun_shadow_map_forced(0, None).is_none() {
         return PreparedSunWork::done(SunShadowSubmit::refused("ShadowmapSunPartitionMissing"));
     }
-    let generation = extracted.generation.0;
+    let generation = extracted.world.generation.0;
 
     let ShadowExecScratch {
         executor: shadow_exec_executor,
@@ -4748,19 +4890,19 @@ fn prepare_shadowmap_sun(
         pack_draws,
     } = shadow_exec;
     shadow_exec_executor.begin_list();
-    shadow_code_sources.clone_from(&extracted.exec_frame.code_sources);
-    if let Some(sun_frame) = extracted.sun_shadow.as_ref() {
+    shadow_code_sources.clone_from(&extracted.frame.exec_frame.code_sources);
+    if let Some(sun_frame) = extracted.frame.sun_shadow.as_ref() {
         shadow_code_sources.set_constant(
             super::CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0,
             super::code_transpose_matrix_rows(sun_frame.partitions[0].clip_from_world),
         );
     }
-    let shadow_exec_view = extracted.sun_shadow.as_ref().and_then(|sun_frame| {
+    let shadow_exec_view = extracted.frame.sun_shadow.as_ref().and_then(|sun_frame| {
         let (catalog, prepared_table) = exec_tables(extracted)?;
         Some(MaterialExecView::shadow_partition(
             catalog,
             prepared_table,
-            &extracted.exec_frame,
+            &extracted.frame.exec_frame,
             sun_frame.partitions[0].clip_from_world,
             sun_frame.partitions[0].view,
             shadow_code_sources,
@@ -4777,7 +4919,7 @@ fn prepare_shadowmap_sun(
         spot_shadow_select: None,
         sampler_table,
         textures: PrepareTextureTables::Shadow {
-            slots: &mut binding_cache.shadow_textures,
+            slots: &mut binding_cache.textures,
             table: texture_table,
         },
         arena: None,
@@ -4884,7 +5026,7 @@ fn prepare_shadowmap_sun(
                 let hit_start = entry.index_byte_offset / 2;
                 let hit_count = u32::from(entry.tri_count).saturating_mul(3);
                 match emit_local_xmodel_shadow_flush(
-                    extracted.xmodel_indices.as_slice(),
+                    extracted.frame.xmodel_indices.as_slice(),
                     hit_start,
                     hit_count,
                     &mut stream,
@@ -4943,7 +5085,7 @@ fn prepare_shadowmap_sun(
                     let hit_start = entry.index_byte_offset / 2;
                     let hit_count = u32::from(entry.tri_count).saturating_mul(3);
                     match emit_local_smodel_shadow_flush(
-                        extracted.static_geometry.smodel_indices.as_slice(),
+                        extracted.world.static_geometry.smodel_indices.as_slice(),
                         hit_start,
                         hit_count,
                         &mut smodel_stream,
@@ -5158,7 +5300,7 @@ fn prepare_shadowmap_sun(
             continue;
         }
 
-        let Some(frame) = extracted.sun_shadow else {
+        let Some(frame) = extracted.frame.sun_shadow else {
             miss = miss.saturating_add(1);
             *miss_rows.entry("MissingSunShadowFrame".into()).or_default() += 1;
             continue;
@@ -5364,7 +5506,7 @@ impl ExactPrepare<'_> {
         let key = item.key;
         let (tess, start, count, vertex_type) = match kind {
             RetainedDrawKind::World { surf, .. } => {
-                if let Some(cause) = self.extracted.static_geometry.world_vertex_refusal {
+                if let Some(cause) = self.extracted.world.static_geometry.world_vertex_refusal {
                     return Err(GpuSubmitRefusal::WorldVertex(cause));
                 }
                 let &(start, count) = world_submit_ranges_for_pass(
@@ -5419,7 +5561,8 @@ impl ExactPrepare<'_> {
                 Some(
                     lighting_iw4::SmodelSurfPath::Rigid | lighting_iw4::SmodelSurfPath::Skinned,
                 ) => {
-                    if let Some(cause) = self.extracted.static_geometry.smodel_vertex_refusal {
+                    if let Some(cause) = self.extracted.world.static_geometry.smodel_vertex_refusal
+                    {
                         return Err(GpuSubmitRefusal::PackedVertex(cause));
                     }
                     let &(start, count) = self
@@ -5447,7 +5590,7 @@ impl ExactPrepare<'_> {
                 }
             },
             RetainedDrawKind::XModel { surface, .. } => {
-                if let Some(cause) = self.extracted.xmodel_vertex_refusal {
+                if let Some(cause) = self.extracted.frame.xmodel_vertex_refusal {
                     return Err(GpuSubmitRefusal::PackedVertex(cause));
                 }
                 let &(start, count) = self
@@ -5473,7 +5616,7 @@ impl ExactPrepare<'_> {
                 )
             }
             RetainedDrawKind::CodeMesh { draw, .. } => {
-                if let Some(cause) = self.extracted.fx_vertex_refusal {
+                if let Some(cause) = self.extracted.frame.fx_vertex_refusal {
                     return Err(GpuSubmitRefusal::PackedVertex(cause));
                 }
                 let &(start, count) = self
@@ -5551,7 +5694,7 @@ impl ExactPrepare<'_> {
                 )
             }
             RetainedDrawKind::Glass { draw, .. } => {
-                if let Some(cause) = self.extracted.glass_mesh_vertex_refusal {
+                if let Some(cause) = self.extracted.frame.glass_mesh_vertex_refusal {
                     return Err(GpuSubmitRefusal::PackedVertex(cause));
                 }
                 let &(start, count) = self
@@ -6248,12 +6391,14 @@ pub(super) fn register(app: &mut App) {
         return;
     };
     render_app
-        .init_resource::<ExtractedExactColour>()
+        .init_resource::<InstalledRenderWorld>()
+        .init_resource::<PublishedRenderFrame>()
         .init_resource::<ExactColourGeometry>()
         .init_resource::<super::resolved_scene::ResolvedScene>()
         .init_resource::<SmodelCacheGpu>()
         .init_resource::<ExactColourPipeline>()
         .init_resource::<ExactColourBindingCache>()
+        .init_resource::<ExactShadowBindingCache>()
         .init_resource::<ExactTextureTable>()
         .init_resource::<ShadowTextureTable>()
         .init_resource::<SceneTextureTables>()
@@ -6268,6 +6413,7 @@ pub(super) fn register(app: &mut App) {
         .init_resource::<ColourSubmitScratch>()
         .init_resource::<CameraPrepareState>()
         .init_resource::<CameraWorldPretess>()
+        .init_resource::<prepare_camera::InstalledColourPass>()
         .init_resource::<indirect::ExactIndirectDraws>()
         .init_resource::<ResidentShadowStaticDraws>()
         .add_systems(
@@ -6276,11 +6422,17 @@ pub(super) fn register(app: &mut App) {
                 pipeline::init_or_update_pipeline.in_set(RenderSystems::PrepareAssets),
                 geometry::upload_exact_geometry.in_set(RenderSystems::PrepareResources),
                 pipeline::kick_extracted_colour_pipelines.in_set(RenderSystems::Prepare),
-                prepare_camera::prepare_camera_colour
+                prepare_camera::install_shared_colour_pass
                     .in_set(RenderSystems::Prepare)
                     .after(geometry::upload_exact_geometry)
                     .after(pipeline::kick_extracted_colour_pipelines)
                     .after(super::gpu_resources::prepare_uploaded_image_registry),
+                prepare_camera::prepare_shadow_passes
+                    .in_set(RenderSystems::Prepare)
+                    .after(prepare_camera::install_shared_colour_pass),
+                prepare_camera::prepare_camera_colour
+                    .in_set(RenderSystems::Prepare)
+                    .after(prepare_camera::prepare_shadow_passes),
             ),
         )
         .add_systems(

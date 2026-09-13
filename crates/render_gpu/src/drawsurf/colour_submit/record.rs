@@ -7,7 +7,8 @@ pub(super) fn draw_exact_colour(
         &ExtractedView,
         Option<&Msaa>,
     )>,
-    extracted: Res<ExtractedExactColour>,
+    world: Res<InstalledRenderWorld>,
+    frame: Res<PublishedRenderFrame>,
     geometry: Res<ExactColourGeometry>,
     smodel_cache_gpu: Res<SmodelCacheGpu>,
     pipeline: Res<ExactColourPipeline>,
@@ -17,6 +18,7 @@ pub(super) fn draw_exact_colour(
     device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     binding_cache: Res<ExactColourBindingCache>,
+    shadow_binding: Res<ExactShadowBindingCache>,
     constant_arena: Res<ExactConstantArena>,
     mut census: ResMut<ExactColourSubmitCensus>,
     (
@@ -56,7 +58,8 @@ pub(super) fn draw_exact_colour(
     ),
     mut context: RenderContext,
 ) {
-    let products = &extracted.frame_products;
+    let extracted = ExtractedColourRefs::new(&world, &frame);
+    let products = &extracted.frame.frame_products;
     let _colour_submit = perf::Span::RenderColourSubmitMs.enter();
     let census_on = perf::enabled();
 
@@ -65,8 +68,11 @@ pub(super) fn draw_exact_colour(
         emit_focused_owner_submit(
             &products,
             &mut focus_submit,
-            Some((&extracted.sorted_material_names, &extracted.image_handles)),
-            exec_tables(&extracted),
+            Some((
+                &extracted.world.sorted_material_names,
+                &extracted.world.image_handles,
+            )),
+            exec_tables(extracted),
             "no_exact_ports",
             0,
             0,
@@ -74,12 +80,15 @@ pub(super) fn draw_exact_colour(
         );
         return;
     }
-    if extracted.sampler_table.is_none() {
+    if extracted.world.sampler_table.is_none() {
         emit_focused_owner_submit(
             &products,
             &mut focus_submit,
-            Some((&extracted.sorted_material_names, &extracted.image_handles)),
-            exec_tables(&extracted),
+            Some((
+                &extracted.world.sorted_material_names,
+                &extracted.world.image_handles,
+            )),
+            exec_tables(extracted),
             "sampler_table_missing",
             0,
             0,
@@ -90,9 +99,10 @@ pub(super) fn draw_exact_colour(
 
     let scene_epoch = scratch.prepared_scene_epoch;
     let shadow_epoch = scratch.prepared_shadow_epoch;
-    let table_epoch_ok = scene_epoch.generation == extracted.generation
-        && binding_cache.generation == extracted.generation
-        && constant_arena.generation == extracted.generation
+    let table_epoch_ok = scene_epoch.generation == extracted.world.generation
+        && binding_cache.generation == extracted.world.generation
+        && shadow_binding.generation == extracted.world.generation
+        && constant_arena.generation == extracted.world.generation
         && shadow_table.epoch() == shadow_epoch
         && texture_table
             .0
@@ -101,9 +111,10 @@ pub(super) fn draw_exact_colour(
     if !table_epoch_ok {
         diag::error!(
             World,
-            "drawsurf colour submit: prepared work is from another table epoch (extracted={:?} binding_cache={:?} arena={:?} prepared_scene={scene_epoch:?} prepared_shadow={shadow_epoch:?} scene={:?} shadow={:?}) — prepare did not run before record; refusing to record against a table this frame never numbered",
-            extracted.generation,
+            "drawsurf colour submit: prepared work is from another table epoch (extracted={:?} binding_cache={:?} shadow_binding={:?} arena={:?} prepared_scene={scene_epoch:?} prepared_shadow={shadow_epoch:?} scene={:?} shadow={:?}) — prepare did not run before record; refusing to record against a table this frame never numbered",
+            extracted.world.generation,
             binding_cache.generation,
+            shadow_binding.generation,
             constant_arena.generation,
             texture_table.0.each_ref().map(ExactTextureTable::epoch),
             shadow_table.epoch(),
@@ -111,8 +122,11 @@ pub(super) fn draw_exact_colour(
         emit_focused_owner_submit(
             &products,
             &mut focus_submit,
-            Some((&extracted.sorted_material_names, &extracted.image_handles)),
-            exec_tables(&extracted),
+            Some((
+                &extracted.world.sorted_material_names,
+                &extracted.world.image_handles,
+            )),
+            exec_tables(extracted),
             "table_epoch_mismatch",
             0,
             0,
@@ -191,8 +205,11 @@ pub(super) fn draw_exact_colour(
         emit_focused_owner_submit(
             &products,
             &mut focus_submit,
-            Some((&extracted.sorted_material_names, &extracted.image_handles)),
-            exec_tables(&extracted),
+            Some((
+                &extracted.world.sorted_material_names,
+                &extracted.world.image_handles,
+            )),
+            exec_tables(extracted),
             "product_empty",
             0,
             0,
@@ -205,8 +222,11 @@ pub(super) fn draw_exact_colour(
         emit_focused_owner_submit(
             &products,
             &mut focus_submit,
-            Some((&extracted.sorted_material_names, &extracted.image_handles)),
-            exec_tables(&extracted),
+            Some((
+                &extracted.world.sorted_material_names,
+                &extracted.world.image_handles,
+            )),
+            exec_tables(extracted),
             "camera_prepare_skipped",
             0,
             0,
@@ -218,9 +238,12 @@ pub(super) fn draw_exact_colour(
     let mut refused_draws = cam.refused_draws;
     let mut pipeline_not_ready = cam.pipeline_not_ready;
     let mut last_refusal = cam.last_refusal.take();
-    let mut submit_refusals = std::mem::take(&mut cam.submit_refusals);
+    let mut refusals = DrawRefusalCensus::taking(
+        census_on,
+        std::mem::take(&mut cam.submit_refusals),
+        std::mem::take(&mut cam.exec_refusals),
+    );
     let exec_refused = cam.exec_refused;
-    let exec_refusals = std::mem::take(&mut cam.exec_refusals);
     let unsupported_state = cam.unsupported_state;
     let bsp_submit_refused_surfaces = cam.bsp_submit_refused_surfaces;
     let pnr_smodel_mats = std::mem::take(&mut cam.pnr_smodel_mats);
@@ -267,9 +290,7 @@ pub(super) fn draw_exact_colour(
     );
     if held > 0 {
         refused_draws = refused_draws.saturating_add(held);
-        *submit_refusals
-            .entry(("colour", "ProductDependencyNotReady"))
-            .or_default() += held;
+        refusals.note_submit_class("colour", "ProductDependencyNotReady", held);
         last_refusal = Some(GpuSubmitRefusal::ProductDependencyNotReady {
             product: FrameProductKind::SunShadow,
         });
@@ -446,9 +467,7 @@ pub(super) fn draw_exact_colour(
                     .filter(|draw| draw.after_scene_resolve)
                     .count() as u32;
                 if skipped > 0 {
-                    *submit_refusals
-                        .entry(("codemesh", "FloatZBlitNotReady"))
-                        .or_default() += skipped;
+                    refusals.note_submit_class("codemesh", "FloatZBlitNotReady", skipped);
                 }
             }
         }
@@ -461,9 +480,7 @@ pub(super) fn draw_exact_colour(
         }
         if encode_not_ready > 0 {
             pipeline_not_ready = pipeline_not_ready.saturating_add(encode_not_ready);
-            *submit_refusals
-                .entry(("encode", "PipelineNotReady"))
-                .or_default() += encode_not_ready;
+            refusals.note_submit_class("encode", "PipelineNotReady", encode_not_ready);
         }
     }
     *working_set = crate::ColourWorkingSet {
@@ -511,7 +528,7 @@ pub(super) fn draw_exact_colour(
         if census.submit_record_ms.is_none() {
             census.submit_record_ms = Some(0.0);
         }
-        let mut ranked: Vec<_> = submit_refusals.iter().collect();
+        let mut ranked: Vec<_> = refusals.submit.iter().collect();
         ranked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
         census.submit_cause = ranked
             .first()
@@ -520,14 +537,16 @@ pub(super) fn draw_exact_colour(
             .get(1)
             .map(|((family, cause), n)| format!("{family}:{cause}:{n}"));
         census.gpu_not_ready_n = Some(
-            submit_refusals
+            refusals
+                .submit
                 .iter()
                 .filter(|((_, cause), _)| *cause == "PipelineNotReady")
                 .map(|(_, n)| *n)
                 .sum(),
         );
         census.gpu_no_port_n = Some(
-            submit_refusals
+            refusals
+                .submit
                 .iter()
                 .filter(|((_, cause), _)| *cause == "NoExactPort")
                 .map(|(_, n)| *n)
@@ -557,8 +576,11 @@ pub(super) fn draw_exact_colour(
     emit_focused_owner_submit(
         &products,
         &mut focus_submit,
-        Some((&extracted.sorted_material_names, &extracted.image_handles)),
-        exec_tables(&extracted),
+        Some((
+            &extracted.world.sorted_material_names,
+            &extracted.world.image_handles,
+        )),
+        exec_tables(extracted),
         "complete",
         focused_prepared_surfaces,
         focused_prepared_passes,
@@ -602,7 +624,7 @@ pub(super) fn draw_exact_colour(
                 colour_run_census.obj_binds,
                 colour_run_census.shell_hits,
                 colour_run_census.shell_misses,
-                rank_pair_map(&exec_refusals, 2)
+                rank_pair_map(&refusals.exec, 2)
                     .as_deref()
                     .unwrap_or("none"),
                 census.submit_cause.as_deref().unwrap_or("none"),
@@ -614,12 +636,7 @@ pub(super) fn draw_exact_colour(
                     .map(|table| table.rebuild_n)
                     .sum::<u32>(),
                 shadow_table.census(),
-                binding_cache
-                    .textures
-                    .iter()
-                    .map(HashMap::len)
-                    .sum::<usize>()
-                    + binding_cache.shadow_textures.len(),
+                binding_cache.interned_n() + shadow_binding.textures.len(),
                 prepare_cost.tex_bind_hit_n,
                 prepare_cost.tex_bind_miss_n,
                 usize::from(constant_arena.gpu.bind_group.is_some()),

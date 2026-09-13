@@ -27,7 +27,7 @@ pub(crate) fn update_shellshock_tinnitus(
     mut clips: Option<ResMut<ClipStore>>,
     mut looping_assets: ResMut<Assets<LoopingPcmAudio>>,
     mut commands: Commands,
-    mut play: MessageWriter<PlayAlias>,
+    mut play: MessageWriter<crate::AliasCommand>,
     mut gaps: ResMut<MissingAliasGaps>,
     epoch: Res<crate::backend::MatchEpoch>,
     playing: Query<(Entity, &ShellshockTinnitus)>,
@@ -85,13 +85,13 @@ pub(crate) fn update_shellshock_tinnitus(
         } else {
             parms.end_alias
         };
-        play.write(PlayAlias {
+        play.write(crate::AliasCommand::Play(PlayAlias {
             namespace: AssetNamespace::Iw4,
             alias: alias.to_owned(),
             fallback: None,
             origin_inches: None,
             snd_ent: Some(SND_ENT_LOCAL),
-        });
+        }));
     }
     *was_active = false;
 }

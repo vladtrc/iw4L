@@ -124,13 +124,21 @@ fn run_export_gltf(games: assets::GamesRoot, artifacts: PathBuf, zone_arg: Strin
     }
     let common_mp = find_runtime_common_mp(&games, &found.path).map(|zone| zone.path);
 
-    let prepared = bevy::tasks::futures_lite::future::block_on(assets::load_prepared_match(
+    let prepared = match bevy::tasks::futures_lite::future::block_on(assets::load_prepared_match(
         Ok(found.path),
         common_mp,
         assets::LoadProgress::default(),
-    ));
-    let summary = assets::export_prepared_world_gltf(&artifacts, &found.zone_name, prepared.world)
-        .unwrap_or_else(|error| fatal(&format!("export-gltf: {error}")));
+    )) {
+        assets::MatchLoadOutcome::Ready(prepared) => prepared,
+        assets::MatchLoadOutcome::Canceled => fatal("export-gltf: map walk canceled"),
+    };
+    let summary = assets::export_prepared_world_gltf(
+        &artifacts,
+        &found.zone_name,
+        prepared.world,
+        &prepared.materials,
+    )
+    .unwrap_or_else(|error| fatal(&format!("export-gltf: {error}")));
     diag::announce_stdout(&summary.scene.display().to_string());
     diag::announce_stdout(&summary.report_line());
 }
@@ -261,7 +269,12 @@ fn run_menu(games: assets::GamesRoot, artifacts: PathBuf) {
     for line in lines {
         diag::info!(Launch, "menu: {line}");
     }
-    app.insert_resource(SoundIwd(std::sync::Arc::new(menu_iwd)));
+    let menu_iwd = std::sync::Arc::new(menu_iwd);
+    app.insert_resource(SoundIwd(std::sync::Arc::clone(&menu_iwd)));
+    if let Some(bank) = app.world().get_resource::<SoundBank>() {
+        let bank = std::sync::Arc::clone(&bank.0);
+        app.insert_resource(audio::ClipStore::start(bank, Some(menu_iwd)));
+    }
     app.insert_resource(launch_identity(&config))
         .insert_resource(MenuMapList(maps))
         .insert_resource(MenuEnabled(true))
@@ -379,12 +392,8 @@ fn run_map(
         })
     };
 
-    let udp_connect = matches!(
-        net::UdpLaunchIntent::from_env(),
-        net::UdpLaunchIntent::Connect(_)
-    );
     let config = LaunchConfig {
-        role: if master_intent.is_join() || (role == Role::Listen && udp_connect) {
+        role: if master_intent.is_join() {
             Role::Client
         } else {
             role

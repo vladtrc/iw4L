@@ -7,8 +7,7 @@ use crate::anim::xmodel_pose::PosedModelSurface;
 use crate::occupancy::script_model::pose_script_dobj_with_materials;
 use crate::{
     MissileDrawPlan, MissileOwnerDraw, XMODEL_OBJECT_ID_MISSILE_BASE, append_missile_surfaces,
-    authored_lit_xmodel_pass_material, dobj_lighting_box_half, stamp_plan_geometry,
-    topology_fingerprint,
+    authored_lit_xmodel_pass_material, dobj_lighting_box_half,
 };
 use anim_iw4::DOBJ_RADIUS_PARENT_ROOT;
 use render_scene::{
@@ -309,11 +308,21 @@ fn append_missile_draws(
     facts: Res<WorldPresentFacts>,
     mut plan: ResMut<MissileDrawPlan>,
     mut lighting_requests: ResMut<ModelLightingRequests>,
+    mut staged: Local<MissileDrawPlan>,
+    mut draws: Local<Vec<XModelSurfaceDraw>>,
+    mut owners: Local<Vec<MissileOwnerDraw>>,
 ) {
-    *plan = MissileDrawPlan::default();
+    // Missiles are rebuilt from scratch every frame, so the rebuild goes to a
+    // staging plan whose allocations survive the frame; `plan` keeps the
+    // revisions, which is the part a consumer reads.
+    let staging = &mut *staged;
+    staging.clear_rebuild();
+    draws.clear();
+    owners.clear();
     let catalog = missile_pose_catalog(projectile_meshes.as_deref());
     let atlas_ref = missile_lighting_atlas(atlas.as_deref(), None);
     if catalog.is_none() || atlas_ref.is_none() || !facts.spawned || tess.is_none() {
+        plan.publish_rebuild(staging, &mut draws, &mut owners);
         return;
     }
     let (Some(catalog), Some(atlas), Some(tess)) = (catalog, atlas_ref, tess.as_deref()) else {
@@ -356,18 +365,18 @@ fn append_missile_draws(
             origin: row.lighting_origin,
             lookup_fallback,
         }));
-        let surfaces_idx = append_missile_surfaces(&mut plan, &row.surfaces, &materials);
+        let surfaces_idx = append_missile_surfaces(staging, &row.surfaces, &materials);
         if surfaces_idx.is_empty() {
             continue;
         }
         let object_id = XMODEL_OBJECT_ID_MISSILE_BASE.saturating_add(row.index as u16);
-        plan.owners.push(MissileOwnerDraw {
+        owners.push(MissileOwnerDraw {
             object_id,
             model: row.name.clone(),
         });
         let world_from_local = missile_world_from_local(row.origin, row.angles);
         for (surface, material) in surfaces_idx {
-            plan.draws.push(XModelSurfaceDraw {
+            draws.push(XModelSurfaceDraw {
                 surface,
                 material,
                 world_from_local,
@@ -383,12 +392,7 @@ fn append_missile_draws(
             });
         }
     }
-    if !plan.draws.is_empty() {
-        let topology =
-            topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.vertices.len());
-        let rev = plan.revision;
-        plan.revision = stamp_plan_geometry(&mut plan.revisions, rev, topology);
-    }
+    plan.publish_rebuild(staging, &mut draws, &mut owners);
 }
 
 pub(crate) fn missile_world_from_local(origin: [f32; 3], angles: [f32; 3]) -> Mat4 {

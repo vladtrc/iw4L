@@ -42,6 +42,25 @@ impl SourceRevisions {
     }
 }
 
+/// Hands a rebuilt row list to the plan that owns it and answers the one
+/// question a consumer used to answer by re-hashing the payload: did this
+/// rebuild change anything? The comparison happens here, at the owner, once —
+/// not once per consumer per frame — so `SourceRevisions` becomes the whole
+/// truth about the rows and nobody downstream has to look at them to find out
+/// whether they moved.
+///
+/// `rebuilt` comes back empty with its allocation intact, ready for the next
+/// frame; the rows it carried are now the published ones.
+pub fn publish_rows<T: PartialEq>(published: &mut Vec<T>, rebuilt: &mut Vec<T>) -> bool {
+    if published == rebuilt {
+        rebuilt.clear();
+        return false;
+    }
+    std::mem::swap(published, rebuilt);
+    rebuilt.clear();
+    true
+}
+
 pub const PACKED_SEGMENT_OWNERS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

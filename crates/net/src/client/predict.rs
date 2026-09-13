@@ -310,8 +310,14 @@ impl ClientPrediction {
         self.had_local_last_snap
     }
 
+    pub fn install_world(&mut self, mut world: SimWorld) {
+        world.suppress_snapshot_publish();
+        self.world = world;
+        self.armed = true;
+    }
+
     pub fn arm_from_content(&mut self, authority: &SimWorld) {
-        self.world.clone_content_from(authority);
+        self.world.initialize_prediction_from(authority);
         self.armed = true;
     }
 

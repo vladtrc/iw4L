@@ -77,7 +77,7 @@ fn cg_entity_event_sound(
     bank: Option<Res<SoundBank>>,
     adopted: Option<Res<net::LastAdoptedSnapshot>>,
     mut output: MessageWriter<WeaponSound>,
-    mut play: MessageWriter<PlayAlias>,
+    mut play: MessageWriter<crate::AliasCommand>,
 ) {
     let event = sound.event.event;
     if event == EntityEventKind::SOUND_ALIAS {
@@ -167,7 +167,7 @@ fn cg_entity_event_sound(
 fn play_cs_sound_alias(
     payload: &net::DispatchedEntityEvent,
     adopted: Option<&net::LastAdoptedSnapshot>,
-    play: &mut MessageWriter<PlayAlias>,
+    play: &mut MessageWriter<crate::AliasCommand>,
 ) {
     let index = u8::try_from(payload.payload.event_parm).unwrap_or(0);
     let Some(alias) = adopted.and_then(|snap| snap.sound_alias_name(index).map(str::to_owned))
@@ -178,13 +178,13 @@ fn play_cs_sound_alias(
         );
         return;
     };
-    play.write(PlayAlias {
+    play.write(crate::AliasCommand::Play(PlayAlias {
         namespace: assets::AssetNamespace::Iw4,
         alias,
         fallback: None,
         origin_inches: Some(payload.payload.origin),
         snd_ent: snd_ent_from_number(payload.payload.number),
-    });
+    }));
 }
 
 fn cg_movement_sound(
@@ -194,7 +194,7 @@ fn cg_movement_sound(
     presented: Res<PresentedSnapshot>,
     mut footsteps: MessageWriter<Footstep>,
     mut gear: MessageWriter<WeaponSound>,
-    mut play: MessageWriter<PlayAlias>,
+    mut play: MessageWriter<crate::AliasCommand>,
     mut land: MessageWriter<LandSound>,
 ) {
     let Ok(identity) = identities.get(sound.entity) else {
@@ -230,13 +230,13 @@ fn cg_movement_sound(
         EntityEventKind::MANTLE => {
             let alias = mantle_gear_alias(player_view).to_owned();
             let fallback = player_view.then(|| mantle_gear_alias(false).to_owned());
-            play.write(PlayAlias {
+            play.write(crate::AliasCommand::Play(PlayAlias {
                 namespace: assets::AssetNamespace::Iw4,
                 alias,
                 fallback,
                 origin_inches,
                 snd_ent: Some(u32::from(identity.number())),
-            });
+            }));
             return;
         }
         _ => unreachable!("EntityMovementSound must carry a movement event"),

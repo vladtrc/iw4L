@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -197,6 +197,7 @@ pub struct BootstrapAck {
 }
 
 pub struct BootstrapLane {
+    pub(super) host_map_ready: Mutex<HashSet<master_protocol::MemberId>>,
     to_worker: Mutex<VecDeque<(Option<master_protocol::MemberId>, Vec<u8>)>>,
     from_worker: Mutex<VecDeque<BootstrapIngress>>,
     acks: Mutex<VecDeque<BootstrapAck>>,
@@ -208,6 +209,7 @@ pub struct BootstrapLane {
 impl BootstrapLane {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
+            host_map_ready: Mutex::new(HashSet::new()),
             to_worker: Mutex::new(VecDeque::new()),
             from_worker: Mutex::new(VecDeque::new()),
             acks: Mutex::new(VecDeque::new()),
@@ -220,6 +222,10 @@ impl BootstrapLane {
     pub fn set_epoch(&self, epoch: u32) {
         let prev = self.epoch.swap(epoch, Ordering::AcqRel);
         if prev != epoch {
+            self.host_map_ready
+                .lock()
+                .expect("bootstrap readiness poisoned")
+                .clear();
             self.entered_bootstrap.store(0, Ordering::Release);
             self.entered_client.store(0, Ordering::Release);
             self.to_worker

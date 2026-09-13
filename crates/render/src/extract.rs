@@ -12,32 +12,20 @@ use render_frontend::assemble::drawsurf::tess::world::WorldDrawGpuPlan;
 use render_frontend::assemble::drawsurf::tess::xmodel::XModelDrawPlan;
 use render_gpu::diag::render_frame_diag::SharedRenderStagesSlot;
 use render_gpu::{
-    ExtractedExactColour, ExtractedRenderFrameProducts, ExtractedRuntimeImageHandles,
-    RetailSamplerTable,
+    ExtractedRenderFrameProducts, ExtractedRuntimeImageHandles, InstalledRenderWorld,
+    PublishedRenderFrame, RetailSamplerTable,
 };
 
-fn extract_share<T: Clone>(share: Option<&Arc<Vec<T>>>, live: &[T]) -> (Arc<Vec<T>>, u32) {
+fn take_published<T>(share: Option<&Arc<Vec<T>>>) -> (Arc<Vec<T>>, u32) {
     match share {
-        Some(arc) => (Arc::clone(arc), 1),
-        None => (Arc::new(live.to_vec()), 0),
+        Some(rows) => (Arc::clone(rows), 1),
+        None => (Arc::new(Vec::new()), 0),
     }
 }
 
-fn tess_extract_clone_bytes<V, I>(
-    v_arc: u32,
-    i_arc: u32,
-    verts: &Arc<Vec<V>>,
-    inds: &Arc<Vec<I>>,
-    ranges: &[(u32, u32)],
-) -> u64 {
-    let mut n = std::mem::size_of_val(ranges) as u64;
-    if v_arc == 0 {
-        n += std::mem::size_of_val(verts.as_slice()) as u64;
-    }
-    if i_arc == 0 {
-        n += std::mem::size_of_val(inds.as_slice()) as u64;
-    }
-    n
+fn insert_empty_colour(commands: &mut Commands) {
+    commands.insert_resource(InstalledRenderWorld::default());
+    commands.insert_resource(PublishedRenderFrame::default());
 }
 
 fn world_colour_extract_counts(plan: Option<&WorldDrawGpuPlan>) -> (usize, usize, usize) {
@@ -62,35 +50,12 @@ fn smodel_colour_extract_counts(plan: Option<&SmodelGpuPlan>) -> (usize, usize) 
 
 pub fn extract_exact_colour(
     mut commands: Commands,
-    material: (
-        Extract<Option<Res<render_frontend::assemble::drawsurf::MaterialGeneration>>>,
-        Extract<Option<Res<render_frontend::assemble::drawsurf::MaterialFrameInputs>>>,
-        Extract<Option<Res<render_frontend::assemble::drawsurf::FrameAssemblyInputs>>>,
-        Extract<Option<Res<render_frontend::assemble::drawsurf::RenderFrameProducts>>>,
-        ResMut<render_gpu::FocusedOwnerSubmitState>,
-    ),
-    world: Extract<Option<Res<WorldDrawGpuPlan>>>,
-    smodel: Extract<Option<Res<SmodelGpuPlan>>>,
-    smc: Extract<
-        Option<Res<render_frontend::prepare::scene::smodel_geom_cache::WorldStaticModelCache>>,
-    >,
-    static_identity: (
-        Extract<Option<Res<render_frontend::assemble::drawsurf::StaticDrawLane>>>,
-        Extract<Option<Res<frame::WorldGeneration>>>,
-    ),
-    xmodel: Extract<Option<Res<XModelDrawPlan>>>,
-    fx: Extract<Option<Res<FxCodeMeshPlan>>>,
-    particle_cloud: Extract<Option<Res<FxParticleCloudPlan>>>,
-    mark_mesh: Extract<Option<Res<GfxMarkMeshPlan>>>,
-    glass_mesh: Extract<Option<Res<GfxGlassMeshPlan>>>,
-    samplers: Extract<Option<Res<RetailSamplerTable>>>,
-    images: Extract<Option<Res<render_frontend::assemble::drawsurf::RuntimeImageHandles>>>,
-    spawn_job: Extract<Option<Res<render_gpu::GpuSubmitReady>>>,
-    mut existing: Option<ResMut<ExtractedExactColour>>,
+    sealed: Extract<Option<Res<PublishedRenderFrame>>>,
+    existing: Option<Res<PublishedRenderFrame>>,
+    mut focus_submit: ResMut<render_gpu::FocusedOwnerSubmitState>,
     slot: Option<Res<SharedRenderStagesSlot>>,
 ) {
-    let (retained, world_generation) = static_identity;
-    let (runtime, mat_frame, assembly, products, mut focus_submit) = material;
+    let started = Instant::now();
     if let Some(existing) = existing.as_ref() {
         render_gpu::emit_focused_owner_submit(
             &existing.frame_products,
@@ -103,12 +68,54 @@ pub fn extract_exact_colour(
             0,
         );
     }
+    if let Some(sealed) = sealed.as_ref() {
+        commands.insert_resource(sealed.world().clone());
+        commands.insert_resource((**sealed).clone());
+    } else {
+        insert_empty_colour(&mut commands);
+    }
+    if let Some(slot) = slot {
+        slot.stamp_extract_products(started.elapsed().as_secs_f32() * 1000.0, 1, 0);
+        slot.stamp_extract_colour(0.0, 0.0, 1, 0, 0, 1, 1, 0);
+    }
+}
+
+pub fn seal_render_frame(
+    mut commands: Commands,
+    material: (
+        Option<Res<render_frontend::assemble::drawsurf::MaterialGeneration>>,
+        Option<Res<render_frontend::assemble::drawsurf::MaterialFrameInputs>>,
+        Option<Res<render_frontend::assemble::drawsurf::FrameAssemblyInputs>>,
+        Option<Res<render_frontend::assemble::drawsurf::RenderFrameProducts>>,
+    ),
+    world: Option<Res<WorldDrawGpuPlan>>,
+    smodel: Option<Res<SmodelGpuPlan>>,
+    smc: Option<Res<render_frontend::prepare::scene::smodel_geom_cache::WorldStaticModelCache>>,
+    static_identity: (
+        Option<Res<render_frontend::assemble::drawsurf::StaticDrawLane>>,
+        Option<Res<frame::WorldGeneration>>,
+    ),
+    xmodel: Option<Res<XModelDrawPlan>>,
+    fx: Option<Res<FxCodeMeshPlan>>,
+    particle_cloud: Option<Res<FxParticleCloudPlan>>,
+    mark_mesh: Option<Res<GfxMarkMeshPlan>>,
+    glass_mesh: Option<Res<GfxGlassMeshPlan>>,
+    samplers: Option<Res<RetailSamplerTable>>,
+    images: Option<Res<render_frontend::assemble::drawsurf::RuntimeImageHandles>>,
+    spawn_job: Option<Res<render_gpu::GpuSubmitReady>>,
+    (existing_world, existing_frame): (
+        Option<Res<InstalledRenderWorld>>,
+        Option<Res<PublishedRenderFrame>>,
+    ),
+) {
+    let (retained, world_generation) = static_identity;
+    let (runtime, mat_frame, assembly, products) = material;
     let Some(runtime) = runtime.as_ref() else {
-        commands.insert_resource(ExtractedExactColour::default());
+        insert_empty_colour(&mut commands);
         return;
     };
     let Some(mat_frame) = mat_frame.as_ref() else {
-        commands.insert_resource(ExtractedExactColour::default());
+        insert_empty_colour(&mut commands);
         return;
     };
     let generation = runtime.catalog.generation_id;
@@ -117,35 +124,27 @@ pub fn extract_exact_colour(
         .map(|generation| **generation)
         .unwrap_or(frame::WorldGeneration(None));
     let Some(products) = products.as_ref() else {
-        commands.insert_resource(ExtractedExactColour::default());
+        insert_empty_colour(&mut commands);
         return;
     };
-    let product_started = Instant::now();
     let snapshot = products.published();
     let coherent =
         frame_submission_matches(assembly.as_deref(), &snapshot, generation, world_generation);
     if !coherent {
-        commands.insert_resource(ExtractedExactColour::default());
+        insert_empty_colour(&mut commands);
         return;
-    }
-    if let Some(slot) = slot.as_ref() {
-        slot.stamp_extract_products(
-            product_started.elapsed().as_secs_f32() * 1000.0,
-            1,
-            u32::from(products.last_bank_new),
-        );
     }
     let frame_products = ExtractedRenderFrameProducts(snapshot);
     let cpu_port_len = runtime.programs.ports().len();
-    let skip_ports = existing.as_ref().is_some_and(|extracted| {
+    let skip_ports = existing_world.as_ref().is_some_and(|world| {
         render_gpu::colour_ports_static(
-            extracted.generation,
-            extracted.ports.len(),
+            world.generation,
+            world.ports.len(),
             generation,
             cpu_port_len,
         )
     });
-    let (ports, extract_ports_ms) = if skip_ports {
+    let (ports, _ports_ms) = if skip_ports {
         (Vec::new(), 0.0_f32)
     } else {
         let ports_started = Instant::now();
@@ -163,21 +162,20 @@ pub fn extract_exact_colour(
             .collect();
         (ports, ports_started.elapsed().as_secs_f32() * 1000.0)
     };
-    let tess_started = Instant::now();
     let warm_pipelines = spawn_job.as_ref().is_some_and(|job| job.warm_pipelines);
     let (world_v, world_i, world_layer_n) =
         world_colour_extract_counts(world.as_ref().map(|plan| &**plan));
     let (smodel_v, smodel_i) = smodel_colour_extract_counts(smodel.as_ref().map(|plan| &**plan));
 
-    let skip_world_smodel = existing.as_ref().is_some_and(|extracted| {
+    let skip_world_smodel = existing_world.as_ref().is_some_and(|world| {
         render_gpu::colour_world_smodel_static(
-            extracted.generation,
-            extracted.world_generation,
-            extracted.static_geometry.world_vertices.len(),
-            extracted.static_geometry.world_indices.len(),
-            extracted.static_geometry.world_layer.len(),
-            extracted.static_geometry.smodel_vertices.len(),
-            extracted.static_geometry.smodel_indices.len(),
+            world.generation,
+            world.world_generation,
+            world.static_geometry.world_vertices.len(),
+            world.static_geometry.world_indices.len(),
+            world.static_geometry.world_layer.len(),
+            world.static_geometry.smodel_vertices.len(),
+            world.static_geometry.smodel_indices.len(),
             generation,
             world_generation,
             world_v,
@@ -189,9 +187,9 @@ pub fn extract_exact_colour(
     });
     let smc_revision = smc.as_ref().map(|cache| cache.content_revision());
     let skip_smc_maps = skip_world_smodel
-        && existing
+        && existing_world
             .as_ref()
-            .is_some_and(|extracted| extracted.smc_revision == smc_revision);
+            .is_some_and(|world| world.smc_revision == smc_revision);
     let (world_vertices, world_layer, world_indices, world_surface_ranges, world_vertex_refusal) =
         if skip_world_smodel {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new(), None)
@@ -256,20 +254,15 @@ pub fn extract_exact_colour(
         xmodel_indices,
         xmodel_surface_ranges,
         xmodel_vertex_refusal,
-        xmodel_arc,
-        xmodel_i_arc,
-        xmodel_r_arc,
+        _xmodel_arc,
+        _xmodel_i_arc,
+        _xmodel_r_arc,
     ) = match xmodel.as_ref() {
         Some(plan) => match plan.exact_packed_vertices() {
-            Ok(vertices) => {
-                let (verts, packed_arc) = if let Some(share) = plan.packed_share.clone() {
-                    (share, 1u32)
-                } else {
-                    (Arc::new(vertices.to_vec()), 0u32)
-                };
-                let (inds, i_arc) = extract_share(plan.index_share.as_ref(), &plan.indices);
-                let (ranges, r_arc) =
-                    extract_share(plan.range_share.as_ref(), &plan.surface_ranges);
+            Ok(_) => {
+                let (verts, packed_arc) = take_published(plan.packed_share.as_ref());
+                let (inds, i_arc) = take_published(plan.index_share.as_ref());
+                let (ranges, r_arc) = take_published(plan.range_share.as_ref());
                 (verts, inds, ranges, None, packed_arc, i_arc, r_arc)
             }
             Err(cause) => (
@@ -307,32 +300,33 @@ pub fn extract_exact_colour(
         fx_surface_ranges,
         fx_vertex_refusal,
         fx_revision,
-        fx_v_arc,
-        fx_i_arc,
+        _fx_v_arc,
+        _fx_i_arc,
+        _fx_r_arc,
     ) = match fx.as_ref() {
         Some(plan) => match plan.exact_packed_vertices() {
             Ok(_) => {
-                let (verts, v_arc) = extract_share(plan.packed_share.as_ref(), &plan.vertices);
-                let (inds, i_arc) = extract_share(plan.index_share.as_ref(), &plan.indices);
+                let (verts, v_arc) = take_published(plan.packed_share.as_ref());
+                let (inds, i_arc) = take_published(plan.index_share.as_ref());
+                let (ranges, r_arc) = take_published(plan.range_share.as_ref());
                 (
                     verts,
                     inds,
-                    plan.draws
-                        .iter()
-                        .map(|draw| (draw.index_start, draw.index_count))
-                        .collect(),
+                    ranges,
                     None,
                     plan.revision,
                     v_arc,
                     i_arc,
+                    r_arc,
                 )
             }
             Err(cause) => (
                 Arc::new(Vec::new()),
                 Arc::new(Vec::new()),
-                Vec::new(),
+                Arc::new(Vec::new()),
                 Some(cause),
                 plan.revision,
+                1u32,
                 1u32,
                 1u32,
             ),
@@ -340,53 +334,57 @@ pub fn extract_exact_colour(
         None => (
             Arc::new(Vec::new()),
             Arc::new(Vec::new()),
-            Vec::new(),
+            Arc::new(Vec::new()),
             None,
             0,
             1u32,
             1u32,
+            1u32,
         ),
     };
-    let (particle_cloud_vertices, particle_cloud_indices, particle_cloud_surface_ranges) =
-        match particle_cloud.as_ref() {
-            Some(plan) => (
+    let (
+        particle_cloud_vertices,
+        particle_cloud_indices,
+        particle_cloud_surface_ranges,
+        _particle_r_arc,
+    ) = match particle_cloud.as_ref() {
+        Some(plan) => {
+            let (ranges, r_arc) = take_published(plan.range_share.as_ref());
+            (
                 Arc::clone(&plan.vertices),
                 Arc::clone(&plan.indices),
-                plan.draws
-                    .iter()
-                    .map(|draw| (draw.index_start, draw.index_count))
-                    .collect(),
-            ),
-            None => (Arc::new(Vec::new()), Arc::new(Vec::new()), Vec::new()),
-        };
-    let (
-        mark_mesh_vertices,
-        mark_mesh_indices,
-        mark_mesh_surface_ranges,
-        mark_mesh_revision,
-        mark_v_arc,
-        mark_i_arc,
-    ) = match mark_mesh.as_ref() {
-        Some(plan) => {
-            let (verts, v_arc) = extract_share(plan.packed_share.as_ref(), &plan.vertices);
-            let (inds, i_arc) = extract_share(plan.index_share.as_ref(), &plan.indices);
-            (
-                verts,
-                inds,
-                plan.draws
-                    .iter()
-                    .map(|draw| (draw.index_start, draw.index_count))
-                    .collect(),
-                plan.revision,
-                v_arc,
-                i_arc,
+                ranges,
+                r_arc,
             )
         }
         None => (
             Arc::new(Vec::new()),
             Arc::new(Vec::new()),
-            Vec::new(),
+            Arc::new(Vec::new()),
+            1u32,
+        ),
+    };
+    let (
+        mark_mesh_vertices,
+        mark_mesh_indices,
+        mark_mesh_surface_ranges,
+        mark_mesh_revision,
+        _mark_v_arc,
+        _mark_i_arc,
+        _mark_r_arc,
+    ) = match mark_mesh.as_ref() {
+        Some(plan) => {
+            let (verts, v_arc) = take_published(plan.packed_share.as_ref());
+            let (inds, i_arc) = take_published(plan.index_share.as_ref());
+            let (ranges, r_arc) = take_published(plan.range_share.as_ref());
+            (verts, inds, ranges, plan.revision, v_arc, i_arc, r_arc)
+        }
+        None => (
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
             0,
+            1u32,
             1u32,
             1u32,
         ),
@@ -397,32 +395,33 @@ pub fn extract_exact_colour(
         glass_mesh_surface_ranges,
         glass_mesh_vertex_refusal,
         glass_mesh_revision,
-        glass_v_arc,
-        glass_i_arc,
+        _glass_v_arc,
+        _glass_i_arc,
+        _glass_r_arc,
     ) = match glass_mesh.as_ref() {
         Some(plan) => match plan.exact_packed_vertices() {
             Ok(_) => {
-                let (verts, v_arc) = extract_share(plan.packed_share.as_ref(), &plan.vertices);
-                let (inds, i_arc) = extract_share(plan.index_share.as_ref(), &plan.indices);
+                let (verts, v_arc) = take_published(plan.packed_share.as_ref());
+                let (inds, i_arc) = take_published(plan.index_share.as_ref());
+                let (ranges, r_arc) = take_published(plan.range_share.as_ref());
                 (
                     verts,
                     inds,
-                    plan.draws
-                        .iter()
-                        .map(|draw| (draw.index_start, draw.index_count))
-                        .collect(),
+                    ranges,
                     None,
                     plan.revision,
                     v_arc,
                     i_arc,
+                    r_arc,
                 )
             }
             Err(cause) => (
                 Arc::new(Vec::new()),
                 Arc::new(Vec::new()),
-                Vec::new(),
+                Arc::new(Vec::new()),
                 Some(cause),
                 plan.revision,
+                1u32,
                 1u32,
                 1u32,
             ),
@@ -430,113 +429,36 @@ pub fn extract_exact_colour(
         None => (
             Arc::new(Vec::new()),
             Arc::new(Vec::new()),
-            Vec::new(),
+            Arc::new(Vec::new()),
             None,
             0,
             1u32,
             1u32,
+            1u32,
         ),
     };
-    let extract_fx_arc = u32::from(
-        fx_v_arc == 1
-            && fx_i_arc == 1
-            && mark_v_arc == 1
-            && mark_i_arc == 1
-            && glass_v_arc == 1
-            && glass_i_arc == 1,
-    );
-    let extract_tess_ms = tess_started.elapsed().as_secs_f32() * 1000.0;
-    let extract_world_clone_bytes = std::mem::size_of_val(world_vertices.as_slice()) as u64
-        + world_layer.len() as u64
-        + std::mem::size_of_val(world_indices.as_slice()) as u64
-        + std::mem::size_of_val(world_surface_ranges.as_slice()) as u64
-        + std::mem::size_of_val(smodel_vertices.as_slice()) as u64
-        + std::mem::size_of_val(smodel_indices.as_slice()) as u64
-        + std::mem::size_of_val(smodel_surface_ranges.as_slice()) as u64;
-    let extract_xmodel_clone_bytes = {
-        let mut n = 0u64;
-        if xmodel_arc == 0 {
-            n += std::mem::size_of_val(xmodel_vertices.as_slice()) as u64;
-        }
-        if xmodel_i_arc == 0 {
-            n += std::mem::size_of_val(xmodel_indices.as_slice()) as u64;
-        }
-        if xmodel_r_arc == 0 {
-            n += std::mem::size_of_val(xmodel_surface_ranges.as_slice()) as u64;
-        }
-        n
-    };
-    let extract_fx_clone_bytes = tess_extract_clone_bytes(
-        fx_v_arc,
-        fx_i_arc,
-        &fx_vertices,
-        &fx_indices,
-        &fx_surface_ranges,
-    ) + tess_extract_clone_bytes(
-        1,
-        1,
-        &particle_cloud_vertices,
-        &particle_cloud_indices,
-        &particle_cloud_surface_ranges,
-    ) + tess_extract_clone_bytes(
-        mark_v_arc,
-        mark_i_arc,
-        &mark_mesh_vertices,
-        &mark_mesh_indices,
-        &mark_mesh_surface_ranges,
-    ) + tess_extract_clone_bytes(
-        glass_v_arc,
-        glass_i_arc,
-        &glass_mesh_vertices,
-        &glass_mesh_indices,
-        &glass_mesh_surface_ranges,
-    );
-    if let Some(slot) = slot {
-        slot.stamp_extract_colour(
-            extract_ports_ms,
-            extract_tess_ms,
-            u32::from(skip_world_smodel),
-            extract_world_clone_bytes,
-            extract_xmodel_clone_bytes,
-            xmodel_arc,
-            extract_fx_arc,
-            extract_fx_clone_bytes,
-        );
-    }
     let image_handles = images
         .as_ref()
         .map(|handles| (**handles).clone())
         .unwrap_or_default();
 
-    let mut exec_frame = existing
-        .as_mut()
-        .map(|extracted| std::mem::take(&mut extracted.exec_frame))
+    let mut exec_frame = existing_frame
+        .as_ref()
+        .map(|frame| frame.exec_frame.clone())
         .unwrap_or_default();
     render_frontend::assemble::drawsurf::material_exec::refresh(
         &mut exec_frame,
         mat_frame,
         assembly.as_deref(),
     );
-    let next = ExtractedExactColour {
-        frame_products,
+    let mut next_world = render_gpu::RenderWorldData {
         generation,
         catalog: Some(Arc::clone(&runtime.catalog)),
         prepared: Some(Arc::clone(&runtime.prepared)),
-        exec_frame,
         world_generation,
         smc_revision,
-        sun_shadow: mat_frame.sun_shadow,
-        warm_pipelines,
-        pipeline_world_materials: spawn_job
-            .as_ref()
-            .map(|job| job.pipeline_world_materials.clone())
-            .unwrap_or_default(),
-        pipeline_smodel_materials: spawn_job
-            .as_ref()
-            .map(|job| job.pipeline_smodel_materials.clone())
-            .unwrap_or_default(),
-        ports,
-        static_geometry: render_gpu::ExtractedStaticGeometry {
+        ports: Arc::new(ports),
+        static_geometry: Arc::new(render_gpu::ExtractedStaticGeometry {
             world_vertices,
             world_layer,
             world_indices,
@@ -547,12 +469,40 @@ pub fn extract_exact_colour(
             smodel_surface_ranges,
             smodel_vertex_refusal,
             smodel_cached_vertices,
-        },
-        smc_vb_patches,
-        smc_ib_patches,
-        smc_index_baked,
+        }),
+        smc_index_baked: Arc::new(smc_index_baked),
         smodel_pretess_indices,
         smodel_index_layout_revision,
+        sampler_table: samplers.as_ref().map(|table| (**table).clone()),
+        image_handles,
+        sorted_material_names: Arc::new(if skip_ports {
+            Vec::new()
+        } else {
+            render_gpu::dump_sorted_material_names(&runtime.catalog)
+        }),
+        shader_program_names: Arc::new(if skip_ports {
+            Vec::new()
+        } else {
+            render_gpu::dump_shader_program_names(&runtime.catalog)
+        }),
+    };
+    let next_frame = render_gpu::RenderFrameData {
+        frame_products,
+        generation,
+        world_generation,
+        exec_frame,
+        sun_shadow: mat_frame.sun_shadow,
+        warm_pipelines,
+        pipeline_world_materials: spawn_job
+            .as_ref()
+            .map(|job| job.pipeline_world_materials.clone())
+            .unwrap_or_default(),
+        pipeline_smodel_materials: spawn_job
+            .as_ref()
+            .map(|job| job.pipeline_smodel_materials.clone())
+            .unwrap_or_default(),
+        smc_vb_patches,
+        smc_ib_patches,
         xmodel_vertices,
         xmodel_indices,
         xmodel_surface_ranges,
@@ -577,29 +527,49 @@ pub fn extract_exact_colour(
         glass_mesh_surface_ranges,
         glass_mesh_revision,
         glass_mesh_vertex_refusal,
-        sampler_table: samplers.as_ref().map(|table| (**table).clone()),
-        image_handles,
-        sorted_material_names: if skip_ports {
-            Vec::new()
-        } else {
-            render_gpu::dump_sorted_material_names(&runtime.catalog)
-        },
-        shader_program_names: if skip_ports {
-            Vec::new()
-        } else {
-            render_gpu::dump_shader_program_names(&runtime.catalog)
-        },
     };
-    if let Some(mut existing) = existing {
-        replace_exact_colour(
-            &mut existing,
-            next,
-            skip_world_smodel,
-            skip_smc_maps,
-            skip_ports,
+    if let Some(existing) = existing_world.as_ref() {
+        reuse_installed_rows(
+            &mut next_world,
+            existing,
+            WorldRowReuse {
+                static_geometry: skip_world_smodel,
+                smc_index_baked: skip_smc_maps,
+                ports: skip_ports,
+            },
         );
-    } else {
-        commands.insert_resource(next);
+    }
+    let world = InstalledRenderWorld::new(next_world);
+    commands.insert_resource(world.clone());
+    commands.insert_resource(PublishedRenderFrame::seal(world, next_frame));
+}
+
+/// Which rows of the installed world the seal decided are still the ones the
+/// GPU already holds. The flags come from the static comparisons above; this
+/// only moves the previously published handles across so publication does not
+/// hand the render world a second copy of geometry it did not rebuild.
+#[derive(Clone, Copy, Debug)]
+struct WorldRowReuse {
+    static_geometry: bool,
+    smc_index_baked: bool,
+    ports: bool,
+}
+
+fn reuse_installed_rows(
+    next: &mut render_gpu::RenderWorldData,
+    existing: &InstalledRenderWorld,
+    reuse: WorldRowReuse,
+) {
+    if reuse.static_geometry {
+        next.static_geometry = existing.static_geometry.clone();
+    }
+    if reuse.smc_index_baked {
+        next.smc_index_baked = existing.smc_index_baked.clone();
+    }
+    if reuse.ports {
+        next.ports = existing.ports.clone();
+        next.sorted_material_names = existing.sorted_material_names.clone();
+        next.shader_program_names = existing.shader_program_names.clone();
     }
 }
 
@@ -617,29 +587,6 @@ fn frame_submission_matches(
         matches!(product.status, render_frame::FrameProductStatus::Missing(_))
             || product.generation_id == generation
     })
-}
-
-fn replace_exact_colour(
-    existing: &mut ExtractedExactColour,
-    mut next: ExtractedExactColour,
-    skip_world_smodel: bool,
-    skip_smc_maps: bool,
-    skip_ports: bool,
-) {
-    // Reuse only explicitly stable payload. Every frame field is replaced,
-    // including pipeline demand even when the geometry has not changed.
-    if skip_world_smodel {
-        next.static_geometry = std::mem::take(&mut existing.static_geometry);
-    }
-    if skip_smc_maps {
-        next.smc_index_baked = std::mem::take(&mut existing.smc_index_baked);
-    }
-    if skip_ports {
-        next.ports = std::mem::take(&mut existing.ports);
-        next.sorted_material_names = std::mem::take(&mut existing.sorted_material_names);
-        next.shader_program_names = std::mem::take(&mut existing.shader_program_names);
-    }
-    *existing = next;
 }
 
 pub fn extract_image_handles(
@@ -889,43 +836,47 @@ mod ownership_tests {
     }
 
     #[test]
-    fn static_geometry_reuse_still_replaces_material_demand_and_frame_payload() {
-        let mut existing = ExtractedExactColour::default();
-        existing.static_geometry.world_indices = vec![1, 2, 3];
-        existing.sorted_material_names = vec!["retained".into()];
-        existing.smc_index_baked = vec![5];
-        existing.pipeline_world_materials = Arc::new([1].into_iter().collect());
-        existing.pipeline_smodel_materials = Arc::new([2].into_iter().collect());
-        let mut next = ExtractedExactColour::default();
-        next.pipeline_world_materials = Arc::new([3].into_iter().collect());
-        next.pipeline_smodel_materials = Arc::new([4].into_iter().collect());
-        next.fx_revision = 42;
-        next.smodel_pretess_indices = Arc::new(vec![9]);
-        replace_exact_colour(&mut existing, next, true, true, true);
-        assert_eq!(existing.static_geometry.world_indices, [1, 2, 3]);
-        assert_eq!(existing.sorted_material_names, ["retained"]);
-        assert_eq!(existing.smc_index_baked, [5]);
-        assert_eq!(
-            *existing.pipeline_world_materials,
-            [3].into_iter().collect()
-        );
-        assert_eq!(
-            *existing.pipeline_smodel_materials,
-            [4].into_iter().collect()
-        );
-        assert_eq!(existing.fx_revision, 42);
-        assert_eq!(*existing.smodel_pretess_indices, [9]);
+    fn reuse_carries_published_world_rows_and_leaves_the_rest_rebuilt() {
+        let mut existing = render_gpu::RenderWorldData::default();
+        existing.static_geometry = Arc::new(render_gpu::ExtractedStaticGeometry {
+            world_indices: vec![1, 2, 3],
+            ..Default::default()
+        });
+        existing.sorted_material_names = Arc::new(vec!["retained".to_string()]);
+        existing.smc_index_baked = Arc::new(vec![5]);
+        let existing = InstalledRenderWorld::new(existing);
 
-        replace_exact_colour(
-            &mut existing,
-            ExtractedExactColour::default(),
-            false,
-            false,
-            false,
+        let mut next = render_gpu::RenderWorldData {
+            smodel_pretess_indices: Arc::new(vec![9]),
+            ..Default::default()
+        };
+        reuse_installed_rows(
+            &mut next,
+            &existing,
+            WorldRowReuse {
+                static_geometry: true,
+                smc_index_baked: true,
+                ports: true,
+            },
         );
-        assert!(existing.static_geometry.world_indices.is_empty());
-        assert!(existing.sorted_material_names.is_empty());
-        assert!(existing.smc_index_baked.is_empty());
-        assert!(existing.pipeline_world_materials.is_empty());
+        assert_eq!(next.static_geometry.world_indices, [1, 2, 3]);
+        assert_eq!(*next.sorted_material_names, ["retained".to_string()]);
+        assert_eq!(*next.smc_index_baked, [5]);
+        // Rows the seal rebuilt are never overwritten by the previous world.
+        assert_eq!(*next.smodel_pretess_indices, [9]);
+
+        let mut rebuilt = render_gpu::RenderWorldData::default();
+        reuse_installed_rows(
+            &mut rebuilt,
+            &existing,
+            WorldRowReuse {
+                static_geometry: false,
+                smc_index_baked: false,
+                ports: false,
+            },
+        );
+        assert!(rebuilt.static_geometry.world_indices.is_empty());
+        assert!(rebuilt.sorted_material_names.is_empty());
+        assert!(rebuilt.smc_index_baked.is_empty());
     }
 }

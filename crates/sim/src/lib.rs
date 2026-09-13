@@ -168,3 +168,5 @@ pub use map_doors::{DoorLeaf, DoorSwitch, MapDoors};
 
 mod objectives;
 pub use objectives::{BombSite, ObjectiveHull, ObjectiveMatch, ObjectiveView};
+
+pub use world::{SimContent, SimContentBuilder};

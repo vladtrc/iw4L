@@ -336,7 +336,7 @@ pub(crate) fn update_reticle(
         .unwrap_or(crate::images::HUD_CHROME_NAMESPACE);
     let center = resolve_slot(
         ReticleSlot::Center,
-        assets.center_slot.is_some(),
+        assets.center_authored,
         &assets.center_image,
         weapon_ns,
         &mut hud_images,
@@ -344,7 +344,7 @@ pub(crate) fn update_reticle(
     );
     let side = resolve_slot(
         ReticleSlot::Side,
-        assets.side_slot.is_some(),
+        assets.side_authored,
         &assets.side_image,
         weapon_ns,
         &mut hud_images,

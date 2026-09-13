@@ -119,4 +119,10 @@ pub(crate) fn published_or_live<'a, T>(share: Option<&'a Arc<Vec<T>>>, live: &'a
     share.map(|rows| rows.as_slice()).unwrap_or(live)
 }
 
+pub(crate) fn publish_index_ranges(
+    draws: impl IntoIterator<Item = (u32, u32)>,
+) -> Arc<Vec<(u32, u32)>> {
+    Arc::new(draws.into_iter().collect())
+}
+
 pub mod sky;

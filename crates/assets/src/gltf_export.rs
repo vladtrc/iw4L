@@ -13,8 +13,8 @@ use bevy::{
 use serde_json::{Map, Value, json};
 
 use crate::{
-    AuthoredMaterial, MaterialCatalog, MaterialCullFace, MaterialDrawMode, PreparedWorld,
-    StaticModelPlacement, TS_COLOR_MAP,
+    AuthoredMaterial, MaterialCullFace, MaterialDrawMode, PreparedWorld, StaticModelPlacement,
+    TS_COLOR_MAP,
 };
 
 const INCHES_TO_METERS: f32 = 0.0254;
@@ -51,6 +51,7 @@ pub fn export_prepared_world_gltf(
     artifacts: &Path,
     map: &str,
     world: PreparedWorld,
+    materials: &crate::MatchMaterials,
 ) -> Result<GltfExportSummary, String> {
     let draw = world
         .draw
@@ -66,10 +67,10 @@ pub fn export_prepared_world_gltf(
         .join(format!("p1a-{export_id}"));
 
     let mut out = GltfBuilder::default();
-    let world_node = out.add_world(draw)?;
+    let world_node = out.add_world(draw, materials)?;
     let mut model_meshes = Vec::with_capacity(world.static_model_meshes.len());
     for model in &world.static_model_meshes {
-        model_meshes.push(out.add_model(model, draw));
+        model_meshes.push(out.add_model(model, materials));
     }
 
     let mut placement_nodes = Vec::new();
@@ -188,15 +189,18 @@ struct GltfBuilder {
 }
 
 impl GltfBuilder {
-    fn add_world(&mut self, draw: &crate::WorldDraw) -> Result<usize, String> {
+    fn add_world(
+        &mut self,
+        draw: &crate::WorldDraw,
+        materials: &crate::MatchMaterials,
+    ) -> Result<usize, String> {
         let mut primitives = Vec::new();
         for batch in &draw.batches {
-            let Some(material) = canonical_material(batch.material, &draw.material_asset_ids)
-            else {
+            let Some(material) = canonical_material(batch.material, &materials.map_ids) else {
                 self.refuse("MaterialUnbound");
                 continue;
             };
-            let material = match self.material(material, &draw.global_materials) {
+            let material = match self.material(material, &materials.population) {
                 Ok(material) => material,
                 Err(reason) => {
                     self.refuse(reason);
@@ -222,15 +226,18 @@ impl GltfBuilder {
         Ok(node)
     }
 
-    fn add_model(&mut self, model: &crate::ModelMesh, draw: &crate::WorldDraw) -> Option<usize> {
+    fn add_model(
+        &mut self,
+        model: &crate::ModelMesh,
+        materials: &crate::MatchMaterials,
+    ) -> Option<usize> {
         let mut primitives = Vec::new();
         for surface in model.surfaces() {
-            let Some(material) = canonical_material(surface.material, &draw.material_asset_ids)
-            else {
+            let Some(material) = canonical_material(surface.material, &materials.map_ids) else {
                 self.refuse("MaterialUnbound");
                 continue;
             };
-            let material = match self.material(material, &draw.global_materials) {
+            let material = match self.material(material, &materials.population) {
                 Ok(material) => material,
                 Err(reason) => {
                     self.refuse(reason);
@@ -345,7 +352,7 @@ impl GltfBuilder {
     fn material(
         &mut self,
         canonical: usize,
-        catalog: &MaterialCatalog,
+        catalog: &crate::MaterialDefinitions,
     ) -> Result<usize, &'static str> {
         if let Some(cached) = self.material_cache.get(&canonical) {
             return *cached;
@@ -358,7 +365,7 @@ impl GltfBuilder {
     fn build_material(
         &mut self,
         canonical: usize,
-        catalog: &MaterialCatalog,
+        catalog: &crate::MaterialDefinitions,
     ) -> Result<usize, &'static str> {
         let material = catalog.materials.get(canonical).ok_or("MaterialUnbound")?;
         let (alpha_mode, alpha_cutoff, coverage_exact) = match catalog.agreed_draw_mode(material) {
@@ -435,7 +442,7 @@ impl GltfBuilder {
         &mut self,
         image_index: usize,
         sampler_state: u8,
-        catalog: &MaterialCatalog,
+        catalog: &crate::MaterialDefinitions,
     ) -> Result<usize, &'static str> {
         if let Some(&texture) = self.texture_cache.get(&(image_index, sampler_state)) {
             return Ok(texture);

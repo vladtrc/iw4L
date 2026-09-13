@@ -162,6 +162,44 @@ instead of smooth text pretending we always knew.
 * living maps (`docs/*`, a `PLAN.md`, a `WHATS-LEFT.md`) describe the present
   state, not the journal. Those are updated. The iterations are not.
 
+## Before shipping: the scaffolding goes back out
+
+A probe is how a claim was proved. It is not part of the runtime, and the
+moment it stops being read it is a file the next agent has to understand before
+they may ignore it.
+
+So the last step of a slice, before `make mr ship` — or before the commit that
+lands on master when the agent works on the root and has no clone — is to read
+the branch's **own** diff:
+
+```
+git diff origin/master...HEAD --stat      # what the branch adds at all
+git diff origin/master...HEAD             # then the hunks, for real
+```
+
+and to ask of every added file, test and print: **what breaks tomorrow if this
+is gone?** "Nothing" means it goes out now, while the context to judge it is
+still in your head. Nobody deletes it later — later it looks load-bearing.
+
+Out:
+
+* **probe code** — a `main` that prints a struct, a temporary `pub fn dump_*`,
+  an `examples/` binary that already answered its question, a `#[test]` written
+  to call one function once and eyeball the output;
+* **a test that only asserts the code ran** — no expected value, or an expected
+  value copied from what the code printed today. It cannot fail for a reason
+  anyone cares about; it buys a false green and costs the run time forever;
+* **debug leftovers** — `dbg!`, an `eprintln!` behind no flag, a commented-out
+  block kept just in case, a feature flag whose only user was the probe.
+
+Stays: a test that would have caught the bug this iteration fixed, and a probe
+somebody will rerun to reproduce a measurement — and that one lives in the
+artifact (`ITERATION-N-…/probe.rs.txt`), not in `crates/`.
+
+Deleting a probe does not delete the evidence. The artifact keeps the output,
+the log and the verdict, which is what the next agent reads anyway; the
+disposable half of it does not need to be in git to have been true.
+
 ## Handing work over
 
 What the report has to contain: what it is based on (the trace, the probe
@@ -169,6 +207,11 @@ output, the measurement); what was **not** done and where the gaps are; whether
 you fixed a symptom or the disease. **A report without the "what was not done"
 section is incomplete** — and that section is what decides between `-FINAL`,
 `-PART` and `-READY`.
+
+It also says what came back out of the tree and what stayed on purpose — which
+probes were removed, which test is there because it would have caught this bug.
+A slice that added no scaffolding says that in one line; it is an answer, not an
+omission.
 
 ## git
 

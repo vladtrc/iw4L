@@ -61,7 +61,6 @@ impl ZoneLane for Iw4Lane {
         image: &ZoneImage,
         progress: &LoadProgress,
         shared_surfaces: asset_model::SharedXModelSurfaces,
-        common_techsets: &[crate::TechniqueSetFacts],
         material_seed: crate::MaterialCatalog,
         common_film_visions: &mut std::collections::BTreeMap<
             String,
@@ -105,6 +104,7 @@ impl ZoneLane for Iw4Lane {
 
         drop(stage);
         let mut sink = ZoneWalkSink::with_stage(progress.stage("walking map assets"));
+        let seeded_techsets = material_seed.technique_set_facts().to_vec();
         sink.seed_materials(material_seed);
         sink.map_xmodels.shared_surfaces = shared_surfaces;
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
@@ -126,7 +126,7 @@ impl ZoneLane for Iw4Lane {
         let light_def_bodies = sink.light_def_bodies;
         let mut materials = std::mem::take(&mut sink.materials);
 
-        let absorbed = materials.absorb_technique_set_tables(common_techsets);
+        let absorbed = materials.absorb_technique_set_tables(&seeded_techsets);
         let stub_routed = materials.reroute_stub_materials();
         report.push(format!(
             "material route (pre-decode): absorbed_techsets={absorbed} stub_routed={stub_routed} \
@@ -376,39 +376,44 @@ impl ZoneLane for Iw4Lane {
             push_mapents_key_census(&mut report, &stream);
             let dm_spawns = dm_spawn_points(&stream);
             drop(stream);
+            let arena_bytes = memory.total_bytes();
+            drop(memory);
             report.push(format!(
-                "s1 arenas kept: map={} ({:.1}MiB) (ZoneMemory after extract; ZoneImage dropped)",
-                memory.total_bytes(),
-                memory.total_bytes() as f64 / (1024.0 * 1024.0),
+                "s1 arenas walked: map={arena_bytes} ({:.1}MiB) (ZoneMemory freed after the walk; ZoneImage dropped)",
+                arena_bytes as f64 / (1024.0 * 1024.0),
             ));
-            return LoadedWorld::from_prepared_parts(
-                PreparedWorld {
+            return LoadedWorld {
+                materials,
+                world: PreparedWorld {
                     fx: std::mem::take(&mut fx),
                     fx_models,
                     fx_glass,
                     impact_fx: impact_fx.take(),
                     dyn_ents,
-                    compass,
-                    script_sound,
                     exp_fog,
                     film_vision,
                     createart_name,
                     policy: WorldDrawPolicy::iw4(),
                     ..Default::default()
                 },
-                clip,
-                dm_spawns,
+                collision: clip,
+                spawns: dm_spawns,
                 bodies,
                 fpv_meshes,
-                map_xanims,
+                xanims: map_xanims,
+                facts: crate::MapFacts {
+                    compass,
+                    script_sound,
+                    ..Default::default()
+                },
+                arena_bytes,
                 report,
-                vec![LaneGap {
+                gaps: vec![LaneGap {
                     capability: PreparedCapability::PreparedWorld,
                     reason: "no GfxWorld reached — nothing to draw".into(),
                     addr: Some("assets::lane::iw4::load_world/no_gfx_world"),
                 }],
-                Some(memory),
-            );
+            };
         };
 
         let world_draw = build_world_draw(&stream, geometry, materials);
@@ -419,7 +424,7 @@ impl ZoneLane for Iw4Lane {
         drop(stage);
         let stage = progress.stage("building static models");
         match world_draw {
-            Ok(draw) => {
+            Ok((draw, map_materials)) => {
                 let map_models = super::build_static_model_draw(&stream, geometry, map_xmodels);
                 {
                     let n = draw.primary_lights.len();
@@ -574,10 +579,11 @@ impl ZoneLane for Iw4Lane {
                 let dm_spawns = dm_spawn_points(&stream);
                 push_mapents_key_census(&mut report, &stream);
                 drop(stream);
+                let arena_bytes = memory.total_bytes();
+                drop(memory);
                 report.push(format!(
-                    "s1 arenas kept: map={} ({:.1}MiB) (ZoneMemory after extract; ZoneImage dropped)",
-                    memory.total_bytes(),
-                    memory.total_bytes() as f64 / (1024.0 * 1024.0),
+                    "s1 arenas walked: map={arena_bytes} ({:.1}MiB) (ZoneMemory freed after the walk; ZoneImage dropped)",
+                    arena_bytes as f64 / (1024.0 * 1024.0),
                 ));
                 report.push(format!(
                     "ffa spawns: {} mp_dm_spawn* ({} start)",
@@ -632,18 +638,18 @@ impl ZoneLane for Iw4Lane {
                 "material catalog: {}/{} surfaces resolved, {} materials, {} images, {} color bindings, {} normal bindings, {} alpha-test, {} blend, {} multiply, {} sky, {} capture gaps, {} agreed draw-mode, {} lit-band draw-mode conflicts, {} unresolved draw-mode",
                 material_surfaces,
                 draw.surface_materials.len(),
-                draw.materials.materials.len(),
-                draw.materials.images.len(),
-                draw.materials.color_binding_count(),
-                draw.materials.normal_binding_count(),
-                draw.materials.alpha_test_count(),
-                draw.materials.blend_count(),
-                draw.materials.multiply_count(),
-                draw.materials.sky_count(),
-                draw.materials.capture_gaps,
-                draw.materials.agreed_draw_mode_count(),
-                draw.materials.lit_band_draw_mode_conflict_count(),
-                draw.materials.unresolved_draw_mode_count(),
+                map_materials.materials.len(),
+                map_materials.images.len(),
+                map_materials.color_binding_count(),
+                map_materials.normal_binding_count(),
+                map_materials.alpha_test_count(),
+                map_materials.blend_count(),
+                map_materials.multiply_count(),
+                map_materials.sky_count(),
+                map_materials.capture_gaps,
+                map_materials.agreed_draw_mode_count(),
+                map_materials.lit_band_draw_mode_conflict_count(),
+                map_materials.unresolved_draw_mode_count(),
             ));
                 report.push(format!(
                 "material batches: {} compact meshes (material identity + lightmap state + primary light)",
@@ -692,7 +698,7 @@ impl ZoneLane for Iw4Lane {
                     .iter()
                     .map(|probe| {
                         probe.image.and_then(|image| {
-                            draw.materials.images.get(image).and_then(|source| {
+                            map_materials.images.get(image).and_then(|source| {
                                 match decode_reflection_probe_cubemap(source) {
                                     Ok(image) => Some(image),
                                     Err(error) => {
@@ -724,8 +730,9 @@ impl ZoneLane for Iw4Lane {
                 let min = draw.stats.min;
                 let max = draw.stats.max;
                 let world_bounds = draw.stats.bounds;
-                LoadedWorld::from_prepared_parts(
-                    PreparedWorld {
+                LoadedWorld {
+                    materials: map_materials,
+                    world: PreparedWorld {
                         draw: Some(draw),
                         static_model_meshes,
                         static_model_instances,
@@ -743,12 +750,6 @@ impl ZoneLane for Iw4Lane {
                         impact_fx,
                         reflection_probe_images,
                         intermission_view,
-                        minimap_corners,
-                        north_yaw,
-                        compass,
-                        script_sound,
-                        t5_teamset: None,
-                        team_icons: crate::TeamIcons::default(),
                         exp_fog,
                         film_vision,
                         createart_name,
@@ -757,49 +758,62 @@ impl ZoneLane for Iw4Lane {
                         world_bounds,
                         policy: WorldDrawPolicy::iw4(),
                     },
-                    clip,
-                    dm_spawns,
+                    collision: clip,
+                    spawns: dm_spawns,
                     bodies,
                     fpv_meshes,
-                    map_xanims,
+                    xanims: map_xanims,
+                    facts: crate::MapFacts {
+                        minimap_corners,
+                        north_yaw,
+                        compass,
+                        script_sound,
+                        ..Default::default()
+                    },
+                    arena_bytes,
                     report,
-                    Vec::new(),
-                    Some(memory),
-                )
+                    gaps: Vec::new(),
+                }
             }
             Err(e) => {
                 report.push(format!("world mesh: {e}"));
                 let dm_spawns = dm_spawn_points(&stream);
                 push_mapents_key_census(&mut report, &stream);
                 drop(stream);
-                LoadedWorld::from_prepared_parts(
-                    PreparedWorld {
+                let arena_bytes = memory.total_bytes();
+                drop(memory);
+                LoadedWorld {
+                    materials: crate::MaterialCatalog::default(),
+                    world: PreparedWorld {
                         fx,
                         fx_models,
                         fx_glass,
                         impact_fx,
                         dyn_ents,
-                        compass,
-                        script_sound,
                         exp_fog,
                         film_vision,
                         createart_name,
                         policy: WorldDrawPolicy::iw4(),
                         ..Default::default()
                     },
-                    clip,
-                    dm_spawns,
+                    collision: clip,
+                    spawns: dm_spawns,
                     bodies,
                     fpv_meshes,
-                    map_xanims,
+                    xanims: map_xanims,
+                    facts: crate::MapFacts {
+                        compass,
+                        script_sound,
+                        ..Default::default()
+                    },
+                    arena_bytes,
                     report,
-                    vec![LaneGap {
+                    gaps: vec![LaneGap {
                         capability: PreparedCapability::PreparedWorld,
                         reason: format!("world mesh: {e}"),
                         addr: Some("assets::lane::iw4::load_world/world_mesh"),
                     }],
-                    Some(memory),
-                )
+                }
             }
         }
     }
@@ -1028,11 +1042,11 @@ impl ZoneLane for Iw4Lane {
         ));
         drop(stream);
         let s1_common_bytes = memory.total_bytes();
+        drop(memory);
         report.push(format!(
-            "s1 arenas kept: common={s1_common_bytes} ({:.1}MiB) (ZoneMemory after walk; ZoneImage dropped)",
+            "s1 arenas walked: common={s1_common_bytes} ({:.1}MiB) (ZoneMemory freed after the walk; ZoneImage dropped)",
             s1_common_bytes as f64 / (1024.0 * 1024.0),
         ));
-        let s1_common_arenas = Some(memory);
         let impact_fx = sink.impact_fx.take_table();
         if let Some(ref table) = impact_fx {
             report.push(format!(
@@ -1044,20 +1058,19 @@ impl ZoneLane for Iw4Lane {
         } else {
             report.push("common_mp impactfx: no table captured".into());
         }
-        let mut fpv_meshes = sink.fpv_meshes;
+        let fpv_meshes = sink.fpv_meshes;
         sink.materials.resolve_technique_set_edges();
-        let technique_sets = sink.materials.technique_set_facts().to_vec();
         if decode_color_maps {
-            fpv_meshes.materials = sink.materials;
+            let mut material_population = sink.materials;
 
-            let stage = progress.stage("planning common_mp FPV material images");
+            let stage = progress.stage("planning common_mp material images");
             let (inline, mut plan) = crate::material_images::plan_material_color_maps(
                 path,
-                &mut fpv_meshes.materials,
+                &mut material_population,
                 &stage,
             );
             report.push(format!(
-                "common_mp FPV materials: {} claimed for the merged pool, {} in-zone bodies decoded here ({} missing, {} unsupported)",
+                "common_mp materials: {} claimed for the merged pool, {} in-zone bodies decoded here ({} missing, {} unsupported)",
                 plan.len(),
                 inline.decoded,
                 inline.missing,
@@ -1065,7 +1078,7 @@ impl ZoneLane for Iw4Lane {
             ));
             let tracer_inline = crate::material_images::plan_color_or_2d_for_names(
                 &mut plan,
-                &mut fpv_meshes.materials,
+                &mut material_population,
                 sink.tracers.named_materials(),
                 &stage,
             );
@@ -1080,7 +1093,7 @@ impl ZoneLane for Iw4Lane {
                 .collect();
             let fx_inline = crate::material_images::plan_color_or_2d_for_names(
                 &mut plan,
-                &mut fpv_meshes.materials,
+                &mut material_population,
                 fx_2d_names,
                 &stage,
             );
@@ -1094,15 +1107,13 @@ impl ZoneLane for Iw4Lane {
                     sink.tracers.named_materials().map(str::to_owned).collect();
                 for name in unique {
                     let bind = crate::fx_material_bind_name(&name);
-                    let twins: Vec<&str> = fpv_meshes
-                        .materials
+                    let twins: Vec<&str> = material_population
                         .materials
                         .iter()
                         .filter(|m| m.name.as_str() == bind)
                         .map(|m| m.name.as_str())
                         .collect();
-                    let images: Vec<&str> = fpv_meshes
-                        .materials
+                    let images: Vec<&str> = material_population
                         .images
                         .iter()
                         .filter(|img| img.name.as_str() == bind)
@@ -1111,8 +1122,7 @@ impl ZoneLane for Iw4Lane {
                     report.push(format!(
                         "common_mp tracer material `{name}` twins={twins:?} images={images:?}"
                     ));
-                    for mat in fpv_meshes
-                        .materials
+                    for mat in material_population
                         .materials
                         .iter()
                         .filter(|m| m.name.as_str() == bind)
@@ -1120,7 +1130,7 @@ impl ZoneLane for Iw4Lane {
                         let sem: Vec<u8> = mat.textures.iter().map(|t| t.semantic).collect();
                         let decoded = mat.textures.iter().any(|t| {
                             t.image
-                                .and_then(|i| fpv_meshes.materials.images.get(i))
+                                .and_then(|i| material_population.images.get(i))
                                 .is_some_and(|img| img.decoded.is_some())
                         });
                         report.push(format!(
@@ -1136,33 +1146,15 @@ impl ZoneLane for Iw4Lane {
 
             let tracer_named = sink.tracers.named_materials().count();
             report.push(format!(
-            "common_mp fx color maps: 0 cloned ({} tracer names Bound into global; no FPV pool clone)",
-            tracer_named
+            "common_mp fx color maps: 0 cloned ({tracer_named} tracer names Bound into global; no pool clone)"
         ));
-            report.push(
-                fpv_meshes
-                    .materials
-                    .image_memory()
-                    .report_row("image memory common_mp FPV pool"),
-            );
-
-            let moved = fpv_meshes.materials.image_memory();
-            let material_population = std::mem::take(&mut fpv_meshes.materials);
+            let moved = material_population.image_memory();
+            report.push(moved.report_row("image memory common_mp population"));
             report.push(format!(
-            "image memory common_mp population: bytes={} ({:.1}MiB) (moved into global at absorb; FPV catalog emptied)",
+            "image memory common_mp population: bytes={} ({:.1}MiB) (moved into global at absorb)",
             moved.total_bytes(),
             moved.total_bytes() as f64 / (1024.0 * 1024.0),
         ));
-            report.push(
-                fpv_meshes
-                    .materials
-                    .image_memory()
-                    .report_row("image memory FPV catalog after move"),
-            );
-            report.push(
-            "image memory common_mp fx color maps: n=0 bytes=0 (Bound into global; no clone of FPV pool)"
-                .into(),
-        );
             CommonCensus {
                 pending_images,
                 scene_models: sink.scene_models,
@@ -1179,13 +1171,12 @@ impl ZoneLane for Iw4Lane {
                 tracers: sink.tracers,
                 impact_fx,
                 material_population,
-                technique_sets,
                 light_defs,
                 report,
                 pen_table: sink.pen_table.unwrap_or_default(),
                 pen_table_loaded: sink.pen_table.is_some(),
                 xmodel_walk: sink.models.walk_census(),
-                s1_common_arenas,
+                s1_common_bytes,
                 teamset_icons: std::collections::HashMap::new(),
                 film_visions: sink.film_visions,
             }
@@ -1214,13 +1205,12 @@ impl ZoneLane for Iw4Lane {
                 tracers: sink.tracers,
                 impact_fx,
                 material_population: sink.materials,
-                technique_sets,
                 light_defs,
                 report,
                 pen_table: sink.pen_table.unwrap_or_default(),
                 pen_table_loaded: sink.pen_table.is_some(),
                 xmodel_walk: sink.models.walk_census(),
-                s1_common_arenas,
+                s1_common_bytes,
                 teamset_icons: std::collections::HashMap::new(),
                 film_visions: sink.film_visions,
             }

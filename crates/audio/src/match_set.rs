@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use frame::{ClientSet, LaunchIdentity, MatchTornDown};
 
 use crate::aliases::movement_prepare_names;
-use crate::ambient::{PreparedMapAmbientPcm, SoundBankLoadAttempted, SoundBankWalk};
+use crate::ambient::{SoundBankLoadAttempted, SoundBankNamespace, SoundBankWalk};
 use crate::clip_store::{ClipKey, ClipStore, clip_keys_for_alias};
 use crate::map_doors::RADIATION_DOOR_ALIASES;
 use crate::playback::SoundBank;
@@ -63,7 +63,7 @@ fn queue_match_clips(
     identity: Option<Res<LaunchIdentity>>,
     catalog: Option<Res<assets::MenuCatalog>>,
     script_sound: Option<Res<assets::SessionMapScriptSound>>,
-    prepared: Res<PreparedMapAmbientPcm>,
+    namespace: Option<Res<SoundBankNamespace>>,
     loading: Option<Res<LoadingScreen>>,
     mut prep: ResMut<MatchClipPrep>,
     mut ready: ResMut<AudioReady>,
@@ -94,6 +94,12 @@ fn queue_match_clips(
     let Some(bank) = bank else {
         return;
     };
+    let Some(namespace) = namespace else {
+        return;
+    };
+    let Some(script_sound) = script_sound else {
+        return;
+    };
     let mut required = HashSet::new();
     let mut aliases = 0usize;
     for weapon in 1..=weapons.0.len() as u32 {
@@ -111,20 +117,15 @@ fn queue_match_clips(
         request_named(clips, &bank.0, AssetNamespace::Iw4, alias, &mut required);
     }
     if let Some(identity) = identity.as_deref() {
-        let ns = prepared.namespace();
-        let zone = if prepared.zone().is_empty() {
-            identity.zone.as_str()
-        } else {
-            prepared.zone()
-        };
+        let ns = namespace.namespace;
+        let zone = namespace.zone.as_str();
+        if zone != identity.zone {
+            return;
+        }
         for emitter in bank.0.createfx_loop_sounds(ns, zone) {
             aliases += 1;
             request_named(clips, &bank.0, ns, &emitter.soundalias, &mut required);
         }
-    }
-    for alias in prepared.alias_names() {
-        aliases += 1;
-        request_named(clips, &bank.0, prepared.namespace(), alias, &mut required);
     }
     for alias in RADIATION_DOOR_ALIASES {
         aliases += 1;
@@ -150,12 +151,9 @@ fn queue_match_clips(
             request_named(clips, &bank.0, AssetNamespace::Iw4, &alias, &mut required);
         }
     }
-    if let Some(alias) = script_sound
-        .as_deref()
-        .and_then(|facts| facts.0.ambient_alias.as_deref())
-    {
+    if let Some(alias) = script_sound.0.ambient_alias.as_deref() {
         aliases += 1;
-        request_named(clips, &bank.0, prepared.namespace(), alias, &mut required);
+        request_named(clips, &bank.0, namespace.namespace, alias, &mut required);
     }
     for alias in MATCH_HUD_PULSE.iter().chain(crate::objectives::EFFECTS) {
         aliases += 1;
@@ -226,7 +224,7 @@ fn request_named(
     required: &mut HashSet<ClipKey>,
 ) {
     for key in clip_keys_for_alias(bank, ns, alias) {
-        clips.request_off_frame(key.clone());
+        clips.request(key.clone());
         if clips.ready(&key).is_none() {
             required.insert(key);
         }

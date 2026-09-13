@@ -53,23 +53,13 @@ pub struct ClipCollision {
     pub leaves: Vec<ClipBspLeaf>,
     pub leafbrushes: Vec<u16>,
 
-    pub verts: Vec<[f32; 3]>,
-
-    pub tri_indices: Vec<u16>,
-
-    pub tri_surface_flags: Vec<u32>,
-
-    pub tri_content_flags: Vec<u32>,
+    /// The mesh tables, shared with every other owner of this collision
+    /// instead of copied into each of them.
+    pub mesh: std::sync::Arc<clipmap_iw4::ClipMeshTables>,
 
     pub tri_material_index: Vec<u16>,
 
     pub materials: Vec<ClipMapMaterial>,
-
-    pub aabb_trees: Vec<clipmap_iw4::ClipAabbNode>,
-
-    pub partitions: Vec<clipmap_iw4::ClipPartition>,
-
-    pub aabb_roots: Vec<u16>,
 
     pub cmodels: Vec<ClipCmodel>,
 
@@ -241,15 +231,7 @@ impl ClipCollision {
             brushes: &self.brushes,
         };
         let ext = clipmap_iw4::TraceExtents::new(start, end, [0.0; 3], [0.0; 3], mask);
-        let mesh = clipmap_iw4::ClipMeshRef {
-            verts: &self.verts,
-            tri_indices: &self.tri_indices,
-            tri_surface_flags: &self.tri_surface_flags,
-            tri_content_flags: &self.tri_content_flags,
-            aabb_trees: &self.aabb_trees,
-            partitions: &self.partitions,
-            aabb_roots: &self.aabb_roots,
-        };
+        let mesh = self.mesh.as_ref().as_ref();
         let trace = clipmap_iw4::trace_brush_and_mesh(&map, &mesh, &ext, &|_piece| true);
         trace.startsolid == 0 && trace.fraction >= 1.0
     }
@@ -270,15 +252,7 @@ impl ClipCollision {
             brushes: &self.brushes,
         };
         let ext = clipmap_iw4::TraceExtents::new(start, end, mins, maxs, mask);
-        let mesh = clipmap_iw4::ClipMeshRef {
-            verts: &self.verts,
-            tri_indices: &self.tri_indices,
-            tri_surface_flags: &self.tri_surface_flags,
-            tri_content_flags: &self.tri_content_flags,
-            aabb_trees: &self.aabb_trees,
-            partitions: &self.partitions,
-            aabb_roots: &self.aabb_roots,
-        };
+        let mesh = self.mesh.as_ref().as_ref();
         let trace = clipmap_iw4::trace_brush_and_mesh(&map, &mesh, &ext, &|_piece| true);
         ClipSweepHit {
             fraction: trace.fraction,
@@ -461,13 +435,14 @@ fn extract_mesh_tables(
     g: ClipMapGeometry,
     out: &mut ClipCollision,
 ) -> Result<(), ClipCollisionError> {
+    let mesh = std::sync::Arc::make_mut(&mut out.mesh);
     let Some(verts_ptr) = g.verts else {
         return Ok(());
     };
-    out.verts.reserve(g.vert_count);
+    mesh.verts.reserve(g.vert_count);
     for i in 0..g.vert_count {
         let v = verts_ptr.at(i * 12);
-        out.verts.push([
+        mesh.verts.push([
             s.f32_at(v, 0).map_err(|_| ClipCollisionError::Truncated)?,
             s.f32_at(v, 4).map_err(|_| ClipCollisionError::Truncated)?,
             s.f32_at(v, 8).map_err(|_| ClipCollisionError::Truncated)?,
@@ -475,12 +450,12 @@ fn extract_mesh_tables(
     }
     if let Some(idx_ptr) = g.tri_indices {
         let n = g.tri_count.saturating_mul(3);
-        out.tri_indices.reserve(n);
+        mesh.tri_indices.reserve(n);
         for i in 0..n {
             let id = s
                 .u16_at(idx_ptr, i * 2)
                 .map_err(|_| ClipCollisionError::Truncated)?;
-            out.tri_indices.push(id);
+            mesh.tri_indices.push(id);
         }
     }
     extract_mesh_materials(s, g, out)?;
@@ -493,14 +468,15 @@ fn extract_aabb_forest(
     g: ClipMapGeometry,
     out: &mut ClipCollision,
 ) -> Result<(), ClipCollisionError> {
+    let mesh = std::sync::Arc::make_mut(&mut out.mesh);
     if let Some(parts) = g.collision_partitions {
-        out.partitions.reserve(g.partition_count);
+        mesh.partitions.reserve(g.partition_count);
         for i in 0..g.partition_count {
             let p = parts.at(i * s.layout(sz::COLLISION_PARTITION, 16));
             let tri_n = s.u8_at(p, 0).map_err(|_| ClipCollisionError::Truncated)?;
             let seg = s.u8_at(p, 2).map_err(|_| ClipCollisionError::Truncated)?;
             let first = s.i32_at(p, 4).map_err(|_| ClipCollisionError::Truncated)?;
-            out.partitions.push(clipmap_iw4::ClipPartition {
+            mesh.partitions.push(clipmap_iw4::ClipPartition {
                 tri_count: tri_n,
                 first_tri: first,
                 first_vert_segment: seg,
@@ -508,7 +484,7 @@ fn extract_aabb_forest(
         }
     }
     if let Some(trees) = g.collision_aabb_trees {
-        out.aabb_trees.reserve(g.aabb_tree_count);
+        mesh.aabb_trees.reserve(g.aabb_tree_count);
         for i in 0..g.aabb_tree_count {
             let node = trees.at(i * sz::COLLISION_AABB_TREE);
             let origin = [
@@ -536,7 +512,7 @@ fn extract_aabb_forest(
             let u = s
                 .i32_at(node, 28)
                 .map_err(|_| ClipCollisionError::Truncated)?;
-            out.aabb_trees.push(clipmap_iw4::ClipAabbNode {
+            mesh.aabb_trees.push(clipmap_iw4::ClipAabbNode {
                 origin,
                 half_size,
                 material_index,
@@ -545,7 +521,7 @@ fn extract_aabb_forest(
             });
         }
     }
-    out.aabb_roots = clipmap_iw4::aabb_forest_roots(&out.aabb_trees);
+    mesh.aabb_roots = clipmap_iw4::aabb_forest_roots(&mesh.aabb_trees);
     Ok(())
 }
 
@@ -554,6 +530,7 @@ fn extract_mesh_materials(
     g: ClipMapGeometry,
     out: &mut ClipCollision,
 ) -> Result<(), ClipCollisionError> {
+    let mesh = std::sync::Arc::make_mut(&mut out.mesh);
     out.materials = extract_clip_materials_iw4(s, g)?;
     if g.tri_count == 0 {
         return Ok(());
@@ -569,9 +546,9 @@ fn extract_mesh_materials(
         }
     }
     let (leaves, partitions) = collect_aabb_leaves_iw4(s, g)?;
-    out.tri_surface_flags =
+    mesh.tri_surface_flags =
         clipmap_iw4::flatten_tri_surface_flags(&leaves, &partitions, &material_sflags, g.tri_count);
-    out.tri_content_flags =
+    mesh.tri_content_flags =
         clipmap_iw4::flatten_tri_surface_flags(&leaves, &partitions, &material_cflags, g.tri_count);
     out.tri_material_index =
         clipmap_iw4::flatten_tri_material_index(&leaves, &partitions, g.tri_count);
@@ -1342,13 +1319,14 @@ fn extract_iw5_mesh_tables(
     g: fastfile_iw5::ClipMapGeometry,
     out: &mut ClipCollision,
 ) -> Result<(), ClipCollisionError> {
+    let mesh = std::sync::Arc::make_mut(&mut out.mesh);
     let Some(verts_ptr) = g.verts else {
         return Ok(());
     };
-    out.verts.reserve(g.vert_count);
+    mesh.verts.reserve(g.vert_count);
     for i in 0..g.vert_count {
         let v = verts_ptr.at(i * 12);
-        out.verts.push([
+        mesh.verts.push([
             s.f32_at(v, 0).map_err(|_| ClipCollisionError::Truncated)?,
             s.f32_at(v, 4).map_err(|_| ClipCollisionError::Truncated)?,
             s.f32_at(v, 8).map_err(|_| ClipCollisionError::Truncated)?,
@@ -1356,12 +1334,12 @@ fn extract_iw5_mesh_tables(
     }
     if let Some(idx_ptr) = g.tri_indices {
         let n = g.tri_count.saturating_mul(3);
-        out.tri_indices.reserve(n);
+        mesh.tri_indices.reserve(n);
         for i in 0..n {
             let id = s
                 .u16_at(idx_ptr, i * 2)
                 .map_err(|_| ClipCollisionError::Truncated)?;
-            out.tri_indices.push(id);
+            mesh.tri_indices.push(id);
         }
     }
     extract_iw5_mesh_materials(s, g, out)?;
@@ -1374,16 +1352,17 @@ fn extract_iw5_aabb_forest(
     g: fastfile_iw5::ClipMapGeometry,
     out: &mut ClipCollision,
 ) -> Result<(), ClipCollisionError> {
+    let mesh = std::sync::Arc::make_mut(&mut out.mesh);
     use fastfile_iw5::size as iw5sz;
 
     if let Some(parts) = g.collision_partitions {
-        out.partitions.reserve(g.partition_count);
+        mesh.partitions.reserve(g.partition_count);
         for i in 0..g.partition_count {
             let p = parts.at(i * s.layout(iw5sz::COLLISION_PARTITION, 16));
             let tri_n = s.u8_at(p, 0).map_err(|_| ClipCollisionError::Truncated)?;
             let seg = s.u8_at(p, 2).map_err(|_| ClipCollisionError::Truncated)?;
             let first = s.i32_at(p, 4).map_err(|_| ClipCollisionError::Truncated)?;
-            out.partitions.push(clipmap_iw4::ClipPartition {
+            mesh.partitions.push(clipmap_iw4::ClipPartition {
                 tri_count: tri_n,
                 first_tri: first,
                 first_vert_segment: seg,
@@ -1391,7 +1370,7 @@ fn extract_iw5_aabb_forest(
         }
     }
     if let Some(trees) = g.collision_aabb_trees {
-        out.aabb_trees.reserve(g.aabb_tree_count);
+        mesh.aabb_trees.reserve(g.aabb_tree_count);
         for i in 0..g.aabb_tree_count {
             let node = trees.at(i * iw5sz::COLLISION_AABB_TREE);
             let origin = [
@@ -1419,7 +1398,7 @@ fn extract_iw5_aabb_forest(
             let u = s
                 .i32_at(node, 28)
                 .map_err(|_| ClipCollisionError::Truncated)?;
-            out.aabb_trees.push(clipmap_iw4::ClipAabbNode {
+            mesh.aabb_trees.push(clipmap_iw4::ClipAabbNode {
                 origin,
                 half_size,
                 material_index,
@@ -1428,7 +1407,7 @@ fn extract_iw5_aabb_forest(
             });
         }
     }
-    out.aabb_roots = clipmap_iw4::aabb_forest_roots(&out.aabb_trees);
+    mesh.aabb_roots = clipmap_iw4::aabb_forest_roots(&mesh.aabb_trees);
     Ok(())
 }
 
@@ -1437,6 +1416,7 @@ fn extract_iw5_mesh_materials(
     g: fastfile_iw5::ClipMapGeometry,
     out: &mut ClipCollision,
 ) -> Result<(), ClipCollisionError> {
+    let mesh = std::sync::Arc::make_mut(&mut out.mesh);
     use fastfile_iw5::ZonePtr;
     use fastfile_iw5::size as iw5sz;
 
@@ -1510,9 +1490,9 @@ fn extract_iw5_mesh_materials(
             leaves.push((mat, part));
         }
     }
-    out.tri_surface_flags =
+    mesh.tri_surface_flags =
         clipmap_iw4::flatten_tri_surface_flags(&leaves, &partitions, &material_sflags, g.tri_count);
-    out.tri_content_flags =
+    mesh.tri_content_flags =
         clipmap_iw4::flatten_tri_surface_flags(&leaves, &partitions, &material_cflags, g.tri_count);
     out.tri_material_index =
         clipmap_iw4::flatten_tri_material_index(&leaves, &partitions, g.tri_count);
@@ -1822,13 +1802,14 @@ fn extract_t5_mesh_tables(
     g: fastfile_t5::ClipMapGeometry,
     out: &mut ClipCollision,
 ) -> Result<(), ClipCollisionError> {
+    let mesh = std::sync::Arc::make_mut(&mut out.mesh);
     let Some(verts_ptr) = g.verts else {
         return Ok(());
     };
-    out.verts.reserve(g.vert_count);
+    mesh.verts.reserve(g.vert_count);
     for i in 0..g.vert_count {
         let v = verts_ptr.at(i * 12);
-        out.verts.push([
+        mesh.verts.push([
             s.f32_at(v, 0).map_err(|_| ClipCollisionError::Truncated)?,
             s.f32_at(v, 4).map_err(|_| ClipCollisionError::Truncated)?,
             s.f32_at(v, 8).map_err(|_| ClipCollisionError::Truncated)?,
@@ -1836,12 +1817,12 @@ fn extract_t5_mesh_tables(
     }
     if let Some(idx_ptr) = g.tri_indices {
         let n = g.tri_count.saturating_mul(3);
-        out.tri_indices.reserve(n);
+        mesh.tri_indices.reserve(n);
         for i in 0..n {
             let id = s
                 .u16_at(idx_ptr, i * 2)
                 .map_err(|_| ClipCollisionError::Truncated)?;
-            out.tri_indices.push(id);
+            mesh.tri_indices.push(id);
         }
     }
     use fastfile_t5::size as t5;
@@ -1862,7 +1843,7 @@ fn extract_t5_mesh_tables(
     if let Some(parts) = g.collision_partitions {
         for i in 0..g.partition_count {
             let p = parts.at(i * t5::COLLISION_PARTITION);
-            out.partitions.push(clipmap_iw4::ClipPartition {
+            mesh.partitions.push(clipmap_iw4::ClipPartition {
                 tri_count: s.u8_at(p, 0).map_err(|_| ClipCollisionError::Truncated)?,
                 first_tri: s.i32_at(p, 4).map_err(|_| ClipCollisionError::Truncated)?,
                 first_vert_segment: 0,
@@ -1872,7 +1853,7 @@ fn extract_t5_mesh_tables(
     if let Some(trees) = g.collision_aabb_trees {
         for i in 0..g.aabb_tree_count {
             let p = trees.at(i * t5::COLLISION_AABB_TREE);
-            out.aabb_trees.push(clipmap_iw4::ClipAabbNode {
+            mesh.aabb_trees.push(clipmap_iw4::ClipAabbNode {
                 origin: [
                     s.f32_at(p, 0).map_err(|_| ClipCollisionError::Truncated)?,
                     s.f32_at(p, 4).map_err(|_| ClipCollisionError::Truncated)?,
@@ -1889,22 +1870,22 @@ fn extract_t5_mesh_tables(
             });
         }
     }
-    let leaves: Vec<_> = out
+    let leaves: Vec<_> = mesh
         .aabb_trees
         .iter()
         .filter(|n| n.child_count == 0)
         .map(|n| (n.material_index, n.u))
         .collect();
-    let partitions: Vec<_> = out
+    let partitions: Vec<_> = mesh
         .partitions
         .iter()
         .map(|p| (p.tri_count, p.first_tri))
         .collect();
     let sflags: Vec<_> = out.materials.iter().map(|m| m.surface_flags).collect();
     let cflags: Vec<_> = out.materials.iter().map(|m| m.content_flags).collect();
-    out.tri_surface_flags =
+    mesh.tri_surface_flags =
         clipmap_iw4::flatten_tri_surface_flags(&leaves, &partitions, &sflags, g.tri_count);
-    out.tri_content_flags =
+    mesh.tri_content_flags =
         clipmap_iw4::flatten_tri_surface_flags(&leaves, &partitions, &cflags, g.tri_count);
     out.tri_material_index =
         clipmap_iw4::flatten_tri_material_index(&leaves, &partitions, g.tri_count);
@@ -1916,6 +1897,7 @@ fn extract_t5_bsp_tables(
     g: fastfile_t5::ClipMapGeometry,
     out: &mut ClipCollision,
 ) -> Result<(), ClipCollisionError> {
+    let mesh = std::sync::Arc::make_mut(&mut out.mesh);
     use fastfile_t5::{ZonePtr, size as sz};
     let (Some(nodes), Some(leaves), Some(lb)) = (g.nodes, g.leaves, g.leafbrush_nodes) else {
         return Err(ClipCollisionError::MissingTables);
@@ -1966,7 +1948,7 @@ fn extract_t5_bsp_tables(
             coll_aabb_count,
         });
     }
-    out.aabb_roots = roots.into_iter().collect();
+    mesh.aabb_roots = roots.into_iter().collect();
     if let Some(models) = g.cmodels {
         for i in 0..g.cmodel_count {
             let p = models.at(i * sz::C_MODEL);

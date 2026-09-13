@@ -474,6 +474,10 @@ pub fn retain_script_model_assets(plan: &mut ScriptModelDrawPlan, keep: &[bool])
         XMODEL_PACKED_UNAVAILABLE,
     );
 
+    // Carry the plan's revisions across the retain: a retain reshuffles surface
+    // indices, it does not make this a different plan, and a revision that
+    // restarts at zero is one a consumer can mistake for the one it last saw.
+    next.revisions = plan.revisions;
     next.revisions.bump_vertices();
     next.generation = plan.generation.wrapping_add(1);
     next.revision = plan.revision;

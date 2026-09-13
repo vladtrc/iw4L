@@ -8,7 +8,7 @@ use crate::lane_capability::{LaneStatus, PreparedCapability};
 use crate::progress::LoadProgress;
 use crate::session_load::{PreparedWorld, WorldDrawPolicy};
 use crate::{
-    MASK_PLAYER_SOLID, T5ZoneMemory, XAnimCatalog, ZoneGame, ZoneImage, build_t5_clip_collision,
+    MASK_PLAYER_SOLID, T5ZoneMemory, ZoneGame, ZoneImage, build_t5_clip_collision,
     build_t5_world_draw, decode_material_color_maps, decode_reflection_probe_cubemap,
     dm_spawn_points_t5, intermission_view_t5, minimap_corners_t5,
 };
@@ -57,7 +57,6 @@ impl ZoneLane for T5Lane {
         image: &ZoneImage,
         progress: &LoadProgress,
         _shared_surfaces: asset_model::SharedXModelSurfaces,
-        common_techsets: &[crate::TechniqueSetFacts],
         material_seed: crate::MaterialCatalog,
         _common_film_visions: &mut std::collections::BTreeMap<
             String,
@@ -102,6 +101,7 @@ impl ZoneLane for T5Lane {
         drop(stage);
         let stage = progress.stage("walking T5 map assets");
         let mut sink = ZoneWalkSink::default();
+        let seeded_techsets = material_seed.technique_set_facts().to_vec();
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(crate::AssetNamespace::T5);
@@ -157,8 +157,8 @@ impl ZoneLane for T5Lane {
                     }
                     report.push(format!(
                         "t5 clip mesh: verts={} tris={} (walk verts={} tris={})",
-                        clip.verts.len(),
-                        clip.tri_indices.len() / 3,
+                        clip.mesh.verts.len(),
+                        clip.mesh.tri_indices.len() / 3,
                         geometry.vert_count,
                         geometry.tri_count
                     ));
@@ -200,7 +200,7 @@ impl ZoneLane for T5Lane {
         let compass = std::mem::take(&mut sink.compass).resolve(&sink.materials);
         report.push(format!("compass: {:?}", compass));
         let mut materials = std::mem::take(&mut sink.materials);
-        let absorbed = materials.absorb_technique_set_tables(common_techsets);
+        let absorbed = materials.absorb_technique_set_tables(&seeded_techsets);
         let promoted = materials.promote_iw5_fallback_tables();
         let t5_alias = materials.absorb_t5_feature_token_donors();
         let stub_routed = materials.reroute_stub_materials();
@@ -236,23 +236,24 @@ impl ZoneLane for T5Lane {
         let Some(geometry) = stream.gfx_world() else {
             report.push("no GfxWorld retained — nothing to draw".into());
             let dm_spawns = dm_spawn_points_t5(&stream);
-            let mut loaded = LoadedWorld::from_prepared_parts(
-                PreparedWorld {
+            let mut loaded = LoadedWorld {
+                world: PreparedWorld {
                     policy: WorldDrawPolicy::t5(),
                     exp_fog,
                     createart_name,
+                    ..Default::default()
+                },
+                collision: clip,
+                spawns: dm_spawns,
+                bodies,
+                fpv_meshes,
+                facts: crate::MapFacts {
                     t5_teamset: t5_teamset.clone(),
                     ..Default::default()
                 },
-                clip,
-                dm_spawns,
-                bodies,
-                fpv_meshes,
-                XAnimCatalog::default(),
                 report,
-                Vec::new(),
-                None,
-            );
+                ..Default::default()
+            };
             loaded.push_gap(
                 PreparedCapability::PreparedWorld,
                 "no GfxWorld retained — nothing to draw",
@@ -271,7 +272,7 @@ impl ZoneLane for T5Lane {
         ));
 
         match build_t5_world_draw(&stream, geometry, materials) {
-            Ok(mut draw) => {
+            Ok((mut draw, map_materials)) => {
                 let mut map_xmodels = map_xmodels;
                 if let Some(name) = geometry.sky_box_model.and_then(|p| stream.cstr(p).ok()) {
                     draw.sky_model = map_xmodels.take_named_mesh(name);
@@ -391,7 +392,7 @@ impl ZoneLane for T5Lane {
                     .iter()
                     .map(|probe| {
                         probe.image.and_then(|image| {
-                            draw.materials.images.get(image).and_then(|source| {
+                            map_materials.images.get(image).and_then(|source| {
                                 match decode_reflection_probe_cubemap(source) {
                                     Ok(image) => Some(image),
                                     Err(error) => {
@@ -514,8 +515,9 @@ impl ZoneLane for T5Lane {
                 let (smodel_lighting_samples, light_grid) = smodel_lighting_samples;
                 let min = draw.stats.min;
                 let max = draw.stats.max;
-                LoadedWorld::from_prepared_parts(
-                    PreparedWorld {
+                LoadedWorld {
+                    materials: map_materials,
+                    world: PreparedWorld {
                         draw: Some(draw),
                         static_model_meshes,
                         static_model_instances,
@@ -534,12 +536,6 @@ impl ZoneLane for T5Lane {
                         impact_fx: sink.impact_fx.take_table(),
                         reflection_probe_images,
                         intermission_view,
-                        minimap_corners,
-                        north_yaw,
-                        compass,
-                        script_sound: crate::MapScriptSoundFacts::default(),
-                        t5_teamset: t5_teamset.clone(),
-                        team_icons: crate::TeamIcons::default(),
                         exp_fog,
                         film_vision: None,
                         createart_name,
@@ -549,36 +545,42 @@ impl ZoneLane for T5Lane {
                         world_bounds: None,
                         policy: WorldDrawPolicy::t5(),
                     },
-                    clip,
-                    dm_spawns,
+                    collision: clip,
+                    spawns: dm_spawns,
                     bodies,
                     fpv_meshes,
-                    XAnimCatalog::default(),
+                    facts: crate::MapFacts {
+                        minimap_corners,
+                        north_yaw,
+                        compass,
+                        t5_teamset: t5_teamset.clone(),
+                        ..Default::default()
+                    },
                     report,
-                    Vec::new(),
-                    None,
-                )
+                    ..Default::default()
+                }
             }
             Err(e) => {
                 report.push(format!("T5 world mesh: {e}"));
                 let dm_spawns = dm_spawn_points_t5(&stream);
-                let mut loaded = LoadedWorld::from_prepared_parts(
-                    PreparedWorld {
+                let mut loaded = LoadedWorld {
+                    world: PreparedWorld {
                         policy: WorldDrawPolicy::t5(),
                         exp_fog,
                         createart_name,
+                        ..Default::default()
+                    },
+                    collision: clip,
+                    spawns: dm_spawns,
+                    bodies,
+                    fpv_meshes,
+                    facts: crate::MapFacts {
                         t5_teamset: t5_teamset.clone(),
                         ..Default::default()
                     },
-                    clip,
-                    dm_spawns,
-                    bodies,
-                    fpv_meshes,
-                    XAnimCatalog::default(),
                     report,
-                    Vec::new(),
-                    None,
-                );
+                    ..Default::default()
+                };
                 loaded.push_gap(
                     PreparedCapability::PreparedWorld,
                     format!("T5 world mesh: {e}"),
@@ -686,7 +688,6 @@ impl ZoneLane for T5Lane {
             sink.xanims.len(),
             sink.xanims.capture_gaps
         ));
-        let technique_sets = sink.materials.technique_set_facts().to_vec();
 
         let mut materials = sink.materials;
 
@@ -720,7 +721,6 @@ impl ZoneLane for T5Lane {
             fx: sink.fx,
             impact_fx: sink.impact_fx.take_table(),
             fx_models: sink.fx_models,
-            technique_sets,
             report,
             teamset_icons: sink.teamset_icons,
             film_visions: std::collections::BTreeMap::new(),

@@ -60,7 +60,7 @@ pub struct SessionSwapCompletion {
 pub enum SessionSwapResult {
     Installed { zone: String },
     Menu,
-    DiscoveryFailed { zone: String, error: String },
+    Failed { zone: String, error: String },
 }
 
 impl SessionSwapRequest {
@@ -395,7 +395,7 @@ fn run_session_swap(
                 stamp_runtime_role(&mut role, &mut identity, RuntimeRole::Listen);
                 finish = Some(SessionSwapCompletion {
                     id: pending.id,
-                    result: SessionSwapResult::DiscoveryFailed {
+                    result: SessionSwapResult::Failed {
                         zone: fact.zone.clone(),
                         error: fact.error.clone(),
                     },
@@ -418,7 +418,7 @@ fn run_session_swap(
         let done_target = match &completed.result {
             SessionSwapResult::Installed { zone } => format!("installed:{zone}"),
             SessionSwapResult::Menu => "menu".into(),
-            SessionSwapResult::DiscoveryFailed { zone, .. } => format!("failed:{zone}"),
+            SessionSwapResult::Failed { zone, .. } => format!("failed:{zone}"),
         };
         perf::swap(completed.id, "done", &done_target);
         transition.pending = None;

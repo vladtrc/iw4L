@@ -67,8 +67,9 @@ shadows are `assemble/drawsurf/sun_shadow.rs`.
   `multi_draw_cmds` counters). Order and per-command `first_instance` do not
   change.
 
-The `render/src/extract.rs` bridge publishes commands and their execution/geometry
-inputs together in `ExtractedExactColour`, checking frame/world/material identity.
+The `render/src/extract.rs` bridge publishes `InstalledRenderWorld` when static
+geometry, ports or SMC maps change, and `PublishedRenderFrame` every frame,
+checking frame/world/material identity.
 CPU image handles share the `assets::image_handles` Arc with the upload registry.
 The loader's decisions are made in
 `render_frontend/src/prepare/scene/world_gpu.rs::consume_gpu_load_progress`.

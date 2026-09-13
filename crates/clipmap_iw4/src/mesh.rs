@@ -38,6 +38,43 @@ pub struct MeshWalkCensus {
     pub aabb_roots: u32,
 }
 
+/// The collision mesh tables as read from a zone: immutable once the walk that
+/// produced them is over, and shared from there by everyone who traces against
+/// the map rather than copied per consumer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ClipMeshTables {
+    pub verts: Vec<[f32; 3]>,
+
+    pub tri_indices: Vec<u16>,
+
+    pub tri_surface_flags: Vec<u32>,
+
+    pub tri_content_flags: Vec<u32>,
+
+    pub aabb_trees: Vec<ClipAabbNode>,
+    pub partitions: Vec<ClipPartition>,
+
+    pub aabb_roots: Vec<u16>,
+}
+
+impl ClipMeshTables {
+    pub fn as_ref(&self) -> ClipMeshRef<'_> {
+        ClipMeshRef {
+            verts: &self.verts,
+            tri_indices: &self.tri_indices,
+            tri_surface_flags: &self.tri_surface_flags,
+            tri_content_flags: &self.tri_content_flags,
+            aabb_trees: &self.aabb_trees,
+            partitions: &self.partitions,
+            aabb_roots: &self.aabb_roots,
+        }
+    }
+
+    pub fn tri_count(&self) -> usize {
+        self.tri_indices.len() / 3
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ClipMeshRef<'a> {
     pub verts: &'a [[f32; 3]],

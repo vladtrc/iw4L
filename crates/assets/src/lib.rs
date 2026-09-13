@@ -265,10 +265,11 @@ pub use fpv_catalog::{
     VIEWHANDS_NAME_T5,
 };
 pub use fx_catalog::{
-    FxCatalog, FxChildEdge, FxElemMaterial, FxElemMaterialReason, FxElemModelEdge, FxElemSoundEdge,
-    OwnedFxEffectDef, OwnedFxElemDef, OwnedFxSparkFountainDef, OwnedFxTrailDef, OwnedFxVisual,
-    alias_fx_color_map_stubs, elem_type as fx_elem_type, fx_color_decoded_in_catalog,
-    fx_color_image_for_name, fx_material_bind_name, insert_fx_color_image, lookup_fx_color_image,
+    FxCatalog, FxChildEdge, FxDefinitions, FxElemMaterial, FxElemMaterialReason, FxElemModelEdge,
+    FxElemSoundEdge, OwnedFxEffectDef, OwnedFxElemDef, OwnedFxSparkFountainDef, OwnedFxTrailDef,
+    OwnedFxVisual, alias_fx_color_map_stubs, elem_type as fx_elem_type,
+    fx_color_decoded_in_catalog, fx_color_image_for_name, fx_material_bind_name,
+    insert_fx_color_image, lookup_fx_color_image,
 };
 pub use fx_model_catalog::{FxModelCatalog, FxModelEntry};
 pub use glass_catalog::{FxGlassReset, GlassZoneCensus, build_fx_glass_reset, build_glass_census};
@@ -315,11 +316,12 @@ pub use match_load::{
 pub use material_catalog::{
     AssetPointerIdentity, AssetRefDumpCensus, AuthoredImage, AuthoredMaterial, AuthoredShader,
     AuthoredVertexDecl, CrossGameReason, CrossGameTechsetResolution, MaterialCatalog,
-    MaterialImageMemory, MaterialTextureBinding, OwnedMaterialPass, OwnedShaderArgument,
-    OwnedShaderRef, OwnedTechnique, OwnedTechniqueGraph, ShaderSourceCensus, T5TechniqueOccupancy,
-    TS_2D, TS_COLOR_MAP, TS_DETAIL_MAP, TS_FUNCTION, TS_NORMAL_MAP, TS_SPECULAR_MAP,
-    TS_T5_COLOR0_MAP, TS_T5_COLOR15_MAP, TS_T5_THROW_MAP, TS_WATER_MAP, TechniqueSetFacts,
-    TechniqueTable, TechsetKey, TechsetResolve, VertexDeclStreamCensus, t5_feature_token_stripped,
+    MaterialDefinitions, MaterialImageMemory, MaterialTextureBinding, OwnedMaterialPass,
+    OwnedShaderArgument, OwnedShaderRef, OwnedTechnique, OwnedTechniqueGraph, ShaderSourceCensus,
+    T5TechniqueOccupancy, TS_2D, TS_COLOR_MAP, TS_DETAIL_MAP, TS_FUNCTION, TS_NORMAL_MAP,
+    TS_SPECULAR_MAP, TS_T5_COLOR0_MAP, TS_T5_COLOR15_MAP, TS_T5_THROW_MAP, TS_WATER_MAP,
+    TechniqueSetFacts, TechniqueTable, TechsetKey, TechsetResolve, VertexDeclStreamCensus,
+    t5_feature_token_stripped,
 };
 pub use material_draw::{
     AlphaTest, ColorMapTransform, D3DCULL_CCW, D3DCULL_CW, D3DCULL_NONE, D3DRS_CULLMODE,
@@ -381,9 +383,9 @@ pub use playeranim_parse::{
 pub use plugin::AssetPlugin;
 
 pub use prepared::{
-    MatchType10SoundHints, PreparedBodies, PreparedBodyClips, PreparedDestructibleDeath,
-    PreparedFpvMeshes, PreparedGaps, PreparedLocalizedStrings, PreparedMap,
-    PreparedProjectileMeshes, PreparedSpawn, PreparedWeapons, PreparedWorldWeapons, PreparedXAnims,
+    MapFacts, MatchMaterials, MatchType10SoundHints, PreparedBodies, PreparedBodyClips,
+    PreparedDestructibleDeath, PreparedFpvMeshes, PreparedGaps, PreparedLocalizedStrings,
+    PreparedMap, PreparedProjectileMeshes, PreparedWeapons, PreparedWorldWeapons, PreparedXAnims,
     PreparedXModelWalkCensus, SessionCompass,
 };
 pub use progress::{
@@ -392,9 +394,9 @@ pub use progress::{
 };
 pub use projectile_mesh_catalog::{ProjectileMeshCatalog, ProjectileMeshEntry};
 pub use session_load::{
-    MatchMaterialSeed, PreparedMatch, PreparedWorld, WorldDrawPolicy, apply_match_material_map,
-    load_match_material_catalog, load_match_material_seed, load_pool, load_prepared_match,
-    load_shell_weapon_registry, load_workers, publish_process_cpus,
+    MatchLoadOutcome, MatchMaterialSeed, PreparedMatch, PreparedWorld, WorldDrawPolicy,
+    apply_match_material_map, load_match_material_catalog, load_match_material_seed, load_pool,
+    load_prepared_match, load_shell_weapon_registry, load_workers, publish_process_cpus,
 };
 pub use soldiers::{
     SoldierKit, SoldierKits, arms_for_body, body_has_tp_attach_bones, ffa_assignment_is_axis,
@@ -408,7 +410,7 @@ pub use sound_catalog::{
 pub use sound_load::{LoadedSoundBank, load_mp_sound_bank, load_sound_catalog, namespace_for_zone};
 pub use sound_load_iw5::load_sound_catalog_iw5;
 pub use sound_load_t5::load_sound_catalog_t5;
-pub use sound_wma_t5::T5_WMA;
+pub use sound_wma_t5::{T5_WMA, decode_t5_xwma};
 pub use t5_code_remap::{
     IW4_CUSTOM_SAMPLER_DEST, LEFTOVER_T5_CODE_BASE, T5_CODE_CUSTOMWIND_CENTER,
     T5_CODE_CUSTOMWIND_SPRING, T5_CODE_EXTRA_CAM_PARAM, T5_CODE_EYEOFFSET, T5_CODE_FOG,
@@ -436,7 +438,9 @@ pub use t5_tech_map::{
     occupancy_to_technique_table, project_t5_slot, remap_t5_state_bits_entry,
     remap_t5_technique_flags, t5_slot_to_iw4,
 };
-pub use tracer_catalog::{OwnedTracerDef, TracerCatalog, TracerMaterial, TracerMaterialReason};
+pub use tracer_catalog::{
+    OwnedTracerDef, TracerCatalog, TracerDefinitions, TracerMaterial, TracerMaterialReason,
+};
 pub use weapon_anim_dispatch::{
     ACTION_GOAL_TIME_SECS, ACTIVE_GOAL_WEIGHT, ANIM_RATE_TABLE, AnimRateOffsets,
     IDLE_INTERRUPT_GOAL_TIME_SECS, INACTIVE_GOAL_WEIGHT, WEAP_ANIM_EVENT_MASK,

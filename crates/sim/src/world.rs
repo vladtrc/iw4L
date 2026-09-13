@@ -103,15 +103,9 @@ pub struct SimClipBsp {
 
 #[derive(Clone, Debug, Default)]
 pub struct SimClipMesh {
-    pub verts: Vec<[f32; 3]>,
-    pub tri_indices: Vec<u16>,
-
-    pub tri_surface_flags: Vec<u32>,
-
-    pub tri_content_flags: Vec<u32>,
-    pub aabb_trees: Vec<clipmap_iw4::ClipAabbNode>,
-    pub partitions: Vec<clipmap_iw4::ClipPartition>,
-    pub aabb_roots: Vec<u16>,
+    /// The immutable collision tables, shared with whoever else traces
+    /// against this map rather than copied per owner.
+    pub tables: std::sync::Arc<clipmap_iw4::ClipMeshTables>,
 
     pub static_models: Vec<SimStaticModel>,
 
@@ -245,19 +239,140 @@ pub(crate) struct PredictionRemoteBody {
     pub life_sequence: crate::LifeSequence,
 }
 
+/// Immutable definitions shared by independently mutable simulations.
+#[derive(Debug)]
+pub struct SimContent {
+    data: SimContentBuilder,
+}
+
+impl SimContent {
+    pub fn clip_brushes(&self) -> &[SimBrush] {
+        &self.data.clip_brushes
+    }
+    pub fn clip_bsp(&self) -> &SimClipBsp {
+        &self.data.clip_bsp
+    }
+    pub fn clip_mesh(&self) -> &SimClipMesh {
+        &self.data.clip_mesh
+    }
+    pub fn clip_cmodels(&self) -> &SimClipCmodels {
+        &self.data.clip_cmodels
+    }
+}
+
+/// Installation work. Consuming this builder closes all definition writers.
+#[derive(Debug, Default)]
+pub struct SimContentBuilder {
+    clip_brushes: Vec<SimBrush>,
+    clip_bsp: SimClipBsp,
+    clip_mesh: SimClipMesh,
+    clip_cmodels: SimClipCmodels,
+    weapon_def_scales: Vec<(f32, f32, f32)>,
+    weapon_combat: Vec<WeaponCombatFacts>,
+    bullet_pen: Vec<weapon_iw4::BulletPenFacts>,
+    pen_table: weapon_iw4::PenetrationDepthTable,
+    pen_table_loaded: bool,
+    player_kits: [PlayerKitCollision; 2],
+    player_anim_tree: Option<Arc<xmodel_runtime::XAnimTreeDefinition>>,
+    player_anim_node_names: Vec<String>,
+    mantle_xanims: Arc<crate::MantleXAnimBind>,
+    weapon_script_names: Arc<[String]>,
+    equipment_runtime: Vec<EquipmentRuntimeFacts>,
+    team_voice_prefix_allies: Option<String>,
+    team_voice_prefix_axis: Option<String>,
+    player_anim_script: Option<Arc<PlayerAnimScript>>,
+}
+
+impl SimContentBuilder {
+    pub fn finish(mut self) -> Arc<SimContent> {
+        self.clip_mesh.rebuild_smodel_grid();
+        Arc::new(SimContent { data: self })
+    }
+    pub fn set_weapon_def_scales(&mut self, scales: Vec<(f32, f32, f32)>) {
+        self.weapon_def_scales = scales;
+    }
+
+    pub fn set_player_anim_script(&mut self, script: Option<Arc<PlayerAnimScript>>) {
+        self.player_anim_script = script;
+    }
+
+    pub fn set_weapon_combat_table(&mut self, rows: Vec<WeaponCombatFacts>) {
+        self.weapon_combat = rows;
+    }
+
+    pub fn set_bullet_pen_facts(&mut self, rows: Vec<weapon_iw4::BulletPenFacts>) {
+        self.bullet_pen = rows;
+    }
+
+    pub fn set_penetration_table(&mut self, table: weapon_iw4::PenetrationDepthTable) {
+        self.pen_table = table;
+    }
+
+    pub fn set_pen_table_loaded(&mut self, loaded: bool) {
+        self.pen_table_loaded = loaded;
+    }
+
+    pub fn set_player_kit_collisions(
+        &mut self,
+        allies: PlayerKitCollision,
+        axis: PlayerKitCollision,
+    ) {
+        self.player_kits = [allies, axis];
+    }
+
+    pub fn set_player_anim_tree(
+        &mut self,
+        definition: Option<Arc<xmodel_runtime::XAnimTreeDefinition>>,
+        node_names: Vec<String>,
+    ) {
+        self.player_anim_tree = definition;
+        self.player_anim_node_names = node_names;
+    }
+
+    pub fn set_mantle_xanims(&mut self, bind: crate::MantleXAnimBind) {
+        self.mantle_xanims = Arc::new(bind);
+    }
+
+    pub fn set_weapon_script_names(&mut self, names: Vec<String>) {
+        self.weapon_script_names = names.into();
+    }
+
+    pub fn set_equipment_runtime_table(&mut self, rows: Vec<EquipmentRuntimeFacts>) {
+        self.equipment_runtime = rows;
+    }
+
+    pub fn set_team_voice_prefixes(&mut self, allies: Option<String>, axis: Option<String>) {
+        self.team_voice_prefix_allies = allies;
+        self.team_voice_prefix_axis = axis;
+    }
+
+    pub fn set_clip_brushes(&mut self, brushes: Vec<SimBrush>) {
+        self.clip_brushes = brushes;
+        self.clip_bsp = SimClipBsp::default();
+        self.clip_mesh = SimClipMesh::default();
+        self.clip_cmodels = SimClipCmodels::default();
+    }
+
+    pub fn set_clip_map(
+        &mut self,
+        brushes: Vec<SimBrush>,
+        bsp: SimClipBsp,
+        mesh: SimClipMesh,
+        cmodels: SimClipCmodels,
+    ) {
+        self.clip_brushes = brushes;
+        self.clip_bsp = bsp;
+        self.clip_mesh = mesh;
+        self.clip_cmodels = cmodels;
+    }
+}
+
 #[derive(Component, Clone, Debug)]
 pub struct SimState {
+    content: Arc<SimContent>,
     clients: Vec<(ClientId, ClientMatchState)>,
 
     prediction_remote_bodies: Vec<PredictionRemoteBody>,
-
-    clip_brushes: Vec<SimBrush>,
-
-    clip_bsp: SimClipBsp,
-
-    clip_mesh: SimClipMesh,
-
-    clip_cmodels: SimClipCmodels,
 
     area_entity_world: Option<clipmap_iw4::AreaEntityWorld>,
 
@@ -266,23 +381,6 @@ pub struct SimState {
     old_buttons: Vec<(ClientId, u32)>,
 
     old_cmd_angles: Vec<(ClientId, [i32; 3])>,
-
-    weapon_def_scales: Vec<(f32, f32, f32)>,
-
-    weapon_combat: Vec<WeaponCombatFacts>,
-
-    bullet_pen: Vec<weapon_iw4::BulletPenFacts>,
-
-    pen_table: weapon_iw4::PenetrationDepthTable,
-
-    pen_table_loaded: bool,
-
-    player_kits: [PlayerKitCollision; 2],
-
-    player_anim_tree: Option<Arc<xmodel_runtime::XAnimTreeDefinition>>,
-    player_anim_node_names: Vec<String>,
-
-    mantle_xanims: Arc<crate::MantleXAnimBind>,
 
     player_anim_trees: HashMap<u32, PlayerAnimTreeSlot>,
 
@@ -298,10 +396,6 @@ pub struct SimState {
     g_hudelems: Vec<crate::hudelem::GameHudElemSlot>,
 
     hud_elem_sound_ids: crate::hudelem::PulseFxSoundIds,
-
-    weapon_script_names: Arc<[String]>,
-
-    equipment_runtime: Vec<EquipmentRuntimeFacts>,
 
     dying_missiles: Vec<entity_iw4::EntityState>,
 
@@ -325,9 +419,6 @@ pub struct SimState {
     placement_cointoss_unwired: u32,
 
     pending_spawn_music: Vec<ClientId>,
-
-    team_voice_prefix_allies: Option<String>,
-    team_voice_prefix_axis: Option<String>,
 
     bc_speakers: Vec<crate::voice::BattlechatterSpeaker>,
 
@@ -399,8 +490,6 @@ pub struct SimState {
 
     last_stuck_ejects: Vec<(ClientId, ClientId)>,
 
-    player_anim_script: Option<Arc<PlayerAnimScript>>,
-
     last_anim_movetype: HashMap<ClientId, u8>,
 
     anim_event_seed: u32,
@@ -453,25 +542,13 @@ pub struct SimState {
 impl Default for SimState {
     fn default() -> Self {
         let mut world = Self {
+            content: SimContentBuilder::default().finish(),
             clients: Vec::new(),
             prediction_remote_bodies: Vec::new(),
-            clip_brushes: Vec::new(),
-            clip_bsp: SimClipBsp::default(),
-            clip_mesh: SimClipMesh::default(),
-            clip_cmodels: SimClipCmodels::default(),
             area_entity_world: None,
             entity_collision_capabilities: Vec::new(),
             old_buttons: Vec::new(),
             old_cmd_angles: Vec::new(),
-            weapon_def_scales: Vec::new(),
-            weapon_combat: Vec::new(),
-            bullet_pen: Vec::new(),
-            pen_table: weapon_iw4::PenetrationDepthTable::empty(),
-            pen_table_loaded: false,
-            player_kits: Default::default(),
-            player_anim_tree: None,
-            player_anim_node_names: Vec::new(),
-            mantle_xanims: Arc::new(crate::MantleXAnimBind::default()),
             player_anim_trees: HashMap::new(),
             corpse_anim_trees: HashMap::new(),
             player_dobjs: HashMap::new(),
@@ -480,8 +557,6 @@ impl Default for SimState {
             damage_feedback_cues: Vec::new(),
             g_hudelems: Vec::new(),
             hud_elem_sound_ids: crate::hudelem::PulseFxSoundIds::default(),
-            weapon_script_names: Arc::from([]),
-            equipment_runtime: Vec::new(),
             dying_missiles: Vec::new(),
             bootstrap: MatchBootstrap::default(),
             running: false,
@@ -494,8 +569,6 @@ impl Default for SimState {
             game_win_winner: None,
             placement_cointoss_unwired: 0,
             pending_spawn_music: Vec::new(),
-            team_voice_prefix_allies: None,
-            team_voice_prefix_axis: None,
             bc_speakers: Vec::new(),
             pending_battlechatter: Vec::new(),
             pending_concussion: Vec::new(),
@@ -539,7 +612,6 @@ impl Default for SimState {
             last_pmove_walking: HashMap::new(),
             stuck_holdrand: 0,
             last_stuck_ejects: Vec::new(),
-            player_anim_script: None,
             last_anim_movetype: HashMap::new(),
             anim_event_seed: 1,
             corpses: crate::PlayerCorpsePool::default(),
@@ -604,8 +676,8 @@ impl SimState {
         if self.running {
             return Err("MatchBootstrap refused: world already Running");
         }
-        if !self.weapon_combat.is_empty() {
-            let table_len = self.weapon_combat.len() as u32;
+        if !self.content.data.weapon_combat.is_empty() {
+            let table_len = self.content.data.weapon_combat.len() as u32;
             for class in &bootstrap.classes {
                 for id in class.weapon_slot_ids() {
                     if id != 0 && id >= table_len {
@@ -769,16 +841,11 @@ impl SimState {
         self.sound_alias_cs.index(name)
     }
 
-    pub fn set_team_voice_prefixes(&mut self, allies: Option<String>, axis: Option<String>) {
-        self.team_voice_prefix_allies = allies;
-        self.team_voice_prefix_axis = axis;
-    }
-
     pub(crate) fn team_voice_prefix(&self, axis: bool) -> Option<&str> {
         if axis {
-            self.team_voice_prefix_axis.as_deref()
+            self.content.data.team_voice_prefix_axis.as_deref()
         } else {
-            self.team_voice_prefix_allies.as_deref()
+            self.content.data.team_voice_prefix_allies.as_deref()
         }
     }
 
@@ -977,16 +1044,8 @@ impl SimState {
         self.bootstrap.respawn_delay_ticks
     }
 
-    pub fn set_weapon_def_scales(&mut self, scales: Vec<(f32, f32, f32)>) {
-        self.weapon_def_scales = scales;
-    }
-
-    pub fn set_player_anim_script(&mut self, script: Option<Arc<PlayerAnimScript>>) {
-        self.player_anim_script = script;
-    }
-
     pub fn player_anim_script(&self) -> Option<Arc<PlayerAnimScript>> {
-        self.player_anim_script.clone()
+        self.content.data.player_anim_script.clone()
     }
 
     pub fn set_last_anim_movetype(&mut self, id: ClientId, movetype: u8) {
@@ -1005,34 +1064,8 @@ impl SimState {
         self.anim_event_seed = seed;
     }
 
-    pub fn set_weapon_combat_table(&mut self, rows: Vec<WeaponCombatFacts>) {
-        self.weapon_combat = rows;
-        self.recompute_content_digest();
-    }
-
-    pub fn set_bullet_pen_facts(&mut self, rows: Vec<weapon_iw4::BulletPenFacts>) {
-        self.bullet_pen = rows;
-    }
-
-    pub fn set_penetration_table(&mut self, table: weapon_iw4::PenetrationDepthTable) {
-        self.pen_table = table;
-    }
-
-    pub fn set_pen_table_loaded(&mut self, loaded: bool) {
-        self.pen_table_loaded = loaded;
-    }
-
     pub fn pen_table_loaded(&self) -> bool {
-        self.pen_table_loaded
-    }
-
-    pub fn set_player_kit_collisions(
-        &mut self,
-        allies: PlayerKitCollision,
-        axis: PlayerKitCollision,
-    ) {
-        self.player_kits = [allies, axis];
-        self.player_body_materialize_error = None;
+        self.content.data.pen_table_loaded
     }
 
     fn collision_kit_index(&self, id: ClientId) -> usize {
@@ -1046,7 +1079,7 @@ impl SimState {
     }
 
     fn collision_kit(&self, id: ClientId) -> &PlayerKitCollision {
-        &self.player_kits[self.collision_kit_index(id)]
+        &self.content.data.player_kits[self.collision_kit_index(id)]
     }
 
     fn kit_assignment_is_axis(client_state_team: i32, ffa_team: Option<u8>) -> bool {
@@ -1057,28 +1090,20 @@ impl SimState {
         }
     }
 
-    pub fn set_player_anim_tree(
-        &mut self,
-        definition: Option<Arc<xmodel_runtime::XAnimTreeDefinition>>,
-        node_names: Vec<String>,
-    ) {
-        self.player_anim_tree = definition;
-        self.player_anim_node_names = node_names;
-        self.player_body_materialize_error = None;
-    }
-
-    pub fn set_mantle_xanims(&mut self, bind: crate::MantleXAnimBind) {
-        self.mantle_xanims = Arc::new(bind);
-    }
-
     pub fn mantle_xanims(&self) -> Arc<crate::MantleXAnimBind> {
-        Arc::clone(&self.mantle_xanims)
+        Arc::clone(&self.content.data.mantle_xanims)
     }
 
     pub fn player_body_pose_kind(&self) -> &'static str {
-        if self.player_kits.iter().all(|k| k.body.is_none()) {
+        if self
+            .content
+            .data
+            .player_kits
+            .iter()
+            .all(|k| k.body.is_none())
+        {
             "none"
-        } else if self.player_anim_tree.is_some() {
+        } else if self.content.data.player_anim_tree.is_some() {
             "anim"
         } else {
             "bind"
@@ -1086,60 +1111,63 @@ impl SimState {
     }
 
     pub fn penetration_table(&self) -> &weapon_iw4::PenetrationDepthTable {
-        &self.pen_table
+        &self.content.data.pen_table
     }
 
     pub(crate) fn bullet_pen_facts_for(&self, weapon: u32) -> weapon_iw4::BulletPenFacts {
-        self.bullet_pen
+        self.content
+            .data
+            .bullet_pen
             .get(weapon as usize)
             .copied()
             .unwrap_or_default()
     }
 
-    pub fn set_weapon_script_names(&mut self, names: Vec<String>) {
-        self.weapon_script_names = names.into();
-    }
-
     pub fn weapon_script_names(&self) -> Arc<[String]> {
-        Arc::clone(&self.weapon_script_names)
+        Arc::clone(&self.content.data.weapon_script_names)
     }
 
     pub fn weapon_script_name(&self, weapon: u32) -> &str {
-        self.weapon_script_names
+        self.content
+            .data
+            .weapon_script_names
             .get(weapon as usize)
             .map(String::as_str)
             .unwrap_or("")
     }
 
     pub fn weapon_index_by_script_name(&self, name: &str) -> Option<u32> {
-        self.weapon_script_names
+        self.content
+            .data
+            .weapon_script_names
             .iter()
             .position(|n| n == name)
             .and_then(|i| u32::try_from(i).ok())
             .filter(|&i| i != 0)
     }
 
-    pub fn set_equipment_runtime_table(&mut self, rows: Vec<EquipmentRuntimeFacts>) {
-        self.equipment_runtime = rows;
-        self.recompute_content_digest();
-    }
-
     pub(crate) fn equipment_facts_for(&self, weapon: u32) -> Option<EquipmentRuntimeFacts> {
-        self.equipment_runtime
+        self.content
+            .data
+            .equipment_runtime
             .get(weapon as usize)
             .copied()
             .filter(|facts| facts.is_usable())
     }
 
     pub(crate) fn offhand_loadout_row(&self, weapon: u32) -> Option<EquipmentRuntimeFacts> {
-        self.equipment_runtime
+        self.content
+            .data
+            .equipment_runtime
             .get(weapon as usize)
             .copied()
             .filter(|facts| facts.is_offhand())
     }
 
     pub(crate) fn missile_launch_facts(&self, weapon: u32) -> Option<EquipmentRuntimeFacts> {
-        self.equipment_runtime
+        self.content
+            .data
+            .equipment_runtime
             .get(weapon as usize)
             .copied()
             .filter(|facts| facts.projectile_speed > 0)
@@ -1211,11 +1239,15 @@ impl SimState {
     }
 
     pub fn weapon_combat_len(&self) -> usize {
-        self.weapon_combat.len()
+        self.content.data.weapon_combat.len()
     }
 
     pub fn weapon_combat_row(&self, weapon: u32) -> Option<WeaponCombatFacts> {
-        self.weapon_combat.get(weapon as usize).copied()
+        self.content
+            .data
+            .weapon_combat
+            .get(weapon as usize)
+            .copied()
     }
 
     pub fn content_digest(&self) -> u64 {
@@ -1228,80 +1260,32 @@ impl SimState {
 
     fn recompute_content_digest(&mut self) {
         self.content_digest = crate::content::content_digest_v2(
-            &self.weapon_combat,
-            &self.equipment_runtime,
+            &self.content.data.weapon_combat,
+            &self.content.data.equipment_runtime,
             &self.bootstrap,
-            &self.clip_brushes,
+            &self.content.data.clip_brushes,
             &self.entity_collision_capabilities,
         );
         self.content_components = crate::content::content_components_v2(
-            &self.weapon_combat,
-            &self.equipment_runtime,
+            &self.content.data.weapon_combat,
+            &self.content.data.equipment_runtime,
             &self.bootstrap,
-            &self.clip_brushes,
+            &self.content.data.clip_brushes,
             &self.entity_collision_capabilities,
         );
     }
 
     pub(crate) fn combat_facts_for(&self, weapon: u32) -> Option<WeaponCombatFacts> {
-        self.weapon_combat
+        self.content
+            .data
+            .weapon_combat
             .get(weapon as usize)
             .copied()
             .filter(|f| f.is_usable())
     }
 
-    pub fn set_clip_brushes(&mut self, brushes: Vec<SimBrush>) {
-        self.clip_brushes = brushes;
-        self.clip_bsp = SimClipBsp::default();
-        self.clip_mesh = SimClipMesh::default();
-        self.clip_cmodels = SimClipCmodels::default();
-        self.area_entity_world = None;
-        self.recompute_content_digest();
-    }
-
-    pub fn set_clip_map(
-        &mut self,
-        brushes: Vec<SimBrush>,
-        bsp: SimClipBsp,
-        mesh: SimClipMesh,
-        cmodels: SimClipCmodels,
-    ) {
-        let brush_count = brushes.len();
-        let node_count = bsp.nodes.len();
-        let leaf_count = bsp.leaves.len();
-        let leafbrush_count = bsp.leafbrushes.len();
-        let vert_count = mesh.verts.len();
-        let tri_count = mesh.tri_indices.len() / 3;
-        let smodel_count = mesh.static_models.len();
-        let cmodel_count = cmodels.models.len();
-        self.clip_brushes = brushes;
-        self.clip_bsp = bsp;
-        self.clip_mesh = mesh;
-        self.clip_mesh.rebuild_smodel_grid();
-        self.clip_cmodels = cmodels;
-        self.reset_area_entity_world();
-        self.recompute_content_digest();
-
-        diag::info!(
-            Sim,
-            "spawn: {} clip brushes, {} BSP nodes / {} leaves, {} leafbrushes, {} verts / {} tris, {} cmodels, {} smodels (grid cells={} occupied={} spill={} size={})",
-            brush_count,
-            node_count,
-            leaf_count,
-            leafbrush_count,
-            vert_count,
-            tri_count,
-            cmodel_count,
-            smodel_count,
-            self.clip_mesh.smodel_grid.cell_n(),
-            self.clip_mesh.smodel_grid.occupied_n(),
-            self.clip_mesh.smodel_grid.spill_n(),
-            self.clip_mesh.smodel_grid.cell_size()
-        );
-    }
-
     fn reset_area_entity_world(&mut self) {
-        let Some(world_model) = self.clip_cmodels.models.first() else {
+        let Some(world_model) = self.content.data.clip_cmodels.models.first() else {
             self.area_entity_world = None;
             return;
         };
@@ -1409,19 +1393,19 @@ impl SimState {
     }
 
     pub fn clip_brushes(&self) -> &[SimBrush] {
-        &self.clip_brushes
+        &self.content.data.clip_brushes
     }
 
     pub fn clip_bsp(&self) -> &SimClipBsp {
-        &self.clip_bsp
+        &self.content.data.clip_bsp
     }
 
     pub fn clip_mesh(&self) -> &SimClipMesh {
-        &self.clip_mesh
+        &self.content.data.clip_mesh
     }
 
     pub fn clip_cmodels(&self) -> &SimClipCmodels {
-        &self.clip_cmodels
+        &self.content.data.clip_cmodels
     }
 
     pub fn entity_kernel(&self) -> &crate::gentity::EntityKernel {
@@ -1922,7 +1906,8 @@ impl SimState {
     }
 
     pub fn has_world_clip(&self) -> bool {
-        !self.clip_brushes.is_empty() || self.clip_mesh.tri_indices.len() >= 3
+        !self.content.data.clip_brushes.is_empty()
+            || self.content.data.clip_mesh.tables.tri_count() >= 1
     }
 
     pub(crate) fn trace_clip(
@@ -1934,9 +1919,9 @@ impl SimState {
         mask: u32,
     ) -> trace_iw4::Trace {
         self.trace_clip_maps(
-            &self.clip_brushes,
-            &self.clip_bsp,
-            &self.clip_mesh,
+            &self.content.data.clip_brushes,
+            &self.content.data.clip_bsp,
+            &self.content.data.clip_mesh,
             start,
             end,
             mins,
@@ -1974,7 +1959,7 @@ impl SimState {
             .collect();
         clip_move_to_bmodels(
             world_hit,
-            &self.clip_cmodels.models,
+            &self.content.data.clip_cmodels.models,
             &clip_bsp.leafbrushes,
             clip_brushes,
             &linked,
@@ -2311,7 +2296,7 @@ impl SimState {
                 None,
             )
         };
-        if self.player_anim_tree.is_none() || legs == 0 {
+        if self.content.data.player_anim_tree.is_none() || legs == 0 {
             return bind();
         }
         let Some(slot) = self.player_anim_trees.get(&id.0) else {
@@ -2410,7 +2395,7 @@ impl SimState {
             if Self::skip_prediction_hitbox_tick(only, id) {
                 continue;
             }
-            let kit = self.player_kits[self.collision_kit_index(id)].clone();
+            let kit = self.content.data.player_kits[self.collision_kit_index(id)].clone();
             let Some(body) = kit.body.as_ref() else {
                 self.player_dobjs.remove(&id.0);
                 continue;
@@ -2467,7 +2452,7 @@ impl SimState {
     ) {
         use crate::match_state::ClientLifecycle;
         let dt = msec as f32 / 1000.0;
-        let Some(definition) = self.player_anim_tree.clone() else {
+        let Some(definition) = self.content.data.player_anim_tree.clone() else {
             self.player_anim_trees.clear();
             return;
         };
@@ -2593,10 +2578,10 @@ impl SimState {
                 .unwrap_or(&default)
         });
         crate::bullet_collision::bullet_trace_with_entity_models(
-            &self.clip_brushes,
-            &self.clip_bsp,
-            &self.clip_cmodels,
-            &self.clip_mesh,
+            &self.content.data.clip_brushes,
+            &self.content.data.clip_bsp,
+            &self.content.data.clip_cmodels,
+            &self.content.data.clip_mesh,
             players,
             &[],
             &query,
@@ -2604,7 +2589,7 @@ impl SimState {
     }
 
     pub fn clip_brush_count(&self) -> usize {
-        self.clip_brushes.len()
+        self.content.data.clip_brushes.len()
     }
 
     pub(crate) fn pmove_walking(&self, id: ClientId) -> Option<i32> {
@@ -2655,7 +2640,7 @@ impl SimState {
 
     pub(crate) fn corpse_dobj_tree_install(&mut self, entnum: i32, legs_anim: i32) {
         self.corpse_anim_trees.remove(&entnum);
-        let Some(definition) = self.player_anim_tree.clone() else {
+        let Some(definition) = self.content.data.player_anim_tree.clone() else {
             return;
         };
         let Some(value) = PlayerAnimValue::from_raw((legs_anim as u16) & PLAYER_ANIM_RAW_MASK)
@@ -3039,22 +3024,10 @@ impl SimState {
         &self.journal
     }
 
-    pub fn clone_content_from(&mut self, other: &SimState) {
-        self.clip_brushes = other.clip_brushes.clone();
-        self.clip_bsp = other.clip_bsp.clone();
-        self.clip_mesh = other.clip_mesh.clone();
-        self.clip_cmodels = other.clip_cmodels.clone();
+    pub fn initialize_prediction_from(&mut self, other: &SimState) {
+        self.content = Arc::clone(&other.content);
         self.reset_area_entity_world();
         self.entity_collision_capabilities = other.entity_collision_capabilities.clone();
-        self.weapon_def_scales = other.weapon_def_scales.clone();
-        self.weapon_combat = other.weapon_combat.clone();
-        self.bullet_pen = other.bullet_pen.clone();
-        self.pen_table = other.pen_table;
-        self.pen_table_loaded = other.pen_table_loaded;
-        self.weapon_script_names = Arc::clone(&other.weapon_script_names);
-        self.team_voice_prefix_allies = other.team_voice_prefix_allies.clone();
-        self.team_voice_prefix_axis = other.team_voice_prefix_axis.clone();
-        self.equipment_runtime = other.equipment_runtime.clone();
         self.bootstrap = other.bootstrap.clone();
         self.root_seed = other.root_seed;
         self.world_objects
@@ -3128,29 +3101,23 @@ impl SimState {
     }
 
     pub(crate) fn scales_for(&self, weapon: u32) -> (f32, f32, f32) {
-        self.weapon_def_scales
+        self.content
+            .data
+            .weapon_def_scales
             .get(weapon as usize)
             .copied()
             .unwrap_or((0.0, 0.0, 1.0))
     }
 
-    pub(crate) fn take_clip_map(&mut self) -> (Vec<SimBrush>, SimClipBsp, SimClipMesh) {
-        (
-            core::mem::take(&mut self.clip_brushes),
-            core::mem::take(&mut self.clip_bsp),
-            core::mem::take(&mut self.clip_mesh),
-        )
+    pub fn content(&self) -> Arc<SimContent> {
+        Arc::clone(&self.content)
     }
 
-    pub(crate) fn restore_clip_map(
-        &mut self,
-        brushes: Vec<SimBrush>,
-        bsp: SimClipBsp,
-        mesh: SimClipMesh,
-    ) {
-        self.clip_brushes = brushes;
-        self.clip_bsp = bsp;
-        self.clip_mesh = mesh;
+    pub fn install_content(&mut self, content: Arc<SimContent>) {
+        self.content = content;
+        self.player_body_materialize_error = None;
+        self.reset_area_entity_world();
+        self.recompute_content_digest();
     }
 
     pub(crate) fn old_buttons_mut(&mut self) -> &mut Vec<(ClientId, u32)> {
@@ -3245,7 +3212,7 @@ impl SimState {
         &self,
         player: impl Fn(ClientId) -> Option<PlayerState>,
     ) -> Vec<HitvolDumpRow> {
-        let pen_table_loaded = self.pen_table_loaded;
+        let pen_table_loaded = self.content.data.pen_table_loaded;
         let error = self.player_body_materialize_error.clone();
         match self.collision_history.latest_poses() {
             Some((_, poses)) if !poses.is_empty() => poses
@@ -3319,8 +3286,8 @@ impl SimState {
                 client: None,
                 bone_count: 0,
                 geom: "none",
-                body_key: self.player_kits[0].body_key.clone(),
-                head_key: self.player_kits[0].head_key.clone(),
+                body_key: self.content.data.player_kits[0].body_key.clone(),
+                head_key: self.content.data.player_kits[0].head_key.clone(),
                 pose_kind: self.player_body_pose_kind(),
                 anim: None,
                 leaf: None,
@@ -3379,6 +3346,8 @@ impl SimState {
         let (_, kind, leaf, time, persist, node_time, goal_weight) =
             self.player_dobj_request(client, ps);
         let clip = self
+            .content
+            .data
             .player_anim_node_names
             .get(leaf as usize)
             .cloned()
@@ -3606,13 +3575,13 @@ pub(crate) fn clip_trace(
     };
     let ext = clipmap_iw4::TraceExtents::new(start, end, mins, maxs, mask);
     let mesh_ref = clipmap_iw4::ClipMeshRef {
-        verts: &mesh.verts,
-        tri_indices: &mesh.tri_indices,
-        tri_surface_flags: &mesh.tri_surface_flags,
-        tri_content_flags: &mesh.tri_content_flags,
-        aabb_trees: &mesh.aabb_trees,
-        partitions: &mesh.partitions,
-        aabb_roots: &mesh.aabb_roots,
+        verts: &mesh.tables.verts,
+        tri_indices: &mesh.tables.tri_indices,
+        tri_surface_flags: &mesh.tables.tri_surface_flags,
+        tri_content_flags: &mesh.tables.tri_content_flags,
+        aabb_trees: &mesh.tables.aabb_trees,
+        partitions: &mesh.tables.partitions,
+        aabb_roots: &mesh.tables.aabb_roots,
     };
 
     let open = || trace_iw4::Trace {
@@ -3748,4 +3717,111 @@ pub(crate) fn spawn_player_state(origin: [f32; 3], viewangles: [f32; 3]) -> Play
     ps.other_flags |= playerstate_iw4::other_flags::PLAYER;
     ps.corpse_index = -1;
     ps
+}
+
+#[cfg(test)]
+mod content_ownership_tests {
+    use super::*;
+
+    /// A 128x128x16 slab whose top face sits at `top_z`, with a distinct
+    /// surface flag per face so a hit can be attributed to the plane it came
+    /// through rather than merely to "something solid".
+    fn slab(top_z: f32) -> SimBrush {
+        SimBrush {
+            planes: vec![
+                [1.0, 0.0, 0.0, 64.0],
+                [-1.0, 0.0, 0.0, 64.0],
+                [0.0, 1.0, 0.0, 64.0],
+                [0.0, -1.0, 0.0, 64.0],
+                [0.0, 0.0, 1.0, top_z],
+                [0.0, 0.0, -1.0, 16.0 - top_z],
+            ],
+            contents: 1,
+            plane_surface_flags: vec![11, 12, 13, 14, 15, 16],
+            glass_encoded: 0,
+        }
+    }
+
+    fn world_with_floor_at(top_z: f32) -> Arc<SimContent> {
+        let mut build = SimContentBuilder::default();
+        build.clip_brushes.push(slab(top_z));
+        build.finish()
+    }
+
+    /// The whole point of the shared backing: a trace that goes all the way
+    /// through the clip map both sides hold.
+    fn drop_to_floor(state: &SimState) -> trace_iw4::Trace {
+        state.trace_world([0.0, 0.0, 64.0], [0.0, 0.0, -64.0], [0.0; 3], [0.0; 3], 1)
+    }
+
+    /// A trace from z=64 down to z=-64 against a floor whose top face is at
+    /// `top_z`, as `trace_through_brush` computes it: the enter fraction backs
+    /// off by one SURFACE_CLIP_EPSILON, so the numbers below are exact f32.
+    fn floor_hit(top_z: f32) -> trace_iw4::Trace {
+        let d1 = 64.0 - top_z;
+        let fraction = (d1 - 0.125) / 128.0;
+        trace_iw4::Trace {
+            fraction,
+            normal: [0.0, 0.0, 1.0],
+            surface_flags: 15,
+            contents: 1,
+            hit_type: trace_iw4::HITTYPE_ENTITY,
+            hit_id: trace_iw4::ENTITYNUM_WORLD,
+            walkable: 1,
+            endpos: [0.0, 0.0, top_z + 0.125],
+            ..trace_iw4::Trace::default()
+        }
+    }
+
+    /// Authority and prediction hold one immutable backing, and that is proved
+    /// by tracing against it rather than by reading a field: install, seed the
+    /// prediction, replace the authority's content, and the prediction still
+    /// resolves the world it was seeded with, down to the plane its shot came
+    /// through and the digest it reports to the session.
+    #[test]
+    fn prediction_keeps_tracing_the_world_it_was_seeded_with_after_authority_replaces_its_own() {
+        let seeded = world_with_floor_at(0.0);
+        let mut authority = SimState::default();
+        authority.install_content(Arc::clone(&seeded));
+
+        // The floor is real geometry, not a row in a vector.
+        assert_eq!(drop_to_floor(&authority), floor_hit(0.0));
+        assert!(authority.has_world_clip());
+
+        let mut prediction = SimState::default();
+        prediction.initialize_prediction_from(&authority);
+
+        // One backing, not a deep copy that happens to compare equal.
+        assert!(Arc::ptr_eq(&seeded, &prediction.content()));
+        assert!(Arc::ptr_eq(&authority.content(), &prediction.content()));
+        assert_eq!(drop_to_floor(&prediction), drop_to_floor(&authority));
+        assert_eq!(prediction.content_digest(), authority.content_digest());
+        let seeded_digest = prediction.content_digest();
+
+        // Shared definitions, independent mutable state: a command the
+        // prediction consumed is not a command the authority consumed.
+        prediction.old_buttons.push((ClientId(1), 8));
+        assert!(authority.old_buttons.is_empty());
+
+        // The authority moves to a different world. Nothing about the
+        // prediction's may follow it.
+        authority.install_content(world_with_floor_at(32.0));
+        assert!(!Arc::ptr_eq(&authority.content(), &prediction.content()));
+        assert_eq!(drop_to_floor(&authority), floor_hit(32.0));
+        assert_eq!(drop_to_floor(&prediction), floor_hit(0.0));
+        assert_eq!(prediction.content_digest(), seeded_digest);
+        assert_ne!(authority.content_digest(), seeded_digest);
+
+        // And an authority with no world at all leaves the prediction's world
+        // standing, because it was never the authority's to drop.
+        authority.install_content(SimContentBuilder::default().finish());
+        assert!(!authority.has_world_clip());
+        assert_eq!(drop_to_floor(&authority).fraction, 1.0);
+        assert_eq!(drop_to_floor(&prediction), floor_hit(0.0));
+        let kept = &prediction.clip_brushes()[0];
+        assert_eq!(prediction.clip_brushes().len(), 1);
+        assert_eq!(kept.planes, slab(0.0).planes);
+        assert_eq!(kept.plane_surface_flags, slab(0.0).plane_surface_flags);
+        assert_eq!(kept.contents, 1);
+    }
 }

@@ -1,5 +1,5 @@
 use crate::{
-    MaterialCatalog, body_catalog::BodyMeshCatalog, fpv_catalog::FpvMeshCatalog,
+    MaterialDefinitions, body_catalog::BodyMeshCatalog, fpv_catalog::FpvMeshCatalog,
     fx_catalog::FxCatalog, model_mesh::MapXModelSceneCatalog,
     projectile_mesh_catalog::ProjectileMeshCatalog, sound_catalog::SoundCatalog,
     tracer_catalog::TracerCatalog, weapon_catalog::WeaponCatalog,
@@ -119,7 +119,7 @@ impl AssetGraphCensus {
 }
 
 pub fn resolve_after_absorb(
-    materials: &MaterialCatalog,
+    materials: &MaterialDefinitions,
     tracers: &mut TracerCatalog,
     fx: &mut FxCatalog,
     weapons: Option<&mut WeaponCatalog>,
@@ -149,7 +149,7 @@ pub fn resolve_after_absorb(
     if let Some(weapons) = weapons {
         weapons.resolve_combat_fx(fx, tracers);
         weapons.resolve_projectile_fx_edges(fx);
-        weapons.resolve_reticles(materials);
+        weapons.resolve_reticle_images(materials);
         census.weapon_tracer_type = weapons.tracer_type_census();
         census.weapon_combat_fx = weapons.combat_fx_census();
         census.weapon_projectile_fx = weapons.projectile_fx_edge_census();

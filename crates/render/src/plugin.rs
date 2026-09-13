@@ -20,7 +20,12 @@ impl Plugin for RenderPlugin {
             render_frontend::RenderAssemblePlugin,
             render_gpu::RenderGpuPlugin,
         ))
-        .add_systems(PostUpdate, stamp_gpu_submit_ready)
+        .add_systems(
+            PostUpdate,
+            (stamp_gpu_submit_ready, crate::extract::seal_render_frame)
+                .chain()
+                .after(frame::RenderSet::FrontendAssemble),
+        )
         .add_systems(
             Update,
             publish_overhead_posed_players

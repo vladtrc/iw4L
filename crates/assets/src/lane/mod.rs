@@ -18,12 +18,6 @@ use crate::{
     progress::LoadProgress,
     session_load::{PreparedWorld, WorldDrawPolicy},
 };
-use asset_anim::AnimLoadCapture;
-use asset_audio::AudioLoadCapture;
-use asset_game::GameLoadCapture;
-use asset_model::ModelLoadCapture;
-use asset_transport::MapTransportCapture;
-use asset_world::WorldLoadCapture;
 
 #[derive(Clone, Debug)]
 pub struct LaneGap {
@@ -34,12 +28,19 @@ pub struct LaneGap {
 
 #[derive(Default)]
 pub struct LoadedWorld {
-    pub world: WorldLoadCapture,
-    pub models: ModelLoadCapture,
-    pub anim: AnimLoadCapture,
-    pub audio: AudioLoadCapture,
-    pub game: GameLoadCapture,
-    pub transport: MapTransportCapture,
+    pub world: PreparedWorld,
+    /// What the map zone itself captured. The local material indices in
+    /// `world` are indices into this pool until the match finalizes one.
+    pub materials: crate::MaterialCatalog,
+    pub collision: Option<crate::ClipCollision>,
+    pub spawns: Vec<crate::SpawnPoint>,
+    pub bodies: BodyMeshCatalog,
+    pub fpv_meshes: FpvMeshCatalog,
+    pub xanims: XAnimCatalog,
+    pub facts: crate::MapFacts,
+    /// Bytes the zone arenas held while the walk read them. The arenas
+    /// themselves die with the walk; only their size travels.
+    pub arena_bytes: usize,
     pub report: Vec<String>,
     pub gaps: Vec<LaneGap>,
 }
@@ -53,7 +54,7 @@ impl LoadedWorld {
     ) -> Self {
         let reason = reason.into();
         Self {
-            world: WorldLoadCapture {
+            world: PreparedWorld {
                 policy,
                 ..Default::default()
             },
@@ -64,95 +65,6 @@ impl LoadedWorld {
                 addr,
             }],
             ..Default::default()
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_prepared_parts(
-        prepared: PreparedWorld,
-        collision: Option<crate::ClipCollision>,
-        spawns: Vec<crate::SpawnPoint>,
-        bodies: BodyMeshCatalog,
-        fpv_meshes: FpvMeshCatalog,
-        xanims: XAnimCatalog,
-        report: Vec<String>,
-        gaps: Vec<LaneGap>,
-        s1_map_arenas: Option<crate::ZoneMemory>,
-    ) -> Self {
-        let PreparedWorld {
-            draw,
-            static_model_meshes,
-            static_model_instances,
-            map_xmodel_scene_assets,
-            script_model_instances,
-            script_brush_models,
-            map_use_triggers,
-            flag_descriptors,
-            dyn_ents,
-            smodel_lighting_samples,
-            light_grid,
-            fx,
-            fx_models,
-            fx_glass,
-            impact_fx,
-            reflection_probe_images,
-            intermission_view,
-            minimap_corners,
-            north_yaw,
-            compass,
-            script_sound,
-            t5_teamset,
-            team_icons,
-            exp_fog,
-            film_vision,
-            createart_name,
-            min,
-            max,
-            world_bounds,
-            policy,
-        } = prepared;
-        Self {
-            world: WorldLoadCapture {
-                draw,
-                collision,
-                spawns,
-                static_model_meshes,
-                static_model_instances,
-                map_xmodel_scene_assets,
-                script_model_instances,
-                script_brush_models,
-                map_use_triggers,
-                flag_descriptors,
-                dyn_ents,
-                smodel_lighting_samples,
-                light_grid,
-                fx_glass,
-                reflection_probe_images,
-                intermission_view,
-                minimap_corners,
-                north_yaw,
-                compass,
-                exp_fog,
-                film_vision,
-                createart_name,
-                min,
-                max,
-                world_bounds,
-                policy,
-            },
-            models: ModelLoadCapture { bodies, fpv_meshes },
-            anim: AnimLoadCapture { xanims },
-            audio: AudioLoadCapture { script_sound },
-            game: GameLoadCapture {
-                fx,
-                fx_models,
-                impact_fx,
-                t5_teamset,
-                team_icons,
-            },
-            transport: MapTransportCapture { s1_map_arenas },
-            report,
-            gaps,
         }
     }
 
@@ -191,8 +103,6 @@ pub struct CommonCensus {
 
     pub material_population: crate::MaterialCatalog,
 
-    pub technique_sets: Vec<crate::TechniqueSetFacts>,
-
     pub light_defs: Vec<crate::CapturedLightDef>,
     pub report: Vec<String>,
 
@@ -201,7 +111,9 @@ pub struct CommonCensus {
 
     pub xmodel_walk: crate::PreparedXModelWalkCensus,
 
-    pub s1_common_arenas: Option<crate::ZoneMemory>,
+    /// Bytes the common_mp arenas held while the walk read them; the arenas
+    /// themselves do not outlive it.
+    pub s1_common_bytes: usize,
 
     pub teamset_icons: std::collections::HashMap<String, crate::TeamIcons>,
     pub film_visions:
@@ -237,7 +149,6 @@ pub trait ZoneLane: Send + Sync {
         progress: &LoadProgress,
 
         shared_surfaces: asset_model::SharedXModelSurfaces,
-        common_techsets: &[crate::TechniqueSetFacts],
 
         material_seed: crate::MaterialCatalog,
         common_film_visions: &mut std::collections::BTreeMap<

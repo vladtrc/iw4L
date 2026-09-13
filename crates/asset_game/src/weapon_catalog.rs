@@ -449,6 +449,9 @@ pub struct CatalogWeapon {
     pub overlay_material: Option<String>,
 
     pub overlay_image: Option<String>,
+    pub reticle_center_slot: Option<Ptr>,
+    pub reticle_side_slot: Option<Ptr>,
+
     pub overlay_material_slot: Option<Ptr>,
 
     pub scope_name: Option<String>,
@@ -545,9 +548,12 @@ pub struct WeaponReticleAssets {
 
     pub side_size: i32,
 
-    pub center_slot: Option<Ptr>,
+    /// Whether the zone authored a reticle material at all. The slot pointers
+    /// that answered this during the walk stay on the build row: the HUD, and
+    /// the edge stamping beside it, only ever asked whether there was one.
+    pub center_authored: bool,
 
-    pub side_slot: Option<Ptr>,
+    pub side_authored: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -986,6 +992,8 @@ impl CatalogWeapon {
             hud_material_edges: WeaponHudMaterialEdges::default(),
             overlay_material: None,
             overlay_image: None,
+            reticle_center_slot: None,
+            reticle_side_slot: None,
             overlay_material_slot: None,
             scope_name: None,
             scope_viewmodel: None,
@@ -1112,12 +1120,14 @@ impl WeaponCatalog {
                 side_image: None,
                 center_size: geometry.reticle_center_size_at_0x128,
                 side_size: geometry.i_reticle_side_size,
-                center_slot: geometry.reticle_center_material_slot,
-                side_slot: geometry.reticle_side_material_slot,
+                center_authored: geometry.reticle_center_material_slot.is_some(),
+                side_authored: geometry.reticle_side_material_slot.is_some(),
             },
             hud_material_edges: WeaponHudMaterialEdges::default(),
             overlay_material: None,
             overlay_image: None,
+            reticle_center_slot: geometry.reticle_center_material_slot,
+            reticle_side_slot: geometry.reticle_side_material_slot,
             overlay_material_slot: geometry.overlay_material_slot,
             scope_name: None,
             scope_viewmodel: None,
@@ -1442,7 +1452,7 @@ impl WeaponCatalog {
             Some((name, image))
         };
         for entry in &mut self.entries {
-            if let Some(slot) = entry.reticle.center_slot {
+            if let Some(slot) = entry.reticle_center_slot {
                 if let Some((name, image)) = names_of(slot) {
                     entry.reticle.center_material = Some(name);
                     entry.reticle.center_image = image;
@@ -1458,7 +1468,7 @@ impl WeaponCatalog {
                     }
                 }
             }
-            if let Some(slot) = entry.reticle.side_slot {
+            if let Some(slot) = entry.reticle_side_slot {
                 if let Some((name, image)) = names_of(slot) {
                     entry.reticle.side_material = Some(name);
                     entry.reticle.side_image = image;
@@ -1543,12 +1553,108 @@ impl WeaponCatalog {
             }
             entry.reticle.center_edge = material_hint_edge(
                 entry.reticle.center_material.as_deref(),
-                entry.reticle.center_slot.is_some(),
+                entry.reticle.center_authored,
                 materials,
             );
             entry.reticle.side_edge = material_hint_edge(
                 entry.reticle.side_material.as_deref(),
-                entry.reticle.side_slot.is_some(),
+                entry.reticle.side_authored,
+                materials,
+            );
+            entry.hud_material_edges.overlay = material_hint_edge(
+                entry.overlay_material.as_deref(),
+                entry.overlay_material_slot.is_some(),
+                materials,
+            );
+            entry.hud_material_edges.hud_icon = material_hint_edge(
+                entry.hud_icon.as_deref(),
+                entry.hud_icon_slot.is_some(),
+                materials,
+            );
+            entry.hud_material_edges.pickup_icon = material_hint_edge(
+                entry.pickup_icon.as_deref(),
+                entry.pickup_icon_slot.is_some(),
+                materials,
+            );
+            entry.hud_material_edges.kill_icon = material_hint_edge(
+                entry.kill_icon.as_deref(),
+                entry.kill_icon_slot.is_some(),
+                materials,
+            );
+        }
+    }
+
+    /// The half of reticle resolution that still has an answer once the walk is
+    /// over: the slot lookups need the zone's pointer map, the name lookups do
+    /// not. Running the slot half against a finished population was reading a
+    /// map that `finalize` had already emptied, so every one of them was `None`.
+    pub fn resolve_reticle_images(&mut self, materials: &crate::MaterialDefinitions) {
+        for entry in &mut self.entries {
+            if entry.reticle.center_image.is_none() {
+                if let Some(name) = entry.reticle.center_material.as_deref() {
+                    if let Some(index) = materials.material_index_by_name(name) {
+                        if let Some(material) = materials.materials.get(index.order()) {
+                            entry.reticle.center_image =
+                                materials.hud_image_name(material).map(str::to_owned);
+                        }
+                    }
+                }
+            }
+            if entry.reticle.side_image.is_none() {
+                if let Some(name) = entry.reticle.side_material.as_deref() {
+                    if let Some(index) = materials.material_index_by_name(name) {
+                        if let Some(material) = materials.materials.get(index.order()) {
+                            entry.reticle.side_image =
+                                materials.hud_image_name(material).map(str::to_owned);
+                        }
+                    }
+                }
+            }
+            if entry.overlay_image.is_none() {
+                if let Some(name) = entry.overlay_material.as_deref() {
+                    if let Some(index) = materials.material_index_by_name(name) {
+                        if let Some(material) = materials.materials.get(index.order()) {
+                            entry.overlay_image =
+                                materials.hud_image_name(material).map(str::to_owned);
+                        }
+                    }
+                }
+            }
+            if entry.hud_icon_image.is_none() {
+                if let Some(name) = entry.hud_icon.as_deref() {
+                    if let Some(index) = materials.material_index_by_name(name) {
+                        if let Some(material) = materials.materials.get(index.order()) {
+                            entry.hud_icon_image =
+                                materials.hud_image_name(material).map(str::to_owned);
+                        }
+                    }
+                }
+            }
+            if entry.kill_icon_image.is_none() {
+                if let Some(name) = entry.kill_icon.as_deref() {
+                    if let Some(index) = materials.material_index_by_name(name) {
+                        if let Some(material) = materials.materials.get(index.order()) {
+                            entry.kill_icon_image =
+                                materials.hud_image_name(material).map(str::to_owned);
+                        }
+                    }
+                }
+            }
+            if let Some(name) = entry.dpad_icon.as_deref()
+                && let Some(index) = materials.material_index_by_name(name)
+                && let Some(material) = materials.materials.get(index.order())
+            {
+                entry.dpad_icon_image = materials.hud_image_name(material).map(str::to_owned);
+                entry.dpad_icon_atlas = material.texture_atlas;
+            }
+            entry.reticle.center_edge = material_hint_edge(
+                entry.reticle.center_material.as_deref(),
+                entry.reticle.center_authored,
+                materials,
+            );
+            entry.reticle.side_edge = material_hint_edge(
+                entry.reticle.side_material.as_deref(),
+                entry.reticle.side_authored,
                 materials,
             );
             entry.hud_material_edges.overlay = material_hint_edge(
@@ -1754,6 +1860,8 @@ impl WeaponCatalog {
         let leftover_anim_overrides = leftover_iw5_anim_overrides(stream, &geometry);
         apply_leftover_default_anim_overrides(&mut sz_xanims, &leftover_anim_overrides);
         self.entries.push(CatalogWeapon {
+            reticle_center_slot: None,
+            reticle_side_slot: None,
             name: name.to_owned(),
             weap_def: geometry.weap_def.map(iw5_ptr_key),
             display_name_key: geometry
@@ -1853,6 +1961,8 @@ impl WeaponCatalog {
             .map(|arr| read_sz_xanims_t5(stream, arr))
             .unwrap_or([const { None }; WEAPON_ANIM_COUNT]);
         self.entries.push(CatalogWeapon {
+            reticle_center_slot: None,
+            reticle_side_slot: None,
             name: name.to_owned(),
             weap_def: geometry.weap_def.map(|p| (p.block, p.offset)),
             display_name_key: geometry
@@ -1982,7 +2092,7 @@ impl WeaponCatalog {
 fn material_hint_edge(
     hint: Option<&str>,
     authored_slot: bool,
-    materials: &crate::MaterialCatalog,
+    materials: &crate::MaterialDefinitions,
 ) -> AssetEdge<MaterialSpace> {
     let hint = hint.filter(|name| !name.is_empty());
     if !authored_slot && hint.is_none() {
@@ -2292,8 +2402,14 @@ fn leftover_t5_reticle(
             weap_def,
             sz::WEAPON_DEF_RETICLE_SIDE_OFF,
         ),
-        center_slot: leftover_t5_asset_slot(stream, weap_def, sz::WEAPON_DEF_RETICLE_CENTER_OFF),
-        side_slot: leftover_t5_asset_slot(stream, weap_def, sz::WEAPON_DEF_RETICLE_SIDE_OFF),
+        center_authored: leftover_t5_asset_slot(
+            stream,
+            weap_def,
+            sz::WEAPON_DEF_RETICLE_CENTER_OFF,
+        )
+        .is_some(),
+        side_authored: leftover_t5_asset_slot(stream, weap_def, sz::WEAPON_DEF_RETICLE_SIDE_OFF)
+            .is_some(),
         center_size: weap_def
             .map(|body| i32_at_t5(stream, body, sz::WEAPON_DEF_RETICLE_CENTER_SIZE_OFF))
             .unwrap_or(0),
@@ -3102,13 +3218,20 @@ fn leftover_iw5_reticle(
             sz::WEAPON_DEF_RETICLE_SIDE_OFF,
             568,
         ),
-        center_slot: leftover_iw5_asset_slot(
+        center_authored: leftover_iw5_asset_slot(
             stream,
             weap_def,
             sz::WEAPON_DEF_RETICLE_CENTER_OFF,
             560,
-        ),
-        side_slot: leftover_iw5_asset_slot(stream, weap_def, sz::WEAPON_DEF_RETICLE_SIDE_OFF, 568),
+        )
+        .is_some(),
+        side_authored: leftover_iw5_asset_slot(
+            stream,
+            weap_def,
+            sz::WEAPON_DEF_RETICLE_SIDE_OFF,
+            568,
+        )
+        .is_some(),
         center_size: weap_def
             .map(|body| i32_at_iw5(stream, body, sz::WEAPON_DEF_RETICLE_CENTER_SIZE_OFF, 576))
             .unwrap_or(0),
@@ -4474,10 +4597,9 @@ impl WeaponRegistry {
                         existing.hud_icon_slot = entry.hud_icon_slot;
                         existing.hud_icon_image = entry.hud_icon_image;
                     }
-                    if existing.reticle.center_slot.is_none()
-                        && existing.reticle.side_slot.is_none()
-                        && (entry.reticle.center_slot.is_some()
-                            || entry.reticle.side_slot.is_some())
+                    if !existing.reticle.center_authored
+                        && !existing.reticle.side_authored
+                        && (entry.reticle.center_authored || entry.reticle.side_authored)
                     {
                         existing.reticle = entry.reticle;
                     }
@@ -4628,16 +4750,16 @@ impl WeaponRegistry {
         self.rows.get(index as usize).map(|row| &row.reticle)
     }
 
-    pub fn resolve_hud_material_edges(&mut self, materials: &crate::MaterialCatalog) {
+    pub fn resolve_hud_material_edges(&mut self, materials: &crate::MaterialDefinitions) {
         for row in &mut self.rows {
             row.reticle.center_edge = material_hint_edge(
                 row.reticle.center_material.as_deref(),
-                row.reticle.center_slot.is_some(),
+                row.reticle.center_authored,
                 materials,
             );
             row.reticle.side_edge = material_hint_edge(
                 row.reticle.side_material.as_deref(),
-                row.reticle.side_slot.is_some(),
+                row.reticle.side_authored,
                 materials,
             );
             row.hud_material_edges = WeaponHudMaterialEdges {

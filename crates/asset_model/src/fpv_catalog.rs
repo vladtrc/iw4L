@@ -8,7 +8,7 @@ use crate::asset_graph::{
 use crate::model_skel::{FpvSkel, capture_fpv_skel, capture_fpv_skel_iw5, capture_fpv_skel_t5};
 use crate::{ModelKind, model_kind};
 use asset_core::AssetNamespace;
-use asset_material::MaterialCatalog;
+use asset_material::{MaterialCatalog, MaterialDefinitions};
 
 pub const VIEWHANDS_NAME: &str = "viewmodel_base_viewhands";
 
@@ -146,7 +146,7 @@ impl FpvMeshEntry {
         materials: Option<&MaterialCatalog>,
     ) -> Self {
         let (material_names, material_edges) =
-            capture_xmodel_material_slots(&skel.surface_materials, materials);
+            capture_xmodel_material_slots(&skel.surface_materials, materials.map(|c| &**c));
         Self {
             namespace,
             skel,
@@ -159,7 +159,7 @@ impl FpvMeshEntry {
         FpvMeshKey::new(self.namespace, &self.skel.name)
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialCatalog) {
+    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         stamp_xmodel_material_edges(
             &mut self.material_names,
             &mut self.material_edges,
@@ -210,8 +210,6 @@ pub struct FpvMeshCatalog {
     capture_ns: AssetNamespace,
 
     pub map_namespace: Option<AssetNamespace>,
-
-    pub materials: MaterialCatalog,
 }
 
 impl Default for FpvMeshCatalog {
@@ -224,7 +222,6 @@ impl Default for FpvMeshCatalog {
             strings: ScriptStrings::default(),
             capture_ns: AssetNamespace::Iw4,
             map_namespace: None,
-            materials: MaterialCatalog::default(),
         }
     }
 }
@@ -351,16 +348,17 @@ impl FpvMeshCatalog {
         self.entries.insert(key, entry);
     }
 
-    pub fn absorb(&mut self, other: FpvMeshCatalog) -> usize {
+    pub fn absorb(&mut self, mut other: FpvMeshCatalog) -> usize {
         let saved = self.capture_zone;
         let mut added = 0;
-        for (i, key) in other.order.iter().enumerate() {
-            let Some(entry) = other.entries.get(key).cloned() else {
+        let order = std::mem::take(&mut other.order);
+        for (i, key) in order.into_iter().enumerate() {
+            let Some(entry) = other.entries.remove(&key) else {
                 continue;
             };
             self.capture_zone = other.zones.get(i).copied().unwrap_or(other.capture_zone);
-            let vacant = !self.entries.contains_key(key);
-            self.retain(key.clone(), entry);
+            let vacant = !self.entries.contains_key(&key);
+            self.retain(key, entry);
             if vacant {
                 added += 1;
             }
@@ -369,7 +367,7 @@ impl FpvMeshCatalog {
         added
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialCatalog) {
+    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         for entry in self.entries.values_mut() {
             entry.resolve_materials(materials);
         }
