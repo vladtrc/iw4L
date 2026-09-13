@@ -1,5 +1,7 @@
 # IW4L
 
+![IW4L running IW4: planting the bomb](docs/screenshots/bomb-plant.png)
+
 IW4L is a standalone, experimental Call of Duty runtime written in Rust on top
 of [bevy](https://bevyengine.org/) and [wgpu](https://wgpu.rs/). It reads the
 game data of an installation you already own and runs it in its own engine.
