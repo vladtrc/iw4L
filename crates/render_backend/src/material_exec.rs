@@ -1,0 +1,729 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use glam::Mat4;
+
+use crate::overlay::{
+    OverlayCodeNeed, apply_shadowable_light, overlay_code_mesh_tess_code_constants,
+    overlay_particle_cloud_tess_code_constants, overlay_smodel_tess_code_constants,
+    overlay_smodel_world_matrix, overlay_viewmodel_depth_hack,
+};
+use render_frame::{
+    MaterialExecFrame, RetainedDrawItem, RetainedDrawKind, host_viewmodel_render_fx_flags,
+};
+use render_material::{
+    LayeredCodeSources, MaterialDrawKey, MaterialExecution, MaterialGenerationId, MaterialRefusal,
+    PackedCodeConstantLane, PreparedMaterialTable, RuntimeCodeSources, RuntimeMaterialCatalog,
+    StableMaterialShell, TechType, execute_material_with_shell, smodel_tess_vertex_type,
+    world_tess_vertex_type, world_tess_vertex_type_authored,
+};
+
+#[derive(Clone, Copy)]
+pub struct MaterialExecView<'a> {
+    pub catalog: &'a RuntimeMaterialCatalog,
+    pub prepared: &'a PreparedMaterialTable,
+    pub frame: &'a MaterialExecFrame,
+
+    pub clip_from_world: Option<Mat4>,
+
+    pub view_from_world: Option<Mat4>,
+
+    pub code_sources: &'a RuntimeCodeSources,
+}
+
+impl<'a> MaterialExecView<'a> {
+    pub fn camera(
+        catalog: &'a RuntimeMaterialCatalog,
+        prepared: &'a PreparedMaterialTable,
+        frame: &'a MaterialExecFrame,
+    ) -> Self {
+        Self {
+            catalog,
+            prepared,
+            frame,
+            clip_from_world: frame.clip_from_world,
+            view_from_world: frame.view_from_world,
+            code_sources: &frame.code_sources,
+        }
+    }
+
+    pub fn shadow_partition(
+        catalog: &'a RuntimeMaterialCatalog,
+        prepared: &'a PreparedMaterialTable,
+        frame: &'a MaterialExecFrame,
+        clip_from_world: Mat4,
+        view_from_world: Mat4,
+        code_sources: &'a RuntimeCodeSources,
+    ) -> Self {
+        Self {
+            catalog,
+            prepared,
+            frame,
+            clip_from_world: Some(clip_from_world),
+            view_from_world: Some(view_from_world),
+            code_sources,
+        }
+    }
+}
+
+pub fn draw_vertex_type(
+    catalog: &RuntimeMaterialCatalog,
+    key: MaterialDrawKey,
+    kind: &RetainedDrawKind,
+    tech_type: TechType,
+) -> u8 {
+    match kind {
+        RetainedDrawKind::Smodel { stream, .. } => smodel_tess_vertex_type(*stream),
+
+        RetainedDrawKind::XModel { .. } => render_frame::xmodel_tess_info_vert_decl_type(1),
+
+        RetainedDrawKind::CodeMesh { .. } | RetainedDrawKind::Glass { .. } => {
+            asset_iw4::vertex_decl::PACKED_VERTEX_TYPE
+        }
+        RetainedDrawKind::World { .. } => world_tess_vertex_type(catalog, key, tech_type),
+
+        RetainedDrawKind::MarkMesh { packed: true, .. } => {
+            asset_iw4::vertex_decl::PACKED_VERTEX_TYPE
+        }
+        RetainedDrawKind::MarkMesh { packed: false, .. } => {
+            world_tess_vertex_type_authored(catalog, key, tech_type)
+        }
+        RetainedDrawKind::ParticleCloud { .. } => asset_iw4::vertex_decl::POS_TEX_VERTEX_TYPE,
+    }
+}
+
+fn execution_gpu_packed(packed: u64) -> u64 {
+    packed & !0x3fff_ffff
+}
+
+fn execution_smodel_packed(packed: u64) -> u64 {
+    packed & !0xffff
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ExecutionShareKey {
+    gpu_packed: u64,
+
+    material_rank: u32,
+    material_id: Option<render_material::MaterialAssetId>,
+    tech: u8,
+    vertex_type: u8,
+    extra: ExecutionShareExtra,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ShellInternKey {
+    gpu_packed: u64,
+    material_rank: u32,
+    material_id: Option<render_material::MaterialAssetId>,
+    tech: u8,
+    vertex_type: u8,
+}
+
+impl ShellInternKey {
+    fn from_share(share: ExecutionShareKey) -> Self {
+        Self {
+            gpu_packed: share.gpu_packed,
+            material_rank: share.material_rank,
+            material_id: share.material_id,
+            tech: share.tech,
+            vertex_type: share.vertex_type,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ExecutionShareExtra {
+    Identity,
+    LightingHandle(u32),
+
+    Instance { depth_hack: bool },
+    Unique(u32),
+    MarkMesh,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct OverlayKeepKey {
+    scene_light: u8,
+    extra: OverlayKeepExtra,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum OverlayKeepExtra {
+    World,
+    Lighting {
+        handle: u32,
+        packed: Option<[u8; 4]>,
+        depth_hack: bool,
+    },
+    Unique(u32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlayMode {
+    Full,
+    ObjOnly,
+}
+
+pub fn draw_material_key(draw: &RetainedDrawItem) -> MaterialDrawKey {
+    MaterialDrawKey::new(draw.key, draw.material_rank).with_material_id(draw.material_id)
+}
+
+fn xmodel_depth_hack(key: u64) -> bool {
+    host_viewmodel_render_fx_flags(dpvs_iw4::GfxDrawSurf { packed: key }.object_id()) != 0
+}
+
+fn execution_share_extra(draw: &RetainedDrawItem) -> ExecutionShareExtra {
+    match draw.kind {
+        RetainedDrawKind::MarkMesh { .. } => ExecutionShareExtra::MarkMesh,
+        RetainedDrawKind::World { .. } => ExecutionShareExtra::Identity,
+        RetainedDrawKind::Glass {
+            lighting_handle, ..
+        } => ExecutionShareExtra::LightingHandle(lighting_handle),
+        RetainedDrawKind::Smodel { .. } => ExecutionShareExtra::Instance { depth_hack: false },
+        RetainedDrawKind::XModel { .. } => ExecutionShareExtra::Instance {
+            depth_hack: xmodel_depth_hack(draw.key),
+        },
+        RetainedDrawKind::ParticleCloud { draw, .. } => ExecutionShareExtra::Unique(draw),
+        RetainedDrawKind::CodeMesh {
+            draw, arg_count, ..
+        } if arg_count != 0 => ExecutionShareExtra::Unique(draw),
+        RetainedDrawKind::CodeMesh { .. } => ExecutionShareExtra::Identity,
+    }
+}
+
+fn execution_share_key(
+    draw: &RetainedDrawItem,
+    tech: TechType,
+    vertex_type: u8,
+) -> ExecutionShareKey {
+    let gpu_packed = match draw.kind {
+        RetainedDrawKind::Smodel { .. } | RetainedDrawKind::XModel { .. } => {
+            execution_smodel_packed(draw.key)
+        }
+        _ => execution_gpu_packed(draw.key),
+    };
+    ExecutionShareKey {
+        gpu_packed,
+        material_rank: draw.material_rank,
+        material_id: draw.material_id,
+        tech: tech.0,
+        vertex_type,
+        extra: execution_share_extra(draw),
+    }
+}
+
+fn instance_matrix_bits(draw: &RetainedDrawItem) -> Option<[u32; 16]> {
+    match draw.kind {
+        RetainedDrawKind::Smodel {
+            world_from_local, ..
+        }
+        | RetainedDrawKind::XModel {
+            world_from_local, ..
+        } => Some(world_from_local.to_cols_array().map(f32::to_bits)),
+        _ => None,
+    }
+}
+
+fn overlay_keep_key(draw: &RetainedDrawItem) -> OverlayKeepKey {
+    let scene_light = dpvs_iw4::GfxDrawSurf { packed: draw.key }.scene_light_index();
+    let extra = match draw.kind {
+        RetainedDrawKind::World { .. } | RetainedDrawKind::CodeMesh { .. } => {
+            OverlayKeepExtra::World
+        }
+        RetainedDrawKind::MarkMesh {
+            lighting_handle, ..
+        } => OverlayKeepExtra::Lighting {
+            handle: lighting_handle,
+            packed: None,
+            depth_hack: false,
+        },
+        RetainedDrawKind::Glass {
+            lighting_handle, ..
+        } => OverlayKeepExtra::Lighting {
+            handle: lighting_handle,
+            packed: None,
+            depth_hack: false,
+        },
+        RetainedDrawKind::Smodel {
+            lighting_handle,
+            packed_lighting,
+            ..
+        } => OverlayKeepExtra::Lighting {
+            handle: lighting_handle,
+            packed: packed_lighting,
+            depth_hack: false,
+        },
+        RetainedDrawKind::XModel {
+            lighting_handle,
+            packed_lighting,
+            ..
+        } => OverlayKeepExtra::Lighting {
+            handle: lighting_handle,
+            packed: packed_lighting,
+            depth_hack: xmodel_depth_hack(draw.key),
+        },
+        RetainedDrawKind::ParticleCloud { draw, .. } => OverlayKeepExtra::Unique(draw),
+    };
+    OverlayKeepKey { scene_light, extra }
+}
+
+fn overlay_draw_material(
+    runtime: MaterialExecView<'_>,
+    draw: &RetainedDrawItem,
+    scratch: &mut RuntimeCodeSources,
+) {
+    let inv_image_height = runtime.frame.inv_image_height;
+    scratch.begin_overlay();
+    apply_shadowable_light(
+        scratch,
+        draw.key,
+        &runtime.frame.primary_lights,
+        &runtime.frame.attenuation,
+        &runtime.frame.t5_falloff,
+        runtime.frame.view_origin,
+        runtime.frame.float_time,
+        &runtime.frame.spot_receivers,
+    );
+    match draw.kind {
+        RetainedDrawKind::Smodel {
+            lighting_handle,
+            packed_lighting,
+            world_from_local,
+            ..
+        } => {
+            overlay_smodel_world_matrix(
+                scratch,
+                runtime.frame.view_origin,
+                world_from_local,
+                runtime.clip_from_world,
+                runtime.view_from_world,
+                OverlayCodeNeed::ALL,
+            );
+
+            overlay_smodel_tess_code_constants(
+                scratch,
+                lighting_handle,
+                inv_image_height,
+                packed_lighting,
+                OverlayCodeNeed::ALL,
+            );
+        }
+        RetainedDrawKind::XModel {
+            lighting_handle,
+            packed_lighting,
+            world_from_local,
+            ..
+        } => {
+            overlay_smodel_world_matrix(
+                scratch,
+                runtime.frame.view_origin,
+                world_from_local,
+                runtime.clip_from_world,
+                runtime.view_from_world,
+                OverlayCodeNeed::ALL,
+            );
+
+            overlay_smodel_tess_code_constants(
+                scratch,
+                lighting_handle,
+                inv_image_height,
+                packed_lighting,
+                OverlayCodeNeed::ALL,
+            );
+            let object_id = dpvs_iw4::GfxDrawSurf { packed: draw.key }.object_id();
+            if host_viewmodel_render_fx_flags(object_id) != 0
+                && let Some(clip) = runtime.frame.viewmodel_clip_from_world
+            {
+                overlay_viewmodel_depth_hack(scratch, clip, runtime.frame.view_origin);
+            }
+        }
+        RetainedDrawKind::ParticleCloud { clouds, .. } => {
+            overlay_particle_cloud_tess_code_constants(
+                scratch,
+                runtime.frame.view_origin,
+                &clouds,
+                runtime.clip_from_world,
+                runtime.view_from_world,
+                runtime.frame.clip_from_view,
+                runtime.frame.outdoor.as_ref(),
+            );
+        }
+        RetainedDrawKind::CodeMesh {
+            args, arg_count, ..
+        } if arg_count != 0 => {
+            overlay_code_mesh_tess_code_constants(scratch, &args[..usize::from(arg_count)]);
+        }
+        RetainedDrawKind::Glass {
+            lighting_handle, ..
+        } => {
+            overlay_smodel_tess_code_constants(
+                scratch,
+                lighting_handle,
+                inv_image_height,
+                None,
+                OverlayCodeNeed::ALL,
+            );
+        }
+        RetainedDrawKind::MarkMesh {
+            lighting_handle, ..
+        } => {
+            overlay_smodel_tess_code_constants(
+                scratch,
+                lighting_handle,
+                inv_image_height,
+                None,
+                OverlayCodeNeed::ALL,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn overlay_draw_obj_only(
+    runtime: MaterialExecView<'_>,
+    draw: &RetainedDrawItem,
+    scratch: &mut RuntimeCodeSources,
+    need: OverlayCodeNeed,
+) {
+    let inv_image_height = runtime.frame.inv_image_height;
+    match draw.kind {
+        RetainedDrawKind::Smodel {
+            lighting_handle,
+            packed_lighting,
+            world_from_local,
+            ..
+        }
+        | RetainedDrawKind::XModel {
+            lighting_handle,
+            packed_lighting,
+            world_from_local,
+            ..
+        } => {
+            overlay_smodel_world_matrix(
+                scratch,
+                runtime.frame.view_origin,
+                world_from_local,
+                runtime.clip_from_world,
+                runtime.view_from_world,
+                need,
+            );
+            overlay_smodel_tess_code_constants(
+                scratch,
+                lighting_handle,
+                inv_image_height,
+                packed_lighting,
+                need,
+            );
+            if matches!(draw.kind, RetainedDrawKind::XModel { .. })
+                && xmodel_depth_hack(draw.key)
+                && let Some(clip) = runtime.frame.viewmodel_clip_from_world
+            {
+                overlay_viewmodel_depth_hack(scratch, clip, runtime.frame.view_origin);
+            }
+        }
+        RetainedDrawKind::ParticleCloud { clouds, .. } => {
+            overlay_particle_cloud_tess_code_constants(
+                scratch,
+                runtime.frame.view_origin,
+                &clouds,
+                runtime.clip_from_world,
+                runtime.view_from_world,
+                runtime.frame.clip_from_view,
+                runtime.frame.outdoor.as_ref(),
+            );
+        }
+        RetainedDrawKind::CodeMesh {
+            args, arg_count, ..
+        } if arg_count != 0 => {
+            overlay_code_mesh_tess_code_constants(scratch, &args[..usize::from(arg_count)]);
+        }
+        _ => {}
+    }
+}
+
+fn overlay_draw_execution(
+    runtime: MaterialExecView<'_>,
+    draw: &RetainedDrawItem,
+    scratch: &mut RuntimeCodeSources,
+    overlay: OverlayMode,
+) {
+    match overlay {
+        OverlayMode::Full => overlay_draw_material(runtime, draw, scratch),
+        OverlayMode::ObjOnly => overlay_draw_obj_only(runtime, draw, scratch, OverlayCodeNeed::ALL),
+    }
+}
+
+fn overlay_need_from_execution(exec: &MaterialExecution) -> OverlayCodeNeed {
+    let mut need = OverlayCodeNeed::NONE;
+    for pass in exec.iter_passes() {
+        for lane in pass.code_constants {
+            need.note(lane.index);
+        }
+    }
+    need
+}
+
+fn patch_code_lane(
+    pass_index: u8,
+    lane: &PackedCodeConstantLane,
+    sources: &RuntimeCodeSources,
+) -> Result<PackedCodeConstantLane, MaterialRefusal> {
+    let Some(src) = sources.constant_arc(lane.index) else {
+        return Ok(lane.clone());
+    };
+    let start = usize::from(lane.first_row);
+    let end = start.saturating_add(usize::from(lane.row_count));
+    if src.get(start..end).is_none() {
+        return Err(MaterialRefusal::CodeConstantRowsOutOfRange {
+            pass_index,
+            stage: lane.stage,
+            index: lane.index,
+            first_row: lane.first_row,
+            row_count: lane.row_count,
+            available_rows: src.len(),
+        });
+    }
+    Ok(PackedCodeConstantLane {
+        stage: lane.stage,
+        destination: lane.destination,
+        index: lane.index,
+        first_row: lane.first_row,
+        row_count: lane.row_count,
+        rows: src,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PlaceLanes<'a> {
+    rows: &'a [(u32, u32)],
+    lanes: &'a [PackedCodeConstantLane],
+}
+
+impl<'a> PlaceLanes<'a> {
+    pub fn pass(&self, index: usize) -> Option<&'a [PackedCodeConstantLane]> {
+        let &(start, len) = self.rows.get(index)?;
+        let start = start as usize;
+        self.lanes.get(start..start.saturating_add(len as usize))
+    }
+}
+
+struct RunState {
+    share: ExecutionShareKey,
+    execution: MaterialExecution,
+
+    first_matrix: Option<[u32; 16]>,
+    first_overlay: OverlayKeepKey,
+
+    need: OverlayCodeNeed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MaterialRunCensus {
+    pub draws: u32,
+    pub material_runs: u32,
+    pub pass_setups: u32,
+    pub obj_binds: u32,
+    pub refused: u32,
+    pub shell_hits: u32,
+    pub shell_misses: u32,
+}
+
+#[derive(Debug, Default)]
+pub struct MaterialRunExecutor {
+    scratch: RuntimeCodeSources,
+    place_scratch: RuntimeCodeSources,
+    last_overlay: Option<OverlayKeepKey>,
+    run: Option<RunState>,
+    place_rows: Vec<(u32, u32)>,
+    place_lanes: Vec<PackedCodeConstantLane>,
+
+    run_serial: u64,
+    census: MaterialRunCensus,
+    shells: HashMap<ShellInternKey, Arc<StableMaterialShell>>,
+    shell_generation: Option<MaterialGenerationId>,
+}
+
+impl std::fmt::Debug for RunState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunState")
+            .field("share", &self.share)
+            .finish()
+    }
+}
+
+impl MaterialRunExecutor {
+    pub fn begin_list(&mut self) {
+        self.scratch.reset_overlay();
+        self.place_scratch.reset_overlay();
+        self.last_overlay = None;
+        self.run = None;
+        self.place_rows.clear();
+        self.place_lanes.clear();
+        self.run_serial = self.run_serial.wrapping_add(1);
+        self.census = MaterialRunCensus::default();
+    }
+
+    fn retain_shells_for(&mut self, generation: MaterialGenerationId) {
+        if self.shell_generation != Some(generation) {
+            self.shells.clear();
+            self.shell_generation = Some(generation);
+        }
+    }
+
+    pub fn run_serial(&self) -> u64 {
+        self.run_serial
+    }
+
+    pub fn census(&self) -> MaterialRunCensus {
+        self.census
+    }
+
+    pub fn vertex_type(
+        view: MaterialExecView<'_>,
+        draw: &RetainedDrawItem,
+        tech_type: TechType,
+    ) -> u8 {
+        draw_vertex_type(view.catalog, draw_material_key(draw), &draw.kind, tech_type)
+    }
+
+    pub fn execute(
+        &mut self,
+        view: MaterialExecView<'_>,
+        draw: &RetainedDrawItem,
+        tech_type: TechType,
+        vertex_type: u8,
+        patch_instance_code: bool,
+    ) -> Result<(), MaterialRefusal> {
+        self.census.draws = self.census.draws.saturating_add(1);
+        self.place_rows.clear();
+        self.place_lanes.clear();
+        let share = execution_share_key(draw, tech_type, vertex_type);
+        let overlay_key = overlay_keep_key(draw);
+        if self.run.as_ref().is_some_and(|run| run.share == share) {
+            let Self {
+                run,
+                place_scratch,
+                place_rows,
+                place_lanes,
+                ..
+            } = self;
+            let run = run.as_ref().expect("run checked above");
+            let matrix = instance_matrix_bits(draw);
+            if patch_instance_code
+                && matrix.is_some()
+                && (run.first_matrix != matrix || run.first_overlay != overlay_key)
+            {
+                self.census.obj_binds = self.census.obj_binds.saturating_add(1);
+                place_scratch.begin_overlay();
+                overlay_draw_obj_only(view, draw, place_scratch, run.need);
+                for pass in run.execution.iter_passes() {
+                    let start =
+                        u32::try_from(place_lanes.len()).expect("place-code lane buffer fits u32");
+                    for lane in pass.code_constants {
+                        if !place_scratch.has_constant(lane.index) {
+                            continue;
+                        }
+                        match patch_code_lane(pass.pass_index, lane, place_scratch) {
+                            Ok(patched) => place_lanes.push(patched),
+                            Err(cause) => {
+                                place_rows.clear();
+                                place_lanes.clear();
+                                self.census.refused = self.census.refused.saturating_add(1);
+                                return Err(cause);
+                            }
+                        }
+                    }
+                    let len = u32::try_from(place_lanes.len())
+                        .expect("place-code lane buffer fits u32")
+                        .saturating_sub(start);
+                    place_rows.push((start, len));
+                }
+            }
+            return Ok(());
+        }
+        let overlay = if self.last_overlay == Some(overlay_key) {
+            OverlayMode::ObjOnly
+        } else {
+            OverlayMode::Full
+        };
+        self.last_overlay = Some(overlay_key);
+        let recycled = self.run.take().map(|run| run.execution);
+        overlay_draw_execution(view, draw, &mut self.scratch, overlay);
+        self.retain_shells_for(view.catalog.generation_id);
+        let shell_key = ShellInternKey::from_share(share);
+        let execution = {
+            let Self {
+                shells,
+                scratch,
+                census,
+                ..
+            } = self;
+            let sources = LayeredCodeSources {
+                base: view.code_sources,
+                overlay: scratch,
+            };
+            if let Some(shell) = shells.get(&shell_key) {
+                census.shell_hits = census.shell_hits.saturating_add(1);
+                let mut execution = recycled.unwrap_or_else(MaterialExecution::vacant);
+                match execution.rebind_into(shell, &sources) {
+                    Ok(()) => Ok(execution),
+                    Err(cause) => Err(cause),
+                }
+            } else {
+                census.shell_misses = census.shell_misses.saturating_add(1);
+                drop(recycled);
+                execute_material_with_shell(
+                    view.catalog,
+                    view.prepared,
+                    &sources,
+                    draw_material_key(draw),
+                    tech_type,
+                    vertex_type,
+                )
+                .map(|execution| {
+                    shells.insert(shell_key, Arc::clone(execution.shell_arc()));
+                    execution
+                })
+            }
+        };
+        match execution {
+            Ok(execution) => {
+                self.run_serial = self.run_serial.wrapping_add(1);
+                self.census.material_runs = self.census.material_runs.saturating_add(1);
+                self.census.pass_setups = self
+                    .census
+                    .pass_setups
+                    .saturating_add(u32::try_from(execution.pass_count()).unwrap_or(u32::MAX));
+                self.run = Some(RunState {
+                    share,
+                    need: overlay_need_from_execution(&execution),
+                    execution,
+                    first_matrix: instance_matrix_bits(draw),
+                    first_overlay: overlay_key,
+                });
+                Ok(())
+            }
+            Err(cause) => {
+                self.last_overlay = None;
+                self.census.refused = self.census.refused.saturating_add(1);
+                Err(cause)
+            }
+        }
+    }
+
+    pub fn execution(&self) -> &MaterialExecution {
+        &self
+            .run
+            .as_ref()
+            .expect("execution() after a refused or unopened run")
+            .execution
+    }
+
+    pub fn place(&self) -> Option<PlaceLanes<'_>> {
+        (!self.place_rows.is_empty()).then_some(PlaceLanes {
+            rows: &self.place_rows,
+            lanes: &self.place_lanes,
+        })
+    }
+}

@@ -1,0 +1,29 @@
+[package]
+name = "render_gpu"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "wgpu resources, pipelines, upload, render graph, and submit."
+
+[dependencies]
+asset_iw4.workspace = true
+assets.workspace = true
+bytemuck = { version = "1", features = ["derive"] }
+d3d9_decl.workspace = true
+d3d9_sm3.workspace = true
+d3d9_state.workspace = true
+diag.workspace = true
+dpvs_iw4.workspace = true
+frame.workspace = true
+fx_iw4.workspace = true
+hud_iw4.workspace = true
+hud = { path = "../hud" }
+lighting_iw4.workspace = true
+perf.workspace = true
+render_backend.workspace = true
+render_frame.workspace = true
+render_material.workspace = true
+bevy.workspace = true
+
+[lints]
+workspace = true

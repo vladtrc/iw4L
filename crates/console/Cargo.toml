@@ -1,0 +1,32 @@
+[package]
+name = "console"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Our console: input, parsing, execution, cvar storage, coverage report."
+
+[dependencies]
+diag.workspace = true
+math_iw4.workspace = true
+dpvs_iw4.workspace = true
+bevy.workspace = true
+frame.workspace = true
+ui.workspace = true
+assets = { path = "../assets" }
+audio = { path = "../audio" }
+input_iw4.workspace = true
+playerstate_iw4.workspace = true
+net = { path = "../net" }
+render = { path = "../render" }
+render_frontend.workspace = true
+session = { path = "../session" }
+render_fx.workspace = true
+replay = { path = "../replay" }
+sim = { path = "../sim" }
+bots = { path = "../bots" }
+hud = { path = "../hud" }
+entity_iw4.workspace = true
+perf.workspace = true
+
+[lints]
+workspace = true

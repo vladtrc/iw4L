@@ -1,0 +1,792 @@
+use assets::{FontDef, LocalizeCatalog, MenuCatalog, MenuDef, MenuItem, MenuRect};
+use hud_iw4::{
+    ExprError, ExprHost, item_text_origin, item_text_paint_scale, next_letter,
+    r_normalized_text_scale, ui_get_font_handle, ui_text_height, window_paint_scale_rect,
+};
+
+use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance};
+use crate::expr_cache::MenuExprCache;
+
+const FLOAT_RECT_X: u32 = 0;
+
+const FLOAT_RECT_Y: u32 = 1;
+
+const FLOAT_RECT_W: u32 = 2;
+
+const FLOAT_RECT_H: u32 = 3;
+
+const FLOAT_FORECOLOR_R: u32 = 4;
+
+const FLOAT_FORECOLOR_G: u32 = 5;
+
+const FLOAT_FORECOLOR_B: u32 = 6;
+
+const FLOAT_FORECOLOR_RGB: u32 = 7;
+
+const FLOAT_FORECOLOR_A: u32 = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChromeGapKind {
+    VisExp,
+    FloatExp,
+    MaterialExp,
+    OwnerDraw,
+    RetailFont,
+    Localize,
+    TextExp,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ChromeAssets<'a> {
+    pub catalog: Option<&'a MenuCatalog>,
+    pub localize: Option<&'a LocalizeCatalog>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ChromeCoverage {
+    pub(crate) items_total: usize,
+    pub(crate) painted: usize,
+    pub(crate) vis_false: usize,
+    pub(crate) typed_gap: usize,
+    pub(crate) gap_ids: Vec<(usize, ChromeGapKind)>,
+}
+
+impl ChromeCoverage {
+    fn painted(&mut self) {
+        self.painted += 1;
+    }
+
+    fn vis_false(&mut self) {
+        self.vis_false += 1;
+    }
+
+    fn gap(&mut self, index: usize, kind: ChromeGapKind) {
+        self.typed_gap += 1;
+        self.gap_ids.push((index, kind));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MenuVisOnError {
+    #[default]
+    PaintAnyway,
+    HideAll,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnerDrawPaint {
+    Painted,
+    Gap(ChromeGapKind),
+}
+
+#[allow(dead_code)]
+pub(crate) struct OwnerDrawArgs<'a> {
+    pub menu: &'a MenuDef,
+    pub index: usize,
+    pub item: &'a MenuItem,
+    pub rect: MenuRect,
+    pub color: [f32; 4],
+    pub surface: &'a crate::surface::Hud2dSurface,
+    pub assets: ChromeAssets<'a>,
+    pub anim: ChromeMenuAnim,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ChromeFrame {
+    pub(crate) list: Draw2dList,
+    pub(crate) coverage: ChromeCoverage,
+    pub(crate) vis_errors: Vec<(usize, String)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ChromeMenuAnim {
+    pub scale: f32,
+    pub alpha: f32,
+}
+
+impl ChromeMenuAnim {
+    pub(crate) const IDENTITY: Self = Self {
+        scale: 1.0,
+        alpha: 1.0,
+    };
+}
+
+pub(crate) fn execute_chrome_menu(
+    menu: &MenuDef,
+    host: &impl ExprHost,
+    surface: &crate::surface::Hud2dSurface,
+    assets: ChromeAssets<'_>,
+    exprs: &mut MenuExprCache,
+) -> ChromeFrame {
+    execute_chrome_menu_ex(
+        menu,
+        host,
+        surface,
+        assets,
+        ChromeMenuAnim::IDENTITY,
+        exprs,
+        MenuVisOnError::PaintAnyway,
+        None,
+    )
+}
+
+pub(crate) fn execute_chrome_menu_with_anim(
+    menu: &MenuDef,
+    host: &impl ExprHost,
+    surface: &crate::surface::Hud2dSurface,
+    assets: ChromeAssets<'_>,
+    anim: ChromeMenuAnim,
+    exprs: &mut MenuExprCache,
+) -> ChromeFrame {
+    execute_chrome_menu_ex(
+        menu,
+        host,
+        surface,
+        assets,
+        anim,
+        exprs,
+        MenuVisOnError::PaintAnyway,
+        None,
+    )
+}
+
+pub(crate) fn execute_chrome_menu_ex(
+    menu: &MenuDef,
+    host: &impl ExprHost,
+    surface: &crate::surface::Hud2dSurface,
+    assets: ChromeAssets<'_>,
+    anim: ChromeMenuAnim,
+    exprs: &mut MenuExprCache,
+    vis_on_error: MenuVisOnError,
+    mut owner_draw: Option<&mut dyn FnMut(OwnerDrawArgs<'_>, &mut ChromeFrame) -> OwnerDrawPaint>,
+) -> ChromeFrame {
+    let mut frame = ChromeFrame {
+        coverage: ChromeCoverage {
+            items_total: menu.items.len(),
+            ..ChromeCoverage::default()
+        },
+        ..ChromeFrame::default()
+    };
+    if !menu.vis_exp.is_empty() {
+        match exprs.is_true(&menu.vis_exp, host) {
+            Ok(false) => {
+                for _ in 0..menu.items.len() {
+                    frame.coverage.vis_false();
+                }
+                return frame;
+            }
+            Ok(true) => {}
+            Err(err) => {
+                frame
+                    .vis_errors
+                    .push((usize::MAX, format!("menu vis {err:?}")));
+                if vis_on_error == MenuVisOnError::HideAll {
+                    for index in 0..menu.items.len() {
+                        frame.coverage.gap(index, ChromeGapKind::VisExp);
+                    }
+                    return frame;
+                }
+            }
+        }
+    }
+    let parent = match apply_menu_float_rect(&menu.rect, menu, host, exprs) {
+        Ok(rect) => rect,
+        Err(err) => {
+            frame
+                .vis_errors
+                .push((usize::MAX, format!("menu floatexp {err:?}")));
+            for index in 0..menu.items.len() {
+                frame.coverage.gap(index, ChromeGapKind::FloatExp);
+            }
+            return frame;
+        }
+    };
+    for (index, item) in menu.items.iter().enumerate() {
+        let hook = owner_draw.as_mut().map(|h| {
+            let h: &mut dyn FnMut(OwnerDrawArgs<'_>, &mut ChromeFrame) -> OwnerDrawPaint = &mut **h;
+            h
+        });
+        paint_item(
+            menu, index, item, host, surface, assets, anim, exprs, &parent, hook, &mut frame,
+        );
+    }
+    frame
+}
+
+fn paint_item(
+    menu: &MenuDef,
+    index: usize,
+    item: &MenuItem,
+    host: &impl ExprHost,
+    surface: &crate::surface::Hud2dSurface,
+    assets: ChromeAssets<'_>,
+    anim: ChromeMenuAnim,
+    exprs: &mut MenuExprCache,
+    parent: &MenuRect,
+    owner_draw: Option<&mut dyn FnMut(OwnerDrawArgs<'_>, &mut ChromeFrame) -> OwnerDrawPaint>,
+    frame: &mut ChromeFrame,
+) {
+    match exprs.is_true(&item.vis_exp, host) {
+        Ok(false) => {
+            frame.coverage.vis_false();
+            return;
+        }
+        Ok(true) => {}
+        Err(err) => {
+            frame.vis_errors.push((index, format!("{err:?}")));
+            frame.coverage.gap(index, ChromeGapKind::VisExp);
+            return;
+        }
+    }
+    let rect = match apply_float_rect(parent, &menu.rect, item, host, exprs) {
+        Ok(rect) => rect,
+        Err(err) => {
+            frame.vis_errors.push((index, format!("floatexp {err:?}")));
+            frame.coverage.gap(index, ChromeGapKind::FloatExp);
+            return;
+        }
+    };
+    if item.owner_draw != 0 {
+        let mut color = item.fore_color;
+        apply_float_forecolor(item, host, exprs, &mut color);
+        color[3] *= anim.alpha;
+        let args = OwnerDrawArgs {
+            menu,
+            index,
+            item,
+            rect,
+            color,
+            surface,
+            assets,
+            anim,
+        };
+        match owner_draw {
+            Some(hook) => match hook(args, frame) {
+                OwnerDrawPaint::Painted => frame.coverage.painted(),
+                OwnerDrawPaint::Gap(kind) => frame.coverage.gap(index, kind),
+            },
+            None => frame.coverage.gap(index, ChromeGapKind::OwnerDraw),
+        }
+        return;
+    }
+    match resolved_material(item, host, exprs) {
+        Ok(Some(material)) => {
+            push_stretch(
+                menu,
+                index,
+                item,
+                rect,
+                material,
+                surface,
+                host,
+                anim,
+                exprs,
+                &mut frame.list,
+            );
+
+            if has_text(item) && item.style != 5 {
+                paint_text(
+                    menu, index, item, &rect, host, surface, assets, anim, exprs, frame,
+                );
+            } else {
+                frame.coverage.painted();
+            }
+        }
+        Ok(None) => {
+            if has_text(item) {
+                paint_text(
+                    menu, index, item, &rect, host, surface, assets, anim, exprs, frame,
+                );
+            } else {
+                frame.coverage.painted();
+            }
+        }
+        Err(err) => {
+            frame.vis_errors.push((index, format!("material {err:?}")));
+            frame.coverage.gap(index, ChromeGapKind::MaterialExp);
+        }
+    }
+}
+
+fn has_text(item: &MenuItem) -> bool {
+    !item.text_key.is_empty() || !item.text_exp.is_empty()
+}
+
+fn paint_text(
+    menu: &MenuDef,
+    index: usize,
+    item: &MenuItem,
+    rect: &MenuRect,
+    host: &impl ExprHost,
+    surface: &crate::surface::Hud2dSurface,
+    assets: ChromeAssets<'_>,
+    anim: ChromeMenuAnim,
+    exprs: &mut MenuExprCache,
+    frame: &mut ChromeFrame,
+) {
+    let resolved = match resolve_text(item, host, assets.localize, exprs) {
+        Ok(Some(text)) => text,
+        Ok(None) => {
+            frame.coverage.painted();
+            return;
+        }
+        Err(kind) => {
+            frame.coverage.gap(index, kind);
+            return;
+        }
+    };
+    if resolved.text.is_empty() {
+        frame.coverage.painted();
+        return;
+    }
+    let font_name = ui_get_font_handle(
+        item.font_enum,
+        surface.scale_virtual_to_real()[1],
+        item.text_scale,
+    );
+    let Some(font) = assets.catalog.and_then(|c| c.font(font_name)) else {
+        frame.coverage.gap(index, ChromeGapKind::RetailFont);
+        return;
+    };
+
+    let draw_text_scale = item_text_paint_scale(item.text_scale, anim.scale);
+    let scale = r_normalized_text_scale(font.pixel_height, draw_text_scale);
+    let measured_w = ui_text_width(font, &resolved.text, item.text_scale);
+    let measured_h = ui_text_height(item.text_scale);
+    let (x, y) = item_text_origin(
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        item.text_align_mode,
+        item.text_align_x,
+        item.text_align_y,
+        measured_w,
+        measured_h,
+    );
+    let applied = surface.apply_rect(
+        x,
+        y,
+        scale,
+        scale,
+        rect.horz_align as i32,
+        rect.vert_align as i32,
+    );
+    let mut color = item.fore_color;
+    apply_float_forecolor(item, host, exprs, &mut color);
+    color[3] *= anim.alpha;
+    let provenance = Draw2dProvenance::MenuItem {
+        menu: menu.name.clone(),
+        index,
+    };
+    if item.glow_color[3] > 0.0 {
+        let mut glow = item.glow_color;
+        glow[3] *= anim.alpha;
+        let glow_material = if font.glow_material.is_empty() {
+            assets::AssetRef::bare_name(&font.material).to_owned()
+        } else {
+            assets::AssetRef::bare_name(&font.glow_material).to_owned()
+        };
+        frame.list.cmds.push(Draw2dCmd {
+            material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+            x: (applied.x + 0.5).floor(),
+            y: (applied.y + 0.5).floor(),
+            w: applied.w,
+            h: applied.h,
+            s0: 0.0,
+            t0: 0.0,
+            s1: 1.0,
+            t1: 1.0,
+            color: glow,
+            material: glow_material,
+            op: Draw2dOp::TextRun {
+                font: font_name.to_owned(),
+                scale,
+                text: resolved.text.clone(),
+                loc_key: resolved.loc_key.clone(),
+
+                style: crate::draw2d::TEXT_STYLE_UNREAD,
+                fx: None,
+            },
+            provenance: provenance.clone(),
+            layer: 1,
+        });
+    }
+    frame.list.cmds.push(Draw2dCmd {
+        material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+        x: (applied.x + 0.5).floor(),
+        y: (applied.y + 0.5).floor(),
+        w: applied.w,
+        h: applied.h,
+        s0: 0.0,
+        t0: 0.0,
+        s1: 1.0,
+        t1: 1.0,
+        color,
+        material: assets::AssetRef::bare_name(&font.material).to_owned(),
+        op: Draw2dOp::TextRun {
+            font: font_name.to_owned(),
+            scale,
+            text: resolved.text,
+            loc_key: resolved.loc_key,
+
+            style: crate::draw2d::TEXT_STYLE_UNREAD,
+            fx: None,
+        },
+        provenance,
+        layer: 1,
+    });
+    frame.coverage.painted();
+}
+
+pub(crate) fn push_owner_text(
+    args: &OwnerDrawArgs<'_>,
+    text: &str,
+    color: [f32; 4],
+    frame: &mut ChromeFrame,
+) -> Result<(), ChromeGapKind> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    let font_name = ui_get_font_handle(
+        args.item.font_enum,
+        args.surface.scale_virtual_to_real()[1],
+        args.item.text_scale,
+    );
+    let Some(font) = args.assets.catalog.and_then(|c| c.font(font_name)) else {
+        return Err(ChromeGapKind::RetailFont);
+    };
+    let draw_text_scale = item_text_paint_scale(args.item.text_scale, args.anim.scale);
+    let scale = r_normalized_text_scale(font.pixel_height, draw_text_scale);
+    let measured_w = ui_text_width(font, text, args.item.text_scale);
+    let measured_h = ui_text_height(args.item.text_scale);
+    let (x, y) = item_text_origin(
+        args.rect.x,
+        args.rect.y,
+        args.rect.w,
+        args.rect.h,
+        args.item.text_align_mode,
+        args.item.text_align_x,
+        args.item.text_align_y,
+        measured_w,
+        measured_h,
+    );
+    let applied = args.surface.apply_rect(
+        x,
+        y,
+        scale,
+        scale,
+        args.rect.horz_align as i32,
+        args.rect.vert_align as i32,
+    );
+    frame.list.cmds.push(Draw2dCmd {
+        material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+        x: (applied.x + 0.5).floor(),
+        y: (applied.y + 0.5).floor(),
+        w: applied.w,
+        h: applied.h,
+        s0: 0.0,
+        t0: 0.0,
+        s1: 1.0,
+        t1: 1.0,
+        color,
+        material: assets::AssetRef::bare_name(&font.material).to_owned(),
+        op: Draw2dOp::TextRun {
+            font: font_name.to_owned(),
+            scale,
+            text: text.to_owned(),
+            loc_key: String::new(),
+
+            style: crate::draw2d::TEXT_STYLE_UNREAD,
+            fx: None,
+        },
+        provenance: Draw2dProvenance::OwnerDraw(args.item.owner_draw),
+        layer: 1,
+    });
+    Ok(())
+}
+
+pub(crate) fn push_owner_pic(
+    args: &OwnerDrawArgs<'_>,
+    material: String,
+    material_namespace: assets::AssetNamespace,
+    color: [f32; 4],
+    op: Draw2dOp,
+    frame: &mut ChromeFrame,
+) {
+    if args.rect.w.abs() <= f32::EPSILON || args.rect.h.abs() <= f32::EPSILON {
+        return;
+    }
+    let (x, y, w, h) = window_paint_scale_rect(
+        args.rect.x,
+        args.rect.y,
+        args.rect.w,
+        args.rect.h,
+        args.anim.scale,
+    );
+    if w.abs() <= f32::EPSILON || h.abs() <= f32::EPSILON {
+        return;
+    }
+    let applied = args.surface.apply_rect(
+        x,
+        y,
+        w,
+        h,
+        args.rect.horz_align as i32,
+        args.rect.vert_align as i32,
+    );
+    frame.list.cmds.push(Draw2dCmd {
+        material_namespace,
+        x: applied.x,
+        y: applied.y,
+        w: applied.w,
+        h: applied.h,
+        s0: 0.0,
+        t0: 0.0,
+        s1: 1.0,
+        t1: 1.0,
+        color,
+        material,
+        op,
+        provenance: Draw2dProvenance::OwnerDraw(args.item.owner_draw),
+        layer: 1,
+    });
+}
+
+struct ResolvedText {
+    text: String,
+    loc_key: String,
+}
+
+fn resolve_text(
+    item: &MenuItem,
+    host: &impl ExprHost,
+    loc: Option<&LocalizeCatalog>,
+    exprs: &mut MenuExprCache,
+) -> Result<Option<ResolvedText>, ChromeGapKind> {
+    let raw = if !item.text_key.is_empty() {
+        item.text_key.clone()
+    } else if !item.text_exp.is_empty() {
+        exprs
+            .evaluate_string(&item.text_exp, host)
+            .map_err(|_| ChromeGapKind::TextExp)?
+    } else {
+        return Ok(None);
+    };
+    if raw.is_empty() {
+        return Ok(Some(ResolvedText {
+            text: String::new(),
+            loc_key: String::new(),
+        }));
+    }
+    if let Some(key) = raw.strip_prefix('@') {
+        let Some(table) = loc else {
+            return Err(ChromeGapKind::Localize);
+        };
+        let Some(text) = table.text(key) else {
+            return Err(ChromeGapKind::Localize);
+        };
+        return Ok(Some(ResolvedText {
+            text: text.to_owned(),
+            loc_key: key.to_owned(),
+        }));
+    }
+    Ok(Some(ResolvedText {
+        text: raw,
+        loc_key: String::new(),
+    }))
+}
+
+pub(crate) fn ui_text_width(font: &FontDef, text: &str, text_scale: f32) -> f32 {
+    r_text_width(font, text) as f32 * r_normalized_text_scale(font.pixel_height, text_scale)
+}
+
+pub(crate) fn r_text_width(font: &FontDef, text: &str) -> i32 {
+    let mut width = 0i32;
+    let mut max_width = 0i32;
+    let mut chars = text.chars().peekable();
+    while let Some(letter) = next_letter(&mut chars) {
+        if letter == 13 || letter == 10 {
+            width = 0;
+            continue;
+        }
+        let Some(glyph) = font.glyph(letter) else {
+            continue;
+        };
+        let dx = i32::from(glyph.dx);
+        width += dx;
+        if max_width < width {
+            max_width = width;
+        }
+    }
+    max_width
+}
+
+fn resolved_material(
+    item: &MenuItem,
+    host: &impl ExprHost,
+    exprs: &mut MenuExprCache,
+) -> Result<Option<String>, ExprError> {
+    if !item.material_exp.is_empty() {
+        let name = exprs.evaluate_string(&item.material_exp, host)?;
+        if name.is_empty() {
+            return Ok(background_stem(&item.background));
+        }
+        return Ok(Some(name));
+    }
+    Ok(background_stem(&item.background))
+}
+
+fn background_stem(raw: &str) -> Option<String> {
+    let raw = raw.trim().trim_start_matches(',').trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw.to_owned())
+    }
+}
+
+fn apply_float_rect(
+    parent: &MenuRect,
+    captured_parent: &MenuRect,
+    item: &MenuItem,
+    host: &impl ExprHost,
+    exprs: &mut MenuExprCache,
+) -> Result<MenuRect, ExprError> {
+    let mut rect = item.rect;
+
+    rect.x += parent.x - captured_parent.x;
+    rect.y += parent.y - captured_parent.y;
+    for &(key, ref dump) in &item.float_exp {
+        if dump.is_empty() {
+            continue;
+        }
+        let value = match exprs.evaluate_float(dump, host) {
+            Ok(value) => value,
+            Err(err) if key <= FLOAT_RECT_H => return Err(err),
+
+            Err(_) => continue,
+        };
+        match key {
+            FLOAT_RECT_X => rect.x = parent.x + value,
+            FLOAT_RECT_Y => rect.y = parent.y + value,
+            FLOAT_RECT_W => rect.w = value,
+            FLOAT_RECT_H => rect.h = value,
+            _ => {}
+        }
+    }
+    Ok(rect)
+}
+
+fn apply_menu_float_rect(
+    base: &MenuRect,
+    menu: &MenuDef,
+    host: &impl ExprHost,
+    exprs: &mut MenuExprCache,
+) -> Result<MenuRect, ExprError> {
+    let mut rect = *base;
+    for &(key, ref dump) in &menu.float_exp {
+        if dump.is_empty() {
+            continue;
+        }
+        let value = exprs.evaluate_float(dump, host)?;
+        match key {
+            FLOAT_RECT_X => rect.x = value,
+            FLOAT_RECT_Y => rect.y = value,
+            FLOAT_RECT_W => rect.w = value,
+            FLOAT_RECT_H => rect.h = value,
+            _ => {}
+        }
+    }
+    Ok(rect)
+}
+
+fn apply_float_forecolor(
+    item: &MenuItem,
+    host: &impl ExprHost,
+    exprs: &mut MenuExprCache,
+    color: &mut [f32; 4],
+) {
+    for &(key, ref dump) in &item.float_exp {
+        if dump.is_empty() {
+            continue;
+        }
+        let Ok(value) = exprs.evaluate_float(dump, host) else {
+            continue;
+        };
+        match key {
+            FLOAT_FORECOLOR_R => color[0] = value,
+            FLOAT_FORECOLOR_G => color[1] = value,
+            FLOAT_FORECOLOR_B => color[2] = value,
+            FLOAT_FORECOLOR_RGB => color[..3].fill(value),
+            FLOAT_FORECOLOR_A => color[3] = value,
+            _ => {}
+        }
+    }
+}
+
+fn push_stretch(
+    menu: &MenuDef,
+    index: usize,
+    item: &MenuItem,
+    rect: MenuRect,
+    material: String,
+    surface: &crate::surface::Hud2dSurface,
+    host: &impl ExprHost,
+    anim: ChromeMenuAnim,
+    exprs: &mut MenuExprCache,
+    list: &mut Draw2dList,
+) {
+    if rect.w.abs() <= f32::EPSILON || rect.h.abs() <= f32::EPSILON {
+        return;
+    }
+    let (x, y, w, h) = window_paint_scale_rect(rect.x, rect.y, rect.w, rect.h, anim.scale);
+    if w.abs() <= f32::EPSILON || h.abs() <= f32::EPSILON {
+        return;
+    }
+    let applied = surface.apply_rect(x, y, w, h, rect.horz_align as i32, rect.vert_align as i32);
+
+    let mut color = if item.style == 1 {
+        item.back_color
+    } else {
+        item.fore_color
+    };
+    if item.style == 1 {
+        for &(key, ref dump) in &item.float_exp {
+            if !(14..=18).contains(&key) || dump.is_empty() {
+                continue;
+            }
+            let Ok(value) = exprs.evaluate_float(dump, host) else {
+                continue;
+            };
+            match key {
+                14..=16 => color[(key - 14) as usize] = value,
+                17 => color[..3].fill(value),
+                18 => color[3] = value,
+                _ => unreachable!(),
+            }
+        }
+    } else {
+        apply_float_forecolor(item, host, exprs, &mut color);
+    }
+    color[3] *= anim.alpha;
+    list.cmds.push(Draw2dCmd {
+        material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+        x: applied.x,
+        y: applied.y,
+        w: applied.w,
+        h: applied.h,
+        s0: 0.0,
+        t0: 0.0,
+        s1: 1.0,
+        t1: 1.0,
+        color,
+        material,
+        op: Draw2dOp::StretchPic,
+        provenance: Draw2dProvenance::MenuItem {
+            menu: menu.name.clone(),
+            index,
+        },
+        layer: 1,
+    });
+}

@@ -1,0 +1,20 @@
+[package]
+name = "perf"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Native Perfetto recording and generated typed instrumentation."
+
+[features]
+default = ["native"]
+native = ["dep:perfetto-sdk"]
+
+[dependencies]
+serde_json.workspace = true
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+perfetto-sdk = { version = "1", optional = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,316 @@
+use bevy::prelude::*;
+use bevy::render::render_resource::Face;
+
+use crate::assemble::drawsurf::{
+    SurfaceLightmapId, SurfaceReflectionProbeId, SurfaceSamplerInputs,
+};
+use crate::prepare::scene::world::{WorldScene, WorldSun};
+
+pub use render_frame::WorldVertex;
+
+#[derive(Clone, Debug)]
+pub struct WorldPassMaterial {
+    pub color: Option<Handle<Image>>,
+    pub normal: Option<Handle<Image>>,
+    pub specular: Option<Handle<Image>>,
+    pub probe: Option<Handle<Image>>,
+    pub ambient: Option<Handle<Image>>,
+    pub directional: Option<Handle<Image>>,
+    pub sun_mask: Option<Handle<Image>>,
+    pub sun: Option<WorldSun>,
+    pub alpha_mode: AlphaMode,
+
+    pub draw_mode: Option<assets::MaterialDrawMode>,
+    pub square_color_map: bool,
+    pub env_map_parms: [f32; 4],
+    pub uv_anim: [f32; 4],
+    pub falloff_parms: [f32; 4],
+    pub falloff_begin: [f32; 4],
+    pub falloff_end: [f32; 4],
+    pub cull_mode: Option<Face>,
+}
+
+pub use render_frame::RetailWorldVertexRefusal;
+
+#[derive(Resource, Clone, Debug, Default)]
+pub struct WorldDrawGpuPlan {
+    pub retail_vertices: assets::RetailWorldVertexPayload,
+
+    pub vertex_layer: Vec<u8>,
+
+    pub vertices: Vec<WorldVertex>,
+    pub indices: Vec<u32>,
+
+    pub surface_ranges: Vec<(u32, u32)>,
+
+    pub surface_material: Vec<u32>,
+
+    pub surface_sampler_inputs: Vec<SurfaceSamplerInputs>,
+    pub materials: Vec<WorldPassMaterial>,
+
+    pub upload_pending: bool,
+}
+
+impl WorldDrawGpuPlan {
+    pub fn exact_retail_vertices(
+        &self,
+    ) -> Result<&[[u8; asset_iw4::size::GFX_WORLD_VERTEX]], RetailWorldVertexRefusal> {
+        let table_stride =
+            asset_iw4::vertex_decl::stream_extent(asset_iw4::vertex_decl::WORLD_VERTEX_TYPE, 0);
+        if table_stride != Some(asset_iw4::size::GFX_WORLD_VERTEX as u16) {
+            return Err(RetailWorldVertexRefusal::RetailStrideMismatch { table_stride });
+        }
+        let vertices = match self.retail_vertices.type2_stream0() {
+            Ok(vertices) => vertices,
+            Err(source_layout) => {
+                return Err(RetailWorldVertexRefusal::ForeignLayout { source_layout });
+            }
+        };
+        if vertices.len() != self.vertices.len() {
+            return Err(RetailWorldVertexRefusal::VertexCountMismatch {
+                retail: vertices.len(),
+                decoded: self.vertices.len(),
+            });
+        }
+        Ok(vertices)
+    }
+
+    pub fn from_scene(
+        scene: &mut WorldScene,
+        exact_handles: &[Option<Handle<Image>>],
+        lightmap_handles: &[Option<crate::assemble::drawsurf::RuntimeLightmapHandles>],
+        reflection_probe_handles: &[Option<Handle<Image>>],
+    ) -> Self {
+        let retail_vertices = std::mem::replace(
+            &mut scene.retained_retail_vertices,
+            assets::RetailWorldVertexPayload::Unavailable {
+                source_layout: "retail payload consumed by WorldDrawGpuPlan",
+            },
+        );
+        let vertex_layer = scene.retained_vertex_layer.clone();
+        let n = scene.retained_positions.len();
+        let mut vertices = Vec::with_capacity(n);
+        for i in 0..n {
+            vertices.push(WorldVertex {
+                position: scene.retained_positions[i],
+                normal: scene
+                    .retained_normals
+                    .get(i)
+                    .copied()
+                    .unwrap_or([0.0, 0.0, 1.0]),
+                tangent: scene
+                    .retained_tangents
+                    .get(i)
+                    .copied()
+                    .unwrap_or([1.0, 0.0, 0.0, 1.0]),
+                color: scene.retained_colors.get(i).copied().unwrap_or([1.0; 4]),
+                uv0: scene
+                    .retained_texture_uvs
+                    .get(i)
+                    .copied()
+                    .unwrap_or([0.0; 2]),
+                uv1: scene
+                    .retained_lightmap_uvs
+                    .get(i)
+                    .copied()
+                    .unwrap_or([0.0; 2]),
+            });
+        }
+
+        scene.retained_tangents.clear();
+        scene.retained_colors.clear();
+        scene.retained_texture_uvs.clear();
+
+        let mut materials = Vec::new();
+        let mut batch_to_mat = vec![u32::MAX; scene.batches.len()];
+
+        for (batch_i, batch) in scene.batches.iter().enumerate() {
+            let runtime = batch
+                .material
+                .and_then(|id| scene.runtime_material_catalog.derived(id));
+            let color = runtime.and_then(|m| {
+                m.texture_semantic(assets::TS_COLOR_MAP)
+                    .and_then(|id| exact_handles.get(id.0 as usize).and_then(Clone::clone))
+            });
+            let normal = runtime.and_then(|m| {
+                m.texture_semantic(assets::TS_NORMAL_MAP)
+                    .and_then(|id| exact_handles.get(id.0 as usize).and_then(Clone::clone))
+            });
+            let specular = runtime.and_then(|m| {
+                m.texture_semantic(assets::TS_SPECULAR_MAP)
+                    .and_then(|id| exact_handles.get(id.0 as usize).and_then(Clone::clone))
+            });
+            let probe = reflection_probe_handles
+                .get(usize::from(batch.reflection_probe_index))
+                .and_then(Clone::clone);
+
+            let (ambient, directional, sun_mask) = if batch.lightmapped {
+                lightmap_handles
+                    .get(usize::from(batch.lightmap_index))
+                    .and_then(|page| page.as_ref())
+                    .map(|page| {
+                        (
+                            Some(page.ambient_diagnostic.clone()),
+                            Some(page.directional_diagnostic.clone()),
+                            Some(page.sun_mask_diagnostic.clone()),
+                        )
+                    })
+                    .unwrap_or((None, None, None))
+            } else {
+                (None, None, None)
+            };
+
+            let mat = WorldPassMaterial {
+                color,
+                normal,
+                specular,
+                probe,
+                ambient,
+                directional,
+                sun_mask,
+                sun: batch.sun,
+                alpha_mode: AlphaMode::Opaque,
+                draw_mode: None,
+                square_color_map: runtime.is_some_and(|m| m.square_color_map),
+                env_map_parms: runtime.map(|m| m.env_map_parms()).unwrap_or([0.0; 4]),
+                uv_anim: runtime.map(|m| m.uv_anim()).unwrap_or([0.0; 4]),
+                falloff_parms: runtime.map(|m| m.falloff_parms()).unwrap_or([0.0; 4]),
+                falloff_begin: runtime.map(|m| m.falloff_begin()).unwrap_or([0.0; 4]),
+                falloff_end: runtime.map(|m| m.falloff_end()).unwrap_or([0.0; 4]),
+                cull_mode: runtime.and_then(|m| super::super::runtime_cull_face(m.cull_mode)),
+            };
+            let idx = materials.len() as u32;
+            materials.push(mat);
+            if let Some(slot) = batch_to_mat.get_mut(batch_i) {
+                *slot = idx;
+            }
+        }
+
+        let Some(cull) = scene.cull.as_ref() else {
+            let upload_pending = !vertices.is_empty();
+            return Self {
+                retail_vertices,
+                vertex_layer,
+                vertices,
+                indices: Vec::new(),
+                surface_ranges: Vec::new(),
+                surface_material: Vec::new(),
+                surface_sampler_inputs: Vec::new(),
+                materials,
+                upload_pending,
+            };
+        };
+
+        let indices = cull.packed_indices.clone();
+        let surface_ranges = cull.surface_index_ranges.clone();
+
+        let surface_material: Vec<u32> = cull
+            .surface_batch_ranges
+            .iter()
+            .zip(surface_ranges.iter())
+            .map(|(&(batch, _, _), &(_, count))| {
+                if count == 0 {
+                    return u32::MAX;
+                }
+                batch_to_mat.get(batch).copied().unwrap_or(u32::MAX)
+            })
+            .collect();
+        let surface_sampler_inputs = cull
+            .surface_batch_ranges
+            .iter()
+            .map(|&(batch, _, _)| {
+                let Some(batch) = scene.batches.get(batch) else {
+                    return SurfaceSamplerInputs::default();
+                };
+                SurfaceSamplerInputs {
+                    reflection_probe: Some(SurfaceReflectionProbeId(batch.reflection_probe_index)),
+                    primary_lightmap: batch
+                        .lightmapped
+                        .then_some(SurfaceLightmapId(batch.lightmap_index)),
+                    secondary_lightmap: batch
+                        .lightmapped
+                        .then_some(SurfaceLightmapId(batch.lightmap_index)),
+                }
+            })
+            .collect();
+
+        let upload_pending = !vertices.is_empty() && !indices.is_empty();
+        Self {
+            retail_vertices,
+            vertex_layer,
+            vertices,
+            indices,
+            surface_ranges,
+            surface_material,
+            surface_sampler_inputs,
+            materials,
+            upload_pending,
+        }
+    }
+}
+
+pub(crate) fn build_world_draw_gpu_plan(
+    mut scene: Option<ResMut<WorldScene>>,
+    job: Res<crate::prepare::scene::spawn::WorldSpawnJob>,
+    existing: Option<Res<WorldDrawGpuPlan>>,
+    mut commands: Commands,
+) {
+    if job.phase != crate::prepare::scene::spawn::WorldSpawnPhase::WorldTess {
+        return;
+    }
+    if existing.is_some() {
+        return;
+    }
+    let Some(scene) = scene.as_mut() else {
+        return;
+    };
+    let (exact, lightmaps, probes) = job.tess_image_handles();
+    let plan = WorldDrawGpuPlan::from_scene(scene, exact, lightmaps, probes);
+    for batch in &scene.batches {
+        let runtime = batch
+            .material
+            .and_then(|material| scene.runtime_material_catalog.derived(material));
+        if runtime.is_some_and(|m| m.unlit)
+            && runtime.is_some_and(|m| m.uv_anim() != [0.0; 4] || m.falloff_begin()[3] >= 0.5)
+        {
+            diag::info!(
+                World,
+                "world unlit anim: {} uvAnim={:?} falloffParms={:?} falloffBegin={:?} falloffEnd={:?}",
+                runtime.map(|m| m.name.as_str()).unwrap_or("<none>"),
+                runtime.map(|m| m.uv_anim()),
+                runtime.map(|m| m.falloff_parms()),
+                runtime.map(|m| m.falloff_begin()),
+                runtime.map(|m| m.falloff_end()),
+            );
+        }
+    }
+    let exact_vertex_status = match plan.exact_retail_vertices() {
+        Ok(vertices) => format!("READY records={} stride=0x2c", vertices.len()),
+        Err(refusal) => format!("REFUSED({refusal:?})"),
+    };
+    let probe_surfaces = plan
+        .surface_sampler_inputs
+        .iter()
+        .filter(|inputs| inputs.reflection_probe.is_some())
+        .count();
+    let lightmap_surfaces = plan
+        .surface_sampler_inputs
+        .iter()
+        .filter(|inputs| inputs.secondary_lightmap.is_some())
+        .count();
+    diag::info!(
+        World,
+        "world drawsurf tess plan: batches={} verts={} indices={} materials={} retail_vb={} surface_inputs={}/{} probe/lightmap (material execution deferred to Colour product); mark_clip_verts pos={} lmap={} nrm={}",
+        scene.batches.len(),
+        plan.vertices.len(),
+        plan.indices.len(),
+        plan.materials.len(),
+        exact_vertex_status,
+        probe_surfaces,
+        lightmap_surfaces,
+        scene.retained_positions.len(),
+        scene.retained_lightmap_uvs.len(),
+        scene.retained_normals.len(),
+    );
+    commands.insert_resource(plan);
+}

@@ -1,0 +1,28 @@
+[package]
+name = "asset_world"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "World, DPVS, MapEnts, collision, dynent, glass, compass, and createart products."
+
+[dependencies]
+asset_core.workspace = true
+asset_transport.workspace = true
+asset_material.workspace = true
+asset_model.workspace = true
+asset_iw4.workspace = true
+fastfile_iw4.workspace = true
+fastfile_iw5.workspace = true
+fastfile_t5.workspace = true
+dpvs_iw4.workspace = true
+clipmap_iw4.workspace = true
+trace_iw4.workspace = true
+lighting_iw4.workspace = true
+fx_iw4.workspace = true
+weapon_iw4.workspace = true
+bcdec_rs.workspace = true
+xmodel_runtime.workspace = true
+bevy.workspace = true
+
+[lints]
+workspace = true

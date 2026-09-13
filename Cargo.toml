@@ -1,0 +1,231 @@
+# quinn-proto 0.11.17 subtracts evicted DATAGRAM bytes twice and panics under
+# relay backpressure. Pin the upstream 0.11.x fix for both clients and master.
+# Remove when a crates.io release includes quinn-rs/quinn#2806.
+[patch.crates-io]
+quinn-proto = { git = "https://github.com/quinn-rs/quinn", rev = "f650e0f213b01ea7bebd60023e5df7df65e5c2bd" }
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/anim_iw4",
+    "crates/asset_core",
+    "crates/asset_anim",
+    "crates/asset_audio",
+    "crates/asset_game",
+    "crates/asset_iw4",
+    "crates/asset_material",
+    "crates/asset_model",
+    "crates/asset_transport",
+    "crates/asset_world",
+    "crates/assets",
+    "crates/bootstrap",
+    "crates/audio",
+    "crates/bots",
+    "crates/clipmap_iw4",
+    "crates/console",
+    "crates/d3d9_decl",
+    "crates/d3d9_sm3",
+    "crates/d3d9_state",
+    "crates/diag",
+    "crates/dpvs_iw4",
+    "crates/entity_iw4",
+    "crates/fastfile_iw4",
+    "crates/fastfile_t5",
+    "crates/fastfile_iw5",
+    "crates/frame",
+    "crates/fx",
+    "crates/fx_iw4",
+    "crates/gamemode_iw4",
+    "crates/hud",
+    "crates/hud_iw4",
+    "crates/killcam_iw4",
+    "crates/sound_iw4",
+    "crates/input_iw4",
+    "crates/launcher",
+    "crates/lighting_iw4",
+    "crates/marks_iw4",
+    "crates/master_protocol",
+    "crates/math_iw4",
+    "crates/movement_iw4",
+    "crates/net",
+    "crates/iw4l-master",
+    "crates/perf",
+    "crates/playerstate_iw4",
+    "crates/render",
+    "crates/render_anim",
+    "crates/render_backend",
+    "crates/render_frame",
+    "crates/render_frontend",
+    "crates/render_fx",
+    "crates/render_gpu",
+    "crates/render_material",
+    "crates/render_scene",
+    "crates/replay",
+    "crates/session",
+    "crates/sim",
+    "crates/trace_iw4",
+    "crates/ui",
+    "crates/updater",
+    "crates/weapon_iw4",
+    "crates/xmodel_runtime",
+    "xtask",
+]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+bevy = { version = "0.19", default-features = false, features = [
+    "bevy_window",
+    "bevy_winit",
+    "bevy_ui",
+    "bevy_ui_render",
+    "bevy_text",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_log",
+    "bevy_sprite",
+    "bevy_sprite_render",
+    "bevy_asset",
+    "bevy_audio",
+    "multi_threaded",
+    "x11",
+    "wayland",
+    "png",
+    "system_clipboard",
+    "bevy_ui_widgets",
+    "ui_picking",
+] }
+bevy_ecs = "0.19"
+miniz_oxide = "0.8"
+bcdec_rs = "0.2"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+zip = { version = "6", default-features = false, features = ["deflate"] }
+dotenvy = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+png = "0.18"
+anim_iw4 = { path = "crates/anim_iw4" }
+asset_iw4 = { path = "crates/asset_iw4" }
+asset_core = { path = "crates/asset_core" }
+asset_anim = { path = "crates/asset_anim" }
+asset_audio = { path = "crates/asset_audio" }
+asset_game = { path = "crates/asset_game" }
+asset_transport = { path = "crates/asset_transport" }
+asset_material = { path = "crates/asset_material" }
+asset_model = { path = "crates/asset_model" }
+asset_world = { path = "crates/asset_world" }
+assets = { path = "crates/assets" }
+audio = { path = "crates/audio" }
+bots = { path = "crates/bots" }
+clipmap_iw4 = { path = "crates/clipmap_iw4" }
+console = { path = "crates/console" }
+d3d9_decl = { path = "crates/d3d9_decl" }
+d3d9_sm3 = { path = "crates/d3d9_sm3" }
+d3d9_state = { path = "crates/d3d9_state" }
+diag = { path = "crates/diag" }
+dpvs_iw4 = { path = "crates/dpvs_iw4" }
+entity_iw4 = { path = "crates/entity_iw4" }
+fastfile_iw4 = { path = "crates/fastfile_iw4" }
+fastfile_t5 = { path = "crates/fastfile_t5" }
+fastfile_iw5 = { path = "crates/fastfile_iw5" }
+frame = { path = "crates/frame" }
+fx = { path = "crates/fx" }
+fx_iw4 = { path = "crates/fx_iw4" }
+gamemode_iw4 = { path = "crates/gamemode_iw4" }
+hud = { path = "crates/hud" }
+hud_iw4 = { path = "crates/hud_iw4" }
+killcam_iw4 = { path = "crates/killcam_iw4" }
+sound_iw4 = { path = "crates/sound_iw4" }
+input_iw4 = { path = "crates/input_iw4" }
+launcher = { path = "crates/launcher" }
+lighting_iw4 = { path = "crates/lighting_iw4" }
+marks_iw4 = { path = "crates/marks_iw4" }
+math_iw4 = { path = "crates/math_iw4" }
+master_protocol = { path = "crates/master_protocol" }
+movement_iw4 = { path = "crates/movement_iw4" }
+net = { path = "crates/net" }
+perf = { path = "crates/perf" }
+playerstate_iw4 = { path = "crates/playerstate_iw4" }
+render = { path = "crates/render" }
+render_anim = { path = "crates/render_anim" }
+render_backend = { path = "crates/render_backend" }
+render_frame = { path = "crates/render_frame" }
+render_frontend = { path = "crates/render_frontend" }
+render_fx = { path = "crates/render_fx" }
+render_gpu = { path = "crates/render_gpu" }
+render_material = { path = "crates/render_material" }
+render_scene = { path = "crates/render_scene" }
+session = { path = "crates/session" }
+replay = { path = "crates/replay" }
+sim = { path = "crates/sim" }
+trace_iw4 = { path = "crates/trace_iw4" }
+ui = { path = "crates/ui" }
+weapon_iw4 = { path = "crates/weapon_iw4" }
+xmodel_runtime = { path = "crates/xmodel_runtime" }
+glam = "0.32.1"
+
+# Transcribing a retail constant at full precision is the requirement, not a
+# style slip. `clippy::excessive_precision` fired on
+# `0.0005882352706976235` — the exact f32 read out of the retail image with
+# `re data` — and rejected an iteration that had ported two more branches of
+# PM_Friction. Shortening such a literal to "enough" digits is the silent
+# approximation this project exists to forbid, so the lint has to go rather
+# than the digits.
+[workspace.lints.clippy]
+excessive_precision = "allow"
+# Retail constants must preserve the transcribed f32 bits. Replacing a literal
+# with a mathematical standard-library constant can change those bits.
+approx_constant = "allow"
+assertions_on_constants = "deny"
+
+# Measured and kept: wall p50 -5.7%, binary 183 MB -> 114 MB. Do not drop these
+# two lines without a new two-map A/B on the same protocol.
+#
+# Live recipes (`make map` / `play` / `bench-demo` / `bench-live` / …) do not use this profile.
+# Fat LTO: `PROFILE=release` on a live target when the number must match S2-I11.
+# Fat LTO + one codegen unit stay on this profile only. `make deploy` does not
+# select it; that is `PROFILE=release`.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+# The dev loop, including `make bench-demo` and the default Windows/master
+# deploy path. Same opt-level as release (Bevy is unusable without it), minus
+# the two settings whose cost is paid at *link* time: fat LTO over the whole
+# dependency graph in one codegen unit is a single-threaded rustc at ~6.6 GB
+# that reruns after an edit in any crate. S2-I11 timed that link at 13m03s.
+# That link, not the game, is what `make play` was waiting on.
+#
+# `lto = false` keeps crate-local ThinLTO; `"off"` is not required.
+# Incremental is for workspace recompiles after the first fill of this
+# profile cache. Strip lives here, not in RUSTFLAGS: env RUSTFLAGS override
+# target rustflags and would split the play/release fingerprint.
+#
+# Separate profile rather than a relaxed `[profile.release]`: S2-I11's verdict
+# stands, and the binary its numbers describe has to stay buildable.
+# Frame-time cost of `play` vs `release` is NOT measured here — that A/B is
+# `make bench-demo` vs `make bench-demo PROFILE=release`.
+[profile.play]
+inherits = "release"
+opt-level = 3
+lto = false
+codegen-units = 16
+incremental = true
+strip = "symbols"
+
+# The binary a sampler can read (`make bench-perf`). Same code as
+# [profile.play] — opt-level and codegen-units unchanged, so the frame times it
+# samples are the frame times `make bench-live` reports — plus the two things
+# perf needs and a release build drops: DWARF line tables (`debug = 1`) to name
+# a frame, and a frame pointer in every function (`-Cforce-frame-pointers=yes`,
+# set by the recipe) so `--call-graph fp` can walk out of it. Strip is off so
+# those line tables survive. Its own profile dir: play/release fingerprints
+# stay one cache, no relink on a bench↔perf switch.
+[profile.perf]
+inherits = "play"
+debug = 1
+strip = "none"

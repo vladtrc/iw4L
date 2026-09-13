@@ -1,0 +1,1 @@
+pub const MATERIAL_SORT_KEY_ROW_MASK: u8 = 0x3f;

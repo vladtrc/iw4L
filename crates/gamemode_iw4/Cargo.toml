@@ -1,0 +1,13 @@
+[package]
+name = "gamemode_iw4"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Retail IW4 multiplayer rules for dm/dd/dom only: scoring, objectives, round flow."
+
+[dependencies]
+libm = { version = "0.2.16", default-features = false }
+math_iw4.workspace = true
+
+[lints]
+workspace = true

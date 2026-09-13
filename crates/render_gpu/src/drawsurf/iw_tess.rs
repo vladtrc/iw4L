@@ -1,0 +1,569 @@
+use std::num::NonZeroU64;
+
+use bevy::core_pipeline::{Core3d, Core3dSystems};
+use bevy::mesh::VertexBufferLayout;
+use bevy::prelude::*;
+use bevy::render::Extract;
+use bevy::render::RenderStartup;
+use bevy::render::render_asset::RenderAssets;
+use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer_sized};
+use bevy::render::render_resource::{
+    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent,
+    BlendFactor, BlendOperation, BlendState, Buffer, BufferDescriptor, BufferUsages,
+    ColorTargetState, ColorWrites, FragmentState, FrontFace, IndexFormat, PipelineCache,
+    PrimitiveState, RenderPipelineDescriptor, SamplerBindingType, ShaderStages,
+    SpecializedRenderPipeline, SpecializedRenderPipelines, TextureFormat, TextureSampleType,
+    VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
+use bevy::render::texture::GpuImage;
+use bevy::render::view::{ExtractedView, ViewTarget};
+use bevy::render::{ExtractSchedule, Render, RenderApp, RenderSystems};
+use bevy::shader::Shader;
+use hud::{HudTessBatch, HudTessGpuFrame, HudTessTechnique, HudTessVertex};
+use hud_iw4::{r_cmd_buf_set_2d_projection, r_set_2d_clip_coeffs};
+
+use super::backend::{
+    DYNAMIC_INDEX_BUFFER_CAPACITY, DYNAMIC_TESSELLATION_VB_CAPACITY, GfxCmdBufStreams,
+    GfxDrawPrimArgs, GfxDynamicIndexBuffer, GfxDynamicVertexBuffer, GfxStreamSource0,
+    copy_tess_vertex_bytes, copy_u16_indices_into_ring, gfx_tess_stream0, r_draw_tess_technique,
+    r_set_stream_source,
+};
+use crate::diag::render_frame_diag::SharedRenderStagesSlot;
+
+const SHADER_PATH: &str = "embedded://render_gpu/drawsurf/iw_tess.wgsl";
+const PARAMS_SIZE: u64 = 16;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct IwTessVertex {
+    xyzw: [f32; 4],
+    color_bgra: [u8; 4],
+    uv: [f32; 2],
+    packed_normal: u32,
+}
+
+#[derive(Resource)]
+struct IwTessMeta {
+    vb: Buffer,
+    ib: Buffer,
+    cpu_vb: GfxDynamicVertexBuffer,
+    cpu_ib: GfxDynamicIndexBuffer,
+    cpu_vb_bytes: Vec<u8>,
+    cpu_ib_indices: Vec<u16>,
+    vb_token: u32,
+    retired_vb: Vec<Buffer>,
+    retired_ib: Vec<Buffer>,
+    vb_wrote: bool,
+    ib_wrote: bool,
+    draws: Vec<PreparedTessGeom>,
+}
+
+struct PreparedTessGeom {
+    vb: Buffer,
+    ib: Buffer,
+    stream: GfxStreamSource0,
+    first_index: u32,
+    index_count: u32,
+    batch_i: usize,
+}
+
+fn create_tess_vb(device: &RenderDevice) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some("iw_tess_dynamic_vb"),
+        size: u64::from(DYNAMIC_TESSELLATION_VB_CAPACITY),
+        usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_tess_ib(device: &RenderDevice) -> Buffer {
+    device.create_buffer(&BufferDescriptor {
+        label: Some("iw_tess_dynamic_ib"),
+        size: u64::from(DYNAMIC_INDEX_BUFFER_CAPACITY) * 2,
+        usage: BufferUsages::INDEX | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+#[derive(Clone, Debug, Default)]
+struct ExtractedTessFrame {
+    vertices: Vec<IwTessVertex>,
+    indices: Vec<u16>,
+    batches: Vec<HudTessBatch>,
+    surface_w: f32,
+    surface_h: f32,
+    visible: bool,
+}
+
+#[derive(Resource, Default)]
+struct ExtractedIwTess(ExtractedTessFrame);
+
+#[derive(Resource)]
+struct IwTessPipeline {
+    shader: Handle<Shader>,
+    modulate_layout: BindGroupLayoutDescriptor,
+    splatter_layout: BindGroupLayoutDescriptor,
+    params: Buffer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct IwTessPipelineKey {
+    target: TextureFormat,
+    samples: u32,
+    technique: HudTessTechnique,
+    state_bits: Option<[u32; 2]>,
+}
+
+impl SpecializedRenderPipeline for IwTessPipeline {
+    type Key = IwTessPipelineKey;
+
+    fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        let (layout, blend, entry, label, defs) = match key.technique {
+            HudTessTechnique::Modulate => (
+                self.modulate_layout.clone(),
+                BlendComponent {
+                    src_factor: BlendFactor::SrcAlpha,
+                    dst_factor: BlendFactor::OneMinusSrcAlpha,
+                    operation: BlendOperation::Add,
+                },
+                "fs_tess",
+                "iw_tess_stretchpic",
+                Vec::new(),
+            ),
+            HudTessTechnique::SplatterAlt => (
+                self.splatter_layout.clone(),
+                BlendComponent {
+                    src_factor: BlendFactor::One,
+                    dst_factor: BlendFactor::OneMinusSrcAlpha,
+                    operation: BlendOperation::Add,
+                },
+                "fs_splatter",
+                "iw_tess_splatter_alt",
+                vec!["IW_TESS_SPLATTER".into()],
+            ),
+        };
+        let state = key.state_bits.map(|bits| {
+            crate::GfxPassState::from_state_bits(bits[0], bits[1])
+                .apply_change_state_0_host(AlphaMode::Blend, false)
+        });
+        RenderPipelineDescriptor {
+            label: Some(label.into()),
+            layout: vec![layout],
+            immediate_size: 0,
+            vertex: VertexState {
+                shader: self.shader.clone(),
+                shader_defs: defs.clone(),
+                entry_point: Some("vs_tess".into()),
+                buffers: vec![VertexBufferLayout {
+                    array_stride: 32,
+                    step_mode: VertexStepMode::Vertex,
+                    attributes: vec![
+                        VertexAttribute {
+                            format: VertexFormat::Float32x4,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        VertexAttribute {
+                            format: VertexFormat::Unorm8x4,
+                            offset: 16,
+                            shader_location: 1,
+                        },
+                        VertexAttribute {
+                            format: VertexFormat::Float32x2,
+                            offset: 20,
+                            shader_location: 2,
+                        },
+                    ],
+                }],
+            },
+            fragment: Some(FragmentState {
+                shader: self.shader.clone(),
+                shader_defs: defs,
+                entry_point: Some(entry.into()),
+                targets: vec![Some(ColorTargetState {
+                    format: key.target,
+                    blend: match state {
+                        Some(state) => state.blend.blend_state(),
+                        None => Some(BlendState {
+                            color: blend,
+                            alpha: blend,
+                        }),
+                    },
+                    write_mask: state.map_or(ColorWrites::ALL, |state| state.colour_writes()),
+                })],
+            }),
+            primitive: PrimitiveState {
+                front_face: FrontFace::Ccw,
+                cull_mode: None,
+                ..default()
+            },
+            depth_stencil: None,
+            multisample: bevy::render::render_resource::MultisampleState {
+                count: key.samples,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            zero_initialize_workgroup_memory: false,
+        }
+    }
+}
+
+fn init_pipeline(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    device: Res<RenderDevice>,
+) {
+    let params = device.create_buffer(&bevy::render::render_resource::BufferDescriptor {
+        label: Some("iw_tess_params"),
+        size: PARAMS_SIZE,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    commands.insert_resource(IwTessPipeline {
+        shader: asset_server.load(SHADER_PATH),
+        modulate_layout: BindGroupLayoutDescriptor::new(
+            "iw_tess_modulate_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::VERTEX_FRAGMENT,
+                (
+                    uniform_buffer_sized(false, NonZeroU64::new(PARAMS_SIZE)),
+                    texture_2d(TextureSampleType::Float { filterable: true }),
+                    sampler(SamplerBindingType::Filtering),
+                ),
+            ),
+        ),
+        splatter_layout: BindGroupLayoutDescriptor::new(
+            "iw_tess_splatter_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::VERTEX_FRAGMENT,
+                (
+                    uniform_buffer_sized(false, NonZeroU64::new(PARAMS_SIZE)),
+                    texture_2d(TextureSampleType::Float { filterable: true }),
+                    sampler(SamplerBindingType::Filtering),
+                    texture_2d(TextureSampleType::Float { filterable: true }),
+                    sampler(SamplerBindingType::Filtering),
+                ),
+            ),
+        ),
+        params,
+    });
+    commands.insert_resource(IwTessMeta {
+        vb: create_tess_vb(&device),
+        ib: create_tess_ib(&device),
+        cpu_vb: GfxDynamicVertexBuffer::default(),
+        cpu_ib: GfxDynamicIndexBuffer {
+            cur_index_count: 0,
+            capacity: DYNAMIC_INDEX_BUFFER_CAPACITY,
+        },
+        cpu_vb_bytes: vec![0u8; DYNAMIC_TESSELLATION_VB_CAPACITY as usize],
+        cpu_ib_indices: vec![0u16; DYNAMIC_INDEX_BUFFER_CAPACITY as usize],
+        vb_token: 1,
+        retired_vb: Vec::new(),
+        retired_ib: Vec::new(),
+        vb_wrote: false,
+        ib_wrote: false,
+        draws: Vec::new(),
+    });
+}
+
+fn extract_iw_tess(mut extracted: ResMut<ExtractedIwTess>, frame: Extract<Res<HudTessGpuFrame>>) {
+    extracted.0 = ExtractedTessFrame {
+        vertices: frame
+            .vertices
+            .iter()
+            .map(|v: &HudTessVertex| IwTessVertex {
+                xyzw: v.xyzw,
+                color_bgra: v.color_bgra,
+                uv: v.uv,
+                packed_normal: v.packed_normal,
+            })
+            .collect(),
+        indices: frame.indices.clone(),
+        batches: frame.batches.clone(),
+        surface_w: frame.surface_w,
+        surface_h: frame.surface_h,
+        visible: frame.visible,
+    };
+}
+
+fn prepare_iw_tess(
+    extracted: Res<ExtractedIwTess>,
+    mut meta: ResMut<IwTessMeta>,
+    pipeline: Res<IwTessPipeline>,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+) {
+    meta.draws.clear();
+    meta.retired_vb.clear();
+    meta.retired_ib.clear();
+    meta.vb_wrote = false;
+    meta.ib_wrote = false;
+    if !extracted.0.visible {
+        return;
+    }
+    for (batch_i, batch) in extracted.0.batches.iter().enumerate() {
+        if batch.index_count == 0 || batch.vertex_count == 0 {
+            continue;
+        }
+        if batch.index_count % 3 != 0 {
+            continue;
+        }
+        let fv = batch.first_vertex as usize;
+        let vc = batch.vertex_count as usize;
+        let fi = batch.first_index as usize;
+        let ic = batch.index_count as usize;
+        let Some(verts) = extracted.0.vertices.get(fv..fv.saturating_add(vc)) else {
+            continue;
+        };
+        if verts.len() != vc {
+            continue;
+        }
+        let Some(indices) = extracted.0.indices.get(fi..fi.saturating_add(ic)) else {
+            continue;
+        };
+        if indices.len() != ic {
+            continue;
+        }
+        let need_vb = batch
+            .vertex_count
+            .saturating_mul(super::backend::GFX_TESS_VERTEX_STRIDE);
+        if meta.cpu_vb.capacity < meta.cpu_vb.used_bytes.saturating_add(need_vb) && meta.vb_wrote {
+            let next = create_tess_vb(&device);
+            let old = core::mem::replace(&mut meta.vb, next);
+            meta.retired_vb.push(old);
+            meta.cpu_vb.used_bytes = 0;
+            meta.vb_token = meta.vb_token.wrapping_add(1).max(1);
+            meta.cpu_vb_bytes.fill(0);
+        }
+        let tess_draw = r_draw_tess_technique(
+            GfxDrawPrimArgs {
+                vertex_count: batch.vertex_count,
+                tri_count: batch.index_count / 3,
+                base_index: 0,
+            },
+            &mut meta.cpu_vb,
+            1,
+        );
+        let packed = bytemuck::cast_slice(verts);
+        if !copy_tess_vertex_bytes(&mut meta.cpu_vb_bytes, tess_draw.vertex, packed) {
+            continue;
+        }
+        let vb_gpu = meta.vb.clone();
+        queue.write_buffer(
+            &vb_gpu,
+            u64::from(tess_draw.vertex.lock_byte_offset),
+            packed,
+        );
+        meta.vb_wrote = true;
+        let tri_count = batch.index_count / 3;
+        if meta
+            .cpu_ib
+            .cur_index_count
+            .saturating_add(batch.index_count)
+            > meta.cpu_ib.capacity
+            && meta.ib_wrote
+        {
+            let next = create_tess_ib(&device);
+            let old = core::mem::replace(&mut meta.ib, next);
+            meta.retired_ib.push(old);
+            meta.cpu_ib.cur_index_count = 0;
+            meta.cpu_ib_indices.fill(0);
+        }
+        let index_append = meta.cpu_ib.r_set_index_data(tri_count);
+        if index_append.lock_byte_offset % 4 != 0 {
+            continue;
+        }
+        copy_u16_indices_into_ring(&mut meta.cpu_ib_indices, index_append.base_index, indices);
+        let ib_gpu = meta.ib.clone();
+        let ib_start = index_append.base_index as usize;
+        let ib_end = ib_start.saturating_add(indices.len());
+        let Some(ib_bytes) = meta.cpu_ib_indices.get(ib_start..ib_end) else {
+            continue;
+        };
+        queue.write_buffer(
+            &ib_gpu,
+            u64::from(index_append.lock_byte_offset),
+            bytemuck::cast_slice(ib_bytes),
+        );
+        meta.ib_wrote = true;
+        let stream = gfx_tess_stream0(meta.vb_token, tess_draw.vertex);
+        meta.draws.push(PreparedTessGeom {
+            vb: vb_gpu,
+            ib: ib_gpu,
+            stream,
+            first_index: index_append.base_index,
+            index_count: batch.index_count,
+            batch_i,
+        });
+    }
+
+    let Some(projection) =
+        r_cmd_buf_set_2d_projection(extracted.0.surface_w as i32, extracted.0.surface_h as i32)
+    else {
+        return;
+    };
+    let coeffs = r_set_2d_clip_coeffs(&projection);
+    queue.write_buffer(&pipeline.params, 0, bytemuck::bytes_of(&coeffs));
+}
+
+fn draw_iw_tess(
+    view: ViewQuery<(&ViewTarget, &ExtractedView)>,
+    extracted: Res<ExtractedIwTess>,
+    meta: Res<IwTessMeta>,
+    pipeline: Res<IwTessPipeline>,
+    mut specialized: ResMut<SpecializedRenderPipelines<IwTessPipeline>>,
+    cache: Res<PipelineCache>,
+    device: Res<RenderDevice>,
+    images: Res<RenderAssets<GpuImage>>,
+    mut context: RenderContext,
+    stages: Option<Res<SharedRenderStagesSlot>>,
+) {
+    if !extracted.0.visible {
+        return;
+    }
+    if meta.draws.is_empty() {
+        if let Some(slot) = stages.as_ref()
+            && let Ok(mut guard) = slot.0.lock()
+        {
+            guard.tess_stream_bind_n = Some(0);
+            guard.tess_stream_skip_n = Some(0);
+        }
+        return;
+    }
+    let (target, _extracted_view) = view.into_inner();
+
+    let samples = 1;
+    let format = target.main_texture_format();
+    let mut prepared = Vec::with_capacity(meta.draws.len());
+    for geom in &meta.draws {
+        let Some(batch) = extracted.0.batches.get(geom.batch_i) else {
+            continue;
+        };
+        let Some(gpu_image) = images.get(&batch.image) else {
+            continue;
+        };
+        let id = specialized.specialize(
+            &cache,
+            &pipeline,
+            IwTessPipelineKey {
+                target: format,
+                samples,
+                technique: batch.technique,
+                state_bits: batch.state_bits,
+            },
+        );
+        if cache.get_render_pipeline(id).is_none() {
+            continue;
+        }
+        let bind = match batch.technique {
+            HudTessTechnique::Modulate => {
+                let layout = cache.get_bind_group_layout(&pipeline.modulate_layout);
+                device.create_bind_group(
+                    "iw_tess_modulate",
+                    &layout,
+                    &BindGroupEntries::sequential((
+                        pipeline.params.as_entire_buffer_binding(),
+                        &gpu_image.texture_view,
+                        &gpu_image.sampler,
+                    )),
+                )
+            }
+            HudTessTechnique::SplatterAlt => {
+                let Some(mask_handle) = batch.mask.as_ref() else {
+                    continue;
+                };
+                let Some(gpu_mask) = images.get(mask_handle) else {
+                    continue;
+                };
+                let layout = cache.get_bind_group_layout(&pipeline.splatter_layout);
+                device.create_bind_group(
+                    "iw_tess_splatter",
+                    &layout,
+                    &BindGroupEntries::sequential((
+                        pipeline.params.as_entire_buffer_binding(),
+                        &gpu_image.texture_view,
+                        &gpu_image.sampler,
+                        &gpu_mask.texture_view,
+                        &gpu_mask.sampler,
+                    )),
+                )
+            }
+        };
+        prepared.push((id, bind, geom));
+    }
+    if prepared.is_empty() {
+        if let Some(slot) = stages.as_ref()
+            && let Ok(mut guard) = slot.0.lock()
+        {
+            guard.tess_stream_bind_n = Some(0);
+            guard.tess_stream_skip_n = Some(0);
+        }
+        return;
+    }
+    let attachments = [Some(target.get_unsampled_color_attachment())];
+    let mut pass =
+        context.begin_tracked_render_pass(bevy::render::render_resource::RenderPassDescriptor {
+            label: Some("iw_tess_stretchpic_pass"),
+            color_attachments: &attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+    let mut streams = GfxCmdBufStreams::default();
+    let mut bind_n = 0u32;
+    let mut skip_n = 0u32;
+    for (id, bind, geom) in &prepared {
+        let Some(gpu_pipeline) = cache.get_render_pipeline(*id) else {
+            continue;
+        };
+        pass.set_render_pipeline(gpu_pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        let action = r_set_stream_source(
+            &mut streams,
+            geom.stream.buffer,
+            geom.stream.offset,
+            geom.stream.stride,
+        );
+        if action.bind_stream0 {
+            pass.set_vertex_buffer(0, geom.vb.slice(u64::from(geom.stream.offset)..));
+            bind_n = bind_n.saturating_add(1);
+        } else {
+            skip_n = skip_n.saturating_add(1);
+        }
+        pass.set_index_buffer(geom.ib.slice(..), IndexFormat::Uint16);
+        let start = geom.first_index;
+        let end = start.saturating_add(geom.index_count);
+        pass.draw_indexed(start..end, 0, 0..1);
+    }
+    drop(pass);
+    if let Some(slot) = stages.as_ref()
+        && let Ok(mut guard) = slot.0.lock()
+    {
+        guard.tess_stream_bind_n = Some(bind_n);
+        guard.tess_stream_skip_n = Some(skip_n);
+    }
+}
+
+pub(super) fn register(app: &mut App) {
+    bevy::asset::embedded_asset!(app, "iw_tess.wgsl");
+    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+        return;
+    };
+    render_app
+        .init_resource::<ExtractedIwTess>()
+        .init_resource::<SpecializedRenderPipelines<IwTessPipeline>>()
+        .add_systems(RenderStartup, init_pipeline)
+        .add_systems(ExtractSchedule, extract_iw_tess)
+        .add_systems(
+            Render,
+            prepare_iw_tess.in_set(RenderSystems::PrepareResources),
+        )
+        .add_systems(
+            Core3d,
+            draw_iw_tess
+                .in_set(Core3dSystems::PostProcess)
+                .after(super::postfx::PostFxSet),
+        );
+}

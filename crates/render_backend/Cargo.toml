@@ -1,0 +1,18 @@
+[package]
+name = "render_backend"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "RB_* consume: tess list workers and unsorted shadow draw-list dispatch."
+
+[dependencies]
+asset_iw4.workspace = true
+dpvs_iw4.workspace = true
+fx_iw4.workspace = true
+glam.workspace = true
+lighting_iw4.workspace = true
+render_frame.workspace = true
+render_material.workspace = true
+
+[lints]
+workspace = true

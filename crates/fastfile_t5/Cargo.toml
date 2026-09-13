@@ -1,0 +1,11 @@
+[package]
+name = "fastfile_t5"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Retail T5 / BO1 zone container: header, stream, pointer fixup → asset_iw4 IR."
+
+[dependencies]
+
+[lints]
+workspace = true

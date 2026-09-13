@@ -1,0 +1,43 @@
+[package]
+name = "assets"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Asset lane orchestration, linking and conversion into engine objects."
+
+[dependencies]
+render_material.workspace = true
+diag.workspace = true
+anim_iw4.workspace = true
+xmodel_runtime.workspace = true
+asset_core.workspace = true
+asset_anim.workspace = true
+asset_audio.workspace = true
+asset_game.workspace = true
+asset_material.workspace = true
+asset_model.workspace = true
+asset_transport.workspace = true
+asset_world.workspace = true
+weapon_iw4.workspace = true
+fastfile_iw4.workspace = true
+fastfile_t5.workspace = true
+fastfile_iw5.workspace = true
+asset_iw4.workspace = true
+dpvs_iw4.workspace = true
+clipmap_iw4.workspace = true
+trace_iw4.workspace = true
+# Light-grid CPU sample chain for authored smodel `$model_lighting` tiles.
+lighting_iw4.workspace = true
+fx_iw4.workspace = true
+bevy.workspace = true
+frame.workspace = true
+bcdec_rs.workspace = true
+serde_json.workspace = true
+png.workspace = true
+
+# `load_pool` puts its workers back on the process's CPUs (`session_load`).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true

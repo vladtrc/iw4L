@@ -1,0 +1,24 @@
+[package]
+name = "hud"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Draws what hud_iw4 computes / Snapshot presents."
+
+[dependencies]
+diag.workspace = true
+bevy.workspace = true
+assets.workspace = true
+hud_iw4 = { path = "../hud_iw4" }
+weapon_iw4 = { path = "../weapon_iw4" }
+movement_iw4 = { path = "../movement_iw4" }
+playerstate_iw4 = { path = "../playerstate_iw4" }
+entity_iw4.workspace = true
+frame.workspace = true
+net = { path = "../net" }
+sim = { path = "../sim" }
+gamemode_iw4.workspace = true
+killcam_iw4 = { path = "../killcam_iw4" }
+
+[lints]
+workspace = true

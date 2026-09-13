@@ -1,0 +1,15 @@
+[package]
+name = "movement_iw4"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Retail IW4 player movement: PM_/BG_ stance, mantle, slide, acceleration."
+
+[dependencies]
+math_iw4.workspace = true
+playerstate_iw4.workspace = true
+trace_iw4.workspace = true
+libm = { version = "0.2.16", default-features = false }
+
+[lints]
+workspace = true

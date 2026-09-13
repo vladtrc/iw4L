@@ -1,0 +1,32 @@
+[package]
+name = "bootstrap"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Composition root: assembles the bevy App for menu / map / play runs."
+
+[features]
+bevy-debug = ["bevy/debug", "bevy/track_location"]
+
+[dependencies]
+bevy.workspace = true
+assets.workspace = true
+audio.workspace = true
+console.workspace = true
+diag.workspace = true
+render.workspace = true
+render_frontend.workspace = true
+sim.workspace = true
+net.workspace = true
+ui.workspace = true
+replay.workspace = true
+session.workspace = true
+bots = { path = "../bots" }
+hud = { path = "../hud" }
+perf.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true

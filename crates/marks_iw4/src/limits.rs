@@ -1,0 +1,31 @@
+pub const GFX_MARK_SURF_LIMIT: u32 = 1536;
+
+pub const GFX_MARK_SURF_VERT_LIMIT: u32 = GFX_MARK_SURF_LIMIT * 4;
+
+pub const GFX_MARK_SURF_INDEX_LIMIT: u32 = GFX_MARK_SURF_LIMIT * 6;
+
+pub const R_WARN_GFX_MARK_SURF_LIMIT: u32 = 0x17;
+
+pub const R_MARK_FRAGMENTS_WORLD_SURF_STACK: u32 = 256;
+
+pub const R_MARK_FRAGMENTS_CLIP_SURF_STRIDE: usize = 0x18;
+
+pub const R_MARK_FRAGMENTS_MAX_TRIS: u32 = 0xff;
+
+pub const R_MARK_FRAGMENTS_MAX_POINTS: u32 = 0x2fd;
+
+pub const GFX_WORLD_VERTEX_STRIDE: usize = 0x2c;
+
+pub const GFX_SURFACE_LIGHTMAP_NONE: u8 = 0x1f;
+
+pub const FX_WORLD_MARK_POINT_STRIDE: usize = 0x18;
+
+pub const R_MARK_CHOP_MAX_POINTS: usize = 9;
+
+pub const R_MARK_CLIP_PLANE_COUNT: usize = 6;
+
+pub const R_MARK_TRI_REJECT_LEN_SQ_SCALE: f32 = 0.25;
+
+pub const R_MARK_CHOP_ON_PLANE: f32 = 0.5;
+
+pub const R_MARK_CHOP_BEHIND: f32 = -0.5;

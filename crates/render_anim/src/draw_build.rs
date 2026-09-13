@@ -1,0 +1,807 @@
+use bevy::mesh::{Indices, VertexAttributeValues};
+use bevy::prelude::*;
+use render_frame::SmodelVertex;
+use render_material::{RuntimeMaterialCatalog, SortedMaterialOrdinal};
+use render_scene::{SmodelPassMaterial, WorldModelLightingAtlas};
+
+use crate::anim::fpv_pose::PosedModelSurface;
+use crate::draw::{
+    BODY_PACKED_UNAVAILABLE, DynEntAssetDraw, DynEntDrawPlan, FPV_PACKED_EMPTY_PLAN,
+    FPV_PACKED_UNAVAILABLE, FpvDrawPlan, FpvPlanSurface, FpvSurfaceDraw, ItemDrawPlan,
+    MissileDrawPlan, RemoteBodyDrawPlan, RemoteBodySurfaceDraw, ScriptModelAssetDraw,
+    ScriptModelDrawPlan, stamp_plan_geometry, topology_fingerprint,
+};
+
+pub const XMODEL_PACKED_UNAVAILABLE: &str =
+    "xmodel merge GfxPackedVertex missing or count-mismatched; decoded float is not packed VB";
+pub const XMODEL_PACKED_EMPTY_PLAN: &str = "xmodel plan has no vertices";
+
+fn install_retained_packed(
+    packed_ok: bool,
+    packed: Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
+    decoded_count: usize,
+    empty: &'static str,
+    missing: &'static str,
+) -> assets::RetailPackedVertexPayload {
+    if packed_ok && packed.len() == decoded_count && !packed.is_empty() {
+        assets::RetailPackedVertexPayload::Iw4(packed)
+    } else if decoded_count == 0 {
+        assets::RetailPackedVertexPayload::Unavailable {
+            source_layout: empty,
+        }
+    } else {
+        assets::RetailPackedVertexPayload::Unavailable {
+            source_layout: missing,
+        }
+    }
+}
+
+pub fn body_lit_pass_material(
+    lighting: &WorldModelLightingAtlas,
+    catalog: &RuntimeMaterialCatalog,
+    material_name: &str,
+) -> Option<SmodelPassMaterial> {
+    let material_sorted_index = catalog
+        .ordinal_for_material_name(material_name)
+        .map(SortedMaterialOrdinal::get);
+    let material_sorted_index = material_sorted_index?;
+    lit_xmodel_pass_material(lighting, material_sorted_index)
+}
+
+pub fn bound_lit_xmodel_pass_material(
+    lighting: &WorldModelLightingAtlas,
+    catalog: &RuntimeMaterialCatalog,
+    material_index: assets::MaterialIndex,
+) -> Option<SmodelPassMaterial> {
+    let ordinal = catalog.ordinal_for_asset_id(material_index)?.get();
+    lit_xmodel_pass_material(lighting, ordinal)
+}
+
+pub fn authored_lit_xmodel_pass_material(
+    lighting: &WorldModelLightingAtlas,
+    catalog: &RuntimeMaterialCatalog,
+    image_handles: &[Option<Handle<Image>>],
+    authored: assets::MaterialIndex,
+) -> Option<SmodelPassMaterial> {
+    use lighting_iw4::{
+        MODEL_LIGHTING_INV_ATLAS_WIDTH, MODEL_LIGHTING_VOLUME_W, model_lighting_inv_image_height,
+        model_lighting_lookup_scale,
+    };
+    let world_material = catalog.derived(authored)?;
+    let ordinal = catalog.ordinal_for_asset_id(authored)?;
+    let maps = render_scene::runtime_maps(Some(authored), catalog, image_handles);
+    let inv_h = model_lighting_inv_image_height(lighting.dims.image_height)?;
+    let scale = model_lighting_lookup_scale(inv_h);
+    Some(SmodelPassMaterial {
+        model_lighting_required: true,
+        color: maps.color,
+        specular: maps.specular,
+        probe: None,
+        atlas: Some(lighting.image.clone()),
+        alpha_mode: maps.alpha_mode,
+        draw_mode: maps.draw_mode,
+        cull_mode: maps.cull_mode,
+        env_map_parms: maps.env_map_parms,
+        lighting_lookup_scale: [scale.u, scale.v, scale.w, scale.q],
+        atlas_lookup: [
+            MODEL_LIGHTING_INV_ATLAS_WIDTH as f32,
+            inv_h,
+            MODEL_LIGHTING_VOLUME_W,
+            0.0,
+        ],
+        sort_key: world_material.sort_key,
+        material_sorted_index: Some(ordinal.get()),
+    })
+}
+
+fn lit_xmodel_pass_material(
+    lighting: &WorldModelLightingAtlas,
+    material_sorted_index: u32,
+) -> Option<SmodelPassMaterial> {
+    use lighting_iw4::{
+        MODEL_LIGHTING_INV_ATLAS_WIDTH, MODEL_LIGHTING_VOLUME_W, model_lighting_inv_image_height,
+        model_lighting_lookup_scale,
+    };
+    let inv_h = model_lighting_inv_image_height(lighting.dims.image_height)?;
+    let scale = model_lighting_lookup_scale(inv_h);
+    Some(SmodelPassMaterial {
+        model_lighting_required: true,
+        color: None,
+        specular: None,
+        probe: None,
+        atlas: Some(lighting.image.clone()),
+        alpha_mode: AlphaMode::Opaque,
+        draw_mode: None,
+        cull_mode: None,
+        env_map_parms: [0.0; 4],
+        lighting_lookup_scale: [scale.u, scale.v, scale.w, scale.q],
+        atlas_lookup: [
+            MODEL_LIGHTING_INV_ATLAS_WIDTH as f32,
+            inv_h,
+            MODEL_LIGHTING_VOLUME_W,
+            0.0,
+        ],
+        sort_key: 0,
+        material_sorted_index: Some(material_sorted_index),
+    })
+}
+
+pub struct BodyPackedSession {
+    packed_ok: bool,
+    packed: Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
+}
+
+impl BodyPackedSession {
+    pub fn reserve_packed(&mut self, n: usize) {
+        self.packed.reserve(n);
+    }
+}
+
+pub fn take_body_packed_session(plan: &mut RemoteBodyDrawPlan) -> BodyPackedSession {
+    let vertices_empty = plan.decoded_n == 0 && plan.vertices.is_empty();
+    let packed_ok = vertices_empty
+        || matches!(
+            plan.packed_vertices,
+            assets::RetailPackedVertexPayload::Iw4(_)
+        );
+    let packed = match std::mem::replace(
+        &mut plan.packed_vertices,
+        assets::RetailPackedVertexPayload::Unavailable {
+            source_layout: BODY_PACKED_UNAVAILABLE,
+        },
+    ) {
+        assets::RetailPackedVertexPayload::Iw4(rows) => rows,
+        assets::RetailPackedVertexPayload::Unavailable { .. } => Vec::new(),
+    };
+    BodyPackedSession { packed_ok, packed }
+}
+
+pub fn install_body_packed_session(plan: &mut RemoteBodyDrawPlan, session: BodyPackedSession) {
+    plan.packed_vertices = install_retained_packed(
+        session.packed_ok,
+        session.packed,
+        plan.decoded_n,
+        XMODEL_PACKED_EMPTY_PLAN,
+        BODY_PACKED_UNAVAILABLE,
+    );
+}
+
+pub fn append_remote_body_cpu_blob(
+    plan: &mut RemoteBodyDrawPlan,
+    session: &mut BodyPackedSession,
+    packed_rows: &[[u8; asset_iw4::size::GFX_PACKED_VERTEX]],
+    indices: &[u32],
+    decoded_n: usize,
+) -> Option<(u32, u32)> {
+    if decoded_n == 0 || indices.is_empty() {
+        return None;
+    }
+    let vert_base = plan.decoded_n as u32;
+    let index_base = plan.indices.len() as u32;
+    plan.decoded_n = plan.decoded_n.saturating_add(decoded_n);
+    plan.indices
+        .extend(indices.iter().map(|&index| vert_base + index));
+    if session.packed_ok && packed_rows.len() == decoded_n {
+        session.packed.extend_from_slice(packed_rows);
+    } else {
+        session.packed_ok = false;
+        session.packed.clear();
+    }
+    Some((vert_base, index_base))
+}
+
+pub fn push_remote_body_cpu_draw(
+    plan: &mut RemoteBodyDrawPlan,
+    index_start: u32,
+    index_count: u32,
+    world_from_local: Mat4,
+    lighting_handle: u32,
+    scene_light_index: u8,
+    reflection_probe_index: u8,
+    material: u32,
+    scene_entnum: Option<u32>,
+) {
+    if lighting_handle == 0 || index_count == 0 {
+        return;
+    }
+    let range_idx = plan.surface_ranges.len() as u32;
+    plan.surface_ranges.push((index_start, index_count));
+    plan.draws.push(RemoteBodySurfaceDraw {
+        surface: range_idx,
+        material,
+        world_from_local,
+        lighting_handle,
+        scene_light_index,
+        reflection_probe_index,
+        scene_entnum,
+    });
+}
+
+pub fn finish_remote_body_draw_plan(plan: &mut RemoteBodyDrawPlan) {
+    let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.decoded_n);
+    if plan.revisions.topology != topology {
+        plan.revisions.topology = topology;
+    }
+}
+
+pub fn append_script_model_asset(
+    plan: &mut ScriptModelDrawPlan,
+    key: assets::MapXModelAssetKey,
+    dobj_state: assets::dobj::DObjSemanticState,
+    camera_lods: Vec<Option<u8>>,
+    surfaces: &[PosedModelSurface],
+    materials: &[Option<SmodelPassMaterial>],
+) -> usize {
+    let mut asset_surfaces = Vec::new();
+
+    let vertices_empty = plan.vertices.is_empty();
+    let mut packed_ok = vertices_empty
+        || matches!(
+            plan.packed_vertices,
+            assets::RetailPackedVertexPayload::Iw4(_)
+        );
+    let mut packed = match std::mem::replace(
+        &mut plan.packed_vertices,
+        assets::RetailPackedVertexPayload::Unavailable {
+            source_layout: XMODEL_PACKED_UNAVAILABLE,
+        },
+    ) {
+        assets::RetailPackedVertexPayload::Iw4(rows) => rows,
+        assets::RetailPackedVertexPayload::Unavailable { .. } => Vec::new(),
+    };
+    for (surface, material) in surfaces.iter().zip(materials) {
+        let Some(material) = material else { continue };
+        let before = plan.vertices.len();
+        let Some((start, count)) =
+            append_mesh(&surface.mesh, &mut plan.vertices, &mut plan.indices)
+        else {
+            continue;
+        };
+        let decoded = plan.vertices.len() - before;
+        if packed_ok && surface.packed_vertices.len() == decoded {
+            packed.extend_from_slice(&surface.packed_vertices);
+        } else {
+            packed_ok = false;
+            packed.clear();
+        }
+        let surface_index = plan.surface_ranges.len() as u32;
+        plan.surface_ranges.push((start, count));
+        let material_index = plan.materials.len() as u32;
+        plan.materials.push(material.clone());
+        asset_surfaces.push((surface_index, material_index));
+    }
+    plan.assets.push(ScriptModelAssetDraw {
+        key,
+        dobj_state,
+        camera_lods,
+        surfaces: asset_surfaces,
+    });
+    plan.packed_vertices = install_retained_packed(
+        packed_ok,
+        packed,
+        plan.vertices.len(),
+        XMODEL_PACKED_EMPTY_PLAN,
+        XMODEL_PACKED_UNAVAILABLE,
+    );
+
+    plan.revisions.bump_vertices();
+    let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.vertices.len());
+    let rev = plan.revision;
+    plan.revision = stamp_plan_geometry(&mut plan.revisions, rev, topology);
+    plan.assets.len() - 1
+}
+
+pub fn overwrite_script_model_asset(
+    plan: &mut ScriptModelDrawPlan,
+    asset_index: usize,
+    dobj_state: assets::dobj::DObjSemanticState,
+    surfaces: &[PosedModelSurface],
+    materials: &[Option<SmodelPassMaterial>],
+) -> bool {
+    let Some(asset) = plan.assets.get(asset_index) else {
+        return false;
+    };
+    let incoming: Vec<(&PosedModelSurface, &SmodelPassMaterial)> = surfaces
+        .iter()
+        .zip(materials)
+        .filter_map(|(surface, material)| material.as_ref().map(|material| (surface, material)))
+        .collect();
+    if incoming.len() != asset.surfaces.len() {
+        return false;
+    }
+    let slots: Vec<(u32, u32)> = asset.surfaces.clone();
+    let mut ranges = Vec::with_capacity(incoming.len());
+    for ((surface, _), &(surf_i, mat_i)) in incoming.iter().zip(&slots) {
+        let Some(&(index_start, count)) = plan.surface_ranges.get(surf_i as usize) else {
+            return false;
+        };
+        let start = index_start as usize;
+        let end = start.saturating_add(count as usize);
+        let Some(slice) = plan.indices.get(start..end) else {
+            return false;
+        };
+        let (Some(&vmin), Some(&vmax)) = (slice.iter().min(), slice.iter().max()) else {
+            return false;
+        };
+        let n = (vmax.saturating_sub(vmin)).saturating_add(1) as usize;
+        let Some(positions) = surface
+            .mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(f32x3)
+        else {
+            return false;
+        };
+        if positions.len() != n || surface.packed_vertices.len() != n {
+            return false;
+        }
+        let index_len = match surface.mesh.indices() {
+            Some(Indices::U32(ix)) => ix.len(),
+            Some(Indices::U16(ix)) => ix.len(),
+            None => return false,
+        };
+        if index_len != count as usize {
+            return false;
+        }
+        ranges.push((vmin as usize, n, mat_i as usize));
+    }
+    for ((base, n, mat_i), (surface, material)) in ranges.into_iter().zip(incoming.iter()) {
+        let Some(positions) = surface
+            .mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(f32x3)
+        else {
+            return false;
+        };
+        let normals = surface
+            .mesh
+            .attribute(Mesh::ATTRIBUTE_NORMAL)
+            .and_then(f32x3);
+        let uvs = surface.mesh.attribute(Mesh::ATTRIBUTE_UV_0).and_then(f32x2);
+        let colors = surface
+            .mesh
+            .attribute(Mesh::ATTRIBUTE_COLOR)
+            .and_then(f32x4);
+        let Some(dst) = plan.vertices.get_mut(base..base + n) else {
+            return false;
+        };
+        for (i, vertex) in dst.iter_mut().enumerate() {
+            *vertex = SmodelVertex {
+                position: positions[i],
+                normal: normals
+                    .and_then(|a| a.get(i).copied())
+                    .unwrap_or([0.0, 0.0, 1.0]),
+                color: colors.and_then(|a| a.get(i).copied()).unwrap_or([1.0; 4]),
+                uv0: uvs.and_then(|a| a.get(i).copied()).unwrap_or([0.0; 2]),
+            };
+        }
+        if let assets::RetailPackedVertexPayload::Iw4(rows) = &mut plan.packed_vertices {
+            let Some(dst) = rows.get_mut(base..base + n) else {
+                return false;
+            };
+            dst.copy_from_slice(&surface.packed_vertices);
+        }
+        if let Some(slot) = plan.materials.get_mut(mat_i) {
+            *slot = (*material).clone();
+        }
+    }
+    if let Some(asset) = plan.assets.get_mut(asset_index) {
+        asset.dobj_state = dobj_state;
+    }
+    plan.revisions.bump_vertices();
+    plan.revision = plan.revision.wrapping_add(1);
+    true
+}
+
+pub fn retain_script_model_assets(plan: &mut ScriptModelDrawPlan, keep: &[bool]) {
+    debug_assert_eq!(keep.len(), plan.assets.len());
+    if keep.iter().all(|k| *k) {
+        return;
+    }
+    let packed_src = match &plan.packed_vertices {
+        assets::RetailPackedVertexPayload::Iw4(rows) => Some(rows.as_slice()),
+        assets::RetailPackedVertexPayload::Unavailable { .. } => None,
+    };
+    let mut next = ScriptModelDrawPlan::default();
+
+    next.vertices.reserve(plan.vertices.len());
+    next.indices.reserve(plan.indices.len());
+    next.surface_ranges.reserve(plan.surface_ranges.len());
+    next.materials.reserve(plan.materials.len());
+    next.assets.reserve(plan.assets.len());
+    let mut packed_dst = Vec::with_capacity(packed_src.map_or(0, <[_]>::len));
+    let mut packed_ok = packed_src.is_some();
+    for (asset_index, asset) in plan.assets.iter().enumerate() {
+        if !keep.get(asset_index).copied().unwrap_or(false) {
+            continue;
+        }
+        let mut new_surfaces = Vec::new();
+        for &(surf_i, mat_i) in &asset.surfaces {
+            let Some(&(index_start, count)) = plan.surface_ranges.get(surf_i as usize) else {
+                continue;
+            };
+            let start = index_start as usize;
+            let end = start.saturating_add(count as usize);
+            let Some(slice) = plan.indices.get(start..end) else {
+                continue;
+            };
+            let (vmin, vmax) = match (slice.iter().min(), slice.iter().max()) {
+                (Some(min), Some(max)) => (*min, *max),
+                _ => continue,
+            };
+            let vbase = next.vertices.len() as u32;
+            for vi in vmin..=vmax {
+                let Some(vertex) = plan.vertices.get(vi as usize) else {
+                    packed_ok = false;
+                    packed_dst.clear();
+                    break;
+                };
+                next.vertices.push(*vertex);
+                if packed_ok {
+                    if let Some(src) = packed_src {
+                        if let Some(row) = src.get(vi as usize) {
+                            packed_dst.push(*row);
+                        } else {
+                            packed_ok = false;
+                            packed_dst.clear();
+                        }
+                    }
+                }
+            }
+            let index_start_new = next.indices.len() as u32;
+            next.indices
+                .extend(slice.iter().map(|index| vbase + (*index - vmin)));
+            let surface_index = next.surface_ranges.len() as u32;
+            next.surface_ranges.push((index_start_new, count));
+            let Some(material) = plan.materials.get(mat_i as usize) else {
+                continue;
+            };
+            let material_index = next.materials.len() as u32;
+            next.materials.push(material.clone());
+            new_surfaces.push((surface_index, material_index));
+        }
+        next.assets.push(ScriptModelAssetDraw {
+            key: asset.key.clone(),
+            dobj_state: asset.dobj_state.clone(),
+            camera_lods: asset.camera_lods.clone(),
+            surfaces: new_surfaces,
+        });
+    }
+    next.packed_vertices = install_retained_packed(
+        packed_ok,
+        packed_dst,
+        next.vertices.len(),
+        XMODEL_PACKED_EMPTY_PLAN,
+        XMODEL_PACKED_UNAVAILABLE,
+    );
+
+    next.revisions.bump_vertices();
+    next.generation = plan.generation.wrapping_add(1);
+    next.revision = plan.revision;
+    next.revisions.bump_admission();
+    let topology = topology_fingerprint(&next.indices, &next.surface_ranges, next.vertices.len());
+    let rev = next.revision;
+    next.revision = stamp_plan_geometry(&mut next.revisions, rev, topology);
+    *plan = next;
+}
+
+pub fn append_missile_surfaces(
+    plan: &mut MissileDrawPlan,
+    surfaces: &[PosedModelSurface],
+    materials: &[Option<SmodelPassMaterial>],
+) -> Vec<(u32, u32)> {
+    let mut asset_surfaces = Vec::new();
+    let mut packed = match &plan.packed_vertices {
+        assets::RetailPackedVertexPayload::Iw4(rows) => rows.clone(),
+        assets::RetailPackedVertexPayload::Unavailable { .. } if plan.vertices.is_empty() => {
+            Vec::new()
+        }
+        assets::RetailPackedVertexPayload::Unavailable { .. } => Vec::new(),
+    };
+    let mut packed_ok = plan.vertices.is_empty()
+        || matches!(
+            plan.packed_vertices,
+            assets::RetailPackedVertexPayload::Iw4(_)
+        );
+    for (surface, material) in surfaces.iter().zip(materials) {
+        let Some(material) = material else { continue };
+        let before = plan.vertices.len();
+        let Some((start, count)) =
+            append_mesh(&surface.mesh, &mut plan.vertices, &mut plan.indices)
+        else {
+            continue;
+        };
+        let decoded = plan.vertices.len() - before;
+        if packed_ok && surface.packed_vertices.len() == decoded {
+            packed.extend_from_slice(&surface.packed_vertices);
+        } else {
+            packed_ok = false;
+            packed.clear();
+        }
+        let surface_index = plan.surface_ranges.len() as u32;
+        plan.surface_ranges.push((start, count));
+        let material_index = plan.materials.len() as u32;
+        plan.materials.push(material.clone());
+        asset_surfaces.push((surface_index, material_index));
+    }
+    plan.packed_vertices = install_retained_packed(
+        packed_ok,
+        packed,
+        plan.vertices.len(),
+        XMODEL_PACKED_EMPTY_PLAN,
+        XMODEL_PACKED_UNAVAILABLE,
+    );
+
+    plan.revisions.bump_vertices();
+    asset_surfaces
+}
+
+pub fn append_item_surfaces(
+    plan: &mut ItemDrawPlan,
+    surfaces: &[PosedModelSurface],
+    materials: &[Option<SmodelPassMaterial>],
+) -> Vec<(u32, u32)> {
+    let mut asset_surfaces = Vec::new();
+    let mut packed = match &plan.packed_vertices {
+        assets::RetailPackedVertexPayload::Iw4(rows) => rows.clone(),
+        assets::RetailPackedVertexPayload::Unavailable { .. } if plan.vertices.is_empty() => {
+            Vec::new()
+        }
+        assets::RetailPackedVertexPayload::Unavailable { .. } => Vec::new(),
+    };
+    let mut packed_ok = plan.vertices.is_empty()
+        || matches!(
+            plan.packed_vertices,
+            assets::RetailPackedVertexPayload::Iw4(_)
+        );
+    for (surface, material) in surfaces.iter().zip(materials) {
+        let Some(material) = material else { continue };
+        let before = plan.vertices.len();
+        let Some((start, count)) =
+            append_mesh(&surface.mesh, &mut plan.vertices, &mut plan.indices)
+        else {
+            continue;
+        };
+        let decoded = plan.vertices.len() - before;
+        if packed_ok && surface.packed_vertices.len() == decoded {
+            packed.extend_from_slice(&surface.packed_vertices);
+        } else {
+            packed_ok = false;
+            packed.clear();
+        }
+        let surface_index = plan.surface_ranges.len() as u32;
+        plan.surface_ranges.push((start, count));
+        let material_index = plan.materials.len() as u32;
+        plan.materials.push(material.clone());
+        asset_surfaces.push((surface_index, material_index));
+    }
+    plan.packed_vertices = install_retained_packed(
+        packed_ok,
+        packed,
+        plan.vertices.len(),
+        XMODEL_PACKED_EMPTY_PLAN,
+        XMODEL_PACKED_UNAVAILABLE,
+    );
+
+    plan.revisions.bump_vertices();
+    asset_surfaces
+}
+
+pub fn append_dynent_surfaces(
+    plan: &mut DynEntDrawPlan,
+    surfaces: &[PosedModelSurface],
+    materials: &[Option<SmodelPassMaterial>],
+) -> Vec<(u32, u32)> {
+    let mut asset_surfaces = Vec::new();
+    let vertices_empty = plan.vertices.is_empty();
+    let mut packed_ok = vertices_empty
+        || matches!(
+            plan.packed_vertices,
+            assets::RetailPackedVertexPayload::Iw4(_)
+        );
+    let mut packed = match std::mem::replace(
+        &mut plan.packed_vertices,
+        assets::RetailPackedVertexPayload::Unavailable {
+            source_layout: XMODEL_PACKED_UNAVAILABLE,
+        },
+    ) {
+        assets::RetailPackedVertexPayload::Iw4(rows) => rows,
+        assets::RetailPackedVertexPayload::Unavailable { .. } => Vec::new(),
+    };
+    for (surface, material) in surfaces.iter().zip(materials) {
+        let Some(material) = material else { continue };
+        let before = plan.vertices.len();
+        let Some((start, count)) =
+            append_mesh(&surface.mesh, &mut plan.vertices, &mut plan.indices)
+        else {
+            continue;
+        };
+        let decoded = plan.vertices.len() - before;
+        if packed_ok && surface.packed_vertices.len() == decoded {
+            packed.extend_from_slice(&surface.packed_vertices);
+        } else {
+            packed_ok = false;
+            packed.clear();
+        }
+        let surface_index = plan.surface_ranges.len() as u32;
+        plan.surface_ranges.push((start, count));
+        let material_index = plan.materials.len() as u32;
+        plan.materials.push(material.clone());
+        asset_surfaces.push((surface_index, material_index));
+    }
+    plan.packed_vertices = install_retained_packed(
+        packed_ok,
+        packed,
+        plan.vertices.len(),
+        XMODEL_PACKED_EMPTY_PLAN,
+        XMODEL_PACKED_UNAVAILABLE,
+    );
+
+    plan.revisions.bump_vertices();
+    asset_surfaces
+}
+
+pub fn append_dynent_asset(
+    plan: &mut DynEntDrawPlan,
+    key: assets::MapXModelAssetKey,
+    camera_lod: Option<u8>,
+    surfaces: &[PosedModelSurface],
+    materials: &[Option<SmodelPassMaterial>],
+) -> Vec<(u32, u32)> {
+    let asset_surfaces = append_dynent_surfaces(plan, surfaces, materials);
+    plan.assets.push(DynEntAssetDraw {
+        key,
+        camera_lod,
+        surfaces: asset_surfaces.clone(),
+    });
+    asset_surfaces
+}
+
+fn f32x3(values: &VertexAttributeValues) -> Option<&[[f32; 3]]> {
+    match values {
+        VertexAttributeValues::Float32x3(v) => Some(v.as_slice()),
+        _ => None,
+    }
+}
+
+fn f32x2(values: &VertexAttributeValues) -> Option<&[[f32; 2]]> {
+    match values {
+        VertexAttributeValues::Float32x2(v) => Some(v.as_slice()),
+        _ => None,
+    }
+}
+
+fn f32x4(values: &VertexAttributeValues) -> Option<&[[f32; 4]]> {
+    match values {
+        VertexAttributeValues::Float32x4(v) => Some(v.as_slice()),
+        _ => None,
+    }
+}
+
+fn append_mesh(
+    mesh: &Mesh,
+    vertices: &mut Vec<SmodelVertex>,
+    indices: &mut Vec<u32>,
+) -> Option<(u32, u32)> {
+    let positions = mesh.attribute(Mesh::ATTRIBUTE_POSITION).and_then(f32x3)?;
+    let normals = mesh.attribute(Mesh::ATTRIBUTE_NORMAL).and_then(f32x3);
+    let uvs = mesh.attribute(Mesh::ATTRIBUTE_UV_0).and_then(f32x2);
+    let colors = mesh.attribute(Mesh::ATTRIBUTE_COLOR).and_then(f32x4);
+    let mesh_indices = mesh.indices()?;
+    let count = match mesh_indices {
+        Indices::U32(ix) => ix.len(),
+        Indices::U16(ix) => ix.len(),
+    };
+    let n = positions.len();
+    if n == 0 || count == 0 {
+        return None;
+    }
+    let indices_in_range = match mesh_indices {
+        Indices::U32(ix) => ix.iter().all(|&index| (index as usize) < n),
+        Indices::U16(ix) => ix.iter().all(|&index| usize::from(index) < n),
+    };
+    if !indices_in_range {
+        return None;
+    }
+
+    let base = vertices.len() as u32;
+    for i in 0..n {
+        vertices.push(SmodelVertex {
+            position: positions[i],
+            normal: normals
+                .and_then(|a| a.get(i).copied())
+                .unwrap_or([0.0, 0.0, 1.0]),
+            color: colors.and_then(|a| a.get(i).copied()).unwrap_or([1.0; 4]),
+            uv0: uvs.and_then(|a| a.get(i).copied()).unwrap_or([0.0; 2]),
+        });
+    }
+    let index_start = indices.len() as u32;
+    match mesh_indices {
+        Indices::U32(ix) => indices.extend(ix.iter().map(|&index| base + index)),
+        Indices::U16(ix) => indices.extend(ix.iter().map(|&index| base + u32::from(index))),
+    }
+    Some((index_start, count as u32))
+}
+
+pub fn rebuild_fpv_draw_plan(
+    plan: &mut FpvDrawPlan,
+    surfaces: &[FpvPlanSurface],
+    lighting_handle: u32,
+    visible: bool,
+) {
+    plan.vertices.clear();
+    plan.indices.clear();
+    plan.surface_ranges.clear();
+    plan.materials.clear();
+    plan.draws.clear();
+    plan.lighting_handle = lighting_handle;
+
+    plan.visible = visible && plan.drawgun != Some(0);
+    if surfaces.is_empty() {
+        plan.hands_plan_n = None;
+        plan.gun_plan_n = None;
+        plan.scope_plan_n = Some(0);
+        plan.scope_house_plan_n = Some(0);
+        plan.scope_lens_plan_n = Some(0);
+        plan.plan_draw_n = Some(0);
+    }
+    let mut packed = Vec::new();
+    let mut packed_ok = true;
+    let mut mat_key: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    for surface in surfaces {
+        let decoded_before = plan.vertices.len();
+        let Some((start, count)) =
+            append_mesh(&surface.mesh, &mut plan.vertices, &mut plan.indices)
+        else {
+            continue;
+        };
+        let decoded_count = plan.vertices.len() - decoded_before;
+        if packed_ok {
+            if surface.packed_vertices.len() == decoded_count {
+                packed.extend_from_slice(&surface.packed_vertices);
+            } else {
+                packed_ok = false;
+                packed.clear();
+            }
+        }
+        let range_idx = plan.surface_ranges.len() as u32;
+        plan.surface_ranges.push((start, count));
+        let mat_idx = if let Some(ai) = surface.authored {
+            *mat_key.entry(ai).or_insert_with(|| {
+                let idx = plan.materials.len() as u32;
+                plan.materials.push(surface.material.clone());
+                idx
+            })
+        } else {
+            let idx = plan.materials.len() as u32;
+            plan.materials.push(surface.material.clone());
+            idx
+        };
+        debug_assert_eq!(
+            plan.materials
+                .get(mat_idx as usize)
+                .map(|m| m.model_lighting_required),
+            Some(true)
+        );
+        plan.draws.push(FpvSurfaceDraw {
+            surface: range_idx,
+            material: mat_idx,
+            is_scope: surface.is_scope && !surface.is_lens,
+        });
+    }
+    plan.packed_vertices = install_retained_packed(
+        packed_ok,
+        packed,
+        plan.vertices.len(),
+        FPV_PACKED_EMPTY_PLAN,
+        FPV_PACKED_UNAVAILABLE,
+    );
+    plan.scope_plan_n = Some(surfaces.iter().filter(|s| s.is_scope).count() as u32);
+    plan.scope_house_plan_n =
+        Some(surfaces.iter().filter(|s| s.is_scope && !s.is_lens).count() as u32);
+    plan.scope_lens_plan_n = Some(surfaces.iter().filter(|s| s.is_lens).count() as u32);
+    plan.plan_draw_n = Some(plan.draws.len() as u32);
+    plan.revisions.bump_vertices();
+    let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.vertices.len());
+    let rev = plan.revision;
+    plan.revision = stamp_plan_geometry(&mut plan.revisions, rev, topology);
+}

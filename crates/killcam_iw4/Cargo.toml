@@ -1,0 +1,11 @@
+[package]
+name = "killcam_iw4"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Retail IW4 killcam rules: camtime chain, window arithmetic, cancel gestures, death timeline, and the cooperative GSC task scheduler."
+
+[dependencies]
+
+[lints]
+workspace = true

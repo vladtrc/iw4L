@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Refuse to commit working memory, and refuse format-only dirt nobody staged.
+#
+# `context/` is local: artifacts, externals, agent clones and the RE tooling and
+# its bases live there and `.gitignore` keeps them out. This is the second wall
+# — `git add -f` walks through the first. Nothing under `context/` is an
+# exception: the shipped repo is the runtime, and the RE side of the work is not
+# published.
+#
+# Installed from xtask/githooks/pre-commit by `cargo xtask mr new|fmt|ship`.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+
+# Deletions (untracking something that should never have been in) are fine.
+staged=()
+while IFS= read -r rel; do
+  [[ -n "$rel" ]] || continue
+  staged+=("$rel")
+done < <(git diff --cached --name-only --diff-filter=ACMR -- context/ || true)
+
+if ((${#staged[@]} > 0)); then
+  printf '%s\n' \
+    'pre-commit: context/ is working memory, not the product. Do not git add it (not even -f).' \
+    'The files stay on disk. Unstage with:' \
+    '  git restore --staged -- context/' \
+    'Nothing under context/ belongs in git.' \
+    'Staged paths:' >&2
+  printf '  %s\n' "${staged[@]}" >&2
+  exit 1
+fi
+
+# Unstaged .rs whose working tree equals rustfmt(index) is the cargo-fmt-all
+# leftover: files the agent did not stage, rewritten in place. Real WIP does
+# not compare equal. Do not guess "my files" — refuse the leftover.
+if command -v rustfmt >/dev/null; then
+  dirt=()
+  tmpdir="$(mktemp -d)"
+  cleanup() { rm -rf "$tmpdir"; }
+  trap cleanup EXIT
+  mapfile -t unstaged < <(git diff --name-only --diff-filter=ACMR || true)
+  for rel in "${unstaged[@]}"; do
+    [[ -n "$rel" && "$rel" == *.rs ]] || continue
+    wt="$ROOT/$rel"
+    [[ -f "$wt" ]] || continue
+    idx="$tmpdir/idx.rs"
+    if ! git show ":$rel" >"$idx" 2>/dev/null; then
+      continue
+    fi
+    if ! rustfmt --edition 2024 "$idx" >/dev/null 2>&1; then
+      continue
+    fi
+    if cmp -s "$idx" "$wt"; then
+      dirt+=("$rel")
+    fi
+  done
+  if ((${#dirt[@]} > 0)); then
+    printf '%s\n' \
+      'pre-commit: unstaged .rs files match rustfmt(index) — likely cargo fmt --all / -p.' \
+      'Restore them; format only the files you own:' \
+      "  git restore -- ${dirt[*]}" \
+      '  cargo xtask mr fmt <your .rs paths>' \
+      'Unstaged format-only paths:' >&2
+    printf '  %s\n' "${dirt[@]}" >&2
+    exit 1
+  fi
+fi
+
+exit 0

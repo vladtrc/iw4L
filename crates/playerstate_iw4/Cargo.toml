@@ -1,0 +1,13 @@
+[package]
+name = "playerstate_iw4"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "playerState_t and usercmd_s from retail MW2 — one-to-one data, with no ECS, bevy, or I/O."
+
+[dependencies]
+math_iw4.workspace = true
+libm = { version = "0.2.16", default-features = false }
+
+[lints]
+workspace = true

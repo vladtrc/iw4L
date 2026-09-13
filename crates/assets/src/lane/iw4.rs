@@ -1,0 +1,1342 @@
+use std::path::Path;
+
+use fastfile_iw4::load_zone;
+
+use super::{
+    CommonCensus, CommonWalkSink, LaneGap, LoadedWorld, MaterialPopulation, MaterialPopulationSink,
+    ZoneLane, ZoneWalkSink,
+};
+use crate::{
+    ZoneGame, ZoneImage, ZoneMemory, build_clip_collision, build_world_draw,
+    census_entity_string_keys, decode_material_color_maps, decode_reflection_probe_cubemap,
+    dm_spawn_points, intermission_view,
+    lane_capability::{LaneStatus, PreparedCapability},
+    map_ents_entity_string, minimap_corners,
+    progress::LoadProgress,
+    session_load::{PreparedWorld, WorldDrawPolicy},
+    worldspawn_north_yaw,
+};
+
+pub struct Iw4Lane;
+
+impl Iw4Lane {
+    pub const GAME: ZoneGame = ZoneGame::Iw4;
+    pub const CAPABILITIES: &'static [(PreparedCapability, LaneStatus)] = &[
+        (PreparedCapability::Envelope, LaneStatus::SupportedPopulated),
+        (
+            PreparedCapability::PreparedWorld,
+            LaneStatus::SupportedPopulated,
+        ),
+        (
+            PreparedCapability::CollisionSpawns,
+            LaneStatus::SupportedPopulated,
+        ),
+        (
+            PreparedCapability::WeaponCatalog,
+            LaneStatus::MissingEvidence,
+        ),
+        (
+            PreparedCapability::BodySkeleton,
+            LaneStatus::SupportedPopulated,
+        ),
+        (
+            PreparedCapability::PlayableFfa,
+            LaneStatus::UnsupportedByRuntimeProfile,
+        ),
+    ];
+}
+
+impl ZoneLane for Iw4Lane {
+    fn game(&self) -> ZoneGame {
+        Self::GAME
+    }
+
+    fn capabilities(&self) -> &'static [(PreparedCapability, LaneStatus)] {
+        Self::CAPABILITIES
+    }
+
+    fn load_world(
+        &self,
+        path: &Path,
+        image: &ZoneImage,
+        progress: &LoadProgress,
+        shared_surfaces: asset_model::SharedXModelSurfaces,
+        common_techsets: &[crate::TechniqueSetFacts],
+        material_seed: crate::MaterialCatalog,
+        common_film_visions: &mut std::collections::BTreeMap<
+            String,
+            Result<crate::FilmVision, crate::FilmVisionParseError>,
+        >,
+    ) -> LoadedWorld {
+        let mut report = Vec::new();
+        let stage = progress.stage("reading zone header");
+        let header = match image.header() {
+            Ok(h) => h,
+            Err(e) => {
+                return LoadedWorld::with_gap(
+                    WorldDrawPolicy::iw4(),
+                    PreparedCapability::PreparedWorld,
+                    format!("zone header: {e}"),
+                    Some("assets::lane::iw4::load_world/zone_header"),
+                );
+            }
+        };
+
+        drop(stage);
+        let stage = progress.stage("preparing zone memory");
+        report.push(crate::zone::xfile_arena_row(
+            "zone arenas map",
+            &header.block_size,
+            fastfile_iw4::XFILE_BLOCK_TEMP,
+            fastfile_iw4::XFILE_BLOCK_VIRTUAL,
+        ));
+        let mut memory = ZoneMemory::for_header(&header);
+        let mut stream = match memory.stream(&image.bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                return LoadedWorld::with_gap(
+                    WorldDrawPolicy::iw4(),
+                    PreparedCapability::PreparedWorld,
+                    format!("zone arenas: {e}"),
+                    Some("assets::lane::iw4::load_world/zone_arenas"),
+                );
+            }
+        };
+
+        drop(stage);
+        let mut sink = ZoneWalkSink::with_stage(progress.stage("walking map assets"));
+        sink.seed_materials(material_seed);
+        sink.map_xmodels.shared_surfaces = shared_surfaces;
+        sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
+        sink.set_capture_ns(crate::AssetNamespace::Iw4);
+        match load_zone(&mut stream, &mut sink) {
+            Ok(_) => report.push(format!("zone walk: complete, {} assets", sink.walked)),
+            Err(e) => report.push(format!(
+                "zone walk: stopped after {} assets — {e}",
+                sink.walked
+            )),
+        }
+        report.push(format!(
+            "pointer drift: {} unsettled offsets",
+            stream.unsettled_offsets()
+        ));
+        report.extend(sink.models.report("map"));
+        drop(sink.stage.take());
+        let light_def_table = sink.light_def_table;
+        let light_def_bodies = sink.light_def_bodies;
+        let mut materials = std::mem::take(&mut sink.materials);
+
+        let absorbed = materials.absorb_technique_set_tables(common_techsets);
+        let stub_routed = materials.reroute_stub_materials();
+        report.push(format!(
+            "material route (pre-decode): absorbed_techsets={absorbed} stub_routed={stub_routed} \
+         unrouted={}",
+            materials.unrouted_material_count()
+        ));
+
+        let compass = std::mem::take(&mut sink.compass).resolve(&materials);
+        let script_sound = std::mem::take(&mut sink.script_sound).finish();
+        let exp_fog = sink.exp_fog.take();
+        let createart_name = sink.createart_name.take();
+        let vision_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .map(|stem| format!("vision/{}.vision", stem.to_ascii_lowercase()));
+        let film_result = match vision_name.as_ref() {
+            Some(name) => match sink.film_visions.remove(name) {
+                Some(Ok(vision)) => Ok(Some((vision, "fastfile"))),
+                Some(Err(error)) => Err(format!("fastfile parse error {error:?}")),
+                None => match common_film_visions.remove(name) {
+                    Some(Ok(vision)) => Ok(Some((vision, "common_mp"))),
+                    Some(Err(error)) => Err(format!("common_mp parse error {error:?}")),
+                    None => Ok(None),
+                },
+            },
+            None => Err("map path has no UTF-8 stem".into()),
+        };
+        let film_vision = match film_result {
+            Ok(Some((vision, source))) => {
+                report.push(format!(
+                    "film vision: READY source={source} enable={} contrast={:.4} brightness={:.4} desaturation={:.5}",
+                    vision.enable,
+                    vision.contrast,
+                    vision.brightness,
+                    vision.desaturation,
+                ));
+                Some(vision)
+            }
+            Ok(None) => {
+                report.push(format!(
+                    "film vision: RED missing `{}` in map and common_mp fastfiles",
+                    vision_name.as_deref().unwrap_or("<invalid map stem>")
+                ));
+                None
+            }
+            Err(error) => {
+                report.push(format!("film vision: RED {error}"));
+                None
+            }
+        };
+        report.push(match (&compass.script, &compass.material, &compass.image) {
+            (Some(script), Some(material), Some(image)) => format!(
+                "compass: {script} declares `{material}` -> image `{image}` range={}",
+                compass
+                    .max_range
+                    .map_or_else(|| "default".to_owned(), |r| format!("{r}"))
+            ),
+            (Some(script), Some(material), None) => {
+                format!("compass gap: {script} declares `{material}` — no image in the zone")
+            }
+            _ => "compass gap: no map script declared a minimap".into(),
+        });
+        report.push(match (&script_sound.script, &script_sound.ambient_alias) {
+            (Some(script), Some(alias)) => {
+                format!("script sound: {script} ambientPlay `{alias}`")
+            }
+            (Some(script), None) => {
+                format!("script sound gap: {script} has no ambientPlay")
+            }
+            _ => "script sound gap: no map script declared ambientPlay".into(),
+        });
+        report.push(match &exp_fog {
+            Some(fog) => format!(
+                "createart fog: READY start={:.3} half={:.3} maxOpacity={:.3} sun={}",
+                fog.start_dist,
+                fog.halfway_dist,
+                fog.max_opacity,
+                fog.sun.is_some()
+            ),
+            None => "createart fog: RED missing maps/createart/<map>_art.gsc setExpFog".into(),
+        });
+        let mut fx = std::mem::take(&mut sink.fx);
+        let fx_models = std::mem::take(&mut sink.fx_models);
+        let mut impact_fx = sink.impact_fx.take_table();
+        let mut map_xmodels = std::mem::take(&mut sink.map_xmodels);
+        let phys_presets = std::mem::take(&mut sink.phys_presets);
+        let bodies = std::mem::take(&mut sink.bodies);
+        let fpv_meshes = std::mem::take(&mut sink.fpv_meshes);
+        let map_xanims = std::mem::take(&mut sink.xanims);
+        report.push(format!(
+            "map XAnim catalog: {} clips captured ({} gaps)",
+            map_xanims.len(),
+            map_xanims.capture_gaps
+        ));
+        report.push(format!(
+            "fx catalog: {} FxEffectDef owned ({} capture gaps)",
+            fx.len(),
+            fx.capture_gaps
+        ));
+        if let Some(ref table) = impact_fx {
+            report.push(format!(
+                "impactfx: table `{}` rows={} gaps={}",
+                table.name,
+                table.row_count(),
+                table.capture_gaps
+            ));
+        }
+
+        let glass_names: Vec<String> = sink
+            .fx_glass_def_materials
+            .iter()
+            .flat_map(|(intact, shattered)| [intact.clone(), shattered.clone()])
+            .filter(|n| !n.is_empty())
+            .collect();
+        let fx_name_hints: Vec<String> = fx
+            .unique_material_name_hints()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let leftover = std::mem::take(&mut sink.fx_glass_def_materials);
+        let image_stage = progress.stage("decoding material images");
+        let clip_stage = progress.stage("building collision map");
+        let mut clip = None;
+        let mut clip_report = Vec::new();
+        let mut fx_glass = None;
+        let mut dyn_ents = crate::DynEntCatalog::default();
+        let materials_side = &mut materials;
+
+        let image_report = crate::session_load::load_pool().scope(|scope| {
+            scope.spawn(async move {
+                decode_map_material_images(
+                    path,
+                    materials_side,
+                    image_stage,
+                    fx_name_hints,
+                    glass_names,
+                )
+            });
+
+            clip = match stream.clip_map() {
+                Some(geometry) => match build_clip_collision(&stream, geometry) {
+                    Ok(mut clip) => {
+                        crate::attach_static_models(
+                            &stream,
+                            geometry,
+                            &sink.xmodel_coll,
+                            &mut clip,
+                        );
+                        clip_report.push(format!(
+                    "clipmap: planes={} brushes={} leaves={} nodes={} cmodels={} verts={} tris={} smodels={}",
+                    geometry.plane_count,
+                    geometry.brush_count,
+                    geometry.leaf_count,
+                    geometry.node_count,
+                    geometry.cmodel_count,
+                    geometry.vert_count,
+                    geometry.tri_count,
+                    clip.static_models.len()
+                ));
+                        clip_report.push(format!(
+                            "clip brushes extracted: {} (player-solid filter at trace time)",
+                            clip.brushes.len()
+                        ));
+                        Some(clip)
+                    }
+                    Err(e) => {
+                        clip_report.push(format!("clipmap extract: {e}"));
+                        None
+                    }
+                },
+                None => {
+                    clip_report.push("clipmap: not reached".into());
+                    None
+                }
+            };
+            let mut census = crate::build_glass_census(&stream, clip.as_ref());
+            if leftover
+                .iter()
+                .any(|(intact, shattered)| !intact.is_empty() || !shattered.is_empty())
+            {
+                census.fx_def_materials = leftover.clone();
+            }
+            clip_report.push(census.report_line());
+            let named = leftover
+                .iter()
+                .filter(|(a, b)| !a.is_empty() || !b.is_empty())
+                .count();
+            clip_report.push(format!(
+            "fx glass def leftover: defs={} named={} (captured during load_fxworld; OFFSET walk is empty)",
+            leftover.len(),
+            named
+        ));
+
+            fx_glass = crate::build_fx_glass_reset(&stream).map(|mut g| {
+                g.def_materials = leftover;
+                g
+            });
+            dyn_ents = match stream.clip_map() {
+                Some(geometry) => crate::build_dyn_ent_catalog(
+                    &stream,
+                    geometry,
+                    |slot| map_xmodels.name_at_slot(slot).map(str::to_owned),
+                    |slot| fx.name_at_slot(slot).map(str::to_owned),
+                    |slot| phys_presets.at_slot(slot).cloned(),
+                ),
+                None => crate::DynEntCatalog::default(),
+            };
+            drop(clip_stage);
+        });
+        report.extend(image_report.into_iter().flatten());
+        report.extend(clip_report);
+        let fx_glass = fx_glass.map(|mut g| {
+            g.resolve_material_edges(&materials);
+            g
+        });
+        match fx_glass.as_ref() {
+            Some(g) => report.push(g.report_line()),
+            None if stream.fx_world().is_some() => {
+                report.push(
+                    "fx glass reset: truncated (initPieceStates/initGeoData not kept)".into(),
+                );
+            }
+            None => {}
+        }
+        if stream.clip_map().is_some() {
+            report.push(dyn_ents.report_line());
+        } else {
+            report.push("dynents: clipmap not reached".into());
+        }
+        map_xmodels.set_dynent_phys_preset_n(dyn_ents.phys_preset_named_n());
+        report.push(format!(
+            "xmodel physPreset: slot={} named={} models={} (XModel+0x128 NameHint; DynEnt def+44 named={} is a different graph)",
+            map_xmodels.phys_preset_slot_n(),
+            map_xmodels.phys_preset_name_hint_n(),
+            map_xmodels.captured_model_n(),
+            dyn_ents.phys_preset_named_n(),
+        ));
+        if let Some(gfx) = stream.gfx_world() {
+            report.push(format!(
+                "gfx dpvsDyn: sceneDynModel={} sceneDynBrush={} (RUNTIME tables; not DrawInst)",
+                gfx.dyn_model_count, gfx.dyn_brush_count
+            ));
+        }
+        let stage = progress.stage("building world geometry");
+        let Some(geometry) = stream.gfx_world() else {
+            report.push("no GfxWorld reached — nothing to draw".into());
+            push_mapents_key_census(&mut report, &stream);
+            let dm_spawns = dm_spawn_points(&stream);
+            drop(stream);
+            report.push(format!(
+                "s1 arenas kept: map={} ({:.1}MiB) (ZoneMemory after extract; ZoneImage dropped)",
+                memory.total_bytes(),
+                memory.total_bytes() as f64 / (1024.0 * 1024.0),
+            ));
+            return LoadedWorld::from_prepared_parts(
+                PreparedWorld {
+                    fx: std::mem::take(&mut fx),
+                    fx_models,
+                    fx_glass,
+                    impact_fx: impact_fx.take(),
+                    dyn_ents,
+                    compass,
+                    script_sound,
+                    exp_fog,
+                    film_vision,
+                    createart_name,
+                    policy: WorldDrawPolicy::iw4(),
+                    ..Default::default()
+                },
+                clip,
+                dm_spawns,
+                bodies,
+                fpv_meshes,
+                map_xanims,
+                report,
+                vec![LaneGap {
+                    capability: PreparedCapability::PreparedWorld,
+                    reason: "no GfxWorld reached — nothing to draw".into(),
+                    addr: Some("assets::lane::iw4::load_world/no_gfx_world"),
+                }],
+                Some(memory),
+            );
+        };
+
+        let world_draw = build_world_draw(&stream, geometry, materials);
+        report.push(format!(
+            "GfxLightDef map zone: table={light_def_table} bodies={light_def_bodies} recorded={}",
+            stream.light_defs().len()
+        ));
+        drop(stage);
+        let stage = progress.stage("building static models");
+        match world_draw {
+            Ok(draw) => {
+                let map_models = super::build_static_model_draw(&stream, geometry, map_xmodels);
+                {
+                    let n = draw.primary_lights.len();
+                    let dir = draw
+                        .primary_lights
+                        .iter()
+                        .filter(|l| l.light_type == lighting_iw4::GFX_LIGHT_TYPE_DIR)
+                        .count();
+                    let omni = draw
+                        .primary_lights
+                        .iter()
+                        .filter(|l| l.light_type == lighting_iw4::GFX_LIGHT_TYPE_OMNI)
+                        .count();
+                    let spot = draw
+                        .primary_lights
+                        .iter()
+                        .filter(|l| l.light_type == lighting_iw4::GFX_LIGHT_TYPE_SPOT)
+                        .count();
+                    let named = draw
+                        .primary_lights
+                        .iter()
+                        .filter(|l| l.def_name.as_ref().is_some_and(|n| !n.is_empty()))
+                        .count();
+                    let falloff_w = draw
+                        .primary_lights
+                        .iter()
+                        .filter(|l| l.falloff_image_width.is_some())
+                        .count();
+                    report.push(format!(
+                        "primary lights: n={n} dir={dir} omni={omni} spot={spot} named_defs={named} falloff_width={falloff_w} (light-def name retained; atten_image filled after global absorb)"
+                    ));
+                }
+                if let Some(error) = map_models.static_error.as_ref() {
+                    report.push(format!("static models: {error}"));
+                }
+                let smodels = &map_models.static_draw;
+                report.push(format!(
+                "static models: {}/{} authored slots resolved to {} unique meshes ({} unresolved)",
+                smodels.resolved_count(),
+                geometry.smodel_count,
+                smodels.meshes.len(),
+                smodels.gaps
+            ));
+                report.push(format!(
+                    "script_model: {} placements linked (MapEnts props; separate visibility owner)",
+                    map_models.script_instances.len()
+                ));
+                report.push(format!(
+                    "script_brushmodel: {} *N placements (SP_script_brushmodel, not DrawInst)",
+                    map_models.script_brush_models.len()
+                ));
+                let crate::PreparedMapModels {
+                    static_draw:
+                        crate::StaticModelDraw {
+                            meshes: static_model_meshes,
+                            placements: static_model_instances,
+                            ..
+                        },
+                    scene_assets: map_xmodel_scene_assets,
+                    script_instances: script_model_instances,
+                    script_brush_models,
+                    map_use_triggers,
+                    flag_descriptors,
+                    ..
+                } = map_models;
+
+                drop(stage);
+                let stage = progress.stage("sampling static model lighting");
+                let smodel_lighting_samples = {
+                    use crate::model_lighting::{
+                        OwnedLightGrid, build_smodel_lighting_samples_with_sight,
+                        census_lit_fragment_tiles, collect_smodel_lighting_origins,
+                    };
+                    use lighting_iw4::LIGHT_GRID_SIGHT_CONTENT_MASK;
+                    match OwnedLightGrid::from_stream(&stream, geometry.light_grid) {
+                        Some(owned) => {
+                            let origins: Vec<_> =
+                                collect_smodel_lighting_origins(&stream, geometry)
+                                    .into_iter()
+                                    .filter(|(slot, _)| {
+                                        static_model_instances
+                                            .get(*slot)
+                                            .and_then(|placement| placement.as_ref())
+                                            .is_some()
+                                    })
+                                    .collect();
+                            let (tiles, census) = if let Some(ref clip_map) = clip {
+                                let scratch = clip_map.sight_scratch();
+                                let clear = |start: [f32; 3], end: [f32; 3]| {
+                                    clip_map.box_sight_clear(
+                                        &scratch,
+                                        start,
+                                        end,
+                                        LIGHT_GRID_SIGHT_CONTENT_MASK,
+                                    )
+                                };
+                                let (tiles, census) = build_smodel_lighting_samples_with_sight(
+                                    &owned.view(),
+                                    &origins,
+                                    Some(&clear),
+                                );
+                                report.push(format!(
+                                "smodel lighting: lit={} / candidates={} (blocked row={} trunc={} empty={}; CM sight mask=0x{LIGHT_GRID_SIGHT_CONTENT_MASK:x} corners need={} cleared={} suppressed={})",
+                                census.lit,
+                                census.candidates,
+                                census.blocked_unmodelled_row,
+                                census.blocked_truncated,
+                                census.blocked_no_live_corner,
+                                census.corners_needing_sight,
+                                census.corners_needing_sight.saturating_sub(census.corners_sight_suppressed),
+                                census.corners_sight_suppressed,
+                            ));
+                                (tiles, census)
+                            } else {
+                                let (tiles, census) = build_smodel_lighting_samples_with_sight(
+                                    &owned.view(),
+                                    &origins,
+                                    None,
+                                );
+                                report.push(format!(
+                                "smodel lighting: lit={} / candidates={} (no clipmap — needsTrace corners suppressed; blocked row={} trunc={} empty={})",
+                                census.lit,
+                                census.candidates,
+                                census.blocked_unmodelled_row,
+                                census.blocked_truncated,
+                                census.blocked_no_live_corner,
+                            ));
+                                (tiles, census)
+                            };
+                            let _ = census;
+                            if let Some(frag) = census_lit_fragment_tiles(&tiles) {
+                                report.push(format!(
+                                "smodel lit_fragment mid-grey: tiles={} lum min={:.4} max={:.4} mean={:.4} (specular=0)",
+                                frag.tiles, frag.lum_min, frag.lum_max, frag.lum_mean
+                            ));
+                            }
+                            (tiles, Some(owned))
+                        }
+                        None => {
+                            report
+                                .push("smodel lighting: none (no owned light-grid tables)".into());
+                            (Vec::new(), None)
+                        }
+                    }
+                };
+                let (smodel_lighting_samples, light_grid) = smodel_lighting_samples;
+                drop(stage);
+                let _stage = progress.stage("finishing world handoff");
+                let intermission_view = intermission_view(&stream);
+                let minimap_corners = minimap_corners(&stream);
+                let north_yaw = worldspawn_north_yaw(&stream);
+                let dm_spawns = dm_spawn_points(&stream);
+                push_mapents_key_census(&mut report, &stream);
+                drop(stream);
+                report.push(format!(
+                    "s1 arenas kept: map={} ({:.1}MiB) (ZoneMemory after extract; ZoneImage dropped)",
+                    memory.total_bytes(),
+                    memory.total_bytes() as f64 / (1024.0 * 1024.0),
+                ));
+                report.push(format!(
+                    "ffa spawns: {} mp_dm_spawn* ({} start)",
+                    dm_spawns.len(),
+                    dm_spawns.iter().filter(|p| p.is_initial()).count()
+                ));
+                report.push(format!(
+                    "world mesh: {} vertices, {} triangles, {} surfaces ({} skipped, {} sky)",
+                    draw.stats.vertices,
+                    draw.stats.triangles,
+                    draw.stats.surfaces,
+                    draw.stats.skipped_surfaces,
+                    draw.stats.sky_surfaces
+                ));
+                report.push(format!(
+                    "visibility: cells={} portals={} aabbNodes={} smodels={} sorted={} surfaceBounds={} smodelBounds={} skyStartSurfs={}",
+                    geometry.cell_count,
+                    geometry.portal_count,
+                    geometry.aabb_node_count,
+                    geometry.smodel_count,
+                    draw.dpvs.sorted_surf_index.len(),
+                    draw.dpvs.surface_bounds.len(),
+                    draw.dpvs.smodel_bounds.len(),
+                    draw.dpvs.sky_start_surfs.len()
+                ));
+                report.push(
+                "draw path: DPVS portal walk + one AABB descent per visible cell into surfaceVisData/smodelVisData"
+                    .into(),
+            );
+                match intermission_view {
+                    Some(view) => report.push(format!(
+                        "camera: mp_global_intermission origin={:?} angles={:?}",
+                        view.origin, view.angles
+                    )),
+                    None => report.push("camera: mp_global_intermission not found".into()),
+                }
+                let lightmapped_surfaces = draw
+                    .surface_lightmapped
+                    .iter()
+                    .filter(|&&lightmapped| lightmapped)
+                    .count();
+                report.push(format!(
+                    "world batches: {lightmapped_surfaces} lightmapped, {} fallback surfaces",
+                    draw.surface_lightmapped.len() - lightmapped_surfaces
+                ));
+                let material_surfaces = draw
+                    .surface_materials
+                    .iter()
+                    .filter(|material| material.is_some())
+                    .count();
+                report.push(format!(
+                "material catalog: {}/{} surfaces resolved, {} materials, {} images, {} color bindings, {} normal bindings, {} alpha-test, {} blend, {} multiply, {} sky, {} capture gaps, {} agreed draw-mode, {} lit-band draw-mode conflicts, {} unresolved draw-mode",
+                material_surfaces,
+                draw.surface_materials.len(),
+                draw.materials.materials.len(),
+                draw.materials.images.len(),
+                draw.materials.color_binding_count(),
+                draw.materials.normal_binding_count(),
+                draw.materials.alpha_test_count(),
+                draw.materials.blend_count(),
+                draw.materials.multiply_count(),
+                draw.materials.sky_count(),
+                draw.materials.capture_gaps,
+                draw.materials.agreed_draw_mode_count(),
+                draw.materials.lit_band_draw_mode_conflict_count(),
+                draw.materials.unresolved_draw_mode_count(),
+            ));
+                report.push(format!(
+                "material batches: {} compact meshes (material identity + lightmap state + primary light)",
+                draw.batches.len()
+            ));
+                let mut sun_surfaces = 0usize;
+                let mut bake_only_surfaces = 0usize;
+                let mut local_light_surfaces = 0usize;
+                for &(batch_index, _, _) in &draw.surface_batch_ranges {
+                    let Some(batch) = draw.batches.get(batch_index) else {
+                        continue;
+                    };
+                    if !batch.lightmapped || batch.primary_light_index == 0 {
+                        bake_only_surfaces += 1;
+                    } else if draw
+                        .primary_lights
+                        .get(usize::from(batch.primary_light_index))
+                        .is_some_and(|light| light.is_sun)
+                    {
+                        sun_surfaces += 1;
+                    } else {
+                        local_light_surfaces += 1;
+                    }
+                }
+                report.push(format!(
+                "primary-light surfaces: {sun_surfaces} sun, {bake_only_surfaces} bake-only/fallback, {local_light_surfaces} local-light gap"
+            ));
+                match &draw.lightmap {
+                    Ok(pages) => {
+                        let decoded = pages.iter().flatten().count();
+                        let names: Vec<&str> = pages
+                            .iter()
+                            .flatten()
+                            .map(|p| p.ambient_source_name.as_str())
+                            .collect();
+                        report.push(format!(
+                            "lightmap: {decoded}/{} pages decoded ({})",
+                            pages.len(),
+                            names.join(", ")
+                        ));
+                    }
+                    Err(gap) => report.push(format!("lightmap gap: {gap}")),
+                }
+                let reflection_probe_images = draw
+                    .reflection_probes
+                    .iter()
+                    .map(|probe| {
+                        probe.image.and_then(|image| {
+                            draw.materials.images.get(image).and_then(|source| {
+                                match decode_reflection_probe_cubemap(source) {
+                                    Ok(image) => Some(image),
+                                    Err(error) => {
+                                        report.push(format!(
+                                            "reflection probe {} gap: {error}",
+                                            source.name
+                                        ));
+                                        None
+                                    }
+                                }
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                report.push(format!(
+                    "reflection probes: {}/{} cubemaps decoded",
+                    reflection_probe_images.iter().flatten().count(),
+                    reflection_probe_images.len()
+                ));
+                report.push(format!(
+                    "dpvs: cells={} planes={} nodes={} sorted={} portal_verts={} cleared_boxes={}",
+                    draw.dpvs.cell_count,
+                    draw.dpvs.planes.len(),
+                    draw.dpvs.nodes.len(),
+                    draw.dpvs.sorted_surf_index.len(),
+                    draw.dpvs.portal_verts.len(),
+                    draw.dpvs.cleared_boxes
+                ));
+                let min = draw.stats.min;
+                let max = draw.stats.max;
+                let world_bounds = draw.stats.bounds;
+                LoadedWorld::from_prepared_parts(
+                    PreparedWorld {
+                        draw: Some(draw),
+                        static_model_meshes,
+                        static_model_instances,
+                        map_xmodel_scene_assets,
+                        script_model_instances,
+                        script_brush_models,
+                        map_use_triggers,
+                        flag_descriptors,
+                        dyn_ents,
+                        smodel_lighting_samples,
+                        light_grid,
+                        fx,
+                        fx_models,
+                        fx_glass,
+                        impact_fx,
+                        reflection_probe_images,
+                        intermission_view,
+                        minimap_corners,
+                        north_yaw,
+                        compass,
+                        script_sound,
+                        t5_teamset: None,
+                        team_icons: crate::TeamIcons::default(),
+                        exp_fog,
+                        film_vision,
+                        createart_name,
+                        min,
+                        max,
+                        world_bounds,
+                        policy: WorldDrawPolicy::iw4(),
+                    },
+                    clip,
+                    dm_spawns,
+                    bodies,
+                    fpv_meshes,
+                    map_xanims,
+                    report,
+                    Vec::new(),
+                    Some(memory),
+                )
+            }
+            Err(e) => {
+                report.push(format!("world mesh: {e}"));
+                let dm_spawns = dm_spawn_points(&stream);
+                push_mapents_key_census(&mut report, &stream);
+                drop(stream);
+                LoadedWorld::from_prepared_parts(
+                    PreparedWorld {
+                        fx,
+                        fx_models,
+                        fx_glass,
+                        impact_fx,
+                        dyn_ents,
+                        compass,
+                        script_sound,
+                        exp_fog,
+                        film_vision,
+                        createart_name,
+                        policy: WorldDrawPolicy::iw4(),
+                        ..Default::default()
+                    },
+                    clip,
+                    dm_spawns,
+                    bodies,
+                    fpv_meshes,
+                    map_xanims,
+                    report,
+                    vec![LaneGap {
+                        capability: PreparedCapability::PreparedWorld,
+                        reason: format!("world mesh: {e}"),
+                        addr: Some("assets::lane::iw4::load_world/world_mesh"),
+                    }],
+                    Some(memory),
+                )
+            }
+        }
+    }
+
+    fn load_common_mp(
+        &self,
+        path: &Path,
+        image: &ZoneImage,
+        progress: &LoadProgress,
+        decode_color_maps: bool,
+        material_seed: crate::MaterialCatalog,
+    ) -> CommonCensus {
+        let zone_name = path.file_stem().map_or_else(
+            || "common_mp".to_owned(),
+            |stem| stem.to_string_lossy().into_owned(),
+        );
+        let header = match image.header() {
+            Ok(header) => header,
+            Err(error) => {
+                return CommonCensus {
+                    report: vec![format!("common_mp models: zone header: {error}")],
+                    ..Default::default()
+                };
+            }
+        };
+        let mut memory = ZoneMemory::for_header(&header);
+        let mut stream = match memory.stream(&image.bytes) {
+            Ok(stream) => stream,
+            Err(error) => {
+                return CommonCensus {
+                    report: vec![format!("common_mp models: zone arenas: {error}")],
+                    ..Default::default()
+                };
+            }
+        };
+        let mut report_arenas = vec![crate::zone::xfile_arena_row(
+            "zone arenas common_mp",
+            &header.block_size,
+            fastfile_iw4::XFILE_BLOCK_TEMP,
+            fastfile_iw4::XFILE_BLOCK_VIRTUAL,
+        )];
+        let mut sink = CommonWalkSink::with_stage(progress.stage(format!("walking {zone_name}")));
+        sink.seed_materials(material_seed);
+        sink.set_capture_zone(crate::ZoneOwner::intern(&zone_name));
+        sink.set_capture_ns(crate::AssetNamespace::Iw4);
+        let walk = load_zone(&mut stream, &mut sink);
+        drop(sink.stage.take());
+        let mut report = sink.models.report("common_mp");
+        report.splice(0..0, report_arenas.drain(..));
+        if let Err(error) = walk {
+            report.push(format!(
+                "common_mp model walk: stopped after {} assets — {error}",
+                sink.walked
+            ));
+        }
+        report.push(format!(
+            "common_mp model pointer drift: {} unsettled offsets",
+            stream.unsettled_offsets()
+        ));
+        report.push(format!(
+            "s2 common walk: reuse_mat={} reuse_img={} pool_mat={} pool_img={}",
+            sink.materials.link_reused_materials,
+            sink.materials.link_reused_images,
+            sink.materials.materials.len(),
+            sink.materials.images.len(),
+        ));
+        let captured = sink.weapons.len();
+
+        sink.weapons.resolve_reticles(&sink.materials);
+        let projectile_hints = sink.weapons.projectile_model_hints();
+        let pending_unclassified = sink.projectile_meshes.len();
+        sink.projectile_meshes.keep_referenced(&projectile_hints);
+        for hint in &projectile_hints {
+            if sink.projectile_meshes.contains(hint) {
+                continue;
+            }
+            if let Some(gun) = sink.world_weapons.get(hint) {
+                sink.projectile_meshes.absorb_world_weapon(gun);
+            }
+        }
+        let graph = crate::resolve_after_absorb(
+            &sink.materials,
+            &mut sink.tracers,
+            &mut sink.fx,
+            Some(&mut sink.weapons),
+            None,
+            Some(&mut sink.world_weapons),
+            None,
+            Some(&mut sink.fpv_meshes),
+            Some(&mut sink.projectile_meshes),
+        );
+        let mut weapons = sink.weapons.into_registry();
+        weapons.apply_stats_tables(sink.stats_tables.values());
+        report.push(format!(
+            "common_mp statsTable: tables={} item_groups={}",
+            sink.stats_tables.len(),
+            weapons.item_group_count(),
+        ));
+        weapons.stamp_projectile_model_edges(
+            &sink.projectile_meshes,
+            crate::ZoneOwner::intern(&zone_name),
+        );
+        weapons.resolve_sz_xanim_edges(&sink.xanims);
+        let filled = weapons.fill_missing_gun_xmodels(|name| {
+            sink.fpv_meshes.contains(crate::AssetNamespace::Iw4, name)
+        });
+        weapons.resolve_fpv_mesh_edges(&sink.fpv_meshes);
+        let world_filled =
+            weapons.fill_missing_world_models(|name| sink.world_weapons.contains(name));
+        weapons.resolve_world_model_edges(&sink.world_weapons);
+        let gun_named = weapons.gun_xmodel_count();
+        report.push(format!(
+        "common_mp weapons: {captured} captures → {} unique catalog ids (sorted; not retail bg_weaponIndex); {gun_named} with gunXModel[0] ({} zone-walk, {filled} filled from IDLE+FPV); {} with szXAnims[IDLE]; {} with any szXAnims slot",
+        weapons.len(),
+        weapons.gun_xmodel_zone_count(),
+        weapons.idle_anim_count(),
+        weapons.sz_xanims_count()
+    ));
+        report.push(format!(
+        "common_mp FPV mesh catalog: {} bind-pose viewmodel_* meshes retained ({} with tag_view)",
+        sink.fpv_meshes.len(),
+        sink.fpv_meshes.tag_view_count()
+    ));
+        report.push(format!(
+            "common_mp weapons worldModel[0]: {} ({} zone-walk, {} filled from gunXModel/IDLE+catalog)",
+            weapons.world_model_count(),
+            weapons.world_model_zone_count(),
+            world_filled
+        ));
+        report.push(format!(
+            "common_mp projectileModel @+0x420: slot={} bound={} unresolved_hint={} (pending unclassified XModels {}, retained {})",
+            weapons.projectile_model_count(),
+            weapons.projectile_model_bound_n(),
+            weapons.projectile_model_name_hint_n(),
+            pending_unclassified,
+            sink.projectile_meshes.len()
+        ));
+        report.push(sink.projectile_meshes.report_line());
+        report.push(format!(
+            "common_mp weapon HUD Material*: bound={} unresolved={} absent={}",
+            graph.weapon_hud_materials.bound,
+            graph.weapon_hud_materials.unresolved,
+            graph.weapon_hud_materials.absent,
+        ));
+        report.push(format!(
+            "common_mp weapon projectile FX: bound={} unresolved={} absent={}",
+            graph.weapon_projectile_fx.bound,
+            graph.weapon_projectile_fx.unresolved,
+            graph.weapon_projectile_fx.absent,
+        ));
+        let sz_xanims = weapons.sz_xanim_edge_census();
+        report.push(format!(
+            "common_mp weapon szXAnims: bound={} unresolved={} absent={}",
+            sz_xanims.bound, sz_xanims.unresolved, sz_xanims.absent,
+        ));
+        report.push(format!(
+            "common_mp TracerDef: {} named ({} bound, {} unresolved); weapon tracerType bound={} unresolved={} absent={}; weapon FxEffectDef* bound={} unresolved={} absent={}; nested fx_child bound={} unresolved={} absent={}; fx_runner bound={} unresolved={} absent={}; world-gun materialHandles bound={} unresolved={} absent={}; FPV materialHandles bound={} unresolved={} absent={}",
+            sink.tracers.len(),
+            graph.tracer_materials.bound,
+            graph.tracer_materials.unresolved,
+            graph.weapon_tracer_type.bound,
+            graph.weapon_tracer_type.unresolved,
+            graph.weapon_tracer_type.absent,
+            graph.weapon_combat_fx.bound,
+            graph.weapon_combat_fx.unresolved,
+            graph.weapon_combat_fx.absent,
+            graph.fx_nested_children.bound,
+            graph.fx_nested_children.unresolved,
+            graph.fx_nested_children.absent,
+            graph.fx_runner_children.bound,
+            graph.fx_runner_children.unresolved,
+            graph.fx_runner_children.absent,
+            graph.xmodel_gun_materials.bound,
+            graph.xmodel_gun_materials.unresolved,
+            graph.xmodel_gun_materials.absent,
+            graph.xmodel_fpv_materials.bound,
+            graph.xmodel_fpv_materials.unresolved,
+            graph.xmodel_fpv_materials.absent,
+        ));
+        report.push(format!(
+            "common_mp TracerDef materials: {}",
+            sink.tracers
+                .names()
+                .map(|n| {
+                    let mat = sink
+                        .tracers
+                        .get(n)
+                        .map(|t| t.material_report())
+                        .unwrap_or("absent");
+                    format!("{n}={mat}")
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        if sink.pen_table.is_some() {
+            report.push("common_mp bullet_penetration_mp: loaded (4x31)".into());
+        } else {
+            report.push(
+                "common_mp bullet_penetration_mp: missing — FirePenetrate depths are 0".into(),
+            );
+        }
+        report.extend(sink.world_weapons.report_lines());
+        report.push(format!(
+            "common_mp XAnim catalog: {} clips captured ({} gaps)",
+            sink.xanims.len(),
+            sink.xanims.capture_gaps
+        ));
+        report.push(format!(
+            "common_mp player animation sources: atr={} script={} types={} decode_errors={}",
+            sink.player_anim_sources.multiplayer_atr().is_some(),
+            sink.player_anim_sources.playeranim_script().is_some(),
+            sink.player_anim_sources.playeranim_types().is_some(),
+            sink.player_anim_sources.decode_errors().len()
+        ));
+        report.push(format!(
+            "common_mp fx catalog: {} FxEffectDef ({} gaps)",
+            sink.fx.len(),
+            sink.fx.capture_gaps
+        ));
+        let light_defs = crate::capture_light_defs(&stream, &sink.materials);
+        report.push(format!(
+            "GfxLightDef common_mp: table={} bodies={} recorded={}",
+            sink.light_def_table,
+            sink.light_def_bodies,
+            light_defs.len()
+        ));
+        drop(stream);
+        let s1_common_bytes = memory.total_bytes();
+        report.push(format!(
+            "s1 arenas kept: common={s1_common_bytes} ({:.1}MiB) (ZoneMemory after walk; ZoneImage dropped)",
+            s1_common_bytes as f64 / (1024.0 * 1024.0),
+        ));
+        let s1_common_arenas = Some(memory);
+        let impact_fx = sink.impact_fx.take_table();
+        if let Some(ref table) = impact_fx {
+            report.push(format!(
+                "common_mp impactfx: table `{}` rows={} gaps={}",
+                table.name,
+                table.row_count(),
+                table.capture_gaps
+            ));
+        } else {
+            report.push("common_mp impactfx: no table captured".into());
+        }
+        let mut fpv_meshes = sink.fpv_meshes;
+        sink.materials.resolve_technique_set_edges();
+        let technique_sets = sink.materials.technique_set_facts().to_vec();
+        if decode_color_maps {
+            fpv_meshes.materials = sink.materials;
+
+            let stage = progress.stage("planning common_mp FPV material images");
+            let (inline, mut plan) = crate::material_images::plan_material_color_maps(
+                path,
+                &mut fpv_meshes.materials,
+                &stage,
+            );
+            report.push(format!(
+                "common_mp FPV materials: {} claimed for the merged pool, {} in-zone bodies decoded here ({} missing, {} unsupported)",
+                plan.len(),
+                inline.decoded,
+                inline.missing,
+                inline.unsupported
+            ));
+            let tracer_inline = crate::material_images::plan_color_or_2d_for_names(
+                &mut plan,
+                &mut fpv_meshes.materials,
+                sink.tracers.named_materials(),
+                &stage,
+            );
+            report.push(format!(
+                "common_mp tracer beam images: {tracer_inline} in-zone TS_COLOR_MAP/TS_2D decoded, rest claimed"
+            ));
+            let fx_2d_names: Vec<String> = sink
+                .fx
+                .unique_material_name_hints()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let fx_inline = crate::material_images::plan_color_or_2d_for_names(
+                &mut plan,
+                &mut fpv_meshes.materials,
+                fx_2d_names,
+                &stage,
+            );
+            report.push(format!(
+                "common_mp fx elem 2d images: {fx_inline} in-zone TS_COLOR_MAP/TS_2D decoded, rest claimed"
+            ));
+            drop(stage);
+            let pending_images = Some(plan);
+            {
+                let unique: std::collections::BTreeSet<String> =
+                    sink.tracers.named_materials().map(str::to_owned).collect();
+                for name in unique {
+                    let bind = crate::fx_material_bind_name(&name);
+                    let twins: Vec<&str> = fpv_meshes
+                        .materials
+                        .materials
+                        .iter()
+                        .filter(|m| m.name.as_str() == bind)
+                        .map(|m| m.name.as_str())
+                        .collect();
+                    let images: Vec<&str> = fpv_meshes
+                        .materials
+                        .images
+                        .iter()
+                        .filter(|img| img.name.as_str() == bind)
+                        .map(|img| img.name.as_str())
+                        .collect();
+                    report.push(format!(
+                        "common_mp tracer material `{name}` twins={twins:?} images={images:?}"
+                    ));
+                    for mat in fpv_meshes
+                        .materials
+                        .materials
+                        .iter()
+                        .filter(|m| m.name.as_str() == bind)
+                    {
+                        let sem: Vec<u8> = mat.textures.iter().map(|t| t.semantic).collect();
+                        let decoded = mat.textures.iter().any(|t| {
+                            t.image
+                                .and_then(|i| fpv_meshes.materials.images.get(i))
+                                .is_some_and(|img| img.decoded.is_some())
+                        });
+                        report.push(format!(
+                        "common_mp tracer twin `{}` techset={} camera_region={} tex={} sem={sem:?} decoded={decoded}",
+                        mat.name,
+                        mat.technique_set,
+                        mat.camera_region,
+                        mat.textures.len(),
+                    ));
+                    }
+                }
+            }
+
+            let tracer_named = sink.tracers.named_materials().count();
+            report.push(format!(
+            "common_mp fx color maps: 0 cloned ({} tracer names Bound into global; no FPV pool clone)",
+            tracer_named
+        ));
+            report.push(
+                fpv_meshes
+                    .materials
+                    .image_memory()
+                    .report_row("image memory common_mp FPV pool"),
+            );
+
+            let moved = fpv_meshes.materials.image_memory();
+            let material_population = std::mem::take(&mut fpv_meshes.materials);
+            report.push(format!(
+            "image memory common_mp population: bytes={} ({:.1}MiB) (moved into global at absorb; FPV catalog emptied)",
+            moved.total_bytes(),
+            moved.total_bytes() as f64 / (1024.0 * 1024.0),
+        ));
+            report.push(
+                fpv_meshes
+                    .materials
+                    .image_memory()
+                    .report_row("image memory FPV catalog after move"),
+            );
+            report.push(
+            "image memory common_mp fx color maps: n=0 bytes=0 (Bound into global; no clone of FPV pool)"
+                .into(),
+        );
+            CommonCensus {
+                pending_images,
+                scene_models: sink.scene_models,
+                shared_surfaces: sink.shared_surfaces,
+                weapons,
+                cac_tables: sink.stats_tables.into_values().collect(),
+                fpv: fpv_meshes,
+                world_weapons: sink.world_weapons,
+                projectile_meshes: sink.projectile_meshes,
+                xanims: sink.xanims,
+                player_anim_sources: sink.player_anim_sources,
+                fx: sink.fx,
+                fx_models: sink.fx_models,
+                tracers: sink.tracers,
+                impact_fx,
+                material_population,
+                technique_sets,
+                light_defs,
+                report,
+                pen_table: sink.pen_table.unwrap_or_default(),
+                pen_table_loaded: sink.pen_table.is_some(),
+                xmodel_walk: sink.models.walk_census(),
+                s1_common_arenas,
+                teamset_icons: std::collections::HashMap::new(),
+                film_visions: sink.film_visions,
+            }
+        } else {
+            let memory = sink.materials.image_memory();
+            report.push(format!(
+                "startup material population: zone={zone_name} materials={} images={} decoded={} payload_bytes={} (IWD decode deferred to absorb merge; not common_mp FPV decode)",
+                sink.materials.materials.len(),
+                memory.images,
+                memory.decoded_images,
+                memory.payload_bytes,
+            ));
+            CommonCensus {
+                pending_images: None,
+                scene_models: sink.scene_models,
+                shared_surfaces: sink.shared_surfaces,
+                weapons,
+                cac_tables: sink.stats_tables.into_values().collect(),
+                fpv: fpv_meshes,
+                world_weapons: sink.world_weapons,
+                projectile_meshes: sink.projectile_meshes,
+                xanims: sink.xanims,
+                player_anim_sources: sink.player_anim_sources,
+                fx: sink.fx,
+                fx_models: sink.fx_models,
+                tracers: sink.tracers,
+                impact_fx,
+                material_population: sink.materials,
+                technique_sets,
+                light_defs,
+                report,
+                pen_table: sink.pen_table.unwrap_or_default(),
+                pen_table_loaded: sink.pen_table.is_some(),
+                xmodel_walk: sink.models.walk_census(),
+                s1_common_arenas,
+                teamset_icons: std::collections::HashMap::new(),
+                film_visions: sink.film_visions,
+            }
+        }
+    }
+
+    fn load_material_population(
+        &self,
+        path: &Path,
+        image: &ZoneImage,
+        progress: &LoadProgress,
+        material_seed: crate::MaterialCatalog,
+    ) -> MaterialPopulation {
+        let zone_name = path.file_stem().map_or_else(
+            || "startup".to_owned(),
+            |stem| stem.to_string_lossy().into_owned(),
+        );
+        let header = match image.header() {
+            Ok(header) => header,
+            Err(error) => {
+                return MaterialPopulation {
+                    materials: material_seed,
+                    report: vec![format!("startup materials: zone header: {error}")],
+                    ..Default::default()
+                };
+            }
+        };
+        let mut memory = ZoneMemory::for_header(&header);
+        let mut stream = match memory.stream(&image.bytes) {
+            Ok(stream) => stream,
+            Err(error) => {
+                return MaterialPopulation {
+                    materials: material_seed,
+                    report: vec![format!("startup materials: zone arenas: {error}")],
+                    ..Default::default()
+                };
+            }
+        };
+        let mut sink =
+            MaterialPopulationSink::with_stage(progress.stage(format!("walking {zone_name}")));
+        sink.seed_materials(material_seed);
+        sink.set_capture_zone(crate::ZoneOwner::intern(&zone_name));
+        sink.set_capture_ns(crate::AssetNamespace::Iw4);
+        let walk = load_zone(&mut stream, &mut sink);
+        drop(sink.stage.take());
+        let mut report = Vec::new();
+        if let Err(error) = walk {
+            report.push(format!(
+                "startup materials: walk stopped after {} assets — {error}",
+                sink.walked
+            ));
+        }
+        let memory = sink.materials.image_memory();
+        report.push(format!(
+            "startup material walk: zone={zone_name} assets={} materials={} images={} decoded={} fpv=0 weapons=0 (materials-only sink; not load_common_mp)",
+            sink.walked,
+            sink.materials.materials.len(),
+            memory.images,
+            memory.decoded_images,
+        ));
+        MaterialPopulation {
+            walked: sink.walked,
+            materials: sink.materials,
+            report,
+        }
+    }
+}
+
+fn push_mapents_key_census(report: &mut Vec<String>, stream: &fastfile_iw4::ZoneStream<'_>) {
+    match map_ents_entity_string(stream) {
+        Some(text) => report.push(census_entity_string_keys(text).report_line()),
+        None => report.push("mapents keys=none".into()),
+    }
+}
+
+fn decode_map_material_images(
+    path: &Path,
+    catalog: &mut crate::MaterialCatalog,
+    stage: crate::progress::LoadStage,
+    fx_name_hints: Vec<String>,
+    glass_names: Vec<String>,
+) -> Vec<String> {
+    let mut report = Vec::new();
+    match decode_material_color_maps(path, catalog, &stage) {
+        Ok(stats) => {
+            report.push(format!(
+                "IWD color/normal maps: {}/{} decoded, {} missing, {} unsupported from {} archives",
+                stats.decoded, stats.requested, stats.missing, stats.unsupported, stats.archives
+            ));
+            if let Some(gap) = stats.first_gap {
+                report.push(format!("IWD material-map gap: {gap}"));
+            }
+            if let Some(gap) = stats.first_unsupported {
+                report.push(format!("IWD material-map unsupported: {gap}"));
+            }
+        }
+        Err(error) => report.push(format!("IWD material-map gap: {error}")),
+    }
+    let mut names = fx_name_hints;
+    names.extend(glass_names.iter().cloned());
+    match crate::material_images::decode_color_or_2d_for_names(path, catalog, names, &stage) {
+        Ok(n) => report.push(format!(
+            "fx elem 2d images: {n} TS_COLOR_MAP/TS_2D decoded (unique Bound names)"
+        )),
+        Err(error) => report.push(format!("fx elem 2d image gap: {error}")),
+    }
+
+    if !glass_names.is_empty() {
+        report.push(format!(
+            "fx glass def leftover: names={} (NameHint; color stays in catalog, not a clone sidecar)",
+            glass_names.len()
+        ));
+    }
+    report.push(
+        "image memory map fx color maps: n=0 bytes=0 (Bound into catalog; no clone sidecar)".into(),
+    );
+    drop(stage);
+    report
+}

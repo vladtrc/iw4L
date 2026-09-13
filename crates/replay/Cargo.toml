@@ -1,0 +1,20 @@
+[package]
+name = "replay"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Recording and playback of the same frames that go over the wire; theater mode."
+
+[dependencies]
+diag.workspace = true
+bevy.workspace = true
+frame.workspace = true
+net.workspace = true
+sim.workspace = true
+playerstate_iw4.workspace = true
+movement_iw4.workspace = true
+perf.workspace = true
+getrandom = "0.3"
+
+[lints]
+workspace = true

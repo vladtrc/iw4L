@@ -1,0 +1,11 @@
+[package]
+name = "d3d9_decl"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "D3D9 vertex declaration types and usage semantics. No IW4 knowledge."
+
+[dependencies]
+
+[lints]
+workspace = true

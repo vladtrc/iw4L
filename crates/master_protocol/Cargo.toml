@@ -1,0 +1,9 @@
+[package]
+name = "master_protocol"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Versioned control and opaque relay protocol shared by iw4l and iw4l-master."
+
+[lints]
+workspace = true

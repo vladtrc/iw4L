@@ -1,0 +1,15 @@
+[package]
+name = "lighting_iw4"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Retail IW4 CPU light-grid sample and static-model lighting facts: Entry layout, RLE stride, smodel lighting offsets."
+
+[dependencies]
+math_iw4.workspace = true
+hud_iw4.workspace = true
+fx_iw4.workspace = true
+libm = { version = "0.2.16", default-features = false }
+
+[lints]
+workspace = true

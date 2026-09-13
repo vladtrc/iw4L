@@ -1,0 +1,36 @@
+[package]
+name = "render_anim"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Presented DObj, FPV, body, item, missile, and script-model producers."
+
+[dependencies]
+anim_iw4.workspace = true
+asset_iw4.workspace = true
+assets.workspace = true
+audio.workspace = true
+diag.workspace = true
+dpvs_iw4.workspace = true
+entity_iw4.workspace = true
+frame.workspace = true
+fx.workspace = true
+fx_iw4.workspace = true
+hud_iw4.workspace = true
+gamemode_iw4.workspace = true
+lighting_iw4.workspace = true
+math_iw4.workspace = true
+net.workspace = true
+perf.workspace = true
+playerstate_iw4.workspace = true
+render_frame.workspace = true
+render_material.workspace = true
+render_scene.workspace = true
+sim.workspace = true
+weapon_iw4.workspace = true
+xmodel_runtime.workspace = true
+bevy.workspace = true
+bytemuck = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

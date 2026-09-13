@@ -1,0 +1,81 @@
+IW4L
+
+Copyright 2026 vladtrc
+
+IW4L was originally developed by vladtrc.
+https://github.com/vladtrc/iw4L
+
+IW4L is licensed under the Apache License, Version 2.0; see LICENSE.
+
+--------------------------------------------------------------------------------
+Third-party material bundled with this repository
+--------------------------------------------------------------------------------
+
+Both fonts below are compiled into the IW4L binary with `include_bytes!`, so
+they are redistributed with every build. Any archive that ships an IW4L binary
+ships these two licence texts with it.
+
+Oxanium (crates/ui/assets/Oxanium-Regular.ttf)
+  Copyright 2019 The Oxanium Project Authors
+  https://github.com/sevmeyer/oxanium
+  SIL Open Font License 1.1 — full text in crates/ui/assets/OFL-Oxanium.txt
+
+GNU FreeFont (crates/console/assets/FreeMono.otf)
+  Copyright (C) 2002-2012 Free Software Foundation, Inc.
+  https://www.gnu.org/software/freefont/
+  GNU General Public License v3 or later, with the GNU font exception — full
+  text in crates/console/assets/COPYING-FreeFont.txt. The exception is what
+  makes embedding the font in an Apache-2.0 binary possible: a document or
+  program that merely uses the font is not thereby covered by the GPL. The
+  font itself is unmodified and remains under the GPL.
+
+--------------------------------------------------------------------------------
+Third-party source code
+--------------------------------------------------------------------------------
+
+No third-party source code is vendored in this repository, and the build links
+no third-party project named below. IW4L's own dependencies are the crates
+declared in Cargo.toml, under their own licences.
+
+--------------------------------------------------------------------------------
+References consulted during development
+--------------------------------------------------------------------------------
+
+These projects were read while working out how the original games behave. They
+are named here because the reading happened, not because anything of theirs is
+distributed: none of them is vendored, linked, bundled or otherwise shipped.
+
+OpenAssetTools — https://github.com/Laupetin/OpenAssetTools
+  Open-source modding tools for older Call of Duty games. Its asset-structure
+  headers document the on-disk layouts IW4L reads. Licensed under GPLv3.
+
+oat (iw4x-x64 fork of OpenAssetTools) — https://github.com/iw4x-x64/oat
+  The x64 fork, at revision 3a7442dee5ce040cfdb8da23fdb9fb525b5f743e, is the
+  tree whose IW4MS headers were read for the 64-bit FastFile layouts.
+  Licensed under GPLv3, like its upstream. No file in this repository is
+  compiled against, generated from or distributed with those headers.
+
+IW4x — https://github.com/iw4x/iw4x-client
+  A custom client for Call of Duty: Modern Warfare 2 (2009), with dedicated
+  servers, security fixes and modding support. Read as a cross-reference for
+  asset and protocol behaviour. Licensed under GPLv3.
+
+KisakCOD — https://github.com/SwagSoftware/KisakCOD
+  A Call of Duty 4 open-source reimplementation. Read as a cross-reference for
+  engine structure. IW4L targets IW4, so this is a neighbouring generation of
+  the same engine family, not the same codebase.
+
+Ghidra — https://github.com/NationalSecurityAgency/ghidra
+  The software reverse engineering framework the original game binaries were
+  read with. A development tool: none of it, and none of its output, is
+  committed here or distributed with IW4L. Licensed under Apache 2.0.
+
+--------------------------------------------------------------------------------
+Game content
+--------------------------------------------------------------------------------
+
+No Call of Duty game data is contained in this repository or in any IW4L
+release archive. IW4L reads game data from a copy of the game the user already
+owns and has installed. Call of Duty, Modern Warfare, Black Ops, related
+trademarks and all original game assets belong to their respective owners.
+IW4L is not affiliated with, endorsed by or supported by them.

@@ -1,0 +1,6 @@
+# `unwrap_or_default()` hides which fallback a site actually takes. Only the
+# default variant is listed: `unwrap_or(explicit)` names its fallback out loud.
+disallowed-methods = [
+  "std::option::Option::unwrap_or_default",
+  "std::result::Result::unwrap_or_default",
+]
