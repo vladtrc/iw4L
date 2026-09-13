@@ -1,6 +1,9 @@
 # IW4L
 
-![IW4L running IW4: planting the bomb](docs/screenshots/bomb-plant.png)
+<p align="center">
+  <img src="docs/screenshots/bomb-plant.jpg" width="49%">
+  <img src="docs/screenshots/tanker-explosion.jpg" width="49%">
+</p>
 
 IW4L is a standalone, experimental Call of Duty runtime written in Rust on top
 of [bevy](https://bevyengine.org/) and [wgpu](https://wgpu.rs/). It reads the
@@ -49,6 +52,11 @@ install on Linux — map load, movement, weapons, bots and effects, driven by
 `make scenario` and `make chaos`. Anything past that list is untested rather
 than promised. Expect missing gameplay systems, incomplete compatibility, bugs
 and desyncs.
+
+<p align="center">
+  <img src="docs/screenshots/terminal-sniper.jpg" width="49%">
+  <img src="docs/screenshots/jungle-crossbow.jpg" width="49%">
+</p>
 
 ## Game data
 
@@ -140,6 +148,11 @@ IW4L is written from scratch, but it was not worked out in a vacuum.
 Nothing from these projects is vendored, linked or distributed with IW4L.
 [`NOTICE`](NOTICE) carries the full attribution, their licences, and the
 bundled fonts.
+
+<p align="center">
+  <img src="docs/screenshots/industrial-daylight.jpg" width="49%">
+  <img src="docs/screenshots/domination-capture.jpg" width="49%">
+</p>
 
 ## License
 
