@@ -56,7 +56,7 @@ publishes the plan, boots the sim and writes `MatchInstalled`.
 `iw4l-artifacts/cache/<kind>/<key>`, content-addressed, leaf in
 `asset_transport::artifact_cache` (`cache_get` / `cache_put`, `fnv1a64`). A
 miss is silent: the caller computes the value anyway, and a hit is obliged to
-be the **same bytes** a miss would have written (A2). The key names every
+be the **same bytes** a miss would have written. The key names every
 input; if the encoder changed, bump the format word at the caller. Live kinds:
 `mips` (`asset_material/material_images.rs`), `wgsl`
 (`render_frontend/.../wgsl_disk_cache.rs`).

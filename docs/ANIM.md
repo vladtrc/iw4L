@@ -1,6 +1,6 @@
 # Animation: what lives where
 
-Three floors, deliberately different: the **retail fact** (pure mathematics),
+Three floors, deliberately different: the **curve facts** (pure mathematics),
 the **runtime tree** (pose state) and **who picked which clip** (the game).
 
 ## `anim_iw4` — facts only, `#![no_std]`, no clock and no allocator
@@ -13,8 +13,8 @@ the **runtime tree** (pose state) and **who picked which clip** (the game).
 * `XBoneInfo` — the OBBs for bone hits (`DObjGeom_RayBones`);
 * `PartBits` — the six-word requested/ignore mask (`DObjCalcAnimInternal`);
 * `PlayerAnimValue` — 10-bit `legsAnim` / `torsoAnim`, a 9-bit index and the
-  `0x200` "restart" bit: a restart changes **only** that bit, not the index (A4);
-* the leaf time step and the goal-weight ramp are measured IW4 constants (A5);
+  `0x200` "restart" bit: a restart changes **only** that bit, not the index;
+* the leaf time step and the goal-weight ramp are measured IW4 constants;
 * script name tables: `ANIM_MT_NAMES`, `ANIM_BODY_PART_NAMES`, `ANIM_COND_NAMES`.
 
 No `Vec`, no `AnimationClip`, no glam matrices and no playback clock here.
@@ -37,12 +37,13 @@ gap, not "ordinary blending".
 
 * `sim` — `player_anim_script.rs`, `mantle_xanim.rs`, `anim_script_gap.rs`:
   what animation the player is in, and it travels into the snapshot as
-  semantics, not as a tree (S11);
+  semantics, not as a tree;
 * `assets` — `XAnimParts` → owning clips;
 * `render_frontend/adapters/anim/` + `render_anim` — the viewmodel (`fpv*.rs`,
   `viewmodel_controller.rs`), third person (`third_person.rs`, `remote_body.rs`),
   kick and sway (`view_kick.rs`, `view_sway.rs`), items and projectiles.
-  FPV actions come from the presented retail `weapAnim`, **never** from the
-  keyboard; the identity of the FPV mesh is `BG_GetViewmodelWeaponIndex`.
+  FPV actions come from the presented `weapAnim`, **never** from the
+  keyboard; the identity of the FPV mesh is
+  `weapon_iw4::bg_get_viewmodel_weapon_index`.
 
 To watch it live: `IW4L_PERF=1` / [`PERF.md`](PERF.md).

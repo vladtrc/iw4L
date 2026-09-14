@@ -46,7 +46,7 @@ the queue; inside `--cmds` that takes an explicit `!`.
 
 `map spawn class give attach name kill damage move tp look nudge press hold
 release bind bot wait mark record stoprecord clip demo dump screenshot ui disconnect quit`
-plus the debug `force_match_start` / `showpos` (our names, not retail).
+plus the debug `force_match_start` / `showpos`.
 `bot` is `add | hold | tp | give | fire`; `dump [name]` writes the current
 snapshot into `dumps/`.
 `clip` writes the last available 45 s into `clips/<ULID>/` (demo + dump) on the

@@ -39,9 +39,9 @@ zone → asset_iw4 IR → prepare/scene/world.rs      the world in our own types
        → sm3*.rs    SM3 tokens (`d3d9_sm3`) → WGSL → gpu_contract.rs → wgpu
 ```
 
-The key point: retail keeps **one** drawsurf machine, only the tess emitters
-fork; the three "renderers" (world / smodel / viewmodel) are a lie, and it has
-been physically burned out. Lighting: `lighting_iw4` (light grid) plus
+The key point: **one** drawsurf machine, with only the tess emitters forking
+per surface type. World, static models and the viewmodel are not three
+renderers; they are three emitters into one list. Lighting: `lighting_iw4` (light grid) plus
 `prepare/scene/smodel_lighting.rs` and the `model_lighting_atlas.rs` atlas;
 shadows are `assemble/drawsurf/sun_shadow.rs`.
 
@@ -82,6 +82,6 @@ word about IW4; the only D3D9 → `wgpu` crossing is the adapter inside `render`
 
 ## How to poke it
 
-The retail `r_*` names are not wired up as live dvars yet. Live, it is env
+There are no live `r_*` dvars. Live, it is env
 vars (`IW4L_SINGLE_CELL`, `IW4L_SUN_SHADOW_*`, …) and native Perfetto
 (`IW4L_PERF=1`, [`PERF.md`](PERF.md)).

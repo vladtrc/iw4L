@@ -14,14 +14,13 @@ pub fn step(world: &mut SimWorld, tick: Tick, input: &TickInput, msec: i32) -> S
 
 Headless, prediction, replay and the determinism test call exactly this one.
 `msec` is the length of the step; time enters **only** as an argument. Details
-in `crates/sim/src/lib.rs`. `step` ≈ `G_RunFrame`; the single funnel is ours.
-The comparison is [`GROUNDED.md`](GROUNDED.md).
+in `crates/sim/src/lib.rs`. One funnel in, one snapshot out.
 
-## What can be an entity at all — a retail fact (`entity_iw4`)
+## What can be an entity at all — fixed by the data (`entity_iw4`)
 
-The wiring is ours, the taxonomy is not. The crate neither serializes nor
-orders fields "for the network" (E2); every value carries the address it was
-read from (E3).
+The wiring is ours, the taxonomy comes with the data. The crate neither
+serializes nor orders fields "for the network": it pins the layout it reads and
+leaves transport to `net`.
 
 | | |
 |---|---|
