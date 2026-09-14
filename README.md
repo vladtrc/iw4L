@@ -14,12 +14,23 @@ reading public technical references.
 
 This whole project is written by an LLM.
 
+## Status
+
+No releases yet: you build it from this tree. Nothing here is stable either —
+the API, the config format, caches and the wire protocol all change between
+commits, so everyone in a session needs to be on the same one. Expect bugs and
+desyncs.
+
+The network side is for arranged playtests among people who already agreed to
+play; it has never been vetted for lobbies full of strangers. IW4L sends nothing
+home, and diagnostic files sit on your disk until you attach them to a report.
+
 ## Architecture
 
 | | |
 |---|---|
-| assets | MW2 zones read natively; MW3 and Black Ops land in the same `asset_iw4` IR. One pipeline, three games. |
-| shaders | Retail D3D9 SM3 tokens translated to WGSL. No DirectX at runtime. |
+| assets | MW2 zones read natively; MW3 and Black Ops land in the same `asset_iw4` IR. |
+| shaders | Retail D3D9 SM3 tokens translated to WGSL, so no DirectX at runtime. |
 | rendering | One sorted drawsurf list; only the tess emitters fork per surface type. |
 | physics | Fixed 17 ms step on its own accumulator. Framerate changes nothing about how a body falls. |
 | simulation | One `TickInput → sim::step → Snapshot` funnel for server, prediction, replay and the determinism test. |
@@ -57,29 +68,6 @@ Live runs use `[profile.play]`, a development build with optimizations turned
 on. `PROFILE=release` builds the real release binary.
 [`docs/WINDOWS.md`](docs/WINDOWS.md) covers Windows.
 
-## Releases, network and updates
-
-Builds go out as pre-releases: `v0.1.0-demo.N`, "IW4L Technical Demo N". Each
-one names the commit it came from, the platforms it was run on, the demo
-scenario and its known limitations, and carries `LICENSE`, `NOTICE` and the
-bundled font licences. A platform reaches that list once a build for it has
-been run; compiling doesn't earn a mention.
-
-* Nothing here is stable yet. The API, the config format, caches and the wire
-  protocol all change between builds, so play a session on one release. Expect
-  bugs and desyncs.
-* The network side is for arranged playtests among people who already agreed
-  to play. It has never been vetted for lobbies full of strangers.
-* Releases never update themselves. A release archive runs as it shipped, and
-  replacing it is your move.
-* IW4L sends nothing home. Diagnostic files sit on your disk until you attach
-  them to a report.
-* The demo master is one machine with no uptime promise. Local play never
-  touches it; [`docs/MASTER.md`](docs/MASTER.md) covers what it logs and how to
-  run your own.
-
-Security reports go to [`SECURITY.md`](SECURITY.md).
-
 ## Documentation
 
 Implementation notes live under `docs/`, one short file per area. Start at
@@ -102,7 +90,8 @@ Implementation notes live under `docs/`, one short file per area. Start at
 
 A personal, experimental project. Bug reports are welcome and get no promised
 fix date. [`CONTRIBUTING.md`](CONTRIBUTING.md) says what a useful report
-contains and how changes get reviewed.
+contains and how changes get reviewed; security reports go to
+[`SECURITY.md`](SECURITY.md).
 
 ## Acknowledgements
 
@@ -128,6 +117,6 @@ IW4L ships none of the code below. It was read against all of it.
 
 IW4L is licensed under the [Apache License 2.0](LICENSE), and
 [`NOTICE`](NOTICE) holds the copyright notices, the licences of the projects
-above and the bundled fonts. That licence covers IW4L's own source code. Call of Duty, Modern Warfare, Black Ops and the
-related assets, trademarks and intellectual property belong to their respective
-owners.
+above and the bundled fonts. That licence covers IW4L's own source code. Call
+of Duty, Modern Warfare, Black Ops and the related assets, trademarks and
+intellectual property belong to their respective owners.
