@@ -13,7 +13,6 @@ impl Plugin for RenderFxPlugin {
             .init_resource::<crate::PreparedFxModels>()
             .init_resource::<crate::PreparedFxElemInfos>()
             .init_resource::<crate::FxCameraOrigin>()
-            .init_resource::<crate::FxSoundStamp>()
             .init_resource::<crate::PreparedImpactFx>()
             .init_resource::<crate::HostFxSystem>()
             .init_resource::<crate::FxMarkDvars>()

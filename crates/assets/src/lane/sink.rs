@@ -10,9 +10,9 @@ fn is_cac_table(name: &str) -> bool {
     crate::is_stats_table_name(name) || name.eq_ignore_ascii_case("mp/attachmentTable.csv")
 }
 use crate::{
-    BodyMeshCatalog, FpvMeshCatalog, FxCatalog, ImpactFxCatalog, MaterialCatalog, ModelKind,
-    PreparedXModelWalkCensus, SoldierKit, WeaponCatalog, WorldWeaponCatalog, XAnimCatalog,
-    ZoneOwner, build_xmodel_mesh, model_kind, progress::LoadStage, soldier_kits,
+    BodyMeshBuild, FpvMeshBuild, FxCatalog, ImpactFxCatalog, MaterialCatalog, ModelKind,
+    PreparedXModelWalkCensus, SoldierKit, WeaponCatalog, WorldWeaponBuild, XAnimBuild, ZoneOwner,
+    build_xmodel_mesh, model_kind, progress::LoadStage, soldier_kits,
 };
 
 #[derive(Default)]
@@ -33,9 +33,9 @@ pub(crate) struct ZoneWalkSink {
     pub fx_glass_def_materials: Vec<(String, String)>,
 
     script_strings: ScriptStrings,
-    pub bodies: BodyMeshCatalog,
-    pub fpv_meshes: FpvMeshCatalog,
-    pub xanims: XAnimCatalog,
+    pub bodies: BodyMeshBuild,
+    pub fpv_meshes: FpvMeshBuild,
+    pub xanims: XAnimBuild,
 
     pub xmodel_coll: crate::XModelCollCatalog,
 
@@ -72,10 +72,10 @@ pub(crate) struct CommonWalkSink {
     pub models: ModelCensus,
     pub materials: MaterialCatalog,
     pub weapons: WeaponCatalog,
-    pub fpv_meshes: FpvMeshCatalog,
-    pub world_weapons: WorldWeaponCatalog,
-    pub projectile_meshes: crate::ProjectileMeshCatalog,
-    pub xanims: XAnimCatalog,
+    pub fpv_meshes: FpvMeshBuild,
+    pub world_weapons: WorldWeaponBuild,
+    pub projectile_meshes: crate::ProjectileMeshBuild,
+    pub xanims: XAnimBuild,
     pub player_anim_sources: crate::PlayerAnimSources,
     pub fx: FxCatalog,
     pub fx_models: crate::FxModelCatalog,

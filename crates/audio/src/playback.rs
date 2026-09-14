@@ -4,9 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use asset_iw4::{SND_CURVE_MAX_KNOTS, snd_attenuate, snd_has_free_voice};
-use assets::{
-    AssetNamespace, NamespaceSoundIwd, PreparedWeapons, SoundCatalog, lerp_range, snd_unit_random,
-};
+use assets::{AssetNamespace, NamespaceSoundIwd, SoundCatalog, lerp_range, snd_unit_random};
 use bevy::{
     audio::{AddAudioSource, AudioSink, AudioSinkPlayback, Volume},
     prelude::*,
@@ -46,12 +44,6 @@ pub struct Channel3d {
 
 #[derive(Resource, Clone)]
 pub struct SoundBank(pub Arc<SoundCatalog>);
-
-#[derive(Resource, Default)]
-pub(crate) struct WeaponSoundStamp {
-    weapons_revision: u64,
-    bank_revision: u64,
-}
 
 #[derive(Resource)]
 pub struct SoundPickState {
@@ -144,7 +136,6 @@ impl Plugin for PlayerSoundPlugin {
             .init_resource::<crate::ambient::MapAmbientBooted>()
             .init_resource::<crate::ambient::SoundBankLoadAttempted>()
             .init_resource::<crate::BobCycleTracker>()
-            .init_resource::<WeaponSoundStamp>()
             .add_audio_source::<PcmAudio>()
             .add_audio_source::<LoopingPcmAudio>()
             .add_message::<AliasCommand>()
@@ -189,7 +180,6 @@ impl Plugin for PlayerSoundPlugin {
                     crate::ambient::start_sound_bank_walk
                         .after(crate::ambient::stop_map_ambient_on_match_torn_down),
                     crate::ambient::install_sound_bank.after(crate::ambient::start_sound_bank_walk),
-                    stamp_weapon_sound_edges.after(crate::ambient::install_sound_bank),
                     crate::ambient::stop_map_ambient_on_match_torn_down.after(SessionSwapApplied),
                     reset_clip_prep_on_match_torn_down,
                 )
@@ -200,7 +190,6 @@ impl Plugin for PlayerSoundPlugin {
 
 fn reset_clip_prep_on_match_torn_down(
     mut torn: MessageReader<MatchTornDown>,
-    mut weapon_sounds: ResMut<WeaponSoundStamp>,
     mut pending: ResMut<PendingStarts>,
     mut shared: ResMut<SharedPlayAssets>,
 ) {
@@ -208,30 +197,7 @@ fn reset_clip_prep_on_match_torn_down(
         return;
     }
     pending.clear();
-    *weapon_sounds = WeaponSoundStamp::default();
     *shared = SharedPlayAssets::default();
-}
-
-pub(crate) fn stamp_weapon_sound_edges(
-    bank: Option<Res<SoundBank>>,
-    mut weapons: Option<ResMut<PreparedWeapons>>,
-    mut stamp: ResMut<WeaponSoundStamp>,
-) {
-    let Some(bank) = bank else {
-        return;
-    };
-    let Some(weapons) = weapons.as_mut() else {
-        return;
-    };
-    let weapons_revision = weapons.0.revision();
-    let bank_revision = bank.0.revision();
-    if stamp.weapons_revision == weapons_revision && stamp.bank_revision == bank_revision {
-        return;
-    }
-    weapons.0.resolve_weapon_sound_edges(&bank.0);
-    weapons.0.resolve_bounce_sound_edges(&bank.0);
-    stamp.weapons_revision = weapons_revision;
-    stamp.bank_revision = bank_revision;
 }
 
 fn listener_pose(listeners: &Query<&Transform, With<AmbientListener>>) -> Option<(Vec3, Vec3)> {

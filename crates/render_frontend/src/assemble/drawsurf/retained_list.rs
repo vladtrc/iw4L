@@ -2579,7 +2579,7 @@ fn emit_world_sun_shadow_surf(
         }
     }
     let empty_ib = world_plan
-        .surface_ranges
+        .surface_ranges()
         .get(surf)
         .map(|&(_, count)| count == 0)
         .unwrap_or(true);

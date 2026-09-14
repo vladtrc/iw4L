@@ -3,11 +3,12 @@ use std::path::{Path, PathBuf};
 use bevy::tasks::{TaskPool, TaskPoolBuilder};
 
 use crate::{
-    BodyMeshCatalog, ClipCollision, FpvMeshCatalog, FxCatalog, IntermissionView, LocalizeCatalog,
-    MP_LOCALIZED_ZONES, MaterialCatalog, PreparedGaps, PreparedMap, WeaponRegistry, WorldDraw,
-    WorldWeaponCatalog, XAnimCatalog, find_common_mp_for_envelope, find_common_mp_for_zone,
-    find_runtime_common_mp, find_runtime_zone, find_zone_file_version, find_zone_for_tree,
-    games_root_from_env,
+    BodyMeshCatalog, ClipCollision, FpvMeshBuild, FpvMeshCatalog, FxCatalog, IntermissionView,
+    LocalizeCatalog, MP_LOCALIZED_ZONES, MaterialCatalog, PreparedGaps, PreparedMap,
+    ProjectileMeshBuild, WeaponBuild, WeaponRegistry, WorldDraw, WorldWeaponBuild,
+    WorldWeaponCatalog, XAnimBuild, XAnimCatalog, find_common_mp_for_envelope,
+    find_common_mp_for_zone, find_runtime_common_mp, find_runtime_zone, find_zone_file_version,
+    find_zone_for_tree, games_root_from_env,
     lane::{LoadedWorld, lane},
     lane_capability::PreparedCapability,
     load_localize_catalog_in_lane,
@@ -71,7 +72,7 @@ pub fn load_shell_weapon_registry(
     Vec<(crate::AssetNamespace, crate::CapturedStringTable)>,
     Vec<String>,
 ) {
-    let mut merged = WeaponRegistry::default();
+    let mut merged = crate::WeaponBuild::default();
     let mut tables = Vec::new();
     let mut report = Vec::new();
     let progress = LoadProgress::default();
@@ -161,7 +162,7 @@ pub fn load_shell_weapon_registry(
             merged.len()
         ));
     }
-    (merged, tables, report)
+    (merged.publish(), tables, report)
 }
 
 #[derive(Default)]
@@ -226,6 +227,9 @@ pub struct PreparedMatch {
 
     pub projectile_meshes: crate::ProjectileMeshCatalog,
     pub xanims: XAnimCatalog,
+    /// Death clip/husk edges stamped at Ready from GSC names. Install wraps
+    /// these rows; it does not look them up again.
+    pub destructible_death: Vec<crate::DestructibleDeathRow>,
     pub player_anim_sources: crate::PlayerAnimSources,
 
     pub tracers: crate::TracerDefinitions,
@@ -481,11 +485,11 @@ pub async fn load_prepared_match(
             )
         }
         Some((_, Err(error))) => (
-            WeaponRegistry::default(),
-            FpvMeshCatalog::default(),
-            WorldWeaponCatalog::default(),
-            crate::ProjectileMeshCatalog::default(),
-            XAnimCatalog::default(),
+            crate::WeaponBuild::default(),
+            FpvMeshBuild::default(),
+            WorldWeaponBuild::default(),
+            ProjectileMeshBuild::default(),
+            XAnimBuild::default(),
             crate::PlayerAnimSources::default(),
             crate::FxCatalog::default(),
             crate::FxModelCatalog::default(),
@@ -494,11 +498,11 @@ pub async fn load_prepared_match(
             vec![format!("common_mp models: open zone: {error}")],
         ),
         None => (
-            WeaponRegistry::default(),
-            FpvMeshCatalog::default(),
-            WorldWeaponCatalog::default(),
-            crate::ProjectileMeshCatalog::default(),
-            XAnimCatalog::default(),
+            crate::WeaponBuild::default(),
+            FpvMeshBuild::default(),
+            WorldWeaponBuild::default(),
+            ProjectileMeshBuild::default(),
+            XAnimBuild::default(),
             crate::PlayerAnimSources::default(),
             crate::FxCatalog::default(),
             crate::FxModelCatalog::default(),
@@ -705,7 +709,7 @@ pub async fn load_prepared_match(
     report.extend(bodies.report_lines());
     let map_fpv_n = map_fpv.len();
     let map_fpv_added = fpv_meshes.absorb(map_fpv);
-    fpv_meshes.map_namespace = map_namespace;
+    fpv_meshes.set_map_namespace(map_namespace);
     weapons.resolve_fpv_mesh_edges(&fpv_meshes);
 
     weapons.resolve_world_model_edges(&world_weapons);
@@ -1334,6 +1338,17 @@ pub async fn load_prepared_match(
     report.extend(progress.timing_report());
 
     let fx = std::mem::take(&mut world.fx).publish();
+    let xanims = xanims.publish();
+    let destructible_death =
+        crate::stamp_match_destructible_death(&xanims, &world.map_xmodel_scene_assets);
+    for row in &destructible_death {
+        report.push(format!(
+            "destructible death {}: clip={} husk={}",
+            row.kind,
+            row.clip.edge_kind(),
+            row.husk.edge_kind()
+        ));
+    }
     MatchLoadOutcome::Ready(PreparedMatch {
         fx,
         world,
@@ -1342,12 +1357,13 @@ pub async fn load_prepared_match(
             map_ids,
         },
         clip,
-        weapons,
-        fpv_meshes,
-        bodies,
-        world_weapons,
-        projectile_meshes,
+        weapons: weapons.publish(),
+        fpv_meshes: fpv_meshes.publish(),
+        bodies: bodies.publish(),
+        world_weapons: world_weapons.publish(),
+        projectile_meshes: projectile_meshes.publish(),
         xanims,
+        destructible_death,
         player_anim_sources,
         tracers: common_tracers.publish(),
         strings,
@@ -1701,10 +1717,10 @@ enum ForeignCommonWork {
 
 #[derive(Default)]
 struct Iw5WeaponBundle {
-    weapons: WeaponRegistry,
-    fpv: FpvMeshCatalog,
-    world_guns: WorldWeaponCatalog,
-    xanims: XAnimCatalog,
+    weapons: WeaponBuild,
+    fpv: FpvMeshBuild,
+    world_guns: WorldWeaponBuild,
+    xanims: XAnimBuild,
 
     materials: MaterialCatalog,
 }
@@ -1876,25 +1892,25 @@ fn walk_t5_weapon_common(
     progress: &LoadProgress,
     material_seed: MaterialCatalog,
 ) -> (
-    WeaponRegistry,
-    FpvMeshCatalog,
-    WorldWeaponCatalog,
+    WeaponBuild,
+    FpvMeshBuild,
+    WorldWeaponBuild,
     MaterialCatalog,
-    XAnimCatalog,
+    XAnimBuild,
     FxCatalog,
-    crate::ProjectileMeshCatalog,
+    crate::ProjectileMeshBuild,
     Option<ImageDemandPlan>,
     Vec<String>,
 ) {
     let empty = |material_seed: MaterialCatalog, report: Vec<String>| {
         (
-            WeaponRegistry::default(),
-            FpvMeshCatalog::default(),
-            WorldWeaponCatalog::default(),
+            crate::WeaponBuild::default(),
+            FpvMeshBuild::default(),
+            WorldWeaponBuild::default(),
             material_seed,
-            XAnimCatalog::default(),
+            XAnimBuild::default(),
             FxCatalog::default(),
-            crate::ProjectileMeshCatalog::default(),
+            crate::ProjectileMeshBuild::default(),
             None,
             report,
         )

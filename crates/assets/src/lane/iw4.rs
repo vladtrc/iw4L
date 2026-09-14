@@ -905,7 +905,7 @@ impl ZoneLane for Iw4Lane {
             Some(&mut sink.fpv_meshes),
             Some(&mut sink.projectile_meshes),
         );
-        let mut weapons = sink.weapons.into_registry();
+        let mut weapons = sink.weapons.into_build();
         weapons.apply_stats_tables(sink.stats_tables.values());
         report.push(format!(
             "common_mp statsTable: tables={} item_groups={}",

@@ -104,6 +104,7 @@ pub struct VehicleFxPulse {
     pub owner: ScriptModelId,
     pub origin: [f32; 3],
     pub def_name: &'static str,
+    pub tag: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -111,6 +112,7 @@ pub struct VehicleSoundPulse {
     pub owner: ScriptModelId,
     pub origin: [f32; 3],
     pub alias: &'static str,
+    pub tag: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -280,6 +282,10 @@ impl WorldObjectState {
 
     pub fn vehicle_bodies(&self) -> &[(ScriptModelId, VehicleDestructibleKind, VehicleBodyState)] {
         &self.vehicle_bodies
+    }
+
+    pub fn toy_bodies(&self) -> &[(ScriptModelId, ToyDestructibleKind, VehicleBodyState)] {
+        &self.toy_bodies
     }
 
     pub fn vehicle_dump_rows(&self) -> Vec<VehicleDumpRow> {
@@ -495,7 +501,13 @@ impl WorldObjectState {
     pub fn take_new_death_fx_pulses(&mut self) -> (Vec<VehicleFxPulse>, Vec<VehicleSoundPulse>) {
         let mut fx = Vec::new();
         let mut sounds = Vec::new();
-        let pending: Vec<(ScriptModelId, &'static str, &'static str, [f32; 3])> = self
+        let pending: Vec<(
+            ScriptModelId,
+            &'static str,
+            &'static str,
+            [f32; 3],
+            Option<&'static str>,
+        )> = self
             .vehicle_bodies
             .iter()
             .filter_map(|(id, kind, body)| {
@@ -507,7 +519,13 @@ impl WorldObjectState {
                 }
                 let origin = lookup_origin(&self.vehicle_origins, *id)?;
                 let def = kind.definition();
-                Some((*id, def.death_fx, def.death_sound, origin))
+                Some((
+                    *id,
+                    def.death_fx,
+                    def.death_sound,
+                    origin,
+                    Some(def.death_fx_tag),
+                ))
             })
             .chain(self.barrel_bodies.iter().filter_map(|(id, body)| {
                 if body.state_index < crate::barrel_policy::EXPLODABLE_BARREL_DESTROYED_STATE {
@@ -522,6 +540,7 @@ impl WorldObjectState {
                     crate::barrel_policy::EXPLODABLE_BARREL_DEATH_FX,
                     crate::barrel_policy::EXPLODABLE_BARREL_DEATH_SOUND,
                     origin,
+                    None,
                 ))
             }))
             .chain(self.toy_bodies.iter().filter_map(|(id, kind, body)| {
@@ -533,21 +552,23 @@ impl WorldObjectState {
                 }
                 let origin = lookup_origin(&self.toy_origins, *id)?;
                 let def = kind.definition();
-                Some((*id, def.death_fx, def.death_sound, origin))
+                Some((*id, def.death_fx, def.death_sound, origin, def.death_fx_tag))
             }))
             .collect();
-        for (id, def_name, alias, origin) in pending {
+        for (id, def_name, alias, origin, tag) in pending {
             self.vehicle_death_fx_emitted.push(id);
             fx.push(VehicleFxPulse {
                 owner: id,
                 origin,
                 def_name,
+                tag,
             });
             if !alias.is_empty() {
                 sounds.push(VehicleSoundPulse {
                     owner: id,
                     origin,
                     alias,
+                    tag,
                 });
             }
         }
@@ -725,6 +746,7 @@ impl WorldObjectState {
                 owner: id,
                 origin,
                 def_name: fx,
+                tag: None,
             });
             *wait = interval;
         }
@@ -852,6 +874,7 @@ impl WorldObjectState {
                     owner: target,
                     origin,
                     def_name: cap_fx,
+                    tag: None,
                 });
             }
         }
@@ -860,8 +883,9 @@ impl WorldObjectState {
         }
         if !was_destroyed
             && next.state_index >= destroyed
-            && let Some(origin) = lookup_origin(&self.toy_origins, target)
+            && let Some(mut origin) = lookup_origin(&self.toy_origins, target)
         {
+            origin[2] += def.explode_origin_offset_z;
             return VehicleApply::Exploded(DestructibleExplodeEvent {
                 owner: target,
                 origin,
@@ -918,6 +942,7 @@ impl WorldObjectState {
                     owner: target,
                     origin,
                     def_name: crate::barrel_policy::EXPLODABLE_BARREL_BURN_START_FX,
+                    tag: None,
                 });
             }
         }

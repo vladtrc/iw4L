@@ -101,22 +101,15 @@ impl<T> ShareBanks<T> {
     }
 }
 
-pub(crate) fn steal_into_share<T>(src: &mut Vec<T>) -> Arc<Vec<T>> {
-    Arc::new(std::mem::take(src))
-}
-
-pub(crate) fn reclaim_share<T>(share: &mut Option<Arc<Vec<T>>>, dst: &mut Vec<T>) {
-    dst.clear();
-    if let Some(arc) = share.take() {
-        if let Ok(mut rows) = Arc::try_unwrap(arc) {
-            rows.clear();
-            *dst = rows;
-        }
+pub(crate) fn reset_rows<T>(rows: &mut Arc<Vec<T>>) {
+    match Arc::get_mut(rows) {
+        Some(v) => v.clear(),
+        None => *rows = Arc::new(Vec::new()),
     }
 }
 
-pub(crate) fn published_or_live<'a, T>(share: Option<&'a Arc<Vec<T>>>, live: &'a [T]) -> &'a [T] {
-    share.map(|rows| rows.as_slice()).unwrap_or(live)
+pub(crate) fn published_rows<T>(share: &Option<Arc<Vec<T>>>) -> &[T] {
+    share.as_ref().map(|rows| rows.as_slice()).unwrap_or(&[])
 }
 
 pub(crate) fn publish_index_ranges(

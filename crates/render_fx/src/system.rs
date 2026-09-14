@@ -9,9 +9,9 @@ use render_anim::sync_camera_from_presented;
 use render_scene::{FlyCamera, WorldPresentFacts};
 
 use crate::{
-    EntityMarks, FxCameraOrigin, FxJournalCursor, FxSoundStamp, HostFxDlights, HostFxPostLights,
-    HostFxSystem, PreparedFxCatalog, PreparedFxModels, PreparedImpactFx, PreparedTracers,
-    PresentedVehicleFx, TracerDrawGate, TracerWorld,
+    EntityMarks, FxCameraOrigin, FxJournalCursor, HostFxDlights, HostFxPostLights, HostFxSystem,
+    PreparedFxCatalog, PreparedFxModels, PreparedImpactFx, PreparedTracers, PresentedVehicleFx,
+    TracerDrawGate, TracerWorld,
 };
 
 pub fn register_fx_orchestration(app: &mut App) {
@@ -28,9 +28,6 @@ pub fn register_fx_orchestration(app: &mut App) {
             stamp_presentation_clock
                 .in_set(ClientSet::Reconcile)
                 .after(advance_cg_frame_clock),
-            stamp_fx_sound_edges
-                .in_set(ClientSet::Reconcile)
-                .after(stamp_presentation_clock),
         ),
     )
     .add_systems(
@@ -66,7 +63,6 @@ fn kill_fx_on_match_torn_down(
     mut torn: MessageReader<MatchTornDown>,
     mut host: ResMut<HostFxSystem>,
     mut cursor: ResMut<FxJournalCursor>,
-    mut sound_stamp: ResMut<FxSoundStamp>,
     mut dlights: ResMut<HostFxDlights>,
     mut post_lights: ResMut<HostFxPostLights>,
     mut tracers: ResMut<TracerWorld>,
@@ -80,7 +76,6 @@ fn kill_fx_on_match_torn_down(
     *host = HostFxSystem::default();
     cursor.createfx_booted = false;
     cursor.createfx_boot_msec = None;
-    *sound_stamp = FxSoundStamp::default();
     *dlights = HostFxDlights::default();
     *post_lights = HostFxPostLights::default();
     *tracers = TracerWorld::default();
@@ -107,27 +102,6 @@ fn stamp_presentation_clock(mut host: ResMut<HostFxSystem>, clock: Res<CgFrameCl
     set_presentation_clock(&mut host.0, msec);
 }
 
-pub fn stamp_fx_sound_edges(
-    mut catalog: Option<ResMut<PreparedFxCatalog>>,
-    bank: Option<Res<audio::SoundBank>>,
-    mut stamp: ResMut<FxSoundStamp>,
-) {
-    let Some(catalog) = catalog.as_mut() else {
-        return;
-    };
-    let Some(bank) = bank else {
-        return;
-    };
-    let fx_n = catalog.0.len();
-    let bank_revision = bank.0.revision();
-    if stamp.fx_n == fx_n && stamp.bank_revision == bank_revision {
-        return;
-    }
-    catalog.0.resolve_sound_edges(&bank.0);
-    stamp.fx_n = fx_n;
-    stamp.bank_revision = bank_revision;
-}
-
 fn play_pending_fx_sounds(
     mut host: ResMut<HostFxSystem>,
     catalog: Option<Res<PreparedFxCatalog>>,
@@ -146,39 +120,28 @@ fn play_pending_fx_sounds(
         if req.msec_begin < clock.old_time() {
             continue;
         }
-        let edge = catalog
+        match catalog
             .0
             .get(&req.parent_name)
             .and_then(|parent| parent.elems.get(req.def_index as usize))
-            .and_then(|elem| elem.sound_edge(req.random_seed));
-        let Some(edge) = edge else {
-            host.0.gaps.raise(FxGapCause::ElemSoundSpawnSkipped {
-                def_index: req.def_index,
-            });
-            continue;
-        };
-        if edge.is_absent() {
-            continue;
+            .map(|elem| elem.sound_in_bank(req.random_seed, &bank.0))
+        {
+            None | Some(assets::FxBankSound::Gap) => {
+                host.0.gaps.raise(FxGapCause::ElemSoundSpawnSkipped {
+                    def_index: req.def_index,
+                });
+            }
+            Some(assets::FxBankSound::Silent) => {}
+            Some(assets::FxBankSound::Play { namespace, alias }) => {
+                output.write(audio::AliasCommand::Play(audio::PlayAlias {
+                    namespace,
+                    alias: alias.to_owned(),
+                    fallback: None,
+                    origin_inches: Some(req.origin),
+                    snd_ent: Some(fx_iw4::FX_ENTITYNUM_WORLD),
+                }));
+            }
         }
-        let Some(index) = edge.bound_index() else {
-            host.0.gaps.raise(FxGapCause::ElemSoundSpawnSkipped {
-                def_index: req.def_index,
-            });
-            continue;
-        };
-        let Some(alias) = bank.0.name_at(index) else {
-            host.0.gaps.raise(FxGapCause::ElemSoundSpawnSkipped {
-                def_index: req.def_index,
-            });
-            continue;
-        };
-        output.write(audio::AliasCommand::Play(audio::PlayAlias {
-            namespace: bank.0.namespace_of_alias(index),
-            alias: alias.to_owned(),
-            fallback: None,
-            origin_inches: Some(req.origin),
-            snd_ent: Some(fx_iw4::FX_ENTITYNUM_WORLD),
-        }));
     }
 }
 

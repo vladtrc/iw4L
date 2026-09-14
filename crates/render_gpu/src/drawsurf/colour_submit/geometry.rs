@@ -24,22 +24,20 @@ pub(super) fn upload_exact_geometry(
     {
         geometry
             .world_cpu_indices
-            .clone_from(&source.world.static_geometry.world_indices);
+            .clone_from(source.world.static_geometry.world_indices.as_ref());
         if geometry.world_surface_ranges.is_empty() {
             geometry
                 .world_surface_ranges
-                .clone_from(&source.world.static_geometry.world_surface_ranges);
+                .clone_from(source.world.static_geometry.world_surface_ranges.as_ref());
         }
     }
     let static_matches = colour_world_smodel_static(
-        geometry.generation,
         geometry.world_generation,
         geometry.world_vertex_count,
         geometry.world_index_count,
         geometry.world_layer_count,
         geometry.smodel_vertex_count,
         geometry.smodel_index_count,
-        source.world.generation,
         source.world.world_generation,
         source.world.static_geometry.world_vertices.len(),
         source.world.static_geometry.world_indices.len(),
@@ -48,7 +46,6 @@ pub(super) fn upload_exact_geometry(
         source.world.static_geometry.smodel_indices.len(),
     );
     if !static_matches {
-        geometry.generation = source.world.generation;
         geometry.world_generation = source.world.world_generation;
         geometry.world_vertex = None;
         geometry.world_layer = None;
@@ -72,25 +69,29 @@ pub(super) fn upload_exact_geometry(
         {
             geometry.world_vertex = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("iw4_exact_colour_world_vb"),
-                contents: bytemuck::cast_slice(&source.world.static_geometry.world_vertices),
+                contents: bytemuck::cast_slice(
+                    source.world.static_geometry.world_vertices.as_slice(),
+                ),
                 usage: BufferUsages::VERTEX,
             }));
             geometry.world_index = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("iw4_exact_colour_world_ib"),
-                contents: bytemuck::cast_slice(&source.world.static_geometry.world_indices),
+                contents: bytemuck::cast_slice(
+                    source.world.static_geometry.world_indices.as_slice(),
+                ),
                 usage: BufferUsages::INDEX,
             }));
             geometry
                 .world_surface_ranges
-                .clone_from(&source.world.static_geometry.world_surface_ranges);
+                .clone_from(source.world.static_geometry.world_surface_ranges.as_ref());
             geometry
                 .world_cpu_indices
-                .clone_from(&source.world.static_geometry.world_indices);
+                .clone_from(source.world.static_geometry.world_indices.as_ref());
         }
         if !source.world.static_geometry.world_layer.is_empty() {
             geometry.world_layer = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("iw4_exact_colour_world_layer_vb"),
-                contents: &source.world.static_geometry.world_layer,
+                contents: source.world.static_geometry.world_layer.as_slice(),
                 usage: BufferUsages::VERTEX,
             }));
         }
@@ -99,19 +100,24 @@ pub(super) fn upload_exact_geometry(
         {
             geometry.smodel_vertex = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("iw4_exact_colour_smodel_vb"),
-                contents: bytemuck::cast_slice(&source.world.static_geometry.smodel_vertices),
+                contents: bytemuck::cast_slice(
+                    source.world.static_geometry.smodel_vertices.as_slice(),
+                ),
                 usage: BufferUsages::VERTEX,
             }));
             geometry.smodel_index = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("iw4_exact_colour_smodel_ib"),
-                contents: bytemuck::cast_slice(&source.world.static_geometry.smodel_indices),
+                contents: bytemuck::cast_slice(
+                    source.world.static_geometry.smodel_indices.as_slice(),
+                ),
                 usage: BufferUsages::INDEX,
             }));
             geometry
                 .smodel_surface_ranges
-                .clone_from(&source.world.static_geometry.smodel_surface_ranges);
+                .clone_from(source.world.static_geometry.smodel_surface_ranges.as_ref());
         }
     }
+    geometry.generation = source.world.generation;
 
     upload_xmodel_streams(geometry, source, &device, &queue);
     if geometry.particle_cloud_vertex.is_none()

@@ -114,6 +114,8 @@ impl ModelSkel {
             contents: self.contents,
             coll_lod: self.coll_lod,
             coll_surfs: self.coll_surfs.clone(),
+            bounds: self.bounds,
+            radius: self.radius,
         })
     }
 

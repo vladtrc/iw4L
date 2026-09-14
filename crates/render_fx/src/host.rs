@@ -17,12 +17,6 @@ pub struct PreparedFxModels(pub assets::FxModelCatalog);
 pub struct PreparedFxElemInfos(pub FxElemInfoCache);
 
 #[derive(Resource, Default)]
-pub struct FxSoundStamp {
-    pub fx_n: usize,
-    pub bank_revision: u64,
-}
-
-#[derive(Resource, Default)]
 pub struct PreparedImpactFx(pub Option<assets::OwnedFxImpactTable>);
 
 #[derive(Resource, Default)]

@@ -36,8 +36,8 @@ pub struct FxSurfaceDraw {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct FxCodeMeshPlan {
-    pub vertices: Vec<[u8; GFX_PACKED_VERTEX]>,
-    pub indices: Vec<u32>,
+    pub vertices: Arc<Vec<[u8; GFX_PACKED_VERTEX]>>,
+    pub indices: Arc<Vec<u32>>,
 
     pub args: Vec<[f32; 4]>,
     pub materials: Vec<FxPassMaterial>,
@@ -49,15 +49,21 @@ pub struct FxCodeMeshPlan {
 
     pub overflow_n: u32,
 
-    pub packed_share: Option<Arc<Vec<[u8; GFX_PACKED_VERTEX]>>>,
-    pub index_share: Option<Arc<Vec<u32>>>,
     pub range_share: Option<Arc<Vec<(u32, u32)>>>,
 }
 
 impl FxCodeMeshPlan {
+    fn verts_mut(&mut self) -> &mut Vec<[u8; GFX_PACKED_VERTEX]> {
+        Arc::make_mut(&mut self.vertices)
+    }
+
+    fn inds_mut(&mut self) -> &mut Vec<u32> {
+        Arc::make_mut(&mut self.indices)
+    }
+
     pub fn clear(&mut self) {
-        super::reclaim_share(&mut self.packed_share, &mut self.vertices);
-        super::reclaim_share(&mut self.index_share, &mut self.indices);
+        super::reset_rows(&mut self.vertices);
+        super::reset_rows(&mut self.indices);
         self.range_share = None;
         self.args.clear();
         self.materials.clear();
@@ -72,8 +78,6 @@ impl FxCodeMeshPlan {
     }
 
     pub fn publish_share(&mut self) {
-        self.packed_share = Some(super::steal_into_share(&mut self.vertices));
-        self.index_share = Some(super::steal_into_share(&mut self.indices));
         self.range_share = Some(super::publish_index_ranges(
             self.draws
                 .iter()
@@ -82,11 +86,11 @@ impl FxCodeMeshPlan {
     }
 
     pub fn packed_rows(&self) -> &[[u8; GFX_PACKED_VERTEX]] {
-        super::published_or_live(self.packed_share.as_ref(), &self.vertices)
+        self.vertices.as_slice()
     }
 
     pub fn index_rows(&self) -> &[u32] {
-        super::published_or_live(self.index_share.as_ref(), &self.indices)
+        self.indices.as_slice()
     }
 
     pub fn exact_packed_vertices(
@@ -127,7 +131,7 @@ impl FxCodeMeshPlan {
             let local = Vec3::new(local_xy[0], local_xy[1], 0.0);
             let uv = corners[i];
             let world = transform.transform_point(local);
-            self.vertices.push(fx_pack_code_mesh_vertex(
+            self.verts_mut().push(fx_pack_code_mesh_vertex(
                 world.to_array(),
                 color_rgba,
                 texcoord(uv[0], uv[1]),
@@ -135,7 +139,7 @@ impl FxCodeMeshPlan {
                 tangent_packed,
             ));
         }
-        self.indices
+        self.inds_mut()
             .extend_from_slice(&fx_sprite_quad_indices(u32::from(base)));
         true
     }
@@ -152,7 +156,7 @@ impl FxCodeMeshPlan {
             self.overflow_n = self.overflow_n.saturating_add(1);
             return false;
         }
-        self.vertices.push(fx_pack_code_mesh_vertex(
+        self.verts_mut().push(fx_pack_code_mesh_vertex(
             xyz,
             color_rgba,
             texcoord_packed,
@@ -169,12 +173,12 @@ impl FxCodeMeshPlan {
         };
         debug_assert_eq!(u32::from(base), self.vertices.len() as u32);
         for xyz in tess.verts {
-            self.vertices
+            self.verts_mut()
                 .push(fx_iw4::fx_post_light_pack_vert(xyz, tess.color_packed));
         }
         let b = u32::from(base);
         for idx in tess.indices {
-            self.indices.push(b.wrapping_add(u32::from(idx)));
+            self.inds_mut().push(b.wrapping_add(u32::from(idx)));
         }
         debug_assert_eq!(arg_base, Some(self.args.len() as u32));
         self.args.extend_from_slice(&tess.args);
@@ -186,19 +190,20 @@ impl FxCodeMeshPlan {
             self.overflow_n = self.overflow_n.saturating_add(1);
             return false;
         }
-        self.indices.extend_from_slice(inds);
+        self.inds_mut().extend_from_slice(inds);
         true
     }
 
     pub fn shrink_verts_to(&mut self, vert_used: u32) {
         let n = self.mesh.vert_used.wrapping_sub(vert_used);
         r_shrink_code_mesh_verts(&mut self.mesh, n);
-        self.vertices.truncate(self.mesh.vert_used as usize);
+        let vert_used = self.mesh.vert_used as usize;
+        self.verts_mut().truncate(vert_used);
     }
 
     pub fn shrink_indices_to(&mut self, index_used: u32) {
         self.mesh.index_used = index_used;
-        self.indices.truncate(index_used as usize);
+        self.inds_mut().truncate(index_used as usize);
     }
 
     pub fn begin_material_draw(

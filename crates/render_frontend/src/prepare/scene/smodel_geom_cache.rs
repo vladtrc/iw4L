@@ -325,10 +325,7 @@ pub(crate) fn cache_visible_smodel_surfaces(
     let Some(plan) = plan else {
         return;
     };
-    if matches!(
-        &plan.packed_vertices,
-        assets::RetailPackedVertexPayload::Unavailable { .. }
-    ) {
+    if plan.exact_packed_vertices().is_err() {
         return;
     }
     if smc_enable.enabled == Some(false) {
@@ -523,9 +520,9 @@ fn skin_cached_static_model_job(
     plan: &SmodelGpuPlan,
     job: PendingSmcSkin,
 ) {
-    let packed_rows = match &plan.packed_vertices {
-        assets::RetailPackedVertexPayload::Iw4(rows) => rows.as_slice(),
-        assets::RetailPackedVertexPayload::Unavailable { .. } => return,
+    let packed_rows = match plan.exact_packed_vertices() {
+        Ok(rows) => rows,
+        Err(_) => return,
     };
     let Some(lock) =
         lighting_iw4::rb_patch_static_model_cache_lock(job.base_vert_index, job.class_verts)
@@ -579,7 +576,7 @@ fn skin_cached_static_model_job(
     let mut baked_any = false;
     for surf in smc_surfs {
         let Some(src_ix) = local_u16_indices(
-            &plan.indices,
+            plan.indices(),
             surf.index_start,
             surf.index_count,
             surf.vert_base,

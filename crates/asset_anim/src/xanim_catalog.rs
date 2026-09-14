@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use asset_iw4::size as sz;
@@ -49,10 +50,15 @@ pub struct XAnimCatalog {
     order: Vec<XAnimKey>,
 
     zones: Vec<ZoneOwner>,
-    capture_zone: ZoneOwner,
-    capture_ns: AssetNamespace,
 
     decoded: Mutex<HashMap<AssetNamespace, HashMap<String, Arc<AnimClip>>>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct XAnimBuild {
+    catalog: XAnimCatalog,
+    capture_zone: ZoneOwner,
+    capture_ns: AssetNamespace,
     pub capture_gaps: usize,
     strings: ScriptStrings,
 }
@@ -63,9 +69,17 @@ impl Default for XAnimCatalog {
             by_ns: HashMap::new(),
             order: Vec::new(),
             zones: Vec::new(),
+            decoded: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for XAnimBuild {
+    fn default() -> Self {
+        Self {
+            catalog: XAnimCatalog::default(),
             capture_zone: ZoneOwner::default(),
             capture_ns: AssetNamespace::Iw4,
-            decoded: Mutex::new(HashMap::new()),
             capture_gaps: 0,
             strings: ScriptStrings::default(),
         }
@@ -83,30 +97,26 @@ impl Clone for XAnimCatalog {
             by_ns: self.by_ns.clone(),
             order: self.order.clone(),
             zones: self.zones.clone(),
-            capture_zone: self.capture_zone,
-            capture_ns: self.capture_ns,
             decoded: Mutex::new(decoded),
-            capture_gaps: self.capture_gaps,
-            strings: self.strings.clone(),
         }
     }
 }
 
-impl XAnimCatalog {
-    pub fn set_strings(&mut self, strings: ScriptStrings) {
-        self.strings = strings;
-    }
+impl Deref for XAnimBuild {
+    type Target = XAnimCatalog;
 
+    fn deref(&self) -> &Self::Target {
+        &self.catalog
+    }
+}
+
+impl XAnimCatalog {
     pub fn len(&self) -> usize {
         self.order.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.order.is_empty()
-    }
-
-    pub fn set_capture_ns(&mut self, ns: AssetNamespace) {
-        self.capture_ns = ns;
     }
 
     pub fn get(&self, ns: AssetNamespace, name: &str) -> Option<&CapturedXAnim> {
@@ -119,10 +129,6 @@ impl XAnimCatalog {
         } else {
             None
         }
-    }
-
-    fn take_row(&mut self, key: &XAnimKey) -> Option<CapturedXAnim> {
-        self.by_ns.get_mut(&key.namespace)?.remove(&key.name)
     }
 
     fn has_key(&self, key: &XAnimKey) -> bool {
@@ -142,44 +148,8 @@ impl XAnimCatalog {
         self.zones.get(index).copied().unwrap_or_default()
     }
 
-    pub fn set_capture_zone(&mut self, zone: ZoneOwner) {
-        self.capture_zone = zone;
-    }
-
     pub fn name_at(&self, index: usize) -> Option<&str> {
         self.order.get(index).map(|k| k.name.as_str())
-    }
-
-    pub fn insert_captured(&mut self, captured: CapturedXAnim) {
-        self.insert_in(self.capture_ns, captured);
-    }
-
-    pub fn insert_in(&mut self, ns: AssetNamespace, mut captured: CapturedXAnim) {
-        captured.namespace = ns;
-        let key = captured.key();
-        self.retain(key, captured);
-    }
-
-    fn retain(&mut self, key: XAnimKey, captured: CapturedXAnim) {
-        if let Some(pos) = self.order.iter().position(|n| n == &key) {
-            self.zones[pos] = self.capture_zone;
-        } else {
-            self.order.push(key.clone());
-            self.zones.push(self.capture_zone);
-        }
-        {
-            let mut decoded = self
-                .decoded
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            if let Some(map) = decoded.get_mut(&key.namespace) {
-                map.remove(&key.name);
-            }
-        }
-        self.by_ns
-            .entry(key.namespace)
-            .or_default()
-            .insert(key.name, captured);
     }
 
     pub fn clip_at(&self, index: usize) -> Option<Arc<AnimClip>> {
@@ -251,19 +221,83 @@ impl XAnimCatalog {
         }
         None
     }
+}
 
-    pub fn absorb(&mut self, mut local: XAnimCatalog) -> usize {
+impl XAnimBuild {
+    pub fn publish(self) -> XAnimCatalog {
+        self.catalog
+    }
+
+    pub fn set_strings(&mut self, strings: ScriptStrings) {
+        self.strings = strings;
+    }
+
+    pub fn set_capture_ns(&mut self, ns: AssetNamespace) {
+        self.capture_ns = ns;
+    }
+
+    pub fn set_capture_zone(&mut self, zone: ZoneOwner) {
+        self.capture_zone = zone;
+    }
+
+    pub fn insert_captured(&mut self, captured: CapturedXAnim) {
+        self.insert_in(self.capture_ns, captured);
+    }
+
+    pub fn insert_in(&mut self, ns: AssetNamespace, mut captured: CapturedXAnim) {
+        captured.namespace = ns;
+        let key = captured.key();
+        self.retain(key, captured);
+    }
+
+    fn take_row(&mut self, key: &XAnimKey) -> Option<CapturedXAnim> {
+        self.catalog
+            .by_ns
+            .get_mut(&key.namespace)?
+            .remove(&key.name)
+    }
+
+    fn retain(&mut self, key: XAnimKey, captured: CapturedXAnim) {
+        if let Some(pos) = self.catalog.order.iter().position(|n| n == &key) {
+            self.catalog.zones[pos] = self.capture_zone;
+        } else {
+            self.catalog.order.push(key.clone());
+            self.catalog.zones.push(self.capture_zone);
+        }
+        {
+            let mut decoded = self
+                .catalog
+                .decoded
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if let Some(map) = decoded.get_mut(&key.namespace) {
+                map.remove(&key.name);
+            }
+        }
+        self.catalog
+            .by_ns
+            .entry(key.namespace)
+            .or_default()
+            .insert(key.name, captured);
+    }
+
+    pub fn absorb(&mut self, mut local: Self) -> usize {
         self.capture_gaps = self.capture_gaps.saturating_add(local.capture_gaps);
         let saved_zone = self.capture_zone;
         let saved_ns = self.capture_ns;
         let mut added = 0;
-        let order = std::mem::take(&mut local.order);
+        let order = std::mem::take(&mut local.catalog.order);
         for (i, key) in order.into_iter().enumerate() {
             let Some(captured) = local.take_row(&key) else {
                 continue;
             };
-            let vacant = !self.has_key(&key);
-            self.capture_zone = local.zones.get(i).copied().unwrap_or(local.capture_zone);
+            let vacant = !self.catalog.has_key(&key);
+            self.capture_zone = local
+                .catalog
+                .zones
+                .get(i)
+                .copied()
+                .unwrap_or(local.capture_zone);
             self.capture_ns = key.namespace;
             self.retain(key, captured);
             if vacant {
@@ -275,7 +309,7 @@ impl XAnimCatalog {
         added
     }
 
-    pub fn absorb_local(&mut self, local: XAnimCatalog) {
+    pub fn absorb_local(&mut self, local: Self) {
         let _ = self.absorb(local);
     }
 
@@ -466,7 +500,7 @@ impl XAnimCatalog {
     }
 }
 
-impl AssetLinkSink for XAnimCatalog {
+impl AssetLinkSink for XAnimBuild {
     fn loaded(
         &mut self,
         _s: &ZoneStream<'_>,

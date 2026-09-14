@@ -659,7 +659,7 @@ impl ZoneLane for T5Lane {
         }
         sink.projectile_meshes
             .keep_referenced(&sink.weapons.projectile_model_hints());
-        let mut weapons = sink.weapons.into_registry();
+        let mut weapons = sink.weapons.into_build();
         weapons.stamp_namespace(crate::AssetNamespace::T5);
         weapons.apply_stats_tables(sink.stats_tables.values());
         weapons.resolve_sz_xanim_edges(&sink.xanims);

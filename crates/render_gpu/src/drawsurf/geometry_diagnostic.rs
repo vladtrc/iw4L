@@ -99,15 +99,15 @@ fn diagnostic_would_draw(item: &RetainedDrawItem, ready: bool, submitted: &HashS
 pub struct ExtractedDiagnosticGeometry {
     pub generation: MaterialGenerationId,
     pub overlay_gpu_wait: bool,
-    pub world_vertices: Vec<WorldVertex>,
-    pub world_indices: Vec<u32>,
-    pub world_surface_ranges: Vec<(u32, u32)>,
-    pub smodel_vertices: Vec<SmodelVertex>,
-    pub smodel_indices: Vec<u32>,
-    pub smodel_surface_ranges: Vec<(u32, u32)>,
-    pub xmodel_vertices: Vec<SmodelVertex>,
-    pub xmodel_indices: Vec<u32>,
-    pub xmodel_surface_ranges: Vec<(u32, u32)>,
+    pub world_vertices: Arc<Vec<WorldVertex>>,
+    pub world_indices: Arc<Vec<u32>>,
+    pub world_surface_ranges: Arc<Vec<(u32, u32)>>,
+    pub smodel_vertices: Arc<Vec<SmodelVertex>>,
+    pub smodel_indices: Arc<Vec<u32>>,
+    pub smodel_surface_ranges: Arc<Vec<(u32, u32)>>,
+    pub xmodel_vertices: Arc<Vec<SmodelVertex>>,
+    pub xmodel_indices: Arc<Vec<u32>>,
+    pub xmodel_surface_ranges: Arc<Vec<(u32, u32)>>,
     pub xmodel_revision: u64,
     pub g0_world_surfs: Vec<u16>,
 }
@@ -123,17 +123,17 @@ struct DiagnosticGeometry {
     generation: MaterialGenerationId,
     world_vertex: Option<Buffer>,
     world_index: Option<Buffer>,
-    world_surface_ranges: Vec<(u32, u32)>,
+    world_surface_ranges: Arc<Vec<(u32, u32)>>,
     smodel_vertex: Option<Buffer>,
     smodel_index: Option<Buffer>,
-    smodel_surface_ranges: Vec<(u32, u32)>,
+    smodel_surface_ranges: Arc<Vec<(u32, u32)>>,
     world_vertex_count: usize,
     world_index_count: usize,
     smodel_vertex_count: usize,
     smodel_index_count: usize,
     xmodel_vertex: Option<Buffer>,
     xmodel_index: Option<Buffer>,
-    xmodel_surface_ranges: Vec<(u32, u32)>,
+    xmodel_surface_ranges: Arc<Vec<(u32, u32)>>,
     xmodel_vertex_count: usize,
     xmodel_index_count: usize,
     xmodel_revision: u64,
@@ -341,20 +341,16 @@ fn upload_geometry(
         && geometry.smodel_vertex_count == source.smodel_vertices.len()
         && geometry.smodel_index_count == source.smodel_indices.len();
     if geometry.generation == source.generation && geometry_matches {
-        geometry
-            .world_surface_ranges
-            .clone_from(&source.world_surface_ranges);
-        geometry
-            .smodel_surface_ranges
-            .clone_from(&source.smodel_surface_ranges);
+        geometry.world_surface_ranges = Arc::clone(&source.world_surface_ranges);
+        geometry.smodel_surface_ranges = Arc::clone(&source.smodel_surface_ranges);
     } else {
         geometry.generation = source.generation;
         geometry.world_vertex = None;
         geometry.world_index = None;
-        geometry.world_surface_ranges.clear();
+        geometry.world_surface_ranges = Arc::new(Vec::new());
         geometry.smodel_vertex = None;
         geometry.smodel_index = None;
-        geometry.smodel_surface_ranges.clear();
+        geometry.smodel_surface_ranges = Arc::new(Vec::new());
         geometry.world_vertex_count = source.world_vertices.len();
         geometry.world_index_count = source.world_indices.len();
         geometry.smodel_vertex_count = source.smodel_vertices.len();
@@ -362,32 +358,28 @@ fn upload_geometry(
         if !source.world_vertices.is_empty() && !source.world_indices.is_empty() {
             geometry.world_vertex = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("iw4_geometry_diagnostic_world_vb"),
-                contents: bytemuck::cast_slice(&source.world_vertices),
+                contents: bytemuck::cast_slice(source.world_vertices.as_slice()),
                 usage: BufferUsages::VERTEX,
             }));
             geometry.world_index = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("iw4_geometry_diagnostic_world_ib"),
-                contents: bytemuck::cast_slice(&source.world_indices),
+                contents: bytemuck::cast_slice(source.world_indices.as_slice()),
                 usage: BufferUsages::INDEX,
             }));
-            geometry
-                .world_surface_ranges
-                .clone_from(&source.world_surface_ranges);
+            geometry.world_surface_ranges = Arc::clone(&source.world_surface_ranges);
         }
         if !source.smodel_vertices.is_empty() && !source.smodel_indices.is_empty() {
             geometry.smodel_vertex = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("iw4_geometry_diagnostic_smodel_vb"),
-                contents: bytemuck::cast_slice(&source.smodel_vertices),
+                contents: bytemuck::cast_slice(source.smodel_vertices.as_slice()),
                 usage: BufferUsages::VERTEX,
             }));
             geometry.smodel_index = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("iw4_geometry_diagnostic_smodel_ib"),
-                contents: bytemuck::cast_slice(&source.smodel_indices),
+                contents: bytemuck::cast_slice(source.smodel_indices.as_slice()),
                 usage: BufferUsages::INDEX,
             }));
-            geometry
-                .smodel_surface_ranges
-                .clone_from(&source.smodel_surface_ranges);
+            geometry.smodel_surface_ranges = Arc::clone(&source.smodel_surface_ranges);
         }
     }
 
@@ -395,30 +387,26 @@ fn upload_geometry(
         && geometry.xmodel_vertex_count == source.xmodel_vertices.len()
         && geometry.xmodel_index_count == source.xmodel_indices.len();
     if xmodel_matches {
-        geometry
-            .xmodel_surface_ranges
-            .clone_from(&source.xmodel_surface_ranges);
+        geometry.xmodel_surface_ranges = Arc::clone(&source.xmodel_surface_ranges);
     } else {
         geometry.xmodel_vertex = None;
         geometry.xmodel_index = None;
-        geometry.xmodel_surface_ranges.clear();
+        geometry.xmodel_surface_ranges = Arc::new(Vec::new());
         geometry.xmodel_vertex_count = source.xmodel_vertices.len();
         geometry.xmodel_index_count = source.xmodel_indices.len();
         geometry.xmodel_revision = source.xmodel_revision;
         if !source.xmodel_vertices.is_empty() && !source.xmodel_indices.is_empty() {
             geometry.xmodel_vertex = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("iw4_geometry_diagnostic_xmodel_vb"),
-                contents: bytemuck::cast_slice(&source.xmodel_vertices),
+                contents: bytemuck::cast_slice(source.xmodel_vertices.as_slice()),
                 usage: BufferUsages::VERTEX,
             }));
             geometry.xmodel_index = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("iw4_geometry_diagnostic_xmodel_ib"),
-                contents: bytemuck::cast_slice(&source.xmodel_indices),
+                contents: bytemuck::cast_slice(source.xmodel_indices.as_slice()),
                 usage: BufferUsages::INDEX,
             }));
-            geometry
-                .xmodel_surface_ranges
-                .clone_from(&source.xmodel_surface_ranges);
+            geometry.xmodel_surface_ranges = Arc::clone(&source.xmodel_surface_ranges);
         }
     }
     geometry.g0_world_surfs.clone_from(&source.g0_world_surfs);

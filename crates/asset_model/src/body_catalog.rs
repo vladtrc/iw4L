@@ -40,7 +40,7 @@ impl BodyMeshEntry {
         }
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
+    pub(crate) fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         stamp_xmodel_material_edges(
             &mut self.material_names,
             &mut self.material_edges,
@@ -75,30 +75,30 @@ impl BodyMeshEntry {
 #[derive(Clone, Debug, Default)]
 pub struct BodyMeshCatalog {
     entries: HashMap<String, BodyMeshEntry>,
-    strings: ScriptStrings,
-
     kits_cache: std::sync::OnceLock<SoldierKits>,
 }
 
-impl BodyMeshCatalog {
+#[derive(Clone, Debug, Default)]
+pub struct BodyMeshBuild {
+    catalog: BodyMeshCatalog,
+    strings: ScriptStrings,
+}
+
+impl std::ops::Deref for BodyMeshBuild {
+    type Target = BodyMeshCatalog;
+
+    fn deref(&self) -> &Self::Target {
+        &self.catalog
+    }
+}
+
+impl BodyMeshBuild {
+    pub fn publish(self) -> BodyMeshCatalog {
+        self.catalog
+    }
+
     pub fn set_strings(&mut self, strings: ScriptStrings) {
         self.strings = strings;
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    pub fn get(&self, name: &str) -> Option<&BodyMeshEntry> {
-        self.entries.get(name)
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.entries.keys().map(String::as_str)
     }
 
     pub fn capture(&mut self, stream: &ZoneStream<'_>, materials: &MaterialCatalog) {
@@ -150,6 +150,43 @@ impl BodyMeshCatalog {
         );
     }
 
+    fn insert_entry(&mut self, name: String, entry: BodyMeshEntry) {
+        self.catalog.kits_cache = std::sync::OnceLock::new();
+        self.catalog.entries.entry(name).or_insert(entry);
+    }
+
+    pub fn insert(&mut self, skel: crate::ModelSkel) {
+        self.insert_captured(skel, None);
+    }
+
+    pub fn insert_captured(&mut self, skel: crate::ModelSkel, materials: Option<&MaterialCatalog>) {
+        self.insert_entry(skel.name.clone(), BodyMeshEntry::from_skel(skel, materials));
+    }
+
+    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
+        for entry in self.catalog.entries.values_mut() {
+            entry.resolve_materials(materials);
+        }
+    }
+}
+
+impl BodyMeshCatalog {
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&BodyMeshEntry> {
+        self.entries.get(name)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(String::as_str)
+    }
+
     pub fn kits(&self) -> &SoldierKits {
         self.kits_cache.get_or_init(|| {
             let names: Vec<String> = self
@@ -162,11 +199,6 @@ impl BodyMeshCatalog {
                 .collect();
             soldier_kits(&names)
         })
-    }
-
-    fn insert_entry(&mut self, name: String, entry: BodyMeshEntry) {
-        self.kits_cache = std::sync::OnceLock::new();
-        self.entries.entry(name).or_insert(entry);
     }
 
     pub fn report_lines(&self) -> Vec<String> {
@@ -234,20 +266,6 @@ impl BodyMeshCatalog {
             }
         }
         kits.allies.is_some() || kits.axis.is_some()
-    }
-
-    pub fn insert(&mut self, skel: crate::ModelSkel) {
-        self.insert_captured(skel, None);
-    }
-
-    pub fn insert_captured(&mut self, skel: crate::ModelSkel, materials: Option<&MaterialCatalog>) {
-        self.insert_entry(skel.name.clone(), BodyMeshEntry::from_skel(skel, materials));
-    }
-
-    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
-        for entry in self.entries.values_mut() {
-            entry.resolve_materials(materials);
-        }
     }
 
     pub fn material_edge_census(&self) -> AssetEdgeCensus {

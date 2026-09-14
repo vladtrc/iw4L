@@ -270,6 +270,7 @@ pub enum HostMatchEvent {
         connection_id: Option<u64>,
     },
     Applied {
+        match_key: MatchKey,
         member: MemberId,
         bootstrap_id: u32,
         connection_id: Option<u64>,
@@ -391,6 +392,7 @@ impl TransitionIds {
                 elapsed_from,
             },
             HostMatchEvent::Applied {
+                match_key: _,
                 member,
                 bootstrap_id,
                 connection_id,
@@ -610,14 +612,17 @@ impl HostMatchCore {
                 self.finish(&ids, before, "bootstrap prepared", Vec::new())
             }
             HostMatchEvent::Applied {
+                match_key,
                 member,
                 bootstrap_id,
                 connection_id,
             } => {
-                // The event carries no match key, so the peer's phase is the
-                // whole guard — which means nothing may be written before it
-                // has passed. A retired match's completion used to land its
-                // connection id on the live peer on its way to being refused.
+                if match_key != self.match_key || match_key.is_none() {
+                    return self.reject(&ids, before, "stale applied");
+                }
+                if !matches!(self.phase, MatchPhase::Loading | MatchPhase::Running) {
+                    return self.reject(&ids, before, "applied without match");
+                }
                 let Some(phase) = self.peers.get(&member).map(|peer| peer.phase) else {
                     return self.reject(&ids, before, "applied unknown peer");
                 };
@@ -630,7 +635,6 @@ impl HostMatchCore {
                     } if pending == bootstrap_id => true,
                     _ => return self.reject(&ids, before, "applied mismatch"),
                 };
-                let match_key = self.match_key;
                 if let Some(peer) = self.peers.get_mut(&member) {
                     if connection_id.is_some() {
                         peer.connection_id = connection_id;
@@ -1396,6 +1400,7 @@ mod publication_tests {
         );
 
         let entered = host.apply(HostMatchEvent::Applied {
+            match_key: first,
             member: member(),
             bootstrap_id: 7,
             connection_id: Some(9),
@@ -1493,6 +1498,7 @@ mod publication_tests {
                 connection_id: Some(9),
             },
             HostMatchEvent::Applied {
+                match_key: first,
                 member: member(),
                 bootstrap_id: 7,
                 connection_id: Some(9),

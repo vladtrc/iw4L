@@ -57,21 +57,23 @@ pub fn mark_mesh_surface_samplers(sub_key: GfxMarkSubKey) -> SurfaceSamplerInput
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct GfxMarkMeshPlan {
-    pub vertices: Vec<[u8; GFX_WORLD_VERTEX]>,
-    pub indices: Vec<u16>,
+    pub vertices: Arc<Vec<[u8; GFX_WORLD_VERTEX]>>,
+    pub indices: Arc<Vec<u16>>,
     pub materials: Vec<FxPassMaterial>,
     pub draws: Vec<GfxMarkMeshDraw>,
     pub revision: u64,
     pub skip_why: Option<&'static str>,
-    pub packed_share: Option<Arc<Vec<[u8; GFX_WORLD_VERTEX]>>>,
-    pub index_share: Option<Arc<Vec<u16>>>,
     pub range_share: Option<Arc<Vec<(u32, u32)>>>,
 }
 
 impl GfxMarkMeshPlan {
+    fn inds_mut(&mut self) -> &mut Vec<u16> {
+        Arc::make_mut(&mut self.indices)
+    }
+
     pub fn clear(&mut self) {
-        super::reclaim_share(&mut self.packed_share, &mut self.vertices);
-        super::reclaim_share(&mut self.index_share, &mut self.indices);
+        super::reset_rows(&mut self.vertices);
+        super::reset_rows(&mut self.indices);
         self.range_share = None;
         self.materials.clear();
         self.draws.clear();
@@ -83,8 +85,6 @@ impl GfxMarkMeshPlan {
     }
 
     pub fn publish_share(&mut self) {
-        self.packed_share = Some(super::steal_into_share(&mut self.vertices));
-        self.index_share = Some(super::steal_into_share(&mut self.indices));
         self.range_share = Some(super::publish_index_ranges(
             self.draws
                 .iter()
@@ -93,11 +93,11 @@ impl GfxMarkMeshPlan {
     }
 
     pub fn packed_rows(&self) -> &[[u8; GFX_WORLD_VERTEX]] {
-        super::published_or_live(self.packed_share.as_ref(), &self.vertices)
+        self.vertices.as_slice()
     }
 
     pub fn index_rows(&self) -> &[u16] {
-        super::published_or_live(self.index_share.as_ref(), &self.indices)
+        self.indices.as_slice()
     }
 
     pub fn append_run_indices(
@@ -109,7 +109,7 @@ impl GfxMarkMeshPlan {
     ) {
         let index_start = self.indices.len() as u32;
         let index_count = indices.len() as u32;
-        self.indices.extend_from_slice(indices);
+        self.inds_mut().extend_from_slice(indices);
         if let Some(run) = self.draws.last_mut() {
             let material = &self.materials[run.material as usize];
             if material.sort_key == sort_key

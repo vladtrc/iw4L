@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bevy::mesh::{Indices, VertexAttributeValues};
 use bevy::prelude::*;
 
@@ -67,11 +69,6 @@ pub struct SmodelPlacement {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct SmodelGpuPlan {
-    pub vertices: Vec<SmodelVertex>,
-    pub indices: Vec<u32>,
-
-    pub surface_ranges: Vec<(u32, u32)>,
-
     pub packed_vertices: assets::RetailPackedVertexPayload,
 
     pub packed_match_surfaces: u32,
@@ -98,6 +95,11 @@ pub struct SmodelGpuPlan {
 
     pub unlit_material_key: std::collections::HashMap<Option<assets::MaterialIndex>, u32>,
     pub upload_pending: bool,
+    pub packed_share: Option<Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>>,
+    pub index_share: Option<Arc<Vec<u32>>>,
+    pub range_share: Option<Arc<Vec<(u32, u32)>>>,
+    pub cached_share: Option<Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>>,
+    pub decoded_share: Option<Arc<Vec<SmodelVertex>>>,
 }
 
 impl SmodelGpuPlan {
@@ -109,29 +111,68 @@ impl SmodelGpuPlan {
         if table_stride != Some(asset_iw4::size::GFX_PACKED_VERTEX as u16) {
             return Err(RetailPackedVertexRefusal::RetailStrideMismatch { table_stride });
         }
-        let vertices = match &self.packed_vertices {
-            assets::RetailPackedVertexPayload::Iw4(vertices) => vertices,
-            assets::RetailPackedVertexPayload::Unavailable { source_layout } => {
-                return Err(RetailPackedVertexRefusal::ForeignLayout { source_layout });
+        let vertices = if let Some(share) = self.packed_share.as_ref() {
+            share.as_slice()
+        } else {
+            match &self.packed_vertices {
+                assets::RetailPackedVertexPayload::Iw4(vertices) => vertices.as_slice(),
+                assets::RetailPackedVertexPayload::Unavailable { source_layout } => {
+                    return Err(RetailPackedVertexRefusal::ForeignLayout { source_layout });
+                }
             }
         };
-        if vertices.len() != self.vertices.len() {
+        if vertices.len() != self.decoded_vertices().len() {
             return Err(RetailPackedVertexRefusal::VertexCountMismatch {
                 retail: vertices.len(),
-                decoded: self.vertices.len(),
+                decoded: self.decoded_vertices().len(),
             });
         }
         Ok(vertices)
     }
 
+    pub fn indices(&self) -> &[u32] {
+        super::published_rows(&self.index_share)
+    }
+
+    pub fn surface_ranges(&self) -> &[(u32, u32)] {
+        super::published_rows(&self.range_share)
+    }
+
+    pub fn decoded_vertices(&self) -> &[SmodelVertex] {
+        super::published_rows(&self.decoded_share)
+    }
+
+    pub fn publish_extract_shares(&mut self) {
+        if self.packed_share.is_none() {
+            match std::mem::replace(
+                &mut self.packed_vertices,
+                assets::RetailPackedVertexPayload::Unavailable {
+                    source_layout: "packed payload published for extract",
+                },
+            ) {
+                assets::RetailPackedVertexPayload::Iw4(rows) => {
+                    self.packed_share = Some(Arc::new(rows));
+                }
+                unavailable => self.packed_vertices = unavailable,
+            }
+        }
+        if self.cached_share.is_none() {
+            self.cached_share = Some(Arc::new(std::mem::take(&mut self.cached_vertices)));
+        }
+    }
+
     pub fn packed_ok(&self) -> bool {
-        matches!(
-            self.packed_vertices,
-            assets::RetailPackedVertexPayload::Iw4(_)
-        )
+        self.packed_share.is_some()
+            || matches!(
+                self.packed_vertices,
+                assets::RetailPackedVertexPayload::Iw4(_)
+            )
     }
 
     pub fn packed_row_count(&self) -> Option<usize> {
+        if let Some(share) = self.packed_share.as_ref() {
+            return Some(share.len());
+        }
         match &self.packed_vertices {
             assets::RetailPackedVertexPayload::Iw4(rows) => Some(rows.len()),
             assets::RetailPackedVertexPayload::Unavailable { .. } => None,
@@ -237,6 +278,9 @@ pub fn pack_smodel_meshes(
     Vec<Vec<assets::RetailXSurfaceCollisionPayload>>,
 ) {
     let mut plan = SmodelGpuPlan::default();
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut surface_ranges = Vec::new();
 
     let mut mesh_authored: Vec<Vec<Option<assets::MaterialIndex>>> =
         Vec::with_capacity(meshes.len());
@@ -263,13 +307,13 @@ pub fn pack_smodel_meshes(
             for surface in &model.lod_surfaces[lod] {
                 packed_row.xsurface_plus_1_by_lod[lod].push(surface.xsurface_plus_1);
                 authored_row.push(surface.material);
-                let decoded_before = plan.vertices.len();
+                let decoded_before = vertices.len();
                 let packed_off = packed.len() as u32;
                 let Some(range_idx) = append_mesh_surface(
                     &surface.mesh,
-                    &mut plan.vertices,
-                    &mut plan.indices,
-                    &mut plan.surface_ranges,
+                    &mut vertices,
+                    &mut indices,
+                    &mut surface_ranges,
                 ) else {
                     skip_surfaces = skip_surfaces.saturating_add(1);
                     if skip_first.is_none() {
@@ -277,12 +321,11 @@ pub fn pack_smodel_meshes(
                     }
                     continue;
                 };
-                let decoded_count = plan.vertices.len() - decoded_before;
+                let decoded_count = vertices.len() - decoded_before;
                 if surface.packed_vertices.len() != decoded_count {
-                    plan.vertices.truncate(decoded_before);
-                    plan.indices
-                        .truncate(plan.surface_ranges[range_idx as usize].0 as usize);
-                    plan.surface_ranges.pop();
+                    vertices.truncate(decoded_before);
+                    indices.truncate(surface_ranges[range_idx as usize].0 as usize);
+                    surface_ranges.pop();
                     skip_surfaces = skip_surfaces.saturating_add(1);
                     if skip_first.is_none() {
                         skip_first = Some(format!(
@@ -294,7 +337,7 @@ pub fn pack_smodel_meshes(
                     }
                     continue;
                 }
-                let (index_start, index_count) = plan.surface_ranges[range_idx as usize];
+                let (index_start, index_count) = surface_ranges[range_idx as usize];
                 let src = SmodelCachedSurfSrc {
                     range_idx,
                     material: surface.material,
@@ -338,13 +381,13 @@ pub fn pack_smodel_meshes(
         mesh_authored.push(authored_row);
         mesh_collision.push(collision_row);
     }
-    packed_ok = packed_ok && packed.len() == plan.vertices.len() && !packed.is_empty();
+    packed_ok = packed_ok && packed.len() == vertices.len() && !packed.is_empty();
     plan.packed_match_surfaces = match_surfaces;
     plan.packed_skip_surfaces = skip_surfaces;
     plan.packed_skip_first = skip_first.clone();
     plan.packed_vertices = if packed_ok {
         assets::RetailPackedVertexPayload::Iw4(packed)
-    } else if plan.vertices.is_empty() {
+    } else if vertices.is_empty() {
         assets::RetailPackedVertexPayload::Unavailable {
             source_layout: "smodel plan has no vertices",
         }
@@ -353,11 +396,11 @@ pub fn pack_smodel_meshes(
             source_layout: "smodel packed vertex records missing or count-mismatched",
         }
     };
-    plan.upload_pending = !plan.vertices.is_empty() && !plan.indices.is_empty();
+    plan.upload_pending = !vertices.is_empty() && !indices.is_empty();
     diag::info!(
         World,
         "smodel packed: verts={} packed={} match_surf={} skip_surf={} first_skip={} upload={} mark_collision=ready:{} missing:{} unavailable:{}",
-        plan.vertices.len(),
+        vertices.len(),
         match &plan.packed_vertices {
             assets::RetailPackedVertexPayload::Iw4(rows) => rows.len(),
             assets::RetailPackedVertexPayload::Unavailable { .. } => 0,
@@ -370,6 +413,9 @@ pub fn pack_smodel_meshes(
         mark_collision_missing,
         mark_collision_unavailable,
     );
+    plan.decoded_share = Some(Arc::new(vertices));
+    plan.index_share = Some(Arc::new(indices));
+    plan.range_share = Some(Arc::new(surface_ranges));
     (plan, mesh_authored, mesh_collision)
 }
 
@@ -605,9 +651,9 @@ pub(crate) fn build_smodel_gpu_plan(
 
     expand_smodel_cached_vertices(&mut plan, |_| None);
     scene.smodel_mark_cpu = Some(crate::prepare::scene::world::SmodelMarkCpu {
-        positions: plan.vertices.iter().map(|v| v.position).collect(),
-        normals: plan.vertices.iter().map(|v| v.normal).collect(),
-        indices: plan.indices.clone(),
+        positions: plan.decoded_vertices().iter().map(|v| v.position).collect(),
+        normals: plan.decoded_vertices().iter().map(|v| v.normal).collect(),
+        indices: plan.indices().to_vec(),
         meshes: plan
             .meshes
             .iter()
@@ -617,7 +663,7 @@ pub(crate) fn build_smodel_gpu_plan(
                     .iter()
                     .zip(mesh_collision.get(mesh_index).into_iter().flatten())
                     .filter_map(|(&(range_idx, authored), collision)| {
-                        plan.surface_ranges.get(range_idx as usize).copied().map(
+                        plan.surface_ranges().get(range_idx as usize).copied().map(
                             |(start, count)| crate::prepare::scene::world::SmodelMarkSurface {
                                 index_start: start,
                                 index_count: count,
@@ -634,9 +680,10 @@ pub(crate) fn build_smodel_gpu_plan(
         World,
         "static models: {} authored slots; retained verts={} indices={} mats={}",
         slot_count,
-        plan.vertices.len(),
-        plan.indices.len(),
+        plan.decoded_vertices().len(),
+        plan.indices().len(),
         plan.materials.len(),
     );
+    plan.publish_extract_shares();
     commands.insert_resource(plan);
 }

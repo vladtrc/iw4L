@@ -1385,14 +1385,13 @@ pub(crate) fn execute_sun_product(
     if casters.items.is_empty() {
         return;
     }
-    let empty_xmodel: [(u32, u32); 0] = [];
     let xmodel_ranges = xmodel_plan
         .as_ref()
-        .map(|plan| plan.surface_ranges.as_slice())
-        .unwrap_or(&empty_xmodel);
-    let world_ranges = world_plan.surface_ranges.as_slice();
-    let world_verts = world_plan.vertices.len() as u32;
-    let smodel_ranges = smodel_plan.surface_ranges.as_slice();
+        .map(|plan| plan.range_rows())
+        .unwrap_or(&[]);
+    let world_ranges = world_plan.surface_ranges();
+    let world_verts = world_plan.decoded_vertices().len() as u32;
+    let smodel_ranges = smodel_plan.surface_ranges();
     let xmodel_topology = xmodel_plan
         .as_ref()
         .map(|plan| plan.topology_revision)
@@ -1520,15 +1519,15 @@ pub(crate) fn bake_spot_shadow_casters(
         world_run_surfs,
         world_plan
             .as_ref()
-            .map(|p| p.surface_ranges.as_slice())
+            .map(|p| p.surface_ranges())
             .unwrap_or(&[]),
         world_plan
             .as_ref()
-            .map(|p| p.vertices.len() as u32)
+            .map(|p| p.decoded_vertices().len() as u32)
             .unwrap_or(0),
         smodel_plan
             .as_ref()
-            .map(|p| p.surface_ranges.as_slice())
+            .map(|p| p.surface_ranges())
             .unwrap_or(&[]),
         smodel_plan.as_deref(),
         lod_ramp.args(),

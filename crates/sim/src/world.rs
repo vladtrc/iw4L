@@ -1855,8 +1855,7 @@ impl SimState {
                 .vehicle_bodies()
                 .iter()
                 .any(|(id, kind, _)| {
-                    Some(*id) == proxy.owner.script_model()
-                        && *kind == gamemode_iw4::VehicleDestructibleKind::Pickup
+                    Some(*id) == proxy.owner.script_model() && kind.has_body_glass()
                 });
             if pickup && let Some(dobj) = proxy.dobj.as_mut() {
                 crate::vehicle_glass::install(dobj);

@@ -15,9 +15,9 @@ pub use drawsurf::*;
 pub use entity_marks::{EntityMarkAttachment, EntityMarkRequest, EntityMarkStore, EntityMarks};
 pub use fire_weapon_fx::fire_weapon_fx_should_client_trace;
 pub use host::{
-    CombatFxDump, FxCameraOrigin, FxDumpRequest, FxJournalCursor, FxMarkDvars, FxSoundStamp,
-    FxWorldColorImages, HostFxDlights, HostFxPostLights, HostFxSystem, LaserDvars,
-    PreparedFxCatalog, PreparedFxElemInfos, PreparedFxModels, PreparedImpactFx, PresentedVehicleFx,
+    CombatFxDump, FxCameraOrigin, FxDumpRequest, FxJournalCursor, FxMarkDvars, FxWorldColorImages,
+    HostFxDlights, HostFxPostLights, HostFxSystem, LaserDvars, PreparedFxCatalog,
+    PreparedFxElemInfos, PreparedFxModels, PreparedImpactFx, PresentedVehicleFx,
     PresentedVehicleFxRow,
 };
 pub use model_append::append_fx_model_asset;

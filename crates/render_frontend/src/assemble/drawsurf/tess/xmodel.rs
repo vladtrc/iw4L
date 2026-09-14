@@ -54,6 +54,7 @@ pub struct XModelDrawPlan {
 
     pub index_share: Option<Arc<Vec<u32>>>,
     pub range_share: Option<Arc<Vec<(u32, u32)>>>,
+    pub decoded_share: Option<Arc<Vec<SmodelVertex>>>,
     packed_banks: super::ShareBanks<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
     index_banks: super::ShareBanks<u32>,
     range_banks: super::ShareBanks<(u32, u32)>,
@@ -92,6 +93,7 @@ impl XModelDrawPlan {
         self.packed_segments.forget();
         self.index_share = None;
         self.range_share = None;
+        self.decoded_share = None;
         self.last_input = None;
         self.last_topology = None;
         self.concat_layout = false;
@@ -113,11 +115,11 @@ impl XModelDrawPlan {
     }
 
     pub fn index_rows(&self) -> &[u32] {
-        super::published_or_live(self.index_share.as_ref(), &self.indices)
+        super::published_rows(&self.index_share)
     }
 
     pub fn range_rows(&self) -> &[(u32, u32)] {
-        super::published_or_live(self.range_share.as_ref(), &self.surface_ranges)
+        super::published_rows(&self.range_share)
     }
 
     pub fn exact_packed_vertices(
@@ -617,9 +619,9 @@ pub fn merge_xmodel_draw_plan(
             merged,
             &mut packed,
             &mut packed_ok,
-            sky.geometry.vertices.len(),
-            &sky.geometry.indices,
-            &sky.geometry.surface_ranges,
+            sky.geometry.decoded_vertices().len(),
+            sky.geometry.indices(),
+            sky.geometry.surface_ranges(),
             &sky.geometry.materials,
             &sky.geometry.packed_vertices,
             sky.draws.iter().map(|draw| XModelSurfaceDraw {
@@ -656,6 +658,7 @@ pub fn merge_xmodel_draw_plan(
         &mut merged.index_banks,
         &mut merged.range_banks,
     );
+    publish_decoded_share(merged);
     merged.last_input = Some(stamp);
     merged.last_topology = Some(stamp.topology);
     let packed_ms = packed_started.elapsed().as_secs_f32() * 1000.0;
@@ -778,7 +781,7 @@ fn concat_packed_owners<'a>(
             payload: sky_geom
                 .map(|g| &g.packed_vertices)
                 .unwrap_or(bodies.packed_vertices()),
-            decoded_n: sky_geom.map(|g| g.vertices.len()).unwrap_or(0),
+            decoded_n: sky_geom.map(|g| g.decoded_vertices().len()).unwrap_or(0),
         },
     ]
 }
@@ -1012,7 +1015,7 @@ fn refresh_concat_draws(
         append_concat_owner_draws(
             merged,
             &mut range_base,
-            sky.geometry.surface_ranges.len(),
+            sky.geometry.surface_ranges().len(),
             &sky.geometry.materials,
             sky.draws.iter().map(|draw| XModelSurfaceDraw {
                 world_from_local: Mat4::from_translation(eye),
@@ -1139,6 +1142,14 @@ fn publish_topology_shares(
     range_banks.put_write(std::mem::take(ranges));
     *index_share = Some(index_banks.published());
     *range_share = Some(range_banks.published());
+}
+
+fn publish_decoded_share(merged: &mut XModelDrawPlan) {
+    if merged.vertices.is_empty() {
+        merged.decoded_share = None;
+        return;
+    }
+    merged.decoded_share = Some(Arc::new(std::mem::take(&mut merged.vertices)));
 }
 
 fn packed_row_count(payload: &assets::RetailPackedVertexPayload) -> usize {

@@ -1,7 +1,7 @@
 use assets::{
-    ClipCollision, DestructibleDeathHint, LoadingScreen, MatchLoadAbort, MatchType10SoundHints,
-    PreparedDestructibleDeath, PreparedFpvMeshes, PreparedMatchReady, PreparedWeapons,
-    PreparedXAnims, SpawnPoint, WeaponRegistry, stamp_destructible_death_edges,
+    ClipCollision, LoadingScreen, MatchLoadAbort, MatchType10SoundHints, PreparedDestructibleDeath,
+    PreparedFpvMeshes, PreparedMatchReady, PreparedWeapons, PreparedXAnims, SpawnPoint,
+    WeaponRegistry,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -919,12 +919,8 @@ fn preflight_match_install(
     let world_weapons = assets::PreparedWorldWeapons(prepared.world_weapons);
     let projectile_meshes = assets::PreparedProjectileMeshes(prepared.projectile_meshes);
     let xmodel_walk = std::mem::take(&mut prepared.xmodel_walk);
-    let mut xanims = PreparedXAnims(prepared.xanims);
-    let death = PreparedDestructibleDeath(stamp_destructible_death_edges(
-        &xanims.0,
-        &prepared.world.map_xmodel_scene_assets,
-        &gsc_death_hints(),
-    ));
+    let xanims = PreparedXAnims(prepared.xanims);
+    let death = PreparedDestructibleDeath(std::mem::take(&mut prepared.destructible_death));
     log_destructible_death_assets(&death);
     let player_anim_sources = prepared.player_anim_sources;
     let prepared_map = prepared.prepared_map;
@@ -981,9 +977,9 @@ fn preflight_match_install(
             ));
         }
     };
+    apply_toy_spawn_models(&mut prepared.world);
     let authority_models = authority_entity_model_install(&prepared.world);
-    let animated =
-        collect_animated_prop_anims(&prepared.world.script_model_instances, &mut xanims.0);
+    let animated = collect_animated_prop_anims(&prepared.world.script_model_instances, &xanims.0);
     let model_spawns = script_model_spawns(&prepared.world.script_model_instances);
     let fx_catalog = PreparedFxCatalog(std::mem::take(&mut prepared.fx));
     let type10 = MatchType10SoundHints(
@@ -1096,7 +1092,7 @@ fn player_kit_collision(bodies: &assets::BodyMeshCatalog, axis: bool) -> sim::Pl
 
 fn collect_animated_prop_anims(
     instances: &[assets::ScriptModelSceneInstance],
-    xanims: &mut assets::XAnimCatalog,
+    xanims: &assets::XAnimCatalog,
 ) -> AnimatedPropAnims {
     let mut rows = Vec::new();
     let mut missing_table = 0;
@@ -1323,28 +1319,6 @@ fn command_duration_ms(
     }
 }
 
-fn gsc_death_hints() -> [DestructibleDeathHint; 3] {
-    let pickup = sim::VehicleDestructibleKind::Pickup;
-    let truck = sim::VehicleDestructibleKind::MovingTruck;
-    [
-        DestructibleDeathHint {
-            kind: pickup.as_str(),
-            clip: pickup.definition().death.clip,
-            husk: pickup.definition().death.husk,
-        },
-        DestructibleDeathHint {
-            kind: truck.as_str(),
-            clip: truck.definition().death.clip,
-            husk: truck.definition().death.husk,
-        },
-        DestructibleDeathHint {
-            kind: "explodable_barrel",
-            clip: "",
-            husk: sim::EXPLODABLE_BARREL_HUSK,
-        },
-    ]
-}
-
 fn log_destructible_death_assets(death: &PreparedDestructibleDeath) {
     for row in &death.0 {
         diag::info!(
@@ -1370,6 +1344,28 @@ fn log_destructible_fx_assets(fx: &PreparedFxCatalog) {
         sim::EXPLODABLE_BARREL_DEATH_FX,
         sim::EXPLODABLE_BARREL_BURN_START_FX,
         sim::EXPLODABLE_BARREL_BURN_LOOP_FX,
+        gamemode_iw4::TOY_TUBETV_DEATH_FX,
+        gamemode_iw4::TOY_FLATSCREEN_DEATH_FX,
+        gamemode_iw4::TOY_FLUORESCENT_DEATH_FX,
+        gamemode_iw4::TOY_FLUORESCENT_SINGLE_DEATH_FX,
+        gamemode_iw4::TOY_ELECTRICBOX_DEATH_FX,
+        gamemode_iw4::TOY_AIRCONDITIONER_DEATH_FX,
+        gamemode_iw4::TOY_WALL_FAN_DEATH_FX,
+        gamemode_iw4::TOY_CEILING_FAN_DEATH_FX,
+        gamemode_iw4::TOY_LOCKER_DOUBLE_DEATH_FX,
+        gamemode_iw4::TOY_FILECABINET_DEATH_FX,
+        gamemode_iw4::TOY_GAS_STATION_TRASH_BIN_01_DEATH_FX,
+        gamemode_iw4::TOY_TRANSFORMER_SMALL01_DEATH_FX,
+        gamemode_iw4::TOY_WATER_COLLECTOR_DEATH_FX,
+        gamemode_iw4::TOY_NEWSPAPER_STAND_RED_DEATH_FX,
+        gamemode_iw4::TOY_NEWSPAPER_STAND_BLUE_DEATH_FX,
+        gamemode_iw4::TOY_CHICKEN_BLACK_WHITE_DEATH_FX,
+        gamemode_iw4::TOY_CHICKEN_WHITE_DEATH_FX,
+        gamemode_iw4::TOY_FIREHYDRANT_DEATH_FX,
+        gamemode_iw4::TOY_COPIER_DEATH_FX,
+        gamemode_iw4::TOY_GENERATOR_DEATH_FX,
+        gamemode_iw4::TOY_DT_MIRROR_LARGE_DEATH_FX,
+        gamemode_iw4::TOY_DT_MIRROR_DEATH_FX,
     ];
     for name in DEFS {
         let status = if fx.0.resolve_def(name).is_some() {
@@ -1400,6 +1396,56 @@ struct AuthorityEntityModelInstall {
     installed_owners: Vec<(assets::ScriptModelId, sim::AuthorityModelOwner)>,
     ambiguous_brush_links: usize,
     standalone_brush_links: usize,
+}
+
+fn apply_toy_spawn_models(world: &mut assets::PreparedWorld) {
+    let remaps: Vec<(usize, String)> = {
+        let captured = &world.map_xmodel_scene_assets;
+        world
+            .script_model_instances
+            .iter()
+            .enumerate()
+            .filter_map(|(index, instance)| {
+                let kind =
+                    sim::ToyDestructibleKind::from_mapents(&instance.metadata.destructible_type)?;
+                let mapent = instance.current_model.0.as_str();
+                let spawn = kind
+                    .spawn_model_candidates(mapent)
+                    .iter()
+                    .copied()
+                    .find(|name| {
+                        matches!(
+                            captured.get_name(name),
+                            Some(
+                                assets::MapXModelSceneAsset::Iw4(_)
+                                    | assets::MapXModelSceneAsset::Iw5(_)
+                                    | assets::MapXModelSceneAsset::T5(_),
+                            )
+                        )
+                    })?;
+                (spawn != mapent).then(|| (index, spawn.to_owned()))
+            })
+            .collect()
+    };
+    for (index, model) in remaps {
+        world.script_model_instances[index].current_model = assets::MapXModelAssetKey(model);
+    }
+}
+
+fn attach_husk_capability(
+    dobj: &mut sim::AuthorityDObjState,
+    world: &assets::PreparedWorld,
+    name: &str,
+) {
+    let key = assets::MapXModelAssetKey(name.to_owned());
+    dobj.husk_capability = match world.map_xmodel_scene_assets.get(&key) {
+        Some(
+            assets::MapXModelSceneAsset::Iw4(model)
+            | assets::MapXModelSceneAsset::Iw5(model)
+            | assets::MapXModelSceneAsset::T5(model),
+        ) => model.retained_capability().map(std::sync::Arc::new),
+        Some(assets::MapXModelSceneAsset::Unavailable { .. }) | None => None,
+    };
 }
 
 fn authority_entity_model_install(world: &assets::PreparedWorld) -> AuthorityEntityModelInstall {
@@ -1447,19 +1493,38 @@ fn authority_entity_model_install(world: &assets::PreparedWorld) -> AuthorityEnt
                 }
                 assets::ScriptBrushModelLink::None => Vec::new(),
             };
-            let capability = match world.map_xmodel_scene_assets.get(&instance.current_model) {
-                Some(
-                    assets::MapXModelSceneAsset::Iw4(model)
-                    | assets::MapXModelSceneAsset::Iw5(model)
-                    | assets::MapXModelSceneAsset::T5(model),
-                ) => model.retained_capability().map(std::sync::Arc::new),
-                Some(assets::MapXModelSceneAsset::Unavailable { .. }) | None => None,
+            let capability = {
+                let key = &instance.current_model;
+                match world.map_xmodel_scene_assets.get(key) {
+                    Some(
+                        assets::MapXModelSceneAsset::Iw4(model)
+                        | assets::MapXModelSceneAsset::Iw5(model)
+                        | assets::MapXModelSceneAsset::T5(model),
+                    ) => model.retained_capability().map(std::sync::Arc::new),
+                    Some(assets::MapXModelSceneAsset::Unavailable { .. }) | None => None,
+                }
             };
             let mut dobj = sim::AuthorityDObjState::new_dirty(
                 instance.current_model.0.clone(),
                 capability,
                 instance.transform.to_matrix(),
             );
+            if let Some(kind) =
+                sim::VehicleDestructibleKind::from_mapents(&instance.metadata.destructible_type)
+            {
+                attach_husk_capability(&mut dobj, world, kind.definition().death.husk);
+            } else if let Some(kind) =
+                sim::ToyDestructibleKind::from_mapents(&instance.metadata.destructible_type)
+            {
+                attach_husk_capability(&mut dobj, world, kind.definition().husk);
+            } else if assets::exploding_prop_machine(
+                &instance.metadata.targetname,
+                &instance.metadata.script_noteworthy,
+                &instance.metadata.destructible_type,
+            ) == Some("explodable_barrel")
+            {
+                attach_husk_capability(&mut dobj, world, sim::EXPLODABLE_BARREL_HUSK);
+            }
 
             if let Some(definition) = &instance.metadata.t5_destructible {
                 sim::t5_destructible::install(&mut dobj, definition.clone());

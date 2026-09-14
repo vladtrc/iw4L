@@ -23,6 +23,69 @@ fn take_published<T>(share: Option<&Arc<Vec<T>>>) -> (Arc<Vec<T>>, u32) {
     }
 }
 
+fn overlay_world_shares(
+    plan: Option<&WorldDrawGpuPlan>,
+) -> (
+    Arc<Vec<render_frame::WorldVertex>>,
+    Arc<Vec<u32>>,
+    Arc<Vec<(u32, u32)>>,
+) {
+    match plan {
+        Some(plan) => (
+            take_published(plan.decoded_share.as_ref()).0,
+            take_published(plan.index_share.as_ref()).0,
+            take_published(plan.range_share.as_ref()).0,
+        ),
+        None => (
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+        ),
+    }
+}
+
+fn overlay_smodel_shares(
+    plan: Option<&SmodelGpuPlan>,
+) -> (
+    Arc<Vec<render_frame::SmodelVertex>>,
+    Arc<Vec<u32>>,
+    Arc<Vec<(u32, u32)>>,
+) {
+    match plan {
+        Some(plan) => (
+            take_published(plan.decoded_share.as_ref()).0,
+            take_published(plan.index_share.as_ref()).0,
+            take_published(plan.range_share.as_ref()).0,
+        ),
+        None => (
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+        ),
+    }
+}
+
+fn overlay_xmodel_shares(
+    plan: Option<&XModelDrawPlan>,
+) -> (
+    Arc<Vec<render_frame::SmodelVertex>>,
+    Arc<Vec<u32>>,
+    Arc<Vec<(u32, u32)>>,
+) {
+    match plan {
+        Some(plan) => (
+            take_published(plan.decoded_share.as_ref()).0,
+            take_published(plan.index_share.as_ref()).0,
+            take_published(plan.range_share.as_ref()).0,
+        ),
+        None => (
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+        ),
+    }
+}
+
 fn insert_empty_colour(commands: &mut Commands) {
     commands.insert_resource(InstalledRenderWorld::default());
     commands.insert_resource(PublishedRenderFrame::default());
@@ -31,7 +94,11 @@ fn insert_empty_colour(commands: &mut Commands) {
 fn world_colour_extract_counts(plan: Option<&WorldDrawGpuPlan>) -> (usize, usize, usize) {
     match plan {
         Some(plan) => match plan.exact_retail_vertices() {
-            Ok(vertices) => (vertices.len(), plan.indices.len(), plan.vertex_layer.len()),
+            Ok(vertices) => (
+                vertices.len(),
+                plan.indices().len(),
+                plan.vertex_layer_rows().len(),
+            ),
             Err(_) => (0, 0, 0),
         },
         None => (0, 0, 0),
@@ -41,7 +108,7 @@ fn world_colour_extract_counts(plan: Option<&WorldDrawGpuPlan>) -> (usize, usize
 fn smodel_colour_extract_counts(plan: Option<&SmodelGpuPlan>) -> (usize, usize) {
     match plan {
         Some(plan) => match plan.exact_packed_vertices() {
-            Ok(vertices) => (vertices.len(), plan.indices.len()),
+            Ok(vertices) => (vertices.len(), plan.indices().len()),
             Err(_) => (0, 0),
         },
         None => (0, 0),
@@ -169,14 +236,12 @@ pub fn seal_render_frame(
 
     let skip_world_smodel = existing_world.as_ref().is_some_and(|world| {
         render_gpu::colour_world_smodel_static(
-            world.generation,
             world.world_generation,
             world.static_geometry.world_vertices.len(),
             world.static_geometry.world_indices.len(),
             world.static_geometry.world_layer.len(),
             world.static_geometry.smodel_vertices.len(),
             world.static_geometry.smodel_indices.len(),
-            generation,
             world_generation,
             world_v,
             world_i,
@@ -190,24 +255,45 @@ pub fn seal_render_frame(
         && existing_world
             .as_ref()
             .is_some_and(|world| world.smc_revision == smc_revision);
+    let empty_static = || {
+        (
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+            None,
+        )
+    };
     let (world_vertices, world_layer, world_indices, world_surface_ranges, world_vertex_refusal) =
         if skip_world_smodel {
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), None)
+            empty_static()
         } else {
             match world.as_ref() {
                 Some(plan) => match plan.exact_retail_vertices() {
-                    Ok(vertices) => (
-                        vertices.to_vec(),
-                        plan.vertex_layer.clone(),
-                        plan.indices.clone(),
-                        plan.surface_ranges.clone(),
-                        None,
-                    ),
-                    Err(cause) => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Some(cause)),
+                    Ok(_) => {
+                        let (verts, _) = take_published(plan.vertex_share.as_ref());
+                        let (layer, _) = take_published(plan.layer_share.as_ref());
+                        let (inds, _) = take_published(plan.index_share.as_ref());
+                        let (ranges, _) = take_published(plan.range_share.as_ref());
+                        (verts, layer, inds, ranges, None)
+                    }
+                    Err(cause) => {
+                        let (empty_v, empty_l, empty_i, empty_r, _) = empty_static();
+                        (empty_v, empty_l, empty_i, empty_r, Some(cause))
+                    }
                 },
-                None => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), None),
+                None => empty_static(),
             }
         };
+    let empty_smodel = || {
+        (
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
+            None,
+            Arc::new(Vec::new()),
+        )
+    };
     let (
         smodel_vertices,
         smodel_indices,
@@ -215,20 +301,23 @@ pub fn seal_render_frame(
         smodel_vertex_refusal,
         smodel_cached_vertices,
     ) = if skip_world_smodel {
-        (Vec::new(), Vec::new(), Vec::new(), None, Vec::new())
+        empty_smodel()
     } else {
         match smodel.as_ref() {
             Some(plan) => match plan.exact_packed_vertices() {
-                Ok(vertices) => (
-                    vertices.to_vec(),
-                    plan.indices.clone(),
-                    plan.surface_ranges.clone(),
-                    None,
-                    plan.cached_vertices.clone(),
-                ),
-                Err(cause) => (Vec::new(), Vec::new(), Vec::new(), Some(cause), Vec::new()),
+                Ok(_) => {
+                    let (verts, _) = take_published(plan.packed_share.as_ref());
+                    let (inds, _) = take_published(plan.index_share.as_ref());
+                    let (ranges, _) = take_published(plan.range_share.as_ref());
+                    let (cached, _) = take_published(plan.cached_share.as_ref());
+                    (verts, inds, ranges, None, cached)
+                }
+                Err(cause) => {
+                    let (empty_v, empty_i, empty_r, _, empty_c) = empty_smodel();
+                    (empty_v, empty_i, empty_r, Some(cause), empty_c)
+                }
             },
-            None => (Vec::new(), Vec::new(), Vec::new(), None, Vec::new()),
+            None => empty_smodel(),
         }
     };
     let mut smc_vb_patches = Vec::new();
@@ -306,19 +395,10 @@ pub fn seal_render_frame(
     ) = match fx.as_ref() {
         Some(plan) => match plan.exact_packed_vertices() {
             Ok(_) => {
-                let (verts, v_arc) = take_published(plan.packed_share.as_ref());
-                let (inds, i_arc) = take_published(plan.index_share.as_ref());
+                let verts = Arc::clone(&plan.vertices);
+                let inds = Arc::clone(&plan.indices);
                 let (ranges, r_arc) = take_published(plan.range_share.as_ref());
-                (
-                    verts,
-                    inds,
-                    ranges,
-                    None,
-                    plan.revision,
-                    v_arc,
-                    i_arc,
-                    r_arc,
-                )
+                (verts, inds, ranges, None, plan.revision, 1u32, 1u32, r_arc)
             }
             Err(cause) => (
                 Arc::new(Vec::new()),
@@ -374,10 +454,10 @@ pub fn seal_render_frame(
         _mark_r_arc,
     ) = match mark_mesh.as_ref() {
         Some(plan) => {
-            let (verts, v_arc) = take_published(plan.packed_share.as_ref());
-            let (inds, i_arc) = take_published(plan.index_share.as_ref());
+            let verts = Arc::clone(&plan.vertices);
+            let inds = Arc::clone(&plan.indices);
             let (ranges, r_arc) = take_published(plan.range_share.as_ref());
-            (verts, inds, ranges, plan.revision, v_arc, i_arc, r_arc)
+            (verts, inds, ranges, plan.revision, 1u32, 1u32, r_arc)
         }
         None => (
             Arc::new(Vec::new()),
@@ -401,19 +481,10 @@ pub fn seal_render_frame(
     ) = match glass_mesh.as_ref() {
         Some(plan) => match plan.exact_packed_vertices() {
             Ok(_) => {
-                let (verts, v_arc) = take_published(plan.packed_share.as_ref());
-                let (inds, i_arc) = take_published(plan.index_share.as_ref());
+                let verts = Arc::clone(&plan.vertices);
+                let inds = Arc::clone(&plan.indices);
                 let (ranges, r_arc) = take_published(plan.range_share.as_ref());
-                (
-                    verts,
-                    inds,
-                    ranges,
-                    None,
-                    plan.revision,
-                    v_arc,
-                    i_arc,
-                    r_arc,
-                )
+                (verts, inds, ranges, None, plan.revision, 1u32, 1u32, r_arc)
             }
             Err(cause) => (
                 Arc::new(Vec::new()),
@@ -701,10 +772,14 @@ pub fn extract_geometry(
         .map(|stats| stats.g0_world_surfs.clone())
         .unwrap_or_default();
     let generation = runtime.catalog.generation_id;
-    let world_v = world.as_ref().map_or(0, |plan| plan.vertices.len());
-    let world_i = world.as_ref().map_or(0, |plan| plan.indices.len());
-    let smodel_v = smodel.as_ref().map_or(0, |plan| plan.vertices.len());
-    let smodel_i = smodel.as_ref().map_or(0, |plan| plan.indices.len());
+    let world_v = world
+        .as_ref()
+        .map_or(0, |plan| plan.decoded_vertices().len());
+    let world_i = world.as_ref().map_or(0, |plan| plan.indices().len());
+    let smodel_v = smodel
+        .as_ref()
+        .map_or(0, |plan| plan.decoded_vertices().len());
+    let smodel_i = smodel.as_ref().map_or(0, |plan| plan.indices().len());
     let overlay_gpu_wait = spawn_job.as_ref().is_some_and(|job| job.overlay_gpu_wait);
     let skip_world_smodel = overlay_gpu_wait
         || existing.as_ref().is_some_and(|extracted| {
@@ -728,21 +803,16 @@ pub fn extract_geometry(
             }
             return;
         }
-        existing.world_surface_ranges = world
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.surface_ranges.clone());
-        existing.smodel_surface_ranges = smodel
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.surface_ranges.clone());
-        existing.xmodel_vertices = xmodel
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.vertices.clone());
-        existing.xmodel_indices = xmodel
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.indices.clone());
-        existing.xmodel_surface_ranges = xmodel
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.surface_ranges.clone());
+        let (_, _, world_ranges) = overlay_world_shares(world.as_ref().map(|plan| plan.as_ref()));
+        let (_, _, smodel_ranges) =
+            overlay_smodel_shares(smodel.as_ref().map(|plan| plan.as_ref()));
+        let (xmodel_vertices, xmodel_indices, xmodel_surface_ranges) =
+            overlay_xmodel_shares(xmodel.as_ref().map(|plan| plan.as_ref()));
+        existing.world_surface_ranges = world_ranges;
+        existing.smodel_surface_ranges = smodel_ranges;
+        existing.xmodel_vertices = xmodel_vertices;
+        existing.xmodel_indices = xmodel_indices;
+        existing.xmodel_surface_ranges = xmodel_surface_ranges;
         existing.xmodel_revision = xmodel.as_ref().map_or(0, |plan| plan.revision);
         existing.g0_world_surfs = g0_world_surfs;
         if let Some(slot) = slot {
@@ -750,36 +820,24 @@ pub fn extract_geometry(
         }
         return;
     }
+    let (world_vertices, world_indices, world_surface_ranges) =
+        overlay_world_shares(world.as_ref().map(|plan| plan.as_ref()));
+    let (smodel_vertices, smodel_indices, smodel_surface_ranges) =
+        overlay_smodel_shares(smodel.as_ref().map(|plan| plan.as_ref()));
+    let (xmodel_vertices, xmodel_indices, xmodel_surface_ranges) =
+        overlay_xmodel_shares(xmodel.as_ref().map(|plan| plan.as_ref()));
     let next = render_gpu::ExtractedDiagnosticGeometry {
         generation,
         overlay_gpu_wait,
-        world_vertices: world
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.vertices.clone()),
-        world_indices: world
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.indices.clone()),
-        world_surface_ranges: world
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.surface_ranges.clone()),
-        smodel_vertices: smodel
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.vertices.clone()),
-        smodel_indices: smodel
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.indices.clone()),
-        smodel_surface_ranges: smodel
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.surface_ranges.clone()),
-        xmodel_vertices: xmodel
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.vertices.clone()),
-        xmodel_indices: xmodel
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.indices.clone()),
-        xmodel_surface_ranges: xmodel
-            .as_ref()
-            .map_or_else(Vec::new, |plan| plan.surface_ranges.clone()),
+        world_vertices,
+        world_indices,
+        world_surface_ranges,
+        smodel_vertices,
+        smodel_indices,
+        smodel_surface_ranges,
+        xmodel_vertices,
+        xmodel_indices,
+        xmodel_surface_ranges,
         xmodel_revision: xmodel.as_ref().map_or(0, |plan| plan.revision),
         g0_world_surfs,
     };
@@ -839,7 +897,7 @@ mod ownership_tests {
     fn reuse_carries_published_world_rows_and_leaves_the_rest_rebuilt() {
         let mut existing = render_gpu::RenderWorldData::default();
         existing.static_geometry = Arc::new(render_gpu::ExtractedStaticGeometry {
-            world_indices: vec![1, 2, 3],
+            world_indices: Arc::new(vec![1, 2, 3]),
             ..Default::default()
         });
         existing.sorted_material_names = Arc::new(vec!["retained".to_string()]);
@@ -859,7 +917,7 @@ mod ownership_tests {
                 ports: true,
             },
         );
-        assert_eq!(next.static_geometry.world_indices, [1, 2, 3]);
+        assert_eq!(next.static_geometry.world_indices.as_slice(), &[1, 2, 3]);
         assert_eq!(*next.sorted_material_names, ["retained".to_string()]);
         assert_eq!(*next.smc_index_baked, [5]);
         // Rows the seal rebuilt are never overwritten by the previous world.

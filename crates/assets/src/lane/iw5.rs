@@ -8,7 +8,7 @@ use crate::lane_capability::{LaneStatus, PreparedCapability};
 use crate::progress::LoadProgress;
 use crate::session_load::{PreparedWorld, WorldDrawPolicy};
 use crate::{
-    BodyMeshCatalog, Iw5ZoneMemory, MASK_PLAYER_SOLID, OwnedLightGrid, XAnimCatalog, ZoneGame,
+    BodyMeshBuild, Iw5ZoneMemory, MASK_PLAYER_SOLID, OwnedLightGrid, XAnimBuild, ZoneGame,
     ZoneImage, attach_iw5_static_models, build_iw5_clip_collision, build_iw5_world_draw,
     decode_reflection_probe_cubemap, dm_spawn_points_iw5, intermission_view_iw5,
     minimap_corners_iw5,
@@ -266,9 +266,9 @@ impl ZoneLane for Iw5Lane {
                     },
                     collision: clip,
                     spawns: dm_spawns,
-                    bodies: BodyMeshCatalog::default(),
+                    bodies: BodyMeshBuild::default(),
                     fpv_meshes,
-                    xanims: XAnimCatalog::default(),
+                    xanims: XAnimBuild::default(),
                     report,
                     gaps: vec![LaneGap {
                         capability: PreparedCapability::PreparedWorld,
@@ -669,7 +669,7 @@ impl ZoneLane for Iw5Lane {
         ));
         sink.weapons.resolve_reticles(&sink.materials);
         let captured = sink.weapons.len();
-        let mut weapons = sink.weapons.into_registry();
+        let mut weapons = sink.weapons.into_build();
         weapons.stamp_namespace(crate::AssetNamespace::Iw5);
         weapons.apply_stats_tables(sink.stats_tables.values());
         weapons.resolve_sz_xanim_edges(&sink.xanims);

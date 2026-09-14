@@ -50,6 +50,10 @@ pub struct RetainedModelCapability {
     pub coll_lod: i16,
 
     pub coll_surfs: Vec<CollSurfCollision>,
+
+    pub bounds: Option<([f32; 3], [f32; 3])>,
+
+    pub radius: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -137,6 +141,55 @@ impl RetainedModelCapability {
         }
         geom_collision_models(&[(self, None)], request, world_from_model, contentmask)
     }
+
+    pub fn bounds_collision_bone(&self, world_from_model: Mat4) -> Option<CollisionBone> {
+        let (mid, half) = match self.bounds {
+            Some((mid, half)) if half.iter().any(|&h| h > 0.0) => (mid, half),
+            _ => {
+                let radius = self.radius.filter(|&r| r.is_finite() && r > 0.0)?;
+                ([0.0; 3], [radius, radius, radius])
+            }
+        };
+        collision_bone_from_local_box(0, mid, half, world_from_model)
+    }
+}
+
+pub fn collision_bone_from_local_box(
+    bone: u16,
+    mid: [f32; 3],
+    half: [f32; 3],
+    world_from_model: Mat4,
+) -> Option<CollisionBone> {
+    if !mid.iter().all(|v| v.is_finite()) || !half.iter().all(|h| h.is_finite() && *h >= 0.0) {
+        return None;
+    }
+    if half.iter().all(|&h| h == 0.0) {
+        return None;
+    }
+    let center = world_from_model
+        .transform_point3(Vec3::from_array(mid))
+        .to_array();
+    if !center.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let mut axes = [[0.0; 3]; 3];
+    let mut half_size = [0.0; 3];
+    for axis in 0..3 {
+        let direction = world_from_model.transform_vector3(Vec3::AXES[axis]);
+        let scale = direction.length();
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        axes[axis] = (direction / scale).to_array();
+        half_size[axis] = half[axis] * scale;
+    }
+    Some(CollisionBone {
+        bone,
+        part_classification: 0,
+        center,
+        axes,
+        half_size,
+    })
 }
 
 pub fn collision_models(

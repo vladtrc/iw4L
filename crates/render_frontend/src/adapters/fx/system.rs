@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use assets::{FxDefinitions, OwnedFxVisual, PreparedWeapons, lookup_fx_color_image};
 use bevy::ecs::system::SystemParam;
@@ -36,7 +37,7 @@ use render_fx::combat::{
     try_play_weapon_fx_bolted,
 };
 use render_fx::fire_weapon_fx_should_client_trace;
-use render_fx::system::{stamp_fx_camera_origin, stamp_fx_sound_edges};
+use render_fx::system::stamp_fx_camera_origin;
 
 use crate::{
     adapters::fx::{
@@ -98,7 +99,6 @@ pub(crate) fn register_combat_fx_systems(app: &mut App) {
             Update,
             (boot_createfx_oneshots, tick_fx_non_dependent_update)
                 .chain()
-                .after(stamp_fx_sound_edges)
                 .after(stamp_fx_camera_origin)
                 .in_set(frame::WorkerCmdSet::FxNonDependent),
         )
@@ -1708,8 +1708,8 @@ fn fill_mark_mesh_plan(
         plan.publish_share();
         return;
     };
-    plan.vertices = mesh.packed;
-    plan.indices.reserve(mesh.indices.len());
+    plan.vertices = Arc::new(mesh.packed);
+    Arc::make_mut(&mut plan.indices).reserve(mesh.indices.len());
     let mut skip_why = None;
 
     let mut admitted: Vec<(u64, u8, u32, GfxMarkSubKey, u32, u32)> =
@@ -2323,12 +2323,8 @@ fn tick_missile_present_state(
         }
 
         if want_ignition
-            && !matches!(
-                weapons.weapon_sound_edge_of(row.weapon, assets::WeaponSoundSlot::ProjIgnition),
-                Some(edge) if edge.is_absent()
-            )
             && weapons
-                .weapon_sound_edge_of(row.weapon, assets::WeaponSoundSlot::ProjIgnition)
+                .authored_weapon_sound(row.weapon, assets::WeaponSoundSlot::ProjIgnition)
                 .is_some()
         {
             match sound_bank.as_deref().and_then(|bank| {

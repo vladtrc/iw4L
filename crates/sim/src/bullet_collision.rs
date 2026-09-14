@@ -25,8 +25,8 @@ thread_local! {
 
 pub fn dobj_contents_match_mask(contents: Option<u32>, mask: u32) -> bool {
     match contents {
+        Some(0) | None => true,
         Some(c) => c & mask != 0,
-        None => true,
     }
 }
 
@@ -187,6 +187,7 @@ pub struct AuthorityDObjState {
 
     pub(crate) t5_destructible: Option<crate::t5_destructible::State>,
     pub(crate) pickup_glass: Option<[gamemode_iw4::VehicleBodyState; 6]>,
+    pub husk_capability: Option<std::sync::Arc<xmodel_runtime::RetainedModelCapability>>,
 }
 
 fn iw_angles_to_mat4(origin: glam::Vec3, angles: [f32; 3]) -> glam::Mat4 {
@@ -213,7 +214,13 @@ fn coll_trace_from_capability(
     request: &xmodel_runtime::DObjPoseRequest,
     world_from_model: glam::Mat4,
 ) -> Result<Option<AuthorityDObjCollTrace>, xmodel_runtime::MaterializeError> {
-    if capability.coll_surfs.is_empty() {
+    if capability.coll_lod < 0
+        || capability.coll_surfs.is_empty()
+        || !capability
+            .coll_surfs
+            .iter()
+            .any(|surf| surf.contents & MASK_BULLET_WORLD != 0)
+    {
         return Ok(None);
     }
     let posed = capability.pose(request, glam::Mat4::IDENTITY)?;
@@ -316,6 +323,7 @@ impl AuthorityDObjState {
             apos: None,
             pickup_glass: None,
             t5_destructible: None,
+            husk_capability: None,
         }
     }
 
@@ -338,7 +346,7 @@ impl AuthorityDObjState {
     pub fn begin_destructible_death(&mut self, husk: &str, clip: &str) {
         self.play_anim = None;
         self.pickup_glass = None;
-        self.set_model(husk.to_owned(), None);
+        self.set_model(husk.to_owned(), self.husk_capability.clone());
         self.pose_revision = self.pose_revision.wrapping_add(1);
         self.semantic_state = xmodel_runtime::DObjSemanticState::one_leaf(
             husk.to_owned(),
@@ -507,6 +515,54 @@ impl AuthorityDObjState {
             }
             Err(error) => {
                 self.materialize_error = Some(error);
+            }
+        }
+    }
+
+    pub fn tag_world_pose(&self, tag: &str) -> Option<([f32; 3], [f32; 3])> {
+        let capability = self.capability.as_ref()?;
+        let bone = capability
+            .pose
+            .bone_names
+            .iter()
+            .position(|name| name == tag)?;
+        let posed = capability
+            .pose(&self.pose_request, self.world_from_model)
+            .ok()?;
+        let matrix = posed.get(bone)?;
+        let origin = matrix.w_axis.truncate().to_array();
+        let forward = matrix.x_axis.truncate();
+        let direction = if forward.length_squared() > 1e-8 {
+            forward.normalize().to_array()
+        } else {
+            gamemode_iw4::VEHICLE_DEATH_FX_FORWARD
+        };
+        Some((origin, direction))
+    }
+
+    pub fn ensure_bounds_collision(&mut self) {
+        let Some(capability) = self.capability.as_ref() else {
+            return;
+        };
+        let Some(bone) = capability.bounds_collision_bone(self.world_from_model) else {
+            return;
+        };
+        match &mut self.current_collision {
+            Some(coll) => {
+                let already = coll.bones.iter().any(|have| {
+                    have.center == bone.center
+                        && have.half_size == bone.half_size
+                        && have.axes == bone.axes
+                });
+                if !already {
+                    coll.bones.push(bone);
+                }
+            }
+            None => {
+                self.current_collision = Some(AuthorityDObjCollision {
+                    bones: vec![bone],
+                    coll: None,
+                });
             }
         }
     }
@@ -1034,7 +1090,7 @@ fn bullet_trace_filtered(
     for geom in script_models {
         if let Some((mins, maxs)) = geom_abs_aabb(geom, cmodels) {
             if matches!(
-                ray_aabb_box(query.start, entity_end, mins, maxs),
+                ray_aabb_box(query.start, query.end, mins, maxs),
                 RayAabb::Miss
             ) {
                 continue;
@@ -1108,30 +1164,28 @@ fn bullet_trace_filtered(
                 &coll.bones,
                 &coll.hide_part_bits,
             );
-            if bone < 0 {
-                continue;
+            if bone >= 0 {
+                if let Ok(bone) = u16::try_from(bone) {
+                    let collider = ColliderId::EntityDObjBone {
+                        owner: geom.owner,
+                        bone,
+                        part_classification: 0,
+                        surface_flags: tr.surface_flags,
+                    };
+                    candidates.push(TraceCandidate {
+                        fraction: tr.fraction,
+                        endpos: [
+                            query.start[0] + (query.end[0] - query.start[0]) * tr.fraction,
+                            query.start[1] + (query.end[1] - query.start[1]) * tr.fraction,
+                            query.start[2] + (query.end[2] - query.start[2]) * tr.fraction,
+                        ],
+                        normal: entity_normal_to_world(coll.world_from_model, tr.normal),
+                        collider,
+                        startsolid: false,
+                    });
+                    continue;
+                }
             }
-            let Ok(bone) = u16::try_from(bone) else {
-                continue;
-            };
-            let collider = ColliderId::EntityDObjBone {
-                owner: geom.owner,
-                bone,
-                part_classification: 0,
-                surface_flags: tr.surface_flags,
-            };
-            candidates.push(TraceCandidate {
-                fraction: tr.fraction,
-                endpos: [
-                    query.start[0] + (query.end[0] - query.start[0]) * tr.fraction,
-                    query.start[1] + (query.end[1] - query.start[1]) * tr.fraction,
-                    query.start[2] + (query.end[2] - query.start[2]) * tr.fraction,
-                ],
-                normal: entity_normal_to_world(coll.world_from_model, tr.normal),
-                collider,
-                startsolid: false,
-            });
-            continue;
         }
         for bone in &dobj_geom.bones {
             let collider = ColliderId::EntityDObjBone {
@@ -1810,11 +1864,34 @@ fn walk_out_of_solid(
     None
 }
 
+/// Brush traces back off the hit plane by this many inches (`trace_iw4`).
+const SURFACE_CLIP_EPSILON: f32 = 0.125;
+
+fn ray_length(query: &BulletTraceQuery) -> f32 {
+    let dx = query.end[0] - query.start[0];
+    let dy = query.end[1] - query.start[1];
+    let dz = query.end[2] - query.start[2];
+    (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+fn flush_with_world(query: &BulletTraceQuery, a: &TraceCandidate, b: &TraceCandidate) -> bool {
+    let world_vs_prop = (is_world(a.collider) && is_damage_collider(b.collider))
+        || (is_world(b.collider) && is_damage_collider(a.collider));
+    if !world_vs_prop {
+        return false;
+    }
+    let len = ray_length(query);
+    (a.fraction * len - b.fraction * len).abs() <= SURFACE_CLIP_EPSILON
+}
+
 fn select_first_hit(query: &BulletTraceQuery, candidates: &mut [TraceCandidate]) -> TraceOutcome {
     if candidates.is_empty() {
         return TraceOutcome::Miss { end: query.end };
     }
     candidates.sort_by(|a, b| {
+        if flush_with_world(query, a, b) {
+            return hit_order_key(a).cmp(&hit_order_key(b));
+        }
         match a
             .fraction
             .partial_cmp(&b.fraction)
@@ -1841,12 +1918,12 @@ fn select_first_hit(query: &BulletTraceQuery, candidates: &mut [TraceCandidate])
 
 fn hit_order_key(hit: &TraceCandidate) -> (u8, u32) {
     match hit.collider {
-        ColliderId::World { .. } => (0, 0),
-        ColliderId::Player { client, .. } => (1, client.0),
-        ColliderId::EntityLinkedBrush { owner, .. } => (2, owner_order_key(owner)),
+        ColliderId::Player { client, .. } => (0, client.0),
         ColliderId::EntityDObjBone { owner, bone, .. } => {
-            (3, owner_order_key(owner).wrapping_add(u32::from(bone)))
+            (1, owner_order_key(owner).wrapping_add(u32::from(bone)))
         }
+        ColliderId::EntityLinkedBrush { owner, .. } => (2, owner_order_key(owner)),
+        ColliderId::World { .. } => (3, 0),
     }
 }
 
@@ -2239,7 +2316,7 @@ pub const COLLISION_COVERAGE: &[CollisionCoverageRow] = &[
     CollisionCoverageRow {
         id: "script_model_xbone_obb",
         support: CoverageSupport::Supported,
-        note: "posed collSurf Bounds as abs-AABB cull; hits are XModelTraceLineAnimated collTris when captured, else fixture XBoneInfo; skipped when captured XModel+0xfc does not overlap MASK_BULLET_WORLD",
+        note: "posed collSurf Bounds as abs-AABB cull; hits are XModelTraceLineAnimated collTris when captured and collLod>=0 with MASK_SHOT surfs, else fixture/bounds OBB; collTris miss falls through to those boxes; XModel+0xfc of 0 is unspecified",
     },
     CollisionCoverageRow {
         id: "static_model_collision",

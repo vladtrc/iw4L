@@ -8,9 +8,9 @@ fn mint_weapon_revision() -> u64 {
 
 use crate::asset_graph::{
     AssetEdge, AssetEdgeCensus, AssetEdgeReason, FpvMeshSpace, FxSpace, MaterialSpace,
-    ProjectileModelSpace, SoundAliasSpace, TracerSpace, WorldWeaponSpace, XAnimSpace, ZoneOwner,
+    ProjectileModelSpace, TracerSpace, WorldWeaponSpace, XAnimSpace, ZoneOwner,
 };
-use asset_iw4::size::{SURF_TYPE_NUM, WEAPON_ANIM_COUNT, weap_anim};
+use asset_iw4::size::{WEAPON_ANIM_COUNT, weap_anim};
 use fastfile_iw4::{
     Ptr, ScriptStrings, WeaponIdleCapture, WeaponMovementOfsCapture, ZonePtr, ZoneStream,
 };
@@ -511,6 +511,8 @@ pub struct CatalogWeapon {
     pub sounds: WeaponSoundAliases,
 
     pub combat_fx: WeaponCombatFx,
+
+    pub(crate) combat_slots: CombatFxSlots,
     pub facts: WeaponBodyFacts,
 }
 
@@ -686,8 +688,6 @@ macro_rules! weapon_sound_slots {
             ];
         }
 
-        const WEAPON_SOUND_SLOT_COUNT: usize = weapon_sound_slots!(@count $($variant),+);
-
         impl WeaponSoundAliases {
             fn hint(&self, slot: WeaponSoundSlot) -> Option<&str> {
                 match slot {
@@ -835,6 +835,24 @@ pub struct LeftoverSoundOverride {
     pub altmode_sound: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CombatFxSlots {
+    view_flash: Option<Ptr>,
+    world_flash: Option<Ptr>,
+    view_shell_eject: Option<Ptr>,
+    world_shell_eject: Option<Ptr>,
+    view_last_shot_eject: Option<Ptr>,
+    world_last_shot_eject: Option<Ptr>,
+    explosion: Option<Ptr>,
+    tracer: Option<Ptr>,
+}
+
+impl CombatFxSlots {
+    fn last_shot_pair_authored(self) -> bool {
+        self.view_last_shot_eject.is_some() && self.world_last_shot_eject.is_some()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WeaponCombatFx {
     pub view_flash: AssetEdge<FxSpace>,
@@ -855,14 +873,8 @@ pub struct WeaponCombatFx {
     pub tracer: AssetEdge<TracerSpace>,
 
     pub tracer_hint: Option<String>,
-    pub view_flash_slot: Option<Ptr>,
-    pub world_flash_slot: Option<Ptr>,
-    pub view_shell_eject_slot: Option<Ptr>,
-    pub world_shell_eject_slot: Option<Ptr>,
-    pub view_last_shot_eject_slot: Option<Ptr>,
-    pub world_last_shot_eject_slot: Option<Ptr>,
-    pub explosion_slot: Option<Ptr>,
-    pub tracer_slot: Option<Ptr>,
+
+    last_shot_eject_pair_authored: bool,
 }
 
 fn present_bound<'a, S: crate::asset_graph::IndexSpace>(
@@ -917,7 +929,7 @@ impl WeaponCombatFx {
     }
 
     pub fn last_shot_eject_pair_authored(&self) -> bool {
-        self.view_last_shot_eject_slot.is_some() && self.world_last_shot_eject_slot.is_some()
+        self.last_shot_eject_pair_authored
     }
 
     pub fn last_shot_eject_present(&self, player_view: bool) -> Option<&str> {
@@ -1031,6 +1043,7 @@ impl CatalogWeapon {
             hide_tags: Vec::new(),
             sounds: WeaponSoundAliases::default(),
             combat_fx: WeaponCombatFx::default(),
+            combat_slots: CombatFxSlots::default(),
             facts: WeaponBodyFacts {
                 body_resolved: weap_def.is_some(),
                 fire_time_ms,
@@ -1303,15 +1316,19 @@ impl WeaponCatalog {
                 fire_player_ptr_kind: None,
                 reload_player_ptr_kind: None,
             },
+            combat_slots: CombatFxSlots {
+                view_flash: geometry.view_flash_slot,
+                world_flash: geometry.world_flash_slot,
+                view_shell_eject: geometry.view_shell_eject_slot,
+                world_shell_eject: geometry.world_shell_eject_slot,
+                view_last_shot_eject: geometry.view_last_shot_eject_slot,
+                world_last_shot_eject: geometry.world_last_shot_eject_slot,
+                explosion: geometry.explosion_slot,
+                tracer: geometry.tracer_slot,
+            },
             combat_fx: WeaponCombatFx {
-                view_flash_slot: geometry.view_flash_slot,
-                world_flash_slot: geometry.world_flash_slot,
-                view_shell_eject_slot: geometry.view_shell_eject_slot,
-                world_shell_eject_slot: geometry.world_shell_eject_slot,
-                view_last_shot_eject_slot: geometry.view_last_shot_eject_slot,
-                world_last_shot_eject_slot: geometry.world_last_shot_eject_slot,
-                explosion_slot: geometry.explosion_slot,
-                tracer_slot: geometry.tracer_slot,
+                last_shot_eject_pair_authored: geometry.view_last_shot_eject_slot.is_some()
+                    && geometry.world_last_shot_eject_slot.is_some(),
                 ..WeaponCombatFx::default()
             },
             facts: WeaponBodyFacts {
@@ -1728,61 +1745,7 @@ impl WeaponCatalog {
 
     pub fn resolve_combat_fx(&mut self, fx: &crate::FxCatalog, tracers: &crate::TracerCatalog) {
         for entry in &mut self.entries {
-            stamp_fx_edge(
-                entry.combat_fx.view_flash_slot,
-                fx,
-                &mut entry.combat_fx.view_flash,
-                &mut entry.combat_fx.view_flash_hint,
-            );
-            stamp_fx_edge(
-                entry.combat_fx.world_flash_slot,
-                fx,
-                &mut entry.combat_fx.world_flash,
-                &mut entry.combat_fx.world_flash_hint,
-            );
-            stamp_fx_edge(
-                entry.combat_fx.view_shell_eject_slot,
-                fx,
-                &mut entry.combat_fx.view_shell_eject,
-                &mut entry.combat_fx.view_shell_eject_hint,
-            );
-            stamp_fx_edge(
-                entry.combat_fx.world_shell_eject_slot,
-                fx,
-                &mut entry.combat_fx.world_shell_eject,
-                &mut entry.combat_fx.world_shell_eject_hint,
-            );
-            stamp_fx_edge(
-                entry.combat_fx.view_last_shot_eject_slot,
-                fx,
-                &mut entry.combat_fx.view_last_shot_eject,
-                &mut entry.combat_fx.view_last_shot_eject_hint,
-            );
-            stamp_fx_edge(
-                entry.combat_fx.world_last_shot_eject_slot,
-                fx,
-                &mut entry.combat_fx.world_last_shot_eject,
-                &mut entry.combat_fx.world_last_shot_eject_hint,
-            );
-            stamp_fx_edge(
-                entry.combat_fx.explosion_slot,
-                fx,
-                &mut entry.combat_fx.explosion,
-                &mut entry.combat_fx.explosion_hint,
-            );
-            let tracer_name = entry
-                .combat_fx
-                .tracer_slot
-                .and_then(|s| tracers.name_at_slot(s));
-            entry.combat_fx.tracer_hint = tracer_name.map(str::to_owned);
-            entry.combat_fx.tracer = match (entry.combat_fx.tracer_slot, tracer_name) {
-                (None, _) => AssetEdge::Absent,
-                (_, Some(name)) => match tracers.index_by_name(name) {
-                    Some(index) => AssetEdge::bind_order(index, tracers.zone_of(index)),
-                    None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
-                },
-                (Some(_), None) => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
-            };
+            stamp_combat_fx(&mut entry.combat_fx, entry.combat_slots, fx, tracers);
         }
     }
 
@@ -1925,6 +1888,7 @@ impl WeaponCatalog {
             hide_tags: read_hide_tags_iw5(stream, strings, geometry.hide_tags),
             sounds: leftover_iw5_sounds(stream, strings, &geometry),
             combat_fx: WeaponCombatFx::default(),
+            combat_slots: CombatFxSlots::default(),
             facts: capture_iw5_body_facts(stream, &geometry),
         });
     }
@@ -2034,9 +1998,14 @@ impl WeaponCatalog {
             sz_xanims_left: [const { None }; WEAPON_ANIM_COUNT],
             hide_tags: read_hide_tags_t5(stream, strings, geometry.hide_tags),
             sounds: leftover_t5_sounds(stream, strings, &geometry),
-            combat_fx: leftover_t5_combat_fx(stream, &geometry),
+            combat_fx: WeaponCombatFx::default(),
+            combat_slots: CombatFxSlots::default(),
             facts: capture_t5_body_facts(stream, &geometry),
         });
+        let last = self.entries.last_mut().expect("just pushed");
+        let (fx, slots) = leftover_t5_combat_fx(stream, &geometry);
+        last.combat_fx = fx;
+        last.combat_slots = slots;
     }
 
     pub fn push(&mut self, entry: CatalogWeapon) {
@@ -2084,8 +2053,8 @@ impl WeaponCatalog {
             .collect()
     }
 
-    pub fn into_registry(self) -> WeaponRegistry {
-        WeaponRegistry::from_catalog(self.entries)
+    pub fn into_build(self) -> WeaponBuild {
+        WeaponBuild::from_catalog(self.entries)
     }
 }
 
@@ -2122,6 +2091,67 @@ fn stamp_fx_edge(
         },
         None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
     };
+}
+
+fn stamp_combat_fx(
+    combat: &mut WeaponCombatFx,
+    slots: CombatFxSlots,
+    fx: &crate::FxCatalog,
+    tracers: &crate::TracerCatalog,
+) {
+    stamp_fx_edge(
+        slots.view_flash,
+        fx,
+        &mut combat.view_flash,
+        &mut combat.view_flash_hint,
+    );
+    stamp_fx_edge(
+        slots.world_flash,
+        fx,
+        &mut combat.world_flash,
+        &mut combat.world_flash_hint,
+    );
+    stamp_fx_edge(
+        slots.view_shell_eject,
+        fx,
+        &mut combat.view_shell_eject,
+        &mut combat.view_shell_eject_hint,
+    );
+    stamp_fx_edge(
+        slots.world_shell_eject,
+        fx,
+        &mut combat.world_shell_eject,
+        &mut combat.world_shell_eject_hint,
+    );
+    stamp_fx_edge(
+        slots.view_last_shot_eject,
+        fx,
+        &mut combat.view_last_shot_eject,
+        &mut combat.view_last_shot_eject_hint,
+    );
+    stamp_fx_edge(
+        slots.world_last_shot_eject,
+        fx,
+        &mut combat.world_last_shot_eject,
+        &mut combat.world_last_shot_eject_hint,
+    );
+    stamp_fx_edge(
+        slots.explosion,
+        fx,
+        &mut combat.explosion,
+        &mut combat.explosion_hint,
+    );
+    let tracer_name = slots.tracer.and_then(|s| tracers.name_at_slot(s));
+    combat.tracer_hint = tracer_name.map(str::to_owned);
+    combat.tracer = match (slots.tracer, tracer_name) {
+        (None, _) => AssetEdge::Absent,
+        (_, Some(name)) => match tracers.index_by_name(name) {
+            Some(index) => AssetEdge::bind_order(index, tracers.zone_of(index)),
+            None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
+        },
+        (Some(_), None) => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
+    };
+    combat.last_shot_eject_pair_authored = slots.last_shot_pair_authored();
 }
 
 fn fpv_zone_hint_edge(
@@ -2161,27 +2191,14 @@ fn world_zone_hint_edge(
     }
 }
 
-fn bounce_hint_edge(
+fn sound_alias_in_bank<'a>(
     hint: Option<&str>,
     ns: crate::AssetNamespace,
-    catalog: &crate::SoundCatalog,
-) -> AssetEdge<SoundAliasSpace> {
-    let hint = hint.filter(|name| !name.is_empty());
-    match hint {
-        None => AssetEdge::Absent,
-        Some(name) => match catalog.index_in(ns, name) {
-            Some(index) => AssetEdge::bind_order(index, catalog.zone_of_alias(index)),
-            None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
-        },
-    }
-}
-
-fn absent_bounce_edges() -> [AssetEdge<SoundAliasSpace>; SURF_TYPE_NUM] {
-    [AssetEdge::Absent; SURF_TYPE_NUM]
-}
-
-fn absent_weapon_sound_edges() -> [AssetEdge<SoundAliasSpace>; WEAPON_SOUND_SLOT_COUNT] {
-    [AssetEdge::Absent; WEAPON_SOUND_SLOT_COUNT]
+    catalog: &'a crate::SoundCatalog,
+) -> Option<(crate::AssetNamespace, &'a str)> {
+    let name = hint.filter(|name| !name.is_empty())?;
+    let order = catalog.index_in(ns, name)?;
+    Some((catalog.namespace_of_alias(order), catalog.name_at(order)?))
 }
 
 fn xanim_hint_edge(
@@ -2511,48 +2528,50 @@ fn leftover_t5_first_positive_fov(fov1: f32, fov2: f32, fov3: f32) -> f32 {
 fn leftover_t5_combat_fx(
     stream: &fastfile_t5::ZoneStream<'_>,
     geometry: &fastfile_t5::WeaponGeometry,
-) -> WeaponCombatFx {
+) -> (WeaponCombatFx, CombatFxSlots) {
     use fastfile_t5::size as sz;
     let body = geometry.weap_def;
-    WeaponCombatFx {
-        view_flash_slot: leftover_t5_asset_slot(stream, body, sz::WEAPON_DEF_VIEW_FLASH_OFF),
-        view_flash_hint: body
-            .and_then(|b| leftover_t5_header_name(stream, b, sz::WEAPON_DEF_VIEW_FLASH_OFF)),
-        world_flash_slot: leftover_t5_asset_slot(stream, body, sz::WEAPON_DEF_WORLD_FLASH_OFF),
-        world_flash_hint: body
-            .and_then(|b| leftover_t5_header_name(stream, b, sz::WEAPON_DEF_WORLD_FLASH_OFF)),
-        view_shell_eject_slot: leftover_t5_asset_slot(
-            stream,
-            body,
-            sz::WEAPON_DEF_VIEW_SHELL_EJECT_OFF,
-        ),
-        view_shell_eject_hint: body
-            .and_then(|b| leftover_t5_header_name(stream, b, sz::WEAPON_DEF_VIEW_SHELL_EJECT_OFF)),
-        world_shell_eject_slot: leftover_t5_asset_slot(
+    let slots = CombatFxSlots {
+        view_flash: leftover_t5_asset_slot(stream, body, sz::WEAPON_DEF_VIEW_FLASH_OFF),
+        world_flash: leftover_t5_asset_slot(stream, body, sz::WEAPON_DEF_WORLD_FLASH_OFF),
+        view_shell_eject: leftover_t5_asset_slot(stream, body, sz::WEAPON_DEF_VIEW_SHELL_EJECT_OFF),
+        world_shell_eject: leftover_t5_asset_slot(
             stream,
             body,
             sz::WEAPON_DEF_WORLD_SHELL_EJECT_OFF,
         ),
-        world_shell_eject_hint: body
-            .and_then(|b| leftover_t5_header_name(stream, b, sz::WEAPON_DEF_WORLD_SHELL_EJECT_OFF)),
-        view_last_shot_eject_slot: leftover_t5_asset_slot(
+        view_last_shot_eject: leftover_t5_asset_slot(
             stream,
             body,
             sz::WEAPON_DEF_VIEW_LAST_SHOT_EJECT_OFF,
         ),
-        view_last_shot_eject_hint: body.and_then(|b| {
-            leftover_t5_header_name(stream, b, sz::WEAPON_DEF_VIEW_LAST_SHOT_EJECT_OFF)
-        }),
-        world_last_shot_eject_slot: leftover_t5_asset_slot(
+        world_last_shot_eject: leftover_t5_asset_slot(
             stream,
             body,
             sz::WEAPON_DEF_WORLD_LAST_SHOT_EJECT_OFF,
         ),
+        explosion: None,
+        tracer: None,
+    };
+    let fx = WeaponCombatFx {
+        view_flash_hint: body
+            .and_then(|b| leftover_t5_header_name(stream, b, sz::WEAPON_DEF_VIEW_FLASH_OFF)),
+        world_flash_hint: body
+            .and_then(|b| leftover_t5_header_name(stream, b, sz::WEAPON_DEF_WORLD_FLASH_OFF)),
+        view_shell_eject_hint: body
+            .and_then(|b| leftover_t5_header_name(stream, b, sz::WEAPON_DEF_VIEW_SHELL_EJECT_OFF)),
+        world_shell_eject_hint: body
+            .and_then(|b| leftover_t5_header_name(stream, b, sz::WEAPON_DEF_WORLD_SHELL_EJECT_OFF)),
+        view_last_shot_eject_hint: body.and_then(|b| {
+            leftover_t5_header_name(stream, b, sz::WEAPON_DEF_VIEW_LAST_SHOT_EJECT_OFF)
+        }),
         world_last_shot_eject_hint: body.and_then(|b| {
             leftover_t5_header_name(stream, b, sz::WEAPON_DEF_WORLD_LAST_SHOT_EJECT_OFF)
         }),
+        last_shot_eject_pair_authored: slots.last_shot_pair_authored(),
         ..WeaponCombatFx::default()
-    }
+    };
+    (fx, slots)
 }
 
 fn leftover_t5_sounds(
@@ -3912,29 +3931,33 @@ fn merge_combat_fx(dst: &mut WeaponCombatFx, src: &WeaponCombatFx) {
             dst.tracer_hint = src.tracer_hint.clone();
         }
     }
-    if dst.view_flash_slot.is_none() {
-        dst.view_flash_slot = src.view_flash_slot;
+    dst.last_shot_eject_pair_authored |= src.last_shot_eject_pair_authored;
+}
+
+fn merge_combat_slots(dst: &mut CombatFxSlots, src: &CombatFxSlots) {
+    if dst.view_flash.is_none() {
+        dst.view_flash = src.view_flash;
     }
-    if dst.world_flash_slot.is_none() {
-        dst.world_flash_slot = src.world_flash_slot;
+    if dst.world_flash.is_none() {
+        dst.world_flash = src.world_flash;
     }
-    if dst.view_shell_eject_slot.is_none() {
-        dst.view_shell_eject_slot = src.view_shell_eject_slot;
+    if dst.view_shell_eject.is_none() {
+        dst.view_shell_eject = src.view_shell_eject;
     }
-    if dst.world_shell_eject_slot.is_none() {
-        dst.world_shell_eject_slot = src.world_shell_eject_slot;
+    if dst.world_shell_eject.is_none() {
+        dst.world_shell_eject = src.world_shell_eject;
     }
-    if dst.view_last_shot_eject_slot.is_none() {
-        dst.view_last_shot_eject_slot = src.view_last_shot_eject_slot;
+    if dst.view_last_shot_eject.is_none() {
+        dst.view_last_shot_eject = src.view_last_shot_eject;
     }
-    if dst.world_last_shot_eject_slot.is_none() {
-        dst.world_last_shot_eject_slot = src.world_last_shot_eject_slot;
+    if dst.world_last_shot_eject.is_none() {
+        dst.world_last_shot_eject = src.world_last_shot_eject;
     }
-    if dst.explosion_slot.is_none() {
-        dst.explosion_slot = src.explosion_slot;
+    if dst.explosion.is_none() {
+        dst.explosion = src.explosion;
     }
-    if dst.tracer_slot.is_none() {
-        dst.tracer_slot = src.tracer_slot;
+    if dst.tracer.is_none() {
+        dst.tracer = src.tracer;
     }
 }
 
@@ -4339,10 +4362,6 @@ struct WeaponRow {
 
     sounds: WeaponSoundAliases,
 
-    sound_edges: [AssetEdge<SoundAliasSpace>; WEAPON_SOUND_SLOT_COUNT],
-
-    bounce_sound_edges: [AssetEdge<SoundAliasSpace>; SURF_TYPE_NUM],
-
     combat_fx: WeaponCombatFx,
 
     reticle: WeaponReticleAssets,
@@ -4407,8 +4426,6 @@ impl Default for WeaponRow {
             hide_tags: Vec::new(),
             scope_viewmodel: None,
             sounds: WeaponSoundAliases::default(),
-            sound_edges: absent_weapon_sound_edges(),
-            bounce_sound_edges: absent_bounce_edges(),
             combat_fx: WeaponCombatFx::default(),
             reticle: WeaponReticleAssets::default(),
             hud_material_edges: WeaponHudMaterialEdges::default(),
@@ -4467,7 +4484,248 @@ impl core::fmt::Display for UnknownWeaponName {
 
 impl std::error::Error for UnknownWeaponName {}
 
-impl WeaponRegistry {
+#[derive(Clone, Debug, Default)]
+pub struct WeaponBuild {
+    registry: WeaponRegistry,
+    combat_slots: Vec<CombatFxSlots>,
+}
+
+impl std::ops::Deref for WeaponBuild {
+    type Target = WeaponRegistry;
+
+    fn deref(&self) -> &Self::Target {
+        &self.registry
+    }
+}
+
+impl WeaponBuild {
+    pub fn publish(self) -> WeaponRegistry {
+        self.registry
+    }
+
+    pub fn absorb(&mut self, other: Self) {
+        if other.registry.is_empty() {
+            return;
+        }
+        if self.registry.rows.is_empty() {
+            *self = other;
+            return;
+        }
+        self.registry
+            .rows
+            .extend(other.registry.rows.into_iter().skip(1));
+        self.combat_slots
+            .extend(other.combat_slots.into_iter().skip(1));
+        self.registry.item_groups.extend(other.registry.item_groups);
+        self.registry.rebuild_name_maps();
+        self.registry.revision = mint_weapon_revision();
+    }
+
+    pub fn resolve_combat_fx(&mut self, fx: &crate::FxCatalog, tracers: &crate::TracerCatalog) {
+        let n = self.registry.rows.len().min(self.combat_slots.len());
+        for i in 1..n {
+            stamp_combat_fx(
+                &mut self.registry.rows[i].combat_fx,
+                self.combat_slots[i],
+                fx,
+                tracers,
+            );
+        }
+    }
+
+    pub fn stamp_namespace(&mut self, ns: crate::AssetNamespace) {
+        for row in self.registry.rows.iter_mut().skip(1) {
+            row.namespace = ns;
+        }
+        self.registry.rebuild_name_maps();
+        self.registry.revision = mint_weapon_revision();
+    }
+
+    pub fn resolve_hud_material_edges(&mut self, materials: &crate::MaterialDefinitions) {
+        for row in &mut self.registry.rows {
+            row.reticle.center_edge = material_hint_edge(
+                row.reticle.center_material.as_deref(),
+                row.reticle.center_authored,
+                materials,
+            );
+            row.reticle.side_edge = material_hint_edge(
+                row.reticle.side_material.as_deref(),
+                row.reticle.side_authored,
+                materials,
+            );
+            row.hud_material_edges = WeaponHudMaterialEdges {
+                overlay: material_hint_edge(
+                    row.overlay_material.as_deref(),
+                    row.overlay_material_from_slot,
+                    materials,
+                ),
+                hud_icon: material_hint_edge(
+                    row.hud_icon.as_deref(),
+                    row.hud_icon_from_slot,
+                    materials,
+                ),
+                pickup_icon: material_hint_edge(
+                    row.pickup_icon.as_deref(),
+                    row.pickup_icon_authored,
+                    materials,
+                ),
+                kill_icon: material_hint_edge(
+                    row.kill_icon.as_deref(),
+                    row.kill_icon_from_slot,
+                    materials,
+                ),
+            };
+        }
+    }
+
+    pub fn resolve_projectile_fx_edges(&mut self, fx: &crate::FxCatalog) {
+        for row in &mut self.registry.rows {
+            row.projectile_fx = WeaponProjectileFx {
+                trail: fx_hint_edge(row.proj_trail_from_slot, row.proj_trail.as_deref(), fx),
+                beacon: fx_hint_edge(row.proj_beacon_from_slot, row.proj_beacon.as_deref(), fx),
+                ignition: fx_hint_edge(
+                    row.proj_ignition_from_slot,
+                    row.proj_ignition.as_deref(),
+                    fx,
+                ),
+            };
+        }
+    }
+
+    pub fn resolve_sz_xanim_edges(&mut self, xanims: &crate::XAnimCatalog) {
+        for row in &mut self.registry.rows {
+            let mut edges = [AssetEdge::Absent; WEAPON_ANIM_COUNT];
+            for (edge, hint) in edges.iter_mut().zip(row.sz_xanims.iter()) {
+                *edge = xanim_hint_edge(hint.as_deref(), row.namespace, xanims);
+            }
+            row.sz_xanim_edges = edges;
+        }
+    }
+
+    pub fn resolve_fpv_mesh_edges(&mut self, fpv: &crate::FpvMeshCatalog) {
+        for row in &mut self.registry.rows {
+            row.gun_xmodel_edge = fpv_zone_hint_edge(
+                row.gun_xmodel_from_zone,
+                row.gun_xmodel.as_deref(),
+                row.namespace,
+                fpv,
+            );
+            row.hand_xmodel_edge = fpv_zone_hint_edge(
+                row.hand_xmodel.is_some(),
+                row.hand_xmodel.as_deref(),
+                row.namespace,
+                fpv,
+            );
+        }
+    }
+
+    pub fn resolve_world_model_edges(&mut self, catalog: &crate::WorldWeaponCatalog) {
+        for row in &mut self.registry.rows {
+            row.world_model_edge = world_zone_hint_edge(
+                row.world_model_from_zone,
+                row.world_model.as_deref(),
+                catalog,
+            );
+        }
+    }
+
+    pub fn apply_stats_item_groups(&mut self, table: &crate::CapturedStringTable) {
+        for id in 1..=self.len() as u32 {
+            let Some(ns) = self.namespace_of(id) else {
+                continue;
+            };
+            let name = self.name_of(id).to_owned();
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(group) = crate::item_group_for_weapon(table, &name) {
+                self.registry
+                    .item_groups
+                    .insert((ns, name), group.to_owned());
+            }
+        }
+    }
+
+    pub fn apply_stats_tables<'a>(
+        &mut self,
+        tables: impl IntoIterator<Item = &'a crate::CapturedStringTable>,
+    ) {
+        for table in tables {
+            if crate::is_stats_table_name(&table.name) {
+                self.apply_stats_item_groups(table);
+            }
+        }
+    }
+
+    pub fn stamp_projectile_model_edges(
+        &mut self,
+        catalog: &crate::ProjectileMeshCatalog,
+        zone: ZoneOwner,
+    ) {
+        for row in &mut self.registry.rows {
+            row.projectile_model_edge = match row.projectile_model.as_deref() {
+                None | Some("") => AssetEdge::Absent,
+                Some(name) => match catalog.index_by_name(name) {
+                    Some(order) => AssetEdge::bind_order(order, zone),
+                    None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
+                },
+            };
+        }
+    }
+
+    pub fn fill_missing_gun_xmodels(&mut self, mut mesh_exists: impl FnMut(&str) -> bool) -> usize {
+        let mut filled = 0usize;
+        for row in self.registry.rows.iter_mut().skip(1) {
+            if row.gun_xmodel.is_some() {
+                continue;
+            }
+            let Some(idle) = row.sz_xanims[weap_anim::IDLE].as_deref() else {
+                continue;
+            };
+            if let Some(gun) = gun_candidates_from_idle(idle)
+                .into_iter()
+                .find(|c| mesh_exists(c))
+            {
+                row.gun_xmodel = Some(gun);
+                row.gun_xmodel_from_zone = false;
+                filled += 1;
+            }
+        }
+        filled
+    }
+
+    pub fn fill_missing_world_models(
+        &mut self,
+        mut mesh_exists: impl FnMut(&str) -> bool,
+    ) -> usize {
+        let mut filled = 0usize;
+        for row in self.registry.rows.iter_mut().skip(1) {
+            if row.world_model.is_some() {
+                continue;
+            }
+            let mut candidates = Vec::new();
+            if let Some(gun) = row.gun_xmodel.as_deref() {
+                candidates.extend(world_candidates_from_viewmodel(gun));
+            }
+            if let Some(idle) = row.sz_xanims[weap_anim::IDLE].as_deref() {
+                for gun in gun_candidates_from_idle(idle) {
+                    candidates.extend(world_candidates_from_viewmodel(&gun));
+                }
+            }
+            if !row.name.is_empty() {
+                candidates.push(format!("weapon_{}", row.name));
+                candidates.push(format!("weapon_{}_mp", row.name));
+                candidates.push(format!("weapon_{}_tactical", row.name));
+            }
+            if let Some(world) = candidates.into_iter().find(|c| mesh_exists(c)) {
+                row.world_model = Some(world);
+                row.world_model_from_zone = false;
+                filled += 1;
+            }
+        }
+        filled
+    }
+
     fn from_catalog(mut entries: Vec<CatalogWeapon>) -> Self {
         let mut gun_by_def: HashMap<(u8, u32), String> = HashMap::new();
         let mut hand_by_def: HashMap<(u8, u32), String> = HashMap::new();
@@ -4476,6 +4734,7 @@ impl WeaponRegistry {
         let mut rocket_by_def: HashMap<(u8, u32), String> = HashMap::new();
         let mut sounds_by_def: HashMap<(u8, u32), WeaponSoundAliases> = HashMap::new();
         let mut combat_fx_by_def: HashMap<(u8, u32), WeaponCombatFx> = HashMap::new();
+        let mut combat_slots_by_def: HashMap<(u8, u32), CombatFxSlots> = HashMap::new();
         let mut facts_by_def: HashMap<(u8, u32), WeaponBodyFacts> = HashMap::new();
         let mut right_by_def: HashMap<(u8, u32), [Option<String>; WEAPON_ANIM_COUNT]> =
             HashMap::new();
@@ -4500,6 +4759,10 @@ impl WeaponRegistry {
             if let Some(key) = entry.weap_def {
                 merge_sound_aliases(sounds_by_def.entry(key).or_default(), &entry.sounds);
                 merge_combat_fx(combat_fx_by_def.entry(key).or_default(), &entry.combat_fx);
+                merge_combat_slots(
+                    combat_slots_by_def.entry(key).or_default(),
+                    &entry.combat_slots,
+                );
                 let slot = facts_by_def.entry(key).or_default();
                 merge_body_facts(slot, entry.facts);
                 if xanims_idle(&entry.sz_xanims_right).is_some() {
@@ -4546,6 +4809,9 @@ impl WeaponRegistry {
                 }
                 if let Some(shared) = combat_fx_by_def.get(&key) {
                     merge_combat_fx(&mut entry.combat_fx, shared);
+                }
+                if let Some(&shared) = combat_slots_by_def.get(&key) {
+                    merge_combat_slots(&mut entry.combat_slots, &shared);
                 }
                 if let Some(&shared) = facts_by_def.get(&key) {
                     merge_body_facts(&mut entry.facts, shared);
@@ -4634,6 +4900,7 @@ impl WeaponRegistry {
                     }
                     merge_sound_aliases(&mut existing.sounds, &entry.sounds);
                     merge_combat_fx(&mut existing.combat_fx, &entry.combat_fx);
+                    merge_combat_slots(&mut existing.combat_slots, &entry.combat_slots);
                     merge_body_facts(&mut existing.facts, entry.facts);
                 }
             }
@@ -4642,12 +4909,15 @@ impl WeaponRegistry {
         names.sort_unstable();
 
         let mut rows = Vec::with_capacity(names.len() + 1);
+        let mut combat_slots = Vec::with_capacity(names.len() + 1);
         let mut index_of = HashMap::with_capacity(names.len());
         rows.push(WeaponRow::default());
+        combat_slots.push(CombatFxSlots::default());
         for name in names {
             let entry = by_name.remove(&name).expect("key from map");
             let id = rows.len() as u32;
             index_of.insert(name.clone(), id);
+            combat_slots.push(entry.combat_slots);
             rows.push(WeaponRow {
                 name,
                 namespace: crate::AssetNamespace::Iw4,
@@ -4671,8 +4941,6 @@ impl WeaponRegistry {
                 hide_tags: entry.hide_tags,
                 scope_viewmodel: entry.scope_viewmodel,
                 sounds: entry.sounds,
-                sound_edges: absent_weapon_sound_edges(),
-                bounce_sound_edges: absent_bounce_edges(),
                 combat_fx: entry.combat_fx,
                 reticle: entry.reticle,
                 hud_material_edges: entry.hud_material_edges,
@@ -4703,25 +4971,22 @@ impl WeaponRegistry {
                 display_name_key: entry.display_name_key,
             });
         }
-        let mut built = Self {
+        let mut registry = WeaponRegistry {
             rows,
             by_name: index_of,
             by_namespaced: HashMap::new(),
             item_groups: HashMap::new(),
             revision: mint_weapon_revision(),
         };
-        built.rebuild_name_maps();
-        built
-    }
-
-    pub fn stamp_namespace(&mut self, ns: crate::AssetNamespace) {
-        for row in self.rows.iter_mut().skip(1) {
-            row.namespace = ns;
+        registry.rebuild_name_maps();
+        Self {
+            registry,
+            combat_slots,
         }
-        self.rebuild_name_maps();
-        self.revision = mint_weapon_revision();
     }
+}
 
+impl WeaponRegistry {
     fn rebuild_name_maps(&mut self) {
         self.by_name.clear();
         self.by_namespaced.clear();
@@ -4732,73 +4997,8 @@ impl WeaponRegistry {
         }
     }
 
-    pub fn absorb(&mut self, other: WeaponRegistry) {
-        if other.is_empty() {
-            return;
-        }
-        if self.rows.is_empty() {
-            *self = other;
-            return;
-        }
-        self.rows.extend(other.rows.into_iter().skip(1));
-        self.item_groups.extend(other.item_groups);
-        self.rebuild_name_maps();
-        self.revision = mint_weapon_revision();
-    }
-
     pub fn reticle_of(&self, index: u32) -> Option<&WeaponReticleAssets> {
         self.rows.get(index as usize).map(|row| &row.reticle)
-    }
-
-    pub fn resolve_hud_material_edges(&mut self, materials: &crate::MaterialDefinitions) {
-        for row in &mut self.rows {
-            row.reticle.center_edge = material_hint_edge(
-                row.reticle.center_material.as_deref(),
-                row.reticle.center_authored,
-                materials,
-            );
-            row.reticle.side_edge = material_hint_edge(
-                row.reticle.side_material.as_deref(),
-                row.reticle.side_authored,
-                materials,
-            );
-            row.hud_material_edges = WeaponHudMaterialEdges {
-                overlay: material_hint_edge(
-                    row.overlay_material.as_deref(),
-                    row.overlay_material_from_slot,
-                    materials,
-                ),
-                hud_icon: material_hint_edge(
-                    row.hud_icon.as_deref(),
-                    row.hud_icon_from_slot,
-                    materials,
-                ),
-                pickup_icon: material_hint_edge(
-                    row.pickup_icon.as_deref(),
-                    row.pickup_icon_authored,
-                    materials,
-                ),
-                kill_icon: material_hint_edge(
-                    row.kill_icon.as_deref(),
-                    row.kill_icon_from_slot,
-                    materials,
-                ),
-            };
-        }
-    }
-
-    pub fn resolve_projectile_fx_edges(&mut self, fx: &crate::FxCatalog) {
-        for row in &mut self.rows {
-            row.projectile_fx = WeaponProjectileFx {
-                trail: fx_hint_edge(row.proj_trail_from_slot, row.proj_trail.as_deref(), fx),
-                beacon: fx_hint_edge(row.proj_beacon_from_slot, row.proj_beacon.as_deref(), fx),
-                ignition: fx_hint_edge(
-                    row.proj_ignition_from_slot,
-                    row.proj_ignition.as_deref(),
-                    fx,
-                ),
-            };
-        }
     }
 
     pub fn projectile_fx_of(&self, index: u32) -> Option<WeaponProjectileFx> {
@@ -4813,16 +5013,6 @@ impl WeaponRegistry {
             }
         }
         census
-    }
-
-    pub fn resolve_sz_xanim_edges(&mut self, xanims: &crate::XAnimCatalog) {
-        for row in &mut self.rows {
-            let mut edges = [AssetEdge::Absent; WEAPON_ANIM_COUNT];
-            for (edge, hint) in edges.iter_mut().zip(row.sz_xanims.iter()) {
-                *edge = xanim_hint_edge(hint.as_deref(), row.namespace, xanims);
-            }
-            row.sz_xanim_edges = edges;
-        }
     }
 
     pub fn sz_xanim_edges_of(
@@ -4842,23 +5032,6 @@ impl WeaponRegistry {
         census
     }
 
-    pub fn resolve_fpv_mesh_edges(&mut self, fpv: &crate::FpvMeshCatalog) {
-        for row in &mut self.rows {
-            row.gun_xmodel_edge = fpv_zone_hint_edge(
-                row.gun_xmodel_from_zone,
-                row.gun_xmodel.as_deref(),
-                row.namespace,
-                fpv,
-            );
-            row.hand_xmodel_edge = fpv_zone_hint_edge(
-                row.hand_xmodel.is_some(),
-                row.hand_xmodel.as_deref(),
-                row.namespace,
-                fpv,
-            );
-        }
-    }
-
     pub fn gun_xmodel_edge_of(&self, index: u32) -> Option<AssetEdge<FpvMeshSpace>> {
         self.rows.get(index as usize).map(|row| row.gun_xmodel_edge)
     }
@@ -4875,16 +5048,6 @@ impl WeaponRegistry {
             census.push(row.gun_xmodel_edge);
         }
         census
-    }
-
-    pub fn resolve_world_model_edges(&mut self, catalog: &crate::WorldWeaponCatalog) {
-        for row in &mut self.rows {
-            row.world_model_edge = world_zone_hint_edge(
-                row.world_model_from_zone,
-                row.world_model.as_deref(),
-                catalog,
-            );
-        }
     }
 
     pub fn world_model_edge_of(&self, index: u32) -> Option<AssetEdge<WorldWeaponSpace>> {
@@ -4915,37 +5078,10 @@ impl WeaponRegistry {
             .and_then(|name| catalog.get(name))
     }
 
-    pub fn resolve_weapon_sound_edges(&mut self, catalog: &crate::SoundCatalog) {
-        for row in &mut self.rows {
-            let mut edges = absent_weapon_sound_edges();
-            for slot in WeaponSoundSlot::ALL {
-                edges[slot as usize] =
-                    bounce_hint_edge(row.sounds.hint(slot), row.namespace, catalog);
-            }
-            row.sound_edges = edges;
-        }
-    }
-
-    pub fn weapon_sound_edge_of(
-        &self,
-        index: u32,
-        slot: WeaponSoundSlot,
-    ) -> Option<AssetEdge<SoundAliasSpace>> {
-        self.rows
-            .get(index as usize)?
-            .sound_edges
-            .get(slot as usize)
-            .copied()
-    }
-
-    pub fn weapon_sound_edge_census(&self) -> AssetEdgeCensus {
-        let mut census = AssetEdgeCensus::default();
-        for row in self.rows.iter().skip(1) {
-            for edge in &row.sound_edges {
-                census.push(*edge);
-            }
-        }
-        census
+    pub fn authored_weapon_sound(&self, index: u32, slot: WeaponSoundSlot) -> Option<&str> {
+        self.sounds_of(index)?
+            .hint(slot)
+            .filter(|name| !name.is_empty())
     }
 
     pub fn weapon_sound_alias<'a>(
@@ -4954,9 +5090,8 @@ impl WeaponRegistry {
         slot: WeaponSoundSlot,
         catalog: &'a crate::SoundCatalog,
     ) -> Option<&'a str> {
-        self.weapon_sound_edge_of(index, slot)?
-            .bound_index()
-            .and_then(|order| catalog.name_at(order))
+        self.weapon_sound_key(index, slot, catalog)
+            .map(|(_, alias)| alias)
     }
 
     pub fn weapon_sound_key<'a>(
@@ -4965,30 +5100,8 @@ impl WeaponRegistry {
         slot: WeaponSoundSlot,
         catalog: &'a crate::SoundCatalog,
     ) -> Option<(crate::AssetNamespace, &'a str)> {
-        let order = self.weapon_sound_edge_of(index, slot)?.bound_index()?;
-        Some((catalog.namespace_of_alias(order), catalog.name_at(order)?))
-    }
-
-    pub fn resolve_bounce_sound_edges(&mut self, catalog: &crate::SoundCatalog) {
-        for row in &mut self.rows {
-            let mut edges = absent_bounce_edges();
-            for (surf, hint) in row.sounds.bounce.iter().enumerate() {
-                edges[surf] = bounce_hint_edge(hint.as_deref(), row.namespace, catalog);
-            }
-            row.bounce_sound_edges = edges;
-        }
-    }
-
-    pub fn bounce_sound_edge_of(
-        &self,
-        index: u32,
-        surf: usize,
-    ) -> Option<AssetEdge<SoundAliasSpace>> {
-        self.rows
-            .get(index as usize)?
-            .bounce_sound_edges
-            .get(surf)
-            .copied()
+        let ns = self.namespace_of(index).unwrap_or_default();
+        sound_alias_in_bank(self.authored_weapon_sound(index, slot), ns, catalog)
     }
 
     pub fn bounce_sound_alias<'a>(
@@ -4997,15 +5110,8 @@ impl WeaponRegistry {
         surf: usize,
         catalog: &'a crate::SoundCatalog,
     ) -> Option<&'a str> {
-        match self.bounce_sound_edge_of(index, surf) {
-            Some(edge) => edge.bound_index().and_then(|order| catalog.name_at(order)),
-            None => self.bounce_sound_of(index, surf).and_then(|name| {
-                let ns = self.namespace_of(index).unwrap_or_default();
-                catalog
-                    .index_in(ns, name)
-                    .and_then(|order| catalog.name_at(order))
-            }),
-        }
+        let ns = self.namespace_of(index).unwrap_or_default();
+        sound_alias_in_bank(self.bounce_sound_of(index, surf), ns, catalog).map(|(_, alias)| alias)
     }
 
     pub fn hud_material_edge_census(&self) -> AssetEdgeCensus {
@@ -5127,32 +5233,6 @@ impl WeaponRegistry {
         self.item_groups
             .get(&(ns, name.to_owned()))
             .map(String::as_str)
-    }
-
-    pub fn apply_stats_item_groups(&mut self, table: &crate::CapturedStringTable) {
-        for id in 1..=self.len() as u32 {
-            let Some(ns) = self.namespace_of(id) else {
-                continue;
-            };
-            let name = self.name_of(id).to_owned();
-            if name.is_empty() {
-                continue;
-            }
-            if let Some(group) = crate::item_group_for_weapon(table, &name) {
-                self.item_groups.insert((ns, name), group.to_owned());
-            }
-        }
-    }
-
-    pub fn apply_stats_tables<'a>(
-        &mut self,
-        tables: impl IntoIterator<Item = &'a crate::CapturedStringTable>,
-    ) {
-        for table in tables {
-            if crate::is_stats_table_name(&table.name) {
-                self.apply_stats_item_groups(table);
-            }
-        }
     }
 
     #[must_use]
@@ -5368,64 +5448,6 @@ impl WeaponRegistry {
 
     pub fn combat_fx_of(&self, index: u32) -> Option<&WeaponCombatFx> {
         self.rows.get(index as usize).map(|row| &row.combat_fx)
-    }
-
-    pub fn resolve_combat_fx(&mut self, fx: &crate::FxCatalog, tracers: &crate::TracerCatalog) {
-        for row in self.rows.iter_mut().skip(1) {
-            let combat = &mut row.combat_fx;
-            stamp_fx_edge(
-                combat.view_flash_slot,
-                fx,
-                &mut combat.view_flash,
-                &mut combat.view_flash_hint,
-            );
-            stamp_fx_edge(
-                combat.world_flash_slot,
-                fx,
-                &mut combat.world_flash,
-                &mut combat.world_flash_hint,
-            );
-            stamp_fx_edge(
-                combat.view_shell_eject_slot,
-                fx,
-                &mut combat.view_shell_eject,
-                &mut combat.view_shell_eject_hint,
-            );
-            stamp_fx_edge(
-                combat.world_shell_eject_slot,
-                fx,
-                &mut combat.world_shell_eject,
-                &mut combat.world_shell_eject_hint,
-            );
-            stamp_fx_edge(
-                combat.view_last_shot_eject_slot,
-                fx,
-                &mut combat.view_last_shot_eject,
-                &mut combat.view_last_shot_eject_hint,
-            );
-            stamp_fx_edge(
-                combat.world_last_shot_eject_slot,
-                fx,
-                &mut combat.world_last_shot_eject,
-                &mut combat.world_last_shot_eject_hint,
-            );
-            stamp_fx_edge(
-                combat.explosion_slot,
-                fx,
-                &mut combat.explosion,
-                &mut combat.explosion_hint,
-            );
-            let tracer_name = combat.tracer_slot.and_then(|s| tracers.name_at_slot(s));
-            combat.tracer_hint = tracer_name.map(str::to_owned);
-            combat.tracer = match (combat.tracer_slot, tracer_name) {
-                (None, _) => AssetEdge::Absent,
-                (_, Some(name)) => match tracers.index_by_name(name) {
-                    Some(index) => AssetEdge::bind_order(index, tracers.zone_of(index)),
-                    None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
-                },
-                (Some(_), None) => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
-            };
-        }
     }
 
     pub fn tracer_type_census(&self) -> AssetEdgeCensus {
@@ -5670,22 +5692,6 @@ impl WeaponRegistry {
             .count()
     }
 
-    pub fn stamp_projectile_model_edges(
-        &mut self,
-        catalog: &crate::ProjectileMeshCatalog,
-        zone: ZoneOwner,
-    ) {
-        for row in &mut self.rows {
-            row.projectile_model_edge = match row.projectile_model.as_deref() {
-                None | Some("") => AssetEdge::Absent,
-                Some(name) => match catalog.index_by_name(name) {
-                    Some(order) => AssetEdge::bind_order(order, zone),
-                    None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
-                },
-            };
-        }
-    }
-
     pub fn projectile_model_edge_of(&self, index: u32) -> Option<AssetEdge<ProjectileModelSpace>> {
         self.rows
             .get(index as usize)
@@ -5739,59 +5745,6 @@ impl WeaponRegistry {
             .skip(1)
             .filter(|row| row.sz_xanims.iter().any(|n| n.is_some()))
             .count()
-    }
-
-    pub fn fill_missing_gun_xmodels(&mut self, mut mesh_exists: impl FnMut(&str) -> bool) -> usize {
-        let mut filled = 0usize;
-        for row in self.rows.iter_mut().skip(1) {
-            if row.gun_xmodel.is_some() {
-                continue;
-            }
-            let Some(idle) = row.sz_xanims[weap_anim::IDLE].as_deref() else {
-                continue;
-            };
-            if let Some(gun) = gun_candidates_from_idle(idle)
-                .into_iter()
-                .find(|c| mesh_exists(c))
-            {
-                row.gun_xmodel = Some(gun);
-                row.gun_xmodel_from_zone = false;
-                filled += 1;
-            }
-        }
-        filled
-    }
-
-    pub fn fill_missing_world_models(
-        &mut self,
-        mut mesh_exists: impl FnMut(&str) -> bool,
-    ) -> usize {
-        let mut filled = 0usize;
-        for row in self.rows.iter_mut().skip(1) {
-            if row.world_model.is_some() {
-                continue;
-            }
-            let mut candidates = Vec::new();
-            if let Some(gun) = row.gun_xmodel.as_deref() {
-                candidates.extend(world_candidates_from_viewmodel(gun));
-            }
-            if let Some(idle) = row.sz_xanims[weap_anim::IDLE].as_deref() {
-                for gun in gun_candidates_from_idle(idle) {
-                    candidates.extend(world_candidates_from_viewmodel(&gun));
-                }
-            }
-            if !row.name.is_empty() {
-                candidates.push(format!("weapon_{}", row.name));
-                candidates.push(format!("weapon_{}_mp", row.name));
-                candidates.push(format!("weapon_{}_tactical", row.name));
-            }
-            if let Some(world) = candidates.into_iter().find(|c| mesh_exists(c)) {
-                row.world_model = Some(world);
-                row.world_model_from_zone = false;
-                filled += 1;
-            }
-        }
-        filled
     }
 }
 

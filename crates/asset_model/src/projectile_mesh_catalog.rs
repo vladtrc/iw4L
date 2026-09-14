@@ -29,7 +29,7 @@ impl ProjectileMeshEntry {
         }
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
+    pub(crate) fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         stamp_xmodel_material_edges(
             &mut self.material_names,
             &mut self.material_edges,
@@ -55,40 +55,29 @@ impl ProjectileMeshEntry {
 pub struct ProjectileMeshCatalog {
     entries: HashMap<String, ProjectileMeshEntry>,
     order: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ProjectileMeshBuild {
+    catalog: ProjectileMeshCatalog,
     strings: ScriptStrings,
 }
 
-impl ProjectileMeshCatalog {
+impl std::ops::Deref for ProjectileMeshBuild {
+    type Target = ProjectileMeshCatalog;
+
+    fn deref(&self) -> &Self::Target {
+        &self.catalog
+    }
+}
+
+impl ProjectileMeshBuild {
+    pub fn publish(self) -> ProjectileMeshCatalog {
+        self.catalog
+    }
+
     pub fn set_strings(&mut self, strings: ScriptStrings) {
         self.strings = strings;
-    }
-
-    pub fn len(&self) -> usize {
-        self.order.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.order.is_empty()
-    }
-
-    pub fn get(&self, name: &str) -> Option<&ProjectileMeshEntry> {
-        self.entries.get(name)
-    }
-
-    pub fn index_by_name(&self, name: &str) -> Option<usize> {
-        self.order.iter().position(|n| n == name)
-    }
-
-    pub fn name_at(&self, index: usize) -> Option<&str> {
-        self.order.get(index).map(String::as_str)
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.order.iter().map(String::as_str)
-    }
-
-    pub fn contains(&self, name: &str) -> bool {
-        self.entries.contains_key(name)
     }
 
     pub fn capture_unclassified(&mut self, stream: &ZoneStream<'_>, materials: &MaterialCatalog) {
@@ -129,11 +118,11 @@ impl ProjectileMeshCatalog {
     }
 
     pub fn absorb(&mut self, mut other: Self) {
-        for name in other.order {
-            if !self.entries.contains_key(&name) {
-                if let Some(entry) = other.entries.remove(&name) {
-                    self.order.push(name.clone());
-                    self.entries.insert(name, entry);
+        for name in std::mem::take(&mut other.catalog.order) {
+            if !self.catalog.entries.contains_key(&name) {
+                if let Some(entry) = other.catalog.entries.remove(&name) {
+                    self.catalog.order.push(name.clone());
+                    self.catalog.entries.insert(name, entry);
                 }
             }
         }
@@ -141,26 +130,27 @@ impl ProjectileMeshCatalog {
 
     fn insert_captured(&mut self, skel: ModelSkel, materials: Option<&MaterialCatalog>) {
         let name = skel.name.clone();
-        if self.entries.contains_key(&name) {
+        if self.catalog.entries.contains_key(&name) {
             return;
         }
-        self.order.push(name.clone());
-        self.entries
+        self.catalog.order.push(name.clone());
+        self.catalog
+            .entries
             .insert(name, ProjectileMeshEntry::from_skel(skel, materials));
     }
 
     pub fn keep_referenced(&mut self, hints: &HashSet<String>) {
-        self.order.retain(|name| hints.contains(name));
-        self.entries.retain(|name, _| hints.contains(name));
+        self.catalog.order.retain(|name| hints.contains(name));
+        self.catalog.entries.retain(|name, _| hints.contains(name));
     }
 
     pub fn absorb_world_weapon(&mut self, entry: &crate::WorldWeaponEntry) {
         let name = entry.skel.name.clone();
-        if self.entries.contains_key(&name) {
+        if self.catalog.entries.contains_key(&name) {
             return;
         }
-        self.order.push(name.clone());
-        self.entries.insert(
+        self.catalog.order.push(name.clone());
+        self.catalog.entries.insert(
             name,
             ProjectileMeshEntry {
                 skel: entry.skel.clone(),
@@ -171,9 +161,39 @@ impl ProjectileMeshCatalog {
     }
 
     pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
-        for entry in self.entries.values_mut() {
+        for entry in self.catalog.entries.values_mut() {
             entry.resolve_materials(materials);
         }
+    }
+}
+
+impl ProjectileMeshCatalog {
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&ProjectileMeshEntry> {
+        self.entries.get(name)
+    }
+
+    pub fn index_by_name(&self, name: &str) -> Option<usize> {
+        self.order.iter().position(|n| n == name)
+    }
+
+    pub fn name_at(&self, index: usize) -> Option<&str> {
+        self.order.get(index).map(String::as_str)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.order.iter().map(String::as_str)
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.entries.contains_key(name)
     }
 
     pub fn material_edge_census(&self) -> AssetEdgeCensus {

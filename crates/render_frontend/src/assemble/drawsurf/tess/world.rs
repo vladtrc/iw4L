@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bevy::prelude::*;
 use bevy::render::render_resource::Face;
 
@@ -36,19 +38,17 @@ pub use render_frame::RetailWorldVertexRefusal;
 pub struct WorldDrawGpuPlan {
     pub retail_vertices: assets::RetailWorldVertexPayload,
 
-    pub vertex_layer: Vec<u8>,
-
-    pub vertices: Vec<WorldVertex>,
-    pub indices: Vec<u32>,
-
-    pub surface_ranges: Vec<(u32, u32)>,
-
     pub surface_material: Vec<u32>,
 
     pub surface_sampler_inputs: Vec<SurfaceSamplerInputs>,
     pub materials: Vec<WorldPassMaterial>,
 
     pub upload_pending: bool,
+    pub vertex_share: Option<Arc<Vec<[u8; asset_iw4::size::GFX_WORLD_VERTEX]>>>,
+    pub index_share: Option<Arc<Vec<u32>>>,
+    pub range_share: Option<Arc<Vec<(u32, u32)>>>,
+    pub layer_share: Option<Arc<Vec<u8>>>,
+    pub decoded_share: Option<Arc<Vec<WorldVertex>>>,
 }
 
 impl WorldDrawGpuPlan {
@@ -60,19 +60,57 @@ impl WorldDrawGpuPlan {
         if table_stride != Some(asset_iw4::size::GFX_WORLD_VERTEX as u16) {
             return Err(RetailWorldVertexRefusal::RetailStrideMismatch { table_stride });
         }
-        let vertices = match self.retail_vertices.type2_stream0() {
-            Ok(vertices) => vertices,
-            Err(source_layout) => {
-                return Err(RetailWorldVertexRefusal::ForeignLayout { source_layout });
+        let vertices = if let Some(share) = self.vertex_share.as_ref() {
+            share.as_slice()
+        } else {
+            match self.retail_vertices.type2_stream0() {
+                Ok(vertices) => vertices,
+                Err(source_layout) => {
+                    return Err(RetailWorldVertexRefusal::ForeignLayout { source_layout });
+                }
             }
         };
-        if vertices.len() != self.vertices.len() {
+        if vertices.len() != self.decoded_vertices().len() {
             return Err(RetailWorldVertexRefusal::VertexCountMismatch {
                 retail: vertices.len(),
-                decoded: self.vertices.len(),
+                decoded: self.decoded_vertices().len(),
             });
         }
         Ok(vertices)
+    }
+
+    pub fn indices(&self) -> &[u32] {
+        super::published_rows(&self.index_share)
+    }
+
+    pub fn surface_ranges(&self) -> &[(u32, u32)] {
+        super::published_rows(&self.range_share)
+    }
+
+    pub fn decoded_vertices(&self) -> &[WorldVertex] {
+        super::published_rows(&self.decoded_share)
+    }
+
+    pub fn vertex_layer_rows(&self) -> &[u8] {
+        super::published_rows(&self.layer_share)
+    }
+
+    pub fn publish_extract_shares(&mut self) {
+        if self.vertex_share.is_none() {
+            match std::mem::replace(
+                &mut self.retail_vertices,
+                assets::RetailWorldVertexPayload::Unavailable {
+                    source_layout: "retail payload published for extract",
+                },
+            ) {
+                assets::RetailWorldVertexPayload::Iw4(rows)
+                | assets::RetailWorldVertexPayload::Iw5(rows)
+                | assets::RetailWorldVertexPayload::T5(rows) => {
+                    self.vertex_share = Some(Arc::new(rows));
+                }
+                unavailable => self.retail_vertices = unavailable,
+            }
+        }
     }
 
     pub fn from_scene(
@@ -188,17 +226,20 @@ impl WorldDrawGpuPlan {
 
         let Some(cull) = scene.cull.as_ref() else {
             let upload_pending = !vertices.is_empty();
-            return Self {
+            let mut plan = Self {
                 retail_vertices,
-                vertex_layer,
-                vertices,
-                indices: Vec::new(),
-                surface_ranges: Vec::new(),
                 surface_material: Vec::new(),
                 surface_sampler_inputs: Vec::new(),
                 materials,
                 upload_pending,
+                vertex_share: None,
+                index_share: Some(Arc::new(Vec::new())),
+                range_share: Some(Arc::new(Vec::new())),
+                layer_share: Some(Arc::new(vertex_layer)),
+                decoded_share: Some(Arc::new(vertices)),
             };
+            plan.publish_extract_shares();
+            return plan;
         };
 
         let indices = cull.packed_indices.clone();
@@ -235,17 +276,20 @@ impl WorldDrawGpuPlan {
             .collect();
 
         let upload_pending = !vertices.is_empty() && !indices.is_empty();
-        Self {
+        let mut plan = Self {
             retail_vertices,
-            vertex_layer,
-            vertices,
-            indices,
-            surface_ranges,
             surface_material,
             surface_sampler_inputs,
             materials,
             upload_pending,
-        }
+            vertex_share: None,
+            index_share: Some(Arc::new(indices)),
+            range_share: Some(Arc::new(surface_ranges)),
+            layer_share: Some(Arc::new(vertex_layer)),
+            decoded_share: Some(Arc::new(vertices)),
+        };
+        plan.publish_extract_shares();
+        plan
     }
 }
 
@@ -302,8 +346,8 @@ pub(crate) fn build_world_draw_gpu_plan(
         World,
         "world drawsurf tess plan: batches={} verts={} indices={} materials={} retail_vb={} surface_inputs={}/{} probe/lightmap (material execution deferred to Colour product); mark_clip_verts pos={} lmap={} nrm={}",
         scene.batches.len(),
-        plan.vertices.len(),
-        plan.indices.len(),
+        plan.decoded_vertices().len(),
+        plan.indices().len(),
         plan.materials.len(),
         exact_vertex_status,
         probe_surfaces,

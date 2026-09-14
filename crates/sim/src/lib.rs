@@ -134,7 +134,10 @@ pub use spawn::{
     SPAWN_IDEAL_DIST, SpawnAttemptReport, SpawnDecision, SpawnReject, host_game_mode_kind,
     pick_ffa_spawn, spawn_candidate_indices, spawn_candidate_indices_for,
 };
-pub use step::{apply_explodable_barrel_death_presentation, phase_materialize_entity_dobjs};
+pub use step::{
+    apply_explodable_barrel_death_presentation, apply_toy_death_presentation,
+    phase_materialize_entity_dobjs,
+};
 pub use use_object::{
     DomFlagInstallError, MapUseBindError, UseCancelReason, UseHoldSession, UseObject,
     UseObjectEvent, UseObjectInstall, UseTriggerKind, bind_map_use_object,

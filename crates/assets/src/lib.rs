@@ -186,14 +186,15 @@ pub use asset_core::{
     AssetKey, AssetKeyError, AssetKind, AssetNamespace, AssetRef, AssetRefCensus, BoundTarget,
     CatalogIndex, IndexSpace, WalkLocalMaterialIndex, ZoneGame, ZoneOwner, bound_zone_names,
 };
+pub(crate) use asset_graph::stamp_match_destructible_death;
 pub use asset_graph::{
-    AssetEdge, AssetEdgeCensus, AssetEdgeReason, AssetGraphCensus, DeathClipEdge, DeathHuskEdge,
-    DestructibleDeathHint, DestructibleDeathRow, FpvMeshIndex, FpvMeshSpace, FxIndex, FxModelIndex,
-    FxModelSpace, FxSpace, LoadedSoundIndex, LoadedSoundSpace, MapXModelIndex, MapXModelSpace,
-    MaterialIndex, MaterialSpace, ProjectileModelIndex, ProjectileModelSpace, SoundAliasIndex,
-    SoundAliasSpace, TechniqueSetIndex, TechniqueSetSpace, TracerIndex, TracerSpace,
-    WorldWeaponIndex, WorldWeaponSpace, XAnimIndex, XAnimSpace, resolve_after_absorb,
-    stamp_destructible_death_edges,
+    AssetEdge, AssetEdgeCensus, AssetEdgeReason, AssetGraphCensus, DESTRUCTIBLE_DEATH_HINTS,
+    DeathClipEdge, DeathHuskEdge, DestructibleDeathHint, DestructibleDeathRow, FpvMeshIndex,
+    FpvMeshSpace, FxIndex, FxModelIndex, FxModelSpace, FxSpace, LoadedSoundIndex, LoadedSoundSpace,
+    MapXModelIndex, MapXModelSpace, MaterialIndex, MaterialSpace, ProjectileModelIndex,
+    ProjectileModelSpace, SoundAliasIndex, SoundAliasSpace, TechniqueSetIndex, TechniqueSetSpace,
+    TracerIndex, TracerSpace, WorldWeaponIndex, WorldWeaponSpace, XAnimIndex, XAnimSpace,
+    resolve_after_absorb,
 };
 pub use asset_iw4::{
     D3DCMP_ALWAYS, D3DCMP_EQUAL, D3DCMP_LESS, D3DCMP_LESSEQUAL, GFXS1_DEPTHTEST_DISABLE,
@@ -215,7 +216,7 @@ pub use attachment_hide::{
     AttachmentVisual, attachment_catalog, bare_weapon_id, bone_has_hidden_ancestor,
     effective_hide_tags, resolve_weapon_for_attachments, surface_visible,
 };
-pub use body_catalog::{BODY_SPINE_BONES, BodyMeshCatalog, BodyMeshEntry};
+pub use body_catalog::{BODY_SPINE_BONES, BodyMeshBuild, BodyMeshCatalog, BodyMeshEntry};
 pub use cac_stats::{
     CacAuthoredCategory, CacPerkRow, CacPerkSlot, CacStatBar, CacWeaponFact, CacWeaponPreview,
     PERK_ICON_COL, PERK_NAME_COL, PERK_REF_COL, PERK_SLOT_COL, STATS_GROUP_COL, STATS_IMAGE_COL,
@@ -261,12 +262,12 @@ pub use dyn_ents::{
 pub use ent_channel::{EntChannel, parse_ent_channel_file};
 pub use fastfile_iw4::GlyphCapture;
 pub use fpv_catalog::{
-    FpvHands, FpvMeshCatalog, FpvMeshEntry, FpvMeshKey, PoseStats, TagViewBind, VIEWHANDS_NAME,
-    VIEWHANDS_NAME_T5,
+    FpvHands, FpvMeshBuild, FpvMeshCatalog, FpvMeshEntry, FpvMeshKey, PoseStats, TagViewBind,
+    VIEWHANDS_NAME, VIEWHANDS_NAME_T5,
 };
 pub use fx_catalog::{
-    FxCatalog, FxChildEdge, FxDefinitions, FxElemMaterial, FxElemMaterialReason, FxElemModelEdge,
-    FxElemSoundEdge, OwnedFxEffectDef, OwnedFxElemDef, OwnedFxSparkFountainDef, OwnedFxTrailDef,
+    FxBankSound, FxCatalog, FxChildEdge, FxDefinitions, FxElemMaterial, FxElemMaterialReason,
+    FxElemModelEdge, OwnedFxEffectDef, OwnedFxElemDef, OwnedFxSparkFountainDef, OwnedFxTrailDef,
     OwnedFxVisual, alias_fx_color_map_stubs, elem_type as fx_elem_type,
     fx_color_decoded_in_catalog, fx_color_image_for_name, fx_material_bind_name,
     insert_fx_color_image, lookup_fx_color_image,
@@ -392,7 +393,9 @@ pub use progress::{
     LoadLaneView, LoadOverflow, LoadProgress, LoadStage, peak_resident_bytes,
     process_resident_bytes,
 };
-pub use projectile_mesh_catalog::{ProjectileMeshCatalog, ProjectileMeshEntry};
+pub use projectile_mesh_catalog::{
+    ProjectileMeshBuild, ProjectileMeshCatalog, ProjectileMeshEntry,
+};
 pub use session_load::{
     MatchLoadOutcome, MatchMaterialSeed, PreparedMatch, PreparedWorld, WorldDrawPolicy,
     apply_match_material_map, load_match_material_catalog, load_match_material_seed, load_pool,
@@ -450,10 +453,10 @@ pub use weapon_anim_dispatch::{
 pub use weapon_animations::{AdsOverlayConvention, WeaponAnimSlot, WeaponAnimations};
 pub use weapon_catalog::{
     CacOffhandBucket, CatalogWeapon, LoadoutCatalogKind, LoadoutCatalogRow, NotetrackConvention,
-    T5_NOTE_RUMBLE_PREFIX, T5_NOTE_SOUND_PREFIX, UnknownWeaponName, WeaponBodyFacts, WeaponCatalog,
-    WeaponCombatFx, WeaponHudMaterialEdges, WeaponKickFacts, WeaponProjectileFx, WeaponRegistry,
-    WeaponReticleAssets, WeaponSoundAliases, WeaponSoundSlot, WeaponSwayFacts, cac_offhand_bucket,
-    gsc_weapon_script_name, gun_candidates_from_idle, overlay_name_is_hud_iris,
+    T5_NOTE_RUMBLE_PREFIX, T5_NOTE_SOUND_PREFIX, UnknownWeaponName, WeaponBodyFacts, WeaponBuild,
+    WeaponCatalog, WeaponCombatFx, WeaponHudMaterialEdges, WeaponKickFacts, WeaponProjectileFx,
+    WeaponRegistry, WeaponReticleAssets, WeaponSoundAliases, WeaponSoundSlot, WeaponSwayFacts,
+    cac_offhand_bucket, gsc_weapon_script_name, gun_candidates_from_idle, overlay_name_is_hud_iris,
     t5_inline_note_alias,
 };
 pub use world_draw::{
@@ -472,8 +475,8 @@ pub use world_mesh::{
     unpack_packed_tex_coords,
 };
 pub use world_t5::{build_t5_world_draw, build_t5_world_mesh};
-pub use world_weapon_catalog::{WorldWeaponCatalog, WorldWeaponEntry};
-pub use xanim_catalog::{CapturedXAnim, XAnimCatalog, XAnimKey};
+pub use world_weapon_catalog::{WorldWeaponBuild, WorldWeaponCatalog, WorldWeaponEntry};
+pub use xanim_catalog::{CapturedXAnim, XAnimBuild, XAnimCatalog, XAnimKey};
 pub use xanim_clip::{
     AnimClip, ClipError, ClipNotify, FrameIndices, Keyed, RawXAnimParts, Rotation, SampledTrack,
     Track, Translation,

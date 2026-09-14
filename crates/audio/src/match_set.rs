@@ -32,7 +32,7 @@ pub(crate) fn register(app: &mut App) {
         .add_systems(
             Update,
             (
-                queue_match_clips.after(crate::playback::stamp_weapon_sound_edges),
+                queue_match_clips.after(crate::ambient::install_sound_bank),
                 poll_match_audio_ready.after(queue_match_clips),
                 reset_match_audio_on_torn_down,
             )

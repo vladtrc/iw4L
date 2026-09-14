@@ -12,8 +12,7 @@ pub(crate) use helpers::{
 pub(crate) use sink::{CommonWalkSink, MaterialPopulationSink, ZoneWalkSink};
 
 use crate::{
-    BodyMeshCatalog, FpvMeshCatalog, WeaponRegistry, WorldWeaponCatalog, XAnimCatalog, ZoneGame,
-    ZoneImage,
+    BodyMeshBuild, FpvMeshBuild, WeaponBuild, WorldWeaponBuild, XAnimBuild, ZoneGame, ZoneImage,
     lane_capability::{LaneStatus, PreparedCapability},
     progress::LoadProgress,
     session_load::{PreparedWorld, WorldDrawPolicy},
@@ -34,9 +33,9 @@ pub struct LoadedWorld {
     pub materials: crate::MaterialCatalog,
     pub collision: Option<crate::ClipCollision>,
     pub spawns: Vec<crate::SpawnPoint>,
-    pub bodies: BodyMeshCatalog,
-    pub fpv_meshes: FpvMeshCatalog,
-    pub xanims: XAnimCatalog,
+    pub bodies: BodyMeshBuild,
+    pub fpv_meshes: FpvMeshBuild,
+    pub xanims: XAnimBuild,
     pub facts: crate::MapFacts,
     /// Bytes the zone arenas held while the walk read them. The arenas
     /// themselves die with the walk; only their size travels.
@@ -86,14 +85,14 @@ impl LoadedWorld {
 pub struct CommonCensus {
     pub scene_models: crate::MapXModelSceneCatalog,
     pub shared_surfaces: asset_model::SharedXModelSurfaces,
-    pub weapons: WeaponRegistry,
+    pub weapons: WeaponBuild,
 
     pub cac_tables: Vec<crate::CapturedStringTable>,
-    pub fpv: FpvMeshCatalog,
-    pub world_weapons: WorldWeaponCatalog,
+    pub fpv: FpvMeshBuild,
+    pub world_weapons: WorldWeaponBuild,
 
-    pub projectile_meshes: crate::ProjectileMeshCatalog,
-    pub xanims: XAnimCatalog,
+    pub projectile_meshes: crate::ProjectileMeshBuild,
+    pub xanims: XAnimBuild,
     pub player_anim_sources: crate::PlayerAnimSources,
     pub fx: crate::FxCatalog,
     pub fx_models: crate::FxModelCatalog,

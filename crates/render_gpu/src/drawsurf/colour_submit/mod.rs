@@ -98,19 +98,19 @@ pub const CODE_TEXTURE_SHADOWMAP_SUN: u32 = 6;
 
 pub const CODE_TEXTURE_SHADOWMAP_SPOT: u32 = 7;
 
-/// Geometry that survives frame replacement within a world/material generation.
+/// Geometry that survives frame replacement within a world generation.
 #[derive(Clone, Debug, Default)]
 pub struct ExtractedStaticGeometry {
-    pub world_vertices: Vec<[u8; asset_iw4::size::GFX_WORLD_VERTEX]>,
-    pub world_layer: Vec<u8>,
-    pub world_indices: Vec<u32>,
-    pub world_surface_ranges: Vec<(u32, u32)>,
+    pub world_vertices: Arc<Vec<[u8; asset_iw4::size::GFX_WORLD_VERTEX]>>,
+    pub world_layer: Arc<Vec<u8>>,
+    pub world_indices: Arc<Vec<u32>>,
+    pub world_surface_ranges: Arc<Vec<(u32, u32)>>,
     pub world_vertex_refusal: Option<render_frame::RetailWorldVertexRefusal>,
-    pub smodel_vertices: Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
-    pub smodel_indices: Vec<u32>,
-    pub smodel_surface_ranges: Vec<(u32, u32)>,
+    pub smodel_vertices: Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>,
+    pub smodel_indices: Arc<Vec<u32>>,
+    pub smodel_surface_ranges: Arc<Vec<(u32, u32)>>,
     pub smodel_vertex_refusal: Option<render_frame::RetailPackedVertexRefusal>,
-    pub smodel_cached_vertices: Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
+    pub smodel_cached_vertices: Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>,
 }
 
 /// Installed world and material resources. Longer-lived than a colour frame:
@@ -1471,14 +1471,12 @@ pub fn colour_ports_static(
 }
 
 pub fn colour_world_smodel_static(
-    gpu_generation: MaterialGenerationId,
     gpu_world_generation: frame::WorldGeneration,
     gpu_world_verts: usize,
     gpu_world_indices: usize,
     gpu_world_layer: usize,
     gpu_smodel_verts: usize,
     gpu_smodel_indices: usize,
-    cpu_generation: MaterialGenerationId,
     cpu_world_generation: frame::WorldGeneration,
     cpu_world_verts: usize,
     cpu_world_indices: usize,
@@ -1486,8 +1484,7 @@ pub fn colour_world_smodel_static(
     cpu_smodel_verts: usize,
     cpu_smodel_indices: usize,
 ) -> bool {
-    gpu_generation == cpu_generation
-        && gpu_world_generation == cpu_world_generation
+    gpu_world_generation == cpu_world_generation
         && gpu_world_verts == cpu_world_verts
         && gpu_world_indices == cpu_world_indices
         && gpu_world_layer == cpu_world_layer
@@ -4672,7 +4669,7 @@ fn prepare_shadowmap_spot(
                 let hit_start = entry.index_byte_offset / 2;
                 let hit_count = u32::from(entry.tri_count).saturating_mul(3);
                 match emit_local_smodel_shadow_flush(
-                    &extracted.world.static_geometry.smodel_indices,
+                    extracted.world.static_geometry.smodel_indices.as_slice(),
                     hit_start,
                     hit_count,
                     &mut smodel_stream,

@@ -99,7 +99,15 @@ pub type FxChildEdge = AssetEdge<crate::asset_graph::FxSpace>;
 
 pub type FxElemModelEdge = AssetEdge<crate::asset_graph::FxModelSpace>;
 
-pub type FxElemSoundEdge = AssetEdge<crate::asset_graph::SoundAliasSpace>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FxBankSound<'a> {
+    Gap,
+    Silent,
+    Play {
+        namespace: crate::AssetNamespace,
+        alias: &'a str,
+    },
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnedFxVisual {
@@ -129,7 +137,6 @@ pub enum OwnedFxVisual {
     },
 
     Sound {
-        edge: FxElemSoundEdge,
         hint: Option<String>,
     },
     UnresolvedMaterial,
@@ -273,15 +280,34 @@ impl OwnedFxElemDef {
         }
     }
 
-    pub fn sound_edge(&self, random_seed: u32) -> Option<FxElemSoundEdge> {
+    pub fn sound_in_bank<'a>(
+        &self,
+        random_seed: u32,
+        sounds: &'a crate::SoundCatalog,
+    ) -> FxBankSound<'a> {
         if self.view.elem_type != elem_type::SOUND {
-            return None;
+            return FxBankSound::Gap;
         }
         let idx = fx_iw4::fx_elem_visual_index(self.view.visual_count, random_seed);
-        match self.visuals.get(idx)? {
-            OwnedFxVisual::Sound { edge, .. } => Some(*edge),
-            OwnedFxVisual::None => Some(AssetEdge::Absent),
-            _ => None,
+        let hint = match self.visuals.get(idx) {
+            None => return FxBankSound::Gap,
+            Some(OwnedFxVisual::None) => return FxBankSound::Silent,
+            Some(OwnedFxVisual::Sound { hint }) => hint.as_deref().filter(|name| !name.is_empty()),
+            Some(_) => return FxBankSound::Gap,
+        };
+        let Some(name) = hint else {
+            return FxBankSound::Silent;
+        };
+        match sounds
+            .index_in(crate::AssetNamespace::Iw4, name)
+            .or_else(|| sounds.index_unique(name))
+            .and_then(|index| {
+                sounds
+                    .name_at(index)
+                    .map(|alias| (sounds.namespace_of_alias(index), alias))
+            }) {
+            Some((namespace, alias)) => FxBankSound::Play { namespace, alias },
+            None => FxBankSound::Gap,
         }
     }
 
@@ -772,18 +798,6 @@ impl FxDefinitions {
         }
     }
 
-    pub fn resolve_sound_edges(&mut self, sounds: &crate::SoundCatalog) {
-        for effect in &mut self.defs {
-            for elem in &mut effect.elems {
-                for vis in &mut elem.visuals {
-                    if let OwnedFxVisual::Sound { edge, hint } = vis {
-                        *edge = sound_hint_edge(hint.as_deref(), sounds);
-                    }
-                }
-            }
-        }
-    }
-
     pub fn resolve_model_edges(&mut self, models: &crate::FxModelCatalog) {
         for effect in &mut self.defs {
             for elem in &mut effect.elems {
@@ -1062,20 +1076,6 @@ impl FxDefinitions {
         census
     }
 
-    pub fn sound_edge_census(&self) -> AssetEdgeCensus {
-        let mut census = AssetEdgeCensus::default();
-        for vis in self
-            .effects()
-            .flat_map(|effect| effect.elems.iter())
-            .flat_map(|elem| elem.visuals.iter())
-        {
-            if let OwnedFxVisual::Sound { edge, .. } = vis {
-                census.push(*edge);
-            }
-        }
-        census
-    }
-
     pub fn model_elem_n(&self) -> usize {
         self.effects()
             .flat_map(|def| def.elems.iter())
@@ -1113,9 +1113,7 @@ impl FxDefinitions {
             .flat_map(|effect| effect.elems.iter())
             .flat_map(|elem| elem.visuals.iter())
         {
-            if let OwnedFxVisual::Sound {
-                hint: Some(name), ..
-            } = vis
+            if let OwnedFxVisual::Sound { hint: Some(name) } = vis
                 && !name.is_empty()
             {
                 seen.insert(name.as_str());
@@ -1519,24 +1517,8 @@ fn runner_visual(name: String) -> OwnedFxVisual {
 fn sound_visual(name: String) -> OwnedFxVisual {
     let hint = Some(name).filter(|name| !name.is_empty());
     match hint {
-        Some(hint) => OwnedFxVisual::Sound {
-            edge: AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
-            hint: Some(hint),
-        },
+        Some(hint) => OwnedFxVisual::Sound { hint: Some(hint) },
         None => OwnedFxVisual::None,
-    }
-}
-
-fn sound_hint_edge(hint: Option<&str>, sounds: &crate::SoundCatalog) -> FxElemSoundEdge {
-    match hint.filter(|name| !name.is_empty()) {
-        None => AssetEdge::Absent,
-        Some(name) => match sounds
-            .index_in(crate::AssetNamespace::Iw4, name)
-            .or_else(|| sounds.index_unique(name))
-        {
-            Some(index) => AssetEdge::bind_order(index, sounds.zone_of_alias(index)),
-            None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
-        },
     }
 }
 

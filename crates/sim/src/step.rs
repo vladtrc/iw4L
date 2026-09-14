@@ -91,6 +91,26 @@ pub fn phase_materialize_entity_dobjs(world: &mut SimState) {
             dobj.materialize();
         }
     }
+    let toy_ids: Vec<crate::ScriptModelId> = world
+        .world_objects()
+        .toy_bodies()
+        .iter()
+        .map(|(id, _, _)| *id)
+        .collect();
+    if toy_ids.is_empty() {
+        return;
+    }
+    for capabilities in world.entity_collision_capabilities_mut() {
+        let Some(id) = capabilities.owner.script_model() else {
+            continue;
+        };
+        if !toy_ids.iter().any(|have| *have == id) {
+            continue;
+        }
+        if let Some(dobj) = capabilities.dobj.as_mut() {
+            dobj.ensure_bounds_collision();
+        }
+    }
 }
 
 fn phase_destructible_death_presentation(world: &mut FrameWorld, msec: i32) {
@@ -137,6 +157,7 @@ fn phase_destructible_death_presentation(world: &mut FrameWorld, msec: i32) {
         world.world_objects_mut().set_death_anim_time(id, time);
     }
     apply_explodable_barrel_death_presentation(world);
+    apply_toy_death_presentation(world);
 }
 
 pub fn apply_explodable_barrel_death_presentation(world: &mut SimState) {
@@ -156,7 +177,44 @@ pub fn apply_explodable_barrel_death_presentation(world: &mut SimState) {
             if let Some(dobj) = capabilities.dobj.as_mut()
                 && dobj.current_model != crate::EXPLODABLE_BARREL_HUSK
             {
-                dobj.set_model(crate::EXPLODABLE_BARREL_HUSK.to_owned(), None);
+                let cap = dobj.husk_capability.clone();
+                dobj.set_model(crate::EXPLODABLE_BARREL_HUSK.to_owned(), cap);
+                dobj.semantic_state = xmodel_runtime::DObjSemanticState::bind_pose(
+                    crate::EXPLODABLE_BARREL_HUSK.to_owned(),
+                    dobj.model_revision,
+                    dobj.pose_revision,
+                );
+                dobj.pose_request = xmodel_runtime::DObjPoseRequest::bind_pose();
+            }
+        }
+    }
+}
+
+pub fn apply_toy_death_presentation(world: &mut SimState) {
+    let deaths: Vec<(crate::ScriptModelId, &'static str)> = world
+        .world_objects()
+        .toy_bodies()
+        .iter()
+        .filter(|(_, kind, body)| body.state_index >= kind.destroyed_state())
+        .map(|(id, kind, _)| (*id, kind.definition().husk))
+        .collect();
+    for (id, husk) in deaths {
+        for capabilities in world.entity_collision_capabilities_mut() {
+            if capabilities.owner.script_model() != Some(id) {
+                continue;
+            }
+            if let Some(dobj) = capabilities.dobj.as_mut()
+                && dobj.current_model != husk
+            {
+                dobj.play_anim = None;
+                let cap = dobj.husk_capability.clone();
+                dobj.set_model(husk.to_owned(), cap);
+                dobj.semantic_state = xmodel_runtime::DObjSemanticState::bind_pose(
+                    husk.to_owned(),
+                    dobj.model_revision,
+                    dobj.pose_revision,
+                );
+                dobj.pose_request = xmodel_runtime::DObjPoseRequest::bind_pose();
             }
         }
     }
@@ -199,6 +257,7 @@ fn emit_vehicle_fx_events(world: &mut FrameWorld, tick: Tick) {
         .world_objects_mut()
         .tick_vehicle_loopfx(crate::MATCH_TICK_MS);
     for pulse in death_sounds {
+        let origin = pulse_world_origin(world, pulse.owner, pulse.tag, pulse.origin);
         let event_parm = i32::from(world.sound_alias_index(pulse.alias));
         world.push_entity_event(
             tick,
@@ -207,13 +266,14 @@ fn emit_vehicle_fx_events(world: &mut FrameWorld, tick: Tick) {
             EntityEventPayload {
                 number: i32::from(trace_iw4::ENTITYNUM_WORLD),
                 event_parm,
-                origin: pulse.origin,
+                origin,
                 correlation: pulse.owner.to_wire(),
                 ..Default::default()
             },
         );
     }
     for pulse in death_fx.into_iter().chain(loop_fx).chain(burn_start) {
+        let (origin, direction) = pulse_world_pose(world, &pulse);
         let event_parm = i32::from(world.effect_name_index(pulse.def_name));
         world.push_entity_event(
             tick,
@@ -222,13 +282,52 @@ fn emit_vehicle_fx_events(world: &mut FrameWorld, tick: Tick) {
             EntityEventPayload {
                 number: i32::from(trace_iw4::ENTITYNUM_WORLD),
                 event_parm,
-                origin: pulse.origin,
-                direction: gamemode_iw4::VEHICLE_DEATH_FX_FORWARD,
+                origin,
+                direction,
                 correlation: pulse.owner.to_wire(),
                 ..Default::default()
             },
         );
     }
+}
+
+fn pulse_world_pose(
+    world: &FrameWorld,
+    pulse: &crate::world_objects::VehicleFxPulse,
+) -> ([f32; 3], [f32; 3]) {
+    let Some(tag) = pulse.tag else {
+        return (pulse.origin, gamemode_iw4::VEHICLE_DEATH_FX_FORWARD);
+    };
+    script_model_dobj(world, pulse.owner)
+        .and_then(|dobj| dobj.tag_world_pose(tag))
+        .unwrap_or((pulse.origin, gamemode_iw4::VEHICLE_DEATH_FX_FORWARD))
+}
+
+fn pulse_world_origin(
+    world: &FrameWorld,
+    owner: crate::ScriptModelId,
+    tag: Option<&str>,
+    fallback: [f32; 3],
+) -> [f32; 3] {
+    let Some(tag) = tag else {
+        return fallback;
+    };
+    script_model_dobj(world, owner)
+        .and_then(|dobj| dobj.tag_world_pose(tag))
+        .map(|(origin, _)| origin)
+        .unwrap_or(fallback)
+}
+
+fn script_model_dobj<'a>(
+    world: &'a FrameWorld,
+    id: crate::ScriptModelId,
+) -> Option<&'a crate::bullet_collision::AuthorityDObjState> {
+    world
+        .entity_collision_capabilities()
+        .iter()
+        .find(|row| row.owner.script_model() == Some(id))?
+        .dobj
+        .as_ref()
 }
 
 fn phase_stuck_in_client(world: &mut FrameWorld) {
@@ -657,9 +756,9 @@ fn run_entity_types_system(ecs: &mut World) {
             }
             phase_health_regen(&mut world, tick);
             phase_finalstand_timer(&mut world, tick);
+            emit_vehicle_fx_events(&mut world, tick);
             phase_destructible_death_presentation(&mut world, msec);
             phase_animated_map_models(&mut world, tick, msec);
-            emit_vehicle_fx_events(&mut world, tick);
         }
     } else {
         crate::entity_run::phase_walk_entity_thinks(&mut world);

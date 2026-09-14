@@ -28,7 +28,7 @@ impl WorldWeaponEntry {
         }
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
+    pub(crate) fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         stamp_xmodel_material_edges(
             &mut self.material_names,
             &mut self.material_edges,
@@ -55,54 +55,34 @@ pub struct WorldWeaponCatalog {
     entries: HashMap<String, WorldWeaponEntry>,
     order: Vec<String>,
     zones: Vec<crate::ZoneOwner>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct WorldWeaponBuild {
+    catalog: WorldWeaponCatalog,
     capture_zone: crate::ZoneOwner,
     strings: ScriptStrings,
 }
 
-impl WorldWeaponCatalog {
+impl std::ops::Deref for WorldWeaponBuild {
+    type Target = WorldWeaponCatalog;
+
+    fn deref(&self) -> &Self::Target {
+        &self.catalog
+    }
+}
+
+impl WorldWeaponBuild {
+    pub fn publish(self) -> WorldWeaponCatalog {
+        self.catalog
+    }
+
     pub fn set_strings(&mut self, strings: ScriptStrings) {
         self.strings = strings;
     }
 
     pub fn set_capture_zone(&mut self, zone: crate::ZoneOwner) {
         self.capture_zone = zone;
-    }
-
-    pub fn len(&self) -> usize {
-        self.order.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.order.is_empty()
-    }
-
-    pub fn get(&self, name: &str) -> Option<&WorldWeaponEntry> {
-        self.entries.get(name)
-    }
-
-    pub fn index_by_name(&self, name: &str) -> Option<usize> {
-        self.order.iter().position(|n| n == name)
-    }
-
-    pub fn zone_of(&self, index: usize) -> crate::ZoneOwner {
-        self.zones.get(index).copied().unwrap_or_default()
-    }
-
-    pub fn get_at(&self, index: usize) -> Option<&WorldWeaponEntry> {
-        let name = self.order.get(index)?;
-        self.entries.get(name)
-    }
-
-    pub fn name_at(&self, index: usize) -> Option<&str> {
-        self.order.get(index).map(String::as_str)
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.order.iter().map(String::as_str)
-    }
-
-    pub fn contains(&self, name: &str) -> bool {
-        self.entries.contains_key(name)
     }
 
     pub fn capture(&mut self, stream: &ZoneStream<'_>, materials: &MaterialCatalog) {
@@ -160,38 +140,83 @@ impl WorldWeaponCatalog {
     pub fn insert_captured(&mut self, skel: ModelSkel, materials: Option<&MaterialCatalog>) {
         let name = skel.name.clone();
         let entry = WorldWeaponEntry::from_skel(skel, materials);
-        if let Some(pos) = self.order.iter().position(|n| n == &name) {
-            self.zones[pos] = self.capture_zone;
+        if let Some(pos) = self.catalog.order.iter().position(|n| n == &name) {
+            self.catalog.zones[pos] = self.capture_zone;
         } else {
-            self.order.push(name.clone());
-            self.zones.push(self.capture_zone);
+            self.catalog.order.push(name.clone());
+            self.catalog.zones.push(self.capture_zone);
         }
-        self.entries.insert(name, entry);
+        self.catalog.entries.insert(name, entry);
     }
 
     pub fn absorb(&mut self, mut other: Self) -> usize {
         let mut added = 0;
-        let order = std::mem::take(&mut other.order);
+        let order = std::mem::take(&mut other.catalog.order);
         for (i, name) in order.into_iter().enumerate() {
-            if self.entries.contains_key(&name) {
+            if self.catalog.entries.contains_key(&name) {
                 continue;
             }
-            let Some(entry) = other.entries.remove(&name) else {
+            let Some(entry) = other.catalog.entries.remove(&name) else {
                 continue;
             };
-            self.order.push(name.clone());
-            self.zones
-                .push(other.zones.get(i).copied().unwrap_or(other.capture_zone));
-            self.entries.insert(name, entry);
+            self.catalog.order.push(name.clone());
+            self.catalog.zones.push(
+                other
+                    .catalog
+                    .zones
+                    .get(i)
+                    .copied()
+                    .unwrap_or(other.capture_zone),
+            );
+            self.catalog.entries.insert(name, entry);
             added += 1;
         }
         added
     }
 
     pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
-        for entry in self.entries.values_mut() {
+        for entry in self.catalog.entries.values_mut() {
             entry.resolve_materials(materials);
         }
+    }
+}
+
+impl WorldWeaponCatalog {
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    pub fn get(&self, name: &str) -> Option<&WorldWeaponEntry> {
+        self.entries.get(name)
+    }
+
+    pub fn index_by_name(&self, name: &str) -> Option<usize> {
+        self.order.iter().position(|n| n == name)
+    }
+
+    pub fn zone_of(&self, index: usize) -> crate::ZoneOwner {
+        self.zones.get(index).copied().unwrap_or_default()
+    }
+
+    pub fn get_at(&self, index: usize) -> Option<&WorldWeaponEntry> {
+        let name = self.order.get(index)?;
+        self.entries.get(name)
+    }
+
+    pub fn name_at(&self, index: usize) -> Option<&str> {
+        self.order.get(index).map(String::as_str)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.order.iter().map(String::as_str)
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.entries.contains_key(name)
     }
 
     pub fn material_edge_census(&self) -> AssetEdgeCensus {

@@ -2226,6 +2226,7 @@ fn handle_command(
             let applied = apply_host(
                 host_match,
                 HostMatchEvent::Applied {
+                    match_key: frame::MatchKey::new(host_match.match_key().session_id, epoch),
                     member: member_id,
                     bootstrap_id,
                     connection_id,

@@ -159,7 +159,7 @@ impl FpvMeshEntry {
         FpvMeshKey::new(self.namespace, &self.skel.name)
     }
 
-    pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
+    pub(crate) fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         stamp_xmodel_material_edges(
             &mut self.material_names,
             &mut self.material_edges,
@@ -199,34 +199,48 @@ impl FpvMeshEntry {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct FpvMeshCatalog {
     entries: HashMap<FpvMeshKey, FpvMeshEntry>,
     order: Vec<FpvMeshKey>,
 
     zones: Vec<crate::ZoneOwner>,
-    capture_zone: crate::ZoneOwner,
-    strings: ScriptStrings,
-    capture_ns: AssetNamespace,
 
     pub map_namespace: Option<AssetNamespace>,
 }
 
-impl Default for FpvMeshCatalog {
+#[derive(Clone, Debug)]
+pub struct FpvMeshBuild {
+    catalog: FpvMeshCatalog,
+    capture_zone: crate::ZoneOwner,
+    strings: ScriptStrings,
+    capture_ns: AssetNamespace,
+}
+
+impl Default for FpvMeshBuild {
     fn default() -> Self {
         Self {
-            entries: HashMap::new(),
-            order: Vec::new(),
-            zones: Vec::new(),
+            catalog: FpvMeshCatalog::default(),
             capture_zone: crate::ZoneOwner::default(),
             strings: ScriptStrings::default(),
             capture_ns: AssetNamespace::Iw4,
-            map_namespace: None,
         }
     }
 }
 
-impl FpvMeshCatalog {
+impl std::ops::Deref for FpvMeshBuild {
+    type Target = FpvMeshCatalog;
+
+    fn deref(&self) -> &Self::Target {
+        &self.catalog
+    }
+}
+
+impl FpvMeshBuild {
+    pub fn publish(self) -> FpvMeshCatalog {
+        self.catalog
+    }
+
     pub fn set_strings(&mut self, strings: ScriptStrings) {
         self.strings = strings;
     }
@@ -239,22 +253,8 @@ impl FpvMeshCatalog {
         self.capture_zone = zone;
     }
 
-    pub fn index_by_name(&self, ns: AssetNamespace, name: &str) -> Option<usize> {
-        let key = FpvMeshKey::new(ns, name);
-        self.order.iter().position(|k| k == &key)
-    }
-
-    pub fn zone_of(&self, index: usize) -> crate::ZoneOwner {
-        self.zones.get(index).copied().unwrap_or_default()
-    }
-
-    pub fn get_at(&self, index: usize) -> Option<&FpvMeshEntry> {
-        let key = self.order.get(index)?;
-        self.entries.get(key)
-    }
-
-    pub fn name_at(&self, index: usize) -> Option<&str> {
-        self.order.get(index).map(|k| k.name.as_str())
+    pub fn set_map_namespace(&mut self, ns: Option<AssetNamespace>) {
+        self.catalog.map_namespace = ns;
     }
 
     pub fn capture(&mut self, stream: &ZoneStream<'_>, materials: &MaterialCatalog) {
@@ -339,25 +339,30 @@ impl FpvMeshCatalog {
     }
 
     fn retain(&mut self, key: FpvMeshKey, entry: FpvMeshEntry) {
-        if let Some(pos) = self.order.iter().position(|k| k == &key) {
-            self.zones[pos] = self.capture_zone;
+        if let Some(pos) = self.catalog.order.iter().position(|k| k == &key) {
+            self.catalog.zones[pos] = self.capture_zone;
         } else {
-            self.order.push(key.clone());
-            self.zones.push(self.capture_zone);
+            self.catalog.order.push(key.clone());
+            self.catalog.zones.push(self.capture_zone);
         }
-        self.entries.insert(key, entry);
+        self.catalog.entries.insert(key, entry);
     }
 
-    pub fn absorb(&mut self, mut other: FpvMeshCatalog) -> usize {
+    pub fn absorb(&mut self, mut other: Self) -> usize {
         let saved = self.capture_zone;
         let mut added = 0;
-        let order = std::mem::take(&mut other.order);
+        let order = std::mem::take(&mut other.catalog.order);
         for (i, key) in order.into_iter().enumerate() {
-            let Some(entry) = other.entries.remove(&key) else {
+            let Some(entry) = other.catalog.entries.remove(&key) else {
                 continue;
             };
-            self.capture_zone = other.zones.get(i).copied().unwrap_or(other.capture_zone);
-            let vacant = !self.entries.contains_key(&key);
+            self.capture_zone = other
+                .catalog
+                .zones
+                .get(i)
+                .copied()
+                .unwrap_or(other.capture_zone);
+            let vacant = !self.catalog.entries.contains_key(&key);
             self.retain(key, entry);
             if vacant {
                 added += 1;
@@ -368,9 +373,29 @@ impl FpvMeshCatalog {
     }
 
     pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
-        for entry in self.entries.values_mut() {
+        for entry in self.catalog.entries.values_mut() {
             entry.resolve_materials(materials);
         }
+    }
+}
+
+impl FpvMeshCatalog {
+    pub fn index_by_name(&self, ns: AssetNamespace, name: &str) -> Option<usize> {
+        let key = FpvMeshKey::new(ns, name);
+        self.order.iter().position(|k| k == &key)
+    }
+
+    pub fn zone_of(&self, index: usize) -> crate::ZoneOwner {
+        self.zones.get(index).copied().unwrap_or_default()
+    }
+
+    pub fn get_at(&self, index: usize) -> Option<&FpvMeshEntry> {
+        let key = self.order.get(index)?;
+        self.entries.get(key)
+    }
+
+    pub fn name_at(&self, index: usize) -> Option<&str> {
+        self.order.get(index).map(|k| k.name.as_str())
     }
 
     pub fn material_edge_census(&self) -> AssetEdgeCensus {

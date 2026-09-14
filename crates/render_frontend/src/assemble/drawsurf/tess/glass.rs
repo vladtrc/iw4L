@@ -68,8 +68,8 @@ pub struct GlassLightingRuntime {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct GfxGlassMeshPlan {
-    pub vertices: Vec<[u8; GFX_PACKED_VERTEX]>,
-    pub indices: Vec<u32>,
+    pub vertices: Arc<Vec<[u8; GFX_PACKED_VERTEX]>>,
+    pub indices: Arc<Vec<u32>>,
     pub materials: Vec<FxPassMaterial>,
     pub draws: Vec<GfxGlassMeshDraw>,
     pub revision: u64,
@@ -94,8 +94,6 @@ pub struct GfxGlassMeshPlan {
     pub lighting_runtime: Option<GlassLightingRuntime>,
 
     pub applied: Vec<(u32, u8)>,
-    pub packed_share: Option<Arc<Vec<[u8; GFX_PACKED_VERTEX]>>>,
-    pub index_share: Option<Arc<Vec<u32>>>,
     pub range_share: Option<Arc<Vec<(u32, u32)>>>,
 }
 
@@ -128,9 +126,17 @@ impl CgGlassTable {
 }
 
 impl GfxGlassMeshPlan {
+    fn verts_mut(&mut self) -> &mut Vec<[u8; GFX_PACKED_VERTEX]> {
+        Arc::make_mut(&mut self.vertices)
+    }
+
+    fn inds_mut(&mut self) -> &mut Vec<u32> {
+        Arc::make_mut(&mut self.indices)
+    }
+
     pub fn clear(&mut self) {
-        super::reclaim_share(&mut self.packed_share, &mut self.vertices);
-        super::reclaim_share(&mut self.index_share, &mut self.indices);
+        super::reset_rows(&mut self.vertices);
+        super::reset_rows(&mut self.indices);
         self.range_share = None;
         self.materials.clear();
         self.draws.clear();
@@ -154,8 +160,6 @@ impl GfxGlassMeshPlan {
     }
 
     pub fn publish_share(&mut self) {
-        self.packed_share = Some(super::steal_into_share(&mut self.vertices));
-        self.index_share = Some(super::steal_into_share(&mut self.indices));
         self.range_share = Some(super::publish_index_ranges(
             self.draws
                 .iter()
@@ -164,11 +168,11 @@ impl GfxGlassMeshPlan {
     }
 
     pub fn packed_rows(&self) -> &[[u8; GFX_PACKED_VERTEX]] {
-        super::published_or_live(self.packed_share.as_ref(), &self.vertices)
+        self.vertices.as_slice()
     }
 
     pub fn index_rows(&self) -> &[u32] {
-        super::published_or_live(self.index_share.as_ref(), &self.indices)
+        self.indices.as_slice()
     }
 
     pub fn exact_packed_vertices(
@@ -341,7 +345,7 @@ impl GfxGlassMeshPlan {
         let color_rgba = fx_glass_def_color_rgba(def);
         let base = self.vertices.len() as u32;
         for v in cpu.iter().take(wrote) {
-            self.vertices.push(fx_pack_code_mesh_vertex(
+            self.verts_mut().push(fx_pack_code_mesh_vertex(
                 v.xyz,
                 color_rgba,
                 fx_trail_pack_texcoord(v.uv[0], v.uv[1]),
@@ -351,7 +355,7 @@ impl GfxGlassMeshPlan {
         }
         let index_start = self.indices.len() as u32;
         for &idx in fan.iter().take(idx_n) {
-            self.indices.push(base.saturating_add(u32::from(idx)));
+            self.inds_mut().push(base.saturating_add(u32::from(idx)));
         }
         let material = self.materials.len() as u32;
         self.materials.push(FxPassMaterial {
