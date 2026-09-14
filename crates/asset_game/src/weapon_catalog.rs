@@ -208,6 +208,8 @@ pub struct WeaponBodyFacts {
 
     pub clip_only: bool,
 
+    pub timed_detonation: bool,
+
     pub proj_impact_explode: bool,
 
     pub stick_to_players: bool,
@@ -217,10 +219,12 @@ pub struct WeaponBodyFacts {
     pub explosion_outer_damage: i32,
     pub projectile_speed: i32,
     pub projectile_speed_up: i32,
+    pub projectile_speed_forward: i32,
     pub projectile_activate_dist: i32,
     pub projectile_explosion_type: i32,
     pub parallel_bounce: Option<[f32; 31]>,
     pub perpendicular_bounce: Option<[f32; 31]>,
+    pub location_damage_mult: Option<[f32; 20]>,
     pub start_ammo: i32,
 
     pub ammo_count_clip_relative: bool,
@@ -1433,6 +1437,7 @@ impl WeaponCatalog {
                 fuse_time_ms: geometry.fuse_time_ms,
                 cook_off_hold: geometry.cook_off_hold,
                 clip_only: geometry.clip_only,
+                timed_detonation: geometry.timed_detonation,
                 proj_impact_explode: geometry.proj_impact_explode,
                 stick_to_players: geometry.stick_to_players,
                 explosion_radius: geometry.explosion_radius,
@@ -1441,10 +1446,12 @@ impl WeaponCatalog {
                 explosion_outer_damage: geometry.explosion_outer_damage,
                 projectile_speed: geometry.projectile_speed,
                 projectile_speed_up: geometry.projectile_speed_up,
+                projectile_speed_forward: geometry.projectile_speed_forward,
                 projectile_activate_dist: geometry.projectile_activate_dist,
                 projectile_explosion_type: geometry.projectile_explosion_type,
                 parallel_bounce: geometry.parallel_bounce,
                 perpendicular_bounce: geometry.perpendicular_bounce,
+                location_damage_mult: geometry.location_damage_mult,
                 start_ammo: geometry.start_ammo,
                 ammo_count_clip_relative: false,
                 min_damage: geometry.min_damage,
@@ -4209,6 +4216,9 @@ fn merge_body_facts(dst: &mut WeaponBodyFacts, src: WeaponBodyFacts) {
     if !dst.cook_off_hold {
         dst.cook_off_hold = src.cook_off_hold;
     }
+    if !dst.timed_detonation {
+        dst.timed_detonation = src.timed_detonation;
+    }
     if !dst.clip_only {
         dst.clip_only = src.clip_only;
     }
@@ -4239,6 +4249,9 @@ fn merge_body_facts(dst: &mut WeaponBodyFacts, src: WeaponBodyFacts) {
     if dst.projectile_speed_up == 0 {
         dst.projectile_speed_up = src.projectile_speed_up;
     }
+    if dst.projectile_speed_forward == 0 {
+        dst.projectile_speed_forward = src.projectile_speed_forward;
+    }
     if dst.projectile_activate_dist == 0 {
         dst.projectile_activate_dist = src.projectile_activate_dist;
     }
@@ -4250,6 +4263,9 @@ fn merge_body_facts(dst: &mut WeaponBodyFacts, src: WeaponBodyFacts) {
     }
     if dst.perpendicular_bounce.is_none() {
         dst.perpendicular_bounce = src.perpendicular_bounce;
+    }
+    if dst.location_damage_mult.is_none() {
+        dst.location_damage_mult = src.location_damage_mult;
     }
     if dst.penetrate_type == 0 && src.penetrate_type != 0 {
         dst.penetrate_type = src.penetrate_type;

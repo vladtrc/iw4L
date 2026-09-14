@@ -137,6 +137,10 @@ pub(super) fn draw_exact_colour(
     let colour = products.0.product(FrameProductKind::Colour);
     let light = products.0.product(FrameProductKind::Light);
     let emissive = products.0.product(FrameProductKind::Emissive);
+    scratch.skinned_tess.upload(&device, &queue);
+    let tess = std::mem::take(&mut scratch.skinned_tess);
+    let smodel_skinned_vertex = tess.vertex_buffer();
+    let smodel_skinned_index = tess.index_buffer();
     let sun_prepared = std::mem::take(&mut scratch.sun_prepared);
     let spot_prepared = std::mem::take(&mut scratch.spot_prepared);
     let sun_started = colour_census_clock(census_on);
@@ -150,6 +154,8 @@ pub(super) fn draw_exact_colour(
         &shadow_arena,
         &static_draws,
         &mut context,
+        smodel_skinned_vertex,
+        smodel_skinned_index,
     );
     let spot_submit = record_shadowmap_spot(
         spot_prepared,
@@ -160,6 +166,8 @@ pub(super) fn draw_exact_colour(
         &mut shadow_table,
         &spot_arena,
         &mut context,
+        smodel_skinned_vertex,
+        smodel_skinned_index,
     );
     let mut record_n = sun_submit.record_n;
     record_n.add(spot_submit.record_n);
@@ -355,6 +363,7 @@ pub(super) fn draw_exact_colour(
                     .filter(|draw| {
                         draw.tess == ExactTessBind::Smodel
                             || draw.tess == ExactTessBind::SmodelCached
+                            || draw.tess == ExactTessBind::SmodelSkinned
                     })
                     .count(),
             ));
@@ -389,6 +398,8 @@ pub(super) fn draw_exact_colour(
             extracted_view,
             &geometry,
             &smodel_cache_gpu,
+            smodel_skinned_vertex,
+            smodel_skinned_index,
             pretess.as_ref(),
             &indirect,
             &registry,
@@ -438,6 +449,8 @@ pub(super) fn draw_exact_colour(
                         extracted_view,
                         &geometry,
                         &smodel_cache_gpu,
+                        smodel_skinned_vertex,
+                        smodel_skinned_index,
                         pretess.as_ref(),
                         &indirect,
                         &registry,

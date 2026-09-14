@@ -5,6 +5,8 @@ use super::spawn::{WorldSpawnJob, WorldSpawnPhase};
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::assemble::drawsurf::{FpvDrawPlan, MaterialGeneration};
+
 pub(crate) const GPU_QUIET_FRAMES: u32 = 2;
 
 pub(crate) fn overlay_is_quiet(ready: bool, quiet: u32) -> bool {
@@ -84,6 +86,60 @@ pub struct GpuSubmitDemand {
     pub wants_residency: bool,
     pub pipeline_world_materials: Arc<HashSet<u16>>,
     pub pipeline_smodel_materials: Arc<HashSet<u16>>,
+    pub pipeline_demand_revision: u64,
+}
+
+/// Producer of the working pipeline demand set. Spawn snapshots are adopted by
+/// pointer identity; live FPV ids are inserted only when the set actually grows.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct PipelineDemandTracker {
+    spawn_world: Arc<HashSet<u16>>,
+    spawn_smodel: Arc<HashSet<u16>>,
+    working_world: Arc<HashSet<u16>>,
+    revision: u64,
+}
+
+impl PipelineDemandTracker {
+    fn sync_spawn(&mut self, world: Arc<HashSet<u16>>, smodel: Arc<HashSet<u16>>) {
+        if Arc::ptr_eq(&self.spawn_world, &world) && Arc::ptr_eq(&self.spawn_smodel, &smodel) {
+            return;
+        }
+        self.spawn_world = world.clone();
+        self.spawn_smodel = smodel;
+        self.working_world = world;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    pub fn absorb_fpv(&mut self, fpv: &FpvDrawPlan, runtime: &MaterialGeneration) {
+        let mut extra = Vec::new();
+        for material in fpv.materials() {
+            let Some(ordinal) = material.material_sorted_index else {
+                continue;
+            };
+            let Some(row) = runtime.catalog.material_for_sorted_ordinal(ordinal) else {
+                continue;
+            };
+            let id = row.asset_id.0;
+            if !self.working_world.contains(&id) {
+                extra.push(id);
+            }
+        }
+        if extra.is_empty() {
+            return;
+        }
+        let mut set = (*self.working_world).clone();
+        set.extend(extra);
+        self.working_world = Arc::new(set);
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    pub fn snapshot(&self) -> (Arc<HashSet<u16>>, Arc<HashSet<u16>>, u64) {
+        (
+            self.working_world.clone(),
+            self.spawn_smodel.clone(),
+            self.revision,
+        )
+    }
 }
 
 #[derive(Resource, Clone, Debug, Default)]
@@ -123,6 +179,7 @@ pub(crate) fn publish_gpu_submit_demand(
     spawn: Option<Res<WorldSpawnJob>>,
     generation: Option<Res<WorldGeneration>>,
     ready: Res<WorldGpuReady>,
+    mut tracker: ResMut<PipelineDemandTracker>,
     mut demand: ResMut<GpuSubmitDemand>,
 ) {
     let warm_pipelines = spawn.as_ref().is_some_and(|job| {
@@ -138,6 +195,17 @@ pub(crate) fn publish_gpu_submit_demand(
     let overlay_gpu_wait = spawn
         .as_ref()
         .is_some_and(|job| job.phase == WorldSpawnPhase::Gpu);
+    let spawn_world = spawn
+        .as_ref()
+        .map(|job| job.images.pipeline_world_materials.clone())
+        .unwrap_or_default();
+    let spawn_smodel = spawn
+        .as_ref()
+        .map(|job| job.images.pipeline_smodel_materials.clone())
+        .unwrap_or_default();
+    tracker.sync_spawn(spawn_world, spawn_smodel);
+    let (pipeline_world_materials, pipeline_smodel_materials, pipeline_demand_revision) =
+        tracker.snapshot();
     *demand = GpuSubmitDemand {
         world_generation,
         warm_pipelines,
@@ -148,14 +216,9 @@ pub(crate) fn publish_gpu_submit_demand(
             overlay_gpu_wait,
             world_generation,
         ),
-        pipeline_world_materials: spawn
-            .as_ref()
-            .map(|job| job.images.pipeline_world_materials.clone())
-            .unwrap_or_default(),
-        pipeline_smodel_materials: spawn
-            .as_ref()
-            .map(|job| job.images.pipeline_smodel_materials.clone())
-            .unwrap_or_default(),
+        pipeline_world_materials,
+        pipeline_smodel_materials,
+        pipeline_demand_revision,
     };
 }
 
@@ -217,6 +280,7 @@ pub(crate) fn poll(
 pub(crate) fn register_resources(app: &mut App) {
     app.init_resource::<WorldGpuReady>()
         .init_resource::<GpuSubmitDemand>()
+        .init_resource::<PipelineDemandTracker>()
         .init_resource::<GpuLoadProgress>()
         .add_systems(
             Update,

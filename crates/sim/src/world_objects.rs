@@ -18,17 +18,62 @@ use crate::identities::{DamageSource, LifeSequence, PelletId, ScriptModelId};
 use crate::world::ClientId;
 
 pub use entity_iw4::{
-    GLASS_DAMAGE_TO_DESTROY, GLASS_DAMAGE_TO_WEAKEN, GLASS_MELEE_DAMAGE, GlassPaneBasis,
-    GlassPieceState, GlassShatterSeed,
+    GLASS_BLAST_DAMAGE_SCALE, GLASS_BLAST_RADIUS_CAP, GLASS_DAMAGE_TO_DESTROY,
+    GLASS_DAMAGE_TO_WEAKEN, GLASS_FRACTURE_PROFILE_VERSION, GLASS_MELEE_DAMAGE,
+    GLASS_PROJECTILE_PANE_HOPS, GlassBreakRecord, GlassCause, GlassPaneBasis, GlassPieceState,
+    GlassShatterSeed, MISSILE_GLASS_SHATTER_VEL, glass_blast_cone_keeps,
+    glass_blast_integer_damage,
 };
 
 pub type GlassPieceId = u32;
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct DestructableInstall {
+    pub id: ScriptModelId,
+    pub origin: [f32; 3],
+    pub accumulate: Option<i32>,
+    pub threshold: Option<i32>,
+    pub script_destructable_area: String,
+    pub has_fx: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlammableCrateInstall {
+    pub id: ScriptModelId,
+    pub origin: [f32; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FlammableCrateBody {
+    health: i32,
+    burning: bool,
+    destroyed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DestructableDown {
+    pub id: ScriptModelId,
+    pub play_fx: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DestructableBody {
+    accumulate: i32,
+    threshold: i32,
+    dmg: i32,
+    destroyed: bool,
+    areas: Vec<String>,
+    has_fx: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GlassPieceSnapshot {
     pub state: GlassPieceState,
+    pub revision: u32,
     pub last_state_change_time: i32,
     pub shatter_seed: Option<GlassShatterSeed>,
+    pub deterministic_seed: u64,
+    pub cause: GlassCause,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -48,6 +93,9 @@ impl DestructibleStateIndex {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorldObjectSnapshot {
+    pub as_of_ms: i32,
+    pub map_round_epoch: u32,
+    pub fracture_profile_version: u32,
     pub destructible_stages: Vec<(ScriptModelId, u8)>,
     pub glass_pieces: Vec<(GlassPieceId, GlassPieceSnapshot)>,
 }
@@ -153,9 +201,28 @@ pub struct WorldObjectState {
     barrel_burn_start: Vec<VehicleFxPulse>,
     glass_pieces: Vec<(GlassPieceId, GGlassPiece)>,
 
+    glass_native: Vec<(GlassPieceId, GlassNativeMeta)>,
+
     glass_panes: Vec<(GlassPieceId, GlassPaneBasis)>,
 
     pending_glass_destroyed: Vec<GlassPieceId>,
+
+    destructable_bodies: Vec<(ScriptModelId, DestructableBody)>,
+    destructable_origins: Vec<(ScriptModelId, [f32; 3])>,
+    blocked_spawn_areas: Vec<String>,
+    pending_destructable_downs: Vec<DestructableDown>,
+    crate_bodies: Vec<(ScriptModelId, FlammableCrateBody)>,
+    crate_origins: Vec<(ScriptModelId, [f32; 3])>,
+    crate_drains: Vec<(ScriptModelId, VehicleHealthDrain)>,
+    pending_crate_downs: Vec<ScriptModelId>,
+    map_round_epoch: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct GlassNativeMeta {
+    revision: u32,
+    cause: GlassCause,
+    deterministic_seed: u64,
 }
 
 impl WorldObjectState {
@@ -208,6 +275,105 @@ impl WorldObjectState {
         for (id, origin) in barrels {
             self.register_barrel_at(id, origin);
         }
+    }
+
+    pub fn install_flammable_crates(
+        &mut self,
+        crates: impl IntoIterator<Item = FlammableCrateInstall>,
+    ) {
+        self.crate_bodies.clear();
+        self.crate_origins.clear();
+        self.crate_drains.clear();
+        self.pending_crate_downs.clear();
+        for ent in crates {
+            upsert_origin(&mut self.crate_origins, ent.id, ent.origin);
+            self.crate_bodies.push((
+                ent.id,
+                FlammableCrateBody {
+                    health: gamemode_iw4::FLAMMABLE_CRATE_HEALTH,
+                    burning: false,
+                    destroyed: false,
+                },
+            ));
+        }
+        self.crate_bodies.sort_by_key(|(id, _)| *id);
+    }
+
+    pub fn install_destructables(
+        &mut self,
+        ents: impl IntoIterator<Item = DestructableInstall>,
+        missing_tdm_spawns: bool,
+    ) -> bool {
+        self.destructable_bodies.clear();
+        self.destructable_origins.clear();
+        self.blocked_spawn_areas.clear();
+        self.pending_destructable_downs.clear();
+        let mut block_area_gap = false;
+        for ent in ents {
+            if !gamemode_iw4::init_keeps_ents("") {
+                continue;
+            }
+            let areas: Vec<String> = gamemode_iw4::areas_from_script(&ent.script_destructable_area)
+                .map(str::to_owned)
+                .collect();
+            if !areas.is_empty() {
+                if missing_tdm_spawns {
+                    block_area_gap = true;
+                }
+                for area in &areas {
+                    self.block_area(area);
+                }
+            }
+            upsert_origin(&mut self.destructable_origins, ent.id, ent.origin);
+            self.destructable_bodies.push((
+                ent.id,
+                DestructableBody {
+                    accumulate: gamemode_iw4::accumulate_of(ent.accumulate),
+                    threshold: gamemode_iw4::threshold_of(ent.threshold),
+                    dmg: 0,
+                    destroyed: false,
+                    areas,
+                    has_fx: ent.has_fx,
+                },
+            ));
+        }
+        self.destructable_bodies.sort_by_key(|(id, _)| *id);
+        block_area_gap
+    }
+
+    pub fn blocked_spawn_areas(&self) -> &[String] {
+        &self.blocked_spawn_areas
+    }
+
+    pub fn take_destructable_downs(&mut self) -> Vec<DestructableDown> {
+        core::mem::take(&mut self.pending_destructable_downs)
+    }
+
+    pub fn destroyed_destructable_ids(&self) -> Vec<ScriptModelId> {
+        self.destructable_bodies
+            .iter()
+            .filter(|(_, body)| body.destroyed)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    pub fn destructable_is_destroyed(&self, id: ScriptModelId) -> bool {
+        self.destructable_bodies
+            .iter()
+            .find(|(have, _)| *have == id)
+            .is_some_and(|(_, body)| body.destroyed)
+    }
+
+    fn block_area(&mut self, area: &str) {
+        if self.blocked_spawn_areas.iter().any(|have| have == area) {
+            return;
+        }
+        self.blocked_spawn_areas.push(area.to_owned());
+        self.blocked_spawn_areas.sort();
+    }
+
+    fn unblock_area(&mut self, area: &str) {
+        self.blocked_spawn_areas.retain(|have| have != area);
     }
 
     fn register_vehicle_at(
@@ -323,8 +489,12 @@ impl WorldObjectState {
         let mut pending = intents.to_vec();
         let mut changed = 0;
         let mut explodes = Vec::new();
-        let owner_cap =
-            self.vehicle_bodies.len() + self.toy_bodies.len() + self.barrel_bodies.len() + 1;
+        let owner_cap = self.vehicle_bodies.len()
+            + self.toy_bodies.len()
+            + self.barrel_bodies.len()
+            + self.crate_bodies.len()
+            + self.destructable_bodies.len()
+            + 1;
         for _ in 0..owner_cap {
             if pending.is_empty() {
                 break;
@@ -430,7 +600,29 @@ impl WorldObjectState {
                         intent.attacker_life,
                         intent.source,
                     ) {
-                        VehicleApply::Unchanged => {}
+                        VehicleApply::Unchanged => match self.apply_crate_amount(
+                            intent.target,
+                            intent.amount,
+                            intent.attacker,
+                            intent.attacker_life,
+                            intent.source,
+                        ) {
+                            VehicleApply::Unchanged => {
+                                match self.apply_destructable_amount(intent.target, intent.amount) {
+                                    VehicleApply::Unchanged => {}
+                                    VehicleApply::Changed => changed += 1,
+                                    VehicleApply::Exploded(explode) => {
+                                        changed += 1;
+                                        explodes.push(explode);
+                                    }
+                                }
+                            }
+                            VehicleApply::Changed => changed += 1,
+                            VehicleApply::Exploded(explode) => {
+                                changed += 1;
+                                explodes.push(explode);
+                            }
+                        },
                         VehicleApply::Changed => changed += 1,
                         VehicleApply::Exploded(explode) => {
                             changed += 1;
@@ -963,6 +1155,188 @@ impl WorldObjectState {
         VehicleApply::Changed
     }
 
+    fn apply_crate_amount(
+        &mut self,
+        target: ScriptModelId,
+        amount: u32,
+        attacker: ClientId,
+        attacker_life: LifeSequence,
+        source: DamageSource,
+    ) -> VehicleApply {
+        let Some(index) = self.crate_bodies.iter().position(|(id, _)| *id == target) else {
+            return VehicleApply::Unchanged;
+        };
+        if self.crate_bodies[index].1.destroyed {
+            return VehicleApply::Unchanged;
+        }
+        let attacker_is_player = !matches!(source, DamageSource::Radius(_));
+        if !gamemode_iw4::flammable_crate_damage_applies(false, attacker_is_player) {
+            return VehicleApply::Unchanged;
+        }
+        let amount = i32::try_from(amount).unwrap_or(i32::MAX);
+        let next =
+            gamemode_iw4::flammable_crate_health_after(self.crate_bodies[index].1.health, amount);
+        if next == self.crate_bodies[index].1.health {
+            return VehicleApply::Unchanged;
+        }
+        self.crate_bodies[index].1.health = next;
+        if gamemode_iw4::flammable_crate_should_ignite(next)
+            && !self.crate_bodies[index].1.burning
+            && !self.crate_drains.iter().any(|(id, _)| *id == target)
+        {
+            self.crate_bodies[index].1.burning = true;
+            self.crate_drains.push((
+                target,
+                VehicleHealthDrain {
+                    wait_ms: 0,
+                    attacker,
+                    attacker_life,
+                    source,
+                },
+            ));
+            self.crate_drains.sort_by_key(|(id, _)| *id);
+        }
+        if !gamemode_iw4::flammable_crate_should_explode(next) {
+            return VehicleApply::Changed;
+        }
+        self.crate_bodies[index].1.destroyed = true;
+        self.crate_bodies[index].1.burning = false;
+        remove_drain(&mut self.crate_drains, target);
+        self.set_destructible_state(target, DestructibleStateIndex::new(1));
+        if !self.pending_crate_downs.iter().any(|have| *have == target) {
+            self.pending_crate_downs.push(target);
+        }
+        let Some(origin) = lookup_origin(&self.crate_origins, target) else {
+            return VehicleApply::Changed;
+        };
+        let mut explode_at = origin;
+        explode_at[2] += gamemode_iw4::FLAMMABLE_CRATE_EXPLODE_ORIGIN_Z;
+        VehicleApply::Exploded(DestructibleExplodeEvent {
+            owner: target,
+            origin: explode_at,
+            attacker,
+            attacker_life,
+            source: DamageSource::Radius(target),
+            explode_range_mp: gamemode_iw4::FLAMMABLE_CRATE_EXPLODE_RANGE,
+            explode_damage: gamemode_iw4::FLAMMABLE_CRATE_EXPLODE_DAMAGE,
+        })
+    }
+
+    pub fn take_flammable_crate_downs(&mut self) -> Vec<ScriptModelId> {
+        core::mem::take(&mut self.pending_crate_downs)
+    }
+
+    pub fn destroyed_flammable_crate_ids(&self) -> Vec<ScriptModelId> {
+        self.crate_bodies
+            .iter()
+            .filter(|(_, body)| body.destroyed)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    pub fn flammable_crate_is_destroyed(&self, id: ScriptModelId) -> bool {
+        self.crate_bodies
+            .iter()
+            .find(|(have, _)| *have == id)
+            .is_some_and(|(_, body)| body.destroyed)
+    }
+
+    pub fn flammable_crate_is_burning(&self, id: ScriptModelId) -> bool {
+        self.crate_bodies
+            .iter()
+            .find(|(have, _)| *have == id)
+            .is_some_and(|(_, body)| body.burning)
+    }
+
+    pub fn tick_flammable_crate_burn(&mut self, dt_ms: u32) -> DestructibleApplyReport {
+        let ids: Vec<ScriptModelId> = self.crate_drains.iter().map(|(id, _)| *id).collect();
+        let mut changed = 0;
+        let mut explodes = Vec::new();
+        for id in ids {
+            let Some(index) = self
+                .crate_drains
+                .iter()
+                .position(|(drain_id, _)| *drain_id == id)
+            else {
+                continue;
+            };
+            self.crate_drains[index].1.wait_ms =
+                self.crate_drains[index].1.wait_ms.saturating_add(dt_ms);
+            while self.crate_drains[index].1.wait_ms
+                >= gamemode_iw4::FLAMMABLE_CRATE_BURN_DRAIN_INTERVAL_MS
+            {
+                self.crate_drains[index].1.wait_ms -=
+                    gamemode_iw4::FLAMMABLE_CRATE_BURN_DRAIN_INTERVAL_MS;
+                let drain = self.crate_drains[index].1;
+                match self.apply_crate_amount(
+                    id,
+                    u32::try_from(gamemode_iw4::FLAMMABLE_CRATE_BURN_DRAIN).unwrap_or(0),
+                    drain.attacker,
+                    drain.attacker_life,
+                    drain.source,
+                ) {
+                    VehicleApply::Unchanged => {}
+                    VehicleApply::Changed => changed += 1,
+                    VehicleApply::Exploded(explode) => {
+                        changed += 1;
+                        explodes.push(explode);
+                        break;
+                    }
+                }
+                if self
+                    .crate_drains
+                    .iter()
+                    .position(|(drain_id, _)| *drain_id == id)
+                    .is_none()
+                {
+                    break;
+                }
+            }
+        }
+        DestructibleApplyReport { changed, explodes }
+    }
+
+    fn apply_destructable_amount(&mut self, target: ScriptModelId, amount: u32) -> VehicleApply {
+        let Some(index) = self
+            .destructable_bodies
+            .iter()
+            .position(|(id, _)| *id == target)
+        else {
+            return VehicleApply::Unchanged;
+        };
+        if self.destructable_bodies[index].1.destroyed {
+            return VehicleApply::Unchanged;
+        }
+        let amount = i32::try_from(amount).unwrap_or(i32::MAX);
+        let threshold = self.destructable_bodies[index].1.threshold;
+        if !gamemode_iw4::damage_applies(amount, threshold) {
+            return VehicleApply::Unchanged;
+        }
+        let next_dmg = self.destructable_bodies[index].1.dmg.saturating_add(amount);
+        self.destructable_bodies[index].1.dmg = next_dmg;
+        if !gamemode_iw4::should_destruct(next_dmg, self.destructable_bodies[index].1.accumulate) {
+            return VehicleApply::Changed;
+        }
+        self.destructable_bodies[index].1.destroyed = true;
+        self.set_destructible_state(target, DestructibleStateIndex::new(1));
+        let areas = self.destructable_bodies[index].1.areas.clone();
+        for area in &areas {
+            self.unblock_area(area);
+        }
+        let play_fx = self.destructable_bodies[index].1.has_fx;
+        if !self
+            .pending_destructable_downs
+            .iter()
+            .any(|down| down.id == target)
+        {
+            self.pending_destructable_downs.push(DestructableDown {
+                id: target,
+                play_fx,
+            });
+        }
+        VehicleApply::Changed
+    }
+
     pub fn glass_piece_state(&self, id: GlassPieceId) -> GlassPieceState {
         self.glass_piece(id).state()
     }
@@ -982,6 +1356,14 @@ impl WorldObjectState {
             .collect()
     }
 
+    pub fn glass_radius_targets(&self) -> Vec<(GlassPieceId, GlassPaneBasis)> {
+        self.glass_panes
+            .iter()
+            .copied()
+            .filter(|(id, _)| self.glass_is_solid(*id))
+            .collect()
+    }
+
     pub fn apply_glass_damage(
         &mut self,
         id: GlassPieceId,
@@ -989,6 +1371,25 @@ impl WorldObjectState {
         at_time_ms: i32,
         weakened_collapse_time_cs: Option<u16>,
         shatter_seed: Option<GlassShatterSeed>,
+    ) -> GlassPieceState {
+        self.apply_glass_damage_caused(
+            id,
+            damage,
+            at_time_ms,
+            weakened_collapse_time_cs,
+            shatter_seed,
+            GlassCause::Impact,
+        )
+    }
+
+    pub fn apply_glass_damage_caused(
+        &mut self,
+        id: GlassPieceId,
+        damage: u32,
+        at_time_ms: i32,
+        weakened_collapse_time_cs: Option<u16>,
+        shatter_seed: Option<GlassShatterSeed>,
+        cause: GlassCause,
     ) -> GlassPieceState {
         if damage == 0 {
             return self.glass_piece_state(id);
@@ -1005,18 +1406,144 @@ impl WorldObjectState {
             shatter_seed,
         ) {
             self.note_glass_destroyed(id, change);
+            let mut meta = self.glass_native_meta(id);
+            meta.revision = meta.revision.saturating_add(1);
+            if change.current == GlassPieceState::Shattered {
+                meta.cause = cause;
+                meta.deterministic_seed = GlassBreakRecord::mix_seed(id, at_time_ms, shatter_seed);
+            } else if change.current == GlassPieceState::Weakened {
+                meta.cause = cause;
+            }
+            upsert_value(&mut self.glass_native, id, meta);
         }
         if piece.damage == 0 {
             remove_key(&mut self.glass_pieces, id);
+            remove_key(&mut self.glass_native, id);
         } else {
             upsert_value(&mut self.glass_pieces, id, piece);
         }
         self.glass_piece_state(id)
     }
 
+    pub fn script_destroy_glass(&mut self, id: GlassPieceId, at_time_ms: i32) -> GlassPieceState {
+        let (hit, dir) = self
+            .glass_pane(id)
+            .map(|pane| (pane.origin, [0.0, 0.0, 1.0]))
+            .unwrap_or(([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]));
+        self.force_shatter_glass(id, at_time_ms, hit, dir, GlassCause::Script)
+    }
+
+    pub fn force_shatter_glass(
+        &mut self,
+        id: GlassPieceId,
+        at_time_ms: i32,
+        hit: [f32; 3],
+        dir: [f32; 3],
+        cause: GlassCause,
+    ) -> GlassPieceState {
+        if !self.glass_is_solid(id) {
+            return self.glass_piece_state(id);
+        }
+        let seed = self
+            .glass_pane(id)
+            .and_then(|pane| glass_shatter_seed_from_hit(pane, hit, dir));
+        self.apply_glass_damage_caused(
+            id,
+            u32::from(GLASS_DAMAGE_TO_DESTROY),
+            at_time_ms,
+            None,
+            seed,
+            cause,
+        )
+    }
+
+    pub fn apply_glass_blast(
+        &mut self,
+        origin: [f32; 3],
+        inner_damage: i32,
+        outer_damage: i32,
+        radius: f32,
+        at_time_ms: i32,
+        next_random: &mut impl FnMut() -> f32,
+    ) {
+        self.apply_glass_blast_oriented(
+            origin,
+            inner_damage,
+            outer_damage,
+            radius,
+            [0.0; 3],
+            0.0,
+            at_time_ms,
+            next_random,
+        );
+    }
+
+    pub fn apply_glass_blast_oriented(
+        &mut self,
+        origin: [f32; 3],
+        inner_damage: i32,
+        outer_damage: i32,
+        radius: f32,
+        cone_dir: [f32; 3],
+        cone_cos: f32,
+        at_time_ms: i32,
+        next_random: &mut impl FnMut() -> f32,
+    ) {
+        if inner_damage <= 0 && outer_damage <= 0 {
+            return;
+        }
+        let r = if radius > entity_iw4::GLASS_BLAST_RADIUS_CAP {
+            entity_iw4::GLASS_BLAST_RADIUS_CAP
+        } else {
+            radius
+        };
+        if !(r > 0.0) {
+            return;
+        }
+        let panes: Vec<(GlassPieceId, GlassPaneBasis)> = self.glass_panes.clone();
+        for (id, pane) in panes {
+            if !self.glass_is_solid(id) {
+                continue;
+            }
+            let dx = pane.origin[0] - origin[0];
+            let dy = pane.origin[1] - origin[1];
+            let dz = pane.origin[2] - origin[2];
+            let d = (dx * dx + dy * dy + dz * dz).sqrt();
+            if !glass_blast_cone_keeps(cone_dir, cone_cos, [dx, dy, dz]) {
+                continue;
+            }
+            let amount = glass_blast_integer_damage(inner_damage, outer_damage, r, d);
+            if amount == 0 {
+                continue;
+            }
+            let dir = if d > 1.0e-4 {
+                [dx / d, dy / d, dz / d]
+            } else {
+                [0.0, 0.0, 1.0]
+            };
+            let _ = self.apply_glass_hit_caused(
+                id,
+                amount,
+                at_time_ms,
+                origin,
+                dir,
+                next_random,
+                GlassCause::Blast,
+            );
+        }
+    }
+
     pub fn install_glass_panes(&mut self, panes: Vec<(GlassPieceId, GlassPaneBasis)>) {
         self.glass_panes = panes;
         sort_pairs(&mut self.glass_panes);
+    }
+
+    pub fn set_map_round_epoch(&mut self, epoch: u32) {
+        self.map_round_epoch = epoch;
+    }
+
+    pub fn map_round_epoch(&self) -> u32 {
+        self.map_round_epoch
     }
 
     pub fn glass_pane(&self, id: GlassPieceId) -> Option<GlassPaneBasis> {
@@ -1036,6 +1563,27 @@ impl WorldObjectState {
         dir: [f32; 3],
         next_random: &mut impl FnMut() -> f32,
     ) -> GlassPieceState {
+        self.apply_glass_hit_caused(
+            id,
+            damage,
+            at_time_ms,
+            hit,
+            dir,
+            next_random,
+            GlassCause::Impact,
+        )
+    }
+
+    pub fn apply_glass_hit_caused(
+        &mut self,
+        id: GlassPieceId,
+        damage: u32,
+        at_time_ms: i32,
+        hit: [f32; 3],
+        dir: [f32; 3],
+        next_random: &mut impl FnMut() -> f32,
+        cause: GlassCause,
+    ) -> GlassPieceState {
         if damage == 0 {
             return self.glass_piece_state(id);
         }
@@ -1053,7 +1601,7 @@ impl WorldObjectState {
                     .and_then(|pane| glass_shatter_seed_from_hit(pane, hit, dir))
             })
             .flatten();
-        self.apply_glass_damage(id, damage, at_time_ms, collapse, seed)
+        self.apply_glass_damage_caused(id, damage, at_time_ms, collapse, seed, cause)
     }
 
     pub fn glass_update(&mut self, at_time_ms: i32) {
@@ -1063,6 +1611,13 @@ impl WorldObjectState {
             if let Some(change) = glass_collapse_piece(&mut piece, at_time_ms) {
                 self.note_glass_destroyed(id, change);
                 upsert_value(&mut self.glass_pieces, id, piece);
+                if change.current == GlassPieceState::Shattered {
+                    let mut meta = self.glass_native_meta(id);
+                    meta.revision = meta.revision.saturating_add(1);
+                    meta.cause = GlassCause::Collapse;
+                    meta.deterministic_seed = GlassBreakRecord::mix_seed(id, at_time_ms, None);
+                    upsert_value(&mut self.glass_native, id, meta);
+                }
             }
         }
     }
@@ -1090,8 +1645,11 @@ impl WorldObjectState {
                     *id,
                     GlassPieceSnapshot {
                         state,
+                        revision: self.glass_native_meta(*id).revision.max(1),
                         last_state_change_time: piece.last_state_change_time,
                         shatter_seed: piece.shatter_seed(),
+                        deterministic_seed: self.glass_native_meta(*id).deterministic_seed,
+                        cause: self.glass_native_meta(*id).cause,
                     },
                 ))
             })
@@ -1099,16 +1657,21 @@ impl WorldObjectState {
         sort_pairs(&mut glass_pieces);
 
         WorldObjectSnapshot {
+            as_of_ms: 0,
+            map_round_epoch: self.map_round_epoch,
+            fracture_profile_version: GLASS_FRACTURE_PROFILE_VERSION,
             destructible_stages,
             glass_pieces,
         }
     }
 
     pub fn adopt_snapshot(&mut self, snap: &WorldObjectSnapshot) {
+        self.map_round_epoch = snap.map_round_epoch;
         self.destructible_stages = snap.destructible_stages.clone();
         sort_pairs(&mut self.destructible_stages);
 
         self.glass_pieces.clear();
+        self.glass_native.clear();
         for (id, snapshot) in &snap.glass_pieces {
             let damage = glass_damage_for_state(snapshot.state);
             if damage != 0 {
@@ -1122,6 +1685,15 @@ impl WorldObjectState {
                     piece.impact_dir = entity_iw4::GLASS_IMPACT_DIR_NONE;
                 }
                 upsert_value(&mut self.glass_pieces, *id, piece);
+                upsert_value(
+                    &mut self.glass_native,
+                    *id,
+                    GlassNativeMeta {
+                        revision: snapshot.revision,
+                        cause: snapshot.cause,
+                        deterministic_seed: snapshot.deterministic_seed,
+                    },
+                );
             }
         }
     }
@@ -1131,6 +1703,28 @@ impl WorldObjectState {
             Some(piece) => piece,
             None => GGlassPiece::default(),
         }
+    }
+
+    fn glass_native_meta(&self, id: GlassPieceId) -> GlassNativeMeta {
+        lookup_value(&self.glass_native, id).unwrap_or_default()
+    }
+
+    pub fn glass_break_record(&self, id: GlassPieceId) -> Option<GlassBreakRecord> {
+        let piece = self.glass_piece(id);
+        if piece.state() != GlassPieceState::Shattered {
+            return None;
+        }
+        let meta = self.glass_native_meta(id);
+        Some(GlassBreakRecord {
+            break_tick: piece.last_state_change_time,
+            deterministic_seed: meta.deterministic_seed,
+            shatter_seed: piece.shatter_seed(),
+            cause: meta.cause,
+        })
+    }
+
+    pub fn glass_revision(&self, id: GlassPieceId) -> u32 {
+        self.glass_native_meta(id).revision
     }
 }
 
@@ -1241,7 +1835,234 @@ impl WorldObjectState {
                     >= crate::barrel_policy::EXPLODABLE_BARREL_DESTROYED_STATE,
             });
         }
+        for (id, body) in &self.crate_bodies {
+            let Some(origin) = lookup_origin(&self.crate_origins, *id) else {
+                continue;
+            };
+            targets.push(DestructibleSplashTarget {
+                id: *id,
+                origin,
+                terminal: body.destroyed,
+            });
+        }
+        for (id, body) in &self.destructable_bodies {
+            let Some(origin) = lookup_origin(&self.destructable_origins, *id) else {
+                continue;
+            };
+            targets.push(DestructibleSplashTarget {
+                id: *id,
+                origin,
+                terminal: body.destroyed,
+            });
+        }
         targets.sort_by_key(|row| row.id);
         targets
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identities::ScriptModelId;
+
+    fn pane(id: GlassPieceId, origin: [f32; 3]) -> (GlassPieceId, GlassPaneBasis) {
+        (
+            id,
+            GlassPaneBasis {
+                origin,
+                axis_s: [32.0, 0.0, 0.0],
+                axis_t: [0.0, 32.0, 0.0],
+            },
+        )
+    }
+
+    #[test]
+    fn blast_reaches_a_pane_with_no_line_of_sight() {
+        let mut objects = WorldObjectState::default();
+        objects.install_glass_panes(vec![pane(0, [40.0, 0.0, 0.0]), pane(1, [200.0, 0.0, 0.0])]);
+        objects.apply_glass_blast([0.0, 0.0, 0.0], 1000, 1000, 256.0, 1_000, &mut || 0.0);
+        assert_eq!(objects.glass_piece_state(0), GlassPieceState::Shattered);
+        assert_eq!(objects.glass_piece_state(1), GlassPieceState::Shattered);
+        assert_eq!(
+            objects.glass_break_record(0).map(|r| r.cause),
+            Some(GlassCause::Blast)
+        );
+    }
+
+    #[test]
+    fn blast_inner_zero_still_applies_outer_at_the_rim() {
+        let mut objects = WorldObjectState::default();
+        objects.install_glass_panes(vec![pane(0, [250.0, 0.0, 0.0])]);
+        objects.apply_glass_blast([0.0, 0.0, 0.0], 0, 50, 256.0, 1_000, &mut || 0.0);
+        assert_eq!(objects.glass_piece_state(0), GlassPieceState::Shattered);
+    }
+
+    #[test]
+    fn script_destroy_writes_script_cause() {
+        let mut objects = WorldObjectState::default();
+        objects.install_glass_panes(vec![pane(0, [0.0, 0.0, 0.0])]);
+        assert_eq!(
+            objects.script_destroy_glass(0, 50),
+            GlassPieceState::Shattered
+        );
+        assert_eq!(
+            objects.glass_break_record(0).map(|r| r.cause),
+            Some(GlassCause::Script)
+        );
+    }
+
+    #[test]
+    fn empty_blast_cone_is_a_full_sphere() {
+        let mut objects = WorldObjectState::default();
+        objects.install_glass_panes(vec![pane(0, [-40.0, 0.0, 0.0])]);
+        objects.apply_glass_blast_oriented(
+            [0.0, 0.0, 0.0],
+            1000,
+            1000,
+            256.0,
+            [0.0; 3],
+            0.9,
+            1_000,
+            &mut || 0.0,
+        );
+        assert_eq!(objects.glass_piece_state(0), GlassPieceState::Shattered);
+    }
+
+    #[test]
+    fn configured_blast_cone_skips_a_pane_behind_the_blast() {
+        let mut objects = WorldObjectState::default();
+        objects.install_glass_panes(vec![pane(0, [40.0, 0.0, 0.0]), pane(1, [-40.0, 0.0, 0.0])]);
+        objects.apply_glass_blast_oriented(
+            [0.0, 0.0, 0.0],
+            1000,
+            1000,
+            256.0,
+            [1.0, 0.0, 0.0],
+            0.5,
+            1_000,
+            &mut || 0.0,
+        );
+        assert_eq!(objects.glass_piece_state(0), GlassPieceState::Shattered);
+        assert_eq!(objects.glass_piece_state(1), GlassPieceState::Intact);
+    }
+
+    #[test]
+    fn snapshot_carries_session_glass_header() {
+        let mut objects = WorldObjectState::default();
+        objects.set_map_round_epoch(9);
+        let snap = objects.to_snapshot();
+        assert_eq!(snap.map_round_epoch, 9);
+        assert_eq!(
+            snap.fracture_profile_version,
+            GLASS_FRACTURE_PROFILE_VERSION
+        );
+    }
+
+    #[test]
+    fn destructable_think_accumulates_then_deletes() {
+        let mut objects = WorldObjectState::default();
+        let id = ScriptModelId::from_wire(7);
+        let gap = objects.install_destructables(
+            [DestructableInstall {
+                id,
+                origin: [0.0, 0.0, 0.0],
+                accumulate: Some(40),
+                threshold: Some(0),
+                script_destructable_area: String::new(),
+                has_fx: false,
+            }],
+            false,
+        );
+        assert!(!gap);
+        let miss = objects.apply_destructible_damage_batch(&[DestructibleDamageIntent {
+            source: DamageSource::Melee,
+            pellet: PelletId(0),
+            attacker: ClientId(0),
+            attacker_life: LifeSequence(0),
+            target: id,
+            amount: 20,
+            epoch: EntityCollisionEpoch::CurrentTick,
+        }]);
+        assert_eq!(miss.changed, 1);
+        assert!(!objects.destructable_is_destroyed(id));
+        let hit = objects.apply_destructible_damage_batch(&[DestructibleDamageIntent {
+            source: DamageSource::Melee,
+            pellet: PelletId(0),
+            attacker: ClientId(0),
+            attacker_life: LifeSequence(0),
+            target: id,
+            amount: 20,
+            epoch: EntityCollisionEpoch::CurrentTick,
+        }]);
+        assert_eq!(hit.changed, 1);
+        assert!(objects.destructable_is_destroyed(id));
+        assert_eq!(objects.take_destructable_downs().len(), 1);
+    }
+
+    #[test]
+    fn destructable_block_area_round_trip() {
+        let mut objects = WorldObjectState::default();
+        let id = ScriptModelId::from_wire(3);
+        objects.install_destructables(
+            [DestructableInstall {
+                id,
+                origin: [1.0, 2.0, 3.0],
+                accumulate: None,
+                threshold: None,
+                script_destructable_area: "yard".to_owned(),
+                has_fx: true,
+            }],
+            true,
+        );
+        assert_eq!(objects.blocked_spawn_areas(), ["yard"]);
+        assert!(gamemode_iw4::spawn_blocked_off(
+            "yard",
+            objects.blocked_spawn_areas()
+        ));
+        objects.apply_destructible_damage_batch(&[DestructibleDamageIntent {
+            source: DamageSource::Melee,
+            pellet: PelletId(0),
+            attacker: ClientId(0),
+            attacker_life: LifeSequence(0),
+            target: id,
+            amount: 40,
+            epoch: EntityCollisionEpoch::CurrentTick,
+        }]);
+        assert!(objects.blocked_spawn_areas().is_empty());
+        let downs = objects.take_destructable_downs();
+        assert_eq!(downs.len(), 1);
+        assert!(downs[0].play_fx);
+    }
+
+    #[test]
+    fn flammable_crate_ignites_then_burns_out() {
+        let mut objects = WorldObjectState::default();
+        let id = ScriptModelId::from_wire(9);
+        objects.install_flammable_crates([FlammableCrateInstall {
+            id,
+            origin: [0.0, 0.0, 0.0],
+        }]);
+        let hit = objects.apply_destructible_damage_batch(&[DestructibleDamageIntent {
+            source: DamageSource::Melee,
+            pellet: PelletId(0),
+            attacker: ClientId(0),
+            attacker_life: LifeSequence(0),
+            target: id,
+            amount: 100,
+            epoch: EntityCollisionEpoch::CurrentTick,
+        }]);
+        assert_eq!(hit.changed, 1);
+        assert!(objects.flammable_crate_is_burning(id));
+        assert!(!objects.flammable_crate_is_destroyed(id));
+        let mut exploded = false;
+        for _ in 0..20 {
+            let burn = objects.tick_flammable_crate_burn(1000);
+            if !burn.explodes.is_empty() {
+                exploded = true;
+                break;
+            }
+        }
+        assert!(exploded);
+        assert!(objects.flammable_crate_is_destroyed(id));
     }
 }

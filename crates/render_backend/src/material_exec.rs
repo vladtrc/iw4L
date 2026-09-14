@@ -225,6 +225,22 @@ fn instance_matrix_bits(draw: &RetainedDrawItem) -> Option<[u32; 16]> {
     }
 }
 
+fn smodel_code_world_from_local(kind: &RetainedDrawKind) -> Mat4 {
+    match *kind {
+        RetainedDrawKind::Smodel {
+            stream: Some(lighting_iw4::SmodelSurfPath::Skinned),
+            ..
+        } => Mat4::IDENTITY,
+        RetainedDrawKind::Smodel {
+            world_from_local, ..
+        }
+        | RetainedDrawKind::XModel {
+            world_from_local, ..
+        } => world_from_local,
+        _ => Mat4::IDENTITY,
+    }
+}
+
 fn overlay_keep_key(draw: &RetainedDrawItem) -> OverlayKeepKey {
     let scene_light = dpvs_iw4::GfxDrawSurf { packed: draw.key }.scene_light_index();
     let extra = match draw.kind {
@@ -289,13 +305,12 @@ fn overlay_draw_material(
         RetainedDrawKind::Smodel {
             lighting_handle,
             packed_lighting,
-            world_from_local,
             ..
         } => {
             overlay_smodel_world_matrix(
                 scratch,
                 runtime.frame.view_origin,
-                world_from_local,
+                smodel_code_world_from_local(&draw.kind),
                 runtime.clip_from_world,
                 runtime.view_from_world,
                 OverlayCodeNeed::ALL,
@@ -391,19 +406,17 @@ fn overlay_draw_obj_only(
         RetainedDrawKind::Smodel {
             lighting_handle,
             packed_lighting,
-            world_from_local,
             ..
         }
         | RetainedDrawKind::XModel {
             lighting_handle,
             packed_lighting,
-            world_from_local,
             ..
         } => {
             overlay_smodel_world_matrix(
                 scratch,
                 runtime.frame.view_origin,
-                world_from_local,
+                smodel_code_world_from_local(&draw.kind),
                 runtime.clip_from_world,
                 runtime.view_from_world,
                 need,

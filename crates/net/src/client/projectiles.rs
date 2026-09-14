@@ -10,9 +10,6 @@ pub enum PresentedProjectile {
         weapon: u32,
         origin: [f32; 3],
         velocity: [f32; 3],
-        gravity: f32,
-        age_ticks: u32,
-        fuse_ticks: u32,
         pos: Trajectory,
         apos: Trajectory,
         launch_time: i32,
@@ -45,9 +42,6 @@ pub fn merge_presented_projectiles(
             weapon: projectile.weapon,
             origin: projectile.origin,
             velocity: projectile.velocity,
-            gravity: projectile.gravity,
-            age_ticks: projectile.age_ticks,
-            fuse_ticks: projectile.fuse_ticks,
             pos: projectile.pos,
             apos: projectile.apos,
             launch_time: projectile.launch_time,
@@ -87,20 +81,6 @@ impl PresentedProjectile {
         match self {
             Self::Authoritative(p) => p.velocity,
             Self::Predicted { velocity, .. } => *velocity,
-        }
-    }
-
-    pub fn age_ticks(&self) -> u32 {
-        match self {
-            Self::Authoritative(p) => p.age_ticks,
-            Self::Predicted { age_ticks, .. } => *age_ticks,
-        }
-    }
-
-    pub fn fuse_ticks(&self) -> u32 {
-        match self {
-            Self::Authoritative(p) => p.fuse_ticks,
-            Self::Predicted { fuse_ticks, .. } => *fuse_ticks,
         }
     }
 

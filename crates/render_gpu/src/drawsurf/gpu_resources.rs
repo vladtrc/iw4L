@@ -50,6 +50,7 @@ pub struct GpuSubmitReady {
     pub overlay_gpu_wait: bool,
     pub pipeline_world_materials: std::sync::Arc<std::collections::HashSet<u16>>,
     pub pipeline_smodel_materials: std::sync::Arc<std::collections::HashSet<u16>>,
+    pub pipeline_demand_revision: u64,
 }
 
 pub const UPLOAD_GRANULE: usize = 64 * 1024;

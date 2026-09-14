@@ -1,3 +1,4 @@
+use crate::fire_weapon_kind;
 use crate::weaponstate::{FireType, WeaponDecodeError, WeaponState};
 
 pub const BURST_COOLDOWN_DEFAULT_MS: i32 = 200;
@@ -23,6 +24,8 @@ pub enum MissingCombatFacts {
     BulletRange,
 
     UnknownFireType,
+
+    LocationDamage,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -130,6 +133,8 @@ pub struct CapturedCombatInput {
     pub ads_gun_kick_reduced_kick_bullets: i32,
 
     pub hip_gun_kick_reduced_kick_bullets: i32,
+
+    pub location_damage: [f32; crate::HITLOC_COUNT],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -249,6 +254,8 @@ pub struct WeaponCombatFacts {
     pub ads_gun_kick_reduced_kick_bullets: i32,
 
     pub hip_gun_kick_reduced_kick_bullets: i32,
+
+    pub location_damage: [f32; crate::HITLOC_COUNT],
 }
 
 impl Default for WeaponCombatFacts {
@@ -332,6 +339,7 @@ impl WeaponCombatFacts {
             offhand_hold_is_cancelable_at_0x681: Some(false),
             ads_gun_kick_reduced_kick_bullets: 0,
             hip_gun_kick_reduced_kick_bullets: 0,
+            location_damage: crate::LOCATION_DAMAGE_IDENTITY,
         }
     }
 
@@ -363,6 +371,9 @@ impl WeaponCombatFacts {
         }
         if input.damage > 0 && input.max_damage_range <= 0.0 && input.min_damage_range <= 0.0 {
             return Err(MissingCombatFacts::BulletRange);
+        }
+        if !crate::location_damage_is_valid(&input.location_damage) {
+            return Err(MissingCombatFacts::LocationDamage);
         }
         Ok(Self {
             fire_time_ms: input.fire_time_ms,
@@ -437,6 +448,7 @@ impl WeaponCombatFacts {
             offhand_hold_is_cancelable_at_0x681: input.offhand_hold_is_cancelable_at_0x681,
             ads_gun_kick_reduced_kick_bullets: input.ads_gun_kick_reduced_kick_bullets,
             hip_gun_kick_reduced_kick_bullets: input.hip_gun_kick_reduced_kick_bullets,
+            location_damage: input.location_damage,
         })
     }
 
@@ -457,10 +469,14 @@ impl WeaponCombatFacts {
     }
 
     pub fn pellet_count(self) -> i32 {
-        if self.shots_per_fire <= 0 {
-            1
+        if self.weap_class == crate::WEAPCLASS_SPREAD {
+            if self.shots_per_fire <= 0 {
+                1
+            } else {
+                self.shots_per_fire
+            }
         } else {
-            self.shots_per_fire
+            1
         }
     }
 
@@ -481,7 +497,15 @@ impl WeaponCombatFacts {
     }
 
     pub fn bullet_range(self) -> f32 {
-        self.min_damage_range.max(self.max_damage_range)
+        if self.weap_class == crate::WEAPCLASS_SPREAD {
+            self.min_damage_range
+        } else {
+            crate::BULLET_MAX_RANGE
+        }
+    }
+
+    pub fn location_scale(self, hitloc: u8) -> f32 {
+        crate::location_damage_scale(&self.location_damage, hitloc)
     }
 
     pub fn spread_facts(self) -> crate::WeaponSpreadFacts {
@@ -678,7 +702,9 @@ pub fn ads_fire_only_delay_ms(frac: f32, ads_in_rate: f32) -> i32 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WeaponTickEvent {
-    ShotAccepted { ammo_used: i32 },
+    ShotAccepted {
+        ammo_used: i32,
+    },
     EmptyClick,
     ReloadStarted,
 
@@ -686,7 +712,9 @@ pub enum WeaponTickEvent {
 
     ReloadEnded,
 
-    ReloadAmmoAdded { shells: i32 },
+    ReloadAmmoAdded {
+        shells: i32,
+    },
 
     RechamberWeapon,
 
@@ -698,9 +726,18 @@ pub enum WeaponTickEvent {
 
     RaiseStarted,
 
-    OffhandUsed { weapon: u32 },
+    OffhandUsed {
+        weapon: u32,
+        remaining_fuse_ms: Option<i32>,
+    },
 
-    OffhandPrepare { weapon: u32 },
+    OffhandCookedOff {
+        weapon: u32,
+    },
+
+    OffhandPrepare {
+        weapon: u32,
+    },
 
     MeleeFired,
 }
@@ -730,8 +767,8 @@ pub fn pm_weapon_ordinary(
     facts: &WeaponCombatFacts,
     cmd: &mut WeaponCmd,
 ) -> Option<WeaponTickEvent> {
-    if crate::offhand::pm_weapon_update_grenade_throw(hand, cmd) {
-        return None;
+    if let Some(cooked) = crate::offhand::pm_weapon_update_grenade_throw(hand, cmd) {
+        return Some(cooked);
     }
 
     if cmd.cmd_weapon == 0 && hand.weapon != 0 {
@@ -1006,6 +1043,9 @@ pub fn pm_weapon_ordinary(
             }
             if hand.weapon_delay != 0 {
                 return None;
+            }
+            if fire_weapon_kind(facts.weap_type, facts.weap_class).is_none() {
+                return Some(WeaponTickEvent::EmptyClick);
             }
             let used = facts.ammo_per_shot().min(hand.clip);
             hand.clip -= used;

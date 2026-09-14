@@ -9,8 +9,9 @@ use crate::{
     StaticModelDraw, StaticModelDrawError, StaticModelInstance, StaticModelPlacement,
     build_iw5_static_model_instances, build_iw5_xmodel_mesh, build_static_model_instances,
     build_t5_static_model_instances, build_t5_xmodel_mesh, build_xmodel_mesh, flag_descriptors,
-    flag_descriptors_iw5, flag_descriptors_t5, map_use_triggers, map_use_triggers_iw5,
-    map_use_triggers_t5, script_brush_model_placements, script_brush_model_placements_iw5,
+    flag_descriptors_iw5, flag_descriptors_t5, map_script_structs, map_script_structs_iw5,
+    map_script_structs_t5, map_use_triggers, map_use_triggers_iw5, map_use_triggers_t5,
+    script_brush_model_placements, script_brush_model_placements_iw5,
     script_brush_model_placements_t5, script_model_placements, script_model_placements_iw5,
     script_model_placements_t5,
 };
@@ -445,6 +446,7 @@ pub(crate) fn build_static_model_draw(
     let brushes = script_brush_model_placements(stream);
     let use_triggers = map_use_triggers(stream);
     let descriptors = flag_descriptors(stream);
+    let structs = map_script_structs(stream);
     link_model_placements(
         placements,
         static_error,
@@ -452,6 +454,7 @@ pub(crate) fn build_static_model_draw(
         brushes,
         use_triggers,
         descriptors,
+        structs,
         catalog,
         geometry.smodel_count,
     )
@@ -475,6 +478,7 @@ pub(crate) fn build_t5_static_model_draw(
     let brushes = script_brush_model_placements_t5(stream);
     let use_triggers = map_use_triggers_t5(stream);
     let descriptors = flag_descriptors_t5(stream);
+    let structs = map_script_structs_t5(stream);
     link_model_placements(
         placements,
         static_error,
@@ -482,6 +486,7 @@ pub(crate) fn build_t5_static_model_draw(
         brushes,
         use_triggers,
         descriptors,
+        structs,
         catalog,
         geometry.smodel_count,
     )
@@ -505,6 +510,7 @@ pub(crate) fn build_iw5_static_model_draw(
     let brushes = script_brush_model_placements_iw5(stream);
     let use_triggers = map_use_triggers_iw5(stream);
     let descriptors = flag_descriptors_iw5(stream);
+    let structs = map_script_structs_iw5(stream);
     link_model_placements(
         placements,
         static_error,
@@ -512,6 +518,7 @@ pub(crate) fn build_iw5_static_model_draw(
         brushes,
         use_triggers,
         descriptors,
+        structs,
         catalog,
         geometry.smodel_count,
     )
@@ -524,6 +531,7 @@ pub(crate) fn link_model_placements(
     script_brush_models: Vec<crate::ScriptBrushModelPlacement>,
     map_use_triggers: Vec<crate::MapUseTrigger>,
     flag_descriptors: Vec<crate::FlagDescriptor>,
+    script_structs: Vec<crate::MapScriptStruct>,
     mut catalog: MapXModelCatalog,
     smodel_count: usize,
 ) -> PreparedMapModels {
@@ -645,6 +653,10 @@ pub(crate) fn link_model_placements(
                 target: placement.target.clone(),
                 script_exploder: placement.script_exploder.clone(),
                 brush_link: placement.brush_link.clone(),
+                script_accumulate: placement.script_accumulate,
+                script_threshold: placement.script_threshold,
+                script_destructable_area: placement.script_destructable_area.clone(),
+                script_fxid: placement.script_fxid.clone(),
             },
         });
     }
@@ -666,6 +678,7 @@ pub(crate) fn link_model_placements(
         script_brush_models,
         map_use_triggers,
         flag_descriptors,
+        script_structs,
         script_gaps,
     }
 }

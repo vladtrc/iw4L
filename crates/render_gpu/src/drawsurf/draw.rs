@@ -23,6 +23,7 @@ pub(crate) fn register_drawsurf_render(app: &mut App) {
                 .in_set(RenderSystems::PrepareResources),
         );
     super::colour_submit::register(app);
+    super::sun_effects::register(app);
     super::postfx::register(app);
     super::iw_tess::register(app);
     super::geometry_diagnostic::register(app);

@@ -13,7 +13,7 @@ use trace_iw4::{HITTYPE_ENTITY, Trace};
 
 use crate::bullet_collision::{LinkedBrushCollisionBrush, PLAYER_MAXS, PLAYER_MINS};
 use crate::combat::{advance_weapon_command, phase_emit, phase_trace};
-use crate::damage::{apply_damage_attempt, radius_attempts_from_truck_explode};
+use crate::damage::{ExplosionBlast, apply_explode_glass_blast, apply_explosion_blast};
 use crate::identities::MatchPhase;
 use crate::input::{ClientAction, TickInput};
 use crate::match_state::{
@@ -158,6 +158,8 @@ fn phase_destructible_death_presentation(world: &mut FrameWorld, msec: i32) {
     }
     apply_explodable_barrel_death_presentation(world);
     apply_toy_death_presentation(world);
+    apply_flammable_crate_death_presentation(world);
+    apply_destructable_death_presentation(world);
 }
 
 pub fn apply_explodable_barrel_death_presentation(world: &mut SimState) {
@@ -216,6 +218,66 @@ pub fn apply_toy_death_presentation(world: &mut SimState) {
                 );
                 dobj.pose_request = xmodel_runtime::DObjPoseRequest::bind_pose();
             }
+        }
+    }
+}
+
+pub fn apply_flammable_crate_death_presentation(world: &mut SimState) {
+    let downs = world.world_objects_mut().take_flammable_crate_downs();
+    for id in &downs {
+        world
+            .script_gaps_mut()
+            .raise(gamemode_iw4::ScriptGapCause::FlammableCrateFx {
+                source_ordinal: id.to_wire(),
+            });
+        world
+            .script_gaps_mut()
+            .raise(gamemode_iw4::ScriptGapCause::FlammableCratePhysics {
+                source_ordinal: id.to_wire(),
+            });
+    }
+    let ids = world.world_objects().destroyed_flammable_crate_ids();
+    for id in ids {
+        for capabilities in world.entity_collision_capabilities_mut() {
+            if capabilities.owner.script_model() != Some(id) {
+                continue;
+            }
+            capabilities.linked_brushes.clear();
+            if let Some(dobj) = capabilities.dobj.as_mut()
+                && dobj.current_model != gamemode_iw4::FLAMMABLE_CRATE_HUSK
+            {
+                let cap = dobj.husk_capability.clone();
+                dobj.set_model(gamemode_iw4::FLAMMABLE_CRATE_HUSK.to_owned(), cap);
+                dobj.semantic_state = xmodel_runtime::DObjSemanticState::bind_pose(
+                    gamemode_iw4::FLAMMABLE_CRATE_HUSK.to_owned(),
+                    dobj.model_revision,
+                    dobj.pose_revision,
+                );
+                dobj.pose_request = xmodel_runtime::DObjPoseRequest::bind_pose();
+            }
+        }
+    }
+}
+
+pub fn apply_destructable_death_presentation(world: &mut SimState) {
+    let downs = world.world_objects_mut().take_destructable_downs();
+    for down in &downs {
+        if down.play_fx {
+            world
+                .script_gaps_mut()
+                .raise(gamemode_iw4::ScriptGapCause::DestructablePlayFx {
+                    source_ordinal: down.id.to_wire(),
+                });
+        }
+    }
+    let ids: Vec<crate::ScriptModelId> = world.world_objects().destroyed_destructable_ids();
+    for id in ids {
+        for capabilities in world.entity_collision_capabilities_mut() {
+            if capabilities.owner.script_model() != Some(id) {
+                continue;
+            }
+            capabilities.linked_brushes.clear();
+            capabilities.dobj = None;
         }
     }
 }
@@ -735,11 +797,15 @@ fn run_entity_types_system(ecs: &mut World) {
             let burn = world
                 .world_objects_mut()
                 .tick_explodable_barrel_burn(crate::MATCH_TICK_MS);
+            let crate_burn = world
+                .world_objects_mut()
+                .tick_flammable_crate_burn(crate::MATCH_TICK_MS);
             let toy_drain = world
                 .world_objects_mut()
                 .tick_toy_healthdrain(crate::MATCH_TICK_MS);
             let mut drain_explodes = drain.explodes;
             drain_explodes.extend(burn.explodes);
+            drain_explodes.extend(crate_burn.explodes);
             drain_explodes.extend(toy_drain.explodes);
             let drain_chain_intents = world
                 .world_objects()
@@ -749,10 +815,12 @@ fn run_entity_types_system(ecs: &mut World) {
                 .apply_destructible_damage_batch(&drain_chain_intents);
             drain_explodes.extend(drain_chain.explodes);
             for explode in &drain_explodes {
-                let drain_splash = radius_attempts_from_truck_explode(&world, explode);
-                for attempt in &drain_splash {
-                    let _ = apply_damage_attempt(&mut world, tick, attempt);
-                }
+                apply_explosion_blast(
+                    &mut world,
+                    tick,
+                    &ExplosionBlast::from_destructible(explode),
+                );
+                apply_explode_glass_blast(&mut world, tick, explode);
             }
             phase_health_regen(&mut world, tick);
             phase_finalstand_timer(&mut world, tick);
@@ -793,6 +861,10 @@ fn dispatch_touches_system(ecs: &mut World) {
         .collect();
     let presses = crate::collect_use_presses(&command_buttons, &old);
     crate::map_doors::advance(&mut world, tick, &latest_cmds);
+    crate::map_lights::advance(&mut world, tick);
+    crate::map_diggers::advance(&mut world, tick);
+    crate::map_moving_diggers::advance(&mut world, tick);
+    crate::map_conveyer::advance(&mut world);
     world.stamp_use_presses(presses.clone());
     if allow_move && world.publishes_snapshot() {
         crate::use_object::phase_use_objects(&mut world, tick, msec as u32, &presses, &cmds);
@@ -845,6 +917,7 @@ fn finalize_system(ecs: &mut World) {
     if reason.advances_authority_world() {
         world.tick_scripted_hud(tick);
     }
+    world.script_gaps_mut().report();
 }
 
 fn publish_snapshot_system(ecs: &mut World) {
@@ -1320,6 +1393,13 @@ fn apply_give_weapon(
         reject(world, crate::GiveRejectReason::UnknownWeaponId);
         return;
     };
+    if world
+        .equipment_facts_for(weapon)
+        .is_some_and(|eq| eq.is_offhand())
+    {
+        apply_give_offhand(world, tick, id, request_id, weapon, &facts);
+        return;
+    }
     if facts.fire_time_ms <= 0 && facts.raise_time_ms <= 0 {
         reject(world, crate::GiveRejectReason::EmptyCombatProfile);
         return;
@@ -1414,6 +1494,64 @@ fn apply_give_weapon(
     meta.weapon_shot_count = 0;
     meta.burst_latch = false;
     meta.rechamber_pending = false;
+    world.push_event(
+        tick,
+        EventAudience::Client(id),
+        SimEvent::GiveAccepted { request_id, weapon },
+    );
+}
+
+fn apply_give_offhand(
+    world: &mut FrameWorld,
+    tick: Tick,
+    id: ClientId,
+    request_id: u32,
+    weapon: u32,
+    facts: &weapon_iw4::WeaponCombatFacts,
+) {
+    let reject = |world: &mut FrameWorld, reason: crate::GiveRejectReason| {
+        world.push_event(
+            tick,
+            EventAudience::Client(id),
+            SimEvent::GiveRejected {
+                request_id,
+                weapon,
+                reason,
+            },
+        );
+    };
+    let Some(eq) = world.equipment_facts_for(weapon) else {
+        reject(world, crate::GiveRejectReason::InvalidWeapon);
+        return;
+    };
+    let Some(mut next) = world.player(id).copied() else {
+        reject(world, crate::GiveRejectReason::NotAlive);
+        return;
+    };
+    inventory_add_weapon(&mut next, weapon, false);
+    if !next.weapons.contains(&(weapon as i32)) {
+        reject(world, crate::GiveRejectReason::InvalidWeapon);
+        return;
+    }
+    match eq.offhand_class {
+        1 | 4 | 5 => next.offhand_primary = eq.offhand_class,
+        2 | 3 => next.offhand_secondary = eq.offhand_class,
+        _ => {}
+    }
+    let clip = eq.spawn_clip_count();
+    seed_ps_ammo_tables(&mut next, weapon, facts, clip, 0, false, 0);
+    *world.player_mut(id).expect("validated alive player") = next;
+    {
+        let meta = world.client_meta_mut(id);
+        meta.set_ammo(weapon, clip, 0);
+        if let Some(loadout) = meta.loadout.as_mut() {
+            match eq.offhand_class {
+                1 | 4 | 5 => loadout.lethal = weapon,
+                2 | 3 => loadout.tactical = weapon,
+                _ => {}
+            }
+        }
+    }
     world.push_event(
         tick,
         EventAudience::Client(id),
@@ -2196,4 +2334,210 @@ fn arm_held_weapon(
     }
     seed_ps_ammo_tables(ps, weapon, facts, clip0, clip1, last_hand >= 1, stock);
     (clip0, stock)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::equipment::EquipmentRuntimeFacts;
+    use crate::spawn::MatchBootstrap;
+    use crate::{SimContentBuilder, SimWorld};
+    use weapon_iw4::WeaponCombatFacts;
+
+    #[test]
+    fn give_offhand_keeps_gun_and_selects_lethal() {
+        let mut rifle = WeaponCombatFacts::none();
+        rifle.fire_time_ms = 80;
+        rifle.damage = 40;
+        let mut frag = WeaponCombatFacts::none();
+        frag.fire_time_ms = 80;
+        frag.raise_time_ms = 250;
+        let mut eq = vec![EquipmentRuntimeFacts::default(); 3];
+        eq[2] = EquipmentRuntimeFacts {
+            offhand_class: 1,
+            fuse_time_ms: 4000,
+            timed_detonation: true,
+            cook_off_hold: true,
+            projectile_speed: 1400,
+            impact_damage: 1,
+            start_ammo: 1,
+            clip_size: 1,
+            ..EquipmentRuntimeFacts::default()
+        };
+
+        let mut world = SimWorld::new();
+        world
+            .bootstrap(MatchBootstrap {
+                allow_debug_actions: true,
+                ..MatchBootstrap::default()
+            })
+            .expect("bootstrap");
+        let mut build = SimContentBuilder::default();
+        build.set_weapon_combat_table(vec![WeaponCombatFacts::none(), rifle, frag]);
+        build.set_equipment_runtime_table(eq);
+        world.install_content(build.finish());
+        world.debug_place_alive_player(ClientId(0), [0.0, 0.0, 0.0]);
+        {
+            let mut frame = world.frame();
+            let ps = frame.player_mut(ClientId(0)).expect("local");
+            ps.weapon = 1;
+            ps.weapons[0] = 1;
+            ps.offhand_primary = 5;
+        }
+        {
+            let meta = world.client_meta_mut(ClientId(0));
+            meta.loadout = Some(crate::match_state::LoadoutSpec {
+                lethal: 99,
+                tactical: 3,
+                ..crate::match_state::LoadoutSpec::default()
+            });
+        }
+
+        apply_give_weapon(&mut world.frame(), Tick(1), ClientId(0), 7, 2);
+
+        {
+            let frame = world.frame();
+            let ps = frame.player(ClientId(0)).expect("local");
+            assert_eq!(ps.weapon, 1);
+            assert!(ps.weapons.contains(&1));
+            assert!(ps.weapons.contains(&2));
+            assert_eq!(ps.offhand_primary, 1);
+        }
+        assert_eq!(
+            world
+                .client_meta(ClientId(0))
+                .and_then(|m| m.loadout.as_ref())
+                .map(|l| l.lethal),
+            Some(2)
+        );
+        assert!(world.journal().iter().any(|row| matches!(
+            row.event,
+            SimEvent::GiveAccepted {
+                request_id: 7,
+                weapon: 2
+            }
+        )));
+    }
+
+    fn world_cmodel() -> crate::SimClipCmodels {
+        crate::SimClipCmodels {
+            models: vec![clipmap_iw4::ClipCmodel {
+                mins: [-2048.0; 3],
+                maxs: [2048.0; 3],
+                radius: 4096.0,
+                first_brush: 0,
+                num_brushes: 1,
+            }],
+        }
+    }
+
+    #[test]
+    fn hold_frag_through_expiry_explodes_in_hand() {
+        let mut rifle = WeaponCombatFacts::none();
+        rifle.fire_time_ms = 80;
+        rifle.damage = 40;
+        let mut frag = WeaponCombatFacts::none();
+        frag.fire_time_ms = 80;
+        frag.raise_time_ms = 250;
+        frag.weap_type = weapon_iw4::WEAPTYPE_GRENADE;
+        frag.weap_class = weapon_iw4::WEAPCLASS_GRENADE;
+        let mut eq = vec![EquipmentRuntimeFacts::default(); 3];
+        eq[2] = EquipmentRuntimeFacts {
+            offhand_class: 1,
+            fuse_time_ms: 400,
+            timed_detonation: true,
+            cook_off_hold: true,
+            projectile_speed: 1400,
+            impact_damage: 1,
+            start_ammo: 1,
+            clip_size: 1,
+            explosion_radius: 256,
+            explosion_inner_damage: 200,
+            explosion_outer_damage: 50,
+            weap_type: weapon_iw4::WEAPTYPE_GRENADE,
+            weap_class: weapon_iw4::WEAPCLASS_GRENADE,
+            ..EquipmentRuntimeFacts::default()
+        };
+
+        let mut world = SimWorld::new();
+        world
+            .bootstrap(MatchBootstrap {
+                allow_debug_actions: true,
+                ..MatchBootstrap::default()
+            })
+            .expect("bootstrap");
+        let mut build = SimContentBuilder::default();
+        build.set_weapon_combat_table(vec![WeaponCombatFacts::none(), rifle, frag]);
+        build.set_equipment_runtime_table(eq);
+        build.set_clip_map(
+            vec![crate::SimBrush {
+                planes: vec![
+                    [1.0, 0.0, 0.0, 64.0],
+                    [-1.0, 0.0, 0.0, 64.0],
+                    [0.0, 1.0, 0.0, 64.0],
+                    [0.0, -1.0, 0.0, 64.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, -1.0, 16.0],
+                ],
+                contents: 1,
+                plane_surface_flags: vec![1; 6],
+                glass_encoded: 0,
+            }],
+            crate::SimClipBsp::default(),
+            crate::SimClipMesh::default(),
+            world_cmodel(),
+        );
+        world.install_content(build.finish());
+        world.set_phase(MatchPhase::Playing);
+        world.debug_place_alive_player(ClientId(0), [0.0, 0.0, 0.0]);
+        {
+            let mut frame = world.frame();
+            let ps = frame.player_mut(ClientId(0)).expect("local");
+            ps.weapon = 1;
+            ps.weapons[0] = 1;
+            ps.command_time = 0;
+        }
+        {
+            world.client_meta_mut(ClientId(0)).loadout = Some(crate::match_state::LoadoutSpec {
+                lethal: 99,
+                ..crate::match_state::LoadoutSpec::default()
+            });
+        }
+        apply_give_weapon(&mut world.frame(), Tick(1), ClientId(0), 1, 2);
+
+        let msec = crate::MATCH_TICK_MS as i32;
+        let mut saw_cook_view = false;
+        for i in 1..=24 {
+            let mut cmd = playerstate_iw4::UserCmd::default();
+            cmd.server_time = i * msec;
+            cmd.buttons = playerstate_iw4::buttons::FRAG;
+            cmd.weapon = 1;
+            cmd.off_hand_index = 2;
+            crate::step(
+                &mut world,
+                Tick(i as u32),
+                &crate::TickInput {
+                    cmds: vec![(ClientId(0), cmd)],
+                    ..crate::TickInput::default()
+                },
+                msec,
+                crate::StepReason::AuthorityFrame,
+            );
+            let frame = world.frame();
+            if let Some(ps) = frame.player(ClientId(0)) {
+                if ps.weap_flags & playerstate_iw4::weap_flags::OFFHAND_VIEW != 0 {
+                    saw_cook_view = true;
+                }
+            }
+        }
+        assert!(saw_cook_view, "hold +frag never entered offhand view");
+        let mut projectile = false;
+        world.visit_projectiles(|_| projectile = true);
+        assert!(!projectile, "hold through expiry must not throw");
+        let hp = {
+            let frame = world.frame();
+            frame.player(ClientId(0)).expect("local").health
+        };
+        assert!(hp < 100, "in-hand cook-off health {hp}");
+    }
 }

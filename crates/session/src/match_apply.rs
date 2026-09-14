@@ -462,6 +462,7 @@ pub fn apply_prepared_match(
             clip,
             pen_table,
             pen_table_loaded,
+            lochit_table,
             tracers,
             fx_catalog,
             type10,
@@ -471,6 +472,10 @@ pub fn apply_prepared_match(
             animated,
             model_spawns,
             map_doors,
+            radiation_diggers,
+            radiation_moving_diggers,
+            radiation_conveyer,
+            radiation_lights,
             map_use_triggers,
             flag_descriptors,
             objective_visuals,
@@ -506,7 +511,7 @@ pub fn apply_prepared_match(
         let mut content = sim::SimContentBuilder::default();
         let mut sim = sim::SimWorld::new();
         content.set_weapon_def_scales(weapons.0.scales_table());
-        let combat = combat_table::from_registry(&weapons.0);
+        let combat = combat_table::from_registry(&weapons.0, lochit_table);
         content.set_weapon_combat_table(combat.clone());
         content.set_bullet_pen_facts(combat_table::pen_from_registry(&weapons.0));
         content.set_penetration_table(pen_table);
@@ -603,7 +608,7 @@ pub fn apply_prepared_match(
         stage_resource(&mut install, xanims);
         stage_resource(&mut install, death);
         stage_resource(&mut install, player_anim_sources);
-        input_gate.cmds_enabled = false;
+        input_gate.local_cmds_enabled = false;
 
         let clip = clip.map(|mut clip| InstalledClip {
             static_models: std::mem::take(&mut clip.static_models),
@@ -624,6 +629,7 @@ pub fn apply_prepared_match(
                 origin: view.origin,
                 angles: view.angles,
                 script_linkto: String::new(),
+                script_destructable_area: String::new(),
             }),
             &prepared_map.spawns,
             &weapons.0,
@@ -678,12 +684,22 @@ pub fn apply_prepared_match(
                 .collect();
             sim.world_objects_mut().install_glass_panes(panes);
         }
+        sim.world_objects_mut()
+            .set_map_round_epoch(load_key.match_key.match_epoch);
         sim.start_script_model_play_anims(animated.rows);
         spawn_script_model_movers(&mut sim, &model_spawns);
+        crate::map_diggers::install(&mut sim, radiation_diggers);
+        crate::map_moving_diggers::install(&mut sim, radiation_moving_diggers);
+        if let Some(belt) = radiation_conveyer {
+            crate::map_conveyer::install(&mut sim, belt);
+        }
         if let Some(doors) = map_doors {
             crate::map_doors::install(&mut sim, doors).map_err(|error| {
                 InstallRefusal::new(format!("Door installation refused: {error:?}"))
             })?;
+        }
+        if let Some(lights) = radiation_lights {
+            crate::map_lights::install(&mut sim, lights);
         }
         stamp_script_mover_numbers(&mut scene, &sim);
         if animated.started > 0 || animated.missing_table > 0 {
@@ -867,6 +883,7 @@ struct MatchInstallPlan {
     clip: Option<ClipCollision>,
     pen_table: sim::PenetrationDepthTable,
     pen_table_loaded: bool,
+    lochit_table: Option<[f32; sim::HITLOC_COUNT]>,
     tracers: PreparedTracers,
     fx_catalog: PreparedFxCatalog,
     type10: MatchType10SoundHints,
@@ -876,6 +893,10 @@ struct MatchInstallPlan {
     animated: AnimatedPropAnims,
     model_spawns: Vec<(sim::ScriptModelId, [f32; 3], [f32; 3])>,
     map_doors: Option<sim::MapDoors>,
+    radiation_diggers: Vec<sim::RadiationDigger>,
+    radiation_moving_diggers: Vec<sim::RadiationMovingDigger>,
+    radiation_conveyer: Option<sim::RadiationConveyer>,
+    radiation_lights: Option<sim::RadiationLights>,
     map_use_triggers: Vec<assets::MapUseTrigger>,
     flag_descriptors: Vec<assets::FlagDescriptor>,
     objective_visuals: Vec<(u32, Vec<u32>, Vec<u32>)>,
@@ -937,6 +958,10 @@ fn preflight_match_install(
     let map_use_triggers = std::mem::take(&mut prepared.world.map_use_triggers);
     let map_doors = crate::map_doors::prepare(zone, &prepared.world, &map_use_triggers)
         .map_err(|error| InstallRefusal::new(format!("Door preparation refused: {error:?}")))?;
+    let radiation_lights = crate::map_lights::prepare(zone, &prepared.world);
+    let radiation_diggers = crate::map_diggers::prepare(zone, &prepared.world);
+    let radiation_moving_diggers = crate::map_moving_diggers::prepare(zone, &prepared.world);
+    let radiation_conveyer = crate::map_conveyer::prepare(zone, &map_use_triggers);
     let objective_setup: Result<_, String> = (|| {
         let visuals = crate::objectives::prepare(&mut prepared.world, &map_use_triggers, kind)?;
         let mut flags = [String::new(), String::new(), String::new()];
@@ -1032,6 +1057,7 @@ fn preflight_match_install(
         clip: prepared.clip,
         pen_table: prepared.pen_table,
         pen_table_loaded: prepared.pen_table_loaded,
+        lochit_table: prepared.lochit_table,
         tracers,
         fx_catalog,
         type10,
@@ -1041,6 +1067,10 @@ fn preflight_match_install(
         animated,
         model_spawns,
         map_doors,
+        radiation_diggers,
+        radiation_moving_diggers,
+        radiation_conveyer,
+        radiation_lights,
         map_use_triggers,
         flag_descriptors,
         objective_visuals,
@@ -1393,6 +1423,8 @@ struct AuthorityEntityModelInstall {
     vehicles: Vec<(sim::ScriptModelId, sim::VehicleDestructibleKind, [f32; 3])>,
     toys: Vec<(sim::ScriptModelId, sim::ToyDestructibleKind, [f32; 3])>,
     barrels: Vec<(sim::ScriptModelId, [f32; 3])>,
+    crates: Vec<sim::FlammableCrateInstall>,
+    destructables: Vec<sim::DestructableInstall>,
     installed_owners: Vec<(assets::ScriptModelId, sim::AuthorityModelOwner)>,
     ambiguous_brush_links: usize,
     standalone_brush_links: usize,
@@ -1452,6 +1484,8 @@ fn authority_entity_model_install(world: &assets::PreparedWorld) -> AuthorityEnt
     let mut vehicles = Vec::new();
     let mut toys = Vec::new();
     let mut barrels = Vec::new();
+    let mut crates = Vec::new();
+    let mut destructables = Vec::new();
     let mut installed_owners = Vec::new();
     let mut ambiguous_brush_links = 0;
     let mut capabilities: Vec<sim::EntityCollisionCapabilities> = world
@@ -1478,6 +1512,27 @@ fn authority_entity_model_install(world: &assets::PreparedWorld) -> AuthorityEnt
             ) == Some("explodable_barrel")
             {
                 barrels.push((sim_id, instance.transform.translation.to_array()));
+            }
+            if assets::exploding_prop_machine(
+                &instance.metadata.targetname,
+                &instance.metadata.script_noteworthy,
+                &instance.metadata.destructible_type,
+            ) == Some("flammable_crate")
+            {
+                crates.push(sim::FlammableCrateInstall {
+                    id: sim_id,
+                    origin: instance.transform.translation.to_array(),
+                });
+            }
+            if gamemode_iw4::is_destructable_targetname(&instance.metadata.targetname) {
+                destructables.push(sim::DestructableInstall {
+                    id: sim_id,
+                    origin: instance.transform.translation.to_array(),
+                    accumulate: instance.metadata.script_accumulate,
+                    threshold: instance.metadata.script_threshold,
+                    script_destructable_area: instance.metadata.script_destructable_area.clone(),
+                    has_fx: !instance.metadata.script_fxid.is_empty(),
+                });
             }
             let linked_brushes = match &instance.metadata.brush_link {
                 assets::ScriptBrushModelLink::Linked(brush) => {
@@ -1524,6 +1579,13 @@ fn authority_entity_model_install(world: &assets::PreparedWorld) -> AuthorityEnt
             ) == Some("explodable_barrel")
             {
                 attach_husk_capability(&mut dobj, world, sim::EXPLODABLE_BARREL_HUSK);
+            } else if assets::exploding_prop_machine(
+                &instance.metadata.targetname,
+                &instance.metadata.script_noteworthy,
+                &instance.metadata.destructible_type,
+            ) == Some("flammable_crate")
+            {
+                attach_husk_capability(&mut dobj, world, gamemode_iw4::FLAMMABLE_CRATE_HUSK);
             }
 
             if let Some(definition) = &instance.metadata.t5_destructible {
@@ -1558,6 +1620,16 @@ fn authority_entity_model_install(world: &assets::PreparedWorld) -> AuthorityEnt
                 angles: brush.angles,
             }],
         ));
+        if gamemode_iw4::is_destructable_targetname(&brush.targetname) {
+            destructables.push(sim::DestructableInstall {
+                id: sim_id,
+                origin: brush.origin,
+                accumulate: brush.script_accumulate,
+                threshold: brush.script_threshold,
+                script_destructable_area: brush.script_destructable_area.clone(),
+                has_fx: !brush.script_fxid.is_empty(),
+            });
+        }
         standalone_brush_links += 1;
     }
     AuthorityEntityModelInstall {
@@ -1565,6 +1637,8 @@ fn authority_entity_model_install(world: &assets::PreparedWorld) -> AuthorityEnt
         vehicles,
         toys,
         barrels,
+        crates,
+        destructables,
         installed_owners,
         ambiguous_brush_links,
         standalone_brush_links,
@@ -1674,6 +1748,14 @@ fn install_clip_and_player(
         .install_toy_destructibles(authority_models.toys);
     sim.world_objects_mut()
         .install_explodable_barrels(authority_models.barrels);
+    sim.world_objects_mut()
+        .install_flammable_crates(authority_models.crates);
+    let missing_tdm = !spawns_in
+        .iter()
+        .any(|spawn| spawn.classname == gamemode_iw4::SPAWN_TDM);
+    let block_area_gap = sim
+        .world_objects_mut()
+        .install_destructables(authority_models.destructables, missing_tdm);
     let owner_count = authority_models.capabilities.len();
     let linked_brushes = authority_models
         .capabilities
@@ -1718,6 +1800,7 @@ fn install_clip_and_player(
             origin: p.origin,
             angles: p.angles,
             script_linkto: p.script_linkto.clone(),
+            script_destructable_area: p.script_destructable_area.clone(),
         })
         .collect();
     let rows = bootstrap_class_rows(host_classes);
@@ -1796,6 +1879,11 @@ fn install_clip_and_player(
         )));
     }
 
+    if block_area_gap {
+        sim.script_gaps_mut()
+            .raise(gamemode_iw4::ScriptGapCause::BlockAreaMissingTdmSpawns);
+    }
+
     if kind == gamemode_iw4::GameModeKind::Domination {
         match install_dom_flags_from_mapents(sim, map_use_triggers) {
             Ok(ids) => {
@@ -1816,7 +1904,7 @@ fn install_clip_and_player(
     })?;
 
     sim_cam.enabled = false;
-    input_gate.cmds_enabled = false;
+    input_gate.local_cmds_enabled = false;
     sim_cam.freeze_fly = has_intermission_view;
     diag::info!(
         Sim,

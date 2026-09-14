@@ -267,6 +267,11 @@ pub struct MapOutdoor {
     pub lookup: [u32; 16],
 }
 
+#[derive(Clone, Copy, Debug, Default, Resource)]
+pub struct MapSunEffects {
+    pub def: Option<render_frame::SunEffectsDef>,
+}
+
 #[derive(Clone, Debug, Default, Resource)]
 pub struct MapPrimaryLights {
     pub lights: Vec<lighting_iw4::GfxLightPack>,

@@ -462,6 +462,25 @@ pub(crate) fn spawn_world(
                 .map(|id| crate::assemble::drawsurf::RuntimeImageId(id)),
             lookup: scene.outdoor_lookup,
         });
+        commands.insert_resource(crate::assemble::drawsurf::MapSunEffects {
+            def: scene.sun_effects,
+        });
+        match scene.sun_effects {
+            Some(sun) => diag::info!(
+                World,
+                "sun effects: READY sprite={} flare={} sprite_image={:?} flare_image={:?} blind={} glare={} dir=({:.3},{:.3},{:.3})",
+                sun.sprite_material.map_or("-".into(), |id| id.to_string()),
+                sun.flare_material.map_or("-".into(), |id| id.to_string()),
+                sun.sprite_image,
+                sun.flare_image,
+                sun.blind_max_darken,
+                sun.glare_max_lighten,
+                sun.direction[0],
+                sun.direction[1],
+                sun.direction[2]
+            ),
+            None => diag::info!(World, "sun effects: off (no authored IW4 record)"),
+        }
         match scene.outdoor_image {
             Some(id) => diag::info!(
                 World,
@@ -862,6 +881,7 @@ pub(crate) fn reset_world_spawn_on_teardown(
     mut torn: MessageReader<MatchTornDown>,
     mut job: ResMut<WorldSpawnJob>,
     mut gpu: ResMut<WorldGpuReady>,
+    mut demand: ResMut<super::world_gpu::PipelineDemandTracker>,
     mut commands: Commands,
 ) {
     if torn.read().count() == 0 {
@@ -869,9 +889,11 @@ pub(crate) fn reset_world_spawn_on_teardown(
     }
     *job = WorldSpawnJob::default();
     *gpu = WorldGpuReady::default();
+    *demand = super::world_gpu::PipelineDemandTracker::default();
     commands.remove_resource::<crate::assemble::drawsurf::WorldDrawGpuPlan>();
     commands.remove_resource::<crate::assemble::drawsurf::SmodelGpuPlan>();
     commands.remove_resource::<crate::assemble::drawsurf::tess::sky::SkyModelDrawPlan>();
+    commands.insert_resource(crate::assemble::drawsurf::MapSunEffects::default());
 
     commands.remove_resource::<crate::prepare::scene::smodel_lighting::WorldSmodelLighting>();
     commands.remove_resource::<crate::prepare::scene::smodel_geom_cache::WorldStaticModelCache>();

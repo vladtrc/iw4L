@@ -21,6 +21,7 @@ pub enum PackedListKind {
     Smodel,
     Cached,
     Pretess,
+    SmodelSkinned,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +39,7 @@ pub struct ShadowDrawListWork {
     pub smodel_flushes: Vec<SmodelRigidFlush>,
     pub smodel_cached_flushes: Vec<SmodelRigidFlush>,
     pub smodel_pretess_flushes: Vec<SmodelRigidFlush>,
+    pub smodel_skinned_flushes: Vec<SmodelRigidFlush>,
 
     pub smodel_skinned_unconsumed: u32,
     pub world_work_calls: u32,
@@ -192,26 +194,6 @@ impl DrawSurfListWorker for XModelListWorker<'_> {
     }
 }
 
-struct SkinnedSkipWorker<'a> {
-    n: u32,
-    done: bool,
-    unconsumed: &'a mut u32,
-}
-
-impl DrawSurfListWorker for SkinnedSkipWorker<'_> {
-    fn work(&mut self, _ctx: &mut GfxCmdBufContext) -> bool {
-        if !self.done {
-            *self.unconsumed = self.unconsumed.saturating_add(self.n);
-            self.done = true;
-        }
-        false
-    }
-
-    fn peek_sort_key(&self) -> u32 {
-        0
-    }
-}
-
 #[derive(Clone, Copy)]
 enum Which {
     World,
@@ -249,7 +231,7 @@ fn dispatch_registered(
     smodel: &mut SmodelListWorker<'_>,
     cached: &mut SmodelListWorker<'_>,
     pretess: &mut SmodelListWorker<'_>,
-    skinned: &mut SkinnedSkipWorker<'_>,
+    skinned: &mut SmodelListWorker<'_>,
 ) {
     let mut which_slots: Vec<Which> = Vec::with_capacity(list.registered_kinds.len());
     let mut kind_ids: Vec<u32> = Vec::with_capacity(list.registered_kinds.len());
@@ -358,11 +340,14 @@ fn run_packed_work(
         kind: PackedListKind::Cached,
         calls: 0,
     };
-    let mut smodel_skinned_unconsumed = 0u32;
-    let mut skinned = SkinnedSkipWorker {
-        n: packed.smodel_skinned.len() as u32,
-        done: false,
-        unconsumed: &mut smodel_skinned_unconsumed,
+    let mut smodel_skinned_flushes = Vec::new();
+    let mut skinned = SmodelListWorker {
+        entries: &packed.smodel_skinned,
+        cur: 0,
+        flushes: &mut smodel_skinned_flushes,
+        emit,
+        kind: PackedListKind::SmodelSkinned,
+        calls: 0,
     };
     dispatch_registered(
         &list,
@@ -378,6 +363,7 @@ fn run_packed_work(
     let world_work_calls = world.calls;
     let xmodel_work_calls = xmodel.calls;
     let smodel_work_calls = smodel.calls;
+    let smodel_skinned_unconsumed = 0u32;
     let end = if sorted {
         let mut cmd = GfxCmdBufDepthState {
             camera_view: 1,
@@ -396,6 +382,7 @@ fn run_packed_work(
         smodel_flushes,
         smodel_cached_flushes,
         smodel_pretess_flushes,
+        smodel_skinned_flushes,
         smodel_skinned_unconsumed,
         world_work_calls,
         xmodel_work_calls,

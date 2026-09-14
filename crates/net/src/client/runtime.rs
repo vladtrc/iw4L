@@ -720,7 +720,7 @@ pub fn sample_client_input(
     trace: Option<ResMut<ClientPhaseTrace>>,
 ) {
     push_phase(trace, "Input");
-    if !gate.cmds_enabled {
+    if !gate.local_cmds_enabled {
         actions.client.weapon_cycles.clear();
         return;
     }
@@ -836,7 +836,7 @@ pub fn enforce_client_work_limits(
     actions: Res<ClientActionInbox>,
 ) {
     if signon.phase.is_failed() {
-        gate.cmds_enabled = false;
+        gate.local_cmds_enabled = false;
         return;
     }
     let oldest = pending.iter().next().map(|(_, cmd, _)| cmd.server_time);
@@ -848,7 +848,7 @@ pub fn enforce_client_work_limits(
         || duration > 1000
     {
         Some("InputBacklogExceeded")
-    } else if gate.cmds_enabled
+    } else if gate.local_cmds_enabled
         && prediction.0.is_armed()
         && template.ready
         && cls.frametime() > 0
@@ -860,7 +860,7 @@ pub fn enforce_client_work_limits(
         None
     };
     if let Some(reason) = reason {
-        gate.cmds_enabled = false;
+        gate.local_cmds_enabled = false;
         prediction.0.disarm();
         if let Some(bridge) = bridge {
             bridge.fail(reason);
@@ -906,7 +906,11 @@ pub fn predict_local_move(
     if *role != RuntimeRole::Replay {
         let _tick = clock.tick(time.delta_secs() * 1000.0);
     }
-    if !gate.cmds_enabled || !prediction.0.is_armed() || !template.ready || !cg_clock.started() {
+    if !gate.local_cmds_enabled
+        || !prediction.0.is_armed()
+        || !template.ready
+        || !cg_clock.started()
+    {
         return;
     }
 

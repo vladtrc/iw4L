@@ -107,6 +107,7 @@ pub struct CommonCensus {
 
     pub pen_table: weapon_iw4::PenetrationDepthTable,
     pub pen_table_loaded: bool,
+    pub lochit_table: Option<[f32; weapon_iw4::HITLOC_COUNT]>,
 
     pub xmodel_walk: crate::PreparedXModelWalkCensus,
 

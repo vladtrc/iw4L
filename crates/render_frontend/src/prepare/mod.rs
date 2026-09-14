@@ -60,6 +60,8 @@ impl Plugin for RenderPreparePlugin {
                 )
                     .in_set(ClientSet::Present),
             )
+            .init_resource::<crate::assemble::drawsurf::MapSunEffects>()
+            .init_resource::<crate::assemble::drawsurf::SunEffectsFrameInput>()
             .init_resource::<crate::assemble::drawsurf::MapPrimaryLightTypes>()
             .init_resource::<crate::assemble::drawsurf::MapPrimaryLights>()
             .init_resource::<crate::assemble::drawsurf::DrawMethodDfog>()
@@ -91,13 +93,17 @@ impl Plugin for RenderPreparePlugin {
                     spawn_world,
                     spawn_world_finish.after(spawn_world),
                     publish_dyn_atpoint_lookup.after(spawn_world),
-                    crate::assemble::drawsurf::tess::glass::apply_cg_glass_tess.after(spawn_world),
+                    crate::assemble::drawsurf::tess::glass::apply_cg_glass_tess
+                        .after(spawn_world)
+                        .after(WorkerCmdSet::FxNonDependent),
                     fly_camera,
                     stamp_prepared_scene_view
                         .after(fly_camera)
                         .after(sync_camera_from_presented)
                         .after(crate::adapters::anim::fpv_present::spawn_pending_fpv)
                         .after(crate::adapters::anim::fpv_present::tick_fpv_viewmodel),
+                    crate::assemble::drawsurf::publish_sun_effects_frame
+                        .after(stamp_prepared_scene_view),
                     crate::assemble::drawsurf::ingest_drawsurf_list
                         .after(WorkerCmdSet::CellStatic)
                         .after(WorkerCmdSet::CellDynModel)

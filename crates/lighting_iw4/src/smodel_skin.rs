@@ -135,6 +135,51 @@ pub fn r_skin_xsurface_static_vert(
     dest[28..32].copy_from_slice(&lit);
 }
 
+pub fn r_skin_xsurface_unique_vert(
+    dest: &mut [u8; PACKED_STRIDE],
+    src: &[u8; PACKED_STRIDE],
+    m: &[f32; 16],
+    fixed_norm_axis: &[i32; 9],
+) {
+    let x = f32_at(src, 0);
+    let y = f32_at(src, 4);
+    let z = f32_at(src, 8);
+    write_f32(dest, 0, m[0] * x + m[4] * y + m[8] * z + m[12]);
+    write_f32(dest, 4, m[1] * x + m[5] * y + m[9] * z + m[13]);
+    write_f32(dest, 8, m[2] * x + m[6] * y + m[10] * z + m[14]);
+    write_u32(
+        dest,
+        12,
+        local_transform_unit_vec(fixed_norm_axis, u32_at(src, 12)),
+    );
+    dest[16..24].copy_from_slice(&src[16..24]);
+    write_u32(
+        dest,
+        24,
+        local_transform_unit_vec(fixed_norm_axis, u32_at(src, 24)),
+    );
+    write_u32(
+        dest,
+        28,
+        local_transform_unit_vec(fixed_norm_axis, u32_at(src, 28)),
+    );
+}
+
+pub fn r_skin_xsurface_unique_verts(
+    dest: &mut [[u8; PACKED_STRIDE]],
+    src: &[[u8; PACKED_STRIDE]],
+    m: &[f32; 16],
+    fixed_norm_axis: &[i32; 9],
+) -> Result<(), SmcSkinError> {
+    if dest.len() < src.len() {
+        return Err(SmcSkinError::ShortDest);
+    }
+    for (out, row) in dest.iter_mut().zip(src.iter()) {
+        r_skin_xsurface_unique_vert(out, row, m, fixed_norm_axis);
+    }
+    Ok(())
+}
+
 pub fn r_skin_xsurface_static_verts(
     dest: &mut [u8],
     src: &[[u8; PACKED_STRIDE]],

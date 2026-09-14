@@ -237,6 +237,22 @@ impl WorldImageUpload {
                 .filter_map(|light| light.image),
         );
         self.reachable_exact.extend(scene.outdoor_image);
+        if let Some(sun) = scene.sun_effects {
+            self.reachable_exact.extend(sun.sprite_image);
+            self.reachable_exact.extend(sun.flare_image);
+            self.pipeline_world_materials = Arc::new({
+                let mut set = (*self.pipeline_world_materials).clone();
+                for material in [sun.sprite_material, sun.flare_material]
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Ok(id) = u16::try_from(material) {
+                        set.insert(id);
+                    }
+                }
+                set
+            });
+        }
         self.probes = std::mem::take(&mut scene.reflection_probes);
         self.probe_handles = vec![None; self.probes.len()];
         self.lightmaps = std::mem::take(&mut scene.lightmaps);

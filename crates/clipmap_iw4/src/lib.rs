@@ -193,10 +193,6 @@ pub struct ClipMapRef<'a, B: BrushView> {
     pub brushes: &'a [B],
 }
 
-pub fn trace_linear<B: BrushView>(map: &ClipMapRef<'_, B>, ext: &TraceExtents) -> Trace {
-    trace_linear_with_glass(map, ext, &|_| true)
-}
-
 pub fn trace_linear_with_glass<B: BrushView>(
     map: &ClipMapRef<'_, B>,
     ext: &TraceExtents,
@@ -215,10 +211,6 @@ pub fn trace_linear_with_glass<B: BrushView>(
         ext.maxs,
         ext.mask,
     )
-}
-
-pub fn trace_through_tree<B: BrushView>(map: &ClipMapRef<'_, B>, ext: &TraceExtents) -> Trace {
-    trace_through_tree_with_glass(map, ext, &|_| true)
 }
 
 pub fn collect_leaf_hits<B: BrushView>(map: &ClipMapRef<'_, B>, ext: &TraceExtents) -> LeafHits {

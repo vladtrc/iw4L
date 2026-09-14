@@ -46,8 +46,10 @@ the two ends of the funnel.
 * `frame` — frame and session markers: `AppScreen`, `HasWorld`, `RuntimeRole`,
   `LaunchIdentity`. No plugins, no systems;
 * `session` — standing the match up and tearing it down (`MatchInstalled` /
-  `MatchTornDown`); `net` — the wire, deltas, prediction; `bots` — they see
-  exactly their own `Snapshot`.
+  `MatchTornDown`); `net` — the wire, deltas, prediction; `bots` — host-only
+  controllers that observe through a sensor adapter, walk a ClipMap-baked
+  graph, and enter the same `TickInput` funnel. Geometric `sim::step` scenes
+  in `bots` tests are the mapless check that a `UserCmd` actually moves.
 
 The snapshot publishes the **semantics** of DObj composition, not runtime trees
 and not posed vertices — see [`ANIM.md`](ANIM.md).

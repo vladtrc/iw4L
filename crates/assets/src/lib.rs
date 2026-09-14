@@ -295,17 +295,18 @@ pub use localize::{
     load_mp_localized_strings,
 };
 pub use map_entities::{
-    FlagDescriptor, IntermissionView, MapEntsKeyCensus, MapUseTrigger, MinimapCorners,
-    ScriptBrushModelLink, ScriptBrushModelPlacement, ScriptModelId, ScriptModelPlacement,
-    SpawnPoint, census_entity_string_keys, dm_spawn_points, dm_spawn_points_iw5,
-    dm_spawn_points_t5, exploding_prop_machine, flag_descriptors, flag_descriptors_iw5,
-    flag_descriptors_t5, intermission_view, intermission_view_iw5, intermission_view_t5,
-    map_ents_entity_string, map_use_triggers, map_use_triggers_iw5, map_use_triggers_t5,
+    FlagDescriptor, IntermissionView, MapEntsKeyCensus, MapScriptStruct, MapUseTrigger,
+    MinimapCorners, ScriptBrushModelLink, ScriptBrushModelPlacement, ScriptModelId,
+    ScriptModelPlacement, SpawnPoint, census_entity_string_keys, dm_spawn_points,
+    dm_spawn_points_iw5, dm_spawn_points_t5, exploding_prop_machine, flag_descriptors,
+    flag_descriptors_iw5, flag_descriptors_t5, intermission_view, intermission_view_iw5,
+    intermission_view_t5, map_ents_entity_string, map_script_structs, map_script_structs_iw5,
+    map_script_structs_t5, map_use_triggers, map_use_triggers_iw5, map_use_triggers_t5,
     minimap_corners, minimap_corners_iw5, minimap_corners_t5, parse_flag_descriptors,
-    parse_map_use_triggers, script_brush_model_placements, script_brush_model_placements_iw5,
-    script_brush_model_placements_t5, script_model_placements, script_model_placements_iw5,
-    script_model_placements_t5, worldspawn_north_yaw, worldspawn_north_yaw_iw5,
-    worldspawn_north_yaw_t5,
+    parse_map_script_structs, parse_map_use_triggers, script_brush_model_placements,
+    script_brush_model_placements_iw5, script_brush_model_placements_t5, script_model_placements,
+    script_model_placements_iw5, script_model_placements_t5, worldspawn_north_yaw,
+    worldspawn_north_yaw_iw5, worldspawn_north_yaw_t5,
 };
 pub use map_script_sound::{
     MapScriptSoundFacts, MapScriptSoundSource, SessionMapScriptSound, ambient_play_alias,
@@ -375,7 +376,8 @@ pub use model_skel::{
     capture_xmodel_skel_t5, dobj_has_lod_for_dist, lod_surface_range, t5_lod, xmodel_lod_for_dist,
 };
 pub use penetration::{
-    PenTableError, capture_pen_table, parse_pen_table_info_string, parse_pen_table_rawfile,
+    LochitTableError, PenTableError, capture_lochit_table, capture_pen_table,
+    parse_lochit_info_string, parse_pen_table_info_string, parse_pen_table_rawfile,
 };
 pub use playeranim_parse::{
     ParsedAnimCommand, ParsedAnimCondition, ParsedAnimItem, ParsedPlayerAnimScript,
@@ -461,8 +463,8 @@ pub use weapon_catalog::{
 };
 pub use world_draw::{
     CapturedLightDef, DpvsWorldData, GfxBrushModelBounds, GfxBrushModelSurfs, OwnedPortal,
-    RetailWorldVertexPayload, WorldBatch, WorldDraw, WorldLightRegionHull, WorldLightmap,
-    WorldLightmapGap, WorldPrimaryLight, WorldReflectionProbe, WorldShadowGeometry,
+    RetailWorldVertexPayload, SunEffectsCapture, WorldBatch, WorldDraw, WorldLightRegionHull,
+    WorldLightmap, WorldLightmapGap, WorldPrimaryLight, WorldReflectionProbe, WorldShadowGeometry,
     brush_model_vertex_centroid, build_world_draw,
 };
 pub(crate) use world_draw::{

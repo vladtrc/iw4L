@@ -313,6 +313,7 @@ impl ZoneLane for T5Lane {
                     script_brush_models,
                     map_use_triggers,
                     flag_descriptors,
+                    script_structs,
                     ..
                 } = map_models;
                 let intermission_view = intermission_view_t5(&stream);
@@ -526,6 +527,7 @@ impl ZoneLane for T5Lane {
                         script_brush_models,
                         map_use_triggers,
                         flag_descriptors,
+                        script_structs,
                         dyn_ents: crate::DynEntCatalog::default(),
                         smodel_lighting_samples,
                         light_grid,

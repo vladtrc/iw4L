@@ -50,7 +50,7 @@ impl ClientShotSamples {
 
 #[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AuthorityInputGate {
-    pub cmds_enabled: bool,
+    pub local_cmds_enabled: bool,
 }
 
 #[derive(Resource, Default)]
@@ -594,6 +594,7 @@ fn gather_authority_input(
     mut ledger: ResMut<crate::ClientActionLedger>,
     mut reliable: ResMut<crate::ReliableEventHub>,
     gate: Res<AuthorityInputGate>,
+    local: Option<Res<LocalPresentClient>>,
     mut pending: ResMut<PendingAuthorityInput>,
     mut pending_acks: ResMut<PendingAcks>,
     trace: Option<ResMut<AuthorityPhaseTrace>>,
@@ -634,22 +635,30 @@ fn gather_authority_input(
             }
         }
     }
-    let (mut cmds, mut acks) = if gate.cmds_enabled {
-        let gathered = inbox.take_for_tick(clock.time_ms);
+    // The gate is the local player's arming switch, not a licence to hold every
+    // peer's input: a queue the authority never drains ages until
+    // `ClientCommandInbox::backlog_fault` retires the peer for a stall the
+    // authority itself caused. Drain on every tick the match is live, and drop
+    // only what the local client is not yet allowed to contribute.
+    let gathered = inbox.take_for_tick(clock.time_ms);
 
-        samples.0.clear();
-        for (client, command_time, sample) in gathered.samples {
-            samples.note(client, command_time, sample);
-        }
+    samples.0.clear();
+    for (client, command_time, sample) in gathered.samples {
+        samples.note(client, command_time, sample);
+    }
 
-        for (client, fault) in gathered.backlog_faults {
-            diag::warn!(Net, "client {}: {fault}", client.0);
-            backlog.0.push((client, fault.to_string()));
-        }
-        (gathered.cmds, gathered.acks)
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    for (client, fault) in gathered.backlog_faults {
+        diag::warn!(Net, "client {}: {fault}", client.0);
+        backlog.0.push((client, fault.to_string()));
+    }
+    let (mut cmds, mut acks) = (gathered.cmds, gathered.acks);
+    if !gate.local_cmds_enabled
+        && let Some(local) = local.as_ref()
+    {
+        cmds.retain(|(id, _)| *id != local.0);
+        acks.retain(|(id, _)| *id != local.0);
+        samples.0.retain(|(id, _), _| *id != local.0);
+    }
     for (client, _) in &backlog.0 {
         cmds.retain(|(id, _)| id != client);
         acks.retain(|(id, _)| id != client);
@@ -1518,4 +1527,105 @@ pub fn register_listen_runtime(app: &mut App) {
             .after(frame::SessionSwapApplied),
     );
     register_authority_phase_seams(app);
+}
+
+#[cfg(test)]
+mod gather_tests {
+    use super::*;
+    use crate::AUTHORITY_MS;
+    use crate::authority::inbox::MAX_QUEUED_COMMAND_AGE_MS;
+    use bevy::ecs::system::RunSystemOnce;
+    use playerstate_iw4::UserCmd;
+
+    const PEER: ClientId = ClientId(1);
+
+    fn world_with_gate(local_cmds_enabled: bool) -> World {
+        let mut world = World::new();
+        world.insert_resource(AuthorityClock::default());
+        world.insert_resource(ClientCommandInbox::default());
+        world.insert_resource(ClientShotSamples::default());
+        world.insert_resource(PendingConnectionFaults::default());
+        world.insert_resource(ClientActionInbox::default());
+        world.insert_resource(crate::ClientActionLedger::default());
+        world.insert_resource(crate::ReliableEventHub::default());
+        world.insert_resource(AuthorityInputGate { local_cmds_enabled });
+        world.insert_resource(LocalPresentClient(ClientId(0)));
+        world.insert_resource(PendingAuthorityInput::default());
+        world.insert_resource(PendingAcks::default());
+        world
+    }
+
+    fn queue(world: &mut World, id: ClientId, seq: u32, server_time: i32) {
+        world.resource_mut::<ClientCommandInbox>().push(
+            id,
+            Some(CmdSeq(seq)),
+            UserCmd {
+                server_time,
+                ..UserCmd::default()
+            },
+            None,
+        );
+    }
+
+    fn tick(world: &mut World) {
+        world.resource_mut::<AuthorityClock>().advance();
+        world
+            .run_system_once(gather_authority_input)
+            .expect("gather ran");
+    }
+
+    fn executed(world: &World) -> Vec<ClientId> {
+        world
+            .resource::<PendingAuthorityInput>()
+            .0
+            .as_ref()
+            .map(|input| input.cmds.iter().map(|(id, _)| *id).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_peer_is_executed_while_the_local_player_is_still_unarmed() {
+        let mut world = world_with_gate(false);
+        queue(&mut world, PEER, 1, 0);
+        tick(&mut world);
+        assert_eq!(executed(&world), vec![PEER]);
+    }
+
+    #[test]
+    fn the_local_client_waits_for_its_own_arming() {
+        let mut world = world_with_gate(false);
+        queue(&mut world, ClientId(0), 1, 0);
+        tick(&mut world);
+        assert!(executed(&world).is_empty());
+
+        world
+            .resource_mut::<AuthorityInputGate>()
+            .local_cmds_enabled = true;
+        queue(&mut world, ClientId(0), 2, 50);
+        tick(&mut world);
+        assert_eq!(executed(&world), vec![ClientId(0)]);
+    }
+
+    #[test]
+    fn an_unarmed_host_does_not_age_a_peer_into_a_backlog_fault() {
+        // The host sits in class select while a peer plays, then spawns. The
+        // peer's queue must not have aged into `OldestAge` in the meantime.
+        let mut world = world_with_gate(false);
+        let ticks = (MAX_QUEUED_COMMAND_AGE_MS / AUTHORITY_MS) * 4;
+        for seq in 1..=ticks as u32 {
+            queue(&mut world, PEER, seq, (seq as i32 - 1) * AUTHORITY_MS);
+            tick(&mut world);
+        }
+        world
+            .resource_mut::<AuthorityInputGate>()
+            .local_cmds_enabled = true;
+        queue(&mut world, PEER, ticks as u32 + 1, ticks * AUTHORITY_MS);
+        tick(&mut world);
+
+        assert!(
+            world.resource::<PendingConnectionFaults>().0.is_empty(),
+            "peer retired for a stall the authority caused: {:?}",
+            world.resource::<PendingConnectionFaults>().0
+        );
+    }
 }

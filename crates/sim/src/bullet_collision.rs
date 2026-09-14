@@ -955,6 +955,7 @@ pub fn bullet_trace(
     brushes: &[SimBrush],
     players: &[PlayerCollisionPose],
     query: &BulletTraceQuery,
+    glass_is_solid: &dyn Fn(u16) -> bool,
 ) -> TraceOutcome {
     bullet_trace_with_entity_models(
         brushes,
@@ -964,6 +965,7 @@ pub fn bullet_trace(
         players,
         &[],
         query,
+        glass_is_solid,
     )
 }
 
@@ -975,6 +977,7 @@ pub fn bullet_trace_with_entity_models(
     players: &[PlayerCollisionPose],
     script_models: &[EntityCollisionTraceGeom],
     query: &BulletTraceQuery,
+    glass_is_solid: &dyn Fn(u16) -> bool,
 ) -> TraceOutcome {
     bullet_trace_filtered(
         brushes,
@@ -984,7 +987,7 @@ pub fn bullet_trace_with_entity_models(
         players,
         script_models,
         query,
-        &|_| true,
+        glass_is_solid,
     )
 }
 
@@ -1216,6 +1219,7 @@ pub fn bullet_trace_segments(
     query: &BulletTraceQuery,
     pen: BulletPenFacts,
     table: &PenetrationDepthTable,
+    glass_is_solid: &dyn Fn(u16) -> bool,
 ) -> (Vec<BulletTraceSegment>, Option<ColliderId>) {
     bullet_trace_segments_with_entity_models(
         brushes,
@@ -1227,6 +1231,7 @@ pub fn bullet_trace_segments(
         query,
         pen,
         table,
+        glass_is_solid,
     )
 }
 
@@ -1240,6 +1245,7 @@ pub fn bullet_trace_segments_with_entity_models(
     query: &BulletTraceQuery,
     pen: BulletPenFacts,
     table: &PenetrationDepthTable,
+    glass_is_solid: &dyn Fn(u16) -> bool,
 ) -> (Vec<BulletTraceSegment>, Option<ColliderId>) {
     bullet_trace_segments_filtered(
         brushes,
@@ -1251,7 +1257,8 @@ pub fn bullet_trace_segments_with_entity_models(
         query,
         pen,
         table,
-        &|_| true,
+        glass_is_solid,
+        None,
     )
 }
 
@@ -1266,6 +1273,7 @@ pub(crate) fn bullet_trace_segments_filtered(
     pen: BulletPenFacts,
     table: &PenetrationDepthTable,
     glass_is_solid: &dyn Fn(u16) -> bool,
+    on_glass_hit: Option<&dyn Fn(u16, [f32; 3])>,
 ) -> (Vec<BulletTraceSegment>, Option<ColliderId>) {
     if !is_finite_vec3(query.start) || !is_finite_vec3(query.end) {
         return (Vec::new(), None);
@@ -1288,6 +1296,7 @@ pub(crate) fn bullet_trace_segments_filtered(
         players,
         script_models,
         glass_is_solid,
+        on_glass_hit,
     };
     if pen.pen_gate(true) {
         fire_penetrate(&world, query, ray_dir, pen, table)
@@ -1305,6 +1314,7 @@ struct TraceWorld<'a> {
     script_models: &'a [EntityCollisionTraceGeom],
 
     glass_is_solid: &'a dyn Fn(u16) -> bool,
+    on_glass_hit: Option<&'a dyn Fn(u16, [f32; 3])>,
 }
 
 struct HitGeom {
@@ -1361,18 +1371,30 @@ fn fire_extended(
             }
             Decode::Hit(hit) => {
                 let contents = collider_contents(hit.collider);
-                let glass = contents & CONTENTS_GLASS != 0;
+                let glass_contents = contents & CONTENTS_GLASS != 0;
+                if glass_contents {
+                    if is_open_pane(world, hit.collider) {
+                        let Some(next) =
+                            bg_advance_trace(hit.end, hit.normal, dir, true, ADVANCE_TRACE_FWD)
+                        else {
+                            break;
+                        };
+                        start = next;
+                        continue;
+                    }
+                    note_glass_hit(world, hit.collider, hit.end);
+                }
                 segments.push(make_segment_from_hit(
                     seg_start,
                     &hit,
-                    glass || is_player(hit.collider),
+                    glass_contents || is_player(hit.collider),
                     0.0,
                     multiplier,
                     BulletPath::Extended,
                     false,
                 ));
                 terminal = Some(hit.collider);
-                if glass {
+                if glass_contents {
                     let Some(next) =
                         bg_advance_trace(hit.end, hit.normal, dir, true, ADVANCE_TRACE_FWD)
                     else {
@@ -1416,40 +1438,55 @@ fn fire_penetrate(
     let mut last_surf = 0u32;
     let mut seg_start = query.start;
 
-    let (first, first_startsolid) = match decode_hit(trace_from(world, query, start, ignore_hit)) {
-        Decode::StopMiss { end } => {
-            segments.push(make_segment(
-                seg_start,
-                end,
-                [0.0; 3],
-                None,
-                false,
-                0.0,
-                multiplier,
-                BulletPath::Penetrate,
-                false,
-            ));
-            return (segments, None);
-        }
-        Decode::StopSolid { collider, .. } => {
-            let Some(collider) = collider else {
+    let mut open_skips = 0u32;
+    let (first, first_startsolid) = loop {
+        match decode_hit(trace_from(world, query, start, ignore_hit)) {
+            Decode::StopMiss { end } => {
                 segments.push(make_segment(
                     seg_start,
-                    query.start,
+                    end,
                     [0.0; 3],
                     None,
                     false,
                     0.0,
                     multiplier,
                     BulletPath::Penetrate,
-                    true,
+                    false,
                 ));
                 return (segments, None);
-            };
-            (startsolid_as_hit(collider, query.start, dir), true)
+            }
+            Decode::StopSolid { collider, .. } => {
+                let Some(collider) = collider else {
+                    segments.push(make_segment(
+                        seg_start,
+                        query.start,
+                        [0.0; 3],
+                        None,
+                        false,
+                        0.0,
+                        multiplier,
+                        BulletPath::Penetrate,
+                        true,
+                    ));
+                    return (segments, None);
+                };
+                break (startsolid_as_hit(collider, query.start, dir), true);
+            }
+            Decode::Hit(hit) if is_open_pane(world, hit.collider) => {
+                let Some(next) =
+                    bg_advance_trace(hit.end, hit.normal, dir, true, ADVANCE_TRACE_FWD)
+                else {
+                    return (segments, None);
+                };
+                open_skips = open_skips.saturating_add(1);
+                if open_skips as usize >= MAX_EXTENDED_STEPS {
+                    return (segments, None);
+                }
+                start = next;
+            }
+            Decode::Hit(hit) => break (hit, false),
+            Decode::Invalid => return (segments, None),
         }
-        Decode::Hit(hit) => (hit, false),
-        Decode::Invalid => return (segments, None),
     };
     last_surf = depth_surf(first.collider, last_surf);
     segments.push(make_segment_from_hit(
@@ -1461,6 +1498,7 @@ fn fire_penetrate(
         BulletPath::Penetrate,
         first_startsolid,
     ));
+    note_glass_hit(world, first.collider, first.end);
     let mut terminal = Some(first.collider);
     let mut last_hit = first;
 
@@ -1528,6 +1566,19 @@ fn fire_penetrate(
             }
             Decode::Invalid => break,
         };
+        if let Some(hit) = &fwd_hit {
+            if is_open_pane(world, hit.collider) {
+                let Some(next) =
+                    bg_advance_trace(hit.end, hit.normal, dir, true, ADVANCE_TRACE_FWD)
+                else {
+                    break;
+                };
+                last_hit.end = next;
+                last_hit.normal = hit.normal;
+                continue;
+            }
+            note_glass_hit(world, hit.collider, hit.end);
+        }
 
         let rev_dir = [-dir[0], -dir[1], -dir[2]];
 
@@ -1787,6 +1838,27 @@ fn collider_glass_encoded(collider: ColliderId) -> u16 {
     }
 }
 
+fn pane_id(collider: ColliderId) -> Option<u16> {
+    let encoded = collider_glass_encoded(collider);
+    (encoded != 0).then(|| encoded - 1)
+}
+
+fn is_open_pane(world: &TraceWorld<'_>, collider: ColliderId) -> bool {
+    pane_id(collider).is_some_and(|piece| !(world.glass_is_solid)(piece))
+}
+
+fn note_glass_hit(world: &TraceWorld<'_>, collider: ColliderId, end: [f32; 3]) {
+    let Some(piece) = pane_id(collider) else {
+        return;
+    };
+    if !(world.glass_is_solid)(piece) {
+        return;
+    }
+    if let Some(cb) = world.on_glass_hit {
+        cb(piece, end);
+    }
+}
+
 fn collider_hit_kind(collider: ColliderId, startsolid: bool) -> (i32, u16) {
     match collider {
         ColliderId::World { glass_encoded, .. } if !startsolid => {
@@ -1937,7 +2009,7 @@ fn is_finite_vec3(v: [f32; 3]) -> bool {
     v.iter().all(|c| c.is_finite())
 }
 
-pub(crate) fn glass_piece_from_hit(hit_type: i32, hit_id: u16) -> Option<u32> {
+pub fn glass_piece_from_hit(hit_type: i32, hit_id: u16) -> Option<u32> {
     let encoded = trace_iw4::trace_get_glass_hit_id(hit_type, hit_id);
     (encoded != 0).then(|| u32::from(encoded) - 1)
 }
@@ -2335,8 +2407,8 @@ pub const COLLISION_COVERAGE: &[CollisionCoverageRow] = &[
     },
     CollisionCoverageRow {
         id: "glass_destructibles",
-        support: CoverageSupport::Locked,
-        note: "MASK_SHOT includes CONTENTS_GLASS; combat Glass_Damage wired; CG_Glass/tess not",
+        support: CoverageSupport::Supported,
+        note: "MASK_SHOT includes CONTENTS_GLASS; mid-trace on_glass_hit updates solidity before the next hop; CG_Glass/tess apply is presentation",
     },
     CollisionCoverageRow {
         id: "mask_shot_material_surface",
@@ -2349,3 +2421,221 @@ pub const COLLISION_COVERAGE: &[CollisionCoverageRow] = &[
         note: "G_RunMissile world half is the same zero-extent brush∪mesh ray as hitscan; plantable G_TraceCapsule hull and TR_STATIONARY rest stay open",
     },
 ];
+
+#[cfg(test)]
+mod glass_mid_trace_tests {
+    use super::*;
+    use crate::world::{SimClipBsp, SimClipCmodels, SimClipMesh};
+    use std::cell::RefCell;
+
+    const SURF_GLASS: u32 = 9 << 20;
+
+    fn aabb(
+        mins: [f32; 3],
+        maxs: [f32; 3],
+        contents: u32,
+        glass_encoded: u16,
+        surf: u32,
+    ) -> SimBrush {
+        SimBrush {
+            planes: vec![
+                [1.0, 0.0, 0.0, maxs[0]],
+                [-1.0, 0.0, 0.0, -mins[0]],
+                [0.0, 1.0, 0.0, maxs[1]],
+                [0.0, -1.0, 0.0, -mins[1]],
+                [0.0, 0.0, 1.0, maxs[2]],
+                [0.0, 0.0, -1.0, -mins[2]],
+            ],
+            contents,
+            plane_surface_flags: vec![surf; 6],
+            glass_encoded,
+        }
+    }
+
+    fn shot_through(
+        brushes: &[SimBrush],
+        glass_is_solid: &dyn Fn(u16) -> bool,
+        on_glass_hit: Option<&dyn Fn(u16, [f32; 3])>,
+    ) -> Vec<BulletTraceSegment> {
+        bullet_trace_segments_filtered(
+            brushes,
+            &SimClipBsp::default(),
+            &SimClipCmodels::default(),
+            &SimClipMesh::default(),
+            &[],
+            &[],
+            &BulletTraceQuery {
+                start: [-64.0, 0.0, 0.0],
+                end: [200.0, 0.0, 0.0],
+                mask: MASK_SHOT,
+                ignore: None,
+                ignore_hit: None,
+            },
+            BulletPenFacts::default(),
+            &PenetrationDepthTable::default(),
+            glass_is_solid,
+            on_glass_hit,
+        )
+        .0
+    }
+
+    fn pane_hits(segments: &[BulletTraceSegment]) -> Vec<u16> {
+        segments
+            .iter()
+            .filter_map(|s| {
+                let encoded = s.glass_encoded;
+                (encoded != 0).then(|| encoded - 1)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn already_open_pane_does_not_block_the_wall_behind_it() {
+        let brushes = [
+            aabb(
+                [20.0, -64.0, -64.0],
+                [80.0, 64.0, 64.0],
+                CONTENTS_GLASS,
+                1,
+                SURF_GLASS,
+            ),
+            aabb(
+                [120.0, -64.0, -64.0],
+                [124.0, 64.0, 64.0],
+                CONTENTS_SOLID,
+                0,
+                0,
+            ),
+        ];
+        let segments = shot_through(&brushes, &|_| false, None);
+        assert!(
+            pane_hits(&segments).is_empty(),
+            "shattered pane must drop out of clip: {segments:?}"
+        );
+        assert!(
+            segments
+                .iter()
+                .any(|s| s.glass_encoded == 0 && s.collider.is_some()),
+            "wall behind the hole must still be a hit: {segments:?}"
+        );
+    }
+
+    #[test]
+    fn shatter_on_first_hop_skips_the_same_pane_on_the_next() {
+        let brushes = [
+            aabb(
+                [20.0, -64.0, -64.0],
+                [80.0, 64.0, 64.0],
+                CONTENTS_GLASS,
+                1,
+                SURF_GLASS,
+            ),
+            aabb(
+                [120.0, -64.0, -64.0],
+                [124.0, 64.0, 64.0],
+                CONTENTS_SOLID,
+                0,
+                0,
+            ),
+        ];
+        let damage = RefCell::new(0u16);
+        let noted = RefCell::new(Vec::<u16>::new());
+        let glass_is_solid = |piece: u16| {
+            if piece == 0 {
+                entity_iw4::glass_is_solid(*damage.borrow())
+            } else {
+                true
+            }
+        };
+        let on_glass_hit = |piece: u16, _end: [f32; 3]| {
+            noted.borrow_mut().push(piece);
+            if piece == 0 {
+                let mut d = damage.borrow_mut();
+                *d = entity_iw4::glass_add_damage(
+                    *d,
+                    u32::from(entity_iw4::GLASS_DAMAGE_TO_DESTROY),
+                );
+            }
+        };
+        let segments = shot_through(&brushes, &glass_is_solid, Some(&on_glass_hit));
+        assert_eq!(
+            *noted.borrow(),
+            vec![0],
+            "one pane, one mid-trace note: {segments:?}"
+        );
+        assert_eq!(
+            pane_hits(&segments),
+            vec![0],
+            "exit of a just-shattered pane must not produce another glass segment: {segments:?}"
+        );
+        assert!(
+            segments
+                .iter()
+                .any(|s| s.glass_encoded == 0 && s.collider.is_some()),
+            "shot continues to the wall after the pane opens: {segments:?}"
+        );
+    }
+
+    #[test]
+    fn two_distinct_panes_on_one_ray_each_shatter_once() {
+        let brushes = [
+            aabb(
+                [20.0, -8.0, -8.0],
+                [24.0, 8.0, 8.0],
+                CONTENTS_GLASS,
+                1,
+                SURF_GLASS,
+            ),
+            aabb(
+                [80.0, -8.0, -8.0],
+                [84.0, 8.0, 8.0],
+                CONTENTS_GLASS,
+                2,
+                SURF_GLASS,
+            ),
+            aabb(
+                [120.0, -64.0, -64.0],
+                [124.0, 64.0, 64.0],
+                CONTENTS_SOLID,
+                0,
+                0,
+            ),
+        ];
+        let damage = RefCell::new([0u16; 2]);
+        let noted = RefCell::new(Vec::<u16>::new());
+        let glass_is_solid = |piece: u16| {
+            damage
+                .borrow()
+                .get(piece as usize)
+                .copied()
+                .map(entity_iw4::glass_is_solid)
+                .unwrap_or(true)
+        };
+        let on_glass_hit = |piece: u16, _end: [f32; 3]| {
+            noted.borrow_mut().push(piece);
+            if let Some(slot) = damage.borrow_mut().get_mut(piece as usize) {
+                *slot = entity_iw4::glass_add_damage(
+                    *slot,
+                    u32::from(entity_iw4::GLASS_DAMAGE_TO_DESTROY),
+                );
+            }
+        };
+        let segments = shot_through(&brushes, &glass_is_solid, Some(&on_glass_hit));
+        assert_eq!(
+            *noted.borrow(),
+            vec![0, 1],
+            "each pane is noted once: {segments:?}"
+        );
+        assert_eq!(
+            pane_hits(&segments),
+            vec![0, 1],
+            "two panes produce two glass segments: {segments:?}"
+        );
+        assert!(
+            segments
+                .iter()
+                .any(|s| s.glass_encoded == 0 && s.collider.is_some()),
+            "shot continues to the wall after both panes open: {segments:?}"
+        );
+    }
+}

@@ -31,8 +31,9 @@ use bevy::render::{Render, RenderSystems};
 use super::ExtractedRenderFrameProducts;
 use super::backend::{
     ModelIndexRingCopyRefuse, ModelIndexStream, PackDraw, PackedEmit, PackedListKind,
-    pack_sun_shadow_frontend, prim_args_from_world_flush, prim_args_u32_index_span,
-    r_draw_spot_shadow_map, r_draw_sun_shadow_map_forced, r_draw_surf_list_work_colour,
+    SmodelRigidFlush, pack_sun_shadow_frontend, prim_args_from_world_flush,
+    prim_args_u32_index_span, r_draw_spot_shadow_map, r_draw_sun_shadow_map_forced,
+    r_draw_surf_list_work_colour,
 };
 use super::depth_range::{
     GFX_DEPTH_RANGE_VIEWMODEL, depth_range_type_for_draw, reverse_z_viewport_depth,
@@ -111,6 +112,7 @@ pub struct ExtractedStaticGeometry {
     pub smodel_surface_ranges: Arc<Vec<(u32, u32)>>,
     pub smodel_vertex_refusal: Option<render_frame::RetailPackedVertexRefusal>,
     pub smodel_cached_vertices: Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>,
+    pub smodel_surface_verts: Arc<Vec<(u32, u32)>>,
 }
 
 /// Installed world and material resources. Longer-lived than a colour frame:
@@ -148,6 +150,7 @@ pub struct RenderWorldData {
     pub prepared: Option<Arc<PreparedMaterialTable>>,
     pub sorted_material_names: Arc<Vec<String>>,
     pub shader_program_names: Arc<Vec<Option<String>>>,
+    pub sun_effects: Option<render_frame::SunEffectsDef>,
 }
 
 /// Commands and changed data of the current frame. Names the installed world by
@@ -185,9 +188,11 @@ pub struct RenderFrameData {
     pub generation: MaterialGenerationId,
     pub world_generation: frame::WorldGeneration,
     pub sun_shadow: Option<SunShadowForcedFrame>,
+    pub sun_effects: Option<render_frame::SunEffectsFrame>,
     pub warm_pipelines: bool,
     pub pipeline_world_materials: Arc<std::collections::HashSet<u16>>,
     pub pipeline_smodel_materials: Arc<std::collections::HashSet<u16>>,
+    pub pipeline_demand_revision: u64,
     pub smc_vb_patches: Vec<(lighting_iw4::SmcPatchLock, Vec<u8>)>,
     pub smc_ib_patches: Vec<(u32, Vec<u8>)>,
     pub xmodel_vertices: Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>,
@@ -236,6 +241,7 @@ mod pipeline;
 mod prepare_camera;
 mod record;
 mod residency;
+mod smodel_skinned;
 
 pub use pipeline::cached_lighting_port_variant;
 
@@ -404,8 +410,10 @@ fn open_shadow_table_epoch(
 #[derive(Resource, Default)]
 struct ExactPipelineKickCache {
     current: Vec<ExactPipelineSlot>,
+    scheduled: HashSet<ExactColourPipelineKey>,
     generation: Option<MaterialGenerationId>,
     views: Vec<(TextureFormat, u32)>,
+    demand_revision: u64,
 }
 
 #[derive(Default)]
@@ -741,6 +749,9 @@ enum GpuSubmitRefusal {
     },
 
     SmodelCachedWithoutDestRange {
+        placement: u32,
+    },
+    SmodelSkinnedDestMissing {
         placement: u32,
     },
     ConstantArenaMissing,
@@ -1209,6 +1220,8 @@ struct ColourSubmitScratch {
     pack_draws: Vec<PackDraw>,
 
     pack_plan: Option<ColourPackPlan>,
+
+    skinned_tess: smodel_skinned::SmodelSkinnedTess,
 
     sun_prepared: PreparedSunWork,
     spot_prepared: PreparedSpotWork,
@@ -1906,6 +1919,7 @@ enum ExactTessBind {
     World,
     Smodel,
     SmodelCached,
+    SmodelSkinned,
     XModel,
     CodeMesh,
     ParticleCloud,
@@ -2024,6 +2038,7 @@ fn submit_refusal_class(cause: &GpuSubmitRefusal) -> &'static str {
         GpuSubmitRefusal::SmodelCacheIndicesMissing { .. } => "SmodelCacheIndicesMissing",
         GpuSubmitRefusal::SmodelXSurfacePathUnread { .. } => "SmodelXSurfacePathUnread",
         GpuSubmitRefusal::SmodelCachedWithoutDestRange { .. } => "SmodelCachedWithoutDestRange",
+        GpuSubmitRefusal::SmodelSkinnedDestMissing { .. } => "SmodelSkinnedDestMissing",
         GpuSubmitRefusal::ConstantArenaMissing => "ConstantArenaMissing",
         GpuSubmitRefusal::WorldPretessSpanBeyondLimit { .. } => "WorldPretessSpanBeyondLimit",
         GpuSubmitRefusal::WorldPretessEpochMismatch { .. } => "WorldPretessEpochMismatch",
@@ -2479,6 +2494,7 @@ struct ExactPrepare<'a> {
     arena: Option<&'a mut ArenaPack>,
     run_pack: RunPackCache,
     cost: PrepareCost,
+    skinned_tess: Option<&'a mut smodel_skinned::SmodelSkinnedTess>,
 }
 
 #[derive(Clone, Copy)]
@@ -2627,6 +2643,7 @@ fn packed_draw_index(packed: &render_frame::PackedFrontendLists, emit: PackedEmi
         PackedListKind::Smodel => packed.smodel_draw_indices.get(i).copied(),
         PackedListKind::Cached => packed.smodel_cached_draw_indices.get(i).copied(),
         PackedListKind::Pretess => packed.smodel_pretess_draw_indices.get(i).copied(),
+        PackedListKind::SmodelSkinned => packed.smodel_skinned_draw_indices.get(i).copied(),
     }
 }
 
@@ -2758,7 +2775,9 @@ fn colour_entry_index_span(
         PackedListKind::Smodel => &packed.smodel,
         PackedListKind::Cached => &packed.smodel_cached,
         PackedListKind::Pretess => &packed.smodel_pretess,
-        PackedListKind::World | PackedListKind::XModel => return None,
+        PackedListKind::SmodelSkinned | PackedListKind::World | PackedListKind::XModel => {
+            return None;
+        }
     };
     entries
         .get(index)
@@ -3179,6 +3198,8 @@ fn submit_exact_draws<'a>(
     extracted_view: &ExtractedView,
     geometry: &ExactColourGeometry,
     smodel_cache_gpu: &SmodelCacheGpu,
+    smodel_skinned_vertex: Option<&Buffer>,
+    smodel_skinned_index: Option<&Buffer>,
     pretess: &CameraWorldPretess,
     indirect: &indirect::ExactIndirectDraws,
     registry: &ExactPipelineRegistry,
@@ -3240,6 +3261,8 @@ fn submit_exact_draws<'a>(
                 extracted_view,
                 geometry,
                 smodel_cache_gpu,
+                smodel_skinned_vertex,
+                smodel_skinned_index,
                 pretess,
                 indirect,
                 registry,
@@ -3282,6 +3305,8 @@ fn submit_exact_draw_run<'a>(
     extracted_view: &ExtractedView,
     geometry: &ExactColourGeometry,
     smodel_cache_gpu: &SmodelCacheGpu,
+    smodel_skinned_vertex: Option<&Buffer>,
+    smodel_skinned_index: Option<&Buffer>,
     pretess: &CameraWorldPretess,
     indirect: &indirect::ExactIndirectDraws,
     registry: &ExactPipelineRegistry,
@@ -3367,6 +3392,7 @@ fn submit_exact_draw_run<'a>(
                 smodel_cache_gpu.vertex_buffer(),
                 smodel_cache_gpu.dynamic_index_buffer(),
             ),
+            ExactTessBind::SmodelSkinned => (smodel_skinned_vertex, smodel_skinned_index),
             ExactTessBind::XModel => (
                 geometry.xmodel.vertex.buffer(),
                 geometry.xmodel.index.buffer(),
@@ -3553,6 +3579,10 @@ fn sun_flush_owner<'a>(
 
 fn sun_flush_world_from_local(kind: &RetainedDrawKind) -> Mat4 {
     match *kind {
+        RetainedDrawKind::Smodel {
+            stream: Some(lighting_iw4::SmodelSurfPath::Skinned),
+            ..
+        } => Mat4::IDENTITY,
         RetainedDrawKind::World {
             world_from_local, ..
         }
@@ -4146,9 +4176,11 @@ impl ExactPrepare<'_> {
             )
             .map_err(|cause| format!("{cause:?}"))?;
             for draw in &mut prepared {
-                draw.start = flush.draw_start;
-                draw.count = flush.draw_count;
-                draw.ring_epoch = flush.ring_epoch;
+                if draw.tess != ExactTessBind::SmodelSkinned {
+                    draw.start = flush.draw_start;
+                    draw.count = flush.draw_count;
+                    draw.ring_epoch = flush.ring_epoch;
+                }
             }
             Ok(ShadowmapSunFlushGpu {
                 draws: prepared,
@@ -4158,6 +4190,50 @@ impl ExactPrepare<'_> {
         })();
         result.map_err(|cause| format!("{}:{cause}", flush.kind.family()))
     }
+}
+
+fn prepare_smodel_skinned_shadow_gpu(
+    prepare: &mut ExactPrepare<'_>,
+    executor: &mut MaterialRunExecutor,
+    view: Option<MaterialExecView<'_>>,
+    packed: &PackedFrontendLists,
+    flushes: &[SmodelRigidFlush],
+    product: &FrameProduct,
+    draw_offset: usize,
+    target: ExactPrepareTarget,
+    miss: &mut u32,
+    miss_rows: &mut BTreeMap<String, u32>,
+) -> Vec<ShadowmapSunFlushGpu> {
+    let mut out = Vec::new();
+    for flush in flushes {
+        let owner_start = flush.entry_start as usize;
+        let owner_end = owner_start.saturating_add(flush.entry_count as usize);
+        let owners = packed
+            .smodel_skinned_draw_indices
+            .get(owner_start..owner_end)
+            .unwrap_or(&[]);
+        match prepare.prepare_shadow_flush_draws(
+            executor,
+            view,
+            SunFlush {
+                kind: SunFlushKind::Smodel,
+                draw_start: 0,
+                draw_count: 1,
+                ring_epoch: 0,
+            },
+            owners,
+            draw_offset,
+            product,
+            target,
+        ) {
+            Ok(gpu) => out.push(gpu),
+            Err(cause) => {
+                *miss = miss.saturating_add(1);
+                *miss_rows.entry(cause).or_default() += 1;
+            }
+        }
+    }
+    out
 }
 
 fn record_shadowmap_draws<'a>(
@@ -4171,6 +4247,8 @@ fn record_shadowmap_draws<'a>(
     xmodel_index_epochs: &[Buffer],
     smodel_vertex: Option<&Buffer>,
     xmodel_vertex: Option<&Buffer>,
+    smodel_skinned_vertex: Option<&Buffer>,
+    smodel_skinned_index: Option<&Buffer>,
     constants_bind: Option<&BindGroup>,
     textures_bind: &BindGroup,
     draws: impl IntoIterator<Item = &'a PreparedExactDraw>,
@@ -4259,6 +4337,7 @@ fn record_shadowmap_draws<'a>(
                 geometry.smodel_cached_vertex.as_ref(),
                 geometry.smodel_cached_index.as_ref(),
             ),
+            ExactTessBind::SmodelSkinned => (smodel_skinned_vertex, smodel_skinned_index),
             _ => {
                 *miss = miss.saturating_add(1);
                 *miss_rows.entry("UnsupportedTessKind".into()).or_default() += 1;
@@ -4400,6 +4479,7 @@ struct PreparedSunPartition {
     pi: usize,
     envelope: super::backend::SunShadowPartitionPass,
     xmodel_draws: Vec<PreparedExactDraw>,
+    skinned_draws: Vec<PreparedExactDraw>,
     xmodel_index_epochs: Vec<Buffer>,
     smodel_index_epochs: Vec<Buffer>,
 }
@@ -4462,6 +4542,7 @@ fn prepare_shadowmap_spot(
     shadowmap: &mut ShadowmapSpotGpu,
     sampler_table: &RetailSamplerTable,
     shadow_exec: &mut ShadowExecScratch,
+    skinned_tess: &mut smodel_skinned::SmodelSkinnedTess,
 ) -> PreparedSpotWork {
     let ShadowExecScratch {
         executor: shadow_exec_executor,
@@ -4505,6 +4586,7 @@ fn prepare_shadowmap_spot(
         arena: None,
         run_pack: RunPackCache::default(),
         cost: PrepareCost::default(),
+        skinned_tess: Some(skinned_tess),
     };
     let target = ExactPrepareTarget {
         color: SHADOWMAP_SPOT_COLOR_FORMAT,
@@ -4716,6 +4798,20 @@ fn prepare_shadowmap_spot(
             }
         }
 
+        let skinned_gpu = prepare_smodel_skinned_shadow_gpu(
+            &mut prepare,
+            shadow_exec_executor,
+            shadow_exec_view,
+            &slot.packed,
+            &work.smodel_skinned_flushes,
+            spot,
+            0,
+            target,
+            &mut miss,
+            &mut miss_rows,
+        );
+        flushes.extend(skinned_gpu);
+
         let start = all_prepared.len();
         for flush in &flushes {
             for (draw, code) in flush.draws.iter().zip(&flush.pass_code) {
@@ -4784,6 +4880,8 @@ fn record_shadowmap_spot(
     texture_table: &mut ExactTextureTable,
     shadow_arena: &ShadowmapSpotArena,
     context: &mut RenderContext,
+    smodel_skinned_vertex: Option<&Buffer>,
+    smodel_skinned_index: Option<&Buffer>,
 ) -> SpotShadowSubmit {
     if work.all_prepared.is_empty() {
         return SpotShadowSubmit {
@@ -4820,6 +4918,8 @@ fn record_shadowmap_spot(
             &slot.xmodel_index_epochs,
             geometry.smodel_vertex.as_ref(),
             geometry.xmodel.vertex.buffer(),
+            smodel_skinned_vertex,
+            smodel_skinned_index,
             shadow_arena.gpu.bind_group.as_ref(),
             &table_binds.scene,
             &draws[..live],
@@ -4861,6 +4961,7 @@ fn prepare_shadowmap_sun(
     static_draws: &mut ResidentShadowStaticDraws,
     sampler_table: &RetailSamplerTable,
     shadow_exec: &mut ShadowExecScratch,
+    skinned_tess: &mut smodel_skinned::SmodelSkinnedTess,
 ) -> PreparedSunWork {
     let sun = products.0.product(FrameProductKind::SunShadow);
     if sun.ordered_draws.is_empty() {
@@ -4922,6 +5023,7 @@ fn prepare_shadowmap_sun(
         arena: None,
         run_pack: RunPackCache::default(),
         cost: PrepareCost::default(),
+        skinned_tess: Some(skinned_tess),
     };
     let mut miss = 0u32;
     let mut miss_rows = BTreeMap::<String, u32>::new();
@@ -5256,6 +5358,24 @@ fn prepare_shadowmap_sun(
                 }
             }
         }
+        let skinned_gpu = prepare_smodel_skinned_shadow_gpu(
+            &mut prepare,
+            shadow_exec_executor,
+            shadow_exec_view,
+            packed,
+            &work.smodel_skinned_flushes,
+            sun,
+            if pi == 0 { 0 } else { near_n },
+            ExactPrepareTarget {
+                color: SHADOWMAP_SUN_COLOR_FORMAT,
+                samples: 1,
+                depth: SHADOWMAP_SUN_DEPTH_FORMAT,
+                forward_z: true,
+                use_world_pretess: false,
+            },
+            &mut miss,
+            &mut miss_rows,
+        );
         ms_prepare += prepare_started.elapsed().as_secs_f32() * 1000.0;
         let patch_started = Instant::now();
         let ResidentShadowStaticDraws {
@@ -5293,7 +5413,17 @@ fn prepare_shadowmap_sun(
             *miss_rows.entry(sun_overlay_refusal(pi).into()).or_default() += dynamic_refused;
         }
         coalesce_shadow_draws(&mut xmodel_draws);
-        if plan.world_draws.is_empty() && plan.smodel_draws.is_empty() && xmodel_draws.is_empty() {
+        let mut skinned_draws = Vec::with_capacity(skinned_gpu.len());
+        let mut skinned_seen = HashMap::new();
+        for flush in &skinned_gpu {
+            plan.push_flush(flush, &mut skinned_seen, &mut skinned_draws);
+        }
+        coalesce_shadow_draws(&mut skinned_draws);
+        if plan.world_draws.is_empty()
+            && plan.smodel_draws.is_empty()
+            && xmodel_draws.is_empty()
+            && skinned_draws.is_empty()
+        {
             continue;
         }
 
@@ -5315,6 +5445,7 @@ fn prepare_shadowmap_sun(
             plan.world_draws
                 .iter()
                 .chain(xmodel_draws.iter())
+                .chain(skinned_draws.iter())
                 .chain(plan.smodel_draws.iter()),
             &mut shadow_arena.gpu[pi],
             pipeline_res,
@@ -5339,6 +5470,7 @@ fn prepare_shadowmap_sun(
             pi,
             envelope,
             xmodel_draws,
+            skinned_draws,
             xmodel_index_epochs,
             smodel_index_epochs,
         });
@@ -5397,6 +5529,8 @@ fn record_shadowmap_sun(
     shadow_arena: &ShadowmapSunArena,
     static_draws: &ResidentShadowStaticDraws,
     context: &mut RenderContext,
+    smodel_skinned_vertex: Option<&Buffer>,
+    smodel_skinned_index: Option<&Buffer>,
 ) -> SunShadowSubmit {
     if let Some(submit) = work.early.take() {
         return submit;
@@ -5439,11 +5573,14 @@ fn record_shadowmap_sun(
                 part.xmodel_index_epochs.as_slice(),
                 geometry.smodel_vertex.as_ref(),
                 geometry.xmodel.vertex.buffer(),
+                smodel_skinned_vertex,
+                smodel_skinned_index,
                 shadow_arena.gpu[part.pi].bind_group.as_ref(),
                 &table_binds.sun_caster,
                 plan.world_draws
                     .iter()
                     .chain(part.xmodel_draws.iter())
+                    .chain(part.skinned_draws.iter())
                     .chain(plan.smodel_draws.iter()),
                 &color_view,
                 &depth_view,
@@ -5497,6 +5634,7 @@ impl ExactPrepare<'_> {
         let after_scene_resolve = matches!(self.textures, PrepareTextureTables::Scene { .. })
             && (item.camera_region == Some(asset_iw4::CAMERA_REGION_EMISSIVE)
                 || matches!(item.kind, RetainedDrawKind::CodeMesh { .. })
+                || matches!(item.kind, RetainedDrawKind::Glass { .. })
                 || execution_binds_code_texture(execution, CODE_TEXTURE_RESOLVED_POST_SUN)
                 || execution_binds_code_texture(execution, CODE_TEXTURE_FLOATZ));
         let kind = item.kind;
@@ -5531,6 +5669,7 @@ impl ExactPrepare<'_> {
                 stream,
                 cache_index,
                 pretess,
+                world_from_local,
                 ..
             } => match stream {
                 None => return Err(GpuSubmitRefusal::SmodelXSurfacePathUnread { placement }),
@@ -5555,9 +5694,7 @@ impl ExactPrepare<'_> {
                     smodel_pretess_submit_refusal(self.extracted, placement, cache_index, pretess)?
                 }
 
-                Some(
-                    lighting_iw4::SmodelSurfPath::Rigid | lighting_iw4::SmodelSurfPath::Skinned,
-                ) => {
+                Some(lighting_iw4::SmodelSurfPath::Rigid) => {
                     if let Some(cause) = self.extracted.world.static_geometry.smodel_vertex_refusal
                     {
                         return Err(GpuSubmitRefusal::PackedVertex(cause));
@@ -5580,6 +5717,23 @@ impl ExactPrepare<'_> {
                     }
                     (
                         ExactTessBind::Smodel,
+                        start,
+                        count,
+                        asset_iw4::vertex_decl::PACKED_VERTEX_TYPE,
+                    )
+                }
+                Some(lighting_iw4::SmodelSurfPath::Skinned) => {
+                    let tess = self
+                        .skinned_tess
+                        .as_mut()
+                        .ok_or(GpuSubmitRefusal::SmodelSkinnedDestMissing { placement })?;
+                    let (start, count) =
+                        tess.append_draw(self.extracted, placement, surface, world_from_local)?;
+                    if count == 0 {
+                        return Err(GpuSubmitRefusal::EmptySmodelIndexRange { surface });
+                    }
+                    (
+                        ExactTessBind::SmodelSkinned,
                         start,
                         count,
                         asset_iw4::vertex_decl::PACKED_VERTEX_TYPE,

@@ -326,19 +326,32 @@ pub fn drive_signon(
     link: Option<bevy::prelude::Res<UdpClientLink>>,
     bridge: Option<bevy::prelude::Res<MasterBridge>>,
     mut incarnation: bevy::prelude::Local<Option<u64>>,
+    mut reported_terminal: bevy::prelude::Local<Option<u64>>,
 ) {
     let current = bridge.as_ref().map(|bridge| bridge.incarnation());
     if *incarnation != current {
         *incarnation = current;
+        *reported_terminal = None;
 
         *signon = SignonState::default();
     }
     if signon.phase.is_failed() {
         return;
     }
+    // A bridge fails its own session once. `MasterBridge::fail` cancels the
+    // worker but leaves the terminal state on the resource, which outlives the
+    // teardown that resets `SignonState` — reading it again would fail the next
+    // session's fresh signon with the previous one's message.
+    let already_reported = *reported_terminal == current && current.is_some();
     if let Some(bridge) = bridge.as_ref() {
         match bridge.state() {
+            MasterBridgeState::Failed { .. } | MasterBridgeState::Closed { .. }
+                if already_reported =>
+            {
+                return;
+            }
             MasterBridgeState::Failed { error, identity } => {
+                *reported_terminal = current;
                 let match_key = identity.match_key();
                 admission.core.apply_fail(SessionFail {
                     stage: if error.operation == "admission" {
@@ -358,6 +371,7 @@ pub fn drive_signon(
                 return;
             }
             MasterBridgeState::Closed { reason, .. } => {
+                *reported_terminal = current;
                 admission.core.apply_close();
                 signon.set_phase(SignonPhase::Failed(SignonFailReason::SessionClosed(reason)));
                 signon.admitted = admission.core.class_select_allowed();

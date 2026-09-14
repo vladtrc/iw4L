@@ -7,6 +7,7 @@ pub mod callbacksetup;
 pub mod class;
 pub mod damage_feedback;
 pub mod dd;
+pub mod destructables;
 pub mod destructible;
 pub mod dom;
 pub mod dom_flag_bootstrap;
@@ -16,8 +17,10 @@ pub mod dom_status;
 pub mod end_game;
 pub mod exploders;
 pub mod ffa;
+pub mod flammable_crate;
 pub mod gamelogic;
 pub mod gameobjects;
+pub mod gaps;
 pub mod give_flag_capture_xp;
 pub mod globallogic;
 pub mod health_regen;
@@ -35,6 +38,12 @@ pub mod perks;
 pub mod phase;
 pub mod playerlogic;
 pub mod prematch;
+pub mod radiation_conveyer;
+pub mod radiation_diggers;
+pub mod radiation_door_clear;
+pub mod radiation_doors;
+pub mod radiation_lights;
+pub mod radiation_moving_diggers;
 pub mod radius_damage;
 mod score;
 pub mod score_popup;
@@ -87,6 +96,12 @@ pub use damage_feedback::{
     DAMAGE_FEEDBACK_FADE_MS, DAMAGE_FEEDBACK_HEIGHT, DAMAGE_FEEDBACK_SHADER, DAMAGE_FEEDBACK_WIDTH,
     DAMAGE_FEEDBACK_X, DAMAGE_FEEDBACK_Y, DamageFeedbackPulse, HIT_ALERT_ALIAS, SCAVENGER_FADE_MS,
     TypeHit, update_damage_feedback,
+};
+pub use destructables::{
+    DEFAULT_ACCUMULATE, DEFAULT_THRESHOLD, SPAWN_DM, SPAWN_TDM,
+    TARGETNAME as DESTRUCTABLE_TARGETNAME, accumulate_of, areas_from_script, block_ents_in_area,
+    damage_applies, init_keeps_ents, is_blockable_spawn_classname, is_destructable_targetname,
+    should_destruct, spawn_blocked_off, threshold_of,
 };
 pub use destructible::{
     DestructibleDeathPresentation, TOY_AIRCONDITIONER_DEATH_FX, TOY_CEILING_FAN_DEATH_FX,
@@ -143,6 +158,19 @@ pub use ffa::{
     FfaOutcomeTitle, GAMETYPE_DIALOG_LINE, MatchEndCause, ffa_highest_scoring_index,
     ffa_outcome_title, ffa_player_is_better, ffa_update_placement, match_end_cause,
 };
+pub use flammable_crate::{
+    BURN as FLAMMABLE_CRATE_BURN, BURN_DRAIN as FLAMMABLE_CRATE_BURN_DRAIN,
+    BURN_DRAIN_INTERVAL_MS as FLAMMABLE_CRATE_BURN_DRAIN_INTERVAL_MS,
+    DESTROYED_STATE as FLAMMABLE_CRATE_DESTROYED_STATE,
+    EXPLODE_DAMAGE as FLAMMABLE_CRATE_EXPLODE_DAMAGE,
+    EXPLODE_ORIGIN_Z as FLAMMABLE_CRATE_EXPLODE_ORIGIN_Z,
+    EXPLODE_RANGE as FLAMMABLE_CRATE_EXPLODE_RANGE, HEALTH as FLAMMABLE_CRATE_HEALTH,
+    HUSK as FLAMMABLE_CRATE_HUSK, TARGETNAME as FLAMMABLE_CRATE_TARGETNAME,
+    damage_applies as flammable_crate_damage_applies, health_after as flammable_crate_health_after,
+    is_flammable_crate, mapent_flag as crate_mapent_flag,
+    should_explode as flammable_crate_should_explode,
+    should_ignite as flammable_crate_should_ignite,
+};
 pub use gamelogic::{
     FORFEIT_DELAY, FORFEIT_FFA_WAIT, FORFEIT_LOWER_Y, FORFEIT_WARNING, FRIENDICONS_INIT,
     ForfeitWinner, GAME_STATE_PLAYING, GameEventForfeit, OBJECTIVE_POINTS_MOD, QUICKMESSAGES_INIT,
@@ -153,6 +181,7 @@ pub use gamelogic::{
 pub use gameobjects::{
     AIRDROP_PALLET, allowed_after_main, gameobject_survives, gameobject_survives_in,
 };
+pub use gaps::{ScriptGap, ScriptGapCause};
 pub use give_flag_capture_xp::{
     CALLOUT_SECURED_POSITION, CapturePace, RANK_INIT_CAPTURE_POINTS, SCORE_CAPTURE_POINTS,
     SCORE_INFO_ASSIST, SCORE_INFO_KILL, SPLASH_CAPTURE_KEY, TouchCredit, cap_xp_scale,
@@ -238,6 +267,32 @@ pub use prematch::{
     OUTCOME_TITLE_FONT_SCALE, OUTCOME_TITLE_Y, PLAYER_WAIT_MS, PrematchStep, countdown_value,
     loc_key_from_label, match_start_remaining_ms, match_start_value_font_scale,
     player_wait_remaining_ms,
+};
+pub use radiation_conveyer::{
+    force_vector as radiation_conveyer_force_vector, is_conveyer_trigger,
+    should_push as radiation_conveyer_should_push,
+};
+pub use radiation_diggers::{is_digger_blade, is_digger_body, pose_at as radiation_digger_pose_at};
+pub use radiation_door_clear::{
+    DROP_ORIGIN as RADIATION_DROP_ORIGIN, DROP_RADIUS as RADIATION_DROP_RADIUS,
+    destroy_due as radiation_destroy_due, drop_due as radiation_drop_due,
+    first_drop_pulse as radiation_first_drop_pulse, is_weapon_equipment,
+    touching_door as radiation_touching_door,
+};
+pub use radiation_doors::{
+    ALARM_TIMES as RADIATION_ALARM_TIMES, DOOR_TIME_MS as RADIATION_DOOR_TIME_MS,
+    KILL_EDGE_DELAY_MS as RADIATION_KILL_EDGE_DELAY_MS,
+    STARTUP_DELAY_MS as RADIATION_STARTUP_DELAY_MS, UNAVAILABLE_MS as RADIATION_UNAVAILABLE_MS,
+    alarm_due as radiation_alarm_due, door_accel_s as radiation_door_accel_s,
+    kill_edge_active as radiation_kill_edge_active, leaf_roll_deg as radiation_leaf_roll_deg,
+    startup_ready as radiation_startup_ready, unavailable as radiation_unavailable,
+};
+pub use radiation_lights::{
+    SwitchLightPhase, TunnelLightPhase, is_switch_struct, is_tunnel_light, switch_light_phase,
+    switch_panel_exploder, tunnel_light_phase, tunnel_plays_fx,
+};
+pub use radiation_moving_diggers::{
+    is_moving_digger, origin_at as radiation_moving_digger_origin_at,
 };
 pub use radius_damage::{
     G_CAN_DAMAGE_CONTENTS_MASK, G_CAN_DAMAGE_HALF_HEIGHT_SCALE, G_CAN_DAMAGE_HALF_WIDTH,

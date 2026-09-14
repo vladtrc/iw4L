@@ -5,7 +5,7 @@ use playerstate_iw4::{AnimPair, PlayerState};
 use crate::anim_script_gap::PlayerAnimScriptGap;
 use crate::bullet_collision::{
     CollisionHistory, EntityCollisionCapabilities, EntityCollisionHistory,
-    LinkedBrushCollisionBrush,
+    EntityCollisionTraceGeom, LinkedBrushCollisionBrush,
 };
 use crate::equipment::{EquipmentRuntimeFacts, ProjectileImpact, ProjectileState};
 use crate::identities::{
@@ -17,6 +17,7 @@ use crate::match_state::{
     RngDebugMeta, SimEvent, SnapshotMeta,
 };
 use crate::player_anim_script::PlayerAnimScript;
+use crate::script_gaps::ScriptGaps;
 use crate::snapshot::Snapshot;
 use crate::spawn::MatchBootstrap;
 use crate::world_objects::WorldObjectState;
@@ -466,6 +467,8 @@ pub struct SimState {
 
     world_objects: WorldObjectState,
 
+    script_gaps: ScriptGaps,
+
     pending_match_clock: Option<gamemode_iw4::ClockTickEmit>,
 
     sound_alias_cs: crate::SoundAliasCs,
@@ -508,6 +511,10 @@ pub struct SimState {
     last_use_presses: Vec<crate::gentity::UsePress>,
 
     pub map_doors: Option<crate::MapDoors>,
+    pub radiation_diggers: Vec<crate::RadiationDigger>,
+    pub radiation_moving_diggers: Vec<crate::RadiationMovingDigger>,
+    pub radiation_conveyer: Option<crate::RadiationConveyer>,
+    pub radiation_lights: Option<crate::RadiationLights>,
     pub objectives: crate::ObjectiveMatch,
 
     use_objects: Vec<crate::use_object::UseObject>,
@@ -600,6 +607,7 @@ impl Default for SimState {
             pellet_fx: Vec::new(),
             anim_script_gap: PlayerAnimScriptGap::default(),
             world_objects: WorldObjectState::default(),
+            script_gaps: ScriptGaps::default(),
             pending_match_clock: None,
             sound_alias_cs: crate::SoundAliasCs::default(),
             effect_name_cs: crate::EffectNameCs::default(),
@@ -622,6 +630,10 @@ impl Default for SimState {
             last_think_dispatch: Vec::new(),
             last_use_presses: Vec::new(),
             map_doors: None,
+            radiation_diggers: Vec::new(),
+            radiation_moving_diggers: Vec::new(),
+            radiation_conveyer: None,
+            radiation_lights: None,
             objectives: crate::ObjectiveMatch::default(),
             use_objects: Vec::new(),
             use_hold: None,
@@ -724,6 +736,7 @@ impl SimState {
         self.pending_player_cards.clear();
         self.damage_feedback_cues.clear();
         self.damage_feedback_seq = 0;
+        self.script_gaps = ScriptGaps::default();
         self.recompute_content_digest();
         Ok(())
     }
@@ -905,6 +918,15 @@ impl SimState {
         self.world_objects_mut().take_glass_destroyed()
     }
 
+    pub fn script_destroy_glass(
+        &mut self,
+        id: crate::GlassPieceId,
+        at_time_ms: i32,
+    ) -> crate::GlassPieceState {
+        self.world_objects_mut()
+            .script_destroy_glass(id, at_time_ms)
+    }
+
     pub fn num_kills(&self) -> u32 {
         self.num_kills
     }
@@ -1034,6 +1056,14 @@ impl SimState {
 
     pub(crate) fn bootstrap_ref(&self) -> &MatchBootstrap {
         &self.bootstrap
+    }
+
+    pub fn authored_spawn_origins(&self) -> Vec<[f32; 3]> {
+        self.bootstrap
+            .spawns
+            .iter()
+            .map(|spawn| spawn.origin)
+            .collect()
     }
 
     pub fn cheats_enabled(&self) -> bool {
@@ -1904,6 +1934,27 @@ impl SimState {
         self.trace_clip(start, end, mins, maxs, mask)
     }
 
+    pub fn trace_static_world(
+        &self,
+        start: [f32; 3],
+        end: [f32; 3],
+        mins: [f32; 3],
+        maxs: [f32; 3],
+        mask: u32,
+    ) -> trace_iw4::Trace {
+        clip_trace(
+            &self.content.data.clip_brushes,
+            &self.content.data.clip_bsp,
+            &self.content.data.clip_mesh,
+            start,
+            end,
+            mins,
+            maxs,
+            mask,
+            &|piece| self.world_objects.glass_is_solid(piece as u32),
+        )
+    }
+
     pub fn has_world_clip(&self) -> bool {
         !self.content.data.clip_brushes.is_empty()
             || self.content.data.clip_mesh.tables.tri_count() >= 1
@@ -2207,6 +2258,14 @@ impl SimState {
 
     pub fn world_objects_mut(&mut self) -> &mut WorldObjectState {
         &mut self.world_objects
+    }
+
+    pub fn script_gaps(&self) -> &ScriptGaps {
+        &self.script_gaps
+    }
+
+    pub fn script_gaps_mut(&mut self) -> &mut ScriptGaps {
+        &mut self.script_gaps
     }
 
     pub(crate) fn alive_collision_poses(
@@ -2569,6 +2628,7 @@ impl SimState {
         query: crate::bullet_collision::BulletTraceQuery,
         poses: Option<&[crate::bullet_collision::PlayerCollisionPose]>,
     ) -> crate::bullet_collision::TraceOutcome {
+        let geoms = self.current_entity_trace_geoms();
         let default = [];
         let players = poses.unwrap_or_else(|| {
             self.collision_history
@@ -2582,9 +2642,27 @@ impl SimState {
             &self.content.data.clip_cmodels,
             &self.content.data.clip_mesh,
             players,
-            &[],
+            &geoms,
             &query,
+            &|piece| self.world_objects.glass_is_solid(piece as u32),
         )
+    }
+
+    /// Readonly sensor path: same world clip and current script-model geoms as
+    /// `bullet_trace`. Sight still uses `MASK_SIGHT` (no glass); shots use `MASK_SHOT`.
+    pub fn sensor_trace(
+        &self,
+        query: crate::bullet_collision::BulletTraceQuery,
+    ) -> crate::bullet_collision::TraceOutcome {
+        self.bullet_trace(query, None)
+    }
+
+    fn current_entity_trace_geoms(&self) -> Vec<EntityCollisionTraceGeom> {
+        self.entity_collision_capabilities
+            .iter()
+            .filter(|capabilities| self.objectives.collision_active(capabilities.owner))
+            .map(EntityCollisionCapabilities::trace_geom)
+            .collect()
     }
 
     pub fn clip_brush_count(&self) -> usize {
@@ -2713,7 +2791,7 @@ impl SimState {
             })
             .collect();
         let mut entities: Vec<_> = script_movers.iter().map(|mover| mover.state).collect();
-        for projectile in projectiles.iter().filter(|p| p.age_ticks < p.fuse_ticks) {
+        for projectile in projectiles.iter() {
             if projectile.entnum != playerstate_iw4::ENTITYNUM_NONE {
                 entities.push(crate::gentity::init_missile_state(
                     projectile.entnum,
@@ -2758,7 +2836,12 @@ impl SimState {
                 effect_names: self.effect_name_cs.occupied(),
                 hud_materials: self.hud_material_cs.occupied(),
                 rng: self.rng_debug_meta(),
-                world_objects: self.world_objects.to_snapshot(),
+                world_objects: {
+                    let mut world_objects = self.world_objects.to_snapshot();
+                    world_objects.as_of_ms =
+                        i32::try_from(self.match_elapsed_ms).unwrap_or(i32::MAX);
+                    world_objects
+                },
                 area_entities: self
                     .area_entity_world
                     .as_ref()
@@ -3822,5 +3905,21 @@ mod content_ownership_tests {
         assert_eq!(kept.planes, slab(0.0).planes);
         assert_eq!(kept.plane_surface_flags, slab(0.0).plane_surface_flags);
         assert_eq!(kept.contents, 1);
+    }
+
+    #[test]
+    fn static_world_trace_matches_clip_when_nothing_is_linked() {
+        let seeded = world_with_floor_at(0.0);
+        let mut authority = SimState::default();
+        authority.install_content(Arc::clone(&seeded));
+        let world = drop_to_floor(&authority);
+        let stat = authority.trace_static_world(
+            [0.0, 0.0, 64.0],
+            [0.0, 0.0, -64.0],
+            [0.0; 3],
+            [0.0; 3],
+            1,
+        );
+        assert_eq!(world, stat);
     }
 }

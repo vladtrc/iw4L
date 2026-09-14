@@ -11,7 +11,15 @@ pub const GLASS_DAMAGE_INVALID: u16 = 0xffff;
 
 pub const GLASS_DAMAGE_ADD_CAP: u16 = 0xfffe;
 
-pub const GLASS_SHATTER_SEED_LIFETIME_MS: i32 = 1000;
+pub const GLASS_FRACTURE_PROFILE_VERSION: u32 = 1;
+
+pub const MISSILE_GLASS_SHATTER_VEL: f32 = 600.0;
+
+pub const GLASS_BLAST_RADIUS_CAP: f32 = 256.0;
+
+pub const GLASS_BLAST_DAMAGE_SCALE: f32 = 4.0;
+
+pub const GLASS_PROJECTILE_PANE_HOPS: u32 = 8;
 
 pub const GLASS_IMPACT_DIR_NONE: u8 = 0xff;
 
@@ -66,10 +74,59 @@ impl GlassPieceState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum GlassCause {
+    #[default]
+    Impact = 0,
+    Blast = 1,
+    Collapse = 2,
+    Script = 3,
+}
+
+impl GlassCause {
+    pub fn from_u8(raw: u8) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Impact),
+            1 => Some(Self::Blast),
+            2 => Some(Self::Collapse),
+            3 => Some(Self::Script),
+            _ => None,
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GlassShatterSeed {
     pub impact_dir: u8,
     pub impact_pos: [u8; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GlassBreakRecord {
+    pub break_tick: i32,
+    pub deterministic_seed: u64,
+    pub shatter_seed: Option<GlassShatterSeed>,
+    pub cause: GlassCause,
+}
+
+impl GlassBreakRecord {
+    pub fn mix_seed(pane: u32, at_time_ms: i32, shatter_seed: Option<GlassShatterSeed>) -> u64 {
+        let mut seed = (u64::from(pane) << 32) ^ (at_time_ms as u32 as u64);
+        if let Some(s) = shatter_seed {
+            seed ^= u64::from(s.impact_dir) << 16;
+            seed ^= u64::from(s.impact_pos[0]) << 8;
+            seed ^= u64::from(s.impact_pos[1]);
+        }
+        if seed == 0 {
+            seed = 0x9E37_79B9_7F4A_7C15;
+        }
+        seed
+    }
 }
 
 impl GlassShatterSeed {
@@ -212,8 +269,35 @@ pub fn glass_apply_damage(
     Some(GlassStateChange { previous, current })
 }
 
-pub fn glass_shatter_seed_is_fresh(last_state_change_time: i32, at_time_ms: i32) -> bool {
-    last_state_change_time.saturating_add(GLASS_SHATTER_SEED_LIFETIME_MS) >= at_time_ms
+pub fn glass_blast_cone_keeps(cone_dir: [f32; 3], cone_cos: f32, offset: [f32; 3]) -> bool {
+    let clen2 = cone_dir[0] * cone_dir[0] + cone_dir[1] * cone_dir[1] + cone_dir[2] * cone_dir[2];
+    if !(clen2 > 0.0) {
+        return true;
+    }
+    let olen2 = offset[0] * offset[0] + offset[1] * offset[1] + offset[2] * offset[2];
+    if !(olen2 > 0.0) {
+        return true;
+    }
+    let inv_c = 1.0 / libm::sqrtf(clen2);
+    let inv_o = 1.0 / libm::sqrtf(olen2);
+    let dot = (cone_dir[0] * inv_c) * (offset[0] * inv_o)
+        + (cone_dir[1] * inv_c) * (offset[1] * inv_o)
+        + (cone_dir[2] * inv_c) * (offset[2] * inv_o);
+    dot >= cone_cos
+}
+
+pub fn glass_blast_integer_damage(inner: i32, outer: i32, radius: f32, distance: f32) -> u32 {
+    let r = if radius > GLASS_BLAST_RADIUS_CAP {
+        GLASS_BLAST_RADIUS_CAP
+    } else {
+        radius
+    };
+    if !(r > 0.0) || distance > r {
+        return 0;
+    }
+    let f = (1.0 - distance / r).clamp(0.0, 1.0);
+    let raw = (outer as f32 + f * (inner - outer) as f32).max(0.0) * GLASS_BLAST_DAMAGE_SCALE;
+    libm::floorf(raw + 0.5) as u32
 }
 
 pub fn glass_state_from_damage(damage: u16) -> GlassPieceState {
@@ -455,4 +539,64 @@ pub fn glass_collapse_piece(piece: &mut GGlassPiece, at_time_ms: i32) -> Option<
 
 pub fn glass_should_notify_destroyed(change: GlassStateChange) -> bool {
     (change.previous as u8) < 2 && (change.current as u8) > 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blast_integer_damage_matches_contract() {
+        assert_eq!(glass_blast_integer_damage(100, 0, 256.0, 0.0), 400);
+        assert_eq!(glass_blast_integer_damage(100, 0, 256.0, 256.0), 0);
+        assert_eq!(glass_blast_integer_damage(50, 10, 100.0, 50.0), 120);
+        assert_eq!(glass_blast_integer_damage(25, 25, 0.0, 0.0), 0);
+        assert_eq!(glass_blast_integer_damage(80, 20, 300.0, 128.0), 200);
+    }
+
+    #[test]
+    fn break_record_seed_survives_beyond_one_second() {
+        let seed = GlassShatterSeed::new(1, [2, 3]).unwrap();
+        let mixed = GlassBreakRecord::mix_seed(7, 1000, Some(seed));
+        assert_ne!(mixed, 0);
+        let record = GlassBreakRecord {
+            break_tick: 1000,
+            deterministic_seed: mixed,
+            shatter_seed: Some(seed),
+            cause: GlassCause::Impact,
+        };
+        assert_eq!(record.deterministic_seed, mixed);
+        assert_eq!(record.shatter_seed, Some(seed));
+    }
+
+    #[test]
+    fn empty_blast_cone_keeps_every_offset() {
+        assert!(glass_blast_cone_keeps([0.0; 3], 0.5, [10.0, 0.0, 0.0]));
+        assert!(glass_blast_cone_keeps([1.0, 0.0, 0.0], 0.5, [0.0; 3]));
+        assert!(glass_blast_cone_keeps(
+            [1.0, 0.0, 0.0],
+            0.5,
+            [10.0, 0.0, 0.0]
+        ));
+        assert!(!glass_blast_cone_keeps(
+            [1.0, 0.0, 0.0],
+            0.5,
+            [-10.0, 0.0, 0.0]
+        ));
+    }
+
+    #[test]
+    fn shatter_coord_roundtrip_stays_inside_the_coded_span() {
+        for uv in [-200.0, -50.0, 0.0, 31.5, 200.0] {
+            let q = glass_encode_shatter_coord(uv);
+            let back = glass_decode_shatter_coord(q);
+            assert!(q <= 0x3f);
+            let err = (back - uv).abs();
+            if uv.abs() <= 250.0 {
+                assert!(err < 12.0, "uv={uv} q={q} back={back} err={err}");
+            }
+        }
+        assert_eq!(glass_encode_shatter_coord(10_000.0), 0x3f);
+        assert_eq!(glass_encode_shatter_coord(-10_000.0), 0);
+    }
 }

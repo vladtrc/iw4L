@@ -117,18 +117,28 @@ fn waiting_pipeline_shaders(
 
 fn stamp_gpu_submit_ready(
     demand: Option<Res<render_frontend::prepare::scene::world_gpu::GpuSubmitDemand>>,
+    fpv: Option<Res<render_frontend::assemble::drawsurf::FpvDrawPlan>>,
+    runtime: Option<Res<render_frontend::assemble::drawsurf::MaterialGeneration>>,
+    mut tracker: ResMut<render_frontend::prepare::scene::world_gpu::PipelineDemandTracker>,
     mut ready: ResMut<render_gpu::GpuSubmitReady>,
 ) {
     let Some(demand) = demand.as_ref() else {
         *ready = render_gpu::GpuSubmitReady::default();
+        *tracker = render_frontend::prepare::scene::world_gpu::PipelineDemandTracker::default();
         return;
     };
+    if let (Some(fpv), Some(runtime)) = (fpv.as_ref(), runtime.as_ref()) {
+        tracker.absorb_fpv(fpv, runtime);
+    }
+    let (pipeline_world_materials, pipeline_smodel_materials, pipeline_demand_revision) =
+        tracker.snapshot();
     *ready = render_gpu::GpuSubmitReady {
         world_generation: demand.world_generation,
         warm_pipelines: demand.warm_pipelines,
         overlay_gpu_wait: demand.overlay_gpu_wait,
-        pipeline_world_materials: demand.pipeline_world_materials.clone(),
-        pipeline_smodel_materials: demand.pipeline_smodel_materials.clone(),
+        pipeline_world_materials,
+        pipeline_smodel_materials,
+        pipeline_demand_revision,
     };
 }
 

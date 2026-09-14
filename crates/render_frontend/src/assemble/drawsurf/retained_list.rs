@@ -284,6 +284,10 @@ pub struct FxDrawLane {
     pub glass_mesh_skipped_no_ordinal: u32,
 }
 
+fn fx_item_uses_distortion_lane(mat_sort_key: u8, world_distortion_key: Option<u32>) -> bool {
+    world_distortion_key == Some(u32::from(material_sort_key_row(mat_sort_key)))
+}
+
 fn push_direct_lane_item(
     colour: &mut Vec<RetainedDrawItem>,
     emissive: &mut Vec<RetainedDrawItem>,
@@ -311,6 +315,39 @@ pub(crate) fn retained_draw_order_tie(kind: &RetainedDrawKind) -> u32 {
         | RetainedDrawKind::MarkMesh { draw, .. }
         | RetainedDrawKind::Glass { draw, .. } => *draw,
     }
+}
+
+fn glass_depth_order(
+    item: &RetainedDrawItem,
+    eye: [f32; 3],
+    glass: Option<&GfxGlassMeshPlan>,
+) -> u32 {
+    let RetainedDrawKind::Glass { draw, .. } = item.kind else {
+        return 0;
+    };
+    let Some(origin) = glass
+        .and_then(|plan| plan.draws.get(draw as usize))
+        .map(|d| d.origin)
+    else {
+        return 0;
+    };
+    let dx = origin[0] - eye[0];
+    let dy = origin[1] - eye[1];
+    let dz = origin[2] - eye[2];
+    !(dx * dx + dy * dy + dz * dz).to_bits()
+}
+
+fn sort_fx_draw_lane(lane: &mut FxDrawLane, eye: [f32; 3], glass: Option<&GfxGlassMeshPlan>) {
+    let order = |item: &RetainedDrawItem| {
+        (
+            item.host_sort_key(),
+            glass_depth_order(item, eye, glass),
+            retained_draw_order_tie(&item.kind),
+        )
+    };
+    lane.colour.sort_unstable_by_key(order);
+    lane.emissive.sort_unstable_by_key(order);
+    lane.distortion.sort_unstable_by_key(order);
 }
 
 pub(crate) fn mix_draw_membership(id: &mut u64, item: &RetainedDrawItem) {
@@ -1814,8 +1851,16 @@ pub(crate) fn rebuild_fx_draw_lane(
     )>,
     lighting: Res<crate::prepare::scene::model_lighting_cache::ResolvedModelLightingTable>,
     smodel_lighting: Option<Res<crate::prepare::scene::smodel_lighting::WorldSmodelLighting>>,
+    camera_origin: Option<Res<render_fx::FxCameraOrigin>>,
+    scene: Option<Res<WorldScene>>,
 ) {
     let (fx, particle_cloud, mark_mesh, glass_mesh) = plans;
+    let eye = camera_origin.map(|c| c.0).unwrap_or([0.0; 3]);
+    let glass_plan = glass_mesh.as_deref();
+    let distortion_key = scene
+        .as_deref()
+        .and_then(|scene| scene.cull.as_ref())
+        .and_then(|cull| cull.sort_key_distortion);
     let lane = &mut *lane;
     let layout = fx_lane_layout_hash(
         fx.as_deref(),
@@ -1838,6 +1883,7 @@ pub(crate) fn rebuild_fx_draw_lane(
             lane,
         )
     {
+        sort_fx_draw_lane(lane, eye, glass_plan);
         lane.payload_revision = payload;
         perf::Counter::FxLayoutOverlay.emit(1.0);
         return;
@@ -2050,16 +2096,17 @@ pub(crate) fn rebuild_fx_draw_lane(
                 },
                 &runtime.catalog,
             );
-            push_direct_lane_item(&mut lane.colour, &mut lane.emissive, None, item);
+            let distortion = if fx_item_uses_distortion_lane(mat.sort_key, distortion_key) {
+                Some(&mut lane.distortion)
+            } else {
+                None
+            };
+            push_direct_lane_item(&mut lane.colour, &mut lane.emissive, distortion, item);
             lane.glass_mesh_sorted = lane.glass_mesh_sorted.saturating_add(1);
         }
     }
 
-    let order =
-        |item: &RetainedDrawItem| (item.host_sort_key(), retained_draw_order_tie(&item.kind));
-    lane.colour.sort_unstable_by_key(order);
-    lane.emissive.sort_unstable_by_key(order);
-    lane.distortion.sort_unstable_by_key(order);
+    sort_fx_draw_lane(lane, eye, glass_plan);
     lane.membership_hash = layout;
     lane.membership_revision = lane.membership_revision.wrapping_add(1);
     lane.payload_revision = payload;
@@ -2236,6 +2283,15 @@ fn emit_smodel_static_lane(
         .census
         .smodel_bucket_context_refused_n
         .saturating_add(consumed.context_refused);
+    diag::info!(
+        World,
+        "smodel buckets: rigid={} skinned={} cached={} unread={} consume={}",
+        list.census.smodel_bucket_rigid_n,
+        list.census.smodel_bucket_skinned_n,
+        list.census.smodel_bucket_cached_n,
+        list.census.smodel_bucket_unread_n,
+        list.census.smodel_bucket_consume_n,
+    );
     if list.smodel_pretess_indices.as_slice() != pretess.indices.as_slice() {
         list.smodel_index_layout_revision = list.smodel_index_layout_revision.wrapping_add(1);
         list.smodel_pretess_indices = Arc::new(pretess.indices);
@@ -3138,6 +3194,21 @@ fn collect_xmodel_sun_shadow_casters(
         ));
     }
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glass_skips_distortion_without_matching_world_key() {
+        assert!(!fx_item_uses_distortion_lane(4, None));
+        assert!(!fx_item_uses_distortion_lane(4, Some(9)));
+        assert!(fx_item_uses_distortion_lane(
+            4,
+            Some(u32::from(material_sort_key_row(4)))
+        ));
+    }
 }
 
 fn rank_cutout_names(map: BTreeMap<String, u32>) -> Option<String> {

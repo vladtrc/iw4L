@@ -219,7 +219,7 @@ pub(crate) fn route_replay_commands(
                     );
                     continue;
                 }
-                if !sim_cam.enabled || !input_gate.cmds_enabled {
+                if !sim_cam.enabled || !input_gate.local_cmds_enabled {
                     echo(
                         "record: the simulation does not own the camera yet \
                          (no clip brushes, or the authored intermission view is active); \

@@ -212,6 +212,14 @@ impl SimWorld {
         self.frame().debug_place_alive_player(id, origin);
     }
 
+    pub fn debug_set_held_ammo(&mut self, id: ClientId, clip: i32, stock: i32) {
+        self.frame().debug_set_held_ammo(id, clip, stock);
+    }
+
+    pub fn debug_set_team(&mut self, id: ClientId, team: i32) {
+        self.frame().debug_set_team(id, team);
+    }
+
     pub fn debug_mark_dead(&mut self, id: ClientId) {
         self.frame().debug_mark_dead(id);
     }

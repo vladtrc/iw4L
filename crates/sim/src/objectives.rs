@@ -311,10 +311,12 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
                     explode_range_mp: dd::EXPLODE_RADIUS as u32,
                     explode_damage: (dd::EXPLODE_OUTER as u32, dd::EXPLODE_INNER as u32),
                 };
-                for attempt in crate::damage::radius_attempts_from_truck_explode(world, &explosion)
-                {
-                    crate::damage::apply_damage_attempt(world, tick, &attempt);
-                }
+                crate::damage::apply_explosion_blast(
+                    world,
+                    tick,
+                    &crate::damage::ExplosionBlast::from_destructible(&explosion),
+                );
+                crate::damage::apply_explode_glass_blast(world, tick, &explosion);
             }
             let index = world
                 .effect_name_index(dd::PLANTED_BOMB_EXPLODE_FX_PATH.expect("pinned DD effect"));

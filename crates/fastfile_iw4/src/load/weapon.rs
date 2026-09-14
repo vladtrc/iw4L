@@ -239,6 +239,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
             segmented_reload: s.u8_at(body, s.layout(0x66e, 2166))? != 0,
             cook_off_hold: s.u8_at(body, s.layout(0x662, 2154))? != 0,
             clip_only: s.u8_at(body, s.layout(0x663, 2155))? != 0,
+            timed_detonation: s.u8_at(body, s.layout(0x677, 2183))? != 0,
             proj_impact_explode: s.u8_at(body, s.layout(0x673, 2171))? != 0,
             stick_to_players: s.u8_at(body, s.layout(0x674, 2172))? != 0,
             sprint_raise_time_ms: s.i32_at(body, s.layout(0x2a8, 1008))?,
@@ -251,10 +252,12 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
             explosion_outer_damage: s.i32_at(body, s.layout(0x3f4, 1360))?,
             projectile_speed: s.i32_at(body, s.layout(0x404, 1376))?,
             projectile_speed_up: s.i32_at(body, s.layout(0x408, 1380))?,
+            projectile_speed_forward: s.i32_at(body, s.layout(0x40c, 1384))?,
             projectile_activate_dist: s.i32_at(body, s.layout(0x410, 1388))?,
             projectile_explosion_type: s.i32_at(body, s.layout(0x424, 1416))?,
-            parallel_bounce: read_bounce_array(s, body, s.layout(0x444, 1472))?,
-            perpendicular_bounce: read_bounce_array(s, body, s.layout(0x448, 1480))?,
+            parallel_bounce: read_f32_array(s, body, s.layout(0x444, 1472))?,
+            perpendicular_bounce: read_f32_array(s, body, s.layout(0x448, 1480))?,
+            location_damage_mult: read_f32_array(s, body, s.layout(0x5b4, 1904))?,
             start_ammo: s.i32_at(body, s.layout(0x208, 824))?,
             min_damage: s.i32_at(body, s.layout(0x598, 1872))?,
             min_player_damage: s.i32_at(body, s.layout(0x59c, 1876))?,
@@ -513,6 +516,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         fuse_time_ms: body_facts.fuse_time_ms,
         cook_off_hold: body_facts.cook_off_hold,
         clip_only: body_facts.clip_only,
+        timed_detonation: body_facts.timed_detonation,
         proj_impact_explode: body_facts.proj_impact_explode,
         stick_to_players: body_facts.stick_to_players,
         explosion_radius: body_facts.explosion_radius,
@@ -521,10 +525,12 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         explosion_outer_damage: body_facts.explosion_outer_damage,
         projectile_speed: body_facts.projectile_speed,
         projectile_speed_up: body_facts.projectile_speed_up,
+        projectile_speed_forward: body_facts.projectile_speed_forward,
         projectile_activate_dist: body_facts.projectile_activate_dist,
         projectile_explosion_type: body_facts.projectile_explosion_type,
         parallel_bounce: body_facts.parallel_bounce,
         perpendicular_bounce: body_facts.perpendicular_bounce,
+        location_damage_mult: body_facts.location_damage_mult,
         start_ammo: body_facts.start_ammo,
         min_damage: body_facts.min_damage,
         min_player_damage: body_facts.min_player_damage,
@@ -647,6 +653,8 @@ struct WeapDefScalars {
 
     clip_only: bool,
 
+    timed_detonation: bool,
+
     proj_impact_explode: bool,
 
     stick_to_players: bool,
@@ -656,10 +664,12 @@ struct WeapDefScalars {
     explosion_outer_damage: i32,
     projectile_speed: i32,
     projectile_speed_up: i32,
+    projectile_speed_forward: i32,
     projectile_activate_dist: i32,
     projectile_explosion_type: i32,
     parallel_bounce: Option<[f32; 31]>,
     perpendicular_bounce: Option<[f32; 31]>,
+    location_damage_mult: Option<[f32; 20]>,
     start_ammo: i32,
     min_damage: i32,
     min_player_damage: i32,
@@ -1098,13 +1108,17 @@ fn follow_snd_alias_custom(s: &mut ZoneStream<'_>, slot: Ptr) -> Result<Option<P
     }
 }
 
-fn read_bounce_array(s: &ZoneStream<'_>, body: Ptr, field: usize) -> Result<Option<[f32; 31]>> {
+fn read_f32_array<const N: usize>(
+    s: &ZoneStream<'_>,
+    body: Ptr,
+    field: usize,
+) -> Result<Option<[f32; N]>> {
     let arr = match s.ptr_at(body, field)? {
         ZonePtr::Null => return Ok(None),
         ZonePtr::Offset(p) => s.resolve_alias(p),
         _ => return Err(crate::ZoneError::UnresolvedPointer(body.at(field))),
     };
-    let mut values = [0.0; 31];
+    let mut values = [0.0; N];
     for (i, value) in values.iter_mut().enumerate() {
         *value = s.f32_at(arr, i * 4)?;
     }

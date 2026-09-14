@@ -47,8 +47,10 @@ pub use event_sound::{
 };
 pub use fire_sound::{select_cg_fire_sound_ptr, select_fire_last_sound_ptr, select_fire_sound_ptr};
 pub use fire_weapon::{
-    FireWeaponKind, WEAPCLASS_GRENADE, WEAPTYPE_BULLET, WEAPTYPE_GRENADE, WEAPTYPE_PROJECTILE,
-    fire_weapon_kind,
+    BULLET_MAX_RANGE, FireWeaponKind, HITLOC_COUNT, LOCATION_DAMAGE_IDENTITY, ROCKET_SPREAD_PLANE,
+    WEAPCLASS_GRENADE, WEAPCLASS_SPREAD, WEAPCLASS_TURRET, WEAPTYPE_BULLET, WEAPTYPE_GRENADE,
+    WEAPTYPE_PROJECTILE, bake_location_damage, fire_weapon_kind, location_damage_is_valid,
+    location_damage_scale,
 };
 pub use kick::{
     DOUBLEBARREL_PITCH_SCALE, FireRecoilImpulse, FireRecoilPsScales, GUN_KICK_OFS_EPS,

@@ -136,6 +136,25 @@ pub fn fx_glass_state_fan_count(state: &[u8; FX_GLASS_PIECE_STATE]) -> u8 {
     state[FX_GLASS_STATE_FAN_DATA_COUNT]
 }
 
+pub fn fx_glass_state_hole_count(state: &[u8; FX_GLASS_PIECE_STATE]) -> u8 {
+    state[FX_GLASS_STATE_HOLE_DATA_COUNT]
+}
+
+pub fn fx_glass_state_crack_count(state: &[u8; FX_GLASS_PIECE_STATE]) -> u8 {
+    state[FX_GLASS_STATE_CRACK_DATA_COUNT]
+}
+
+pub fn fx_glass_state_geo_span(state: &[u8; FX_GLASS_PIECE_STATE]) -> u32 {
+    u32::from(fx_glass_state_vert_count(state))
+        + u32::from(fx_glass_state_hole_count(state))
+        + u32::from(fx_glass_state_crack_count(state))
+        + u32::from(fx_glass_state_fan_count(state))
+}
+
+pub fn fx_glass_state_set_geo_start(state: &mut [u8; FX_GLASS_PIECE_STATE], start: u16) {
+    write_u16(state, FX_GLASS_STATE_GEO_DATA_START, start);
+}
+
 pub fn fx_glass_state_def_index(state: &[u8; FX_GLASS_PIECE_STATE]) -> u8 {
     state[FX_GLASS_STATE_DEF_INDEX]
 }
@@ -426,6 +445,174 @@ pub fn fx_glass_intact_fan_indices(vert_n: u8, out: &mut [u16]) -> Option<usize>
         i += 1;
     }
     Some(want)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FxGlassSlabVert {
+    pub xyz: [f32; 3],
+    pub uv: [f32; 2],
+    pub normal: [f32; 3],
+    pub tangent: [f32; 3],
+    pub binormal_sign: f32,
+}
+
+pub fn fx_glass_slab_counts(vert_n: usize, half_thickness: f32) -> (usize, usize) {
+    if vert_n < 3 {
+        return (0, 0);
+    }
+    let front_tris = vert_n - 2;
+    let front_idx = front_tris * 3;
+    let back_idx = front_idx;
+    let rim = if half_thickness.abs() > 1e-4 {
+        vert_n * 6
+    } else {
+        0
+    };
+    let verts = if half_thickness.abs() > 1e-4 {
+        vert_n * 2 + vert_n * 4
+    } else {
+        vert_n * 2
+    };
+    (verts, front_idx + back_idx + rim)
+}
+
+pub fn fx_glass_emit_slab(
+    cpu: &[FxGlassIntactVert],
+    normal: [f32; 3],
+    tangent: [f32; 3],
+    half_thickness: f32,
+    out_verts: &mut [FxGlassSlabVert],
+    out_idx: &mut [u16],
+) -> Option<(usize, usize)> {
+    let n = cpu.len();
+    if n < 3 {
+        return None;
+    }
+    let (need_v, need_i) = fx_glass_slab_counts(n, half_thickness);
+    if out_verts.len() < need_v || out_idx.len() < need_i {
+        return None;
+    }
+    let h = half_thickness;
+    let back_n = [-normal[0], -normal[1], -normal[2]];
+    let back_t = [-tangent[0], -tangent[1], -tangent[2]];
+    let mut v = 0usize;
+    for src in cpu {
+        out_verts[v] = FxGlassSlabVert {
+            xyz: [
+                src.xyz[0] + normal[0] * h,
+                src.xyz[1] + normal[1] * h,
+                src.xyz[2] + normal[2] * h,
+            ],
+            uv: src.uv,
+            normal,
+            tangent,
+            binormal_sign: -1.0,
+        };
+        v += 1;
+    }
+    let back_base = v as u16;
+    for src in cpu {
+        out_verts[v] = FxGlassSlabVert {
+            xyz: [
+                src.xyz[0] - normal[0] * h,
+                src.xyz[1] - normal[1] * h,
+                src.xyz[2] - normal[2] * h,
+            ],
+            uv: src.uv,
+            normal: back_n,
+            tangent: back_t,
+            binormal_sign: 1.0,
+        };
+        v += 1;
+    }
+    let mut i = 0usize;
+    let mut k = 1u16;
+    while k + 1 < n as u16 {
+        out_idx[i] = 0;
+        out_idx[i + 1] = k;
+        out_idx[i + 2] = k + 1;
+        i += 3;
+        k += 1;
+    }
+    k = 1u16;
+    while k + 1 < n as u16 {
+        out_idx[i] = back_base;
+        out_idx[i + 1] = back_base + k + 1;
+        out_idx[i + 2] = back_base + k;
+        i += 3;
+        k += 1;
+    }
+    if h.abs() > 1e-4 {
+        for e in 0..n {
+            let a = e;
+            let b = (e + 1) % n;
+            let ea = [
+                cpu[b].xyz[0] - cpu[a].xyz[0],
+                cpu[b].xyz[1] - cpu[a].xyz[1],
+                cpu[b].xyz[2] - cpu[a].xyz[2],
+            ];
+            let outward = fx_glass_normalize3_local(fx_cross(ea, normal)).unwrap_or(tangent);
+            let rim_t = fx_glass_normalize3_local(ea).unwrap_or(tangent);
+            let fa = v as u16;
+            out_verts[v] = FxGlassSlabVert {
+                xyz: out_verts[a].xyz,
+                uv: [0.0, 0.0],
+                normal: outward,
+                tangent: rim_t,
+                binormal_sign: -1.0,
+            };
+            v += 1;
+            out_verts[v] = FxGlassSlabVert {
+                xyz: out_verts[b].xyz,
+                uv: [1.0, 0.0],
+                normal: outward,
+                tangent: rim_t,
+                binormal_sign: -1.0,
+            };
+            v += 1;
+            out_verts[v] = FxGlassSlabVert {
+                xyz: out_verts[back_base as usize + b].xyz,
+                uv: [1.0, 1.0],
+                normal: outward,
+                tangent: rim_t,
+                binormal_sign: -1.0,
+            };
+            v += 1;
+            out_verts[v] = FxGlassSlabVert {
+                xyz: out_verts[back_base as usize + a].xyz,
+                uv: [0.0, 1.0],
+                normal: outward,
+                tangent: rim_t,
+                binormal_sign: -1.0,
+            };
+            v += 1;
+            out_idx[i] = fa;
+            out_idx[i + 1] = fa + 1;
+            out_idx[i + 2] = fa + 2;
+            out_idx[i + 3] = fa;
+            out_idx[i + 4] = fa + 2;
+            out_idx[i + 5] = fa + 3;
+            i += 6;
+        }
+    }
+    Some((v, i))
+}
+
+fn fx_cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn fx_glass_normalize3_local(v: [f32; 3]) -> Option<[f32; 3]> {
+    let len_sq = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+    if len_sq <= 1e-12 {
+        return None;
+    }
+    let inv = 1.0 / libm::sqrtf(len_sq);
+    Some([v[0] * inv, v[1] * inv, v[2] * inv])
 }
 
 fn read_f32(bytes: &[u8], off: usize) -> f32 {

@@ -19,6 +19,7 @@ mod sm3_wgsl;
 mod smodel_cache_gpu;
 mod smodel_cached;
 mod state;
+mod sun_effects;
 mod texture_table;
 
 pub use admitted::AdmittedExactPort;

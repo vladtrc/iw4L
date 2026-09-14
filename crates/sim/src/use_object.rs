@@ -476,6 +476,11 @@ fn emit_script_calls(
                     UseCallbackKind::DomFlag => apply_dom_on_use_body(world, object, player),
                     UseCallbackKind::DemBombzone => {
                         world.push_use_event(UseObjectEvent::UseCallbackBlocked { object, kind });
+                        if kind.on_use_gap() == Some(gamemode_iw4::ScriptGap::DemOnUseObject) {
+                            world
+                                .script_gaps_mut()
+                                .raise(gamemode_iw4::ScriptGapCause::DemOnUseObject { object });
+                        }
                     }
                 }
             }

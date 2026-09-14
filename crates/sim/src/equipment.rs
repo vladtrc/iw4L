@@ -9,12 +9,15 @@ use crate::{
     bullet_trace_with_entity_models, level_time_ms,
 };
 use entity_iw4::{
-    GRENADE_SPIN_PITCH_MAX, GRENADE_SPIN_PITCH_MIN, GRENADE_SPIN_ROLL_MAX, GRENADE_SPIN_ROLL_MIN,
-    MissileLandAnglesIn, TR_STATIONARY, Trajectory, bg_evaluate_trajectory,
-    bg_evaluate_trajectory_delta, g_fire_grenade_no_draw_ms, g_init_grenade_apos,
-    g_init_grenade_pos, missile_land_angles,
+    GLASS_PROJECTILE_PANE_HOPS, GRENADE_SPIN_PITCH_MAX, GRENADE_SPIN_PITCH_MIN,
+    GRENADE_SPIN_ROLL_MAX, GRENADE_SPIN_ROLL_MIN, MISSILE_GLASS_SHATTER_VEL, MissileLandAnglesIn,
+    TR_GRAVITY, TR_STATIONARY, Trajectory, bg_evaluate_trajectory, bg_evaluate_trajectory_delta,
+    g_fire_grenade_no_draw_ms, g_fire_missile_apos, g_init_grenade_apos, g_init_grenade_pos,
+    missile_land_angles,
 };
 use trace_iw4::surface_type_from_flags;
+
+const SURF_TYPE_GLASS: u8 = 9;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EquipmentRuntimeFacts {
@@ -28,6 +31,8 @@ pub struct EquipmentRuntimeFacts {
 
     pub cook_off_hold: bool,
 
+    pub timed_detonation: bool,
+
     pub proj_impact_explode: bool,
 
     pub stick_to_players: bool,
@@ -37,8 +42,11 @@ pub struct EquipmentRuntimeFacts {
     pub explosion_outer_damage: i32,
     pub projectile_speed: i32,
     pub projectile_speed_up: i32,
+    pub projectile_speed_forward: i32,
     pub projectile_activate_dist: i32,
     pub projectile_explosion_type: i32,
+    pub weap_type: i32,
+    pub weap_class: i32,
     pub parallel_bounce: Option<[f32; 31]>,
     pub perpendicular_bounce: Option<[f32; 31]>,
 }
@@ -55,14 +63,6 @@ impl EquipmentRuntimeFacts {
     pub fn spawn_clip_count(self) -> i32 {
         self.start_ammo.max(self.clip_size).max(1)
     }
-
-    pub fn fuse_ticks(self) -> u32 {
-        if self.fuse_time_ms <= 0 {
-            u32::MAX
-        } else {
-            (self.fuse_time_ms as u32 + 49) / 50
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -73,17 +73,16 @@ pub struct ProjectileState {
     pub weapon: u32,
     pub origin: [f32; 3],
     pub velocity: [f32; 3],
-    pub gravity: f32,
-    pub age_ticks: u32,
-    pub fuse_ticks: u32,
-
     pub pos: Trajectory,
-
     pub apos: Trajectory,
-
     pub entnum: i32,
-
     pub launch_time: i32,
+    pub spawn_time_ms: i32,
+    pub detonate_at_ms: Option<i32>,
+    pub cleanup_at_ms: i32,
+    pub travel_distance: f32,
+    pub live: bool,
+    pub stuck_pane: Option<u32>,
 }
 
 impl ProjectileState {
@@ -94,41 +93,26 @@ impl ProjectileState {
     pub fn velocity_at(&self, at_time_ms: i32) -> [f32; 3] {
         bg_evaluate_trajectory_delta(&self.pos, at_time_ms)
     }
+
+    pub fn is_armed(&self, activate_dist: i32) -> bool {
+        self.live && (activate_dist <= 0 || self.travel_distance >= activate_dist as f32)
+    }
 }
+
+pub const GRENADE_FUSE_CAP_MS: i32 = 60_000;
+pub const GRENADE_DEFAULT_FUSE_MS: i32 = 30_000;
+pub const ROCKET_CLEANUP_MS: i32 = 60_000;
+pub const BOUNCE_EVENT_SPEED_DELTA: f32 = 100.0;
+const WEAPCLASS_THROWINGKNIFE: i32 = 9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProjectileHitGeometry {
-    World,
-    Player,
-    Entity { epoch: EntityCollisionEpoch },
-    Bounce,
-    Fuse,
+pub(crate) enum GrenadeLaunchKind {
+    Thrown { remaining_fuse_ms: Option<i32> },
+    Launcher,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ProjectileImpact {
-    pub id: ProjectileId,
-    pub owner: ClientId,
-    pub weapon: u32,
-    pub origin: [f32; 3],
-    pub geometry: ProjectileHitGeometry,
-    pub terminal: Option<ColliderId>,
-    pub amount: i32,
-
-    pub fraction: Option<f32>,
-
-    pub surface_flags: Option<u32>,
-
-    pub surf_type: Option<u8>,
-
-    pub entnum: i32,
-}
-
-pub fn projectile_birth_ms(tick: Tick, age_ticks: u32) -> i32 {
-    (tick
-        .0
-        .saturating_sub(age_ticks)
-        .saturating_mul(crate::MATCH_TICK_MS)) as i32
+pub fn projectile_birth_ms(projectile: &ProjectileState) -> i32 {
+    projectile.spawn_time_ms
 }
 
 fn forward(angles: [f32; 3]) -> [f32; 3] {
@@ -141,11 +125,113 @@ fn forward(angles: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-pub(crate) fn spawn_offhand_projectile(
+fn vec3_length(v: [f32; 3]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+
+fn vec3_normalize(v: [f32; 3]) -> Option<[f32; 3]> {
+    let len = vec3_length(v);
+    if len < 1e-6 {
+        None
+    } else {
+        Some([v[0] / len, v[1] / len, v[2] / len])
+    }
+}
+
+fn flatten_xy(dir: [f32; 3]) -> Option<[f32; 3]> {
+    vec3_normalize([dir[0], dir[1], 0.0])
+}
+
+fn project_owner_velocity(launch_vel: [f32; 3], owner_vel: [f32; 3]) -> [f32; 3] {
+    let Some(dir) = vec3_normalize(launch_vel) else {
+        return launch_vel;
+    };
+    let along = owner_vel[0] * dir[0] + owner_vel[1] * dir[1] + owner_vel[2] * dir[2];
+    [
+        launch_vel[0] + dir[0] * along,
+        launch_vel[1] + dir[1] * along,
+        launch_vel[2] + dir[2] * along,
+    ]
+}
+
+fn grenade_launch_velocity(
+    direction: [f32; 3],
+    facts: &EquipmentRuntimeFacts,
+    owner_vel: [f32; 3],
+) -> [f32; 3] {
+    let speed = facts.projectile_speed as f32;
+    let mut velocity = [
+        direction[0] * speed,
+        direction[1] * speed,
+        direction[2] * speed + facts.projectile_speed_up as f32,
+    ];
+    if facts.projectile_speed_forward != 0
+        && let Some(flat) = flatten_xy(direction)
+    {
+        let extra = facts.projectile_speed_forward as f32;
+        velocity[0] += flat[0] * extra;
+        velocity[1] += flat[1] * extra;
+        velocity[2] += flat[2] * extra;
+    }
+    project_owner_velocity(velocity, owner_vel)
+}
+
+fn grenade_fuse_due(now_ms: i32, detonate_at_ms: Option<i32>, live: bool) -> bool {
+    detonate_at_ms.is_some_and(|deadline| live && deadline <= now_ms)
+}
+
+fn grenade_deadlines(
+    facts: &EquipmentRuntimeFacts,
+    kind: GrenadeLaunchKind,
+    now_ms: i32,
+) -> (Option<i32>, i32) {
+    let cap_at = now_ms.saturating_add(GRENADE_FUSE_CAP_MS);
+    let cleanup_at_ms = cap_at;
+    match kind {
+        GrenadeLaunchKind::Launcher if facts.fuse_time_ms <= 0 => {
+            if facts.projectile_activate_dist != 0 {
+                (None, cleanup_at_ms)
+            } else {
+                (
+                    Some(now_ms.saturating_add(GRENADE_DEFAULT_FUSE_MS).min(cap_at)),
+                    cleanup_at_ms,
+                )
+            }
+        }
+        GrenadeLaunchKind::Thrown { remaining_fuse_ms } => {
+            let authored = facts.fuse_time_ms;
+            let fuse = if facts.timed_detonation {
+                remaining_fuse_ms.filter(|&ms| ms > 0).unwrap_or(authored)
+            } else {
+                authored
+            };
+            let fuse = if fuse <= 0 {
+                GRENADE_DEFAULT_FUSE_MS
+            } else {
+                fuse.min(GRENADE_FUSE_CAP_MS)
+            };
+            (Some(now_ms.saturating_add(fuse)), cleanup_at_ms)
+        }
+        GrenadeLaunchKind::Launcher => {
+            let fuse = if facts.fuse_time_ms <= 0 {
+                GRENADE_DEFAULT_FUSE_MS
+            } else {
+                facts.fuse_time_ms.min(GRENADE_FUSE_CAP_MS)
+            };
+            (Some(now_ms.saturating_add(fuse)), cleanup_at_ms)
+        }
+    }
+}
+
+pub(crate) fn spawn_grenade_projectile(
     world: &mut FrameWorld,
-    id: ClientId,
+    owner: ClientId,
     weapon: u32,
     tick: Tick,
+    origin: [f32; 3],
+    angles: [f32; 3],
+    owner_vel: [f32; 3],
+    kind: GrenadeLaunchKind,
 ) -> bool {
     let Some(facts) = world.equipment_facts_for(weapon) else {
         return false;
@@ -153,7 +239,60 @@ pub(crate) fn spawn_offhand_projectile(
     if !facts.is_usable() {
         return false;
     }
-    let (origin, angles, gravity, owner_life) = {
+    let owner_life = world.client_meta(owner).unwrap().life_sequence;
+    let direction = forward(angles);
+    let time_ms = level_time_ms(tick);
+    let (pitch_rate, roll_rate) = match kind {
+        GrenadeLaunchKind::Launcher => (0.0, 0.0),
+        GrenadeLaunchKind::Thrown { .. } if facts.weap_class == WEAPCLASS_THROWINGKNIFE => {
+            (entity_iw4::GRENADE_BLADE_SPIN_PITCH, 0.0)
+        }
+        GrenadeLaunchKind::Thrown { .. } => grenade_spin_rates(world),
+    };
+    let apos = if pitch_rate == 0.0 && roll_rate == 0.0 {
+        g_fire_missile_apos(direction)
+    } else {
+        g_init_grenade_apos(direction, time_ms, pitch_rate, roll_rate)
+    };
+    let velocity = grenade_launch_velocity(direction, &facts, owner_vel);
+    let pos = g_init_grenade_pos(origin, velocity, time_ms);
+    let speed = vec3_length(velocity);
+    let launch_time = time_ms + g_fire_grenade_no_draw_ms(speed);
+    let (detonate_at_ms, cleanup_at_ms) = grenade_deadlines(&facts, kind, time_ms);
+    let id_projectile = world.allocate_projectile_id();
+    let entnum = world
+        .allocate_dynamic_entity(crate::gentity::EntityRunKind::Missile)
+        .expect("G_Spawn exhausted dynamic entity slots for grenade projectile")
+        .number();
+    world.push_projectile(ProjectileState {
+        id: id_projectile,
+        owner,
+        owner_life,
+        weapon,
+        origin,
+        velocity: pos.tr_delta,
+        pos,
+        apos,
+        entnum,
+        launch_time,
+        spawn_time_ms: time_ms,
+        detonate_at_ms,
+        cleanup_at_ms,
+        travel_distance: 0.0,
+        live: true,
+        stuck_pane: None,
+    });
+    true
+}
+
+pub(crate) fn spawn_offhand_projectile(
+    world: &mut FrameWorld,
+    id: ClientId,
+    weapon: u32,
+    tick: Tick,
+    remaining_fuse_ms: Option<i32>,
+) -> bool {
+    let (origin, angles, owner_vel) = {
         let Some(ps) = world.player(id) else {
             return false;
         };
@@ -164,44 +303,103 @@ pub(crate) fn spawn_offhand_projectile(
                 ps.origin[2] + ps.view_height_current,
             ],
             ps.viewangles,
-            ps.gravity.max(0) as f32,
-            world.client_meta(id).unwrap().life_sequence,
+            ps.velocity,
         )
     };
-    let direction = forward(angles);
-    let (pitch_rate, roll_rate) = grenade_spin_rates(world);
-    let time_ms = level_time_ms(tick);
-    let apos = g_init_grenade_apos(direction, time_ms, pitch_rate, roll_rate);
-    let velocity = [
-        direction[0] * facts.projectile_speed as f32,
-        direction[1] * facts.projectile_speed as f32,
-        direction[2] * facts.projectile_speed as f32 + facts.projectile_speed_up as f32,
-    ];
-    let pos = g_init_grenade_pos(origin, velocity, time_ms);
-    let speed =
-        (velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2]).sqrt();
-    let launch_time = time_ms + g_fire_grenade_no_draw_ms(speed);
-    let id_projectile = world.allocate_projectile_id();
-    let entnum = world
-        .allocate_dynamic_entity(crate::gentity::EntityRunKind::Missile)
-        .expect("G_Spawn exhausted dynamic entity slots for offhand projectile")
-        .number();
-    world.push_projectile(ProjectileState {
-        id: id_projectile,
-        owner: id,
-        owner_life,
+    spawn_grenade_projectile(
+        world,
+        id,
         weapon,
+        tick,
         origin,
-        velocity: pos.tr_delta,
-        gravity,
-        age_ticks: 0,
-        fuse_ticks: facts.fuse_ticks(),
-        pos,
-        apos,
-        entnum,
-        launch_time,
-    });
-    true
+        angles,
+        owner_vel,
+        GrenadeLaunchKind::Thrown { remaining_fuse_ms },
+    )
+}
+
+pub(crate) fn explode_offhand_in_hand(
+    world: &mut FrameWorld,
+    id: ClientId,
+    weapon: u32,
+    tick: Tick,
+) {
+    let Some(facts) = world.equipment_facts_for(weapon) else {
+        return;
+    };
+    let Some(ps) = world.player(id).copied() else {
+        return;
+    };
+    let owner_life = world
+        .client_meta(id)
+        .map(|m| m.life_sequence)
+        .unwrap_or_default();
+    let origin = [
+        ps.origin[0],
+        ps.origin[1],
+        ps.origin[2] + ps.view_height_current,
+    ];
+    let radius = facts
+        .explosion_radius
+        .max(facts.explosion_radius_min)
+        .max(0) as f32;
+    if facts.projectile_explosion_type == 2 {
+        crate::damage::apply_flashbang_blast(
+            world,
+            tick,
+            origin,
+            facts.explosion_radius.max(0) as f32,
+            facts.explosion_radius_min.max(0) as f32,
+        );
+    }
+    if radius <= 0.0 || facts.explosion_inner_damage <= 0 {
+        return;
+    }
+    let blast = crate::damage::ExplosionBlast {
+        origin,
+        radius,
+        inner_damage: facts.explosion_inner_damage as f32,
+        outer_damage: facts.explosion_outer_damage.max(0) as f32,
+        weapon,
+        source: DamageSource::Projectile(ProjectileId(0)),
+        attacker: id,
+        attacker_life: owner_life,
+        killcam_entity_start_time: level_time_ms(tick),
+    };
+    crate::damage::apply_explosion_blast(world, tick, &blast);
+    let chain = crate::damage::apply_explosion_destructibles(world, &blast, None);
+    for explode in &chain {
+        crate::damage::apply_explosion_blast(
+            world,
+            tick,
+            &crate::damage::ExplosionBlast::from_destructible(explode),
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectileHitGeometry {
+    World,
+    Player,
+    Entity { epoch: EntityCollisionEpoch },
+    Bounce,
+    Fuse,
+    Dud,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProjectileImpact {
+    pub id: ProjectileId,
+    pub owner: ClientId,
+    pub weapon: u32,
+    pub origin: [f32; 3],
+    pub geometry: ProjectileHitGeometry,
+    pub terminal: Option<ColliderId>,
+    pub amount: i32,
+    pub fraction: Option<f32>,
+    pub surface_flags: Option<u32>,
+    pub surf_type: Option<u8>,
+    pub entnum: i32,
 }
 
 fn grenade_spin_rates(world: &mut FrameWorld) -> (f32, f32) {
@@ -251,6 +449,7 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         amount: i32,
         fraction: Option<f32>,
         surface_flags: Option<u32>,
+        splash: bool,
     }
     let mut detonated = Vec::new();
     let mut direct_hits = Vec::new();
@@ -259,10 +458,17 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
     let Some(mut projectile) = world.projectile_by_number(entnum) else {
         return;
     };
-    if projectile.age_ticks >= projectile.fuse_ticks {
+    let time = level_time_ms(tick);
+    let prev = time.saturating_sub(crate::MATCH_TICK_MS as i32);
+    if time >= projectile.cleanup_at_ms
+        && projectile
+            .detonate_at_ms
+            .is_none_or(|deadline| deadline > projectile.cleanup_at_ms || !projectile.live)
+    {
         let _ = world.remove_projectile_by_number(entnum);
         return;
     }
+    let facts = required_projectile_facts(world, projectile.weapon);
     let script_models: Vec<EntityCollisionTraceGeom> = world
         .entity_collision_capabilities()
         .iter()
@@ -276,24 +482,123 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         content.clip_bsp(),
         content.clip_mesh(),
     );
-    let time = level_time_ms(tick);
     let start = projectile.origin;
-    let end = projectile.origin_at(time);
-    let outcome = bullet_trace_with_entity_models(
-        &brushes,
-        &bsp,
-        &cmodels,
-        &mesh,
-        &players,
-        &script_models,
-        &BulletTraceQuery {
-            start,
-            end,
-            mask: MASK_BULLET_WORLD,
-            ignore: Some(projectile.owner),
-            ignore_hit: None,
-        },
-    );
+    let mut eval_time = time;
+    if let Some(deadline) = projectile
+        .detonate_at_ms
+        .filter(|&ms| projectile.live && ms <= time)
+    {
+        eval_time = eval_time.min(deadline);
+    }
+    if projectile.cleanup_at_ms > prev && projectile.cleanup_at_ms <= eval_time {
+        eval_time = eval_time.min(projectile.cleanup_at_ms);
+    }
+    let end = projectile.origin_at(eval_time);
+    let vel = projectile.velocity_at(eval_time);
+    let speed = (vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]).sqrt();
+    if let Some(pane) = projectile.stuck_pane {
+        if world.world_objects().glass_is_solid(pane) {
+            if let Some(row) = world.projectile_mut_by_number(entnum) {
+                *row = projectile;
+            }
+            return;
+        }
+        unstick_missile(tick, &mut projectile);
+        projectile.stuck_pane = None;
+    }
+    let mut trace_start = start;
+    let mut hops = 0u32;
+    let mut hop_capped = false;
+    let outcome = loop {
+        let glass_pairs = world.world_objects().glass_damage_pairs();
+        let outcome = bullet_trace_with_entity_models(
+            &brushes,
+            &bsp,
+            &cmodels,
+            &mesh,
+            &players,
+            &script_models,
+            &BulletTraceQuery {
+                start: trace_start,
+                end,
+                mask: MASK_BULLET_WORLD,
+                ignore: Some(projectile.owner),
+                ignore_hit: None,
+            },
+            &|piece| {
+                crate::world_objects::glass_piece_is_solid(
+                    glass_pairs
+                        .iter()
+                        .find(|(id, _)| *id == u32::from(piece))
+                        .map(|(_, d)| *d)
+                        .unwrap_or(0),
+                )
+            },
+        );
+        let punched = match outcome {
+            TraceOutcome::Hit {
+                end: hit_end,
+                collider:
+                    ColliderId::World {
+                        surface_flags,
+                        glass_encoded,
+                        ..
+                    },
+                ..
+            }
+            | TraceOutcome::StartSolid {
+                end: hit_end,
+                collider:
+                    Some(ColliderId::World {
+                        surface_flags,
+                        glass_encoded,
+                        ..
+                    }),
+            } if missile_glass_punch_eligible(speed, surface_flags, glass_encoded) => {
+                let pane = u32::from(glass_encoded).saturating_sub(1);
+                if world.world_objects().glass_is_solid(pane) {
+                    let _ = world.world_objects_mut().force_shatter_glass(
+                        pane,
+                        time,
+                        hit_end,
+                        vel,
+                        entity_iw4::GlassCause::Impact,
+                    );
+                    hops = hops.saturating_add(1);
+                    if hops >= GLASS_PROJECTILE_PANE_HOPS {
+                        hop_capped = true;
+                        park_missile_at(tick, &mut projectile, hit_end, vel);
+                        None
+                    } else {
+                        let dx = end[0] - trace_start[0];
+                        let dy = end[1] - trace_start[1];
+                        let dz = end[2] - trace_start[2];
+                        let len = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
+                        trace_start = [
+                            hit_end[0] + dx / len * 0.25,
+                            hit_end[1] + dy / len * 0.25,
+                            hit_end[2] + dz / len * 0.25,
+                        ];
+                        Some(())
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if punched.is_some() && !hop_capped {
+            continue;
+        }
+        break outcome;
+    };
+    if hop_capped {
+        projectile.velocity = vel;
+        if let Some(row) = world.projectile_mut_by_number(entnum) {
+            *row = projectile;
+        }
+        return;
+    }
     let mut pending_detonation = None;
     let hit = match outcome {
         TraceOutcome::Hit {
@@ -307,175 +612,301 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         }
         TraceOutcome::Miss { .. } | TraceOutcome::Invalid { .. } => None,
     };
-    if let Some((end, normal, collider, fraction)) = hit {
-        projectile.origin = end;
-        let facts = required_projectile_facts(world, projectile.weapon);
-        let (surface_flags, hit_surf) = match collider {
-            Some(ColliderId::World { surface_flags, .. }) => (
-                Some(surface_flags),
-                Some(surface_type_from_flags(surface_flags)),
-            ),
-            _ => (None, None),
-        };
-        match collider {
-            Some(ColliderId::Player { client, .. }) => {
-                if facts.stick_to_players {
-                    stick_missile(tick, &mut projectile, end);
-                    push_grenade_stick(world, tick, &projectile);
-                } else {
-                    direct_hits.push((projectile, client));
-                    pending_detonation = Some(PendingDetonation {
-                        projectile,
-                        origin: end,
-                        normal,
-                        surf_type: 0,
-                        geometry: ProjectileHitGeometry::Player,
-                        terminal: collider,
-                        amount: facts.impact_damage.max(0),
-                        fraction: Some(fraction),
-                        surface_flags: None,
-                    });
-                    projectile.age_ticks = projectile.fuse_ticks;
-                }
+    let mut contact_time = eval_time;
+    if let Some((_end, _normal, _collider, fraction)) = hit {
+        contact_time = prev.saturating_add(((eval_time - prev) as f32 * fraction) as i32);
+    }
+    let fuse_due = grenade_fuse_due(time, projectile.detonate_at_ms, projectile.live);
+    let cleanup_due = time >= projectile.cleanup_at_ms;
+    let contact_before_fuse = hit.is_some()
+        && projectile
+            .detonate_at_ms
+            .is_none_or(|deadline| contact_time <= deadline);
+    enum TickOutcome {
+        Contact,
+        Fuse,
+        Cleanup,
+        Fly,
+    }
+    let tick_outcome = if hit.is_some() && contact_before_fuse {
+        TickOutcome::Contact
+    } else if fuse_due {
+        TickOutcome::Fuse
+    } else if cleanup_due {
+        TickOutcome::Cleanup
+    } else {
+        TickOutcome::Fly
+    };
+    match tick_outcome {
+        TickOutcome::Cleanup => {
+            let _ = world.remove_projectile_by_number(entnum);
+            return;
+        }
+        TickOutcome::Fuse => {
+            let fuse_time = projectile.detonate_at_ms.unwrap_or(eval_time);
+            projectile.origin = projectile.origin_at(fuse_time);
+            projectile.velocity = projectile.velocity_at(fuse_time);
+            pending_detonation = Some(PendingDetonation {
+                projectile,
+                origin: projectile.origin,
+                normal: [0.0, 0.0, 1.0],
+                surf_type: 0,
+                geometry: ProjectileHitGeometry::Fuse,
+                terminal: None,
+                amount: 0,
+                fraction: None,
+                surface_flags: None,
+                splash: projectile.live,
+            });
+        }
+        TickOutcome::Fly => {
+            let traveled = vec3_length([end[0] - start[0], end[1] - start[1], end[2] - start[2]]);
+            projectile.origin = end;
+            projectile.travel_distance = projectile.travel_distance + traveled;
+            projectile.velocity = projectile.velocity_at(time);
+            if let Some(row) = world.projectile_mut_by_number(entnum) {
+                *row = projectile;
             }
-            Some(
-                collider @ (ColliderId::EntityDObjBone { .. }
-                | ColliderId::EntityLinkedBrush { .. }),
-            ) => {
-                let epoch = entity_collision_epoch(collider, &script_models)
-                    .unwrap_or(EntityCollisionEpoch::CurrentTick);
-                if facts.proj_impact_explode {
-                    if let Some(target) = match collider {
-                        ColliderId::EntityDObjBone { owner, .. }
-                        | ColliderId::EntityLinkedBrush { owner, .. } => owner.script_model(),
-                        _ => None,
-                    } {
-                        destructible_intents.push(DestructibleDamageIntent {
-                            source: DamageSource::Projectile(projectile.id),
-                            pellet: PelletId(0),
-                            attacker: projectile.owner,
-                            attacker_life: projectile.owner_life,
-                            target,
-                            amount: facts.impact_damage.max(0) as u32,
-                            epoch,
+            return;
+        }
+        TickOutcome::Contact => {
+            let (end, normal, collider, fraction) = hit.expect("contact");
+            let traveled = vec3_length([end[0] - start[0], end[1] - start[1], end[2] - start[2]]);
+            projectile.origin = end;
+            projectile.travel_distance = projectile.travel_distance + traveled;
+            let armed = projectile.is_armed(facts.projectile_activate_dist);
+            let (surface_flags, hit_surf) = match collider {
+                Some(ColliderId::World { surface_flags, .. }) => (
+                    Some(surface_flags),
+                    Some(surface_type_from_flags(surface_flags)),
+                ),
+                _ => (None, None),
+            };
+            match collider {
+                Some(ColliderId::Player { client, .. }) => {
+                    if facts.stick_to_players {
+                        stick_missile(tick, &mut projectile, end);
+                        push_grenade_stick(world, tick, &projectile);
+                    } else if !armed {
+                        direct_hits.push((projectile, client));
+                        projectile.live = false;
+                        pending_detonation = Some(PendingDetonation {
+                            projectile,
+                            origin: end,
+                            normal,
+                            surf_type: 0,
+                            geometry: ProjectileHitGeometry::Dud,
+                            terminal: collider,
+                            amount: facts.impact_damage.max(0),
+                            fraction: Some(fraction),
+                            surface_flags: None,
+                            splash: false,
+                        });
+                    } else if facts.proj_impact_explode {
+                        direct_hits.push((projectile, client));
+                        pending_detonation = Some(PendingDetonation {
+                            projectile,
+                            origin: end,
+                            normal,
+                            surf_type: 0,
+                            geometry: ProjectileHitGeometry::Player,
+                            terminal: collider,
+                            amount: facts.impact_damage.max(0),
+                            fraction: Some(fraction),
+                            surface_flags: None,
+                            splash: true,
+                        });
+                    } else {
+                        direct_hits.push((projectile, client));
+                        bounce_missile(world, tick, &mut projectile, end, normal, fraction, 0);
+                        impacts.push(ProjectileImpact {
+                            id: projectile.id,
+                            owner: projectile.owner,
+                            weapon: projectile.weapon,
+                            origin: end,
+                            geometry: ProjectileHitGeometry::Bounce,
+                            terminal: collider,
+                            amount: 0,
+                            fraction: Some(fraction),
+                            surface_flags: None,
+                            surf_type: None,
+                            entnum: projectile.entnum,
                         });
                     }
-                    pending_detonation = Some(PendingDetonation {
-                        projectile,
-                        origin: end,
-                        normal,
-                        surf_type: 0,
-                        geometry: ProjectileHitGeometry::Entity { epoch },
-                        terminal: Some(collider),
-                        amount: facts.impact_damage.max(0),
-                        fraction: Some(fraction),
-                        surface_flags: None,
-                    });
-                    projectile.age_ticks = projectile.fuse_ticks;
-                } else if facts.stick_to_players {
-                    stick_missile(tick, &mut projectile, end);
-                    push_grenade_stick(world, tick, &projectile);
-                } else {
-                    bounce_missile(world, tick, &mut projectile, end, normal, fraction, 0);
-                    push_grenade_bounce(world, tick, &projectile, 0);
-                    impacts.push(ProjectileImpact {
-                        id: projectile.id,
-                        owner: projectile.owner,
-                        weapon: projectile.weapon,
-                        origin: end,
-                        geometry: ProjectileHitGeometry::Bounce,
-                        terminal: Some(collider),
-                        amount: 0,
-                        fraction: Some(fraction),
-                        surface_flags: None,
-                        surf_type: None,
-                        entnum: projectile.entnum,
-                    });
                 }
-            }
-            Some(world_collider @ ColliderId::World { .. }) => {
-                let surf_type = hit_surf.unwrap_or(0);
-                if facts.proj_impact_explode {
-                    pending_detonation = Some(PendingDetonation {
-                        projectile,
-                        origin: end,
-                        normal,
-                        surf_type,
-                        geometry: ProjectileHitGeometry::World,
-                        terminal: Some(world_collider),
-                        amount: facts.impact_damage.max(0),
-                        fraction: Some(fraction),
-                        surface_flags,
-                    });
-                    projectile.age_ticks = projectile.fuse_ticks;
-                } else if facts.stick_to_players {
-                    stick_missile(tick, &mut projectile, end);
-                    push_grenade_stick(world, tick, &projectile);
-                } else {
-                    bounce_missile(
-                        world,
-                        tick,
-                        &mut projectile,
-                        end,
-                        normal,
-                        fraction,
-                        surf_type,
-                    );
-                    push_grenade_bounce(world, tick, &projectile, surf_type);
-                    impacts.push(ProjectileImpact {
-                        id: projectile.id,
-                        owner: projectile.owner,
-                        weapon: projectile.weapon,
-                        origin: end,
-                        geometry: ProjectileHitGeometry::Bounce,
-                        terminal: Some(world_collider),
-                        amount: 0,
-                        fraction: Some(fraction),
-                        surface_flags,
-                        surf_type: hit_surf,
-                        entnum: projectile.entnum,
-                    });
+                Some(
+                    collider @ (ColliderId::EntityDObjBone { .. }
+                    | ColliderId::EntityLinkedBrush { .. }),
+                ) => {
+                    let epoch = entity_collision_epoch(collider, &script_models)
+                        .unwrap_or(EntityCollisionEpoch::CurrentTick);
+                    if armed && facts.proj_impact_explode {
+                        if let Some(target) = match collider {
+                            ColliderId::EntityDObjBone { owner, .. }
+                            | ColliderId::EntityLinkedBrush { owner, .. } => owner.script_model(),
+                            _ => None,
+                        } {
+                            destructible_intents.push(DestructibleDamageIntent {
+                                source: DamageSource::Projectile(projectile.id),
+                                pellet: PelletId(0),
+                                attacker: projectile.owner,
+                                attacker_life: projectile.owner_life,
+                                target,
+                                amount: facts.impact_damage.max(0) as u32,
+                                epoch,
+                            });
+                        }
+                        pending_detonation = Some(PendingDetonation {
+                            projectile,
+                            origin: end,
+                            normal,
+                            surf_type: 0,
+                            geometry: ProjectileHitGeometry::Entity { epoch },
+                            terminal: Some(collider),
+                            amount: facts.impact_damage.max(0),
+                            fraction: Some(fraction),
+                            surface_flags: None,
+                            splash: true,
+                        });
+                    } else if facts.stick_to_players {
+                        stick_missile(tick, &mut projectile, end);
+                        push_grenade_stick(world, tick, &projectile);
+                    } else if !armed {
+                        projectile.live = false;
+                        pending_detonation = Some(PendingDetonation {
+                            projectile,
+                            origin: end,
+                            normal,
+                            surf_type: 0,
+                            geometry: ProjectileHitGeometry::Dud,
+                            terminal: Some(collider),
+                            amount: facts.impact_damage.max(0),
+                            fraction: Some(fraction),
+                            surface_flags: None,
+                            splash: false,
+                        });
+                    } else {
+                        bounce_missile(world, tick, &mut projectile, end, normal, fraction, 0);
+                        impacts.push(ProjectileImpact {
+                            id: projectile.id,
+                            owner: projectile.owner,
+                            weapon: projectile.weapon,
+                            origin: end,
+                            geometry: ProjectileHitGeometry::Bounce,
+                            terminal: Some(collider),
+                            amount: 0,
+                            fraction: Some(fraction),
+                            surface_flags: None,
+                            surf_type: None,
+                            entnum: projectile.entnum,
+                        });
+                    }
                 }
-            }
-            None => {
-                if facts.proj_impact_explode {
-                    pending_detonation = Some(PendingDetonation {
-                        projectile,
-                        origin: end,
-                        normal,
-                        surf_type: 0,
-                        geometry: ProjectileHitGeometry::World,
-                        terminal: None,
-                        amount: facts.impact_damage.max(0),
-                        fraction: Some(fraction),
-                        surface_flags: None,
-                    });
-                    projectile.age_ticks = projectile.fuse_ticks;
+                Some(world_collider @ ColliderId::World { .. }) => {
+                    let surf_type = hit_surf.unwrap_or(0);
+                    if armed && facts.proj_impact_explode {
+                        pending_detonation = Some(PendingDetonation {
+                            projectile,
+                            origin: end,
+                            normal,
+                            surf_type,
+                            geometry: ProjectileHitGeometry::World,
+                            terminal: Some(world_collider),
+                            amount: facts.impact_damage.max(0),
+                            fraction: Some(fraction),
+                            surface_flags,
+                            splash: true,
+                        });
+                    } else if facts.stick_to_players {
+                        if let ColliderId::World { glass_encoded, .. } = world_collider
+                            && glass_encoded != 0
+                        {
+                            let pane = u32::from(glass_encoded).saturating_sub(1);
+                            if world.world_objects().glass_is_solid(pane) {
+                                projectile.stuck_pane = Some(pane);
+                            }
+                        }
+                        stick_missile(tick, &mut projectile, end);
+                        push_grenade_stick(world, tick, &projectile);
+                    } else if !armed {
+                        projectile.live = false;
+                        pending_detonation = Some(PendingDetonation {
+                            projectile,
+                            origin: end,
+                            normal,
+                            surf_type,
+                            geometry: ProjectileHitGeometry::Dud,
+                            terminal: Some(world_collider),
+                            amount: facts.impact_damage.max(0),
+                            fraction: Some(fraction),
+                            surface_flags,
+                            splash: false,
+                        });
+                    } else {
+                        bounce_missile(
+                            world,
+                            tick,
+                            &mut projectile,
+                            end,
+                            normal,
+                            fraction,
+                            surf_type,
+                        );
+                        impacts.push(ProjectileImpact {
+                            id: projectile.id,
+                            owner: projectile.owner,
+                            weapon: projectile.weapon,
+                            origin: end,
+                            geometry: ProjectileHitGeometry::Bounce,
+                            terminal: Some(world_collider),
+                            amount: 0,
+                            fraction: Some(fraction),
+                            surface_flags,
+                            surf_type: hit_surf,
+                            entnum: projectile.entnum,
+                        });
+                    }
+                }
+                None => {
+                    if armed && facts.proj_impact_explode {
+                        pending_detonation = Some(PendingDetonation {
+                            projectile,
+                            origin: end,
+                            normal,
+                            surf_type: 0,
+                            geometry: ProjectileHitGeometry::World,
+                            terminal: None,
+                            amount: facts.impact_damage.max(0),
+                            fraction: Some(fraction),
+                            surface_flags: None,
+                            splash: true,
+                        });
+                    } else if !armed {
+                        projectile.live = false;
+                        pending_detonation = Some(PendingDetonation {
+                            projectile,
+                            origin: end,
+                            normal,
+                            surf_type: 0,
+                            geometry: ProjectileHitGeometry::Dud,
+                            terminal: None,
+                            amount: 0,
+                            fraction: Some(fraction),
+                            surface_flags: None,
+                            splash: false,
+                        });
+                    }
                 }
             }
         }
-    } else {
-        projectile.origin = end;
     }
-    projectile.velocity = projectile.velocity_at(time);
-    projectile.age_ticks = projectile.age_ticks.saturating_add(1);
+
     if let Some(info) = pending_detonation {
         detonated.push(info);
-    } else if projectile.age_ticks >= projectile.fuse_ticks {
-        detonated.push(PendingDetonation {
-            projectile,
-            origin: projectile.origin,
-            normal: [0.0, 0.0, 1.0],
-            surf_type: 0,
-            geometry: ProjectileHitGeometry::Fuse,
-            terminal: None,
-            amount: 0,
-            fraction: None,
-            surface_flags: None,
-        });
     }
 
     if detonated.is_empty() {
+        projectile.velocity = projectile.velocity_at(time);
         if let Some(row) = world.projectile_mut_by_number(entnum) {
             *row = projectile;
         }
@@ -499,7 +930,9 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
     }
     world.record_projectile_impacts(tick, &impacts);
     for info in &detonated {
-        world.note_dying_missile(tick, info.projectile);
+        if info.splash {
+            world.note_dying_missile(tick, info.projectile);
+        }
     }
     let resolves_damage = world.publishes_snapshot();
     if resolves_damage {
@@ -517,7 +950,7 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
                 target_life: target_meta.life_sequence,
                 weapon: projectile.weapon,
                 amount: facts.impact_damage.max(0),
-                killcam_entity_start_time: projectile_birth_ms(tick, projectile.age_ticks),
+                killcam_entity_start_time: projectile_birth_ms(&projectile),
                 inflictor_origin: Some(projectile.origin),
                 hitloc: 0,
             };
@@ -527,13 +960,18 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
             .world_objects_mut()
             .apply_destructible_damage_batch(&destructible_intents);
         for explode in &destructible.explodes {
-            let splash = crate::damage::radius_attempts_from_truck_explode(world, explode);
-            for attempt in &splash {
-                let _ = crate::damage::apply_damage_attempt(world, tick, attempt);
-            }
+            crate::damage::apply_explosion_blast(
+                world,
+                tick,
+                &crate::damage::ExplosionBlast::from_destructible(explode),
+            );
+            crate::damage::apply_explode_glass_blast(world, tick, explode);
         }
     }
     for info in detonated {
+        if !info.splash {
+            continue;
+        }
         let facts = required_projectile_facts(world, info.projectile.weapon);
         let event_kind = if facts.projectile_explosion_type == 2 {
             entity_iw4::EntityEventKind::FLASHBANG_EXPLODE
@@ -571,57 +1009,38 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
             .explosion_radius
             .max(facts.explosion_radius_min)
             .max(0) as f32;
-        if radius <= 0.0 || facts.explosion_inner_damage <= 0 {
+        if radius <= 0.0 || (facts.explosion_inner_damage <= 0 && facts.explosion_outer_damage <= 0)
+        {
             continue;
         }
-        let inner_radius = facts
-            .explosion_radius_min
-            .max(0)
-            .min(facts.explosion_radius) as f32;
-        let mut intents = Vec::new();
-        for target in crate::damage::radius_player_candidates(world, info.origin, radius) {
-            let Some(meta) = world.client_meta(target) else {
-                continue;
-            };
-            if meta.lifecycle != ClientLifecycle::Alive {
-                continue;
-            }
-            let Some(ps) = world.player(target) else {
-                continue;
-            };
-            let dx = ps.origin[0] - info.origin[0];
-            let dy = ps.origin[1] - info.origin[1];
-            let dz = ps.origin[2] - info.origin[2];
-            let distance = (dx * dx + dy * dy + dz * dz).sqrt();
-            if distance > radius {
-                continue;
-            }
-            let amount = if distance <= inner_radius || radius <= inner_radius {
-                facts.explosion_inner_damage
-            } else {
-                let fraction = (distance - inner_radius) / (radius - inner_radius);
-                (facts.explosion_inner_damage as f32
-                    + (facts.explosion_outer_damage - facts.explosion_inner_damage) as f32
-                        * fraction)
-                    .round() as i32
-            };
-            intents.push(DamageAttempt {
-                source: DamageSource::Projectile(info.projectile.id),
-                pellet: PelletId(0),
-                attacker: info.projectile.owner,
-                attacker_life: info.projectile.owner_life,
-                target,
-                target_life: meta.life_sequence,
-                weapon: info.projectile.weapon,
-                amount,
-                killcam_entity_start_time: projectile_birth_ms(tick, info.projectile.age_ticks),
-                inflictor_origin: Some(info.origin),
-                hitloc: 0,
-            });
+        let blast = crate::damage::ExplosionBlast {
+            origin: info.origin,
+            radius,
+            inner_damage: facts.explosion_inner_damage as f32,
+            outer_damage: facts.explosion_outer_damage.max(0) as f32,
+            weapon: info.projectile.weapon,
+            source: DamageSource::Projectile(info.projectile.id),
+            attacker: info.projectile.owner,
+            attacker_life: info.projectile.owner_life,
+            killcam_entity_start_time: projectile_birth_ms(&info.projectile),
+        };
+        crate::damage::apply_explosion_blast(world, tick, &blast);
+        let chain = crate::damage::apply_explosion_destructibles(world, &blast, None);
+        for explode in &chain {
+            crate::damage::apply_explosion_blast(
+                world,
+                tick,
+                &crate::damage::ExplosionBlast::from_destructible(explode),
+            );
         }
-        for attempt in &intents {
-            let _ = crate::damage::apply_damage_attempt(world, tick, attempt);
-        }
+        crate::damage::apply_shared_glass_blast(
+            world,
+            tick,
+            info.origin,
+            facts.explosion_inner_damage,
+            facts.explosion_outer_damage,
+            radius,
+        );
     }
 }
 
@@ -662,6 +1081,26 @@ fn push_grenade_stick(world: &mut FrameWorld, tick: Tick, projectile: &Projectil
     );
 }
 
+fn missile_glass_punch_eligible(speed: f32, surface_flags: u32, glass_encoded: u16) -> bool {
+    speed >= MISSILE_GLASS_SHATTER_VEL
+        && surface_type_from_flags(surface_flags) == SURF_TYPE_GLASS
+        && glass_encoded != 0
+}
+
+fn park_missile_at(
+    tick: Tick,
+    projectile: &mut ProjectileState,
+    origin: [f32; 3],
+    velocity: [f32; 3],
+) {
+    let time = level_time_ms(tick);
+    projectile.origin = origin;
+    projectile.velocity = velocity;
+    projectile.pos.tr_base = origin;
+    projectile.pos.tr_time = time;
+    projectile.pos.tr_delta = velocity;
+}
+
 fn stick_missile(tick: Tick, projectile: &mut ProjectileState, origin: [f32; 3]) {
     let time = level_time_ms(tick);
     projectile.origin = origin;
@@ -670,6 +1109,16 @@ fn stick_missile(tick: Tick, projectile: &mut ProjectileState, origin: [f32; 3])
     projectile.pos.tr_time = time;
     projectile.pos.tr_duration = 0;
     projectile.pos.tr_base = origin;
+    projectile.pos.tr_delta = [0.0, 0.0, 0.0];
+}
+
+fn unstick_missile(tick: Tick, projectile: &mut ProjectileState) {
+    let time = level_time_ms(tick);
+    projectile.velocity = [0.0, 0.0, 0.0];
+    projectile.pos.tr_type = TR_GRAVITY;
+    projectile.pos.tr_time = time;
+    projectile.pos.tr_duration = 0;
+    projectile.pos.tr_base = projectile.origin;
     projectile.pos.tr_delta = [0.0, 0.0, 0.0];
 }
 
@@ -713,13 +1162,23 @@ fn bounce_missile(
     let prev = time.saturating_sub(crate::MATCH_TICK_MS as i32);
     let hit_time = prev.saturating_add(((time - prev) as f32 * fraction) as i32);
     projectile.velocity = projectile.velocity_at(hit_time);
+    let incoming = projectile.velocity;
     let facts = required_projectile_facts(world, projectile.weapon);
     bounce_velocity(projectile, normal, &facts, surf_type);
+    let outgoing = projectile.velocity;
     projectile.origin = origin;
     projectile.pos.tr_base = origin;
     projectile.pos.tr_time = time;
     projectile.pos.tr_delta = projectile.velocity;
     apply_missile_land_angles(world, tick, projectile, normal, fraction);
+    let delta = vec3_length([
+        outgoing[0] - incoming[0],
+        outgoing[1] - incoming[1],
+        outgoing[2] - incoming[2],
+    ]);
+    if delta > BOUNCE_EVENT_SPEED_DELTA {
+        push_grenade_bounce(world, tick, projectile, surf_type);
+    }
 }
 
 fn required_projectile_facts(world: &FrameWorld, weapon: u32) -> EquipmentRuntimeFacts {
@@ -743,14 +1202,36 @@ fn bounce_velocity(
         .zip(facts.perpendicular_bounce.as_ref())
         .and_then(|(p, n)| p.get(surf_type as usize).zip(n.get(surf_type as usize)))
         .unwrap_or_else(|| panic!("missing projectile surface bounce coefficients"));
-    let normal_speed = projectile.velocity[0] * normal[0]
-        + projectile.velocity[1] * normal[1]
-        + projectile.velocity[2] * normal[2];
-    for axis in 0..3 {
-        let normal_velocity = normal[axis] * normal_speed;
-        let tangent = projectile.velocity[axis] - normal_velocity;
-        projectile.velocity[axis] = tangent * coefficients.0 - normal_velocity * coefficients.1;
+    let incoming = projectile.velocity;
+    projectile.velocity =
+        bounce_reflected_scale(incoming, normal, *coefficients.0, *coefficients.1);
+}
+
+fn bounce_reflected_scale(
+    incoming: [f32; 3],
+    normal: [f32; 3],
+    parallel: f32,
+    perpendicular: f32,
+) -> [f32; 3] {
+    let speed = vec3_length(incoming);
+    let nlen = vec3_length(normal);
+    if speed < 1e-6 || nlen < 1e-6 {
+        return [0.0, 0.0, 0.0];
     }
+    let n = [normal[0] / nlen, normal[1] / nlen, normal[2] / nlen];
+    let d = incoming[0] * n[0] + incoming[1] * n[1] + incoming[2] * n[2];
+    let reflected = [
+        incoming[0] - 2.0 * d * n[0],
+        incoming[1] - 2.0 * d * n[1],
+        incoming[2] - 2.0 * d * n[2],
+    ];
+    let incidence = (-d / speed).clamp(0.0, 1.0);
+    let factor = parallel + (perpendicular - parallel) * incidence;
+    [
+        reflected[0] * factor,
+        reflected[1] * factor,
+        reflected[2] * factor,
+    ]
 }
 
 fn startsolid_normal(start: [f32; 3], end: [f32; 3]) -> [f32; 3] {
@@ -776,4 +1257,246 @@ fn entity_collision_epoch(
     rows.iter()
         .find(|row| row.owner == owner)
         .map(|row| row.epoch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ClientId, LifeSequence, ProjectileId, Tick};
+    use entity_iw4::Trajectory;
+
+    const SURF_GLASS: u32 = 9 << 20;
+
+    fn sample_projectile() -> ProjectileState {
+        ProjectileState {
+            id: ProjectileId(3),
+            owner: ClientId(1),
+            owner_life: LifeSequence(2),
+            weapon: 7,
+            origin: [0.0, 0.0, 0.0],
+            velocity: [800.0, 0.0, 0.0],
+            pos: Trajectory {
+                tr_type: TR_GRAVITY,
+                tr_time: 0,
+                tr_duration: 0,
+                tr_base: [0.0, 0.0, 0.0],
+                tr_delta: [800.0, 0.0, 0.0],
+            },
+            apos: Trajectory::default(),
+            entnum: 14,
+            launch_time: 0,
+            spawn_time_ms: 0,
+            detonate_at_ms: None,
+            cleanup_at_ms: ROCKET_CLEANUP_MS,
+            travel_distance: 0.0,
+            live: true,
+            stuck_pane: None,
+        }
+    }
+
+    fn frag_facts() -> EquipmentRuntimeFacts {
+        EquipmentRuntimeFacts {
+            offhand_class: 1,
+            fuse_time_ms: 4000,
+            timed_detonation: true,
+            cook_off_hold: true,
+            projectile_speed: 1400,
+            projectile_speed_up: 200,
+            projectile_speed_forward: 150,
+            impact_damage: 1,
+            ..EquipmentRuntimeFacts::default()
+        }
+    }
+
+    #[test]
+    fn projectile_lifetime_cook_arm_bounce_and_restore() {
+        let now = 10_000;
+        let frag = frag_facts();
+        assert!(grenade_fuse_due(6000, Some(6000), true));
+        assert!(grenade_fuse_due(6600, Some(6000), true));
+        assert!(!grenade_fuse_due(5950, Some(6000), true));
+        assert!(!grenade_fuse_due(6000, Some(6000), false));
+
+        let held_h = 1000;
+        let authored = frag.fuse_time_ms;
+        let (detonate_after_hold, _) = grenade_deadlines(
+            &frag,
+            GrenadeLaunchKind::Thrown {
+                remaining_fuse_ms: Some(authored - held_h),
+            },
+            now,
+        );
+        assert_eq!(detonate_after_hold, Some(now + authored - held_h));
+
+        let gl = EquipmentRuntimeFacts {
+            fuse_time_ms: 0,
+            projectile_activate_dist: 375,
+            projectile_speed: 2400,
+            impact_damage: 135,
+            ..EquipmentRuntimeFacts::default()
+        };
+        let (gl_detonate, gl_cleanup) = grenade_deadlines(&gl, GrenadeLaunchKind::Launcher, now);
+        assert_eq!(gl_detonate, None);
+        assert_eq!(gl_cleanup, now + GRENADE_FUSE_CAP_MS);
+
+        let dud = ProjectileState {
+            id: ProjectileId(1),
+            owner: ClientId(0),
+            owner_life: Default::default(),
+            weapon: 1,
+            origin: [0.0; 3],
+            velocity: [0.0; 3],
+            pos: Trajectory::default(),
+            apos: Trajectory::default(),
+            entnum: 64,
+            launch_time: now,
+            spawn_time_ms: now,
+            detonate_at_ms: None,
+            cleanup_at_ms: now + GRENADE_FUSE_CAP_MS,
+            travel_distance: 10_000.0,
+            live: false,
+            stuck_pane: None,
+        };
+        assert!(!dud.is_armed(375));
+        let restored = dud;
+        assert_eq!(restored.detonate_at_ms, None);
+        assert_eq!(restored.cleanup_at_ms, now + GRENADE_FUSE_CAP_MS);
+        assert!(!restored.live);
+
+        let dir = [1.0, 0.0, 0.0];
+        let sideways = grenade_launch_velocity(dir, &frag, [0.0, 400.0, 0.0]);
+        let forward_only = grenade_launch_velocity(dir, &frag, [0.0, 0.0, 0.0]);
+        assert_eq!(sideways, forward_only);
+        let along = grenade_launch_velocity(dir, &frag, [200.0, 0.0, 0.0]);
+        let launch_len = vec3_length(forward_only);
+        let launch_dir = [
+            forward_only[0] / launch_len,
+            forward_only[1] / launch_len,
+            forward_only[2] / launch_len,
+        ];
+        let added = 200.0 * launch_dir[0];
+        assert!((along[0] - forward_only[0] - launch_dir[0] * added).abs() < 1e-3);
+        assert!((along[1] - forward_only[1] - launch_dir[1] * added).abs() < 1e-3);
+        assert!((along[2] - forward_only[2] - launch_dir[2] * added).abs() < 1e-3);
+
+        let incoming = [100.0, 0.0, -100.0];
+        let outgoing = bounce_reflected_scale(incoming, [0.0, 0.0, 1.0], 0.5, 1.0);
+        let incoming_speed = (100.0f32 * 100.0 + 100.0 * 100.0).sqrt();
+        let incidence = 100.0 / incoming_speed;
+        let factor = 0.5 + (1.0 - 0.5) * incidence;
+        assert!((outgoing[0] - 100.0 * factor).abs() < 1e-4);
+        assert!(outgoing[1].abs() < 1e-4);
+        assert!((outgoing[2] - 100.0 * factor).abs() < 1e-4);
+        let small_in = [10.0, 0.0, -10.0];
+        let small_out = bounce_reflected_scale(small_in, [0.0, 0.0, 1.0], 0.95, 0.95);
+        let dx = small_out[0] - small_in[0];
+        let dy = small_out[1] - small_in[1];
+        let dz = small_out[2] - small_in[2];
+        let delta = (dx * dx + dy * dy + dz * dz).sqrt();
+        assert!(delta < BOUNCE_EVENT_SPEED_DELTA);
+
+        let mut world = crate::SimWorld::new();
+        world
+            .bootstrap(crate::spawn::MatchBootstrap {
+                allow_debug_actions: true,
+                ..crate::spawn::MatchBootstrap::default()
+            })
+            .expect("bootstrap");
+        let mut build = crate::SimContentBuilder::default();
+        let mut rifle = weapon_iw4::WeaponCombatFacts::none();
+        rifle.fire_time_ms = 80;
+        rifle.damage = 40;
+        let mut eq_table = vec![EquipmentRuntimeFacts::default(); 2];
+        eq_table[1] = EquipmentRuntimeFacts {
+            fuse_time_ms: 0,
+            projectile_activate_dist: 375,
+            projectile_speed: 2400,
+            impact_damage: 135,
+            weap_class: 6,
+            ..EquipmentRuntimeFacts::default()
+        };
+        build.set_weapon_combat_table(vec![weapon_iw4::WeaponCombatFacts::none(), rifle]);
+        build.set_equipment_runtime_table(eq_table);
+        world.install_content(build.finish());
+        world.debug_place_alive_player(ClientId(0), [0.0, 0.0, 0.0]);
+        let tick = Tick(1);
+        assert!(spawn_grenade_projectile(
+            &mut world.frame(),
+            ClientId(0),
+            1,
+            tick,
+            [0.0, 0.0, 60.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 400.0, 0.0],
+            GrenadeLaunchKind::Launcher,
+        ));
+        let spawned = {
+            let mut found = None;
+            world.visit_projectiles(|p| found = Some(*p));
+            found.expect("launcher projectile")
+        };
+        assert_eq!(spawned.detonate_at_ms, None);
+        assert_eq!(
+            spawned.cleanup_at_ms,
+            crate::level_time_ms(tick) + GRENADE_FUSE_CAP_MS
+        );
+        assert_eq!(spawned.apos.tr_delta, [0.0, 0.0, 0.0]);
+        let cloned = world.clone();
+        let restored_live = {
+            let mut found = None;
+            cloned.visit_projectiles(|p| found = Some(*p));
+            found.expect("cloned projectile")
+        };
+        assert_eq!(restored_live.detonate_at_ms, spawned.detonate_at_ms);
+        assert_eq!(restored_live.cleanup_at_ms, spawned.cleanup_at_ms);
+        assert_eq!(restored_live.live, spawned.live);
+        assert_eq!(restored_live.travel_distance, spawned.travel_distance);
+    }
+
+    #[test]
+    fn sub_threshold_speed_does_not_punch_glass() {
+        assert!(!missile_glass_punch_eligible(599.0, SURF_GLASS, 1));
+        assert!(missile_glass_punch_eligible(600.0, SURF_GLASS, 1));
+        assert!(missile_glass_punch_eligible(601.0, SURF_GLASS, 1));
+        assert!(!missile_glass_punch_eligible(600.0, 0, 1));
+        assert!(!missile_glass_punch_eligible(600.0, SURF_GLASS, 0));
+    }
+
+    #[test]
+    fn hop_cap_parks_the_trajectory_at_the_last_pane() {
+        let mut projectile = sample_projectile();
+        park_missile_at(
+            Tick(2),
+            &mut projectile,
+            [50.0, 0.0, 0.0],
+            [100.0, 0.0, 0.0],
+        );
+        let parked_at = level_time_ms(Tick(2));
+        assert_eq!(projectile.origin, [50.0, 0.0, 0.0]);
+        assert_eq!(projectile.pos.tr_base, [50.0, 0.0, 0.0]);
+        assert_eq!(projectile.pos.tr_time, parked_at);
+        assert_eq!(projectile.pos.tr_delta, [100.0, 0.0, 0.0]);
+        assert_eq!(projectile.origin_at(parked_at), [50.0, 0.0, 0.0]);
+        let later = projectile.origin_at(parked_at + crate::MATCH_TICK_MS as i32);
+        assert!(
+            later[0] > 50.0,
+            "next hop continues from the parked pane, not the old tr_base: {later:?}"
+        );
+    }
+
+    #[test]
+    fn sticky_detach_rewrites_gravity_from_the_pane() {
+        let mut projectile = sample_projectile();
+        stick_missile(Tick(1), &mut projectile, [12.0, 4.0, 8.0]);
+        assert_eq!(projectile.pos.tr_type, TR_STATIONARY);
+        projectile.stuck_pane = Some(3);
+        unstick_missile(Tick(2), &mut projectile);
+        assert!(projectile.stuck_pane.is_some());
+        projectile.stuck_pane = None;
+        assert_eq!(projectile.pos.tr_type, TR_GRAVITY);
+        assert_eq!(projectile.pos.tr_base, [12.0, 4.0, 8.0]);
+        assert_eq!(projectile.origin, [12.0, 4.0, 8.0]);
+        assert_eq!(projectile.velocity, [0.0, 0.0, 0.0]);
+        assert_eq!(projectile.pos.tr_delta, [0.0, 0.0, 0.0]);
+    }
 }

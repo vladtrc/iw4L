@@ -8,6 +8,7 @@ pub mod packet;
 pub mod packing;
 pub mod products;
 pub mod retained;
+pub mod sun_effects;
 pub mod sun_shadow;
 pub mod texture_bind;
 
@@ -51,6 +52,7 @@ pub use retained::{
     BspCameraLane, LightAttenuationBind, RENDER_FX_DEPTH_HACK, RetainedDrawItem, RetainedDrawKind,
     T5LightFalloffPack, XMODEL_OBJECT_ID_VIEWMODEL, host_viewmodel_render_fx_flags,
 };
+pub use sun_effects::{SunEffectsDef, SunEffectsFrame, angular_lerp};
 pub use sun_shadow::{
     SUN_SHADOW_CASTER_TECH, SUN_SHADOW_FORCED_PROFILE, SUN_SHADOW_PARTITION_COUNT,
     SunShadowAtlasProfile, SunShadowCasterLists, SunShadowForcedFrame, SunShadowPartition,

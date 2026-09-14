@@ -116,6 +116,10 @@ impl FrameWorld<'_> {
         visit_script_movers(self.ecs, visit);
     }
 
+    pub(crate) fn visit_projectiles(&self, visit: impl FnMut(&ProjectileState)) {
+        visit_projectiles(self.ecs, visit);
+    }
+
     pub fn spawn_script_mover(
         &mut self,
         id: ScriptModelId,
@@ -342,6 +346,22 @@ impl FrameWorld<'_> {
         *self.ensure_player(id) = ps;
         self.client_meta_mut(id).lifecycle = ClientLifecycle::Alive;
         self.link_player_standing_area(id);
+    }
+
+    pub fn debug_set_held_ammo(&mut self, id: ClientId, clip: i32, stock: i32) {
+        if !self.cheats_enabled() {
+            return;
+        }
+        let meta = self.client_meta_mut(id);
+        meta.ammo_clip = clip;
+        meta.ammo_stock = stock;
+    }
+
+    pub fn debug_set_team(&mut self, id: ClientId, team: i32) {
+        if !self.cheats_enabled() {
+            return;
+        }
+        self.client_meta_mut(id).client_state_team = team;
     }
 
     pub fn debug_mark_dead(&mut self, id: ClientId) {

@@ -189,9 +189,7 @@ fn drain_level_notifies_to_music(
     let prematch_n = prematch.read().count();
     let win_msgs: Vec<GameWin> = game_win.read().copied().collect();
     let spawned_msgs: Vec<SpawnedPlayerNotify> = spawned.read().copied().collect();
-    host.unhandled_glass_destroyed = host
-        .unhandled_glass_destroyed
-        .saturating_add(glass_destroyed.read().count() as u32);
+    let _ = glass_destroyed.read().count();
     let highest = host.players.first().map(|p| p.client);
     let losing = host.losing.clone();
     let level = ffa_level(&losing, highest);

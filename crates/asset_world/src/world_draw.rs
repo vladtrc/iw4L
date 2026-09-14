@@ -15,7 +15,7 @@ use crate::world_mesh::{
     BoundsTable, WorldMeshError, WorldMeshStats, normalize_or_up, unpack_color, unpack_unit_vec,
 };
 use asset_material::{AuthoredMaterial, MaterialCatalog, MaterialDefinitions};
-use fastfile_iw4::{GfxWorldGeometry, Ptr, ZonePtr, ZoneStream};
+use fastfile_iw4::{GfxSunEffectsGeometry, GfxWorldGeometry, Ptr, ZonePtr, ZoneStream};
 
 use crate::{SurfaceCastsSunShadow, WorldCapture, world_capture_from_casters};
 
@@ -368,6 +368,8 @@ pub struct WorldDraw {
 
     pub outdoor_lookup: [u32; 16],
 
+    pub sun_effects: Option<SunEffectsCapture>,
+
     pub t5_sun_parse_exposure: Option<f32>,
 
     pub t5_sky_dynamic_intensity: Option<[f32; 4]>,
@@ -379,6 +381,32 @@ pub struct WorldDraw {
     pub t5_tree_scatter_amount: Option<f32>,
 
     pub t5_exposure_volume_count: u32,
+}
+
+/// Zone-local sun-effects capture. Material slots are walk-local indices.
+#[derive(Clone, Copy, Debug)]
+pub struct SunEffectsCapture {
+    pub sprite_material: Option<usize>,
+    pub flare_material: Option<usize>,
+    pub sprite_size: f32,
+    pub flare_min_size: f32,
+    pub flare_min_dot: f32,
+    pub flare_max_size: f32,
+    pub flare_max_dot: f32,
+    pub flare_max_alpha: f32,
+    pub flare_fade_in_ms: i32,
+    pub flare_fade_out_ms: i32,
+    pub blind_min_dot: f32,
+    pub blind_max_dot: f32,
+    pub blind_max_darken: f32,
+    pub blind_fade_in_ms: i32,
+    pub blind_fade_out_ms: i32,
+    pub glare_min_dot: f32,
+    pub glare_max_dot: f32,
+    pub glare_max_lighten: f32,
+    pub glare_fade_in_ms: i32,
+    pub glare_fade_out_ms: i32,
+    pub direction: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -798,6 +826,7 @@ pub fn build_world_draw(
                 .map(|image| image.name.to_string())
         })
     });
+    let sun_effects = extract_sun_effects(s, geometry.sun_effects, &materials)?;
     let (brush_models, brush_model_bounds) = decode_brush_models(s, geometry)?;
 
     Ok((
@@ -842,6 +871,7 @@ pub fn build_world_draw(
             outdoor_image_name,
             outdoor_image: None,
             outdoor_lookup: geometry.outdoor_lookup,
+            sun_effects,
             t5_sun_parse_exposure: None,
             t5_sky_dynamic_intensity: None,
             t5_sun_light: None,
@@ -1625,6 +1655,97 @@ fn aabb_children_offset(s: &ZoneStream<'_>, node: Ptr) -> Result<i32, WorldMeshE
         return Err(WorldMeshError::InvalidAabbChildrenOffset { offset, stride });
     }
     Ok(offset / stride * dpvs_iw4::AABB_NODE_STRIDE as i32)
+}
+
+fn sun_f32(raw: &[u8], off: usize) -> Option<f32> {
+    let bytes = raw.get(off..off + 4)?;
+    Some(f32::from_bits(u32::from_le_bytes(bytes.try_into().ok()?)))
+}
+
+fn sun_i32(raw: &[u8], off: usize) -> Option<i32> {
+    let bytes = raw.get(off..off + 4)?;
+    Some(i32::from_le_bytes(bytes.try_into().ok()?))
+}
+
+fn sun_name(bytes: &[u8], len: u8) -> Option<&str> {
+    let len = usize::from(len);
+    core::str::from_utf8(bytes.get(..len)?)
+        .ok()
+        .filter(|name| !name.is_empty())
+}
+
+fn resolve_sun_material(
+    materials: &MaterialCatalog,
+    slot: Ptr,
+    header: Option<Ptr>,
+    name: Option<&str>,
+) -> Option<usize> {
+    materials
+        .material_index(slot)
+        .or_else(|| header.and_then(|header| materials.material_index(header)))
+        .map(|index| index.get())
+        .or_else(|| {
+            let name = name?;
+            materials
+                .materials
+                .iter()
+                .position(|material| material.name.as_ref() == name)
+        })
+}
+
+fn extract_sun_effects(
+    s: &ZoneStream<'_>,
+    sun: Option<GfxSunEffectsGeometry>,
+    materials: &MaterialCatalog,
+) -> Result<Option<SunEffectsCapture>, WorldMeshError> {
+    let Some(sun) = sun else {
+        return Ok(None);
+    };
+    let sprite_name = sun_name(&sun.sprite_name, sun.sprite_name_len);
+    let flare_name = sun_name(&sun.flare_name, sun.flare_name_len);
+    let sprite_index = resolve_sun_material(materials, sun.sprite, sun.sprite_header, sprite_name);
+    let flare_index = resolve_sun_material(materials, sun.flare, sun.flare_header, flare_name);
+    if sun.raw[0] == 0 {
+        return Ok(None);
+    }
+    let direction = [
+        sun_f32(&sun.raw, s.layout(84, 96)).unwrap_or(0.0),
+        sun_f32(&sun.raw, s.layout(88, 100)).unwrap_or(0.0),
+        sun_f32(&sun.raw, s.layout(92, 104)).unwrap_or(0.0),
+    ];
+    let len_sq =
+        direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2];
+    if !len_sq.is_finite() || len_sq < 0.25 {
+        return Ok(None);
+    }
+    let inv = 1.0 / len_sq.sqrt();
+    let need =
+        |off32: usize, off64: usize| sun_f32(&sun.raw, s.layout(off32, off64)).unwrap_or(0.0);
+    let need_i =
+        |off32: usize, off64: usize| sun_i32(&sun.raw, s.layout(off32, off64)).unwrap_or(0);
+    Ok(Some(SunEffectsCapture {
+        sprite_material: sprite_index,
+        flare_material: flare_index,
+        sprite_size: need(12, 24),
+        flare_min_size: need(16, 28),
+        flare_min_dot: need(20, 32),
+        flare_max_size: need(24, 36),
+        flare_max_dot: need(28, 40),
+        flare_max_alpha: need(32, 44),
+        flare_fade_in_ms: need_i(36, 48),
+        flare_fade_out_ms: need_i(40, 52),
+        blind_min_dot: need(44, 56),
+        blind_max_dot: need(48, 60),
+        blind_max_darken: need(52, 64),
+        blind_fade_in_ms: need_i(56, 68),
+        blind_fade_out_ms: need_i(60, 72),
+        glare_min_dot: need(64, 76),
+        glare_max_dot: need(68, 80),
+        glare_max_lighten: need(72, 84),
+        glare_fade_in_ms: need_i(76, 88),
+        glare_fade_out_ms: need_i(80, 92),
+        direction: [direction[0] * inv, direction[1] * inv, direction[2] * inv],
+    }))
 }
 
 fn extract_dpvs(s: &ZoneStream<'_>, g: GfxWorldGeometry) -> Result<DpvsWorldData, WorldMeshError> {

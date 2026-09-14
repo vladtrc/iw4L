@@ -78,6 +78,16 @@ impl ResolvedModelLightingTable {
         self.by_owner.entry(owner).or_insert(value);
     }
 
+    pub fn remove(&mut self, owner: ModelLightingOwner) {
+        self.by_owner.remove(&owner);
+    }
+
+    pub fn retain_glass(&mut self, live: &std::collections::HashSet<ModelLightingOwner>) {
+        self.by_owner.retain(|owner, _| {
+            !matches!(owner, ModelLightingOwner::Glass(_)) || live.contains(owner)
+        });
+    }
+
     pub fn get_or_insert_with(
         &mut self,
         owner: ModelLightingOwner,

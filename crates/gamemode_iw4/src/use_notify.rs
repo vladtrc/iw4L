@@ -44,6 +44,13 @@ impl UseCallbackKind {
             UseCallbackKind::DemBombzone => Some("gsc.dem.onUseObject"),
         }
     }
+
+    pub fn on_use_gap(self) -> Option<crate::ScriptGap> {
+        match self.on_use_gap_id() {
+            Some(id) => crate::ScriptGap::from_use_gap_id(id),
+            None => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

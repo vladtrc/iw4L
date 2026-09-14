@@ -569,6 +569,23 @@ pub struct GfxWorldGeometry {
     pub models: Option<Ptr>,
 
     pub bounds: Option<[u32; 6]>,
+
+    /// Owned sunflare bytes and material slots. Copied during load; not a live zone pointer.
+    pub sun_effects: Option<GfxSunEffectsGeometry>,
+}
+
+/// Authored sunflare copied while `GfxWorld` is still intact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GfxSunEffectsGeometry {
+    pub sprite: Ptr,
+    pub flare: Ptr,
+    pub sprite_header: Option<Ptr>,
+    pub flare_header: Option<Ptr>,
+    pub sprite_name: [u8; 32],
+    pub sprite_name_len: u8,
+    pub flare_name: [u8; 32],
+    pub flare_name_len: u8,
+    pub raw: [u8; 112],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1233,6 +1250,8 @@ pub struct WeaponGeometry {
 
     pub clip_only: bool,
 
+    pub timed_detonation: bool,
+
     pub proj_impact_explode: bool,
 
     pub stick_to_players: bool,
@@ -1245,6 +1264,7 @@ pub struct WeaponGeometry {
 
     pub projectile_speed: i32,
     pub projectile_speed_up: i32,
+    pub projectile_speed_forward: i32,
 
     pub projectile_activate_dist: i32,
 
@@ -1252,6 +1272,7 @@ pub struct WeaponGeometry {
 
     pub parallel_bounce: Option<[f32; 31]>,
     pub perpendicular_bounce: Option<[f32; 31]>,
+    pub location_damage_mult: Option<[f32; 20]>,
 
     pub start_ammo: i32,
 

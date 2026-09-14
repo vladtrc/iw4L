@@ -1,4 +1,4 @@
-use crate::bullet::{angles_to_forward, bullet_damage_at_distance};
+use crate::bullet::bullet_damage_at_distance;
 use crate::bullet_collision::{
     BulletTraceQuery, ColliderId, EntityCollisionEpoch, EntityCollisionTraceGeom,
     HistorySampleVerdict, MASK_BULLET_WORLD, bullet_trace_segments_filtered, glass_piece_from_hit,
@@ -7,9 +7,13 @@ use crate::frame::FrameWorld;
 use crate::identities::{DamageSource, LifeSequence, MatchRng, PelletId, ShotId};
 use crate::match_state::{ClientLifecycle, EventAudience};
 use crate::world::{ClientId, Tick};
+use crate::world_objects::glass_piece_is_solid;
 use anim_iw4::{ANIM_ET_FIREWEAPON, ANIM_ET_RELOAD};
+use entity_iw4::glass_add_damage;
 use movement_iw4::{Pml, mantle_is_weapon_inactive, pm_is_in_air};
 use playerstate_iw4::{ENTITYNUM_NONE, PlayerState, mantle_flags};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use weapon_iw4::{
     AIM_SPREAD_MOVE_SPEED_THRESHOLD_DEFAULT, AimSpreadMotion, AimSpreadState, CURSOR_HINT_NONE,
     FireWeaponKind, MELEE_TRACE_OFFSETS, MeleeChargeState, OFFHAND_INV_SLOTS, OffhandCmd,
@@ -39,6 +43,8 @@ pub struct AcceptedShot {
 
     pub perks0: u32,
     pub combat_seed: u32,
+    pub owner_velocity: [f32; 3],
+    pub spread_degrees: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -481,11 +487,7 @@ pub(crate) fn advance_weapon_command(
                         continue;
                     };
                     apply_weapon_anim_event(world, *id, ANIM_ET_FIREWEAPON);
-                    let combat_seed = if facts.damage > 0 {
-                        world.combat_rng_mut().next_u32()
-                    } else {
-                        0
-                    };
+                    let combat_seed = world.combat_rng_mut().next_u32();
                     let origin = [
                         ps.origin[0],
                         ps.origin[1],
@@ -519,6 +521,21 @@ pub(crate) fn advance_weapon_command(
                         .player(*id)
                         .map(|p| p.aim_spread_scale)
                         .unwrap_or(ps.aim_spread_scale);
+                    let ads_frac = ps.f_weapon_pos_frac.clamp(0.0, 1.0);
+                    let override_state = SpreadOverrideState::from_i32(ps.spread_override_state);
+                    let cone = bg_get_spread_for_weapon(
+                        ps.view_height_current,
+                        ps.spread_override,
+                        override_state,
+                        &facts.spread_facts(),
+                        weapon_iw4::perk_weap_spread_multiplier(ps.perks[0]),
+                    );
+                    let spread_degrees = fire_weapon_spread_degrees(
+                        cone,
+                        facts.ads_spread,
+                        ads_frac,
+                        aim_spread_scale,
+                    );
                     accepted.push(AcceptedShot {
                         shot_id,
                         attacker: *id,
@@ -527,11 +544,13 @@ pub(crate) fn advance_weapon_command(
                         ammo_used,
                         origin,
                         angles: ps.viewangles,
-                        ads_frac: ps.f_weapon_pos_frac.clamp(0.0, 1.0),
+                        ads_frac,
                         view_height_current: ps.view_height_current,
                         aim_spread_scale,
                         perks0: ps.perks[0],
                         combat_seed,
+                        owner_velocity: ps.velocity,
+                        spread_degrees,
                     });
                 }
                 WeaponTickEvent::OffhandPrepare { weapon } => {
@@ -543,7 +562,10 @@ pub(crate) fn advance_weapon_command(
                         );
                     }
                 }
-                WeaponTickEvent::OffhandUsed { weapon } => {
+                WeaponTickEvent::OffhandUsed {
+                    weapon,
+                    remaining_fuse_ms,
+                } => {
                     let combat = world.weapon_combat_row(weapon);
                     let meta = world.client_meta_mut(*id);
                     let (clip, stock) = meta.ammo_for(weapon);
@@ -559,7 +581,13 @@ pub(crate) fn advance_weapon_command(
                             spend_ps_offhand_round(ps, weapon, facts);
                         }
                     }
-                    if crate::equipment::spawn_offhand_projectile(world, *id, weapon, tick) {
+                    if crate::equipment::spawn_offhand_projectile(
+                        world,
+                        *id,
+                        weapon,
+                        tick,
+                        remaining_fuse_ms,
+                    ) {
                         if let Some(ps) = world.player(*id).copied() {
                             let origin = [
                                 ps.origin[0],
@@ -581,6 +609,24 @@ pub(crate) fn advance_weapon_command(
                         }
                         crate::voice::on_grenade_fire(world, tick, *id, weapon);
                     }
+                }
+                WeaponTickEvent::OffhandCookedOff { weapon } => {
+                    let combat = world.weapon_combat_row(weapon);
+                    let meta = world.client_meta_mut(*id);
+                    let (clip, stock) = meta.ammo_for(weapon);
+                    if clip + stock > 0 {
+                        if clip > 0 {
+                            meta.set_ammo(weapon, clip - 1, stock);
+                        } else {
+                            meta.set_ammo(weapon, 0, stock - 1);
+                        }
+                    }
+                    if let Some(facts) = combat {
+                        if let Some(ps) = world.player_mut(*id) {
+                            spend_ps_offhand_round(ps, weapon, facts);
+                        }
+                    }
+                    crate::equipment::explode_offhand_in_hand(world, *id, weapon, tick);
                 }
                 WeaponTickEvent::ReloadStarted => {
                     apply_weapon_anim_event(world, *id, ANIM_ET_RELOAD);
@@ -707,32 +753,31 @@ pub fn spread_pellet_direction(
     spread_degrees: f32,
     rng: &mut MatchRng,
 ) -> [f32; 3] {
-    let forward = angles_to_forward(angles);
+    spread_direction_on_plane(angles, spread_degrees, rng, 1.0)
+}
+
+pub fn spread_direction_on_plane(
+    angles: [f32; 3],
+    spread_degrees: f32,
+    rng: &mut MatchRng,
+    plane: f32,
+) -> [f32; 3] {
+    let (forward, right, up) = math_iw4::angle_vectors(angles);
     if spread_degrees <= 0.0 {
         return forward;
     }
-    let yaw = angles[1].to_radians();
-    let right = [yaw.sin(), -yaw.cos(), 0.0];
-    let up = [
-        right[1] * forward[2] - right[2] * forward[1],
-        right[2] * forward[0] - right[0] * forward[2],
-        right[0] * forward[1] - right[1] * forward[0],
-    ];
     let unit = |draw: u32| draw as f32 / u32::MAX as f32;
-    let radius = unit(rng.next_u32()).sqrt() * spread_degrees.to_radians().tan();
+    let radius = unit(rng.next_u32());
     let theta = unit(rng.next_u32()) * core::f32::consts::TAU;
-    let x = radius * theta.cos();
-    let y = radius * theta.sin();
-    let direction = [
-        forward[0] + right[0] * x + up[0] * y,
-        forward[1] + right[1] * x + up[1] * y,
-        forward[2] + right[2] * x + up[2] * y,
+    let lateral = plane * spread_degrees.to_radians().tan() * radius;
+    let q = [
+        plane * forward[0] + lateral * (theta.cos() * right[0] + theta.sin() * up[0]),
+        plane * forward[1] + lateral * (theta.cos() * right[1] + theta.sin() * up[1]),
+        plane * forward[2] + lateral * (theta.cos() * right[2] + theta.sin() * up[2]),
     ];
-    let len =
-        (direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2])
-            .sqrt();
+    let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
     if len > 0.0 {
-        [direction[0] / len, direction[1] / len, direction[2] / len]
+        [q[0] / len, q[1] / len, q[2] / len]
     } else {
         forward
     }
@@ -753,17 +798,6 @@ pub(crate) fn phase_emit(world: &FrameWorld, shots: &[AcceptedShot]) -> Vec<Emis
             }
             _ => continue,
         }
-        let ads_frac = shot.ads_frac.clamp(0.0, 1.0);
-        let cone = bg_get_spread_for_weapon(
-            shot.view_height_current,
-            0,
-            SpreadOverrideState::None,
-            &facts.spread_facts(),
-            weapon_iw4::perk_weap_spread_multiplier(shot.perks0),
-        );
-
-        let spread =
-            fire_weapon_spread_degrees(cone, facts.ads_spread, ads_frac, shot.aim_spread_scale);
         let mut rng = MatchRng::new(shot.combat_seed as u64);
         let pellet_count = facts.pellet_count().clamp(1, u16::MAX as i32) as u16;
         for pellet in 0..pellet_count {
@@ -774,7 +808,7 @@ pub(crate) fn phase_emit(world: &FrameWorld, shots: &[AcceptedShot]) -> Vec<Emis
                 attacker_life: shot.attacker_life,
                 weapon: shot.weapon,
                 origin: shot.origin,
-                direction: spread_pellet_direction(shot.angles, spread, &mut rng),
+                direction: spread_pellet_direction(shot.angles, shot.spread_degrees, &mut rng),
                 max_range: facts.bullet_range(),
                 base_damage: facts.damage,
             });
@@ -800,7 +834,31 @@ pub(crate) fn phase_trace(
             em.origin[2] + em.direction[2] * em.max_range,
         ];
         let pen = world.bullet_pen_facts_for(em.weapon);
-        let glass_pairs = world.world_objects().glass_damage_pairs();
+        let glass_damage = RefCell::new(
+            world
+                .world_objects()
+                .glass_damage_pairs()
+                .into_iter()
+                .collect::<HashMap<u32, u16>>(),
+        );
+        let glass_seen = RefCell::new(Vec::<u32>::new());
+        let on_glass_hit = |piece: u16, end: [f32; 3]| {
+            let pane = u32::from(piece);
+            if glass_seen.borrow().contains(&pane) {
+                return;
+            }
+            glass_seen.borrow_mut().push(pane);
+            let dist = {
+                let dx = end[0] - em.origin[0];
+                let dy = end[1] - em.origin[1];
+                let dz = end[2] - em.origin[2];
+                (dx * dx + dy * dy + dz * dz).sqrt()
+            };
+            let scaled = bullet_damage_at_distance(&facts, dist).max(0) as u32;
+            let mut map = glass_damage.borrow_mut();
+            let cur = map.entry(pane).or_insert(0);
+            *cur = glass_add_damage(*cur, scaled);
+        };
         let (segments, terminal) = bullet_trace_segments_filtered(
             world.clip_brushes(),
             world.clip_bsp(),
@@ -818,14 +876,15 @@ pub(crate) fn phase_trace(
             pen,
             world.penetration_table(),
             &|piece| {
-                crate::world_objects::glass_piece_is_solid(
-                    glass_pairs
-                        .iter()
-                        .find(|(id, _)| *id == u32::from(piece))
-                        .map(|(_, d)| *d)
+                glass_piece_is_solid(
+                    glass_damage
+                        .borrow()
+                        .get(&(u32::from(piece)))
+                        .copied()
                         .unwrap_or(0),
                 )
             },
+            Some(&on_glass_hit),
         );
         let entity_epoch = entity_collision_epoch(terminal, &query.entities.rows);
         let startsolid = segments.first().is_some_and(|s| s.startsolid);
@@ -860,6 +919,7 @@ pub(crate) fn phase_trace(
         if segments.is_empty() {
             continue;
         }
+        let mut glass_hit: Vec<u32> = Vec::new();
         for segment in &segments {
             let exit = segment.surface_flags & fx_iw4::FX_IMPACT_EXIT_SURFACE_FLAG != 0;
             let dist = {
@@ -1004,16 +1064,21 @@ pub(crate) fn phase_trace(
                             .world_objects_mut()
                             .apply_destructible_damage_batch(&[intent]);
                         for explode in &report.explodes {
-                            let attempts =
-                                crate::damage::radius_attempts_from_truck_explode(world, explode);
-                            for attempt in &attempts {
-                                let _ = crate::damage::apply_damage_attempt(world, tick, attempt);
-                            }
+                            crate::damage::apply_explosion_blast(
+                                world,
+                                tick,
+                                &crate::damage::ExplosionBlast::from_destructible(explode),
+                            );
+                            crate::damage::apply_explode_glass_blast(world, tick, explode);
                         }
                     }
                 }
                 Some(ColliderId::World { .. }) => {
                     if let Some(piece) = glass_piece_from_hit(segment.hit_type, segment.hit_id) {
+                        if glass_hit.contains(&piece) {
+                            continue;
+                        }
+                        glass_hit.push(piece);
                         let at_time_ms = i32::try_from(tick.0.saturating_mul(crate::MATCH_TICK_MS))
                             .unwrap_or(i32::MAX);
                         let mut holdrand = *world.stuck_holdrand_mut();
@@ -1088,6 +1153,7 @@ fn fire_weapon_melee(
             weapon_iw4::BulletPenFacts::default(),
             world.penetration_table(),
             &is_solid,
+            None,
         );
         let Some(segment) = segments.iter().find(|s| s.collider.is_some()) else {
             continue;

@@ -22,6 +22,7 @@ mod missile;
 pub mod player_anim_script;
 pub mod rules;
 mod score;
+pub mod script_gaps;
 mod smodel_grid;
 mod snapshot;
 mod sound_alias_cs;
@@ -55,13 +56,15 @@ pub use bullet_collision::{
     PLAYER_MINS, PlayerCollisionPose, ScriptModelPlayAnim, ShotSampleProvenance, ShotSampleQuality,
     TraceInvalidReason, TraceOutcome, bullet_trace, bullet_trace_segments,
     bullet_trace_segments_with_entity_models, bullet_trace_with_entity_models,
-    dobj_contents_match_mask, lagcomp_rewind_ticks,
+    dobj_contents_match_mask, glass_piece_from_hit, lagcomp_rewind_ticks,
 };
 pub use carrier::{SimWorld, StepReason, step};
-pub use clipmap_iw4::{ClipCmodel, ClipLeaf, ClipNode};
+pub use clipmap_iw4::{
+    ClipCmodel, ClipLeaf, ClipNode, ClipStaticModel, XModelColl, XModelCollSurf, XModelCollTri,
+};
 pub use combat::{
     AcceptedShot, Emission, PlayerCollisionRepresentation, ShotCollisionGeometry,
-    ShotCollisionVerdict, TracePhaseOutput, spread_pellet_direction,
+    ShotCollisionVerdict, TracePhaseOutput, spread_direction_on_plane, spread_pellet_direction,
 };
 pub use content::{
     CONTENT_DIGEST_SCHEME, ContentComponents, content_components_v2, content_digest_v0,
@@ -120,6 +123,7 @@ pub use player_anim_script::{
 };
 pub use rules::{FFA, FreeForAllRules};
 pub use score::{MATCH_TICK_MS, bootstrap_score_defaults};
+pub use script_gaps::ScriptGaps;
 pub use snapshot::{
     AreaEntityLinkSnapshot, AreaEntityWorldSnapshot, AreaEntityWorldSnapshotError,
     AreaSectorSnapshot, Snapshot,
@@ -135,8 +139,8 @@ pub use spawn::{
     pick_ffa_spawn, spawn_candidate_indices, spawn_candidate_indices_for,
 };
 pub use step::{
-    apply_explodable_barrel_death_presentation, apply_toy_death_presentation,
-    phase_materialize_entity_dobjs,
+    apply_destructable_death_presentation, apply_explodable_barrel_death_presentation,
+    apply_toy_death_presentation, phase_materialize_entity_dobjs,
 };
 pub use use_object::{
     DomFlagInstallError, MapUseBindError, UseCancelReason, UseHoldSession, UseObject,
@@ -144,8 +148,9 @@ pub use use_object::{
     trigger_radius_world_aabb, world_aabb_from_r_box,
 };
 pub use weapon_iw4::{
-    BulletPenFacts, CapturedCombatInput, FireType, MissingCombatFacts, PERK_FASTRELOAD,
-    PenetrationDepthTable, WeaponCombatFacts,
+    BulletPenFacts, CapturedCombatInput, FireType, HITLOC_COUNT, LOCATION_DAMAGE_IDENTITY,
+    MissingCombatFacts, PERK_FASTRELOAD, PenetrationDepthTable, WeaponCombatFacts,
+    bake_location_damage, location_damage_is_valid, location_damage_scale,
 };
 pub use world::{
     ClientId, DamageFeedbackCue, HitvolDumpRow, PendingPlayerCardEvent, PendingPlayerCardKind,
@@ -153,11 +158,14 @@ pub use world::{
     blank_player_state,
 };
 pub use world_objects::{
-    DestructibleApplyReport, DestructibleDamageIntent, DestructibleExplodeEvent,
-    DestructibleStateIndex, GLASS_DAMAGE_TO_DESTROY, GLASS_DAMAGE_TO_WEAKEN, GLASS_MELEE_DAMAGE,
-    GlassPaneBasis, GlassPieceId, GlassPieceSnapshot, GlassPieceState, GlassShatterSeed,
+    DestructableDown, DestructableInstall, DestructibleApplyReport, DestructibleDamageIntent,
+    DestructibleExplodeEvent, DestructibleStateIndex, FlammableCrateInstall,
+    GLASS_BLAST_DAMAGE_SCALE, GLASS_BLAST_RADIUS_CAP, GLASS_DAMAGE_TO_DESTROY,
+    GLASS_DAMAGE_TO_WEAKEN, GLASS_FRACTURE_PROFILE_VERSION, GLASS_MELEE_DAMAGE,
+    GLASS_PROJECTILE_PANE_HOPS, GlassBreakRecord, GlassCause, GlassPaneBasis, GlassPieceId,
+    GlassPieceSnapshot, GlassPieceState, GlassShatterSeed, MISSILE_GLASS_SHATTER_VEL,
     ToyDestructibleKind, VehicleDestructibleKind, VehicleDumpRow, VehicleFxPulse,
-    VehicleSoundPulse, WorldObjectSnapshot, WorldObjectState,
+    VehicleSoundPulse, WorldObjectSnapshot, WorldObjectState, glass_blast_integer_damage,
 };
 pub use xmodel_runtime::{
     AnimClip, BoneCollision, DObjCompositionDescriptor, DObjModelDescriptor, DObjPoseRequest,
@@ -166,8 +174,16 @@ pub use xmodel_runtime::{
     XAnimSemanticNode, XAnimSemanticNodeKind, XAnimTreeDefinition, XAnimTreeSnapshot,
 };
 
+mod map_conveyer;
+mod map_diggers;
 mod map_doors;
+mod map_lights;
+mod map_moving_diggers;
+pub use map_conveyer::RadiationConveyer;
+pub use map_diggers::RadiationDigger;
 pub use map_doors::{DoorLeaf, DoorSwitch, MapDoors};
+pub use map_lights::RadiationLights;
+pub use map_moving_diggers::RadiationMovingDigger;
 
 mod objectives;
 pub use objectives::{BombSite, ObjectiveHull, ObjectiveMatch, ObjectiveView};

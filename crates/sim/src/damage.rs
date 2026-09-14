@@ -1,11 +1,11 @@
 use crate::frame::FrameWorld;
-use crate::identities::{LifeSequence, PelletId};
+use crate::identities::{DamageSource, LifeSequence, PelletId};
 use crate::match_state::{
     CLASS_CATALOG_DANGER_CLOSE, CLASS_CATALOG_STOPPING_POWER, ClientLifecycle, EventAudience,
     SimEvent, class_catalog_has,
 };
 use crate::world::{ClientId, Tick};
-use crate::world_objects::DestructibleExplodeEvent;
+use crate::world_objects::{DestructibleExplodeEvent, GlassPaneBasis, GlassPieceId};
 use gamemode_iw4::{
     G_CAN_DAMAGE_CONTENTS_MASK, g_can_damage_player_vis_scale, g_radius_damage_amount,
     radius_damage_distance_to_aabb,
@@ -86,42 +86,212 @@ pub enum DamageOutcome {
     Died(DeathCommit),
 }
 
-pub fn radius_attempts_from_truck_explode(
-    world: &FrameWorld,
-    explode: &DestructibleExplodeEvent,
-) -> Vec<DamageAttempt> {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ExplosionBlast {
+    pub origin: [f32; 3],
+    pub radius: f32,
+    pub inner_damage: f32,
+    pub outer_damage: f32,
+    pub weapon: u32,
+    pub source: DamageSource,
+    pub attacker: ClientId,
+    pub attacker_life: LifeSequence,
+    pub killcam_entity_start_time: i32,
+}
+
+impl ExplosionBlast {
+    pub(crate) fn from_destructible(explode: &DestructibleExplodeEvent) -> Self {
+        Self {
+            origin: explode.origin,
+            radius: explode.explode_range_mp as f32,
+            inner_damage: explode.explode_damage.1 as f32,
+            outer_damage: explode.explode_damage.0 as f32,
+            weapon: 0,
+            source: explode.source,
+            attacker: explode.attacker,
+            attacker_life: explode.attacker_life,
+            killcam_entity_start_time: 0,
+        }
+    }
+}
+
+struct GlassBlastHit {
+    id: GlassPieceId,
+    amount: u32,
+    hit: [f32; 3],
+    dir: [f32; 3],
+}
+
+pub(crate) fn apply_explosion_blast(world: &mut FrameWorld, tick: Tick, blast: &ExplosionBlast) {
+    if !world.publishes_snapshot() {
+        return;
+    }
+    let attempts = radius_player_attempts(world, blast);
+    let glass = radius_glass_hits(world, blast);
+    for attempt in &attempts {
+        let _ = apply_damage_attempt(world, tick, attempt);
+    }
+    apply_glass_blast_hits(world, tick, glass);
+}
+
+pub(crate) fn apply_explosion_destructibles(
+    world: &mut FrameWorld,
+    blast: &ExplosionBlast,
+    skip_owner: Option<crate::ScriptModelId>,
+) -> Vec<DestructibleExplodeEvent> {
+    if !world.publishes_snapshot() {
+        return Vec::new();
+    }
+    let explode = DestructibleExplodeEvent {
+        owner: skip_owner.unwrap_or(crate::ScriptModelId::from_wire(u32::MAX)),
+        origin: blast.origin,
+        attacker: blast.attacker,
+        attacker_life: blast.attacker_life,
+        source: blast.source,
+        explode_range_mp: blast.radius.max(0.0) as u32,
+        explode_damage: (
+            blast.outer_damage.max(0.0) as u32,
+            blast.inner_damage.max(0.0) as u32,
+        ),
+    };
+    let intents = world
+        .world_objects()
+        .destructible_radius_intents(&[explode]);
+    world
+        .world_objects_mut()
+        .apply_destructible_damage_batch(&intents)
+        .explodes
+}
+
+fn radius_player_attempts(world: &FrameWorld, blast: &ExplosionBlast) -> Vec<DamageAttempt> {
     let mut intents = Vec::new();
-    let inner = explode.explode_damage.1 as f32;
-    let outer = explode.explode_damage.0 as f32;
-    let radius = explode.explode_range_mp as f32;
-    for target in radius_player_candidates(world, explode.origin, radius) {
+    if blast.radius <= 0.0 {
+        return intents;
+    }
+    for target in radius_player_candidates(world, blast.origin, blast.radius) {
         let Some(meta) = world.client_meta(target) else {
             continue;
         };
         let bounds = world.player_area_bounds(target).unwrap_or_else(|| {
             panic!("CM_AreaEntities returned a player without linked absolute Bounds");
         });
-        let dist = radius_damage_distance_to_aabb(explode.origin, bounds.mid(), bounds.half());
-        let vis_scale = player_radius_vis_scale(world, explode.origin, target);
-        let amount = g_radius_damage_amount(inner, outer, radius, dist, vis_scale);
+        let dist = radius_damage_distance_to_aabb(blast.origin, bounds.mid(), bounds.half());
+        let vis_scale = player_radius_vis_scale(world, blast.origin, target);
+        let amount = g_radius_damage_amount(
+            blast.inner_damage,
+            blast.outer_damage,
+            blast.radius,
+            dist,
+            vis_scale,
+        );
         if amount <= 0 {
             continue;
         }
         intents.push(DamageAttempt {
-            source: explode.source,
+            source: blast.source,
             pellet: PelletId(0),
-            attacker: explode.attacker,
-            attacker_life: explode.attacker_life,
+            attacker: blast.attacker,
+            attacker_life: blast.attacker_life,
             target,
             target_life: meta.life_sequence,
-            weapon: 0,
+            weapon: blast.weapon,
             amount,
-            killcam_entity_start_time: 0,
-            inflictor_origin: Some(explode.origin),
+            killcam_entity_start_time: blast.killcam_entity_start_time,
+            inflictor_origin: Some(blast.origin),
             hitloc: 0,
         });
     }
     intents
+}
+
+fn radius_glass_hits(world: &FrameWorld, blast: &ExplosionBlast) -> Vec<GlassBlastHit> {
+    let mut hits = Vec::new();
+    if blast.radius <= 0.0 {
+        return hits;
+    }
+    for (id, pane) in world.world_objects().glass_radius_targets() {
+        let (mid, half) = glass_pane_aabb(pane);
+        let dist = radius_damage_distance_to_aabb(blast.origin, mid, half);
+        let amount = g_radius_damage_amount(
+            blast.inner_damage,
+            blast.outer_damage,
+            blast.radius,
+            dist,
+            1.0,
+        );
+        if amount <= 0 {
+            continue;
+        }
+        let dir = [
+            mid[0] - blast.origin[0],
+            mid[1] - blast.origin[1],
+            mid[2] - blast.origin[2],
+        ];
+        hits.push(GlassBlastHit {
+            id,
+            amount: amount as u32,
+            hit: mid,
+            dir,
+        });
+    }
+    hits
+}
+
+fn apply_glass_blast_hits(world: &mut FrameWorld, tick: Tick, hits: Vec<GlassBlastHit>) {
+    if hits.is_empty() {
+        return;
+    }
+    let at_time_ms = i32::try_from(tick.0.saturating_mul(crate::MATCH_TICK_MS)).unwrap_or(i32::MAX);
+    let mut holdrand = *world.stuck_holdrand_mut();
+    for hit in hits {
+        world.world_objects_mut().apply_glass_hit(
+            hit.id,
+            hit.amount,
+            at_time_ms,
+            hit.hit,
+            hit.dir,
+            &mut || crate::item::g_random(&mut holdrand),
+        );
+    }
+    *world.stuck_holdrand_mut() = holdrand;
+}
+
+fn glass_pane_aabb(pane: GlassPaneBasis) -> ([f32; 3], [f32; 3]) {
+    let mut min = pane.origin;
+    let mut max = pane.origin;
+    for corner in [
+        [
+            pane.origin[0] + pane.axis_s[0],
+            pane.origin[1] + pane.axis_s[1],
+            pane.origin[2] + pane.axis_s[2],
+        ],
+        [
+            pane.origin[0] + pane.axis_t[0],
+            pane.origin[1] + pane.axis_t[1],
+            pane.origin[2] + pane.axis_t[2],
+        ],
+        [
+            pane.origin[0] + pane.axis_s[0] + pane.axis_t[0],
+            pane.origin[1] + pane.axis_s[1] + pane.axis_t[1],
+            pane.origin[2] + pane.axis_s[2] + pane.axis_t[2],
+        ],
+    ] {
+        for i in 0..3 {
+            min[i] = min[i].min(corner[i]);
+            max[i] = max[i].max(corner[i]);
+        }
+    }
+    let mid = [
+        (min[0] + max[0]) * 0.5,
+        (min[1] + max[1]) * 0.5,
+        (min[2] + max[2]) * 0.5,
+    ];
+    let half = [
+        (max[0] - min[0]) * 0.5,
+        (max[1] - min[1]) * 0.5,
+        (max[2] - min[2]) * 0.5,
+    ];
+    (mid, half)
 }
 
 pub(crate) fn radius_player_candidates(
@@ -139,6 +309,42 @@ pub(crate) fn radius_player_candidates(
         .into_iter()
         .map(|entity_num| ClientId(u32::from(entity_num)))
         .collect()
+}
+
+pub(crate) fn apply_shared_glass_blast(
+    world: &mut FrameWorld,
+    tick: Tick,
+    origin: [f32; 3],
+    inner_damage: i32,
+    outer_damage: i32,
+    radius: f32,
+) {
+    let time = crate::level_time_ms(tick);
+    let mut holdrand = *world.stuck_holdrand_mut();
+    world.world_objects_mut().apply_glass_blast(
+        origin,
+        inner_damage,
+        outer_damage,
+        radius,
+        time,
+        &mut || crate::item::g_random(&mut holdrand),
+    );
+    *world.stuck_holdrand_mut() = holdrand;
+}
+
+pub(crate) fn apply_explode_glass_blast(
+    world: &mut FrameWorld,
+    tick: Tick,
+    explode: &DestructibleExplodeEvent,
+) {
+    apply_shared_glass_blast(
+        world,
+        tick,
+        explode.origin,
+        explode.explode_damage.1 as i32,
+        explode.explode_damage.0 as i32,
+        explode.explode_range_mp as f32,
+    );
 }
 
 fn player_radius_vis_scale(world: &FrameWorld, inflictor: [f32; 3], target: ClientId) -> f32 {
@@ -383,6 +589,18 @@ pub(crate) fn apply_damage_attempt(
         return DamageOutcome::Refused(DamageRefusal::StaleLife);
     }
 
+    let mut incoming = intent.amount;
+    if !matches!(intent.source, crate::DamageSource::Melee) {
+        let scale = world
+            .combat_facts_for(intent.weapon)
+            .map(|facts| facts.location_scale(intent.hitloc))
+            .unwrap_or(1.0);
+        incoming = (incoming as f32 * scale) as i32;
+        if incoming <= 0 {
+            return DamageOutcome::Refused(DamageRefusal::NonPositive);
+        }
+    }
+
     let attacker_perks = world
         .client_meta(intent.attacker)
         .and_then(|m| m.loadout.as_ref())
@@ -400,7 +618,7 @@ pub(crate) fn apply_damage_attempt(
         crate::DamageSource::Melee => gamemode_iw4::CacDamageMeans::Other,
     };
     let amount = gamemode_iw4::cac_modified_damage(
-        intent.amount,
+        incoming,
         means,
         inherits_perks,
         class_catalog_has(attacker_perks, CLASS_CATALOG_STOPPING_POWER),
@@ -700,5 +918,363 @@ fn anim_script_damagetype(
             }
         }
         crate::DamageSource::Melee => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::combat::AcceptedShot;
+    use crate::identities::ShotId;
+    use crate::spawn::MatchBootstrap;
+    use crate::{SimContentBuilder, SimWorld};
+    use weapon_iw4::{
+        BULLET_MAX_RANGE, LOCATION_DAMAGE_IDENTITY, WEAPCLASS_SPREAD, WeaponCombatFacts,
+        fire_weapon_kind,
+    };
+
+    const HITLOC_HEAD: u8 = 2;
+    const HITLOC_TORSO_UPPER: u8 = 4;
+    const RIFLE: u32 = 1;
+    const SHOTGUN: u32 = 2;
+
+    fn rifle_facts() -> WeaponCombatFacts {
+        let mut loc = LOCATION_DAMAGE_IDENTITY;
+        loc[HITLOC_HEAD as usize] = 1.4;
+        loc[HITLOC_TORSO_UPPER as usize] = 1.0;
+        let mut facts = WeaponCombatFacts::none();
+        facts.fire_time_ms = 80;
+        facts.weap_type = 0;
+        facts.weap_class = 0;
+        facts.shots_per_fire = 9;
+        facts.damage = 40;
+        facts.min_damage = 30;
+        facts.max_damage_range = 1500.0;
+        facts.min_damage_range = 2000.0;
+        facts.location_damage = loc;
+        facts.inherits_perks = true;
+        facts
+    }
+
+    fn shotgun_facts() -> WeaponCombatFacts {
+        let mut facts = WeaponCombatFacts::none();
+        facts.fire_time_ms = 80;
+        facts.weap_type = 0;
+        facts.weap_class = WEAPCLASS_SPREAD;
+        facts.shots_per_fire = 8;
+        facts.damage = 20;
+        facts.min_damage = 15;
+        facts.min_damage_range = 500.0;
+        facts
+    }
+
+    fn cheat_world(combat: Vec<WeaponCombatFacts>) -> SimWorld {
+        let mut world = SimWorld::new();
+        world
+            .bootstrap(MatchBootstrap {
+                allow_debug_actions: true,
+                ..MatchBootstrap::default()
+            })
+            .expect("bootstrap");
+        let mut build = SimContentBuilder::default();
+        build.set_weapon_combat_table(combat);
+        world.install_content(build.finish());
+        world
+    }
+
+    fn world_cmodel() -> crate::SimClipCmodels {
+        crate::SimClipCmodels {
+            models: vec![clipmap_iw4::ClipCmodel {
+                mins: [-2048.0; 3],
+                maxs: [2048.0; 3],
+                radius: 4096.0,
+                first_brush: 0,
+                num_brushes: 0,
+            }],
+        }
+    }
+
+    fn shot_attempt(
+        target: ClientId,
+        target_life: LifeSequence,
+        hitloc: u8,
+        amount: i32,
+    ) -> DamageAttempt {
+        DamageAttempt {
+            source: DamageSource::Shot(ShotId(1)),
+            pellet: PelletId(0),
+            attacker: ClientId(0),
+            attacker_life: LifeSequence(0),
+            target,
+            target_life,
+            weapon: RIFLE,
+            amount,
+            killcam_entity_start_time: 0,
+            inflictor_origin: None,
+            hitloc,
+        }
+    }
+
+    #[test]
+    fn fire_to_health_reach_pellets_and_location() {
+        let rifle = rifle_facts();
+        let shotgun = shotgun_facts();
+        assert_eq!(rifle.bullet_range(), BULLET_MAX_RANGE);
+        assert_eq!(rifle.pellet_count(), 1);
+        assert_eq!(shotgun.bullet_range(), 500.0);
+        assert_eq!(shotgun.pellet_count(), 8);
+        assert_eq!(crate::bullet::bullet_damage_at_distance(&rifle, 1000.0), 40);
+        assert_eq!(crate::bullet::bullet_damage_at_distance(&rifle, 2500.0), 30);
+        assert!(9000.0 > rifle.bullet_range());
+        assert_eq!(
+            fire_weapon_kind(rifle.weap_type, rifle.weap_class),
+            Some(weapon_iw4::FireWeaponKind::Bullet)
+        );
+
+        let mut world = cheat_world(vec![WeaponCombatFacts::none(), rifle, shotgun]);
+        world.debug_place_alive_player(ClientId(0), [0.0, 0.0, 0.0]);
+        world.debug_place_alive_player(ClientId(1), [100.0, 0.0, 0.0]);
+        let life = world
+            .client_meta(ClientId(1))
+            .expect("target")
+            .life_sequence;
+        let tick = Tick(1);
+
+        let rifle_em = crate::combat::phase_emit(
+            &world.frame(),
+            &[AcceptedShot {
+                shot_id: ShotId(1),
+                attacker: ClientId(0),
+                attacker_life: LifeSequence(0),
+                weapon: RIFLE,
+                ammo_used: 1,
+                origin: [0.0, 0.0, 60.0],
+                angles: [0.0, 0.0, 0.0],
+                ads_frac: 1.0,
+                view_height_current: 60.0,
+                aim_spread_scale: 0.0,
+                perks0: 0,
+                combat_seed: 1,
+                owner_velocity: [0.0; 3],
+                spread_degrees: 0.0,
+            }],
+        );
+        assert_eq!(rifle_em.len(), 1);
+        assert_eq!(rifle_em[0].max_range, BULLET_MAX_RANGE);
+        assert_eq!(rifle_em[0].base_damage, 40);
+
+        let shotgun_em = crate::combat::phase_emit(
+            &world.frame(),
+            &[AcceptedShot {
+                shot_id: ShotId(2),
+                attacker: ClientId(0),
+                attacker_life: LifeSequence(0),
+                weapon: SHOTGUN,
+                ammo_used: 1,
+                origin: [0.0, 0.0, 60.0],
+                angles: [0.0, 0.0, 0.0],
+                ads_frac: 0.0,
+                view_height_current: 60.0,
+                aim_spread_scale: 1.0,
+                perks0: 0,
+                combat_seed: 1,
+                owner_velocity: [0.0; 3],
+                spread_degrees: 4.0,
+            }],
+        );
+        assert_eq!(shotgun_em.len(), 8);
+        assert!(shotgun_em.iter().all(|em| em.max_range == 500.0));
+
+        let head = apply_damage_attempt(
+            &mut world.frame(),
+            tick,
+            &shot_attempt(ClientId(1), life, HITLOC_HEAD, 40),
+        );
+        assert_eq!(head, DamageOutcome::Nonlethal { health_after: 44 });
+
+        {
+            let mut frame = world.frame();
+            frame.player_mut(ClientId(1)).expect("target").health = 100;
+        }
+        let torso = apply_damage_attempt(
+            &mut world.frame(),
+            tick,
+            &shot_attempt(ClientId(1), life, HITLOC_TORSO_UPPER, 40),
+        );
+        assert_eq!(torso, DamageOutcome::Nonlethal { health_after: 60 });
+
+        {
+            let mut frame = world.frame();
+            frame.player_mut(ClientId(1)).expect("target").health = 100;
+        }
+        let melee = apply_damage_attempt(
+            &mut world.frame(),
+            tick,
+            &DamageAttempt {
+                source: DamageSource::Melee,
+                pellet: PelletId(0),
+                attacker: ClientId(0),
+                attacker_life: LifeSequence(0),
+                target: ClientId(1),
+                target_life: life,
+                weapon: RIFLE,
+                amount: 40,
+                killcam_entity_start_time: 0,
+                inflictor_origin: None,
+                hitloc: HITLOC_HEAD,
+            },
+        );
+        assert_eq!(melee, DamageOutcome::Nonlethal { health_after: 60 });
+
+        let min_falloff = crate::bullet::bullet_damage_at_distance(&rifle_facts(), 2500.0);
+        {
+            let mut frame = world.frame();
+            frame.player_mut(ClientId(1)).expect("target").health = 100;
+        }
+        let far = apply_damage_attempt(
+            &mut world.frame(),
+            tick,
+            &shot_attempt(ClientId(1), life, HITLOC_HEAD, min_falloff),
+        );
+        assert_eq!(far, DamageOutcome::Nonlethal { health_after: 58 });
+
+        {
+            let mut frame = world.frame();
+            frame.client_meta_mut(ClientId(0)).loadout = Some(crate::LoadoutSpec {
+                perks: [CLASS_CATALOG_STOPPING_POWER, 0, 0],
+                ..Default::default()
+            });
+            frame.player_mut(ClientId(1)).expect("target").health = 100;
+        }
+        let torso_sp = apply_damage_attempt(
+            &mut world.frame(),
+            tick,
+            &shot_attempt(ClientId(1), life, HITLOC_TORSO_UPPER, 40),
+        );
+        assert_eq!(torso_sp, DamageOutcome::Nonlethal { health_after: 44 });
+
+        {
+            let mut frame = world.frame();
+            frame.player_mut(ClientId(1)).expect("target").health = 100;
+        }
+        let head_sp = apply_damage_attempt(
+            &mut world.frame(),
+            tick,
+            &shot_attempt(ClientId(1), life, HITLOC_HEAD, 40),
+        );
+        assert_eq!(head_sp, DamageOutcome::Nonlethal { health_after: 22 });
+    }
+
+    #[test]
+    fn blast_cover_vis_scale_and_authority() {
+        assert_eq!(gamemode_iw4::g_can_damage_hits_to_scale(0), 0.0);
+        assert!((gamemode_iw4::g_can_damage_hits_to_scale(1) - 1.0 / 3.0).abs() < 1e-6);
+        assert_eq!(gamemode_iw4::g_can_damage_hits_to_scale(4), 1.0);
+
+        assert_eq!(g_radius_damage_amount(100.0, 25.0, 256.0, 0.0, 0.0), 0);
+        assert_eq!(g_radius_damage_amount(100.0, 25.0, 256.0, 0.0, 1.0), 100);
+        assert_eq!(
+            g_radius_damage_amount(100.0, 25.0, 256.0, 0.0, 1.0 / 3.0),
+            33
+        );
+
+        let mut hits = 0u32;
+        let vis_none = g_can_damage_player_vis_scale(
+            [0.0, 0.0, 0.0],
+            60.0,
+            [1.0, 0.0, 0.0],
+            [-80.0, 0.0, 32.0],
+            |_, _| false,
+        );
+        assert_eq!(vis_none, 0.0);
+        let vis_one = g_can_damage_player_vis_scale(
+            [0.0, 0.0, 0.0],
+            60.0,
+            [1.0, 0.0, 0.0],
+            [-80.0, 0.0, 32.0],
+            |_, _| {
+                hits += 1;
+                hits == 1
+            },
+        );
+        assert!((vis_one - 1.0 / 3.0).abs() < 1e-6);
+        let vis_all = g_can_damage_player_vis_scale(
+            [0.0, 0.0, 0.0],
+            60.0,
+            [1.0, 0.0, 0.0],
+            [-80.0, 0.0, 32.0],
+            |_, _| true,
+        );
+        assert_eq!(vis_all, 1.0);
+
+        fn blast_world(wall: bool) -> SimWorld {
+            let mut world = SimWorld::new();
+            world
+                .bootstrap(MatchBootstrap {
+                    allow_debug_actions: true,
+                    ..MatchBootstrap::default()
+                })
+                .expect("bootstrap");
+            let mut build = SimContentBuilder::default();
+            let brushes = if wall {
+                vec![crate::SimBrush {
+                    planes: vec![
+                        [1.0, 0.0, 0.0, 8.0],
+                        [-1.0, 0.0, 0.0, 8.0],
+                        [0.0, 1.0, 0.0, 64.0],
+                        [0.0, -1.0, 0.0, 64.0],
+                        [0.0, 0.0, 1.0, 128.0],
+                        [0.0, 0.0, -1.0, 16.0],
+                    ],
+                    contents: 1,
+                    plane_surface_flags: vec![1; 6],
+                    glass_encoded: 0,
+                }]
+            } else {
+                Vec::new()
+            };
+            build.set_clip_map(
+                brushes,
+                crate::SimClipBsp::default(),
+                crate::SimClipMesh::default(),
+                world_cmodel(),
+            );
+            world.install_content(build.finish());
+            world.debug_place_alive_player(ClientId(1), [120.0, 0.0, 0.0]);
+            world
+        }
+
+        let blast = ExplosionBlast {
+            origin: [-120.0, 0.0, 32.0],
+            radius: 256.0,
+            inner_damage: 100.0,
+            outer_damage: 25.0,
+            weapon: 0,
+            source: DamageSource::Radius(crate::ScriptModelId::from_wire(0)),
+            attacker: ClientId(0),
+            attacker_life: LifeSequence(0),
+            killcam_entity_start_time: 0,
+        };
+        let tick = Tick(1);
+
+        let mut predicted = blast_world(false);
+        predicted.suppress_snapshot_publish();
+        apply_explosion_blast(&mut predicted.frame(), tick, &blast);
+        let predicted_hp = predicted
+            .frame()
+            .player(ClientId(1))
+            .expect("victim")
+            .health;
+        assert_eq!(predicted_hp, 100);
+
+        let mut open = blast_world(false);
+        apply_explosion_blast(&mut open.frame(), tick, &blast);
+        let open_hp = open.frame().player(ClientId(1)).expect("victim").health;
+        assert!(open_hp < 100, "open blast health {open_hp}");
+
+        let mut covered = blast_world(true);
+        apply_explosion_blast(&mut covered.frame(), tick, &blast);
+        let covered_hp = covered.frame().player(ClientId(1)).expect("victim").health;
+        assert_eq!(covered_hp, 100);
     }
 }

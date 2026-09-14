@@ -279,6 +279,61 @@ impl FxMarksSystemHost {
             .and_then(|m| m.as_ref())
     }
 
+    pub fn hide_marks_overlapping(&mut self, origin: [f32; 3], radius: f32) -> u32 {
+        let mut hidden = 0u32;
+        for slot in 0..self.constructed.len() {
+            let Some(mark) = self.constructed[slot] else {
+                continue;
+            };
+            let dx = mark.origin[0] - origin[0];
+            let dy = mark.origin[1] - origin[1];
+            let dz = mark.origin[2] - origin[2];
+            let reach = mark.radius + radius;
+            if dx * dx + dy * dy + dz * dz > reach * reach {
+                continue;
+            }
+            self.recycle_tri_chain(mark.tris);
+            self.recycle_point_chain(mark.points);
+            self.constructed[slot] = None;
+            if let Some(name) = self.material_names.get_mut(slot) {
+                *name = None;
+            }
+            self.next[slot] = self.first_free;
+            self.first_free = slot as u16;
+            self.live = self.live.saturating_sub(1);
+            hidden = hidden.saturating_add(1);
+        }
+        hidden
+    }
+
+    fn recycle_tri_chain(&mut self, mut head: u16) {
+        while head != FX_TRI_GROUP_CHAIN_NONE {
+            let slot = head as usize;
+            if slot >= self.tri_groups.len() {
+                break;
+            }
+            let next = self.tri_groups[slot].next;
+            self.tri_groups[slot] = FxTriGroup::ZERO;
+            self.tri_next[slot] = self.tri_first;
+            self.tri_first = head as u32;
+            head = next;
+        }
+    }
+
+    fn recycle_point_chain(&mut self, mut head: u16) {
+        while head != FX_POINT_GROUP_CHAIN_NONE {
+            let slot = head as usize;
+            if slot >= self.point_groups.len() {
+                break;
+            }
+            let next = self.point_groups[slot].next;
+            self.point_groups[slot] = FxPointGroup::ZERO;
+            self.point_next[slot] = self.point_first;
+            self.point_first = head as u32;
+            head = next;
+        }
+    }
+
     pub fn generate_world_mark_verts(&self) -> GfxMarkMeshCensus {
         let mut census = GfxMarkMeshCensus::default();
         for slot in 0..FX_MARKS_LIMIT {
@@ -433,5 +488,40 @@ impl FxMarksSystemHost {
                 req.receivers.fx_marks_smodels,
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mark_at(origin: [f32; 3]) -> FxMarkConstructed {
+        FxMarkConstructed {
+            frame_count_drawn: 0,
+            frame_count_alloced: 1,
+            origin,
+            radius: 4.0,
+            tex_coord_axis: [0.0, 0.0, 1.0],
+            native_color: 0,
+            material: 0,
+            context: 0,
+            tri_count: 1,
+            point_count: 3,
+            tris: 0,
+            points: 0,
+        }
+    }
+
+    #[test]
+    fn hide_marks_overlapping_drops_only_the_vanished_surface() {
+        let mut host = FxMarksSystemHost::init();
+        host.constructed[0] = Some(mark_at([0.0, 0.0, 0.0]));
+        host.constructed[1] = Some(mark_at([1000.0, 0.0, 0.0]));
+        host.live = 2;
+        let hidden = host.hide_marks_overlapping([0.0, 0.0, 0.0], 16.0);
+        assert_eq!(hidden, 1);
+        assert!(host.constructed[0].is_none());
+        assert!(host.constructed[1].is_some());
+        assert_eq!(host.live, 1);
     }
 }

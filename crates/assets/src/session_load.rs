@@ -182,6 +182,8 @@ pub struct PreparedWorld {
 
     pub flag_descriptors: Vec<crate::FlagDescriptor>,
 
+    pub script_structs: Vec<crate::MapScriptStruct>,
+
     pub dyn_ents: crate::DynEntCatalog,
 
     pub smodel_lighting_samples: Vec<crate::SmodelLightingSample>,
@@ -241,6 +243,7 @@ pub struct PreparedMatch {
 
     pub pen_table: weapon_iw4::PenetrationDepthTable,
     pub pen_table_loaded: bool,
+    pub lochit_table: Option<[f32; weapon_iw4::HITLOC_COUNT]>,
 
     pub xmodel_walk: crate::PreparedXModelWalkCensus,
 }
@@ -427,6 +430,8 @@ pub async fn load_prepared_match(
     let mut common_light_defs = Vec::new();
     let mut common_pen_table = weapon_iw4::PenetrationDepthTable::empty();
     let mut common_pen_loaded = false;
+    let mut common_lochit_table = None;
+
     let mut common_tracers = crate::TracerCatalog::default();
     let mut xmodel_walk = crate::PreparedXModelWalkCensus::default();
     let mut s1_common_bytes = 0;
@@ -465,6 +470,7 @@ pub async fn load_prepared_match(
             common_light_defs = census.light_defs;
             common_pen_table = census.pen_table;
             common_pen_loaded = census.pen_table_loaded;
+            common_lochit_table = census.lochit_table;
             common_tracers = census.tracers;
             xmodel_walk = census.xmodel_walk;
             s1_common_bytes = census.s1_common_bytes;
@@ -1371,6 +1377,7 @@ pub async fn load_prepared_match(
         prepared_map,
         pen_table: common_pen_table,
         pen_table_loaded: common_pen_loaded,
+        lochit_table: common_lochit_table,
         xmodel_walk,
     })
 }

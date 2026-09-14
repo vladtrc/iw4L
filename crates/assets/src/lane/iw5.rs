@@ -332,6 +332,7 @@ impl ZoneLane for Iw5Lane {
                     script_brush_models,
                     map_use_triggers,
                     flag_descriptors,
+                    script_structs,
                     ..
                 } = map_models;
                 let intermission_view = intermission_view_iw5(&stream);
@@ -569,6 +570,7 @@ impl ZoneLane for Iw5Lane {
                             script_brush_models,
                             map_use_triggers,
                             flag_descriptors,
+                            script_structs,
                             intermission_view,
                             light_grid,
                             reflection_probe_images,

@@ -261,6 +261,8 @@ pub struct WorldScene {
 
     pub outdoor_lookup: [u32; 16],
 
+    pub sun_effects: Option<render_frame::SunEffectsDef>,
+
     pub exact_world_refuse: Option<String>,
 
     pub exact_world_cause2: Option<String>,
@@ -594,6 +596,52 @@ fn remap_local_material(
         .map(assets::MaterialIndex::from_order)
 }
 
+fn sun_color_image(
+    catalog: &crate::assemble::drawsurf::RuntimeMaterialCatalog,
+    material: Option<assets::MaterialIndex>,
+) -> Option<u32> {
+    let material = catalog.derived(material?)?;
+    material
+        .texture_semantic(assets::TS_COLOR_MAP)
+        .or_else(|| material.texture_semantic(assets::TS_2D))
+        .map(|image| image.0)
+}
+
+fn install_sun_effects(
+    capture: Option<&assets::SunEffectsCapture>,
+    asset_ids: &[Option<usize>],
+    catalog: &crate::assemble::drawsurf::RuntimeMaterialCatalog,
+) -> Option<render_frame::SunEffectsDef> {
+    let capture = capture?;
+    let sprite_material = remap_local_material(capture.sprite_material, asset_ids);
+    let flare_material = remap_local_material(capture.flare_material, asset_ids);
+    Some(render_frame::SunEffectsDef {
+        sprite_material: sprite_material.and_then(|id| u32::try_from(id.order()).ok()),
+        flare_material: flare_material.and_then(|id| u32::try_from(id.order()).ok()),
+        sprite_image: sun_color_image(catalog, sprite_material),
+        flare_image: sun_color_image(catalog, flare_material),
+        sprite_size: capture.sprite_size,
+        flare_min_size: capture.flare_min_size,
+        flare_min_dot: capture.flare_min_dot,
+        flare_max_size: capture.flare_max_size,
+        flare_max_dot: capture.flare_max_dot,
+        flare_max_alpha: capture.flare_max_alpha,
+        flare_fade_in_ms: capture.flare_fade_in_ms,
+        flare_fade_out_ms: capture.flare_fade_out_ms,
+        blind_min_dot: capture.blind_min_dot,
+        blind_max_dot: capture.blind_max_dot,
+        blind_max_darken: capture.blind_max_darken,
+        blind_fade_in_ms: capture.blind_fade_in_ms,
+        blind_fade_out_ms: capture.blind_fade_out_ms,
+        glare_min_dot: capture.glare_min_dot,
+        glare_max_dot: capture.glare_max_dot,
+        glare_max_lighten: capture.glare_max_lighten,
+        glare_fade_in_ms: capture.glare_fade_in_ms,
+        glare_fade_out_ms: capture.glare_fade_out_ms,
+        direction: capture.direction,
+    })
+}
+
 impl WorldScene {
     pub fn from_bounds(mesh: Mesh, min: [f32; 3], max: [f32; 3]) -> Self {
         let min = Vec3::from_array(min);
@@ -673,6 +721,7 @@ impl WorldScene {
             shadow_geometry: Vec::new(),
             outdoor_image: None,
             outdoor_lookup: [0; 16],
+            sun_effects: None,
             exact_world_refuse: None,
             exact_world_cause2: None,
             exact_packed_refuse: None,
@@ -757,6 +806,7 @@ impl WorldScene {
             shadow_geometry: Vec::new(),
             outdoor_image: None,
             outdoor_lookup: [0; 16],
+            sun_effects: None,
             exact_world_refuse: None,
             exact_world_cause2: None,
             exact_packed_refuse: None,
@@ -1519,6 +1569,11 @@ pub fn world_scene_from_draw(
         .outdoor_image
         .and_then(|index| u32::try_from(index).ok());
     scene.outdoor_lookup = draw.outdoor_lookup;
+    scene.sun_effects = install_sun_effects(
+        draw.sun_effects.as_ref(),
+        &map_ids,
+        &scene.runtime_material_catalog,
+    );
     scene.asset_ref = asset_ref;
     scene.script_brush_gameobjects = script_brush_gameobjects;
     scene.script_brush_exploders = script_brush_exploders;

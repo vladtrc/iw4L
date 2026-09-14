@@ -12,9 +12,9 @@ use fx::{
     MarkReceiverEnable, PlayResult, axis_from_hit_normal,
 };
 use fx_iw4::{
-    FX_ELEM_VEL_LOCAL, FX_ELEM_VEL_WORLD, fx_elem_run_mode, fx_elem_spawn_offset_mode,
-    fx_laser_from_tag_orientation, fx_tail_anchor_origin, fx_tail_sprite_axes,
-    fx_tail_sprite_full_extent,
+    FX_ELEM_VEL_LOCAL, FX_ELEM_VEL_WORLD, FX_GLASS_SHATTER_FX_PER_FRAME, fx_elem_run_mode,
+    fx_elem_spawn_offset_mode, fx_laser_from_tag_orientation, fx_tail_anchor_origin,
+    fx_tail_sprite_axes, fx_tail_sprite_full_extent,
 };
 use net::{
     AuthorityLoadHold, CEntity, CEntitySlots, CgPlayerDrawGate, CgameActive, ClientPredictionState,
@@ -97,7 +97,11 @@ pub(crate) fn register_combat_fx_systems(app: &mut App) {
         .add_systems(Update, latch_authority_load_hold.in_set(ClientSet::Load))
         .add_systems(
             Update,
-            (boot_createfx_oneshots, tick_fx_non_dependent_update)
+            (
+                boot_createfx_oneshots,
+                crate::assemble::drawsurf::tess::glass::apply_glass_host,
+                tick_fx_non_dependent_update,
+            )
                 .chain()
                 .after(stamp_fx_camera_origin)
                 .in_set(frame::WorkerCmdSet::FxNonDependent),
@@ -230,9 +234,45 @@ fn tick_fx_non_dependent_update(
     camera_origin: Res<FxCameraOrigin>,
     fx_world: FxSceneAccess,
     mut post_lights: ResMut<HostFxPostLights>,
+    mut aliases: MessageWriter<audio::AliasCommand>,
 ) {
     let msec = host.0.msec_now;
-    host.0.glass.advance(msec);
+    let clip_world = prediction
+        .as_ref()
+        .filter(|p| p.0.is_armed() && p.0.world().has_world_clip())
+        .map(|p| p.0.world());
+    {
+        let glass_clip = clip_world.map(PredictionGlassTrace);
+        host.0.glass.advance_in_world(
+            msec,
+            glass_clip.as_ref().map(|g| g as &dyn fx::GlassWorldTrace),
+        );
+    }
+    let mut shatter_fx = 0u32;
+    for ev in host.0.glass.take_events() {
+        if !ev.play_oneshot {
+            continue;
+        }
+        let landing = ev.landing;
+        if !landing {
+            if shatter_fx >= FX_GLASS_SHATTER_FX_PER_FRAME {
+                continue;
+            }
+            shatter_fx = shatter_fx.saturating_add(1);
+        }
+        let (alias, fallback) = if landing {
+            ("glass_pane_shatter", "glass_pane_blowout")
+        } else {
+            glass_break_alias(ev.cause)
+        };
+        aliases.write(audio::AliasCommand::Play(audio::PlayAlias {
+            namespace: assets::AssetNamespace::Iw4,
+            alias: alias.to_owned(),
+            fallback: Some(fallback.to_owned()),
+            origin_inches: Some(ev.origin),
+            snd_ent: Some(fx_iw4::FX_ENTITYNUM_WORLD),
+        }));
+    }
     let Some(catalog) = catalog else {
         return;
     };
@@ -246,11 +286,6 @@ fn tick_fx_non_dependent_update(
     };
     let _fx_update = perf::Span::HostFxUpdateCpuMs.enter();
 
-    let clip_world = prediction
-        .as_ref()
-        .filter(|p| p.0.is_armed() && p.0.world().has_world_clip())
-        .map(|p| p.0.world());
-
     elem_infos.0.sync(&catalog.0);
     tick_fx_non_dependent(
         &mut host.0,
@@ -261,6 +296,43 @@ fn tick_fx_non_dependent_update(
         clip_world,
         fx_world.view().as_ref().map(|s| s as &dyn FxScene),
     );
+}
+
+fn glass_break_alias(cause: u8) -> (&'static str, &'static str) {
+    match cause {
+        1 => ("glass_pane_blowout", "glass_pane_shatter"),
+        2 => ("glass_pane_breakout", "glass_pane_shatter"),
+        _ => ("glass_pane_shatter", "glass_pane_blowout"),
+    }
+}
+
+struct PredictionGlassTrace<'a>(&'a sim::SimWorld);
+
+impl fx::GlassWorldTrace for PredictionGlassTrace<'_> {
+    fn sweep(&self, start: [f32; 3], end: [f32; 3]) -> Option<fx::GlassWorldContact> {
+        let hit = self
+            .0
+            .trace_static_world(start, end, [0.0; 3], [0.0; 3], sim::MASK_SHOT);
+        if hit.startsolid != 0 {
+            return Some(fx::GlassWorldContact {
+                fraction: 0.0,
+                end: start,
+                normal: hit.normal,
+                startsolid: true,
+                pane: sim::glass_piece_from_hit(hit.hit_type, hit.hit_id),
+            });
+        }
+        if hit.fraction >= 1.0 {
+            return None;
+        }
+        Some(fx::GlassWorldContact {
+            fraction: hit.fraction,
+            end: hit.endpos,
+            normal: hit.normal,
+            startsolid: false,
+            pane: sim::glass_piece_from_hit(hit.hit_type, hit.hit_id),
+        })
+    }
 }
 
 fn tick_fx_remaining_update(

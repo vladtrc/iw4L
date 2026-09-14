@@ -536,6 +536,14 @@ pub struct ScriptModelMetadata {
 
     pub script_exploder: String,
     pub brush_link: crate::ScriptBrushModelLink,
+
+    pub script_accumulate: Option<i32>,
+
+    pub script_threshold: Option<i32>,
+
+    pub script_destructable_area: String,
+
+    pub script_fxid: String,
 }
 
 #[derive(Clone, Debug)]
@@ -595,6 +603,9 @@ pub struct PreparedMapModels {
     pub map_use_triggers: Vec<crate::MapUseTrigger>,
 
     pub flag_descriptors: Vec<crate::FlagDescriptor>,
+
+    pub script_structs: Vec<crate::MapScriptStruct>,
+
     pub script_gaps: usize,
 }
 

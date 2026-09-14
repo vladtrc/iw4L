@@ -261,13 +261,24 @@ fn encode_projectile(out: &mut WireWriter, projectile: &ProjectileState) {
     for value in projectile.velocity {
         out.put_f32(value);
     }
-    out.put_f32(projectile.gravity);
-    out.put_u32(projectile.age_ticks);
-    out.put_u32(projectile.fuse_ticks);
+    out.put_i32(projectile.spawn_time_ms);
+    match projectile.detonate_at_ms {
+        Some(ms) => out.put_i32(ms),
+        None => out.put_i32(i32::MIN),
+    }
+    out.put_i32(projectile.cleanup_at_ms);
+    out.put_f32(projectile.travel_distance);
+    out.put_u32(u32::from(projectile.live));
     encode_trajectory(out, &projectile.pos);
     encode_trajectory(out, &projectile.apos);
     out.put_i32(projectile.entnum);
     out.put_i32(projectile.launch_time);
+    out.put_u32(
+        projectile
+            .stuck_pane
+            .map(|p| p.saturating_add(1))
+            .unwrap_or(0),
+    );
 }
 
 fn encode_trajectory(out: &mut WireWriter, tr: &entity_iw4::Trajectory) {
@@ -300,13 +311,22 @@ fn decode_projectile(input: &mut WireReader<'_>) -> Result<ProjectileState, Wire
         weapon: input.get_u32()?,
         origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
         velocity: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
-        gravity: input.get_f32()?,
-        age_ticks: input.get_u32()?,
-        fuse_ticks: input.get_u32()?,
+        spawn_time_ms: input.get_i32()?,
+        detonate_at_ms: {
+            let raw = input.get_i32()?;
+            (raw != i32::MIN).then_some(raw)
+        },
+        cleanup_at_ms: input.get_i32()?,
+        travel_distance: input.get_f32()?,
+        live: input.get_u32()? != 0,
         pos: decode_trajectory(input)?,
         apos: decode_trajectory(input)?,
         entnum: input.get_i32()?,
         launch_time: input.get_i32()?,
+        stuck_pane: {
+            let encoded = input.get_u32()?;
+            (encoded != 0).then(|| encoded.saturating_sub(1))
+        },
     })
 }
 
@@ -416,4 +436,99 @@ pub(crate) fn decode_usercmd(input: &mut WireReader<'_>) -> Result<UserCmd, Wire
         selected_location,
         remote_control,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use entity_iw4::Trajectory;
+    use sim::{ClientId, LifeSequence, ProjectileId, ProjectileState, WorldObjectSnapshot};
+
+    fn sample_projectile(stuck_pane: Option<u32>) -> ProjectileState {
+        ProjectileState {
+            id: ProjectileId(3),
+            owner: ClientId(1),
+            owner_life: LifeSequence(2),
+            weapon: 7,
+            origin: [1.0, 2.0, 3.0],
+            velocity: [4.0, 5.0, 6.0],
+            pos: Trajectory::default(),
+            apos: Trajectory::default(),
+            entnum: 14,
+            launch_time: 50,
+            spawn_time_ms: 50,
+            detonate_at_ms: None,
+            cleanup_at_ms: 50,
+            travel_distance: 0.0,
+            live: true,
+            stuck_pane,
+        }
+    }
+
+    #[test]
+    fn sticky_pane_survives_the_wire() {
+        let mut out = WireWriter::new();
+        encode_projectile(&mut out, &sample_projectile(Some(7)));
+        let bytes = out.finish();
+        let decoded = decode_projectile(&mut WireReader::new(&bytes)).expect("decode");
+        assert_eq!(decoded.stuck_pane, Some(7));
+        assert_eq!(decoded.id, ProjectileId(3));
+    }
+
+    #[test]
+    fn absent_sticky_pane_is_zero_on_the_wire() {
+        let mut out = WireWriter::new();
+        encode_projectile(&mut out, &sample_projectile(None));
+        let bytes = out.finish();
+        let decoded = decode_projectile(&mut WireReader::new(&bytes)).expect("decode");
+        assert_eq!(decoded.stuck_pane, None);
+    }
+
+    #[test]
+    fn as_of_ms_survives_full_and_empty_world_object_sync() {
+        let mut encoder = WorldObjectSyncEncoder::default();
+        let first = WorldObjectSnapshot {
+            as_of_ms: 12_345,
+            ..Default::default()
+        };
+        let wire = encoder.encode(Tick(1), &first);
+        let mut decoder = WorldObjectSyncDecoder::default();
+        let got = decoder.apply_wire(&wire).expect("full");
+        assert_eq!(got.as_of_ms, 12_345);
+
+        let later = WorldObjectSnapshot {
+            as_of_ms: 12_400,
+            ..Default::default()
+        };
+        let wire = encoder.encode(Tick(2), &later);
+        let got = decoder.apply_wire(&wire).expect("empty delta");
+        assert_eq!(got.as_of_ms, 12_400);
+    }
+
+    #[test]
+    fn session_glass_header_survives_full_and_empty_world_object_sync() {
+        let mut encoder = WorldObjectSyncEncoder::default();
+        let first = WorldObjectSnapshot {
+            as_of_ms: 12_345,
+            map_round_epoch: 7,
+            fracture_profile_version: 1,
+            ..Default::default()
+        };
+        let wire = encoder.encode(Tick(1), &first);
+        let mut decoder = WorldObjectSyncDecoder::default();
+        let got = decoder.apply_wire(&wire).expect("full");
+        assert_eq!(got.map_round_epoch, 7);
+        assert_eq!(got.fracture_profile_version, 1);
+
+        let later = WorldObjectSnapshot {
+            as_of_ms: 12_400,
+            map_round_epoch: 8,
+            fracture_profile_version: 1,
+            ..Default::default()
+        };
+        let wire = encoder.encode(Tick(2), &later);
+        let got = decoder.apply_wire(&wire).expect("empty delta");
+        assert_eq!(got.map_round_epoch, 8);
+        assert_eq!(got.fracture_profile_version, 1);
+    }
 }

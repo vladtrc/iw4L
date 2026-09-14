@@ -488,6 +488,7 @@ impl ZoneLane for Iw4Lane {
                     script_brush_models,
                     map_use_triggers,
                     flag_descriptors,
+                    script_structs,
                     ..
                 } = map_models;
 
@@ -741,6 +742,7 @@ impl ZoneLane for Iw4Lane {
                         script_brush_models,
                         map_use_triggers,
                         flag_descriptors,
+                        script_structs,
                         dyn_ents,
                         smodel_lighting_samples,
                         light_grid,
@@ -1015,6 +1017,12 @@ impl ZoneLane for Iw4Lane {
                 "common_mp bullet_penetration_mp: missing — FirePenetrate depths are 0".into(),
             );
         }
+        if sink.lochit_table.is_some() {
+            report.push("common_mp mp_lochit_dmgtable: loaded (20)".into());
+        } else {
+            report
+                .push("common_mp mp_lochit_dmgtable: missing — location scale is identity".into());
+        }
         report.extend(sink.world_weapons.report_lines());
         report.push(format!(
             "common_mp XAnim catalog: {} clips captured ({} gaps)",
@@ -1175,6 +1183,7 @@ impl ZoneLane for Iw4Lane {
                 report,
                 pen_table: sink.pen_table.unwrap_or_default(),
                 pen_table_loaded: sink.pen_table.is_some(),
+                lochit_table: sink.lochit_table,
                 xmodel_walk: sink.models.walk_census(),
                 s1_common_bytes,
                 teamset_icons: std::collections::HashMap::new(),
@@ -1209,6 +1218,7 @@ impl ZoneLane for Iw4Lane {
                 report,
                 pen_table: sink.pen_table.unwrap_or_default(),
                 pen_table_loaded: sink.pen_table.is_some(),
+                lochit_table: sink.lochit_table,
                 xmodel_walk: sink.models.walk_census(),
                 s1_common_bytes,
                 teamset_icons: std::collections::HashMap::new(),

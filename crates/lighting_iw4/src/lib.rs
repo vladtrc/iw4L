@@ -222,7 +222,8 @@ pub use smodel_skin::{
     SMC_UNIT_VEC_FIXED_SCALE, SMC_UNIT_VEC_OUT_W, SMC_UNIT_VEC_PACK_BIAS, SmcCachedVertLighting,
     SmcSkinError, SmcSkinSurface, local_transform_unit_vec, r_skin_cached_static_model_cmd,
     r_skin_cached_static_model_cmd_matrix, r_skin_xsurface_static_vert,
-    r_skin_xsurface_static_verts, setup_transform_unit_vec,
+    r_skin_xsurface_static_verts, r_skin_xsurface_unique_vert, r_skin_xsurface_unique_verts,
+    setup_transform_unit_vec,
 };
 pub use spot_shadow::{
     GFX_SHADOWABLE_SLOT_STRIDE, GFX_SPOT_SHADOW_CMDBUF_ROW_STRIDE, GFX_SPOT_SHADOW_RT_LARGE,

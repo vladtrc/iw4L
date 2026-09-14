@@ -198,15 +198,21 @@ impl<'a> ModelLightingCacheGlob<'a> {
         if let Some(slot) = model_lighting_cache_slot(self.base_index, current_handle) {
             if slot < self.xmodel_entry_limit {
                 let same = self.origins[slot as usize] == origin;
-
-                let _ = allow_moved_reuse;
+                let word = (slot >> 5) as usize;
+                let mask = model_lighting_cache_bit_mask(slot);
                 if same {
-                    let word = (slot >> 5) as usize;
-                    let mask = model_lighting_cache_bit_mask(slot);
                     self.curr[word] &= !mask;
                     return ModelLightingCacheAlloc::Reused {
                         handle: current_handle,
                         info: self.lighting_info[slot as usize],
+                    };
+                }
+                if allow_moved_reuse {
+                    self.curr[word] &= !mask;
+                    self.origins[slot as usize] = origin;
+                    return ModelLightingCacheAlloc::Assigned {
+                        handle: current_handle,
+                        slot,
                     };
                 }
             }
@@ -252,5 +258,51 @@ impl<'a> ModelLightingCacheGlob<'a> {
 
         *self.alloc_fail = true;
         ModelLightingCacheAlloc::Failed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moved_reuse_resamples_the_same_handle() {
+        let mut rover = 0u32;
+        let mut alloc_fail = false;
+        let mut origins = [[0.0; 3]; 32];
+        let mut lighting_info = [0u16; 32];
+        let prev_prev = [!0u32; 1];
+        let prev = [!0u32; 1];
+        let mut curr = [!0u32; 1];
+        let mut glob = ModelLightingCacheGlob::new(
+            0,
+            32,
+            &mut rover,
+            &mut alloc_fail,
+            &mut origins,
+            &mut lighting_info,
+            &prev_prev,
+            &prev,
+            &mut curr,
+        )
+        .expect("glob");
+        let first = glob.alloc(0, [1.0, 2.0, 3.0], false);
+        let handle = match first {
+            ModelLightingCacheAlloc::Assigned { handle, .. } => handle,
+            other => panic!("{other:?}"),
+        };
+        let moved = glob.alloc(handle, [8.0, 9.0, 10.0], true);
+        match moved {
+            ModelLightingCacheAlloc::Assigned {
+                handle: moved_handle,
+                ..
+            } => assert_eq!(moved_handle, handle),
+            other => panic!("{other:?}"),
+        }
+        let same = glob.alloc(handle, [8.0, 9.0, 10.0], true);
+        match same {
+            ModelLightingCacheAlloc::Reused { handle: reused, .. } => assert_eq!(reused, handle),
+            other => panic!("{other:?}"),
+        }
     }
 }

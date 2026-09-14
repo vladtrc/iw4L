@@ -38,7 +38,7 @@ pub struct MapDoors {
 impl MapDoors {
     pub fn unavailable(&self, now: u32) -> bool {
         self.started_at
-            .is_some_and(|at| now.saturating_sub(at) < 28_000)
+            .is_some_and(|at| gamemode_iw4::radiation_unavailable(now.saturating_sub(at)))
     }
 }
 
@@ -89,11 +89,13 @@ fn sound(world: &mut FrameWorld, tick: Tick, origin: [f32; 3], alias: &str) {
 }
 
 fn fraction(elapsed: u32, accel: f32) -> f32 {
-    let t = (elapsed as f32 / 1000.0).clamp(0.0, 8.0);
+    let t =
+        (elapsed as f32 / 1000.0).clamp(0.0, gamemode_iw4::RADIATION_DOOR_TIME_MS as f32 / 1000.0);
+    let duration = gamemode_iw4::RADIATION_DOOR_TIME_MS as f32 / 1000.0;
     if t < accel {
-        t * t / (8.0 * accel)
+        t * t / (duration * accel)
     } else {
-        1.0 - (8.0 - t) * (8.0 - t) / (8.0 * (8.0 - accel))
+        1.0 - (duration - t) * (duration - t) / (duration * (duration - accel))
     }
 }
 
@@ -123,7 +125,7 @@ pub(crate) fn advance(
             }
         }
         if doors.startup_at.is_none() {
-            doors.startup_at = Some(now + 300);
+            doors.startup_at = Some(now + gamemode_iw4::RADIATION_STARTUP_DELAY_MS);
         }
     }
     let held: Vec<_> = cmds
@@ -152,11 +154,22 @@ pub(crate) fn advance(
             sound(world, tick, origin, "evt_hydraulic_switch");
         }
         sound(world, tick, doors.leaves[0].origin, "evt_hydraulic_start");
+        world
+            .script_gaps_mut()
+            .raise(gamemode_iw4::ScriptGapCause::RadiationSwitchExploder);
     }
     doors.held = held;
     if let Some(at) = doors.started_at {
         let elapsed = now.saturating_sub(at);
-        while doors.alarm_count < 5 && elapsed >= 500 + u32::from(doors.alarm_count) * 2000 {
+        if gamemode_iw4::radiation_kill_edge_active(doors.open, elapsed, doors.completed)
+            && elapsed.saturating_sub(crate::MATCH_TICK_MS)
+                < gamemode_iw4::RADIATION_KILL_EDGE_DELAY_MS
+        {
+            world
+                .script_gaps_mut()
+                .raise(gamemode_iw4::ScriptGapCause::RadiationDoorKillEdge);
+        }
+        while gamemode_iw4::radiation_alarm_due(doors.alarm_count, elapsed) {
             for origin in [
                 [-664.0, 110.0, 436.0],
                 [-664.0, -72.0, 436.0],
@@ -169,9 +182,9 @@ pub(crate) fn advance(
         }
         if !doors.completed {
             for (i, leaf) in doors.leaves.iter().enumerate() {
-                let accel = if (i == 0) != doors.open { 4.8 } else { 5.6 };
+                let accel = gamemode_iw4::radiation_door_accel_s(i, !doors.open);
                 let progress = fraction(elapsed, accel);
-                let roll = (if i == 0 { 123.0 } else { -123.0 })
+                let roll = gamemode_iw4::radiation_leaf_roll_deg(i)
                     * if doors.open { 1.0 - progress } else { progress };
                 let mut angles = leaf.angles;
                 angles[2] += roll;
@@ -206,7 +219,7 @@ pub(crate) fn advance(
                     }
                 }
             }
-            if elapsed >= 8000 {
+            if elapsed >= gamemode_iw4::RADIATION_DOOR_TIME_MS {
                 doors.open = !doors.open;
                 doors.completed = true;
                 sound(
@@ -221,6 +234,46 @@ pub(crate) fn advance(
                 );
             }
         }
+        sweep_clear(world, tick, &doors, elapsed);
     }
     world.map_doors = Some(doors);
+}
+
+fn sweep_clear(world: &mut FrameWorld, tick: Tick, doors: &MapDoors, elapsed: u32) {
+    if gamemode_iw4::radiation_first_drop_pulse(elapsed, doors.completed) {
+        world
+            .script_gaps_mut()
+            .raise(gamemode_iw4::ScriptGapCause::RadiationDoorDropToGround);
+    }
+    if !gamemode_iw4::radiation_destroy_due(elapsed, doors.completed) {
+        return;
+    }
+    let bounds: Vec<_> = doors
+        .leaves
+        .iter()
+        .filter_map(|leaf| {
+            let cmodel = world.clip_cmodels().models.get(leaf.cmodel as usize)?;
+            Some((leaf.origin, cmodel.mins, cmodel.maxs))
+        })
+        .collect();
+    if bounds.is_empty() {
+        return;
+    }
+    let mut rows = Vec::new();
+    world.visit_projectiles(|projectile| {
+        rows.push((projectile.entnum, projectile.origin, projectile.weapon));
+    });
+    for (entnum, origin, weapon) in rows {
+        if !gamemode_iw4::is_weapon_equipment(world.weapon_script_name(weapon)) {
+            continue;
+        }
+        if !bounds.iter().any(|(door, mins, maxs)| {
+            gamemode_iw4::radiation_touching_door(origin, *door, *mins, *maxs)
+        }) {
+            continue;
+        }
+        if let Some(projectile) = world.projectile_mut_by_number(entnum) {
+            projectile.detonate_at_ms = Some(crate::level_time_ms(tick));
+        }
+    }
 }

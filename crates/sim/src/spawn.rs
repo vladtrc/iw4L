@@ -28,6 +28,8 @@ pub struct AuthoredSpawnPoint {
     pub angles: [f32; 3],
 
     pub script_linkto: String,
+
+    pub script_destructable_area: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -541,6 +543,14 @@ pub(crate) fn decide_spawn_seeded_report(
         spawn_team,
         world.use_start_spawns(),
     );
+    let blocked: Vec<String> = world.world_objects().blocked_spawn_areas().to_vec();
+    candidates.retain(|index| {
+        let spawn = &world.bootstrap_ref().spawns[*index];
+        if !gamemode_iw4::is_blockable_spawn_classname(&spawn.classname) {
+            return true;
+        }
+        !gamemode_iw4::spawn_blocked_off(&spawn.script_destructable_area, &blocked)
+    });
     if kind == GameModeKind::Demolition && !world.use_start_spawns() {
         let planted: Vec<_> = world
             .objectives

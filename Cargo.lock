@@ -1821,10 +1821,13 @@ dependencies = [
 name = "bots"
 version = "0.1.0"
 dependencies = [
+ "assets",
  "bevy",
  "diag",
  "entity_iw4",
  "frame",
+ "gamemode_iw4",
+ "glam",
  "math_iw4",
  "movement_iw4",
  "net",

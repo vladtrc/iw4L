@@ -1,9 +1,13 @@
 use assets::{WeaponBodyFacts, WeaponRegistry};
-use sim::{CapturedCombatInput, MissingCombatFacts, WeaponCombatFacts};
+use sim::{
+    CapturedCombatInput, HITLOC_COUNT, LOCATION_DAMAGE_IDENTITY, MissingCombatFacts,
+    WeaponCombatFacts, bake_location_damage, location_damage_is_valid,
+};
 
 pub(crate) fn validated_facts(
     f: WeaponBodyFacts,
     melee_charge_anim: bool,
+    global_location: Option<[f32; HITLOC_COUNT]>,
 ) -> Result<WeaponCombatFacts, MissingCombatFacts> {
     let fire_type =
         sim::FireType::from_i32(f.fire_type).map_err(|_| MissingCombatFacts::UnknownFireType)?;
@@ -16,6 +20,11 @@ pub(crate) fn validated_facts(
     } else {
         0
     };
+    if let Some(table) = f.location_damage_mult {
+        if !location_damage_is_valid(&table) {
+            return Err(MissingCombatFacts::LocationDamage);
+        }
+    }
     WeaponCombatFacts::try_from_captured(CapturedCombatInput {
         fire_time_ms: f.fire_time_ms,
         fire_delay_ms: f.fire_delay_ms,
@@ -92,10 +101,19 @@ pub(crate) fn validated_facts(
         offhand_hold_is_cancelable_at_0x681: f.offhand_hold_is_cancelable_at_0x681,
         ads_gun_kick_reduced_kick_bullets: f.kick.ads_gun_kick_reduced_kick_bullets,
         hip_gun_kick_reduced_kick_bullets: f.kick.hip_gun_kick_reduced_kick_bullets,
+        location_damage: bake_location_damage(
+            f.weap_type,
+            f.weap_class,
+            global_location.unwrap_or(LOCATION_DAMAGE_IDENTITY),
+            f.location_damage_mult,
+        ),
     })
 }
 
-pub fn from_registry(weapons: &WeaponRegistry) -> Vec<WeaponCombatFacts> {
+pub fn from_registry(
+    weapons: &WeaponRegistry,
+    global_location: Option<[f32; HITLOC_COUNT]>,
+) -> Vec<WeaponCombatFacts> {
     (0..=weapons.len())
         .map(|i| {
             if i == 0 {
@@ -117,7 +135,8 @@ pub fn from_registry(weapons: &WeaponRegistry) -> Vec<WeaponCombatFacts> {
                 .and_then(|t| t.get(8))
                 .and_then(|s| s.as_ref())
                 .is_some_and(|s| !s.is_empty());
-            validated_facts(f, charge_anim).unwrap_or_else(|_| WeaponCombatFacts::none())
+            validated_facts(f, charge_anim, global_location)
+                .unwrap_or_else(|_| WeaponCombatFacts::none())
         })
         .collect()
 }
@@ -151,6 +170,7 @@ pub fn equipment_from_registry(weapons: &WeaponRegistry) -> Vec<sim::EquipmentRu
                 fuse_time_ms: f.fuse_time_ms,
                 hold_fire_time_ms: f.hold_fire_time_ms,
                 cook_off_hold: f.cook_off_hold,
+                timed_detonation: f.timed_detonation,
                 proj_impact_explode: f.proj_impact_explode,
                 stick_to_players: f.stick_to_players,
                 explosion_radius: f.explosion_radius,
@@ -159,8 +179,11 @@ pub fn equipment_from_registry(weapons: &WeaponRegistry) -> Vec<sim::EquipmentRu
                 explosion_outer_damage: f.explosion_outer_damage,
                 projectile_speed: f.projectile_speed,
                 projectile_speed_up: f.projectile_speed_up,
+                projectile_speed_forward: f.projectile_speed_forward,
                 projectile_activate_dist: f.projectile_activate_dist,
                 projectile_explosion_type: f.projectile_explosion_type,
+                weap_type: f.weap_type,
+                weap_class: f.weap_class,
                 parallel_bounce: f.parallel_bounce,
                 perpendicular_bounce: f.perpendicular_bounce,
             }

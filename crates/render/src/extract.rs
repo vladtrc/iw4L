@@ -170,6 +170,10 @@ pub fn seal_render_frame(
     samplers: Option<Res<RetailSamplerTable>>,
     images: Option<Res<render_frontend::assemble::drawsurf::RuntimeImageHandles>>,
     spawn_job: Option<Res<render_gpu::GpuSubmitReady>>,
+    sun: (
+        Option<Res<render_frontend::assemble::drawsurf::MapSunEffects>>,
+        Option<Res<render_frontend::assemble::drawsurf::SunEffectsFrameInput>>,
+    ),
     (existing_world, existing_frame): (
         Option<Res<InstalledRenderWorld>>,
         Option<Res<PublishedRenderFrame>>,
@@ -292,6 +296,7 @@ pub fn seal_render_frame(
             Arc::new(Vec::new()),
             None,
             Arc::new(Vec::new()),
+            Arc::new(Vec::new()),
         )
     };
     let (
@@ -300,6 +305,7 @@ pub fn seal_render_frame(
         smodel_surface_ranges,
         smodel_vertex_refusal,
         smodel_cached_vertices,
+        smodel_surface_verts,
     ) = if skip_world_smodel {
         empty_smodel()
     } else {
@@ -310,11 +316,12 @@ pub fn seal_render_frame(
                     let (inds, _) = take_published(plan.index_share.as_ref());
                     let (ranges, _) = take_published(plan.range_share.as_ref());
                     let (cached, _) = take_published(plan.cached_share.as_ref());
-                    (verts, inds, ranges, None, cached)
+                    let (vert_ranges, _) = take_published(plan.vert_range_share.as_ref());
+                    (verts, inds, ranges, None, cached, vert_ranges)
                 }
                 Err(cause) => {
-                    let (empty_v, empty_i, empty_r, _, empty_c) = empty_smodel();
-                    (empty_v, empty_i, empty_r, Some(cause), empty_c)
+                    let (empty_v, empty_i, empty_r, _, empty_c, empty_vr) = empty_smodel();
+                    (empty_v, empty_i, empty_r, Some(cause), empty_c, empty_vr)
                 }
             },
             None => empty_smodel(),
@@ -540,6 +547,7 @@ pub fn seal_render_frame(
             smodel_surface_ranges,
             smodel_vertex_refusal,
             smodel_cached_vertices,
+            smodel_surface_verts,
         }),
         smc_index_baked: Arc::new(smc_index_baked),
         smodel_pretess_indices,
@@ -556,6 +564,7 @@ pub fn seal_render_frame(
         } else {
             render_gpu::dump_shader_program_names(&runtime.catalog)
         }),
+        sun_effects: sun.0.and_then(|sun| sun.def),
     };
     let next_frame = render_gpu::RenderFrameData {
         frame_products,
@@ -563,6 +572,7 @@ pub fn seal_render_frame(
         world_generation,
         exec_frame,
         sun_shadow: mat_frame.sun_shadow,
+        sun_effects: sun.1.and_then(|input| input.frame),
         warm_pipelines,
         pipeline_world_materials: spawn_job
             .as_ref()
@@ -572,6 +582,10 @@ pub fn seal_render_frame(
             .as_ref()
             .map(|job| job.pipeline_smodel_materials.clone())
             .unwrap_or_default(),
+        pipeline_demand_revision: spawn_job
+            .as_ref()
+            .map(|job| job.pipeline_demand_revision)
+            .unwrap_or(0),
         smc_vb_patches,
         smc_ib_patches,
         xmodel_vertices,

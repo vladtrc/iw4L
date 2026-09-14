@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anim_iw4::{
     DOBJ_COMPUTE_BOUNDS_MODEL_LIMIT, DOBJ_RADIUS_PARENT_ROOT, dobj_compute_bounds_radius,
@@ -104,6 +104,12 @@ impl WorldModelLightingCache {
         self.body_handles.get(&key).copied().unwrap_or(0)
     }
 
+    pub(crate) fn retain_glass(&mut self, live: &HashSet<ModelLightingOwner>) {
+        self.body_handles.retain(|owner, _| {
+            !matches!(owner, ModelLightingOwner::Glass(_)) || live.contains(owner)
+        });
+    }
+
     pub fn alloc_sample_at(
         &mut self,
         key: ModelLightingOwner,
@@ -112,6 +118,7 @@ impl WorldModelLightingCache {
         scene: Option<&WorldScene>,
         images: &mut Assets<Image>,
         lookup_fallback: u8,
+        allow_moved_reuse: bool,
     ) -> u32 {
         let dims = atlas.dims;
         let base = dims.smodel_entry_limit;
@@ -140,7 +147,7 @@ impl WorldModelLightingCache {
                 &pixel_free_bits[p],
                 &mut curr,
             ) {
-                Ok(mut glob) => Some(glob.alloc(current, origin, false)),
+                Ok(mut glob) => Some(glob.alloc(current, origin, allow_moved_reuse)),
                 Err(_) => None,
             }
         };
@@ -377,7 +384,7 @@ pub(crate) fn update_dirty_model_lighting(
     requests: ResMut<ModelLightingRequests>,
     resolved: ResMut<ResolvedModelLightingTable>,
 ) {
-    drain_model_lighting_requests(cache, atlas, scene, images, requests, resolved);
+    drain_model_lighting_requests(cache, atlas, scene, images, requests, resolved, false);
 }
 
 pub(crate) fn update_glass_dyn_lighting(
@@ -388,7 +395,7 @@ pub(crate) fn update_glass_dyn_lighting(
     requests: ResMut<ModelLightingRequests>,
     resolved: ResMut<ResolvedModelLightingTable>,
 ) {
-    drain_model_lighting_requests(cache, atlas, scene, images, requests, resolved);
+    drain_model_lighting_requests(cache, atlas, scene, images, requests, resolved, true);
 }
 
 pub(crate) fn update_fx_dyn_lighting(
@@ -399,7 +406,7 @@ pub(crate) fn update_fx_dyn_lighting(
     requests: ResMut<ModelLightingRequests>,
     resolved: ResMut<ResolvedModelLightingTable>,
 ) {
-    drain_model_lighting_requests(cache, atlas, scene, images, requests, resolved);
+    drain_model_lighting_requests(cache, atlas, scene, images, requests, resolved, false);
 }
 
 fn drain_model_lighting_requests(
@@ -409,8 +416,14 @@ fn drain_model_lighting_requests(
     mut images: ResMut<Assets<Image>>,
     mut requests: ResMut<ModelLightingRequests>,
     mut resolved: ResMut<ResolvedModelLightingTable>,
+    prune_glass: bool,
 ) {
     let pending = requests.take_pending();
+    let live_glass: HashSet<ModelLightingOwner> = pending
+        .iter()
+        .map(|request| request.owner)
+        .filter(|owner| matches!(owner, ModelLightingOwner::Glass(_)))
+        .collect();
     let scene_atlas = scene.as_ref().and_then(|scene| {
         Some(WorldModelLightingAtlas {
             image: scene.model_lighting_image.clone()?,
@@ -422,10 +435,17 @@ fn drain_model_lighting_requests(
         for request in pending {
             resolved.insert_if_absent(request.owner, ResolvedModelLighting::Failed);
         }
+        if prune_glass {
+            resolved.retain_glass(&live_glass);
+        }
         return;
     };
     let scene = scene.as_deref();
     for request in pending {
+        let moving_glass = matches!(request.owner, ModelLightingOwner::Glass(_));
+        if moving_glass {
+            resolved.remove(request.owner);
+        }
         resolved.get_or_insert_with(request.owner, || {
             let handle = cache.alloc_sample_at(
                 request.owner,
@@ -434,6 +454,7 @@ fn drain_model_lighting_requests(
                 scene,
                 &mut images,
                 request.lookup_fallback,
+                moving_glass,
             );
             if handle == 0 {
                 if request.owner == ModelLightingOwner::Eye {
@@ -452,5 +473,9 @@ fn drain_model_lighting_requests(
                 }
             }
         });
+    }
+    if prune_glass {
+        cache.retain_glass(&live_glass);
+        resolved.retain_glass(&live_glass);
     }
 }

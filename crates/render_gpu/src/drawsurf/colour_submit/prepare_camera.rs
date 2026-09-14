@@ -214,6 +214,12 @@ pub(super) fn prepare_camera_colour(
             &mut scratch.pack_draws,
         );
         let work = r_draw_surf_list_work_colour(&packed);
+        diag::info!(
+            World,
+            "smodel skinned: packed={} unconsumed={}",
+            packed.smodel_skinned.len(),
+            work.smodel_skinned_unconsumed,
+        );
         let world_rows = world_packed_row_meta(colour, light, emissive, &packed, world_run_surfs);
         scratch.pack_plan = Some(ColourPackPlan {
             key: pack_key,
@@ -313,6 +319,7 @@ pub(super) fn prepare_camera_colour(
     let exec_frame = &extracted.frame.exec_frame;
     let exec_view = exec_tables(extracted)
         .map(|(catalog, prepared)| MaterialExecView::camera(catalog, prepared, exec_frame));
+    let run_pack = std::mem::take(&mut scratch.run_pack);
     let mut exact_prepare = ExactPrepare {
         extracted,
         geometry: &geometry,
@@ -328,8 +335,9 @@ pub(super) fn prepare_camera_colour(
             tables: &mut texture_table.0,
         },
         arena: Some(&mut arena_pack),
-        run_pack: std::mem::take(&mut scratch.run_pack),
+        run_pack,
         cost: PrepareCost::default(),
+        skinned_tess: Some(&mut scratch.skinned_tess),
     };
     exact_prepare.run_pack.begin_pack_intern_frame();
     let prepare_target = ExactPrepareTarget {
@@ -616,8 +624,9 @@ pub(super) fn prepare_camera_colour(
     }
     let prepare_cost = std::mem::take(&mut exact_prepare.cost);
     exact_prepare.run_pack.sweep_pack_intern();
-    scratch.run_pack = std::mem::take(&mut exact_prepare.run_pack);
+    let run_pack = std::mem::take(&mut exact_prepare.run_pack);
     drop(exact_prepare);
+    scratch.run_pack = run_pack;
     let colour_run_census = executor.census();
     let viewmodel_held = if viewmodel_pipeline_gap {
         pending_viewmodel_keys.len()
@@ -767,7 +776,8 @@ pub(super) fn prepare_shadow_passes(
     let products = &extracted.frame.frame_products;
     let mut sun_exec = std::mem::take(&mut scratch.sun_exec);
     let mut spot_exec = std::mem::take(&mut scratch.spot_exec);
-    scratch.sun_prepared = prepare_shadowmap_sun(
+    scratch.skinned_tess.begin_frame();
+    let sun_prepared = prepare_shadowmap_sun(
         products,
         extracted,
         &geometry,
@@ -783,8 +793,9 @@ pub(super) fn prepare_shadow_passes(
         &mut static_draws,
         sampler_table,
         &mut sun_exec,
+        &mut scratch.skinned_tess,
     );
-    scratch.spot_prepared = prepare_shadowmap_spot(
+    let spot_prepared = prepare_shadowmap_spot(
         products,
         extracted,
         &geometry,
@@ -799,7 +810,10 @@ pub(super) fn prepare_shadow_passes(
         &mut spotmap,
         sampler_table,
         &mut spot_exec,
+        &mut scratch.skinned_tess,
     );
+    scratch.sun_prepared = sun_prepared;
+    scratch.spot_prepared = spot_prepared;
     scratch.sun_exec = sun_exec;
     scratch.spot_exec = spot_exec;
 }

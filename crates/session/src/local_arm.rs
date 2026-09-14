@@ -45,7 +45,7 @@ pub fn arm_local_from_presented(
     sim_cam.freeze_fly = false;
 
     if !role.is_some_and(|role| *role == RuntimeRole::Replay) {
-        input_gate.cmds_enabled = true;
+        input_gate.local_cmds_enabled = true;
     }
     *screen = AppScreen::InGame;
 

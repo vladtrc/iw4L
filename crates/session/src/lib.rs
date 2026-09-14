@@ -36,6 +36,10 @@ pub use match_apply::{
 };
 pub use plugin::SessionPlugin;
 
+mod map_conveyer;
+mod map_diggers;
 mod map_doors;
+mod map_lights;
+mod map_moving_diggers;
 
 mod objectives;

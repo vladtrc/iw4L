@@ -3,7 +3,7 @@ use crate::spawn::{AuthoredSpawnPoint, MatchBootstrap};
 use crate::world::SimBrush;
 use weapon_iw4::WeaponCombatFacts;
 
-pub const CONTENT_DIGEST_SCHEME: u64 = 11;
+pub const CONTENT_DIGEST_SCHEME: u64 = 13;
 
 #[derive(Clone, Copy)]
 struct Digest(u64);
@@ -139,6 +139,9 @@ fn hash_combat(h: &mut Digest, combat: &[WeaponCombatFacts]) {
         h.i32(row.melee_charge_delay_ms);
         h.u32(row.knife_model);
         h.i32(row.quick_raise_time_ms);
+        for value in row.location_damage {
+            h.f32(value);
+        }
     }
 }
 
@@ -206,6 +209,7 @@ fn hash_equipment(h: &mut Digest, rows: &[crate::EquipmentRuntimeFacts]) {
         h.i32(row.fuse_time_ms);
         h.i32(row.hold_fire_time_ms);
         h.bool(row.cook_off_hold);
+        h.bool(row.timed_detonation);
         h.bool(row.proj_impact_explode);
         h.bool(row.stick_to_players);
         h.i32(row.explosion_radius);
@@ -214,8 +218,11 @@ fn hash_equipment(h: &mut Digest, rows: &[crate::EquipmentRuntimeFacts]) {
         h.i32(row.explosion_outer_damage);
         h.i32(row.projectile_speed);
         h.i32(row.projectile_speed_up);
+        h.i32(row.projectile_speed_forward);
         h.i32(row.projectile_activate_dist);
         h.i32(row.projectile_explosion_type);
+        h.i32(row.weap_type);
+        h.i32(row.weap_class);
         for coefficients in [row.parallel_bounce, row.perpendicular_bounce] {
             h.bool(coefficients.is_some());
             if let Some(values) = coefficients {

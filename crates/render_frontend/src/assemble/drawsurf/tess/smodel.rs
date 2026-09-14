@@ -98,6 +98,7 @@ pub struct SmodelGpuPlan {
     pub packed_share: Option<Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>>,
     pub index_share: Option<Arc<Vec<u32>>>,
     pub range_share: Option<Arc<Vec<(u32, u32)>>>,
+    pub vert_range_share: Option<Arc<Vec<(u32, u32)>>>,
     pub cached_share: Option<Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>>,
     pub decoded_share: Option<Arc<Vec<SmodelVertex>>>,
 }
@@ -416,6 +417,18 @@ pub fn pack_smodel_meshes(
     plan.decoded_share = Some(Arc::new(vertices));
     plan.index_share = Some(Arc::new(indices));
     plan.range_share = Some(Arc::new(surface_ranges));
+    let mut vert_ranges =
+        vec![(0u32, 0u32); plan.range_share.as_ref().map_or(0, |rows| rows.len())];
+    for mesh in &plan.meshes {
+        for lod in 0..4 {
+            for src in &mesh.smc_surfs_by_lod[lod] {
+                if let Some(slot) = vert_ranges.get_mut(src.range_idx as usize) {
+                    *slot = (src.packed_off, src.packed_n);
+                }
+            }
+        }
+    }
+    plan.vert_range_share = Some(Arc::new(vert_ranges));
     (plan, mesh_authored, mesh_collision)
 }
 

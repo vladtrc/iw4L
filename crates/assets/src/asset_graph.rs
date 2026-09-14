@@ -48,6 +48,11 @@ pub const DESTRUCTIBLE_DEATH_HINTS: &[DestructibleDeathHint] = &[
         husk: "com_barrel_piece",
     },
     DestructibleDeathHint {
+        kind: "flammable_crate",
+        clip: "",
+        husk: "global_flammable_crate_jap_piece01_d",
+    },
+    DestructibleDeathHint {
         kind: "toy_oxygen_tank_01",
         clip: "",
         husk: "machinery_oxygen_tank01_des",

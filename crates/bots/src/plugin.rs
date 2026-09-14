@@ -1,19 +1,29 @@
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use net::{
-    AUTHORITY_MS, ClientActionInbox, ClientCommandInbox, ClientSet, LocalPresentClient,
-    PresentedSnapshot, look_angles_from_degrees,
+    AUTHORITY_MS, AuthorityClock, AuthorityWorld, ClientActionInbox, ClientCommandInbox,
+    LocalPresentClient, authority_should_tick, look_angles_from_degrees,
 };
-use sim::{ClassId, ClientAction, ClientLifecycle};
+use sim::{ClassId, ClientAction, ClientLifecycle, SimWorld, Tick};
 
-use crate::brain::{BotSenses, Brain};
+use crate::nav::{self, NAV_HULL, NAV_SCHEMA, NavGraph};
+use crate::query::{Budgeted, TraceBudget};
 use crate::roster::{
     BotAddQueue, BotClassPool, BotFireQueue, BotHold, BotRoster, BotTpQueue, BotTpTarget,
     BotTpWhere,
 };
+use crate::sensor;
 use crate::unique_loadout::pick_class_id;
-use frame::MatchTornDown;
+use frame::{AuthoritySet, MatchTornDown};
 
 const VIEW_PITCH_DOWN: f32 = 85.0;
+const TRACE_QUOTA: u32 = 96;
+const ASTAR_QUOTA: u32 = 2048;
+
+#[derive(Resource, Default)]
+struct BotNav {
+    graph: NavGraph,
+}
 
 pub struct BotsPlugin;
 
@@ -25,6 +35,7 @@ impl Plugin for BotsPlugin {
             .init_resource::<BotHold>()
             .init_resource::<BotTpQueue>()
             .init_resource::<BotFireQueue>()
+            .init_resource::<BotNav>()
             .add_systems(
                 Update,
                 (
@@ -32,9 +43,14 @@ impl Plugin for BotsPlugin {
                     reset_roster_on_match_torn_down,
                     boot_bots,
                     apply_bot_tp,
-                    think_bots.in_set(ClientSet::Input),
                 )
                     .chain(),
+            )
+            .add_systems(
+                FixedUpdate,
+                think_bots
+                    .in_set(AuthoritySet::Ingress)
+                    .run_if(authority_should_tick),
             );
     }
 }
@@ -127,14 +143,29 @@ fn apply_bot_tp(
     roster: Res<BotRoster>,
     mut actions: ResMut<ClientActionInbox>,
     mut request_ids: ResMut<net::ActionRequestIds>,
-    presented: Res<PresentedSnapshot>,
+    world: Option<Res<AuthorityWorld>>,
     local: Res<LocalPresentClient>,
 ) {
     let requests = queue.drain();
     if requests.is_empty() {
         return;
     }
-    let local_ps = presented.alive_player(local.0);
+    let Some(world) = world else {
+        return;
+    };
+    let snapshot = world.0.snapshot(Tick(0));
+    let local_ps = snapshot
+        .meta
+        .for_client(local.0)
+        .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive)
+        .then(|| {
+            snapshot
+                .players
+                .iter()
+                .find(|(id, _)| *id == local.0)
+                .map(|(_, ps)| ps)
+        })
+        .flatten();
     for request in requests {
         let ids: Vec<sim::ClientId> = match request.target {
             BotTpTarget::All => roster
@@ -153,9 +184,11 @@ fn apply_bot_tp(
             }
         };
         for id in ids {
-            let current = presented
-                .alive_player(id)
-                .map(|ps| ps.viewangles)
+            let current = snapshot
+                .players
+                .iter()
+                .find(|(c, _)| *c == id)
+                .map(|(_, ps)| ps.viewangles)
                 .unwrap_or([0.0, 0.0, 0.0]);
             let (origin, angles) = match request.where_ {
                 BotTpWhere::Absolute { origin, yaw, pitch } => {
@@ -201,33 +234,57 @@ fn apply_bot_tp(
     }
 }
 
-fn think_bots(
-    mut roster: ResMut<BotRoster>,
-    mut cmds: ResMut<ClientCommandInbox>,
-    presented: Res<PresentedSnapshot>,
-    hold: Res<BotHold>,
-    mut fire: ResMut<BotFireQueue>,
-) {
-    let Some(snapshot) = presented.snapshot() else {
-        return;
-    };
-    let fires = fire.drain();
-    for bot in &mut roster.bots {
-        let senses = BotSenses::from_snapshot(snapshot, bot.id);
-        if senses.lifecycle != ClientLifecycle::Alive {
+#[derive(SystemParam)]
+struct ThinkBots<'w> {
+    clock: Res<'w, AuthorityClock>,
+    world: ResMut<'w, AuthorityWorld>,
+    nav: ResMut<'w, BotNav>,
+    roster: ResMut<'w, BotRoster>,
+    cmds: ResMut<'w, ClientCommandInbox>,
+    hold: Res<'w, BotHold>,
+    fire: ResMut<'w, BotFireQueue>,
+    local: Res<'w, LocalPresentClient>,
+}
+
+fn think_bots(mut p: ThinkBots) {
+    refresh_nav(&mut p.world.0, &mut p.nav.graph);
+    let snapshot = p.world.0.snapshot(Tick(p.clock.tick.saturating_sub(1)));
+    let fires = p.fire.drain();
+    let mut budget = TraceBudget::new(TRACE_QUOTA);
+    let mut astar = ASTAR_QUOTA;
+    for bot in &mut p.roster.bots {
+        if bot.id == p.local.0 {
             continue;
         }
-        let mut cmd = if hold.0 {
+        let mut queried = Budgeted {
+            world: &mut p.world.0,
+            budget: &mut budget,
+        };
+        let Some(obs) = sensor::observe(&snapshot, bot.id, &mut queried) else {
+            continue;
+        };
+        if obs.self_state.lifecycle != ClientLifecycle::Alive {
+            continue;
+        }
+        let mut cmd = if p.hold.0 {
             let mut cmd = playerstate_iw4::UserCmd {
-                server_time: 0,
+                server_time: p.clock.time_ms,
                 ..playerstate_iw4::UserCmd::default()
             };
-            if let Some(ps) = presented.alive_player(bot.id) {
-                cmd.angles = look_angles_from_degrees(ps.viewangles);
-            }
+            cmd.angles = look_angles_from_degrees(obs.self_state.viewangles);
+            cmd.weapon = obs.self_state.weapon;
+            cmd.weapon_mapped = obs.self_state.weapon;
             cmd
         } else {
-            bot.brain.think(&senses, AUTHORITY_MS)
+            let mut cmd = bot.brain.drive_nav(
+                &obs,
+                &mut queried,
+                Some(&p.nav.graph),
+                &mut astar,
+                AUTHORITY_MS,
+            );
+            cmd.server_time = p.clock.time_ms;
+            cmd
         };
         if fires.iter().any(|target| match target {
             BotTpTarget::All => true,
@@ -235,9 +292,26 @@ fn think_bots(
         }) {
             cmd.buttons |= playerstate_iw4::buttons::ATTACK;
         }
-
-        cmds.push(bot.id, None, cmd, None);
+        p.cmds.push(bot.id, None, cmd, None);
     }
+}
+
+fn refresh_nav(world: &mut SimWorld, graph: &mut NavGraph) {
+    let digest = world.content_digest();
+    if graph.digest == digest && graph.schema == NAV_SCHEMA && graph.hull == NAV_HULL {
+        return;
+    }
+    let seeds = world.authored_spawn_origins();
+    let Some(bounds) = nav::playable_bounds(world.clip_brushes(), &seeds) else {
+        *graph = NavGraph {
+            digest,
+            schema: NAV_SCHEMA,
+            hull: NAV_HULL,
+            ..NavGraph::default()
+        };
+        return;
+    };
+    *graph = nav::bake_seeded(world, bounds, digest, &seeds);
 }
 
 fn aim_viewangles(from: [f32; 3], target: [f32; 3]) -> [f32; 3] {

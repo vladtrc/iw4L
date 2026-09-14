@@ -16,6 +16,8 @@ pub struct SpawnPoint {
     pub angles: [f32; 3],
 
     pub script_linkto: String,
+
+    pub script_destructable_area: String,
 }
 
 impl SpawnPoint {
@@ -49,6 +51,14 @@ pub struct ScriptBrushModelPlacement {
     pub gameobject: String,
 
     pub script_exploder: String,
+
+    pub script_accumulate: Option<i32>,
+
+    pub script_threshold: Option<i32>,
+
+    pub script_destructable_area: String,
+
+    pub script_fxid: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,6 +99,14 @@ pub struct ScriptModelPlacement {
     pub target: String,
 
     pub brush_link: ScriptBrushModelLink,
+
+    pub script_accumulate: Option<i32>,
+
+    pub script_threshold: Option<i32>,
+
+    pub script_destructable_area: String,
+
+    pub script_fxid: String,
 }
 
 pub fn exploding_prop_machine(
@@ -100,6 +118,11 @@ pub fn exploding_prop_machine(
         || script_noteworthy.eq_ignore_ascii_case("explodable_barrel")
     {
         return Some("explodable_barrel");
+    }
+    if targetname.eq_ignore_ascii_case("flammable_crate")
+        || script_noteworthy.eq_ignore_ascii_case("flammable_crate")
+    {
+        return Some("flammable_crate");
     }
     if has_ascii_prefix(destructible_type, "toy_propane") {
         return Some("propane");
@@ -128,6 +151,8 @@ pub struct MapUseTrigger {
     pub height: Option<f32>,
 
     pub model: String,
+
+    pub target_struct_angles: Option<[f32; 3]>,
 }
 
 const MAP_USE_TRIGGER_CLASSNAMES: &[&str] = &[
@@ -138,16 +163,28 @@ const MAP_USE_TRIGGER_CLASSNAMES: &[&str] = &[
 ];
 
 pub fn parse_map_use_triggers(text: &str) -> Vec<MapUseTrigger> {
-    parse_entities(text)
+    let entities: Vec<_> = parse_entities(text).collect();
+    let structs: Vec<(&str, [f32; 3])> = entities
+        .iter()
+        .filter(|entity| entity.classname == Some("script_struct"))
+        .filter_map(|entity| Some((entity.targetname?, entity.angles.unwrap_or([0.0; 3]))))
+        .collect();
+    entities
+        .into_iter()
         .enumerate()
         .filter_map(|(ordinal, entity)| {
             let classname = entity.classname?;
             if !MAP_USE_TRIGGER_CLASSNAMES.contains(&classname) {
                 return None;
             }
+            let target = entity.target.unwrap_or("");
+            let target_struct_angles = structs
+                .iter()
+                .find(|(name, _)| *name == target)
+                .map(|(_, angles)| *angles);
             Some(MapUseTrigger {
                 hulls: None,
-                target: entity.target.unwrap_or("").to_owned(),
+                target: target.to_owned(),
                 source_ordinal: u32::try_from(ordinal).ok()?,
                 classname: classname.to_owned(),
                 origin: entity.origin?,
@@ -158,6 +195,7 @@ pub fn parse_map_use_triggers(text: &str) -> Vec<MapUseTrigger> {
                 radius: parse_finite_f32(entity.radius),
                 height: parse_finite_f32(entity.height),
                 model: entity.model.unwrap_or("").to_owned(),
+                target_struct_angles,
             })
         })
         .collect()
@@ -165,6 +203,10 @@ pub fn parse_map_use_triggers(text: &str) -> Vec<MapUseTrigger> {
 
 fn parse_finite_f32(value: Option<&str>) -> Option<f32> {
     value?.trim().parse().ok().filter(|v: &f32| v.is_finite())
+}
+
+fn parse_i32(value: &str) -> Option<i32> {
+    value.trim().parse().ok()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -208,6 +250,53 @@ pub fn flag_descriptors_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Vec<FlagDescrip
         return Vec::new();
     };
     parse_flag_descriptors(text)
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MapScriptStruct {
+    pub targetname: String,
+    pub origin: [f32; 3],
+    pub angles: [f32; 3],
+    pub target: String,
+    pub script_int: Option<i32>,
+}
+
+pub fn parse_map_script_structs(text: &str) -> Vec<MapScriptStruct> {
+    parse_entities(text)
+        .filter_map(|entity| {
+            if entity.classname != Some("script_struct") {
+                return None;
+            }
+            Some(MapScriptStruct {
+                targetname: entity.targetname.unwrap_or("").to_owned(),
+                origin: entity.origin?,
+                angles: entity.angles.unwrap_or([0.0; 3]),
+                target: entity.target.unwrap_or("").to_owned(),
+                script_int: entity.script_int,
+            })
+        })
+        .collect()
+}
+
+pub fn map_script_structs(s: &ZoneStream<'_>) -> Vec<MapScriptStruct> {
+    let Some(text) = entity_string(s) else {
+        return Vec::new();
+    };
+    parse_map_script_structs(text)
+}
+
+pub fn map_script_structs_t5(s: &fastfile_t5::ZoneStream<'_>) -> Vec<MapScriptStruct> {
+    let Some(text) = entity_string_t5(s) else {
+        return Vec::new();
+    };
+    parse_map_script_structs(text)
+}
+
+pub fn map_script_structs_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Vec<MapScriptStruct> {
+    let Some(text) = entity_string_iw5(s) else {
+        return Vec::new();
+    };
+    parse_map_script_structs(text)
 }
 
 pub fn map_use_triggers(s: &ZoneStream<'_>) -> Vec<MapUseTrigger> {
@@ -513,6 +602,7 @@ fn parse_spawn_points(text: &str, classnames: &[&str]) -> Vec<SpawnPoint> {
             origin,
             angles: entity.angles.unwrap_or([0.0, 0.0, 0.0]),
             script_linkto: entity.script_linkto.unwrap_or("").to_owned(),
+            script_destructable_area: entity.script_destructable_area.unwrap_or("").to_owned(),
         });
     }
     out
@@ -586,6 +676,13 @@ fn parse_script_model_placements(text: &str) -> Vec<ScriptModelPlacement> {
                         candidate.script_prefab_exploder,
                         candidate.script_exploder,
                     ),
+                    script_accumulate: candidate.script_accumulate,
+                    script_threshold: candidate.script_threshold,
+                    script_destructable_area: candidate
+                        .script_destructable_area
+                        .unwrap_or("")
+                        .to_owned(),
+                    script_fxid: candidate.script_fxid.unwrap_or("").to_owned(),
                 })
             })
             .collect::<Vec<_>>();
@@ -614,6 +711,10 @@ fn parse_script_model_placements(text: &str) -> Vec<ScriptModelPlacement> {
             ),
             target: target.to_owned(),
             brush_link,
+            script_accumulate: entity.script_accumulate,
+            script_threshold: entity.script_threshold,
+            script_destructable_area: entity.script_destructable_area.unwrap_or("").to_owned(),
+            script_fxid: entity.script_fxid.unwrap_or("").to_owned(),
         });
     }
     out
@@ -641,6 +742,10 @@ fn parse_script_brush_model_placements(text: &str) -> Vec<ScriptBrushModelPlacem
                     entity.script_prefab_exploder,
                     entity.script_exploder,
                 ),
+                script_accumulate: entity.script_accumulate,
+                script_threshold: entity.script_threshold,
+                script_destructable_area: entity.script_destructable_area.unwrap_or("").to_owned(),
+                script_fxid: entity.script_fxid.unwrap_or("").to_owned(),
             })
         })
         .collect()
@@ -666,6 +771,11 @@ struct RawEntity<'a> {
     script_label: Option<&'a str>,
     script_linkname: Option<&'a str>,
     script_linkto: Option<&'a str>,
+    script_accumulate: Option<i32>,
+    script_threshold: Option<i32>,
+    script_destructable_area: Option<&'a str>,
+    script_fxid: Option<&'a str>,
+    script_int: Option<i32>,
 }
 
 fn parse_entities(text: &str) -> impl Iterator<Item = RawEntity<'_>> + '_ {
@@ -689,6 +799,11 @@ fn parse_entities(text: &str) -> impl Iterator<Item = RawEntity<'_>> + '_ {
         let mut script_label = None;
         let mut script_linkname = None;
         let mut script_linkto = None;
+        let mut script_accumulate = None;
+        let mut script_threshold = None;
+        let mut script_destructable_area = None;
+        let mut script_fxid = None;
+        let mut script_int = None;
         let mut saw_key = false;
         for line in entity.lines() {
             let Some((key, value)) = entity_pair(line) else {
@@ -715,6 +830,11 @@ fn parse_entities(text: &str) -> impl Iterator<Item = RawEntity<'_>> + '_ {
                 EntityKey::ScriptLabel => script_label = Some(value),
                 EntityKey::ScriptLinkname => script_linkname = Some(value),
                 EntityKey::ScriptLinkto => script_linkto = Some(value),
+                EntityKey::ScriptAccumulate => script_accumulate = parse_i32(value),
+                EntityKey::ScriptThreshold => script_threshold = parse_i32(value),
+                EntityKey::ScriptDestructableArea => script_destructable_area = Some(value),
+                EntityKey::ScriptFxid => script_fxid = Some(value),
+                EntityKey::ScriptInt => script_int = parse_i32(value),
                 EntityKey::Other => {}
             }
         }
@@ -738,6 +858,11 @@ fn parse_entities(text: &str) -> impl Iterator<Item = RawEntity<'_>> + '_ {
             script_label,
             script_linkname,
             script_linkto,
+            script_accumulate,
+            script_threshold,
+            script_destructable_area,
+            script_fxid,
+            script_int,
         })
     })
 }
@@ -764,6 +889,11 @@ enum EntityKey {
     ScriptLabel,
     ScriptLinkname,
     ScriptLinkto,
+    ScriptAccumulate,
+    ScriptThreshold,
+    ScriptDestructableArea,
+    ScriptFxid,
+    ScriptInt,
     Other,
 }
 
@@ -805,6 +935,11 @@ fn named_key(key: &str) -> EntityKey {
         "script_label" => EntityKey::ScriptLabel,
         "script_linkname" => EntityKey::ScriptLinkname,
         "script_linkto" => EntityKey::ScriptLinkto,
+        "script_accumulate" => EntityKey::ScriptAccumulate,
+        "script_threshold" => EntityKey::ScriptThreshold,
+        "script_destructable_area" => EntityKey::ScriptDestructableArea,
+        "script_fxid" => EntityKey::ScriptFxid,
+        "script_int" => EntityKey::ScriptInt,
         _ => EntityKey::Other,
     }
 }
@@ -908,4 +1043,48 @@ fn capture_trigger_hulls(
         out.push(MapTriggerHull { mid, half, slabs });
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_picks_up_targeted_struct_angles() {
+        let text = concat!(
+            "{\n",
+            "\"classname\" \"script_struct\"\n",
+            "\"targetname\" \"belt_dir\"\n",
+            "\"angles\" \"0 90 0\"\n",
+            "\"origin\" \"0 0 0\"\n",
+            "}\n",
+            "{\n",
+            "\"classname\" \"trigger_multiple\"\n",
+            "\"targetname\" \"coveyer_trig\"\n",
+            "\"target\" \"belt_dir\"\n",
+            "\"origin\" \"1 2 3\"\n",
+            "}\n",
+        );
+        let triggers = parse_map_use_triggers(text);
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0].target_struct_angles, Some([0.0, 90.0, 0.0]));
+    }
+
+    #[test]
+    fn script_struct_keeps_script_int_and_target() {
+        let text = concat!(
+            "{\n",
+            "\"classname\" \"script_struct\"\n",
+            "\"targetname\" \"digger_a\"\n",
+            "\"origin\" \"10 20 30\"\n",
+            "\"script_int\" \"8\"\n",
+            "\"target\" \"digger_b\"\n",
+            "}\n",
+        );
+        let structs = parse_map_script_structs(text);
+        assert_eq!(structs.len(), 1);
+        assert_eq!(structs[0].script_int, Some(8));
+        assert_eq!(structs[0].target, "digger_b");
+        assert_eq!(structs[0].origin, [10.0, 20.0, 30.0]);
+    }
 }

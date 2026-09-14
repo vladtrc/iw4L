@@ -94,6 +94,7 @@ pub(crate) struct CommonWalkSink {
     pub light_def_bodies: usize,
 
     pub pen_table: Option<weapon_iw4::PenetrationDepthTable>,
+    pub lochit_table: Option<[f32; weapon_iw4::HITLOC_COUNT]>,
 
     pub teamset_icons: HashMap<String, crate::TeamIcons>,
 
@@ -1123,6 +1124,9 @@ impl AssetLinkSink for CommonWalkSink {
             .capture(name, data, zlib_compressed);
         if let Some(table) = crate::capture_pen_table(name, data, zlib_compressed) {
             self.pen_table = Some(table);
+        }
+        if let Some(table) = crate::capture_lochit_table(name, data, zlib_compressed) {
+            self.lochit_table = Some(table);
         }
         match crate::parse_film_vision_rawfile(name, data, zlib_compressed) {
             Ok(Some(vision)) => {

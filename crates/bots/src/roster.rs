@@ -1,7 +1,9 @@
 use bevy::prelude::Resource;
 use sim::{ClassId, ClientId};
 
-use crate::brain::DumbBrain;
+use crate::controller::HostController;
+
+pub const MAX_HOST_BOTS: u32 = 20;
 
 #[derive(Resource, Debug, Default, Clone)]
 pub struct BotClassPool {
@@ -79,7 +81,7 @@ impl BotFireQueue {
 #[derive(Debug)]
 pub struct BotSlot {
     pub id: ClientId,
-    pub brain: DumbBrain,
+    pub brain: HostController,
     pub joined: bool,
     pub class_requested: bool,
 }
@@ -108,11 +110,13 @@ impl BotRoster {
     }
 
     pub fn add_bots(&mut self, count: u32) -> Vec<ClientId> {
+        let room = MAX_HOST_BOTS.saturating_sub(self.bots.len() as u32);
+        let count = count.min(room);
         let mut added = Vec::with_capacity(count as usize);
         for i in 0..count {
             let id = ClientId(self.next_client);
             self.next_client = self.next_client.wrapping_add(1).max(1);
-            let brain = DumbBrain::new(self.seed ^ (u64::from(id.0) << 32) ^ u64::from(i));
+            let brain = HostController::new(self.seed ^ (u64::from(id.0) << 32) ^ u64::from(i));
             self.bots.push(BotSlot {
                 id,
                 brain,

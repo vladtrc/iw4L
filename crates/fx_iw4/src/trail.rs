@@ -144,11 +144,30 @@ pub fn fx_pack_code_mesh_vertex(
     normal_packed: u32,
     tangent_packed: u32,
 ) -> [u8; FX_CODE_MESH_VERTEX_STRIDE] {
+    fx_pack_code_mesh_vertex_signed(
+        xyz,
+        color_rgba,
+        texcoord_packed,
+        normal_packed,
+        tangent_packed,
+        FX_CODE_MESH_BINORMAL_SIGN,
+    )
+}
+
+#[inline]
+pub fn fx_pack_code_mesh_vertex_signed(
+    xyz: [f32; 3],
+    color_rgba: [u8; 4],
+    texcoord_packed: u32,
+    normal_packed: u32,
+    tangent_packed: u32,
+    binormal_sign: f32,
+) -> [u8; FX_CODE_MESH_VERTEX_STRIDE] {
     let mut row = [0u8; FX_CODE_MESH_VERTEX_STRIDE];
     row[0..4].copy_from_slice(&xyz[0].to_le_bytes());
     row[4..8].copy_from_slice(&xyz[1].to_le_bytes());
     row[8..12].copy_from_slice(&xyz[2].to_le_bytes());
-    row[12..16].copy_from_slice(&FX_CODE_MESH_BINORMAL_SIGN.to_le_bytes());
+    row[12..16].copy_from_slice(&binormal_sign.to_le_bytes());
     let [r, g, b, a] = color_rgba;
     row[16] = b;
     row[17] = g;

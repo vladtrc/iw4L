@@ -7,10 +7,10 @@ use sim::{
     ClassRejectReason, ClientAction, ClientId, ClientLifecycle, ClientSnapshotMeta, DamageSource,
     DroppedItemAmmo, EntityEventPayload, EntityEventRecord, EntityKernelOccupiedSnapshot,
     EntityKernelSlotSnapshot, EntityKernelSnapshot, EntityRef, EntityRelations, EntityRunKind,
-    EventAudience, EventRecord, EventSequence, GiveRejectReason, GlassPieceSnapshot,
-    GlassPieceState, GlassShatterSeed, ItemPickupRecord, LifeSequence, LoadoutSpec, MATCH_TICK_MS,
-    MatchEndReason, MatchPhase, PelletFxRecord, PlayerCorpsePool, PlayerCorpseSlot, RngDebugMeta,
-    ScriptModelId, SimEvent, SnapshotMeta, Tick, WorldObjectSnapshot,
+    EventAudience, EventRecord, EventSequence, GiveRejectReason, GlassCause, GlassPieceSnapshot,
+    GlassPieceState, GlassShatterSeed, ItemPickupRecord, LifeSequence, LoadoutSpec, MatchEndReason,
+    MatchPhase, PelletFxRecord, PlayerCorpsePool, PlayerCorpseSlot, RngDebugMeta, ScriptModelId,
+    SimEvent, SnapshotMeta, Tick, WorldObjectSnapshot,
 };
 
 use crate::transport::wire::{WireError, WireReader, WireWriter};
@@ -37,6 +37,9 @@ impl WorldObjectSyncEncoder {
     pub fn encode(&mut self, tick: Tick, current: &WorldObjectSnapshot) -> Vec<u8> {
         let mut out = WireWriter::with_capacity(64);
         let current = canonical_world_object_snapshot(tick, current);
+        out.put_i32(current.as_of_ms);
+        out.put_u32(current.map_round_epoch);
+        out.put_u32(current.fracture_profile_version);
         let full = self.force_full || tick.0 % WORLD_SYNC_PERIOD_TICKS == 0;
         if full {
             out.put_u8(2);
@@ -47,6 +50,9 @@ impl WorldObjectSyncEncoder {
             let (destructibles, glass) = world_object_delta(&self.baseline, &current);
             if destructibles.is_empty() && glass.is_empty() {
                 out.put_u8(0);
+                self.baseline.as_of_ms = current.as_of_ms;
+                self.baseline.map_round_epoch = current.map_round_epoch;
+                self.baseline.fracture_profile_version = current.fracture_profile_version;
             } else {
                 out.put_u8(1);
                 encode_world_object_delta(&mut out, &self.baseline, &current);
@@ -161,19 +167,10 @@ fn world_object_delta(
 }
 
 fn canonical_world_object_snapshot(
-    tick: Tick,
+    _tick: Tick,
     current: &WorldObjectSnapshot,
 ) -> WorldObjectSnapshot {
-    let mut current = current.clone();
-    let at_time_ms = i32::try_from(tick.0.saturating_mul(MATCH_TICK_MS)).unwrap_or(i32::MAX);
-    for (_, row) in &mut current.glass_pieces {
-        if row.shatter_seed.is_some()
-            && !entity_iw4::glass_shatter_seed_is_fresh(row.last_state_change_time, at_time_ms)
-        {
-            row.shatter_seed = None;
-        }
-    }
-    current
+    current.clone()
 }
 
 fn encode_world_object_full(out: &mut WireWriter, snap: &WorldObjectSnapshot) {
@@ -239,6 +236,9 @@ fn decode_world_object_sync(
     input: &mut WireReader<'_>,
     state: &mut WorldObjectSnapshot,
 ) -> Result<(), WireError> {
+    state.as_of_ms = input.get_i32()?;
+    state.map_round_epoch = input.get_u32()?;
+    state.fracture_profile_version = input.get_u32()?;
     match input.get_u8()? {
         0 => {}
         1 => {
@@ -282,6 +282,9 @@ fn decode_world_object_sync(
                 glass_pieces.push((input.get_u32()?, decode_glass_piece_snapshot(input)?));
             }
             *state = WorldObjectSnapshot {
+                as_of_ms: state.as_of_ms,
+                map_round_epoch: state.map_round_epoch,
+                fracture_profile_version: state.fracture_profile_version,
                 destructible_stages,
                 glass_pieces,
             };
@@ -293,7 +296,10 @@ fn decode_world_object_sync(
 
 fn encode_glass_piece_snapshot(out: &mut WireWriter, row: GlassPieceSnapshot) {
     out.put_u8(row.state.as_u8());
+    out.put_u32(row.revision);
     out.put_i32(row.last_state_change_time);
+    out.put_u8(row.cause.as_u8());
+    out.put_u64(row.deterministic_seed);
     match row.shatter_seed {
         None => out.put_u8(0),
         Some(seed) => {
@@ -315,7 +321,11 @@ fn decode_glass_piece_snapshot(
 ) -> Result<GlassPieceSnapshot, WireError> {
     let state = GlassPieceState::from_u8(input.get_u8()?)
         .ok_or(WireError::Malformed("unknown glass piece state"))?;
+    let revision = input.get_u32()?;
     let last_state_change_time = input.get_i32()?;
+    let cause =
+        GlassCause::from_u8(input.get_u8()?).ok_or(WireError::Malformed("unknown glass cause"))?;
+    let deterministic_seed = input.get_u64()?;
     let shatter_seed = match input.get_u8()? {
         0 => None,
         1 if state == GlassPieceState::Shattered => {
@@ -331,8 +341,11 @@ fn decode_glass_piece_snapshot(
     };
     Ok(GlassPieceSnapshot {
         state,
+        revision,
         last_state_change_time,
         shatter_seed,
+        deterministic_seed,
+        cause,
     })
 }
 
