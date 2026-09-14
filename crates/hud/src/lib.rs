@@ -37,9 +37,7 @@ pub use draw2d::{
 pub use gaps::{GapCause, HudGap, HudPresentationGaps};
 pub use gpu_list::{HudTessBatch, HudTessGpuFrame, HudTessTechnique, HudTessVertex};
 pub use hitmarker::PendingHitmarker;
-pub use hudelem::{
-    HudElemSoundLatch, ProducerStatus, SCRIPTED_PRODUCERS, ScriptedProducer, open_producer_count,
-};
+pub use hudelem::HudElemSoundLatch;
 pub use overhead_names::{
     OverheadPosedHead, OverheadPosedPlayerFrame, OverheadPosedPlayerFramePublished,
 };

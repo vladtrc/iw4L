@@ -12,12 +12,13 @@
 //!    private key, a piece of an original game install — none of it is the
 //!    product, and a stray `git add -f` is all it takes. This is the half worth
 //!    running before every push.
-//! 2. **Retail offsets.** A standalone runtime resolves nothing against a
-//!    retail image, so a hardcoded address from one is dead weight wherever it
-//!    appears, and a decompiler placeholder name (`FUN_…`, `DAT_…`) is a
-//!    half-finished symbol. Naming IW4x, KisakCOD, an original executable or
-//!    Ghidra is *not* a finding: crediting what was read is the policy, not a
-//!    leak.
+//! 2. **Retail offsets and pinned source.** A standalone runtime resolves
+//!    nothing against a retail image, so a hardcoded address from one is dead
+//!    weight wherever it appears, a decompiler placeholder name (`FUN_…`,
+//!    `DAT_…`) is a half-finished symbol, and a script file pinned by hash and
+//!    line range is an index into somebody else's tree. Naming IW4x, KisakCOD,
+//!    an original executable or Ghidra is *not* a finding: crediting what was
+//!    read is the policy, not a leak.
 //!
 //! It walks the tracked tree, so it sees exactly what a push would publish —
 //! and only that. It cannot see history, and it cannot see a release archive;
@@ -322,6 +323,25 @@ fn address_in_name(lower: &str) -> bool {
     })
 }
 
+/// A script file pinned by content hash and line range. Nothing here reads one,
+/// and a `ScriptGap` id, which names a hole in our own runtime, is not this
+/// shape.
+fn gsc_citation(lower: &str) -> bool {
+    let Some(at) = lower.find(".gsc@sha256:") else {
+        return lower.find(".gsc#l").is_some_and(|at| {
+            lower[at + ".gsc#l".len()..]
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_digit)
+        });
+    };
+    lower[at + ".gsc@sha256:".len()..]
+        .bytes()
+        .take_while(|b| is_hex(*b))
+        .count()
+        >= 16
+}
+
 fn scan_line(line: &str) -> Option<String> {
     let lower = line.to_ascii_lowercase();
     let bytes = lower.as_bytes();
@@ -361,6 +381,9 @@ fn scan_line(line: &str) -> Option<String> {
     }
     if address_in_name(&lower) {
         return Some("address inside an identifier".to_string());
+    }
+    if gsc_citation(&lower) {
+        return Some("script citation (path, hash and line range)".to_string());
     }
     None
 }
@@ -506,6 +529,24 @@ mod tests {
     fn tells_a_binary_from_text() {
         assert!(looks_binary(b"\0\x01\x02"));
         assert!(!looks_binary(b"pub const KICK_STEP_MS: i32 = 5;\n"));
+    }
+
+    /// A script pinned by hash and line range is an index into somebody else's
+    /// tree. The gap ids, which name holes in our own runtime, are not that.
+    #[test]
+    fn catches_a_pinned_script() {
+        for line in [
+            r#"pub const CITE: &str = "gsc:maps/mp/_destructables.gsc@sha256:05084ef406fb5ea1#L1-19";"#,
+            "// maps/mp/gametypes/_rank.gsc#L504-557 is where the popup lives",
+        ] {
+            assert!(scan_line(line).is_some(), "missed: {line}");
+        }
+        for line in [
+            r#"Self::DestructablesPlayFx => "gsc.mp._destructables.destructable_destruct","#,
+            r#"let raw = zone.rawfile("maps/mp/_destructables.gsc")?;"#,
+        ] {
+            assert!(scan_line(line).is_none(), "false positive: {line}");
+        }
     }
 
     /// Naming what was read is the policy, so none of this is a finding any
