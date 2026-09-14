@@ -199,6 +199,7 @@ pub struct WorldObjectState {
     barrel_drains: Vec<(ScriptModelId, VehicleHealthDrain)>,
 
     barrel_burn_start: Vec<VehicleFxPulse>,
+    pending_barrel_downs: Vec<ScriptModelId>,
     glass_pieces: Vec<(GlassPieceId, GGlassPiece)>,
 
     glass_native: Vec<(GlassPieceId, GlassNativeMeta)>,
@@ -272,6 +273,7 @@ impl WorldObjectState {
         self.barrel_origins.clear();
         self.barrel_drains.clear();
         self.barrel_burn_start.clear();
+        self.pending_barrel_downs.clear();
         for (id, origin) in barrels {
             self.register_barrel_at(id, origin);
         }
@@ -440,6 +442,10 @@ impl WorldObjectState {
         ));
         self.barrel_bodies.sort_by_key(|(id, _)| *id);
         upsert_origin(&mut self.barrel_origins, id, origin);
+    }
+
+    pub fn take_explodable_barrel_downs(&mut self) -> Vec<ScriptModelId> {
+        core::mem::take(&mut self.pending_barrel_downs)
     }
 
     pub fn explodable_barrel_bodies(&self) -> &[(ScriptModelId, VehicleBodyState)] {
@@ -1138,19 +1144,21 @@ impl WorldObjectState {
                 });
             }
         }
-        if !was_destroyed
-            && next.state_index >= destroyed
-            && let Some(origin) = lookup_origin(&self.barrel_origins, target)
-        {
-            return VehicleApply::Exploded(DestructibleExplodeEvent {
-                owner: target,
-                origin,
-                attacker,
-                attacker_life,
-                source: DamageSource::Radius(target),
-                explode_range_mp: crate::barrel_policy::EXPLODABLE_BARREL_EXPLODE_RANGE,
-                explode_damage: crate::barrel_policy::EXPLODABLE_BARREL_EXPLODE_DAMAGE,
-            });
+        if !was_destroyed && next.state_index >= destroyed {
+            if !self.pending_barrel_downs.iter().any(|have| *have == target) {
+                self.pending_barrel_downs.push(target);
+            }
+            if let Some(origin) = lookup_origin(&self.barrel_origins, target) {
+                return VehicleApply::Exploded(DestructibleExplodeEvent {
+                    owner: target,
+                    origin,
+                    attacker,
+                    attacker_life,
+                    source: DamageSource::Radius(target),
+                    explode_range_mp: crate::barrel_policy::EXPLODABLE_BARREL_EXPLODE_RANGE,
+                    explode_damage: crate::barrel_policy::EXPLODABLE_BARREL_EXPLODE_DAMAGE,
+                });
+            }
         }
         VehicleApply::Changed
     }
@@ -2064,5 +2072,59 @@ mod tests {
         }
         assert!(exploded);
         assert!(objects.flammable_crate_is_destroyed(id));
+    }
+
+    #[test]
+    fn a_killing_blow_explodes_the_barrel_and_records_the_physics_gap() {
+        let mut objects = WorldObjectState::default();
+        let id = ScriptModelId::from_wire(4);
+        objects.install_explodable_barrels([(id, [0.0, 0.0, 0.0])]);
+        let hit = objects.apply_destructible_damage_batch(&[DestructibleDamageIntent {
+            source: DamageSource::Radius(id),
+            pellet: PelletId(0),
+            attacker: ClientId(0),
+            attacker_life: LifeSequence(0),
+            target: id,
+            amount: crate::barrel_policy::EXPLODABLE_BARREL_HEALTH,
+            epoch: EntityCollisionEpoch::CurrentTick,
+        }]);
+        assert_eq!(hit.explodes.len(), 1);
+        assert_eq!(objects.take_explodable_barrel_downs(), [id]);
+        let destroyed = objects
+            .explodable_barrel_bodies()
+            .iter()
+            .find(|(have, _)| *have == id)
+            .is_some_and(|(_, body)| {
+                body.state_index >= crate::barrel_policy::EXPLODABLE_BARREL_DESTROYED_STATE
+            });
+        assert!(destroyed);
+    }
+
+    #[test]
+    fn a_partial_hit_burns_until_the_barrel_explodes() {
+        let mut objects = WorldObjectState::default();
+        let id = ScriptModelId::from_wire(5);
+        objects.install_explodable_barrels([(id, [8.0, 0.0, 0.0])]);
+        let hit = objects.apply_destructible_damage_batch(&[DestructibleDamageIntent {
+            source: DamageSource::Radius(id),
+            pellet: PelletId(0),
+            attacker: ClientId(0),
+            attacker_life: LifeSequence(0),
+            target: id,
+            amount: 50,
+            epoch: EntityCollisionEpoch::CurrentTick,
+        }]);
+        assert!(hit.explodes.is_empty());
+        assert!(objects.take_explodable_barrel_downs().is_empty());
+        let mut exploded = false;
+        for _ in 0..20 {
+            let burn = objects.tick_explodable_barrel_burn(1000);
+            if !burn.explodes.is_empty() {
+                exploded = true;
+                break;
+            }
+        }
+        assert!(exploded);
+        assert_eq!(objects.take_explodable_barrel_downs(), [id]);
     }
 }

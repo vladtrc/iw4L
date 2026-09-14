@@ -163,6 +163,14 @@ fn phase_destructible_death_presentation(world: &mut FrameWorld, msec: i32) {
 }
 
 pub fn apply_explodable_barrel_death_presentation(world: &mut SimState) {
+    let downs = world.world_objects_mut().take_explodable_barrel_downs();
+    for id in &downs {
+        world
+            .script_gaps_mut()
+            .raise(gamemode_iw4::ScriptGapCause::ExplodableBarrelPhysics {
+                source_ordinal: id.to_wire(),
+            });
+    }
     let ids: Vec<crate::ScriptModelId> = world
         .world_objects()
         .explodable_barrel_bodies()
