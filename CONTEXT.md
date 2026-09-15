@@ -200,6 +200,49 @@ Deleting a probe does not delete the evidence. The artifact keeps the output,
 the log and the verdict, which is what the next agent reads anyway; the
 disposable half of it does not need to be in git to have been true.
 
+## Making a public push
+
+The slice rule above is this branch. This pass is everything about to leave
+the machine. It adds no behaviour. It takes the tree the agents built and
+leaves only the runtime: names, comments and tests that a reader who never
+opened `context/` can live with.
+
+**History.** Unpushed commits are the research path. Soft-reset them onto
+`origin/master` and make one commit whose message is the effect, not the
+investigation. Fixes, probes, reverts and "try this" do not survive as
+separate objects. History that has already been pushed is not rewritten —
+[`docs/DEPLOY.md`](docs/DEPLOY.md).
+
+**Tests.** Disposable by default. A test stays when rewriting it would cost
+more than keeping it: cross-system behaviour, a network contract, a state
+machine, a bug that took a week to see. Helper tests, agent self-checks,
+one-shot snapshots go out. Doubt deletes.
+
+**Comments.** Current architecture only. No address, no offset, no function
+number, no "as in the original", no diary of how it was found. If deleting
+the comment loses nothing, it was already noise.
+
+**Names.** IW4L domain. An original identifier that does not mean anything
+here is a citation, not a name, and it does not land. The structure of the
+code is free to differ; resemblance is not a metric.
+
+**Scaffolding.** Temporary stubs, confidence tables, research scars, dead
+code. Out.
+
+The last look at the diff is one question: *does this read as a standalone
+runtime, or as the traces of a dig?* The second answer is not a push.
+
+```
+1. ship every mrs/ clone that is ready
+2. on the resulting master: delete, rename, strip
+   — probes go without asking
+   — a test you are not sure about goes too
+3. stop. the human reads the diff
+4. one commit, short message, the effect
+5. make publish-check
+6. push
+```
+
 ## Handing work over
 
 What the report has to contain: what it is based on (the trace, the probe

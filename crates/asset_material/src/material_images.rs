@@ -1856,11 +1856,11 @@ impl Drop for DecodedImageBatch {
 
 /// What one plan's claims cost and what survived the merge.
 ///
-/// The names are the ones the iteration brief asks for, and they answer
-/// different questions: `canonical_variants` is how many distinct images the
-/// plan wanted, `prepared_variants` how many it actually decoded, and
-/// `discarded_decoded_bytes` how much of that decode the merged catalog threw
-/// away because another source had already answered for the same name.
+/// The three counts answer different questions: `canonical_variants` is how
+/// many distinct images the plan wanted, `prepared_variants` how many it
+/// actually decoded, and `discarded_decoded_bytes` how much of that decode
+/// the merged catalog threw away because another source had already answered
+/// for the same name.
 #[derive(Clone, Debug, Default)]
 pub struct ImageMergeCensus {
     pub claimed_rows: usize,
@@ -2275,11 +2275,11 @@ impl DecodedImageBatch {
 
 /// Where the merged catalog's answer for a dropped claim came from.
 ///
-/// This is the difference the iteration brief asks for and the reason-string
-/// alone cannot make: "another source decoded it first" covers both a plan that
-/// prepared the very same archive entry a second time — avoidable work — and
-/// two games that ship different images under one name, where preparing both
-/// and keeping one is a *scheduling* question and not a duplicate at all.
+/// The reason-string alone cannot make this difference: "another source
+/// decoded it first" covers both a plan that prepared the very same archive
+/// entry a second time — avoidable work — and two games that ship different
+/// images under one name, where preparing both and keeping one is a
+/// *scheduling* question and not a duplicate at all.
 enum Winner {
     /// The kept row holds the same source and recipe this plan prepared.
     SameVariant,

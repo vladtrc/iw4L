@@ -15,3 +15,6 @@ placeholder name (`FUN_…`, `DAT_…`) is dead weight wherever it appears.
 `make publish-check` walks the tracked tree for both. It is a grep over a fixed
 set of shapes — it proves no claim about origin or licensing, and passing it is
 not an argument for anything beyond the absence of those shapes.
+
+A push of unpushed work is a pass of its own — history, tests, comments, names —
+in `CONTEXT.md` under Making a public push.

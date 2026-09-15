@@ -1733,9 +1733,9 @@ fn capture_common_zone(
 }
 
 /// An image plan already on the pool, and the job row that records when it got
-/// there. The producer owns both from the moment its plan is ready, which is
-/// the whole of patch A: the walk that discovers the demand hands it over
-/// itself rather than carrying it back to a consumer that is busy elsewhere.
+/// there. The producer owns both from the moment its plan is ready: the walk
+/// that discovers the demand hands it over itself rather than carrying it back
+/// to a consumer that is busy elsewhere.
 struct PendingImages {
     job: load_jobs::Job,
     task: bevy::tasks::Task<(&'static str, crate::material_images::DecodedImageBatch)>,
