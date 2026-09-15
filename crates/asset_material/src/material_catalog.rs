@@ -19,6 +19,22 @@ pub const TS_T5_COLOR0_MAP: u8 = 0x0C;
 pub const TS_T5_COLOR15_MAP: u8 = 0x1B;
 pub const TS_T5_THROW_MAP: u8 = 0x1C;
 
+/// Which prepared variant a decoded image is: the source bytes it came from
+/// and the recipe applied to them.
+///
+/// Two claims on the same *name* are not the same image — IW4, IW5 and T5 each
+/// ship their own `hud_teamcaret` — so a name is not enough to say whether one
+/// plan's decode could have answered another's. This is, and it travels on the
+/// row so the merge can say which of the two happened to a claim it dropped:
+/// the same bytes prepared twice, or a genuine override by another source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ImageVariantId {
+    /// Digest of the resolved archive entries the decode read, in order.
+    pub source: u64,
+    /// The decode options that change the prepared payload.
+    pub recipe: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct AuthoredImage {
     pub name: AssetRef,
@@ -33,6 +49,9 @@ pub struct AuthoredImage {
     pub format: u32,
     pub payload: Vec<u8>,
     pub decoded: Option<Image>,
+    /// Which variant `decoded` is, when it came from a plan. `None` means it
+    /// was decoded from this row's own inline payload or never decoded.
+    pub decoded_variant: Option<ImageVariantId>,
 
     pub pending_decode: Option<u64>,
 }
@@ -1335,6 +1354,7 @@ impl MaterialCatalog {
             format: geometry.format,
             payload,
             decoded: None,
+            decoded_variant: None,
             pending_decode: None,
         }))
     }
@@ -2307,6 +2327,7 @@ impl MaterialCatalog {
             format: geometry.format,
             payload,
             decoded: None,
+            decoded_variant: None,
             pending_decode: None,
         }))
     }
@@ -2618,6 +2639,7 @@ impl MaterialCatalog {
             format: geometry.format,
             payload,
             decoded: None,
+            decoded_variant: None,
             pending_decode: None,
         }))
     }

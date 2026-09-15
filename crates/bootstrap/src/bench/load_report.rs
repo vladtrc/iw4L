@@ -4,13 +4,15 @@
 //! the serial story — request, walk, install, spawn, first drawn frame — and it
 //! is what a player waits through. The **stages** are the parallel story: the
 //! walk runs on the load pool, so a stage's own duration says nothing about
-//! whether removing it would shorten anything. `exclusive` below narrows that:
-//! the time a stage was the only one running is an *upper bound* on what
-//! deleting it could save, and not a promise of saving it. Whatever else the
-//! pool would have picked up in that window still has to run, and a stage that
-//! was never alone can still be on the critical path by holding a dependency
-//! everything behind it is waiting on. The number bounds the win; it does not
-//! measure it.
+//! whether removing it would shorten anything.
+//!
+//! `sole_open` is the time a stage was the only one open. It used to be
+//! printed as an upper bound on what deleting the stage could save, and it is
+//! not one: a stage that was never alone can still be exactly what everything
+//! behind it is queued on, and deleting it would then save its whole length.
+//! The number says how much of the window this stage was the only thing the
+//! load was doing. What deleting it would save is a question for
+//! `load_jobs.csv` and its dependency edges.
 
 use std::time::{Duration, Instant};
 
@@ -28,9 +30,85 @@ pub(crate) fn render(bench: &Milestones, command_start: Option<Instant>, out: &m
     out.push(String::new());
     stages(&bench.lanes, out);
     out.push(String::new());
+    image_plans(out);
+    out.push(String::new());
     audio(out);
     out.push(String::new());
     picture(bench, out);
+}
+
+/// Each image plan's time split into the four things it can be waiting on, and
+/// what its decode bought.
+///
+/// `service` used to be one number for "a worker had the job", which folded
+/// together the memory ceiling holding a worker back and the decoding itself.
+/// They have opposite fixes: the first is a scheduling parameter, the second is
+/// the decoder. `budget wait` and `decode` are those two, `produced` is what
+/// the plan prepared and `discarded` the part of it the merge had no row for.
+fn image_plans(out: &mut Vec<String>) {
+    let jobs = assets::load_jobs::snapshot();
+    let plans: Vec<_> = jobs
+        .rows
+        .iter()
+        .filter(|row| row.kind == assets::load_jobs::JobKind::ImageDecode)
+        .collect();
+    if plans.is_empty() {
+        out.push("  image plans: MISS — no image decode job was recorded".to_owned());
+        return;
+    }
+    out.push("  image plans — what each one waited on, and what its decode bought:".to_owned());
+    let mut table = Table::new(
+        2,
+        &[
+            ("plan", Align::Left),
+            ("ready→queue", Align::Right),
+            ("queue", Align::Right),
+            ("budget wait", Align::Right),
+            ("decode", Align::Right),
+            ("done→join", Align::Right),
+            ("produced", Align::Right),
+            ("kept", Align::Right),
+            ("discarded", Align::Right),
+        ],
+    );
+    let gap = |from: Option<Instant>, to: Option<Instant>| -> String {
+        match (from, to) {
+            (Some(from), Some(to)) => ms(to.saturating_duration_since(from).as_nanos() as u64),
+            _ => "MISS".to_owned(),
+        }
+    };
+    let size = |value: Option<u64>| value.map_or_else(|| "MISS".to_owned(), mib);
+    for row in &plans {
+        table.row([
+            row.canonical.clone().unwrap_or_else(|| row.id.to_string()),
+            gap(row.plan_ready_at, row.enqueued_at),
+            gap(row.enqueued_at, row.started_at),
+            gap(row.started_at, row.decode_started_at),
+            gap(row.decode_started_at, row.finished_at),
+            gap(row.finished_at, row.joined_at),
+            size(row.produced_bytes),
+            size(row.retained_bytes),
+            size(row.discarded_bytes),
+        ]);
+    }
+    table.render(out);
+    let held = plans.iter().filter(|row| row.waited_for_budget).count();
+    out.push(format!(
+        "  {held} of {} plans were held by the decode budget before they began; `budget wait` is that hold and `decode` is the work. The ceiling is a threshold on starting, not a cap: a plan that is let through decodes all of itself, so outstanding bytes can end above it.",
+        plans.len()
+    ));
+    let (shared, shared_bytes) = assets::shared_variant_census();
+    if shared > 0 {
+        out.push(format!(
+            "  {shared} prepared variants ({}) were answered out of another plan's work instead of being decoded a second time — same archive entry, same recipe.",
+            mib(shared_bytes),
+        ));
+    } else {
+        out.push(
+            "  no prepared variant was shared between plans: every plan resolved its own archive entries, so what one plan discarded was not another's decode repeated."
+                .to_owned(),
+        );
+    }
 }
 
 fn waterfall(bench: &Milestones, command_start: Option<Instant>, out: &mut Vec<String>) {
@@ -127,7 +205,7 @@ fn stages(lanes: &[LoadLaneTiming], out: &mut Vec<String>) {
         .unwrap_or(Duration::ZERO);
     let held: Duration = lanes.iter().map(|lane| lane.elapsed).sum();
     let covered = union(lanes);
-    let exclusive = exclusive(lanes);
+    let sole_open = sole_open(lanes);
 
     let occupancy = if covered.is_zero() {
         "—".to_owned()
@@ -145,7 +223,7 @@ fn stages(lanes: &[LoadLaneTiming], out: &mut Vec<String>) {
         "  mean occupancy {occupancy} stages while anything was open. That is how many stages overlapped on average — not a speed-up, and not a count of busy cores: a stage that spends its time waiting on I/O is open and occupying nothing."
     ));
     out.push(
-        "  `exclusive` is the time a stage was the only one open. It is an upper bound on what deleting that stage could save, not the saving: the work behind it still has to run, and a stage that was never alone can still be what everything else is queued on."
+        "  `sole_open` is the time a stage was the only one open — how much of the window this stage was the only thing the load was doing. It is not a bound on what deleting it would save: a stage that was never alone can still be the dependency everything behind it is queued on, and deleting that one saves its whole length."
             .to_owned(),
     );
 
@@ -158,7 +236,7 @@ fn stages(lanes: &[LoadLaneTiming], out: &mut Vec<String>) {
             ("stage", Align::Left),
             ("at", Align::Right),
             ("held", Align::Right),
-            ("exclusive", Align::Right),
+            ("sole_open", Align::Right),
             ("items", Align::Right),
             ("memory", Align::Left),
         ],
@@ -172,7 +250,7 @@ fn stages(lanes: &[LoadLaneTiming], out: &mut Vec<String>) {
             ),
             secs(lane.at),
             secs(lane.elapsed),
-            secs(exclusive[*index]),
+            secs(sole_open[*index]),
             items(lane.done, lane.total),
             lane.mem_suffix().trim().to_owned(),
         ]);
@@ -398,7 +476,7 @@ fn union(lanes: &[LoadLaneTiming]) -> Duration {
 /// Per stage, the time it was the only stage running. A sweep over the edges:
 /// between two consecutive edges the set of running stages does not change, so
 /// a gap with exactly one stage open belongs to that stage.
-fn exclusive(lanes: &[LoadLaneTiming]) -> Vec<Duration> {
+fn sole_open(lanes: &[LoadLaneTiming]) -> Vec<Duration> {
     let mut edges: Vec<(Duration, isize, usize)> = Vec::with_capacity(lanes.len() * 2);
     for (index, lane) in lanes.iter().enumerate() {
         edges.push((lane.at, 1, index));
@@ -452,17 +530,17 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_credits_only_the_stage_nobody_overlapped() {
+    fn sole_open_credits_only_the_stage_nobody_overlapped() {
         // 0..100 alone, 100..150 shared, 150..200 alone on the second stage.
         let lanes = [lane(0, 150), lane(100, 100)];
-        let exclusive = exclusive(&lanes);
-        assert_eq!(exclusive[0], Duration::from_millis(100));
-        assert_eq!(exclusive[1], Duration::from_millis(50));
+        let sole_open = sole_open(&lanes);
+        assert_eq!(sole_open[0], Duration::from_millis(100));
+        assert_eq!(sole_open[1], Duration::from_millis(50));
     }
 
     #[test]
     fn a_stage_that_shared_its_whole_window_is_credited_nothing() {
         let lanes = [lane(0, 200), lane(50, 50)];
-        assert_eq!(exclusive(&lanes)[1], Duration::ZERO);
+        assert_eq!(sole_open(&lanes)[1], Duration::ZERO);
     }
 }

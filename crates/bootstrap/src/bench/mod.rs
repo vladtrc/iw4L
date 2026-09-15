@@ -15,11 +15,14 @@
 mod counter_report;
 mod facts;
 mod frame_report;
+mod frames_section;
+mod identity;
 mod load_report;
 mod manifest;
 mod milestones;
 mod summary;
 mod table;
+mod tables;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -47,6 +50,7 @@ static REPORTED: AtomicBool = AtomicBool::new(false);
 /// later code pays for a `getenv` per span.
 pub fn arm() {
     perf::stats::arm();
+    assets::load_jobs::arm(enabled());
     if !enabled() {
         return;
     }
@@ -98,6 +102,13 @@ pub fn insert(
     progress: LoadProgress,
 ) {
     facts::workload(zone, demo, role);
+    facts::scheduling(app);
+    // Off the main thread: a release binary is a few hundred megabytes and
+    // digesting it at exit would charge the run it is describing.
+    identity::spawn(
+        demo.map(Path::new),
+        artifacts.parent().unwrap_or_else(|| Path::new(".")),
+    );
     let screenshot = milestones::screenshot_path(artifacts, zone);
     if let Some(parent) = screenshot.parent()
         && let Err(error) = std::fs::create_dir_all(parent)
@@ -266,6 +277,60 @@ fn write_run_package(artifacts: &Path, lines: &[String]) -> Vec<String> {
     match summary::write(&path, &facts) {
         Ok(()) => {}
         Err(error) => out.push(format!("run package: summary not written ({error})")),
+    }
+
+    let frames = perf::frames::snapshot();
+    let path = dir.join("frames.csv");
+    if frames.rows.is_empty() {
+        out.push(
+            "run package: frames.csv not written — the per-frame recorder kept no row (IW4L_BENCH_FRAMES=0, or the run drew nothing)"
+                .to_owned(),
+        );
+    } else {
+        match tables::write_frames(&path, &frames) {
+            Ok(()) => out.push(format!(
+                "run package: frames.csv {} rows{}",
+                frames.rows.len(),
+                if frames.dropped == 0 {
+                    String::new()
+                } else {
+                    format!(
+                        ", {} dropped — the table held {} and the run was longer",
+                        frames.dropped, frames.capacity
+                    )
+                },
+            )),
+            Err(error) => out.push(format!("run package: frames.csv not written ({error})")),
+        }
+    }
+
+    let jobs = assets::load_jobs::snapshot();
+    let path = dir.join("load_jobs.csv");
+    if jobs.rows.is_empty() {
+        out.push("run package: load_jobs.csv not written — no load job was recorded".to_owned());
+    } else {
+        let origin = COMMAND_START
+            .get()
+            .copied()
+            .or_else(|| milestones::with(|bench| bench.t0))
+            .unwrap_or_else(Instant::now);
+        match tables::write_jobs(&path, &jobs, origin) {
+            Ok(()) => out.push(format!(
+                "run package: load_jobs.csv {} rows ({} mode){}",
+                jobs.rows.len(),
+                if jobs.per_asset {
+                    "per-asset"
+                } else {
+                    "per-class"
+                },
+                if jobs.dropped == 0 {
+                    String::new()
+                } else {
+                    format!(", {} dropped", jobs.dropped)
+                },
+            )),
+            Err(error) => out.push(format!("run package: load_jobs.csv not written ({error})")),
+        }
     }
     out
 }

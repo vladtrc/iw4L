@@ -48,9 +48,35 @@ const GPU_MS: [Counter; 6] = [
     Counter::RenderGpuFrameMs,
 ];
 
+/// Inside `Present` and `Ui`, whose span self-time is most of what the frame
+/// report cannot name. Two phases in one table because they are adjacent and a
+/// reader chasing the frame reads them together; the `present_`/`ui_` prefix
+/// says which is which.
+const PHASE_MS: [Counter; 5] = [
+    Counter::PresentPublishMs,
+    Counter::HudTessBodyMs,
+    Counter::UiHudSetupMs,
+    Counter::UiApplyDeferredMs,
+    Counter::UiHudVisibilityMs,
+];
+
+/// Gaps *between* systems, kept in their own table so nothing adds them to the
+/// bodies above.
+///
+/// `.chain()` fixes the order of the HUD systems and promises nothing about
+/// what the executor runs in the gaps between them. A wide gap therefore says
+/// the schedule put something there — it is not evidence that the HUD system
+/// on either side of it was slow, and reading it as one is how an earlier
+/// iteration set out to rewrite a HUD whose bodies were short.
+const SCHEDULE_MS: [Counter; 2] = [
+    Counter::HudSurfacesScheduleMs,
+    Counter::HudStageMaxScheduleMs,
+];
+
 /// Per-frame work: what the CPU asked the GPU to do, and what it allocated
 /// doing it.
-const WORK: [Counter; 11] = [
+const WORK: [Counter; 12] = [
+    Counter::HudTessJobs,
     Counter::CounterDraws,
     Counter::CounterDipsColour,
     Counter::CounterDipsSun,
@@ -89,6 +115,19 @@ pub(crate) fn render(wall: &SpanStats, out: &mut Vec<String>) {
     );
 
     out.push(String::new());
+    out.push("  inside Present and Ui, CPU (ms)".to_owned());
+    ms_table(&stats, &PHASE_MS, wall, frames, Share::Frame, out);
+    out.push(
+        "    Bodies: each one was taken inside the functions it names, so it is what that work cost. `hud_tess_body` is the nine HUD tess flush systems' own bodies summed over the frame, and `hud_tess_jobs` in the work table below is how many tess jobs they applied."
+            .to_owned(),
+    );
+
+    out.push(String::new());
+    out.push("  HUD schedule gaps, wall (ms)".to_owned());
+    ms_table(&stats, &SCHEDULE_MS, wall, frames, Share::Frame, out);
+    hud_stage(&stats, out);
+
+    out.push(String::new());
     out.push(
         "  GPU passes (ms) — measured on the device, resolved some frames after the CPU work that queued them. They overlap, so they are not summed; `gpu_frame` is the measured interval."
             .to_owned(),
@@ -114,12 +153,40 @@ pub(crate) fn render(wall: &SpanStats, out: &mut Vec<String>) {
     never_sampled(out);
 }
 
+/// Which HUD slice was the largest, not only how large. An index is not a
+/// duration and has no business in a millisecond table, so it gets a sentence:
+/// the reader who has just seen a HUD stage take a third of the frame should
+/// not then have to bisect the chain to find out which one.
+fn hud_stage(stats: &[CounterStats], out: &mut Vec<String>) {
+    out.push(
+        "    These are wall intervals between two systems, not the cost of either. Whatever the executor ran in the gap is in them; compare them against `hud_tess_body` above rather than adding the two, and do not subtract either from a span."
+            .to_owned(),
+    );
+    let Some(at) = find(stats, Counter::HudStageMaxScheduleAt) else {
+        return;
+    };
+    out.push(format!(
+        "    `hud_stage_max_schedule_interval` is the largest of the nine gaps inside `hud_surfaces_schedule_interval`, not a phase beside it. It was slice {:.0} on the median frame (min {:.0}, max {:.0}) — the wall between `hud_stage_close::<{:.0}>` and the close before it, in crates/hud/src/plugin.rs.",
+        at.p50,
+        at.min,
+        at.max,
+        at.p50,
+    ));
+}
+
 /// Counters that took a sample and are in none of the three tables above. The
 /// tables are a curated set — the frame's cost and the frame's work — while
 /// `summary.json` carries every counter the recorder held. Naming the rest is
 /// what stops the report reading as the whole list when it is a selection.
 fn untabled(stats: &[CounterStats], out: &mut Vec<String>) {
-    let tabled: Vec<Counter> = CPU_MS.into_iter().chain(GPU_MS).chain(WORK).collect();
+    let tabled: Vec<Counter> = CPU_MS
+        .into_iter()
+        .chain(PHASE_MS)
+        .chain(SCHEDULE_MS)
+        .chain(GPU_MS)
+        .chain(WORK)
+        .chain([Counter::HudStageMaxScheduleAt])
+        .collect();
     let rest: Vec<&str> = stats
         .iter()
         .filter(|row| !tabled.contains(&row.counter))

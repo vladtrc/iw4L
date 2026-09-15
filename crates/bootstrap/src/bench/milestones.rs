@@ -161,6 +161,13 @@ pub(crate) fn poll(
     let ready_now = working
         .as_ref()
         .is_some_and(|set| set.hits > 0 && set.pipeline_not_ready == 0);
+    // Per-frame state, so `frames.csv` can say what was true of a slow frame
+    // rather than leaving the reader to guess from its position in the run.
+    perf::frames::set_state(perf::frames::flag::LOADING, overlay_now);
+    perf::frames::set_state(
+        perf::frames::flag::WARMUP,
+        ingame_now && !working.is_some_and(|set| set.pipeline_not_ready == 0),
+    );
 
     with(|bench| {
         if bench.request.is_none() && saw_request {

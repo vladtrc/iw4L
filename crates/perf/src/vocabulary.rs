@@ -202,6 +202,11 @@ impl Counter {
         match self {
             Self::CounterFxElemAllocFail | Self::CounterFxElemLive => CounterCategory::Fx,
             Self::CounterProcessAllocations => CounterCategory::Frame,
+            Self::HudSurfacesScheduleMs
+            | Self::HudStageMaxScheduleMs
+            | Self::HudStageMaxScheduleAt
+            | Self::HudTessBodyMs
+            | Self::HudTessJobs => CounterCategory::Frame,
             _ => CounterCategory::Render,
         }
     }

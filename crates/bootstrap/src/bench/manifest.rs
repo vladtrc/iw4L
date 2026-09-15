@@ -46,9 +46,22 @@ pub(crate) struct RuntimeFacts {
     /// Adapter name, backend, device type and driver, as wgpu reported them.
     pub(crate) adapter: Option<AdapterFacts>,
     pub(crate) window: Option<WindowFacts>,
+    /// The surface the camera actually drew into. Not the window: a scale
+    /// factor, a letterbox or a render-to-texture camera make the two differ,
+    /// and it is this one the frame cost scales with.
+    pub(crate) render_target: Option<(u32, u32)>,
+    /// The part of that surface a camera actually rendered — its viewport. The
+    /// passes and the postfx chain are sized by this, not by the surface, and
+    /// the two differ whenever a camera is letterboxed or inset.
+    pub(crate) view_extent: Option<(u32, u32)>,
     pub(crate) present_mode: Option<String>,
     /// Threads in each Bevy pool, by pool name.
     pub(crate) pools: Vec<(String, usize)>,
+    /// Whether rendering runs a frame behind on its own thread, and whether
+    /// this build has Bevy's multi-threaded executor at all. Two runs with
+    /// different answers here are not comparable.
+    pub(crate) pipelined_rendering: Option<bool>,
+    pub(crate) compute_threads: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +85,7 @@ pub(crate) struct WindowFacts {
 }
 
 pub(crate) fn build(facts: &RuntimeFacts, run_id: Option<&str>, artifacts: &Path) -> Value {
+    let digests = super::identity::digests();
     json!({
         "format": "iw4l-bench-1",
         "run": run_id,
@@ -86,10 +100,12 @@ pub(crate) fn build(facts: &RuntimeFacts, run_id: Option<&str>, artifacts: &Path
             "opt_level": built!("IW4L_BUILD_OPT_LEVEL"),
             "debug_assertions": cfg!(debug_assertions),
             "cargo_lock_fnv1a": built!("IW4L_BUILD_LOCK_HASH"),
+            "cargo_lock_sha256": digests.lock,
+            "git_patch_fnv1a": built!("IW4L_BUILD_GIT_PATCH_HASH"),
             "bevy": built!("IW4L_BUILD_BEVY_VERSION"),
             "wgpu": built!("IW4L_BUILD_WGPU_VERSION"),
         },
-        "binary": binary(),
+        "binary": binary(digests.binary.as_deref()),
         "host": host(),
         "gpu": facts.adapter.as_ref().map_or(Value::Null, |adapter| json!({
             "adapter": adapter.name,
@@ -104,21 +120,53 @@ pub(crate) fn build(facts: &RuntimeFacts, run_id: Option<&str>, artifacts: &Path
             "height": window.height,
             "scale_factor": window.scale,
         })),
+        "render_target": facts.render_target.map_or(Value::Null, |(width, height)| json!({
+            "width": width,
+            "height": height,
+            "what": "the surface a camera drew into",
+        })),
+        "view_extent": facts.view_extent.map_or(Value::Null, |(width, height)| json!({
+            "width": width,
+            "height": height,
+            "what": "the viewport the passes and the postfx chain were sized by",
+        })),
         "present_mode": facts.present_mode,
-        "pools": facts
-            .pools
-            .iter()
-            .map(|(name, threads)| json!({ "pool": name, "threads": threads }))
-            .collect::<Vec<_>>(),
+        "scheduling": {
+            "pipelined_rendering": facts.pipelined_rendering,
+            "compute_threads": facts.compute_threads,
+        },
+        "threads": threads(),
+        "pools": pools(facts),
         "workload": {
             "zone": facts.zone,
             "demo": facts.demo,
+            "demo_sha256": digests.demo,
             "role": facts.role,
             "command_line": std::env::args().collect::<Vec<_>>(),
         },
         "env": toggles(),
         "caches": caches(artifacts),
     })
+}
+
+/// Every pool, by name and thread count.
+///
+/// Most are read on the first frame, because that is when they exist and
+/// nothing changes them after. The clip-prep pool is not: it starts when the
+/// match asks for its first sound, which is long after the first frame, so
+/// reading it with the others reported zero threads for a pool that had two.
+/// It is read here, at exit, instead.
+fn pools(facts: &RuntimeFacts) -> Value {
+    let mut pools: Vec<Value> = facts
+        .pools
+        .iter()
+        .map(|(name, threads)| json!({ "pool": name, "threads": threads }))
+        .collect();
+    pools.push(json!({
+        "pool": "audio_prep",
+        "threads": audio::clip_prep_cost().workers,
+    }));
+    Value::Array(pools)
 }
 
 fn dirty() -> Value {
@@ -129,11 +177,14 @@ fn dirty() -> Value {
     }
 }
 
-/// The binary this process is running, by path, size and mtime. Enough to tell
-/// two runs of "the same" build apart when one of them was rebuilt in between;
-/// not a content hash, because reading a release binary at exit to digest it
-/// costs more than the fact is worth.
-fn binary() -> Value {
+/// The binary this process is running: path, size, mtime and content digest.
+///
+/// The digest is what pairs two runs — size and mtime agree across a rebuild
+/// that changed nothing observable and disagree across a copy that changed
+/// nothing at all — and it is read on its own thread from the moment the bench
+/// is inserted, so it costs the run nothing. `null` if that thread had not
+/// finished when the run ended.
+fn binary(sha256: Option<&str>) -> Value {
     let Ok(path) = std::env::current_exe() else {
         return Value::Null;
     };
@@ -141,11 +192,39 @@ fn binary() -> Value {
     json!({
         "path": path.display().to_string(),
         "bytes": metadata.as_ref().map(std::fs::Metadata::len),
+        "sha256": sha256,
         "modified_unix_s": metadata
             .as_ref()
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|since| since.as_secs()),
+    })
+}
+
+/// Every OS thread with its name and the CPUs it is allowed on. A pool that
+/// pins its workers is only pinned if the kernel agrees, and this is where
+/// that shows — as is the load pool being handed a wider set than the thread
+/// that spawned it.
+fn threads() -> Value {
+    let threads = super::identity::threads();
+    if threads.is_empty() {
+        return Value::Null;
+    }
+    json!({
+        "main_thread_cpus_allowed": super::identity::main_thread_cpus_allowed(),
+        "note": "affinity is per thread on Linux; there is no process-wide mask. \
+                 The main thread is narrowed to the performance cores at startup \
+                 and the load pool is given back the wider set, so the two rows \
+                 differing is the design and not a mistake.",
+        "sampled_at": "exit",
+        "threads": threads
+            .iter()
+            .map(|thread| json!({
+                "tid": thread.tid,
+                "name": thread.name,
+                "cpus_allowed": thread.cpus_allowed,
+            }))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -216,27 +295,64 @@ fn caches(artifacts: &Path) -> Value {
     })
 }
 
+/// What the prepared-artifact cache holds, by kind.
+///
+/// The store nests: `cache/<kind>/<prefix>/<key>`, so reading only the top
+/// directory counted zero files on a run whose log reported seven thousand mip
+/// hits and five hundred clip hits. A zero there does not mean a cold run — it
+/// meant the wrong directory — and the two have to be told apart, so this walks
+/// the kinds and reports each one.
 fn prepared_cache(artifacts: &Path) -> Value {
     let dir = artifacts.join("cache");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    let Ok(kinds) = std::fs::read_dir(&dir) else {
         return json!({ "path": dir.display().to_string(), "present": false });
     };
+    let mut by_kind = serde_json::Map::new();
     let mut files = 0u64;
     let mut bytes = 0u64;
-    for entry in entries.flatten() {
-        if let Ok(metadata) = entry.metadata()
-            && metadata.is_file()
-        {
-            files += 1;
-            bytes += metadata.len();
+    for kind in kinds.flatten() {
+        if !kind.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
         }
+        let (kind_files, kind_bytes) = walk(&kind.path());
+        files += kind_files;
+        bytes += kind_bytes;
+        by_kind.insert(
+            kind.file_name().to_string_lossy().into_owned(),
+            json!({ "files": kind_files, "bytes": kind_bytes }),
+        );
     }
     json!({
         "path": dir.display().to_string(),
         "present": true,
         "files": files,
         "bytes": bytes,
+        "by_kind": Value::Object(by_kind),
     })
+}
+
+/// Files and bytes under a directory, following its subdirectories.
+fn walk(dir: &Path) -> (u64, u64) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    for entry in entries.flatten() {
+        match entry.metadata() {
+            Ok(metadata) if metadata.is_file() => {
+                files += 1;
+                bytes += metadata.len();
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                let (sub_files, sub_bytes) = walk(&entry.path());
+                files += sub_files;
+                bytes += sub_bytes;
+            }
+            _ => {}
+        }
+    }
+    (files, bytes)
 }
 
 pub(crate) fn write(path: &PathBuf, manifest: &Value) -> Result<(), String> {

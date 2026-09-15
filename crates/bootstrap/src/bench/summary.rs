@@ -41,6 +41,7 @@ fn build(facts: &RuntimeFacts) -> Value {
             "percentile_relative_error": perf::stats::PRECISION,
             "unmatched_end": anomalies.unmatched_end,
             "reopened": anomalies.reopened,
+            "misnested": anomalies.misnested,
             "counters_never_sampled": perf::stats::counters_never_sampled()
                 .into_iter()
                 .map(|counter| counter.name())

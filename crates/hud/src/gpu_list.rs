@@ -177,6 +177,42 @@ pub struct HudTessPass {
     pub match_start: TessJob,
 }
 
+/// What the HUD tess flush systems' own bodies cost this frame.
+///
+/// The bench report used to read the HUD's cost off the gap between two
+/// `hud_stage_close` systems. A gap between two systems is the executor's to
+/// fill: `.chain()` fixes their order and promises nothing about what runs in
+/// between, so that number was the schedule's, not the HUD's. These two are
+/// taken inside the functions, so they are.
+static BODY_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static JOBS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Charge the scope it is held in to the frame's HUD tess total.
+#[must_use = "the body is timed until this is dropped"]
+pub struct TessBody(std::time::Instant);
+
+impl TessBody {
+    pub fn open() -> Self {
+        Self(std::time::Instant::now())
+    }
+}
+
+impl Drop for TessBody {
+    fn drop(&mut self) {
+        BODY_NS.fetch_add(
+            self.0.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+/// The frame's total and job count, reset for the next frame.
+pub fn take_tess_body_cost() -> (f32, u32) {
+    let ns = BODY_NS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let jobs = JOBS.swap(0, std::sync::atomic::Ordering::Relaxed);
+    (ns as f32 / 1e6, jobs)
+}
+
 pub fn apply_tess_job(
     job: TessJob,
     host: &mut Node,
@@ -187,6 +223,7 @@ pub fn apply_tess_job(
     surface_w: f32,
     surface_h: f32,
 ) {
+    JOBS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     match job {
         TessJob::None => {
             if !latch.hidden && !latch.packed.vertices.is_empty() {

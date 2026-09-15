@@ -19,7 +19,8 @@ use bevy::tasks::{ComputeTaskPool, TaskPool};
 use crate::material_catalog::TS_2D;
 use crate::progress::LoadStage;
 use crate::{
-    AuthoredImage, MaterialDefinitions, TS_COLOR_MAP, TS_FUNCTION, TS_NORMAL_MAP, TS_WATER_MAP,
+    AuthoredImage, ImageVariantId, MaterialDefinitions, TS_COLOR_MAP, TS_FUNCTION, TS_NORMAL_MAP,
+    TS_WATER_MAP,
 };
 
 struct DecodedMips {
@@ -261,8 +262,15 @@ pub fn decode_material_color_maps(
 
     for outcome in decoded {
         match outcome {
-            ImageOutcome::Decoded { image_index, image } => {
-                catalog.images[image_index].decoded = Some(image);
+            ImageOutcome::Decoded {
+                image_index,
+                image,
+                variant,
+                ..
+            } => {
+                let slot = &mut catalog.images[image_index];
+                slot.decoded = Some(own(image));
+                slot.decoded_variant = variant;
                 stats.decoded += 1;
             }
             ImageOutcome::Missing { gap } => {
@@ -343,8 +351,16 @@ pub fn decode_color_or_2d_for_names(
     let decoded = decode_requests_in_parallel(images, index.as_ref(), &work, stage);
     let mut n = 0usize;
     for outcome in decoded {
-        if let ImageOutcome::Decoded { image_index, image } = outcome {
-            catalog.images[image_index].decoded = Some(image);
+        if let ImageOutcome::Decoded {
+            image_index,
+            image,
+            variant,
+            ..
+        } = outcome
+        {
+            let slot = &mut catalog.images[image_index];
+            slot.decoded = Some(own(image));
+            slot.decoded_variant = variant;
             n += 1;
         }
     }
@@ -434,8 +450,16 @@ pub fn decode_catalog_images_from_iwd(
     let decoded = decode_requests_in_parallel(catalog_images, index.as_ref(), &work, stage);
     let mut n = 0usize;
     for outcome in decoded {
-        if let ImageOutcome::Decoded { image_index, image } = outcome {
-            catalog.images[image_index].decoded = Some(image);
+        if let ImageOutcome::Decoded {
+            image_index,
+            image,
+            variant,
+            ..
+        } = outcome
+        {
+            let slot = &mut catalog.images[image_index];
+            slot.decoded = Some(own(image));
+            slot.decoded_variant = variant;
             n += 1;
         }
     }
@@ -486,12 +510,135 @@ pub fn decode_in_zone_builtin_images(catalog: &mut MaterialDefinitions) -> usize
 }
 
 enum ImageOutcome {
-    Decoded { image_index: usize, image: Image },
-    Missing { gap: String },
-    Unsupported { gap: String },
+    Decoded {
+        image_index: usize,
+        /// Shared rather than owned: two plans that resolved the same archive
+        /// entry with the same recipe get the same buffer, and only the rows
+        /// the merge keeps ever pay for a copy of it.
+        image: Arc<Image>,
+        /// Which prepared variant this is, when it came out of an archive.
+        variant: Option<ImageVariantId>,
+        /// Another plan had already prepared this exact variant and this one
+        /// took its buffer instead of decoding again.
+        shared: bool,
+    },
+    Missing {
+        gap: String,
+    },
+    Unsupported {
+        gap: String,
+    },
 }
 
 type ImageRequest = (usize, (u8, bool, bool, bool));
+
+/// Prepared variants that are still alive somewhere, so a second plan asking
+/// for the same archive entry with the same recipe joins the first one's work
+/// instead of repeating it.
+///
+/// Weak on purpose. A strong map would keep every image the load ever touched
+/// resident for the life of the process — a gigabyte of it — to save work that
+/// only overlapping plans can save. An entry lives exactly as long as some
+/// batch or catalog row still holds the image, which is the window in which
+/// sharing is worth anything.
+type Prepared = (std::sync::Mutex<PreparedVariants>, std::sync::Condvar);
+
+#[derive(Default)]
+struct PreparedVariants {
+    live: HashMap<ImageVariantId, std::sync::Weak<Image>>,
+    decoding: HashSet<ImageVariantId>,
+}
+
+fn prepared() -> &'static Prepared {
+    static PREPARED: std::sync::OnceLock<Prepared> = std::sync::OnceLock::new();
+    PREPARED.get_or_init(Default::default)
+}
+
+static SHARED_VARIANTS: AtomicU64 = AtomicU64::new(0);
+static SHARED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Variants handed to a second asker instead of decoded again, and the bytes
+/// that saved.
+pub fn shared_variant_census() -> (u64, u64) {
+    (
+        SHARED_VARIANTS.load(Ordering::Relaxed),
+        SHARED_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+/// Prepare `variant` once, however many plans ask for it.
+///
+/// The first asker decodes; the rest wait for it and take the buffer. Waiting
+/// here cannot deadlock: a worker that holds a variant is decoding, never
+/// waiting on another one, so the set of holders always drains.
+fn share_or_decode(
+    variant: ImageVariantId,
+    image_index: usize,
+    decode: impl FnOnce() -> ImageOutcome,
+) -> ImageOutcome {
+    let (lock, signal) = prepared();
+    let mut state = lock.lock().unwrap_or_else(|poison| poison.into_inner());
+    loop {
+        if let Some(live) = state.live.get(&variant) {
+            if let Some(image) = live.upgrade() {
+                SHARED_VARIANTS.fetch_add(1, Ordering::Relaxed);
+                SHARED_BYTES.fetch_add(image_bytes(&image), Ordering::Relaxed);
+                return ImageOutcome::Decoded {
+                    image_index,
+                    image,
+                    variant: Some(variant),
+                    shared: true,
+                };
+            }
+            state.live.remove(&variant);
+        }
+        if !state.decoding.contains(&variant) {
+            break;
+        }
+        state = signal
+            .wait(state)
+            .unwrap_or_else(|poison| poison.into_inner());
+    }
+    state.decoding.insert(variant);
+    drop(state);
+
+    // Held across the decode so that a panic in it wakes the askers waiting on
+    // this variant instead of parking them for the life of the process. It is
+    // dropped *after* the result is published, so a waiter that wakes finds the
+    // image rather than an empty slot it would decode again.
+    let flight = Flight(variant);
+    let outcome = match decode() {
+        ImageOutcome::Decoded { image, .. } => {
+            lock.lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .live
+                .insert(variant, Arc::downgrade(&image));
+            ImageOutcome::Decoded {
+                image_index,
+                image,
+                variant: Some(variant),
+                shared: false,
+            }
+        }
+        gap => gap,
+    };
+    drop(flight);
+    outcome
+}
+
+/// The claim on a variant while it is being decoded.
+struct Flight(ImageVariantId);
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        let (lock, signal) = prepared();
+        lock.lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .decoding
+            .remove(&self.0);
+        signal.notify_all();
+    }
+}
 
 fn decode_requests_in_parallel(
     images: &[AuthoredImage],
@@ -529,7 +676,61 @@ fn decode_requests_in_parallel(
     .collect()
 }
 
+/// What a decode reads and what it does to it, as one identity.
+///
+/// The source half is the ordered list of archive entries the decode would
+/// try, by CRC, size and name — not the image's name, which three games spell
+/// the same and fill differently. The recipe half is every option that changes
+/// the prepared payload: two rows that want the same entry as a normal map and
+/// as a colour map are two variants and must not share a buffer.
+fn variant_of(
+    index: &IwdIndex,
+    source: &AuthoredImage,
+    name: &str,
+    (sampler_state, is_normal, alpha_test_color, force_linear): (u8, bool, bool, bool),
+) -> Option<ImageVariantId> {
+    let candidates = index.0.image_candidates(name)?;
+    let mut digest = crate::fnv1a64(name.as_bytes());
+    for candidate in candidates {
+        digest = crate::fnv1a64_more(digest, &candidate.crc32().to_le_bytes());
+        digest = crate::fnv1a64_more(digest, &candidate.size().to_le_bytes());
+        digest = crate::fnv1a64_more(digest, candidate.entry().as_bytes());
+    }
+    let recipe = u32::from(sampler_state)
+        | u32::from(is_normal) << 8
+        | u32::from(alpha_test_color) << 9
+        | u32::from(force_linear) << 10
+        | u32::from(source.use_srgb_reads) << 11
+        | u32::from(source.map_type) << 12;
+    Some(ImageVariantId {
+        source: digest,
+        recipe,
+    })
+}
+
 fn decode_one_request(
+    images: &[AuthoredImage],
+    index: &IwdIndex,
+    image_index: usize,
+    request: (u8, bool, bool, bool),
+) -> ImageOutcome {
+    let Some(source) = images.get(image_index) else {
+        return ImageOutcome::Missing {
+            gap: format!("catalog image index {image_index} is out of bounds"),
+        };
+    };
+    if source.payload.is_empty() {
+        let name = crate::AssetRef::bare_name(source.name.as_str());
+        if let Some(variant) = variant_of(index, source, name, request) {
+            return share_or_decode(variant, image_index, || {
+                decode_one_uncached(images, index, image_index, request)
+            });
+        }
+    }
+    decode_one_uncached(images, index, image_index, request)
+}
+
+fn decode_one_uncached(
     images: &[AuthoredImage],
     index: &IwdIndex,
     image_index: usize,
@@ -556,11 +757,13 @@ fn decode_one_request(
             return match cubemap {
                 Ok((size, faces)) => ImageOutcome::Decoded {
                     image_index,
-                    image: pack_material_cubemap(
+                    image: Arc::new(pack_material_cubemap(
                         size,
                         &faces,
                         source.use_srgb_reads && !force_linear,
-                    ),
+                    )),
+                    variant: None,
+                    shared: false,
                 },
                 Err(error) => ImageOutcome::Unsupported {
                     gap: format!("{}: {error}", source.name),
@@ -609,7 +812,12 @@ fn decode_one_request(
     image.data = Some(mips.packed());
     image.sampler =
         ImageSampler::Descriptor(sampler_from_iw4(sampler_state, levels, alpha_test_color));
-    ImageOutcome::Decoded { image_index, image }
+    ImageOutcome::Decoded {
+        image_index,
+        image: Arc::new(image),
+        variant: None,
+        shared: false,
+    }
 }
 
 pub fn decode_reflection_probe_cubemap(source: &AuthoredImage) -> Result<Image, String> {
@@ -1602,13 +1810,219 @@ pub struct ImageDemandPlan {
 
     demands: Vec<AuthoredImage>,
     requests: Vec<(u8, bool, bool, bool)>,
+    /// Catalog rows that pointed at one of `demands`. More rows than demands
+    /// is the normal case — several materials share an image — and the
+    /// difference is what `duplicate_claims` reports.
+    claimed_rows: usize,
+}
+
+/// One image this plan has ready, and how it got it.
+struct PreparedImage {
+    name: String,
+    image: Arc<Image>,
+    variant: Option<ImageVariantId>,
+    /// Another plan had prepared this exact variant first; no decode was
+    /// repeated for it.
+    shared: bool,
 }
 
 #[derive(Default)]
 pub struct DecodedImageBatch {
     plan: Option<u64>,
-    decoded: Vec<(String, Image)>,
+    decoded: Vec<PreparedImage>,
     pub stats: MaterialImageStats,
+    /// Bytes of `decoded`, charged against the decode budget until `apply`
+    /// hands them to the catalog or the batch is dropped.
+    held_bytes: u64,
+    /// Bytes this plan decoded itself, and bytes it took from another plan's
+    /// work. Only the first is what the plan cost.
+    produced_bytes: u64,
+    shared_bytes: u64,
+    shared_variants: usize,
+    claimed_rows: usize,
+    canonical_variants: usize,
+}
+
+impl Drop for DecodedImageBatch {
+    /// A batch nobody applied still held its bytes against the budget. The
+    /// release belongs here rather than in `apply` alone, because a canceled
+    /// load drops batches without applying them and would otherwise leak the
+    /// budget for the rest of the process.
+    fn drop(&mut self) {
+        release_decode_budget(self.held_bytes);
+        self.held_bytes = 0;
+    }
+}
+
+/// What one plan's claims cost and what survived the merge.
+///
+/// The names are the ones the iteration brief asks for, and they answer
+/// different questions: `canonical_variants` is how many distinct images the
+/// plan wanted, `prepared_variants` how many it actually decoded, and
+/// `discarded_decoded_bytes` how much of that decode the merged catalog threw
+/// away because another source had already answered for the same name.
+#[derive(Clone, Debug, Default)]
+pub struct ImageMergeCensus {
+    pub claimed_rows: usize,
+    pub canonical_variants: usize,
+    pub prepared_variants: usize,
+    pub duplicate_claims: usize,
+    pub filled_rows: usize,
+    pub already_decoded: usize,
+    pub discarded_variants: usize,
+    pub discarded_decoded_bytes: u64,
+    pub final_cpu_bytes: u64,
+    /// Bytes this plan decoded itself, and bytes it took from a variant another
+    /// plan had already prepared. `produced_bytes` is what the plan cost;
+    /// `shared_bytes` is what it did not have to pay again.
+    pub produced_bytes: u64,
+    pub shared_bytes: u64,
+    pub shared_variants: usize,
+    /// Of the discarded variants, how many the winning row had prepared from
+    /// the *same* source and recipe — the same bytes twice — against how many
+    /// were genuinely answered by a different source, and how many the merge
+    /// answered from an inline body.
+    pub discarded_same_variant: usize,
+    pub discarded_overridden: usize,
+    pub discarded_inline: usize,
+    /// Of the same-variant discards, how many cost nothing because the buffer
+    /// was shared rather than decoded twice.
+    pub discarded_shared: usize,
+    /// Every discarded variant grouped by why the merge had no use for it.
+    pub discard_reasons: Vec<(&'static str, usize)>,
+    pub first_discarded: Option<String>,
+    /// A discarded name whose winner came from a different source, as evidence
+    /// that the two are not the same image.
+    pub first_override: Option<String>,
+}
+
+impl ImageMergeCensus {
+    /// The reasons as one line, or `None` when nothing was discarded.
+    pub fn discard_line(&self) -> Option<String> {
+        if self.discarded_variants == 0 {
+            return None;
+        }
+        let reasons = self
+            .discard_reasons
+            .iter()
+            .map(|(reason, n)| format!("{reason}={n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(format!(
+            "{} variants, {} bytes ({} same source+recipe of which {} cost nothing by sharing, {} overridden by another source, {} by an inline body): {reasons}{}{}",
+            self.discarded_variants,
+            self.discarded_decoded_bytes,
+            self.discarded_same_variant,
+            self.discarded_shared,
+            self.discarded_overridden,
+            self.discarded_inline,
+            self.first_discarded
+                .as_ref()
+                .map_or_else(String::new, |name| format!(" first={name}")),
+            self.first_override
+                .as_ref()
+                .map_or_else(String::new, |name| format!(" first_override={name}")),
+        ))
+    }
+}
+
+/// Decoded bytes that have been produced and not yet handed to a catalog.
+///
+/// Starting a decode earlier — which is the point of enqueueing a plan the
+/// moment it is ready — moves those bytes earlier too, and they sit in the
+/// process until the merge takes them. Without a ceiling, two plans that used
+/// to run one after the other now hold both peaks at once. This is that
+/// ceiling: a plan waits before it starts, never in the middle, so a worker
+/// can never block on bytes only another worker in the same pool could free.
+///
+/// It is a *starting* threshold and not a hard cap, and the two are different
+/// claims. A plan that is let through decodes everything it planned, so the
+/// bytes outstanding can end up well over the ceiling — what is bounded is how
+/// much is already outstanding when the next plan is allowed to begin. A hard
+/// cap would need reservation, splitting or eviction inside the decode, which
+/// is a different change; saying "ceiling" for this one is what made a run
+/// holding 886 MiB under a 768 MiB setting look like a bug.
+static UNAPPLIED_BYTES: AtomicU64 = AtomicU64::new(0);
+static UNAPPLIED_BATCHES: AtomicU64 = AtomicU64::new(0);
+
+/// How long a plan may be held back before it starts anyway.
+///
+/// The wait is only safe while every plan that holds bytes is joined before the
+/// plan that is waiting — which is true of today's join order, and is exactly
+/// the kind of ordering a later change breaks silently. A bounded wait cannot
+/// deadlock whatever the order becomes: the worst it can do is what the load
+/// did before the ceiling existed, and it says so in the log.
+const BUDGET_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+const DECODE_BUDGET_ENV: &str = "IW4L_IMAGE_DECODE_BUDGET_MIB";
+const DECODE_BUDGET_DEFAULT_MIB: u64 = 768;
+
+/// How many bytes of decoded-but-unapplied images the load may hold at once.
+pub fn decode_budget_bytes() -> u64 {
+    static BUDGET: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let mib = match std::env::var(DECODE_BUDGET_ENV) {
+            Ok(value) => value
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(DECODE_BUDGET_DEFAULT_MIB),
+            Err(_) => DECODE_BUDGET_DEFAULT_MIB,
+        };
+        mib.saturating_mul(1024 * 1024)
+    })
+}
+
+/// Bytes decoded and not yet applied, right now.
+pub fn unapplied_decoded_bytes() -> u64 {
+    UNAPPLIED_BYTES.load(Ordering::Relaxed)
+}
+
+/// Block until the unapplied bytes are under the ceiling, or until this is the
+/// only batch in flight — one plan always runs, so the budget can throttle the
+/// load but never stop it.
+///
+/// Returns what was outstanding when the plan was let through and whether it
+/// had to wait at all, so the decode timer can start here and the row can say
+/// which of the two the time went to.
+fn wait_for_decode_budget() -> (u64, bool) {
+    let budget = decode_budget_bytes();
+    let since = std::time::Instant::now();
+    let mut waited = false;
+    while UNAPPLIED_BATCHES.load(Ordering::Relaxed) > 0
+        && UNAPPLIED_BYTES.load(Ordering::Relaxed) >= budget
+    {
+        if since.elapsed() >= BUDGET_WAIT_LIMIT {
+            diag::warn!(
+                Zone,
+                "image decode budget: started a plan anyway after {:.1}s with {} MiB outstanding over the {} MiB threshold — the consumer is not joining finished plans ahead of this one",
+                since.elapsed().as_secs_f32(),
+                UNAPPLIED_BYTES.load(Ordering::Relaxed) >> 20,
+                budget >> 20,
+            );
+            break;
+        }
+        waited = true;
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    (UNAPPLIED_BYTES.load(Ordering::Relaxed), waited)
+}
+
+fn release_decode_budget(bytes: u64) {
+    if bytes == 0 {
+        return;
+    }
+    UNAPPLIED_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+    UNAPPLIED_BATCHES.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// Take the image out of its shared handle, copying only if someone else still
+/// holds it. The sole asker for a variant pays nothing for the sharing.
+fn own(image: Arc<Image>) -> Image {
+    Arc::try_unwrap(image).unwrap_or_else(|shared| (*shared).clone())
+}
+
+fn image_bytes(image: &Image) -> u64 {
+    image.data.as_ref().map_or(0, Vec::len) as u64
 }
 
 impl ImageDemandPlan {
@@ -1619,6 +2033,7 @@ impl ImageDemandPlan {
             zone_ff: zone_ff.to_owned(),
             demands: Vec::new(),
             requests: Vec::new(),
+            claimed_rows: 0,
         }
     }
 
@@ -1630,7 +2045,19 @@ impl ImageDemandPlan {
         self.demands.is_empty()
     }
 
+    /// Distinct images this plan will decode. `len` is the same number; this
+    /// is the name the census uses for it.
+    pub fn canonical_variants(&self) -> usize {
+        self.demands.len()
+    }
+
+    /// Catalog rows that asked for one of those images.
+    pub fn claimed_rows(&self) -> usize {
+        self.claimed_rows
+    }
+
     fn push(&mut self, image: AuthoredImage, request: (u8, bool, bool, bool)) {
+        self.claimed_rows += 1;
         if let Some(at) = self
             .demands
             .iter()
@@ -1646,10 +2073,15 @@ impl ImageDemandPlan {
         self.requests.push(request);
     }
 
-    pub fn run(self, stage: &LoadStage) -> DecodedImageBatch {
+    /// Decode this plan's images. `job` is the row this work reports into, and
+    /// it is stamped *after* the memory ceiling lets the plan through, so the
+    /// decode timer measures decoding and the wait before it is its own column.
+    pub fn run(self, stage: &LoadStage, job: asset_transport::Job) -> DecodedImageBatch {
         if self.demands.is_empty() {
             return DecodedImageBatch::default();
         }
+        let (outstanding, waited) = wait_for_decode_budget();
+        job.decode_started(outstanding, waited);
         let index = match game_main_for_zone(&self.zone_ff).and_then(|main| IwdIndex::open(&main)) {
             Ok(index) => index,
             Err(error) => {
@@ -1662,6 +2094,12 @@ impl ImageDemandPlan {
                         first_gap: Some(error),
                         ..Default::default()
                     },
+                    held_bytes: 0,
+                    produced_bytes: 0,
+                    shared_bytes: 0,
+                    shared_variants: 0,
+                    claimed_rows: self.claimed_rows,
+                    canonical_variants: self.demands.len(),
                 };
             }
         };
@@ -1679,13 +2117,32 @@ impl ImageDemandPlan {
         stage.total(work.len() as u64);
         let outcomes = decode_requests_in_parallel(&self.demands, index.as_ref(), &work, stage);
         let mut decoded = Vec::with_capacity(outcomes.len());
+        let mut produced_bytes = 0u64;
+        let mut shared_bytes = 0u64;
+        let mut shared_variants = 0usize;
         for outcome in outcomes {
             match outcome {
-                ImageOutcome::Decoded { image_index, image } => {
+                ImageOutcome::Decoded {
+                    image_index,
+                    image,
+                    variant,
+                    shared,
+                } => {
                     let Some(source) = self.demands.get(image_index) else {
                         continue;
                     };
-                    decoded.push((source.name.as_str().to_owned(), image));
+                    if shared {
+                        shared_bytes += image_bytes(&image);
+                        shared_variants += 1;
+                    } else {
+                        produced_bytes += image_bytes(&image);
+                    }
+                    decoded.push(PreparedImage {
+                        name: source.name.as_str().to_owned(),
+                        image,
+                        variant,
+                        shared,
+                    });
                     stats.decoded += 1;
                 }
                 ImageOutcome::Missing { gap } => {
@@ -1698,59 +2155,176 @@ impl ImageDemandPlan {
                 }
             }
         }
+        // Charged whole, shared buffers included: the ceiling is about how much
+        // the process is holding, and a buffer two batches point at is still
+        // resident until both let go of it.
+        let held_bytes = decoded
+            .iter()
+            .map(|prepared| image_bytes(&prepared.image))
+            .sum();
+        UNAPPLIED_BATCHES.fetch_add(1, Ordering::Relaxed);
+        UNAPPLIED_BYTES.fetch_add(held_bytes, Ordering::Relaxed);
         DecodedImageBatch {
             plan: Some(self.id),
             decoded,
             stats,
+            held_bytes,
+            produced_bytes,
+            shared_bytes,
+            shared_variants,
+            claimed_rows: self.claimed_rows,
+            canonical_variants: self.demands.len(),
         }
     }
 }
 
 impl DecodedImageBatch {
-    pub fn apply(self, catalog: &mut MaterialDefinitions) -> (usize, usize, usize) {
-        let Some(id) = self.plan else {
-            return (0, 0, 0);
+    /// Hand the decoded images to the merged catalog and say what happened.
+    ///
+    /// A claimed row does not always survive the merge: another source can
+    /// supply the same name with an inline payload, or have decoded it first,
+    /// and `link_image` then keeps that row and drops this plan's. The decode
+    /// behind the dropped claim is work the run paid for and threw away, so it
+    /// is counted here by reason rather than left as a difference between two
+    /// other numbers.
+    pub fn apply(mut self, catalog: &mut MaterialDefinitions) -> ImageMergeCensus {
+        let mut census = ImageMergeCensus {
+            claimed_rows: self.claimed_rows,
+            canonical_variants: self.canonical_variants,
+            prepared_variants: self.stats.decoded,
+            duplicate_claims: self.claimed_rows.saturating_sub(self.canonical_variants),
+            produced_bytes: self.produced_bytes,
+            shared_bytes: self.shared_bytes,
+            shared_variants: self.shared_variants,
+            ..ImageMergeCensus::default()
         };
-        let mut decoded: HashMap<String, Image> = self.decoded.into_iter().collect();
+        let Some(id) = self.plan else {
+            return census;
+        };
+        let mut decoded: HashMap<String, PreparedImage> = std::mem::take(&mut self.decoded)
+            .into_iter()
+            .map(|prepared| (prepared.name.clone(), prepared))
+            .collect();
 
         let mut rows: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut already = 0usize;
         for (index, image) in catalog.images.iter_mut().enumerate() {
             if image.pending_decode != Some(id) {
                 continue;
             }
             image.pending_decode = None;
             if image.decoded.is_some() {
-                already += 1;
+                census.already_decoded += 1;
                 continue;
             }
             rows.entry(image.name.as_str().to_owned())
                 .or_default()
                 .push(index);
         }
-        let mut filled = 0usize;
         for (name, indices) in rows {
-            let Some(image) = decoded.remove(&name) else {
+            let Some(prepared) = decoded.remove(&name) else {
                 continue;
             };
+            census.final_cpu_bytes += image_bytes(&prepared.image);
+            let variant = prepared.variant;
             let mut indices = indices.into_iter();
             let Some(first) = indices.next() else {
                 continue;
             };
             for index in indices {
                 if let Some(slot) = catalog.images.get_mut(index) {
-                    slot.decoded = Some(image.clone());
-                    filled += 1;
+                    slot.decoded = Some((*prepared.image).clone());
+                    slot.decoded_variant = variant;
+                    census.filled_rows += 1;
                 }
             }
             if let Some(slot) = catalog.images.get_mut(first) {
-                slot.decoded = Some(image);
-                filled += 1;
+                slot.decoded = Some(own(prepared.image));
+                slot.decoded_variant = variant;
+                census.filled_rows += 1;
             }
         }
 
-        let lost = decoded.len();
-        (filled, already, lost)
+        let mut reasons: HashMap<&'static str, usize> = HashMap::new();
+        for (name, prepared) in decoded {
+            census.discarded_variants += 1;
+            census.discarded_decoded_bytes += image_bytes(&prepared.image);
+            census.first_discarded.get_or_insert_with(|| name.clone());
+            *reasons.entry(discard_reason(catalog, &name)).or_default() += 1;
+            match winner_of(catalog, &name, prepared.variant) {
+                Winner::SameVariant => {
+                    census.discarded_same_variant += 1;
+                    if prepared.shared {
+                        census.discarded_shared += 1;
+                    }
+                }
+                Winner::OtherSource => {
+                    census.discarded_overridden += 1;
+                    census.first_override.get_or_insert(name);
+                }
+                Winner::InlineBody => census.discarded_inline += 1,
+                Winner::Unknown => {}
+            }
+        }
+        census.discard_reasons = reasons.into_iter().collect();
+        census
+            .discard_reasons
+            .sort_by_key(|(reason, n)| (std::cmp::Reverse(*n), *reason));
+        census
+    }
+}
+
+/// Where the merged catalog's answer for a dropped claim came from.
+///
+/// This is the difference the iteration brief asks for and the reason-string
+/// alone cannot make: "another source decoded it first" covers both a plan that
+/// prepared the very same archive entry a second time — avoidable work — and
+/// two games that ship different images under one name, where preparing both
+/// and keeping one is a *scheduling* question and not a duplicate at all.
+enum Winner {
+    /// The kept row holds the same source and recipe this plan prepared.
+    SameVariant,
+    /// The kept row holds a different variant: another source answered.
+    OtherSource,
+    /// The kept row carries its own inline body.
+    InlineBody,
+    /// The name is not in the merged catalog, or the winner records no variant.
+    Unknown,
+}
+
+fn winner_of(catalog: &MaterialDefinitions, name: &str, ours: Option<ImageVariantId>) -> Winner {
+    let Some(kept) = catalog
+        .images
+        .iter()
+        .find(|image| image.name.as_str() == name)
+    else {
+        return Winner::Unknown;
+    };
+    if !kept.payload.is_empty() {
+        return Winner::InlineBody;
+    }
+    match (kept.decoded_variant, ours) {
+        (Some(theirs), Some(ours)) if theirs == ours => Winner::SameVariant,
+        (Some(_), Some(_)) => Winner::OtherSource,
+        _ => Winner::Unknown,
+    }
+}
+
+/// Why the merged catalog had no row waiting for a decoded image.
+///
+/// Each answer is checked against the catalog as it stands now, not inferred:
+/// a name the merge kept under another source's row reads differently from a
+/// name that left the catalog entirely, and only the first one says the decode
+/// was avoidable by asking the merge first.
+fn discard_reason(catalog: &MaterialDefinitions, name: &str) -> &'static str {
+    match catalog
+        .images
+        .iter()
+        .find(|image| image.name.as_str() == name)
+    {
+        Some(image) if !image.payload.is_empty() => "merged onto an inline payload",
+        Some(image) if image.decoded.is_some() => "another source decoded it first",
+        Some(_) => "claim dropped, row kept undecoded",
+        None => "name is not in the merged catalog",
     }
 }
 
@@ -1817,8 +2391,15 @@ fn decode_inline(
     let images = &catalog.images;
     for outcome in decode_requests_in_parallel(images, &index, work, stage) {
         match outcome {
-            ImageOutcome::Decoded { image_index, image } => {
-                catalog.images[image_index].decoded = Some(image);
+            ImageOutcome::Decoded {
+                image_index,
+                image,
+                variant,
+                ..
+            } => {
+                let slot = &mut catalog.images[image_index];
+                slot.decoded = Some(own(image));
+                slot.decoded_variant = variant;
                 stats.decoded += 1;
             }
             ImageOutcome::Missing { gap } => {
@@ -1832,4 +2413,118 @@ fn decode_inline(
         }
     }
     stats
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn one_pixel() -> ImageOutcome {
+        let mut image = Image::new_uninit(
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            TextureFormat::Rgba8Unorm,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        image.data = Some(vec![0, 0, 0, 255]);
+        ImageOutcome::Decoded {
+            image_index: 0,
+            image: Arc::new(image),
+            variant: None,
+            shared: false,
+        }
+    }
+
+    fn arc_of(outcome: ImageOutcome) -> Arc<Image> {
+        match outcome {
+            ImageOutcome::Decoded { image, .. } => image,
+            _ => panic!("expected a decoded image"),
+        }
+    }
+
+    #[test]
+    fn the_same_source_and_recipe_is_prepared_once() {
+        let variant = ImageVariantId {
+            source: 0xfeed_face,
+            recipe: 7,
+        };
+        let first = share_or_decode(variant, 0, one_pixel);
+        let first = arc_of(first);
+        let second = share_or_decode(variant, 1, || panic!("decoded a variant twice"));
+        match second {
+            ImageOutcome::Decoded {
+                image_index,
+                image,
+                shared,
+                ..
+            } => {
+                assert!(shared, "the second asker decoded instead of sharing");
+                assert!(Arc::ptr_eq(&first, &image), "not the same buffer");
+                // The buffer is shared; the destination is the asker's own.
+                assert_eq!(image_index, 1);
+            }
+            _ => panic!("expected a decoded image"),
+        }
+    }
+
+    #[test]
+    fn a_different_recipe_over_the_same_source_is_a_different_variant() {
+        // Same archive entry wanted as a colour map and as a normal map: two
+        // prepared payloads, and sharing one between them would be wrong.
+        let source = 0x1234_5678;
+        let colour = arc_of(share_or_decode(
+            ImageVariantId { source, recipe: 0 },
+            0,
+            one_pixel,
+        ));
+        let normal = arc_of(share_or_decode(
+            ImageVariantId {
+                source,
+                recipe: 1 << 8,
+            },
+            0,
+            one_pixel,
+        ));
+        assert!(!Arc::ptr_eq(&colour, &normal));
+    }
+
+    #[test]
+    fn a_variant_nobody_holds_any_more_is_decoded_again() {
+        // The registry keeps weak handles, so the corpus does not stay resident
+        // for the life of the process once the batches holding it are gone.
+        let variant = ImageVariantId {
+            source: 0xdead_beef,
+            recipe: 0,
+        };
+        drop(arc_of(share_or_decode(variant, 0, one_pixel)));
+        let again = share_or_decode(variant, 0, one_pixel);
+        match again {
+            ImageOutcome::Decoded { shared, .. } => {
+                assert!(!shared, "shared a buffer that nothing was holding");
+            }
+            _ => panic!("expected a decoded image"),
+        }
+    }
+
+    #[test]
+    fn a_decode_that_fails_does_not_park_the_next_asker() {
+        let variant = ImageVariantId {
+            source: 0x0bad_0bad,
+            recipe: 0,
+        };
+        let gap = share_or_decode(variant, 0, || ImageOutcome::Missing {
+            gap: "absent".to_owned(),
+        });
+        assert!(matches!(gap, ImageOutcome::Missing { .. }));
+        // The slot is free again, so the next asker decodes rather than waiting
+        // on a flight that will never publish.
+        assert!(matches!(
+            share_or_decode(variant, 0, one_pixel),
+            ImageOutcome::Decoded { shared: false, .. }
+        ));
+    }
 }

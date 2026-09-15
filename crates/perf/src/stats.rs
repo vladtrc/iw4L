@@ -13,6 +13,11 @@
 //! Durations land in a log-scale histogram, [`SUB`] buckets per octave, so a
 //! percentile is exact to within [`PRECISION`] of its own value. Counts, sums,
 //! minima and maxima are exact.
+//!
+//! What a span cost and which frame it cost it in are two different questions.
+//! The histogram here answers the first with the span's whole elapsed time. The
+//! per-frame table answers the second, and takes only the part of the span that
+//! overlapped the frame — see [`frames`](crate::frames).
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
@@ -110,8 +115,30 @@ static COUNTER_REJECTED: [AtomicU64; Counter::COUNT] =
 /// `PreUpdate` and `PostUpdate` on the task pool, so a span's begin and its end
 /// are not promised the same thread — which is also why the Perfetto side gives
 /// every span its own named track. One slot per span is enough because a span
-/// is a single scope: it is never open twice at once.
+/// is a single scope: it is never open twice at once. Nesting is *not* read out
+/// of this table; see [`STACK`].
 static OPEN_AT: [AtomicU64; Span::COUNT] = [const { AtomicU64::new(0) }; Span::COUNT];
+
+/// Spans open on *this* thread, innermost last.
+///
+/// Nesting is a property of a call stack, and a call stack belongs to a thread.
+/// Reading the innermost span out of the global table instead made the render
+/// thread's spans the parents of whatever the main thread opened next, which is
+/// how a schedule-level span acquired a child it never called. A span that
+/// opens with nothing under it on its own thread is a root, and roots are what
+/// the frame's coverage union is built from.
+///
+/// Sixteen is deeper than the tree gets; overflowing it loses the parent name
+/// for that one span rather than corrupting the stack.
+const DEPTH: usize = 16;
+
+thread_local! {
+    static STACK: std::cell::RefCell<Vec<Span>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Spans that closed on a thread where they were not the innermost open span.
+static MISNESTED: AtomicU64 = AtomicU64::new(0);
 
 /// The zero of the recorder's clock, fixed by [`arm`] before the first span.
 static BASE: OnceLock<Instant> = OnceLock::new();
@@ -120,7 +147,9 @@ static BASE: OnceLock<Instant> = OnceLock::new();
 /// is recorded.
 pub fn arm() {
     let _ = BASE.set(Instant::now());
-    ARMED.store(env_enabled(), Ordering::Relaxed);
+    let on = env_enabled();
+    ARMED.store(on, Ordering::Relaxed);
+    crate::frames::arm(on);
 }
 
 /// Nanoseconds since the recorder's zero. Wraps in 584 years.
@@ -163,10 +192,21 @@ pub(crate) fn begin(span: Span) {
     if !enabled() {
         return;
     }
-    if span != Span::FramesWallFrameMs {
+    let at = now_ns();
+    if span == Span::FramesWallFrameMs {
+        // The frame clock is the row's wall, not a scope inside it: it takes no
+        // parent and it is what every other span is clipped against.
+        crate::frames::open(at);
+    } else {
         remember_parent(span, innermost_open());
+        STACK.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if stack.len() < DEPTH {
+                stack.push(span);
+            }
+        });
     }
-    if OPEN_AT[span as usize].swap(now_ns() + 1, Ordering::Relaxed) != 0 {
+    if OPEN_AT[span as usize].swap(at + 1, Ordering::Relaxed) != 0 {
         REOPENED.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -182,25 +222,54 @@ pub(crate) fn end(span: Span) {
         UNMATCHED_END.fetch_add(1, Ordering::Relaxed);
         return;
     }
-    record(span, now.saturating_sub(started - 1));
+    let started = started - 1;
+    let ns = now.saturating_sub(started);
+    // The histogram keeps the span's whole elapsed time — that is what the span
+    // cost. The frame row keeps only the part that ran inside the frame.
+    record(span, ns);
+    // The frame clock is the row, not a span inside it, and it closes last:
+    // draining the accumulators before the frame's own spans had ended would
+    // charge them to the frame after.
+    if span == Span::FramesWallFrameMs {
+        crate::frames::close(started, now, phase_index() as u8);
+    } else {
+        crate::frames::add_span(span, started, now, pop(span));
+    }
 }
 
-/// The open span that began most recently — the one this span is nesting
-/// inside. `wall` is excluded: it is the frame clock, opened in one frame and
-/// closed in the next, so it encloses no scope and is the root of the printed
-/// tree instead of a parent in it.
+/// Take `span` off this thread's stack and say whether it was a root — nothing
+/// else was open under it here.
+///
+/// A span that is not on top closed out of order, which the Perfetto side would
+/// show as a crossed pair. It is counted and removed wherever it sits rather
+/// than left behind to become a false parent for the rest of the frame.
+///
+/// A span that is not on this thread's stack at all opened somewhere else, or
+/// deeper than [`DEPTH`]. It is not treated as a root: claiming its interval
+/// covers the frame would hide unattributed time behind a span this thread
+/// cannot vouch for, and unclassified time that is too large is a hole the
+/// reader can see while one that is too small is a hole nobody finds.
+#[inline]
+fn pop(span: Span) -> bool {
+    STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        let Some(at) = stack.iter().rposition(|open| *open == span) else {
+            return false;
+        };
+        if at + 1 != stack.len() {
+            MISNESTED.fetch_add(1, Ordering::Relaxed);
+        }
+        stack.remove(at);
+        at == 0
+    })
+}
+
+/// The span this one is opening inside: the innermost still open *on this
+/// thread*. `None` is a root — the top of a schedule, or work on a thread whose
+/// enclosing span belongs to another one.
+#[inline]
 fn innermost_open() -> Option<Span> {
-    let mut innermost: Option<(u64, Span)> = None;
-    for span in Span::ALL {
-        if span == Span::FramesWallFrameMs {
-            continue;
-        }
-        let at = OPEN_AT[span as usize].load(Ordering::Relaxed);
-        if at != 0 && innermost.is_none_or(|(latest, _)| at > latest) {
-            innermost = Some((at, span));
-        }
-    }
-    innermost.map(|(_, span)| span)
+    STACK.with(|stack| stack.borrow().last().copied())
 }
 
 fn remember_parent(span: Span, parent: Option<Span>) {
@@ -230,7 +299,9 @@ pub(crate) fn count(counter: Counter, value: f64) {
         Unit::Milliseconds => value * 1e6,
         Unit::Count => value,
     };
-    COUNTERS[phase][counter as usize].record(stored as u64);
+    let stored = stored as u64;
+    COUNTERS[phase][counter as usize].record(stored);
+    crate::frames::add_counter(counter, stored);
 }
 
 #[inline]
@@ -473,12 +544,16 @@ fn quantiles(histogram: &Histogram, count: u64, wanted: &[f64]) -> Vec<u64> {
 pub struct Anomalies {
     pub unmatched_end: u64,
     pub reopened: u64,
+    /// Spans that closed while something they did not enclose was still open
+    /// under them on the same thread.
+    pub misnested: u64,
 }
 
 pub fn anomalies() -> Anomalies {
     Anomalies {
         unmatched_end: UNMATCHED_END.load(Ordering::Relaxed),
         reopened: REOPENED.load(Ordering::Relaxed),
+        misnested: MISNESTED.load(Ordering::Relaxed),
     }
 }
 

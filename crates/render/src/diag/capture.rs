@@ -195,6 +195,15 @@ pub(crate) fn capture_frame(
     };
 
     take_ready_capture(&mut commands, &mut queue, facts);
+    // A capture is four things — the request waiting, the readback, the encode
+    // and the file write — and only the first two are over when the request
+    // leaves the queue. Holding the flag while anything is still writing keeps
+    // the encode and the write on the bill of the frames they actually ran in,
+    // which is where the worst-frame table was reading a blank.
+    perf::frames::set_state(
+        perf::frames::flag::SCREENSHOT,
+        !queue.pending.is_empty() || queue.writing > 0,
+    );
 
     if queue.write_completed {
         queue.write_completed = false;
@@ -252,6 +261,9 @@ fn take_ready_capture(commands: &mut Commands, queue: &mut CaptureQueue, facts: 
             let mut save = save_to_disk(path);
             commands.spawn(Screenshot::primary_window()).observe(
                 move |captured: On<ScreenshotCaptured>, mut queue: ResMut<CaptureQueue>| {
+                    // The readback landed here; `save` encodes and writes it.
+                    // Both are on this frame, not on the one that asked.
+                    perf::frames::mark(perf::frames::flag::SCREENSHOT);
                     save(captured);
                     queue.writing -= 1;
                     queue.write_completed = true;

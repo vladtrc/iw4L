@@ -16,6 +16,7 @@ use crate::{
     open_zone, open_zone_shared, peek_zone_version,
     progress::LoadProgress,
 };
+use asset_transport::load_jobs::{self, JobKind};
 
 pub use asset_world::WorldDrawPolicy;
 
@@ -307,9 +308,10 @@ pub async fn load_prepared_match(
     let (data_common_walk, mut iw5_weapon_walk) = match shared_donor {
         Some(donor) => {
             let progress = progress.clone();
+            let job = load_jobs::open(JobKind::ImageDecode).namespace("iw5");
             (
                 ForeignCommonWork::Shared(
-                    pool.spawn(async move { walk_shared_iw5_common(&donor, &progress) }),
+                    pool.spawn(async move { walk_shared_iw5_common(&donor, &progress, job) }),
                 ),
                 None,
             )
@@ -317,11 +319,13 @@ pub async fn load_prepared_match(
         None => {
             let material = material_donor.map(|donor| {
                 let progress = progress.clone();
-                pool.spawn(async move { walk_foreign_material_common(&donor, &progress) })
+                let job = load_jobs::open(JobKind::ImageDecode).namespace("iw5");
+                pool.spawn(async move { walk_foreign_material_common(&donor, &progress, job) })
             });
             let weapons = weapon_donor.map(|donor| {
                 let progress = progress.clone();
-                pool.spawn(async move { walk_iw5_weapon_bundle(&donor, &progress) })
+                let job = load_jobs::open(JobKind::ImageDecode).namespace("iw5");
+                pool.spawn(async move { walk_iw5_weapon_bundle(&donor, &progress, job) })
             });
             (ForeignCommonWork::Split(material), weapons)
         }
@@ -378,9 +382,10 @@ pub async fn load_prepared_match(
 
     let t5_weapon_walk = {
         let progress = progress.clone();
-        pool.spawn(
-            async move { walk_t5_weapon_common(t5_common_prep.await, &progress, material_seed) },
-        )
+        let job = load_jobs::open(JobKind::ImageDecode).namespace("t5");
+        pool.spawn(async move {
+            walk_t5_weapon_common(t5_common_prep.await, &progress, material_seed, job)
+        })
     };
 
     let (
@@ -391,10 +396,9 @@ pub async fn load_prepared_match(
         t5_xanims,
         t5_fx,
         t5_projectiles,
-        t5_plan,
+        t5_images,
         t5_report,
     ) = t5_weapon_walk.await;
-    let t5_images = spawn_image_plan("T5 common_mp", t5_plan, &progress);
     let t5_ids = t5_weapons.len();
     let t5_fpv_n = t5_fpv.len();
     let t5_xanim_n = t5_xanims.len();
@@ -405,20 +409,19 @@ pub async fn load_prepared_match(
         .saturating_sub(startup_count)
         .saturating_add(t5_reuse_mat);
     common_report.extend(t5_report);
-    let (foreign_materials, mut foreign_report, shared_bundle, foreign_plan) =
+    let (foreign_materials, mut foreign_report, shared_bundle, foreign_images) =
         match data_common_walk {
             ForeignCommonWork::Shared(task) => {
-                let (materials, bundle, plan, report) = task.await;
-                (materials, report, Some(bundle), plan)
+                let (materials, bundle, images, report) = task.await;
+                (materials, report, Some(bundle), images)
             }
             ForeignCommonWork::Split(Some(task)) => {
-                let (materials, plan, report) = task.await;
-                (materials, report, None, plan)
+                let (materials, images, report) = task.await;
+                (materials, report, None, images)
             }
             ForeignCommonWork::Split(None) => (MaterialCatalog::default(), Vec::new(), None, None),
         };
 
-    let foreign_images = spawn_image_plan("IW5 common_mp", foreign_plan, &progress);
     common_report.append(&mut donor_report);
     common_report.append(&mut foreign_report);
 
@@ -437,8 +440,9 @@ pub async fn load_prepared_match(
     let mut s1_common_bytes = 0;
     let mut teamset_icons = std::collections::HashMap::new();
     let mut common_film_visions = std::collections::BTreeMap::new();
-    let mut common_plan = None;
+    let mut common_images = None;
 
+    let common_images_job = load_jobs::open(JobKind::ImageDecode).namespace("iw4");
     let common_opened = common_open.await;
     if progress.is_canceled() {
         diag::info!(
@@ -464,7 +468,15 @@ pub async fn load_prepared_match(
         Some((path, Ok(image))) => {
             let mut census =
                 lane(image.game).load_common_mp(&path, &image, &progress, true, material_seed);
-            common_plan = census.pending_images.take();
+            // The runtime common_mp walk is synchronous here, so its plan is
+            // handed over the instant the walk puts it down rather than at the
+            // bottom of the function.
+            common_images = spawn_image_plan(
+                "common_mp FPV",
+                census.pending_images.take(),
+                &progress,
+                common_images_job,
+            );
             shared_surfaces = census.shared_surfaces;
             common_scene_models = census.scene_models;
             common_light_defs = census.light_defs;
@@ -519,7 +531,6 @@ pub async fn load_prepared_match(
     };
     common_report.append(&mut common_walk_report);
 
-    let common_images = spawn_image_plan("common_mp FPV", common_plan, &progress);
     let common_reuse_mat = material_seed.link_reused_materials;
     let common_reuse_img = material_seed.link_reused_images;
     let seed_mat = material_seed.materials.len();
@@ -529,12 +540,11 @@ pub async fn load_prepared_match(
     common_report.push(player_anim_sources.compile_report_line());
     common_report.push(player_anim_sources.parse_report_line());
 
-    let (bundle, bundle_plan, mut iw5_report) = match (iw5_weapon_walk.take(), shared_bundle) {
+    let (bundle, bundle_images, mut iw5_report) = match (iw5_weapon_walk.take(), shared_bundle) {
         (Some(task), _) => task.await,
         (None, Some(bundle)) => (bundle, None, Vec::new()),
         (None, None) => (Iw5WeaponBundle::default(), None, Vec::new()),
     };
-    let bundle_images = spawn_image_plan("IW5 weapon bundle", bundle_plan, &progress);
     let Iw5WeaponBundle {
         weapons: iw5_weapons,
         fpv: iw5_fpv,
@@ -841,15 +851,41 @@ pub async fn load_prepared_match(
         .into_iter()
         .flatten()
     {
-        let (label, batch) = pending.await;
+        let job = pending.job;
+        let (label, batch) = pending.join().await;
         let requested = batch.stats.requested;
         let missing = batch.stats.missing;
         let unsupported = batch.stats.unsupported;
         let first_gap = batch.stats.first_gap.clone();
-        let (filled, already, lost) = batch.apply(&mut global);
+        let census = batch.apply(&mut global);
+        job.bytes(None, Some(census.final_cpu_bytes))
+            // What the plan prepared, not what survived: `retained + discarded`
+            // is a check on this number and never its definition.
+            .produced(census.produced_bytes + census.shared_bytes)
+            .merged(
+                census.final_cpu_bytes,
+                census.discarded_decoded_bytes,
+                census.discard_line(),
+            );
         report.push(format!(
-                "{label} claimed images: {filled}/{requested} into the merged pool ({already} already decoded by an earlier source, {missing} missing, {unsupported} unsupported, {lost} claimed rows dropped by the merge)"
+                "{label} claimed images: {}/{requested} into the merged pool ({} already decoded by an earlier source, {missing} missing, {unsupported} unsupported, {} claimed rows dropped by the merge)",
+                census.filled_rows, census.already_decoded, census.discarded_variants,
             ));
+        report.push(format!(
+            "{label} image demand: claimed_rows={} canonical_variants={} prepared_variants={} duplicate_claims={} final_cpu_bytes={} produced_bytes={} shared_variants={} shared_bytes={} discarded_decoded_bytes={}",
+            census.claimed_rows,
+            census.canonical_variants,
+            census.prepared_variants,
+            census.duplicate_claims,
+            census.final_cpu_bytes,
+            census.produced_bytes,
+            census.shared_variants,
+            census.shared_bytes,
+            census.discarded_decoded_bytes,
+        ));
+        if let Some(line) = census.discard_line() {
+            report.push(format!("{label} image discard: {line}"));
+        }
         if let Some(gap) = first_gap {
             report.push(format!("{label} claimed image gap: {gap}"));
         }
@@ -1642,7 +1678,8 @@ fn resolve_foreign_material_donor(
 fn walk_foreign_material_common(
     donor: &Path,
     progress: &LoadProgress,
-) -> (MaterialCatalog, Option<ImageDemandPlan>, Vec<String>) {
+    job: load_jobs::Job,
+) -> (MaterialCatalog, Option<PendingImages>, Vec<String>) {
     let mut report = Vec::new();
     let Some(mut census) = capture_common_zone(
         donor,
@@ -1653,7 +1690,8 @@ fn walk_foreign_material_common(
     ) else {
         return (MaterialCatalog::default(), None, report);
     };
-    let pending_images = census.pending_images.take();
+    let pending_images =
+        spawn_image_plan("IW5 common_mp", census.pending_images.take(), progress, job);
     let materials = census.material_population;
     report.extend(census.report);
     report.push(format!(
@@ -1694,20 +1732,52 @@ fn capture_common_zone(
     }
 }
 
+/// An image plan already on the pool, and the job row that records when it got
+/// there. The producer owns both from the moment its plan is ready, which is
+/// the whole of patch A: the walk that discovers the demand hands it over
+/// itself rather than carrying it back to a consumer that is busy elsewhere.
+struct PendingImages {
+    job: load_jobs::Job,
+    task: bevy::tasks::Task<(&'static str, crate::material_images::DecodedImageBatch)>,
+}
+
+impl PendingImages {
+    async fn join(self) -> (&'static str, crate::material_images::DecodedImageBatch) {
+        let done = self.task.await;
+        self.job.joined();
+        done
+    }
+}
+
+/// Put a ready plan on the load pool now.
+///
+/// `job` is opened by the producer when it starts looking, so the row carries
+/// the whole story: discovered → ready → enqueued → started → finished →
+/// joined. The gap this exists to expose is `ready → enqueued`; a timer that
+/// starts when a worker picks the job up cannot see it at all.
 fn spawn_image_plan(
     label: &'static str,
     plan: Option<ImageDemandPlan>,
     progress: &LoadProgress,
-) -> Option<bevy::tasks::Task<(&'static str, crate::material_images::DecodedImageBatch)>> {
+    job: load_jobs::Job,
+) -> Option<PendingImages> {
     let plan = plan.filter(|plan| !plan.is_empty())?;
+    let job = job
+        .canonical(label)
+        .items(plan.canonical_variants() as u64)
+        .plan_ready()
+        .enqueued();
     let progress = progress.clone();
 
-    Some(load_pool().spawn(async move {
+    let task = load_pool().spawn(async move {
+        job.started();
         let stage = progress.stage(format!("decoding {label} material images"));
-        let batch = plan.run(&stage);
+        let batch = plan.run(&stage, job);
         drop(stage);
+        job.finished();
         (label, batch)
-    }))
+    });
+    Some(PendingImages { job, task })
 }
 
 enum ForeignCommonWork {
@@ -1715,11 +1785,11 @@ enum ForeignCommonWork {
         bevy::tasks::Task<(
             MaterialCatalog,
             Iw5WeaponBundle,
-            Option<ImageDemandPlan>,
+            Option<PendingImages>,
             Vec<String>,
         )>,
     ),
-    Split(Option<bevy::tasks::Task<(MaterialCatalog, Option<ImageDemandPlan>, Vec<String>)>>),
+    Split(Option<bevy::tasks::Task<(MaterialCatalog, Option<PendingImages>, Vec<String>)>>),
 }
 
 #[derive(Default)]
@@ -1760,7 +1830,8 @@ fn resolve_iw5_weapon_donor(
 fn walk_iw5_weapon_bundle(
     donor: &Path,
     progress: &LoadProgress,
-) -> (Iw5WeaponBundle, Option<ImageDemandPlan>, Vec<String>) {
+    job: load_jobs::Job,
+) -> (Iw5WeaponBundle, Option<PendingImages>, Vec<String>) {
     let mut report = Vec::new();
     let Some(mut census) = capture_common_zone(
         donor,
@@ -1771,7 +1842,15 @@ fn walk_iw5_weapon_bundle(
     ) else {
         return (Iw5WeaponBundle::default(), None, report);
     };
-    let pending_images = census.pending_images.take();
+    // Patch A. The bundle's images used to wait here until the consumer had
+    // finished the synchronous `common_mp` walk and got round to unpacking
+    // this tuple — 2.4 s of ready work with nobody holding it.
+    let pending_images = spawn_image_plan(
+        "IW5 weapon bundle",
+        census.pending_images.take(),
+        progress,
+        job,
+    );
     report.extend(census.report);
     report.push(format!(
         "iw5 weapons: path={} ids={} gun_named={} fpv={} world_guns={} xanims={} materials={}",
@@ -1799,10 +1878,11 @@ fn walk_iw5_weapon_bundle(
 fn walk_shared_iw5_common(
     donor: &Path,
     progress: &LoadProgress,
+    job: load_jobs::Job,
 ) -> (
     MaterialCatalog,
     Iw5WeaponBundle,
-    Option<ImageDemandPlan>,
+    Option<PendingImages>,
     Vec<String>,
 ) {
     let mut report = Vec::new();
@@ -1820,7 +1900,11 @@ fn walk_shared_iw5_common(
             report,
         );
     };
-    let pending_images = census.pending_images.take();
+    // One capture serves the material seed and the weapon bundle, so there is
+    // one plan here, not two: the donor is walked once and its images are
+    // claimed once.
+    let pending_images =
+        spawn_image_plan("IW5 common_mp", census.pending_images.take(), progress, job);
     report.extend(census.report);
     let materials = census.material_population;
     report.push(format!(
@@ -1898,6 +1982,7 @@ fn walk_t5_weapon_common(
     prep: T5CommonPrep,
     progress: &LoadProgress,
     material_seed: MaterialCatalog,
+    job: load_jobs::Job,
 ) -> (
     WeaponBuild,
     FpvMeshBuild,
@@ -1906,7 +1991,7 @@ fn walk_t5_weapon_common(
     XAnimBuild,
     FxCatalog,
     crate::ProjectileMeshBuild,
-    Option<ImageDemandPlan>,
+    Option<PendingImages>,
     Vec<String>,
 ) {
     let empty = |material_seed: MaterialCatalog, report: Vec<String>| {
@@ -1949,7 +2034,8 @@ fn walk_t5_weapon_common(
         }
     };
     let mut census = lane(image.game).load_common_mp(&donor, &image, progress, true, material_seed);
-    let pending_images = census.pending_images.take();
+    let pending_images =
+        spawn_image_plan("T5 common_mp", census.pending_images.take(), progress, job);
     report.extend(census.report);
     report.push(format!(
         "t5 weapon common: path={} weapons={} fpv={} world_guns={} materials={} xanims={} fx={}",

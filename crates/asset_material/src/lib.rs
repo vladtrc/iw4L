@@ -8,7 +8,9 @@ pub mod vertex_layout;
 pub use vertex_layout::*;
 
 pub use asset_core::*;
-pub use asset_transport::{LoadProgress, LoadStage, cache_flight, cache_get, cache_put, fnv1a64};
+pub use asset_transport::{
+    LoadProgress, LoadStage, cache_flight, cache_get, cache_put, fnv1a64, fnv1a64_more,
+};
 pub use material_catalog::*;
 pub use material_draw::*;
 pub use material_images::*;

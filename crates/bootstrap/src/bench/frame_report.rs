@@ -37,6 +37,7 @@ pub(crate) fn render(out: &mut Vec<String>) {
     tree(&stats, &wall, out);
     out.push(String::new());
     top_self(&stats, &wall, out);
+    crate::bench::frames_section::render(out);
     silent_spans(out);
     anomalies(out);
     out.push(String::new());
@@ -325,12 +326,12 @@ fn silent_spans(out: &mut Vec<String>) {
 
 fn anomalies(out: &mut Vec<String>) {
     let anomalies = perf::stats::anomalies();
-    if anomalies.unmatched_end == 0 && anomalies.reopened == 0 {
+    if anomalies.unmatched_end == 0 && anomalies.reopened == 0 && anomalies.misnested == 0 {
         return;
     }
     out.push(String::new());
     out.push(format!(
-        "  recorder: {} span ends closed nothing, {} spans were opened while already open — those instances are missing from the numbers above.",
-        anomalies.unmatched_end, anomalies.reopened
+        "  recorder: {} span ends closed nothing, {} spans were opened while already open — those instances are missing from the numbers above. {} closed while something they did not enclose was still open under them, so the parent column named for those is the enclosing scope and not a call.",
+        anomalies.unmatched_end, anomalies.reopened, anomalies.misnested
     ));
 }

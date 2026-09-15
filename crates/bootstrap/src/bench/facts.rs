@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 
 use bevy::prelude::*;
 use bevy::render::renderer::{RenderAdapterInfo, RenderDevice};
+use bevy::tasks::ComputeTaskPool;
 use bevy::window::PrimaryWindow;
 
 use crate::bench::manifest::{AdapterFacts, RuntimeFacts, WindowFacts};
@@ -24,6 +25,16 @@ static WORKLOAD: OnceLock<(String, Option<String>, String)> = OnceLock::new();
 /// What was asked for, recorded at insert time: zone, demo path and role.
 pub(crate) fn workload(zone: &str, demo: Option<&str>, role: &str) {
     let _ = WORKLOAD.set((zone.to_owned(), demo.map(str::to_owned), role.to_owned()));
+}
+
+/// Whether rendering runs pipelined. Read from the assembled `App` at insert
+/// time, because by the first frame the plugin is no longer a thing to ask
+/// about — it has already moved the render world onto its own thread.
+static PIPELINED: OnceLock<bool> = OnceLock::new();
+
+pub(crate) fn scheduling(app: &App) {
+    let _ = PIPELINED
+        .set(app.is_plugin_added::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>());
 }
 
 /// What was collected, or an empty set if the run never reached a frame. Every
@@ -49,6 +60,7 @@ pub(crate) fn collect(
     adapter: Option<Res<RenderAdapterInfo>>,
     device: Option<Res<RenderDevice>>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    cameras: Query<&Camera>,
 ) {
     if FACTS.get().is_some() {
         return;
@@ -77,11 +89,34 @@ pub(crate) fn collect(
             height: window.resolution.physical_height(),
             scale: f64::from(window.resolution.scale_factor()),
         }),
+        // The largest target any camera drew into. Several cameras share one
+        // surface here; the biggest is the one the frame cost scales with, and
+        // a camera that has not drawn yet reports nothing rather than zero.
+        render_target: cameras
+            .iter()
+            .filter_map(|camera| camera.physical_target_size())
+            .map(|size| (size.x, size.y))
+            .max_by_key(|(width, height)| u64::from(*width) * u64::from(*height)),
+        // Not the same as the target: a camera with a viewport draws into part
+        // of the surface, and the passes and the postfx chain are sized by this
+        // one. Printing only the target is how a manifest headed 2880x1800 sat
+        // next to a postfx log reading 2880x1688 with nothing to say which the
+        // workload was.
+        view_extent: cameras
+            .iter()
+            .filter_map(|camera| camera.physical_viewport_size())
+            .map(|size| (size.x, size.y))
+            .max_by_key(|(width, height)| u64::from(*width) * u64::from(*height)),
         present_mode: windows
             .single()
             .ok()
             .map(|window| format!("{:?}", window.present_mode)),
         pools: pools(),
+        pipelined_rendering: PIPELINED.get().copied(),
+        // Not the ECS executor kind — Bevy exposes no getter for it — but the
+        // thing that decides whether systems can overlap at all: how many
+        // threads the compute pool was built with.
+        compute_threads: ComputeTaskPool::try_get().map(|pool| pool.thread_num()),
     };
     let _ = FACTS.set(facts);
 }
@@ -89,7 +124,7 @@ pub(crate) fn collect(
 /// Threads in each Bevy pool. The pools are global and already built by the
 /// time a frame runs, so this reads them rather than constructing anything.
 fn pools() -> Vec<(String, usize)> {
-    use bevy::tasks::{AsyncComputeTaskPool, ComputeTaskPool, IoTaskPool};
+    use bevy::tasks::{AsyncComputeTaskPool, IoTaskPool};
     let mut out = Vec::new();
     if let Some(pool) = ComputeTaskPool::try_get() {
         out.push(("compute".to_owned(), pool.thread_num()));
@@ -100,5 +135,8 @@ fn pools() -> Vec<(String, usize)> {
     if let Some(pool) = IoTaskPool::try_get() {
         out.push(("io".to_owned(), pool.thread_num()));
     }
+    // Not a Bevy pool: the asset walk builds its own, sized from the CPUs the
+    // process was given, and it is the one every load stage runs on.
+    out.push(("load".to_owned(), assets::session_load::load_workers()));
     out
 }

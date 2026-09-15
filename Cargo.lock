@@ -1814,6 +1814,7 @@ dependencies = [
  "replay",
  "serde_json",
  "session",
+ "sha2",
  "sim",
  "ui",
 ]

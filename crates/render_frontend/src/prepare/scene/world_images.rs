@@ -138,8 +138,20 @@ fn image_bytes(image: &Image) -> u64 {
 pub struct WorldImageUpload {
     pub done: u32,
     pub total: u32,
-    pub uploaded_bytes: u64,
+    /// Bytes handed to `Assets<Image>`. **Not** bytes on the GPU: the asset
+    /// server takes the image here, the render world turns it into a texture
+    /// some frames later, and the driver copies it later still. Calling this
+    /// "uploaded" is how a handoff rate gets reported as a transfer rate.
+    pub handed_bytes: u64,
     pub bytes_total: u64,
+    /// The longest single handoff, and how big it was. A frame budget can only
+    /// be kept to the granularity of the largest thing that cannot be split —
+    /// so when a 40 ms slice runs to 227 ms, this is the number that says
+    /// whether the budget was ignored or was never keepable.
+    pub largest_step_ns: u64,
+    pub largest_step_bytes: u64,
+    pub handoff_ns: u64,
+    pub steps: u64,
 
     pub skipped: u32,
 
@@ -263,7 +275,7 @@ impl WorldImageUpload {
             as u32;
         self.done = 0;
         self.skipped = 0;
-        self.uploaded_bytes = 0;
+        self.handed_bytes = 0;
         self.bytes_total = self
             .exact_images
             .iter()
@@ -281,6 +293,19 @@ impl WorldImageUpload {
         }
     }
 
+    /// One handoff that could not be interrupted. Kept as a maximum rather
+    /// than a histogram: the question is what the smallest keepable budget is,
+    /// and that is the largest step, not its distribution.
+    fn note_step(&mut self, took: std::time::Duration, bytes: u64) {
+        let ns = u64::try_from(took.as_nanos()).unwrap_or(u64::MAX);
+        self.steps = self.steps.saturating_add(1);
+        self.handoff_ns = self.handoff_ns.saturating_add(ns);
+        if ns > self.largest_step_ns {
+            self.largest_step_ns = ns;
+            self.largest_step_bytes = bytes;
+        }
+    }
+
     pub fn until(
         &mut self,
         images: &mut Assets<Image>,
@@ -288,7 +313,7 @@ impl WorldImageUpload {
         max_this_frame: u32,
     ) -> bool {
         let start_done = self.done;
-        let start_bytes = self.uploaded_bytes;
+        let start_bytes = self.handed_bytes;
         let byte_budget = if max_this_frame == u32::MAX {
             u64::MAX
         } else {
@@ -305,7 +330,7 @@ impl WorldImageUpload {
         };
         let mut stepped = false;
         while self.exact_at < self.exact_images.len() {
-            if stepped && capped(self.done, self.uploaded_bytes) {
+            if stepped && capped(self.done, self.handed_bytes) {
                 return false;
             }
             let image = self.exact_images[self.exact_at].take();
@@ -318,36 +343,42 @@ impl WorldImageUpload {
                 self.sync_stage();
                 continue;
             }
-            self.uploaded_bytes += image.as_ref().map(image_bytes).unwrap_or(0);
+            let bytes = image.as_ref().map(image_bytes).unwrap_or(0);
+            self.handed_bytes += bytes;
+            let step = std::time::Instant::now();
             self.exact_handles[self.exact_at] = image.map(|image| images.add(image));
+            self.note_step(step.elapsed(), bytes);
             self.exact_at += 1;
             self.done = self.done.saturating_add(1);
             stepped = true;
             self.sync_stage();
         }
         while self.probe_at < self.probes.len() {
-            if stepped && capped(self.done, self.uploaded_bytes) {
+            if stepped && capped(self.done, self.handed_bytes) {
                 return false;
             }
             let image = self.probes[self.probe_at].take();
-            self.uploaded_bytes += image.as_ref().map(image_bytes).unwrap_or(0);
-
+            let bytes = image.as_ref().map(image_bytes).unwrap_or(0);
+            self.handed_bytes += bytes;
+            let step = std::time::Instant::now();
             self.probe_handles[self.probe_at] = image.map(|mut image| {
                 if let Some(mode) = probe_debug_mode() {
                     paint_probe_debug(&mut image, mode);
                 }
                 images.add(image)
             });
+            self.note_step(step.elapsed(), bytes);
             self.probe_at += 1;
             self.done = self.done.saturating_add(1);
             stepped = true;
             self.sync_stage();
         }
         while self.lightmap_at < self.lightmaps.len() {
-            if stepped && capped(self.done, self.uploaded_bytes) {
+            if stepped && capped(self.done, self.handed_bytes) {
                 return false;
             }
             let page = self.lightmaps[self.lightmap_at].take();
+            let step = std::time::Instant::now();
             self.lightmap_handles[self.lightmap_at] = page.map(|lightmap| {
                 diag::info!(
                     World,
@@ -369,6 +400,9 @@ impl WorldImageUpload {
                     sun_mask_diagnostic: images.add(lightmap.sun_mask_image),
                 }
             });
+            // One lightmap page is six adds and they cannot be split, so the
+            // page is the indivisible unit here, not the image.
+            self.note_step(step.elapsed(), 0);
             if self.lightmap_handles[self.lightmap_at].is_some() {
                 self.done = self.done.saturating_add(1);
             }

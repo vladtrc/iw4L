@@ -3,6 +3,7 @@ mod event;
 #[cfg(not(all(unix, feature = "native")))]
 #[path = "event_noop.rs"]
 mod event;
+pub mod frames;
 pub mod run;
 #[cfg(all(unix, feature = "native"))]
 mod session;

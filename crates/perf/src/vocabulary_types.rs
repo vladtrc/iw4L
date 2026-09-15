@@ -66,6 +66,16 @@ pub enum Counter {
     RenderSubmitArenaMs,
     RenderSubmitRecordMs,
 
+    PresentPublishMs,
+    HudSurfacesScheduleMs,
+    HudStageMaxScheduleMs,
+    HudTessBodyMs,
+    HudTessJobs,
+    UiHudSetupMs,
+    UiApplyDeferredMs,
+    UiHudVisibilityMs,
+    HudStageMaxScheduleAt,
+
     RenderGpuColourMs,
 
     RenderGpuSunMs,
@@ -209,6 +219,15 @@ impl Counter {
         Self::RenderSubmitPrepareMs,
         Self::RenderSubmitArenaMs,
         Self::RenderSubmitRecordMs,
+        Self::PresentPublishMs,
+        Self::HudSurfacesScheduleMs,
+        Self::HudStageMaxScheduleMs,
+        Self::HudTessBodyMs,
+        Self::HudTessJobs,
+        Self::UiHudSetupMs,
+        Self::UiApplyDeferredMs,
+        Self::UiHudVisibilityMs,
+        Self::HudStageMaxScheduleAt,
         Self::RenderGpuColourMs,
         Self::RenderGpuSunMs,
         Self::RenderGpuSpotMs,
@@ -249,6 +268,15 @@ impl Counter {
             Self::RenderSubmitPrepareMs => "submit_prepare",
             Self::RenderSubmitArenaMs => "submit_arena",
             Self::RenderSubmitRecordMs => "submit_record",
+            Self::PresentPublishMs => "present_publish",
+            Self::HudSurfacesScheduleMs => "hud_surfaces_schedule_interval",
+            Self::HudStageMaxScheduleMs => "hud_stage_max_schedule_interval",
+            Self::HudTessBodyMs => "hud_tess_body",
+            Self::HudTessJobs => "hud_tess_jobs",
+            Self::UiHudSetupMs => "ui_hud_setup",
+            Self::UiApplyDeferredMs => "ui_apply_deferred",
+            Self::UiHudVisibilityMs => "ui_hud_visibility",
+            Self::HudStageMaxScheduleAt => "hud_stage_max_schedule_interval_at",
             Self::RenderGpuColourMs => "gpu_colour",
             Self::RenderGpuSunMs => "gpu_sun",
             Self::RenderGpuSpotMs => "gpu_spot",
@@ -279,6 +307,13 @@ impl Counter {
             | Self::RenderSubmitPrepareMs
             | Self::RenderSubmitArenaMs
             | Self::RenderSubmitRecordMs
+            | Self::PresentPublishMs
+            | Self::HudSurfacesScheduleMs
+            | Self::HudStageMaxScheduleMs
+            | Self::HudTessBodyMs
+            | Self::UiHudSetupMs
+            | Self::UiApplyDeferredMs
+            | Self::UiHudVisibilityMs
             | Self::RenderGpuColourMs
             | Self::RenderGpuSunMs
             | Self::RenderGpuSpotMs

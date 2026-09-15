@@ -23,6 +23,15 @@ fn main() {
         git(&root, &["describe", "--always", "--dirty", "--tags"]),
     );
     emit("IW4L_BUILD_GIT_DIRTY", git_dirty(&root));
+    // A dirty flag says the tree differed from the revision; it does not say
+    // whether two dirty runs differed from it in the *same* way. This does:
+    // the same patch hash on two runs means the same uncommitted diff. Empty
+    // on a clean tree, where `git` prints nothing and the field stays null —
+    // "no patch", which `git_dirty` already said.
+    emit(
+        "IW4L_BUILD_GIT_PATCH_HASH",
+        git(&root, &["diff", "HEAD"]).map(|diff| fnv1a_hex(&diff)),
+    );
     emit("IW4L_BUILD_RUSTC", rustc_version());
     // Two different answers, and the report needs the first one. `PROFILE` is
     // only ever `debug` or `release` — a build script cannot see that this is

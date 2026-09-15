@@ -1,6 +1,7 @@
 pub mod artifact_cache;
 pub mod discover;
 pub mod iwd;
+pub mod load_jobs;
 pub mod namespace_trees;
 pub mod progress;
 pub mod zone;
@@ -19,6 +20,7 @@ pub use iwd::{
     IwdFile, IwdIndex, IwdSoundIndex, cached_iwd_dirs, game_main_for_zone, game_mains_under,
     inflate_zlib, iwd_read_cost, read_iwd_named, read_text,
 };
+pub use load_jobs::{CacheResult, Job, JobKind};
 pub use namespace_trees::{NamespaceSoundIwd, NamespaceTree, NamespaceTrees};
 pub use progress::{
     LoadLaneTiming, LoadLaneView, LoadOverflow, LoadProgress, LoadStage, peak_resident_bytes,

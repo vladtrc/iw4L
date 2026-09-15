@@ -102,6 +102,9 @@ mod penetration {
 }
 pub mod plugin;
 pub mod prepared;
+pub mod load_jobs {
+    pub use asset_transport::load_jobs::*;
+}
 pub mod progress {
     pub use asset_transport::progress::*;
 }
@@ -340,6 +343,7 @@ pub use material_images::{
     decode_material_color_maps, decode_menu_background, decode_reflection_probe_cubemap,
     decode_ui_image, decode_ui_image_from_main, decode_zone_image_rgba, game_main_for_zone,
     iwd_read_cost, last_image_working_set, mip_cache_cost, retail_lightmap_bake, retail_lit_color,
+    shared_variant_census,
 };
 pub use menu_catalog::{
     CapturedStringTable, FontDef, HUD_CHROME_MENUS, ITEM_TYPE_BUTTON, ITEM_TYPE_TEXT, MenuCatalog,

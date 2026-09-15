@@ -275,19 +275,21 @@ pub(crate) fn spawn_world(
         } else {
             u32::MAX
         };
-        let bytes_before = job.images.uploaded_bytes;
+        let bytes_before = job.images.handed_bytes;
         let finished = job.images.until(&mut images, deadline, max_this_frame);
         job.last_work_ms = frame_started.elapsed().as_secs_f32() * 1000.0;
         let gap_ms = job.slice_gap_ms(std::time::Instant::now());
         diag::info!(
             World,
-            "world spawn slice: phase=images done={}/{} skipped={} {:.1}ms gap={gap_ms:.1}ms bytes={} total_bytes={} (budget 40ms)",
+            "world spawn slice: phase=images done={}/{} skipped={} {:.1}ms gap={gap_ms:.1}ms handed_bytes={} total_handed={} largest_step={:.1}ms/{}B (budget 40ms; bytes are handed to Assets<Image>, not copied to the GPU)",
             job.images.done,
             job.images.total,
             job.images.skipped,
             job.last_work_ms,
-            job.images.uploaded_bytes - bytes_before,
-            job.images.uploaded_bytes
+            job.images.handed_bytes - bytes_before,
+            job.images.handed_bytes,
+            job.images.largest_step_ns as f64 / 1.0e6,
+            job.images.largest_step_bytes,
         );
         if finished {
             let _ = job.images.take_stage();

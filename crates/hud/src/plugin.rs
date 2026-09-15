@@ -182,6 +182,7 @@ fn begin_hud_tess_frame(
     surface: Res<crate::surface::Hud2dSurface>,
     mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
 ) {
+    let _body = gpu_list::TessBody::open();
     *frame = crate::gpu_list::HudTessGpuFrame::default();
     if !surface.is_ready() {
         return;
@@ -196,6 +197,7 @@ fn flush_blood_tess(
     job: Res<BloodGpuJob>,
     mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
 ) {
+    let _body = gpu_list::TessBody::open();
     match *job {
         BloodGpuJob::Show | BloodGpuJob::Write => {
             if latch.packed.is_empty() {
@@ -212,6 +214,7 @@ fn flush_flash_tess(
     job: Res<FlashGpuJob>,
     mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
 ) {
+    let _body = gpu_list::TessBody::open();
     match *job {
         FlashGpuJob::Write => {
             if latch.packed.is_empty() {
@@ -433,6 +436,7 @@ fn flush_hud_tess(
         ),
     >,
 ) {
+    let _body = gpu_list::TessBody::open();
     if !surface.is_ready() {
         return;
     }
@@ -542,6 +546,7 @@ fn flush_killcam_skip_tess(
         With<KillcamSkipRaster>,
     >,
 ) {
+    let _body = gpu_list::TessBody::open();
     if !surface.is_ready() {
         return;
     }
@@ -571,6 +576,7 @@ fn flush_mantle_hint_tess(
         With<MantleHintRaster>,
     >,
 ) {
+    let _body = gpu_list::TessBody::open();
     if !surface.is_ready() {
         return;
     }
@@ -600,6 +606,7 @@ fn flush_scoreboard_tess(
         With<ScoreboardRaster>,
     >,
 ) {
+    let _body = gpu_list::TessBody::open();
     if !surface.is_ready() {
         return;
     }
@@ -629,6 +636,7 @@ fn flush_match_start_tess(
         With<MatchStartRaster>,
     >,
 ) {
+    let _body = gpu_list::TessBody::open();
     if !surface.is_ready() {
         return;
     }
@@ -664,6 +672,13 @@ fn hud_stage_close<const N: usize>(
 fn hud_surfaces_close(stamp: Res<HudPresentStamp>, mut census: ResMut<UpdatePhaseCensus>) {
     let now = Instant::now();
     census.hud_surfaces_ms = stamp.0.map(|t| (now - t).as_secs_f32() * 1000.0);
+    // Two different quantities, published side by side on purpose: the line
+    // above is the gap between two systems, and the tess bodies below ran
+    // inside part of it. Whatever else the executor put in that gap is the
+    // difference, and naming it is the point.
+    let (body_ms, jobs) = gpu_list::take_tess_body_cost();
+    census.hud_tess_body_ms = Some(body_ms);
+    census.hud_tess_jobs = Some(jobs);
 }
 
 fn reset_match_hud_on_torn_down(
@@ -695,6 +710,7 @@ fn flush_use_hint_tess(
         With<crate::use_hint::UseHintRaster>,
     >,
 ) {
+    let _body = gpu_list::TessBody::open();
     if !surface.is_ready() {
         return;
     }
