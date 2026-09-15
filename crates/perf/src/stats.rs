@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
-use crate::vocabulary_types::Span;
+use crate::vocabulary_types::{Counter, Origin, Span, Unit};
 
 const ENV: &str = "IW4L_BENCH";
 
@@ -91,6 +91,19 @@ static UNMATCHED_END: AtomicU64 = AtomicU64::new(0);
 static REOPENED: AtomicU64 = AtomicU64::new(0);
 static HISTOGRAMS: [[Histogram; Span::COUNT]; Phase::COUNT] =
     [const { [const { Histogram::ZERO }; Span::COUNT] }; Phase::COUNT];
+
+/// Counters get the same histogram as spans, one per phase. A [`Unit::Count`]
+/// sample is stored as the count itself and a [`Unit::Milliseconds`] one as
+/// nanoseconds, so both keep the histogram's precision without a second scale.
+static COUNTERS: [[Histogram; Counter::COUNT]; Phase::COUNT] =
+    [const { [const { Histogram::ZERO }; Counter::COUNT] }; Phase::COUNT];
+
+/// Samples an emitter handed us that the histogram cannot hold: NaN, infinity
+/// or a negative value. Counted rather than clamped, because a counter that
+/// goes negative is a bug in the emitter and silently recording a zero for it
+/// would hide that behind a plausible number.
+static COUNTER_REJECTED: [AtomicU64; Counter::COUNT] =
+    [const { AtomicU64::new(0) }; Counter::COUNT];
 
 /// When each span opened, as nanoseconds since [`BASE`] plus one; zero is
 /// closed. Global rather than thread-local on purpose: Bevy runs `FixedUpdate`,
@@ -200,10 +213,34 @@ fn remember_parent(span: Span, parent: Option<Span>) {
     }
 }
 
+/// One counter sample, in whatever unit [`Counter::unit`] declares. Called
+/// from `Counter::emit` before the Perfetto category gate, so the bench report
+/// sees the value whether or not a trace is being written.
+#[inline]
+pub(crate) fn count(counter: Counter, value: f64) {
+    if !enabled() {
+        return;
+    }
+    let phase = phase_index();
+    if !value.is_finite() || value < 0.0 {
+        COUNTER_REJECTED[counter as usize].fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let stored = match counter.unit() {
+        Unit::Milliseconds => value * 1e6,
+        Unit::Count => value,
+    };
+    COUNTERS[phase][counter as usize].record(stored as u64);
+}
+
+#[inline]
+fn phase_index() -> usize {
+    (PHASE.load(Ordering::Relaxed) as usize).min(Phase::COUNT - 1)
+}
+
 #[inline]
 fn record(span: Span, ns: u64) {
-    let phase = (PHASE.load(Ordering::Relaxed) as usize).min(Phase::COUNT - 1);
-    HISTOGRAMS[phase][span as usize].record(ns);
+    HISTOGRAMS[phase_index()][span as usize].record(ns);
 }
 
 /// Values below [`SUB`] are their own bucket; above it, `SUB` buckets cover
@@ -278,6 +315,124 @@ pub fn snapshot(phase: Phase) -> Vec<SpanStats> {
         .collect()
 }
 
+/// What one counter recorded over one phase. `sum`, `min`, `max` and the
+/// percentiles are in the counter's own [`Unit`]; nothing here is comparable
+/// across units, which is why the unit travels with the row.
+#[derive(Clone, Copy, Debug)]
+pub struct CounterStats {
+    pub counter: Counter,
+    pub unit: Unit,
+    pub origin: Origin,
+    /// Samples the emitter produced. Not the frame count: a counter emitted
+    /// twice a frame has twice as many, and one the GPU could not resolve has
+    /// fewer.
+    pub samples: u64,
+    /// Samples refused as not finite or negative. They are in no other number
+    /// on this row.
+    pub rejected: u64,
+    pub sum: f64,
+    pub min: f64,
+    pub max: f64,
+    pub p50: f64,
+    pub p95: f64,
+    pub p99: f64,
+}
+
+impl CounterStats {
+    /// The mean of one sample — the cost or size of a single emission. For a
+    /// counter emitted more than once a frame this is *not* the per-frame
+    /// figure; divide `sum` by the frame count for that.
+    pub fn avg(&self) -> f64 {
+        if self.samples == 0 {
+            return 0.0;
+        }
+        self.sum / self.samples as f64
+    }
+
+    /// How many samples this counter produced per frame of the phase.
+    pub fn per_frame_samples(&self, frames: u64) -> Option<f64> {
+        (frames > 0).then(|| self.samples as f64 / frames as f64)
+    }
+
+    /// The counter's total spread over the frames of the phase. This is the
+    /// number to compare against a frame budget; `avg` is not.
+    pub fn per_frame(&self, frames: u64) -> Option<f64> {
+        (frames > 0).then(|| self.sum / frames as f64)
+    }
+}
+
+/// Every counter that took at least one sample in `phase`, in declaration
+/// order. A counter that was never emitted is absent rather than zero: the
+/// report has to be able to say MISS.
+pub fn counter_snapshot(phase: Phase) -> Vec<CounterStats> {
+    let histograms = &COUNTERS[phase.index()];
+    Counter::ALL
+        .into_iter()
+        .filter_map(|counter| {
+            let histogram = &histograms[counter as usize];
+            let samples = histogram.count.load(Ordering::Relaxed);
+            let rejected = COUNTER_REJECTED[counter as usize].load(Ordering::Relaxed);
+            if samples == 0 && rejected == 0 {
+                return None;
+            }
+            let quantiles = quantiles(histogram, samples.max(1), &[0.50, 0.95, 0.99]);
+            let scale = |stored: u64| match counter.unit() {
+                Unit::Milliseconds => stored as f64 / 1e6,
+                Unit::Count => stored as f64,
+            };
+            Some(CounterStats {
+                counter,
+                unit: counter.unit(),
+                origin: counter.origin(),
+                samples,
+                rejected,
+                sum: scale(histogram.sum_ns.load(Ordering::Relaxed)),
+                min: if samples == 0 {
+                    0.0
+                } else {
+                    scale(histogram.min_ns.load(Ordering::Relaxed))
+                },
+                max: scale(histogram.max_ns.load(Ordering::Relaxed)),
+                p50: scale(quantiles[0]),
+                p95: scale(quantiles[1]),
+                p99: scale(quantiles[2]),
+            })
+        })
+        .collect()
+}
+
+/// Counters this build declares but that took no sample at all in either
+/// phase. A name here is either instrumentation that never ran on this
+/// workload or a counter nothing emits any more; the report prints them so a
+/// reader does not mistake an absent row for a zero.
+pub fn counters_never_sampled() -> Vec<Counter> {
+    Counter::ALL
+        .into_iter()
+        .filter(|counter| {
+            COUNTERS
+                .iter()
+                .all(|phase| phase[*counter as usize].count.load(Ordering::Relaxed) == 0)
+                && COUNTER_REJECTED[*counter as usize].load(Ordering::Relaxed) == 0
+        })
+        .collect()
+}
+
+/// Spans this build declares that opened in neither phase. The tree can only
+/// print what took a sample, so without this a span whose producer was deleted
+/// or compiled out looks exactly like a span the workload never reached — and
+/// the first is a hole in the instrumentation while the second is a fact about
+/// the run.
+pub fn spans_never_sampled() -> Vec<Span> {
+    Span::ALL
+        .into_iter()
+        .filter(|span| {
+            HISTOGRAMS
+                .iter()
+                .all(|phase| phase[*span as usize].count.load(Ordering::Relaxed) == 0)
+        })
+        .collect()
+}
+
 fn parent_of(span: Span) -> Option<Span> {
     let parent = PARENT[span as usize].load(Ordering::Relaxed);
     if parent == NO_PARENT {
@@ -330,6 +485,32 @@ pub fn anomalies() -> Anomalies {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_declaration_order_arrays_index_their_own_enums() {
+        // The recorder indexes `COUNTERS` and `HISTOGRAMS` by `x as usize` and
+        // reads them back by walking `ALL`. If a variant is added to one and
+        // not the other, every row after it reports another row's samples.
+        for (index, span) in Span::ALL.into_iter().enumerate() {
+            assert_eq!(span as usize, index, "{} is out of order", span.name());
+        }
+        for (index, counter) in Counter::ALL.into_iter().enumerate() {
+            assert_eq!(
+                counter as usize,
+                index,
+                "{} is out of order",
+                counter.name()
+            );
+        }
+    }
+
+    #[test]
+    fn a_millisecond_counter_reads_back_in_milliseconds() {
+        let histogram = Histogram::ZERO;
+        histogram.record((4.5 * 1e6) as u64);
+        let stored = histogram.sum_ns.load(Ordering::Relaxed);
+        assert!((stored as f64 / 1e6 - 4.5).abs() < 1e-6);
+    }
 
     #[test]
     fn every_value_lands_in_a_bucket_that_contains_it() {

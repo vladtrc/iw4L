@@ -3,6 +3,7 @@ mod event;
 #[cfg(not(all(unix, feature = "native")))]
 #[path = "event_noop.rs"]
 mod event;
+pub mod run;
 #[cfg(all(unix, feature = "native"))]
 mod session;
 #[cfg(not(all(unix, feature = "native")))]
@@ -23,5 +24,16 @@ pub use event::{
     world_ready,
 };
 pub use session::{RunMetadata, enabled, flush, start};
-pub use stats::{Anomalies, Phase, SpanStats};
+
+/// Whether *any* recorder is listening: the Perfetto session (`IW4L_PERF`) or
+/// the in-process bench statistics (`IW4L_BENCH`). Census code that only asked
+/// [`enabled`] was silently free on a `IW4L_BENCH=1` run, which left the bench
+/// report's counter tables empty and indistinguishable from a workload that
+/// genuinely never drew anything.
+#[inline]
+pub fn recording() -> bool {
+    stats::enabled() || enabled()
+}
+pub use stats::{Anomalies, CounterStats, Phase, SpanStats};
 pub use vocabulary::{Counter, Span, SpanGuard};
+pub use vocabulary_types::{Origin, Unit};

@@ -68,9 +68,7 @@ pub fn start(metadata: RunMetadata) -> Result<Option<PathBuf>, String> {
         return Ok(Some(state.dir.clone()));
     }
 
-    let id = uuid::Uuid::new_v4();
-    let dir = PathBuf::from("iw4l-artifacts/runs").join(id.to_string());
-    std::fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let dir = crate::run::dir()?;
 
     Producer::init(
         ProducerInitArgsBuilder::new()

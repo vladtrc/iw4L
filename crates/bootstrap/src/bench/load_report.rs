@@ -4,8 +4,13 @@
 //! the serial story — request, walk, install, spawn, first drawn frame — and it
 //! is what a player waits through. The **stages** are the parallel story: the
 //! walk runs on the load pool, so a stage's own duration says nothing about
-//! whether removing it would shorten anything. What answers that is the time a
-//! stage held the load *alone*, which is what `exclusive` below measures.
+//! whether removing it would shorten anything. `exclusive` below narrows that:
+//! the time a stage was the only one running is an *upper bound* on what
+//! deleting it could save, and not a promise of saving it. Whatever else the
+//! pool would have picked up in that window still has to run, and a stage that
+//! was never alone can still be on the critical path by holding a dependency
+//! everything behind it is waiting on. The number bounds the win; it does not
+//! measure it.
 
 use std::time::{Duration, Instant};
 
@@ -18,10 +23,12 @@ use crate::bench::table::{Align, Table, bytes, items, mib, ms, secs};
 const TOP_STAGES: usize = 16;
 
 pub(crate) fn render(bench: &Milestones, command_start: Option<Instant>, out: &mut Vec<String>) {
-    out.push("[1/2] MAP LOAD".to_owned());
+    out.push("[1/3] MAP LOAD".to_owned());
     waterfall(bench, command_start, out);
     out.push(String::new());
     stages(&bench.lanes, out);
+    out.push(String::new());
+    audio(out);
     out.push(String::new());
     picture(bench, out);
 }
@@ -122,20 +129,23 @@ fn stages(lanes: &[LoadLaneTiming], out: &mut Vec<String>) {
     let covered = union(lanes);
     let exclusive = exclusive(lanes);
 
-    let parallel = if covered.is_zero() {
+    let occupancy = if covered.is_zero() {
         "—".to_owned()
     } else {
-        format!("{:.1}x", held.as_secs_f64() / covered.as_secs_f64())
+        format!("{:.1}", held.as_secs_f64() / covered.as_secs_f64())
     };
     out.push(format!(
-        "  load stages: {} stages holding {} across a {} window — {parallel} parallel, {} covered by no stage",
+        "  load stages: {} stages holding {} across a {} window; {} of that window had no stage open",
         lanes.len(),
         secs(held),
         secs(window),
         secs(window.saturating_sub(covered)),
     ));
+    out.push(format!(
+        "  mean occupancy {occupancy} stages while anything was open. That is how many stages overlapped on average — not a speed-up, and not a count of busy cores: a stage that spends its time waiting on I/O is open and occupying nothing."
+    ));
     out.push(
-        "  `exclusive` is the time a stage was the only one running: the part of the load it, alone, lengthened."
+        "  `exclusive` is the time a stage was the only one open. It is an upper bound on what deleting that stage could save, not the saving: the work behind it still has to run, and a stage that was never alone can still be what everything else is queued on."
             .to_owned(),
     );
 
@@ -182,6 +192,134 @@ fn stages(lanes: &[LoadLaneTiming], out: &mut Vec<String>) {
     }
 }
 
+/// What preparing the match's clips cost, split by the decoder each clip took.
+///
+/// The stage table above has `preparing match audio` as one row holding one
+/// number, which on every run so far has been the largest stage in the load —
+/// and a single number cannot say whether that is thousands of cheap byte
+/// loops or hundreds of external processes. These are the same clips counted
+/// by the decoder that ran, so the two questions have different answers.
+///
+/// Every duration here is summed over the prep workers, several of which run
+/// at once. They are worker time, and adding them to a milestone is wrong.
+fn audio(out: &mut Vec<String>) {
+    let prep = audio::clip_prep_cost();
+    if prep.requests == 0 {
+        out.push("  match audio: MISS — this run asked for no clip".to_owned());
+        return;
+    }
+    let prepared: u64 = prep.paths.iter().map(|(_, cost)| cost.prepared).sum();
+    let failed: u64 = prep.paths.iter().map(|(_, cost)| cost.failed).sum();
+    out.push(format!(
+        "  match audio: {prepared} clips prepared, {failed} failed, {} still in flight when the run ended",
+        prep.queued.saturating_sub(prepared + failed),
+    ));
+    out.push(format!(
+        "  {} asks resolved to {} clips: {} of the asks were for a clip somebody had already asked for, and the store queued each clip once. {} clips were queued after AudioReady.",
+        prep.requests,
+        prep.queued,
+        prep.requests.saturating_sub(prep.queued),
+        prep.late,
+    ));
+    out.push(format!(
+        "  a job waited {} on average before a worker took it ({} over {} jobs, {} prep workers). The sum is worker queue time, not a stretch of the load.",
+        ms_secs(prep.queue_wait_ms / prep.queued.max(1) as f64),
+        ms_secs(prep.queue_wait_ms),
+        prep.queued,
+        prep.workers,
+    ));
+
+    let mut table = Table::new(
+        2,
+        &[
+            ("decoder", Align::Left),
+            ("prepared", Align::Right),
+            ("failed", Align::Right),
+            ("worker time", Align::Right),
+            ("per clip", Align::Right),
+            ("resident pcm", Align::Left),
+        ],
+    );
+    let mut silent = Vec::new();
+    for (path, cost) in &prep.paths {
+        let n = cost.prepared + cost.failed;
+        if n == 0 {
+            silent.push(path.name());
+            continue;
+        }
+        table.row([
+            path.name().to_owned(),
+            cost.prepared.to_string(),
+            cost.failed.to_string(),
+            ms_secs(cost.wall_ms),
+            format!("{:.2} ms", cost.wall_ms / n as f64),
+            mib(cost.sample_bytes),
+        ]);
+    }
+    table.render(out);
+    if !silent.is_empty() {
+        out.push(format!("  no clip on this run took: {}", silent.join(", ")));
+    }
+    xwma(out);
+}
+
+/// The one decoder that leaves the process. Everything else on the table above
+/// is a loop over bytes; this one is `ffmpeg`, and both numbers it is judged by
+/// are here: how many clips it was asked about, and how many processes that
+/// took. The artifact cache answers the second run of a zone; the batching is
+/// what the first run gets.
+fn xwma(out: &mut Vec<String>) {
+    let cost = assets::xwma_decode_cost();
+    if cost.hit + cost.miss + cost.failed == 0 {
+        out.push(
+            "  t5 xwma: MISS — no clip reached the external decoder, so the cache answered nothing and nothing was stored."
+                .to_owned(),
+        );
+        return;
+    }
+    out.push(format!(
+        "  t5 xwma: {} cached, {} decoded, {} failed; {} external ffmpeg processes for {} of samples",
+        cost.hit,
+        cost.miss,
+        cost.failed,
+        cost.spawned,
+        mib(cost.pcm_bytes),
+    ));
+    if cost.spawned > 0 {
+        out.push(format!(
+            "  {:.1} clips per process — starting ffmpeg costs more than decoding one of these clips, so the match's clips are decoded in batches of up to {}.{}",
+            (cost.miss + cost.failed) as f64 / cost.spawned as f64,
+            audio::PREP_BATCH,
+            if cost.retried == 0 {
+                String::new()
+            } else {
+                format!(
+                    " {} clips were asked again one at a time after the batch holding them was refused.",
+                    cost.retried
+                )
+            },
+        ));
+    }
+    out.push(format!(
+        "  t5 xwma worker time: {} in ffmpeg, {} hashing payloads into keys, {} reading and writing the cache",
+        ms_secs(cost.decode_ms),
+        ms_secs(cost.key_ms),
+        ms_secs(cost.io_ms),
+    ));
+    if cost.miss == 0 && cost.failed == 0 {
+        out.push(
+            "  the cache answered every clip. A warm cache is not a faster decoder: the first run on these zones still paid for all of it, and a zone that changes pays again."
+                .to_owned(),
+        );
+    }
+}
+
+/// Milliseconds as seconds. The audio numbers are sums over worker threads and
+/// run to tens of seconds, where `ms` would print five digits.
+fn ms_secs(ms: f64) -> String {
+    format!("{:.3}s", ms / 1000.0)
+}
+
 fn picture(bench: &Milestones, out: &mut Vec<String>) {
     let mut lines = Vec::new();
     if let Some(bytes) = bench.progress.zone_image_bytes() {
@@ -197,6 +335,10 @@ fn picture(bench: &Milestones, out: &mut Vec<String>) {
     }
     if !lines.is_empty() {
         out.push(format!("  memory: {}", lines.join(", ")));
+        out.push(
+            "  RSS is the whole process. A stage's delta is what the process grew across its window, which on a parallel walk includes every other stage that was open — so the per-stage deltas do not add up to the peak and none of them is that stage's ownership."
+                .to_owned(),
+        );
     }
 
     let frames = perf::stats::snapshot(perf::Phase::Load)

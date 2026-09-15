@@ -13,6 +13,35 @@ struct Config {
     zone: String,
     commands: String,
     focus: Option<String>,
+    /// The recorder the on-arm turns on. `IW4L_PERF` is the Perfetto session;
+    /// `IW4L_BENCH` is the in-process recorder that feeds `make bench`, whose
+    /// cost is a different question with a different answer.
+    var: Recorder,
+}
+
+/// Which recorder is being measured. A closed set rather than a free-form
+/// variable name: a typo would otherwise run both arms identically and report
+/// its own noise as the overhead of something.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Recorder {
+    Perf,
+    Bench,
+}
+
+impl Recorder {
+    const fn env(self) -> &'static str {
+        match self {
+            Self::Perf => "IW4L_PERF",
+            Self::Bench => "IW4L_BENCH",
+        }
+    }
+
+    /// Whether an on-arm of this recorder leaves a `trace.pftrace` behind.
+    /// Only the Perfetto session writes one; the bench recorder writes a report
+    /// and a manifest, and counting traces would expect a file it never makes.
+    const fn writes_trace(self) -> bool {
+        matches!(self, Self::Perf)
+    }
 }
 
 struct Pair {
@@ -41,6 +70,7 @@ fn parse(root: &Path, args: Vec<String>) -> Result<Config, String> {
     let mut zone = "mp_boneyard".to_owned();
     let mut commands = None;
     let mut focus = None;
+    let mut var = Recorder::Perf;
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let value = args
@@ -62,6 +92,17 @@ fn parse(root: &Path, args: Vec<String>) -> Result<Config, String> {
             "--zone" => zone = value,
             "--cmds" => commands = Some(value),
             "--focus" => focus = Some(value),
+            "--var" => {
+                var = match value.as_str() {
+                    "IW4L_PERF" => Recorder::Perf,
+                    "IW4L_BENCH" => Recorder::Bench,
+                    other => {
+                        return Err(format!(
+                            "unknown --var {other}: expected IW4L_PERF or IW4L_BENCH"
+                        ));
+                    }
+                }
+            }
             _ => return Err(format!("unknown flag: {flag}\n{}", usage())),
         }
     }
@@ -91,11 +132,12 @@ fn parse(root: &Path, args: Vec<String>) -> Result<Config, String> {
         zone,
         commands,
         focus,
+        var,
     })
 }
 
 fn usage() -> String {
-    "usage: cargo xtask perf-overhead --pairs N --warmup-pairs N --bin PATH [--workdir PATH] --zone ZONE --cmds SCRIPT [--focus SELECTOR]"
+    "usage: cargo xtask perf-overhead --pairs N --warmup-pairs N --bin PATH [--workdir PATH] --zone ZONE --cmds SCRIPT [--focus SELECTOR] [--var IW4L_PERF|IW4L_BENCH]"
         .to_owned()
 }
 
@@ -107,7 +149,7 @@ fn run_inner(root: &Path, config: Result<Config, String>) -> Result<(), String> 
     if let Some(focus) = &config.focus {
         println!("comparison: focus={focus} / no-focus (IW4L_PERF=1 in both arms)");
     } else {
-        println!("comparison: IW4L_PERF on / off");
+        println!("comparison: {} on / off", config.var.env());
     }
     println!(
         "design: {} warmup pair(s), {} measured AB/BA pair(s)",
@@ -180,16 +222,18 @@ fn run_once(config: &Config, enabled: bool) -> Result<f64, String> {
         .args(["map", &config.zone, "--cmds", &config.commands])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Both recorders are cleared first: whichever one the caller inherited
+    // would otherwise sit in the off-arm and be measured as no overhead at all.
     command.env_remove("IW4L_PERF_FOCUS");
+    command.env_remove("IW4L_PERF");
+    command.env_remove("IW4L_BENCH");
     if let Some(focus) = &config.focus {
         command.env("IW4L_PERF", "1");
         if enabled {
             command.env("IW4L_PERF_FOCUS", focus);
         }
     } else if enabled {
-        command.env("IW4L_PERF", "1");
-    } else {
-        command.env_remove("IW4L_PERF");
+        command.env(config.var.env(), "1");
     }
     let started = Instant::now();
     let output = command
@@ -207,7 +251,7 @@ fn run_once(config: &Config, enabled: bool) -> Result<f64, String> {
     }
     let after = trace_runs(&config.workdir)?;
     let added = after.difference(&before).count();
-    let expected = usize::from(config.focus.is_some() || enabled);
+    let expected = usize::from(config.focus.is_some() || (enabled && config.var.writes_trace()));
     if added != expected {
         return Err(format!(
             "{} run created {added} trace(s), expected {expected}; do not benchmark alongside another recorder",

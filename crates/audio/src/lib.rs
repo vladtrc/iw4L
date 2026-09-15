@@ -25,7 +25,7 @@ pub use ambient::{
     MAX_ACTIVE_MAP_EMITTERS, MIN_AUDIBLE_EMITTER_GAIN, MapAmbient, MapAmbientBooted, MapEmitter,
     SoundIwd, stop_map_ambient, update_map_emitter_gain,
 };
-pub use clip_store::ClipStore;
+pub use clip_store::{ClipPath, ClipPathCost, ClipPrepCost, ClipStore, PREP_BATCH, clip_prep_cost};
 pub use emit::{BobCycleTracker, emit_footstep_on_bob_wrap, emit_weapon_fire};
 pub use match_set::AudioReady;
 pub use messages::{

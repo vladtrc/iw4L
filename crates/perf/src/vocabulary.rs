@@ -19,7 +19,7 @@ pub(crate) fn register_categories() {
 
 pub use crate::vocabulary_types::Span;
 
-const SPAN_COUNT: usize = Span::TocUi as usize + 1;
+const SPAN_COUNT: usize = Span::COUNT;
 static SPAN_TRACKS: [OnceLock<TrackEventTrack>; SPAN_COUNT] =
     [const { OnceLock::new() }; SPAN_COUNT];
 
@@ -182,7 +182,7 @@ impl Drop for SpanGuard {
 
 pub use crate::vocabulary_types::Counter;
 
-const COUNTER_COUNT: usize = Counter::SmodelIbSkip as usize + 1;
+const COUNTER_COUNT: usize = Counter::COUNT;
 static COUNTER_TRACKS: [OnceLock<TrackEventTrack>; COUNTER_COUNT] =
     [const { OnceLock::new() }; COUNTER_COUNT];
 
@@ -195,43 +195,7 @@ enum CounterCategory {
 
 impl Counter {
     fn track_name(self) -> &'static str {
-        match self {
-            Self::CounterBindGroup0 => "bind0",
-            Self::CounterBindGroup1 => "bind1",
-            Self::CounterCmdState => "cmd_state",
-            Self::CounterMultiDraws => "multi_draw",
-            Self::CounterMultiDrawCommands => "multi_draw_cmds",
-            Self::CounterDipsColour => "dip_colour",
-            Self::CounterDipsSun => "dip_sun",
-            Self::CounterDraws => "draws",
-            Self::CounterFxElemAllocFail => "fx_elem_alloc_fail",
-            Self::CounterFxElemLive => "fx_elem_live",
-            Self::CounterProcessAllocations => "process_allocations",
-            Self::CounterSubmittedBatches => "batches",
-            Self::RenderGraphRenderMs => "graph_render",
-            Self::RenderGraphSubmitMs => "graph_submit",
-            Self::RenderSubmitSunMs => "submit_sun",
-            Self::RenderSubmitGatherMs => "submit_gather",
-            Self::RenderSubmitPrepareMs => "submit_prepare",
-            Self::RenderSubmitArenaMs => "submit_arena",
-            Self::RenderSubmitRecordMs => "submit_record",
-            Self::RenderGraphPresentMs => "graph_present",
-            Self::RenderGpuColourMs => "gpu_colour",
-            Self::RenderGpuSunMs => "gpu_sun",
-            Self::RenderGpuSpotMs => "gpu_spot",
-            Self::RenderGpuFloatzMs => "gpu_floatz",
-            Self::RenderGpuPostfxMs => "gpu_postfx",
-            Self::RenderGpuFrameMs => "gpu_frame",
-            Self::SpotShadowGpu => "spot_shadow_gpu",
-            Self::SpotShadowGpuMiss => "spot_shadow_gpu_miss",
-            Self::SpotShadowSlotN => "spot_shadow_slot_n",
-            Self::XmodelColourCameraFrustum => "xmodel_colour_camera_frustum",
-            Self::XmodelColourNoLighting => "xmodel_colour_no_lighting",
-            Self::XmodelLayoutOverlay => "xmodel_layout_overlay",
-            Self::FxLayoutOverlay => "fx_layout_overlay",
-            Self::WorldPretessSkip => "world_pretess_skip",
-            Self::SmodelIbSkip => "smodel_ib_skip",
-        }
+        self.name()
     }
 
     fn category(self) -> CounterCategory {
@@ -254,6 +218,7 @@ impl Counter {
 
     #[inline]
     pub fn emit(self, value: f64) {
+        crate::stats::count(self, value);
         macro_rules! emit {
             ($category:literal) => {{
                 if !perfetto_sdk::track_event_category_enabled!($category) {

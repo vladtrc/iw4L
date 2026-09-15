@@ -8,6 +8,7 @@ rather than one frame, is [`BENCH.md`](BENCH.md).
 ```bash
 make bench-live                            # record + compact p50/p90/p95/p99/hot-path report
 make bench-overhead                        # 10 alternating on/off pairs + paired 95% CI
+make bench-overhead VAR=IW4L_BENCH         # the same, for the in-process bench recorder
 cargo xtask perf-overhead --pairs 10 --bin target/play/iw4l --zone mp_highrise --cmds 'wait world; wait 8s; quit' --focus script_model:192
 make scenario                              # scripted match: IW4L_PERF=1, then cargo xtask scenario
 make chaos                                 # RPG splash run: IW4L_PERF=1, then cargo xtask chaos

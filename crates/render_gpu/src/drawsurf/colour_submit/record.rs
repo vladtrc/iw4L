@@ -61,7 +61,7 @@ pub(super) fn draw_exact_colour(
     let extracted = ExtractedColourRefs::new(&world, &frame);
     let products = &extracted.frame.frame_products;
     let _colour_submit = perf::Span::RenderColourSubmitMs.enter();
-    let census_on = perf::enabled();
+    let census_on = perf::recording();
 
     *working_set = crate::ColourWorkingSet::default();
     if pipeline.ports.is_empty() {
@@ -666,7 +666,7 @@ pub(super) fn copy_submit_prepare_ms(
     census: Res<ExactColourSubmitCensus>,
     slot: Option<Res<crate::diag::render_frame_diag::SharedRenderStagesSlot>>,
 ) {
-    if !perf::enabled() {
+    if !perf::recording() {
         return;
     }
 

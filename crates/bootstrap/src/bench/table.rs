@@ -31,6 +31,18 @@ impl Table {
         self.rows.push(cells.into_iter().collect());
     }
 
+    /// A row for something that was asked for and did not answer. Every cell
+    /// but the name reads MISS, because a metric nobody sampled is not a zero
+    /// and a table that prints it as one is worse than no table.
+    pub(crate) fn miss(&mut self, name: &str) {
+        let mut row = vec![name.to_owned()];
+        row.extend(std::iter::repeat_n(
+            "MISS".to_owned(),
+            self.headers.len().saturating_sub(1),
+        ));
+        self.rows.push(row);
+    }
+
     pub(crate) fn render(&self, out: &mut Vec<String>) {
         let mut widths: Vec<usize> = self
             .headers

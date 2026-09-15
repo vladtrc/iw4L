@@ -40,10 +40,11 @@ half-installed resources. Commit publishes it, boots the sim, writes
 
 ## Cache, and poking it: `iw4l-artifacts/cache/<kind>/<key>`, content-addressed
 
-Leaf in `asset_transport::artifact_cache` (`cache_get` / `cache_put`, `fnv1a64`).
-A miss is silent — the caller computes the value anyway — and a hit must be the
-**same bytes** a miss would have written. The key names every input; if the
-encoder changed, bump the format word. Live kinds: `mips`, `wgsl`. `IW4L_GAMES`
-is the root holding the game trees; no folder name is hardcoded and the container
-version picks the decoder. Live it is `make map mp_boneyard` ([`RUN.md`](RUN.md)),
-with stages in `LoadProgress` and the `.pftrace`.
+Leaf in `asset_transport::artifact_cache` (`cache_get` / `cache_put`,
+`fnv1a64`). A miss is silent — the caller computes the value anyway — and a hit
+must be the **same bytes** a miss would have written. The key names every input;
+if the encoder changed, bump the format word. Live kinds: `mips`, `wgsl`,
+`localize` and `xwma_pcm`, whose miss is a batched external `ffmpeg`.
+`IW4L_GAMES` is the root holding the game trees; no folder name is hardcoded and
+the container version picks the decoder. Live it is `make map mp_boneyard`
+([`RUN.md`](RUN.md)), with stages in `LoadProgress` and the `.pftrace`.

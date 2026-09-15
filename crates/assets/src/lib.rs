@@ -415,7 +415,9 @@ pub use sound_catalog::{
 pub use sound_load::{LoadedSoundBank, load_mp_sound_bank, load_sound_catalog, namespace_for_zone};
 pub use sound_load_iw5::load_sound_catalog_iw5;
 pub use sound_load_t5::load_sound_catalog_t5;
-pub use sound_wma_t5::{T5_WMA, decode_t5_xwma};
+pub use sound_wma_t5::{
+    T5_WMA, XwmaClip, XwmaDecodeCost, decode_t5_xwma, decode_t5_xwma_batch, xwma_decode_cost,
+};
 pub use t5_code_remap::{
     IW4_CUSTOM_SAMPLER_DEST, LEFTOVER_T5_CODE_BASE, T5_CODE_CUSTOMWIND_CENTER,
     T5_CODE_CUSTOMWIND_SPRING, T5_CODE_EXTRA_CAM_PARAM, T5_CODE_EYEOFFSET, T5_CODE_FOG,

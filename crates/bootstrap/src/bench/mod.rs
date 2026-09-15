@@ -1,17 +1,24 @@
-//! `make bench`: one run, two independent reports.
+//! `make bench`: one run, three independent reports and a package.
 //!
 //! [`load_report`] is the cost of getting a map on screen; [`frame_report`] is
-//! the cost of a frame once it is there. They share a process and nothing else
-//! — either can be MISS while the other stands — and the split between them is
-//! the first playable frame, where the recorder switches phase.
+//! the cost of a frame once it is there; [`counter_report`] is what the frame
+//! asked the machine to do to cost that. They share a process and nothing else
+//! — any of them can be MISS while the others stand — and the split between the
+//! first two is the first playable frame, where the recorder switches phase.
 //!
-//! Both are printed to stdout at exit and written to
-//! `iw4l-artifacts/bench/<stamp>.txt`, so a run can be diffed against
-//! the one before it. Off unless `IW4L_BENCH` is set.
+//! All three are printed to stdout at exit and written to
+//! `iw4l-artifacts/bench/<stamp>.txt`, so a run can be diffed against the one
+//! before it. The same text, the [`manifest`] that says what the run *was* and
+//! the [`summary`] of the same numbers as data go to the run's own directory,
+//! next to the trace it recorded. Off unless `IW4L_BENCH` is set.
 
+mod counter_report;
+mod facts;
 mod frame_report;
 mod load_report;
+mod manifest;
 mod milestones;
+mod summary;
 mod table;
 
 use std::path::{Path, PathBuf};
@@ -82,7 +89,15 @@ pub fn enabled() -> bool {
 /// The capture waits for the loading overlay to come down, which a demo now
 /// does as soon as the first snapshot is presented — so it settles during the
 /// load, long before `quit` could be left owing it.
-pub fn insert(app: &mut App, zone: &str, artifacts: &Path, progress: LoadProgress) {
+pub fn insert(
+    app: &mut App,
+    zone: &str,
+    demo: Option<&str>,
+    role: &str,
+    artifacts: &Path,
+    progress: LoadProgress,
+) {
+    facts::workload(zone, demo, role);
     let screenshot = milestones::screenshot_path(artifacts, zone);
     if let Some(parent) = screenshot.parent()
         && let Err(error) = std::fs::create_dir_all(parent)
@@ -102,7 +117,7 @@ pub fn insert(app: &mut App, zone: &str, artifacts: &Path, progress: LoadProgres
     milestones::install(Milestones::new(zone.to_owned(), screenshot, progress));
     let _ = ARTIFACTS.set(artifacts.to_path_buf());
     arm_exit_hook();
-    app.add_systems(Last, milestones::poll);
+    app.add_systems(Last, (milestones::poll, facts::collect));
 }
 
 /// Playing a demo ends in `std::process::exit` (`console::exit_replay_process`),
@@ -161,7 +176,7 @@ fn report(artifacts: &Path, trace: Option<PathBuf>) {
             let mut lines = Vec::new();
             heading("<none>", trace.as_deref(), &mut lines);
             lines.push(
-                "[1/2] MAP LOAD: MISS — this run loaded no map, so there was nothing to time."
+                "[1/3] MAP LOAD: MISS — this run loaded no map, so there was nothing to time."
                     .to_owned(),
             );
             lines.push(String::new());
@@ -174,6 +189,9 @@ fn report(artifacts: &Path, trace: Option<PathBuf>) {
     match write_report(artifacts, &lines) {
         Ok(path) => lines.push(format!("report: {}", path.display())),
         Err(error) => lines.push(format!("report: not written ({error})")),
+    }
+    for line in write_run_package(artifacts, &lines) {
+        lines.push(line);
     }
     for line in &lines {
         diag::announce_stdout(line);
@@ -210,6 +228,46 @@ fn write_report(artifacts: &Path, lines: &[String]) -> Result<PathBuf, String> {
     body.push('\n');
     std::fs::write(&path, body).map_err(|error| format!("write {}: {error}", path.display()))?;
     Ok(path)
+}
+
+/// The run's own directory: `report.txt`, `manifest.json` and `summary.json`
+/// next to the `trace.pftrace` the same run wrote.
+///
+/// The flat `bench/<stamp>.txt` above stays where it is — it is the file a
+/// human diffs against the last run and nothing should move it. This is the
+/// package: one directory per run id, holding everything needed to read the
+/// report months later without knowing what else was true that afternoon.
+fn write_run_package(artifacts: &Path, lines: &[String]) -> Vec<String> {
+    let dir = match perf::run::dir() {
+        Ok(dir) => dir,
+        Err(error) => return vec![format!("run package: not written ({error})")],
+    };
+    let mut out = Vec::new();
+
+    let mut body = lines.join("\n");
+    body.push('\n');
+    let report = dir.join("report.txt");
+    if let Err(error) = std::fs::write(&report, body) {
+        out.push(format!(
+            "run package: {} not written ({error})",
+            report.display()
+        ));
+    }
+
+    let facts = facts::snapshot();
+    let path = dir.join("manifest.json");
+    let manifest = manifest::build(&facts, perf::run::id().as_deref(), artifacts);
+    match manifest::write(&path, &manifest) {
+        Ok(()) => out.push(format!("run package: {}", dir.display())),
+        Err(error) => out.push(format!("run package: manifest not written ({error})")),
+    }
+
+    let path = dir.join("summary.json");
+    match summary::write(&path, &facts) {
+        Ok(()) => {}
+        Err(error) => out.push(format!("run package: summary not written ({error})")),
+    }
+    out
 }
 
 /// Seconds since the epoch, zero-padded: the reports sort by name in the order

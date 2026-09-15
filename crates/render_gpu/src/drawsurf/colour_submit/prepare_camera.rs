@@ -52,7 +52,7 @@ pub(super) fn prepare_camera_colour(
     let extracted = ExtractedColourRefs::new(&world, &frame);
     let products = &extracted.frame.frame_products;
     *cam = CameraPrepareState::default();
-    let census_on = perf::enabled();
+    let census_on = perf::recording();
     if census_on {
         reset_exact_colour_census(&mut census);
     }

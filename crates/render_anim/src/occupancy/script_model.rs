@@ -191,7 +191,7 @@ impl RenderFocusSelect {
                 return Err(format!("{PERF_FOCUS_ENV} is not valid UTF-8"));
             }
         };
-        if !perf::enabled() {
+        if !perf::recording() {
             return Err(format!(
                 "{PERF_FOCUS_ENV} requires IW4L_PERF=1; focused facts exist only in .pftrace"
             ));

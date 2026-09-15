@@ -1812,6 +1812,7 @@ dependencies = [
  "render",
  "render_frontend",
  "replay",
+ "serde_json",
  "session",
  "sim",
  "ui",

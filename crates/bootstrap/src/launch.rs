@@ -402,14 +402,7 @@ fn run_map(
         games_root: games.0.clone(),
         artifacts,
     };
-    start_perf(
-        Some(zone.clone()),
-        match config.role {
-            Role::Listen => "listen",
-            Role::Client => "client",
-            Role::Replay => "replay",
-        },
-    );
+    start_perf(Some(zone.clone()), role_name(config.role));
     let (menus, menu_report) = load_ui_menu_catalog(&games);
     for line in &menu_report {
         diag::info!(Launch, "{line}");
@@ -498,6 +491,13 @@ fn run_map(
         Role::Listen => add_runtime_plugins(&mut app),
         Role::Client => add_runtime_plugins_with_role(&mut app, net::RuntimeRole::Client),
     }
+    // The demo, before the playback moves into the world: it names the workload
+    // in the bench manifest, and "same demo" is what makes two runs comparable
+    // at all. The whole path, not a stem — a clip is `clips/<id>/clip.iw4ldemo`,
+    // whose stem is `clip` for every clip ever recorded.
+    let demo = playback
+        .as_ref()
+        .map(|playback| playback.path().display().to_string());
     if let Some(playback) = playback {
         app.insert_resource(playback);
     }
@@ -506,7 +506,14 @@ fn run_map(
     }
     let bench = bench::enabled();
     if bench {
-        bench::insert(&mut app, &zone, &config.artifacts, progress.clone());
+        bench::insert(
+            &mut app,
+            &zone,
+            demo.as_deref(),
+            role_name(config.role),
+            &config.artifacts,
+            progress.clone(),
+        );
     }
     app.run();
     let trace = flush_perf();
@@ -548,6 +555,14 @@ fn queue_launch_capture(app: &mut App, request: CaptureRequest) {
         .get_resource_mut::<CaptureQueue>()
         .expect("CaptureQueue: RenderPlugin must be added before a launch capture is queued")
         .push(request);
+}
+
+const fn role_name(role: Role) -> &'static str {
+    match role {
+        Role::Listen => "listen",
+        Role::Client => "client",
+        Role::Replay => "replay",
+    }
 }
 
 fn launch_present_mode(acceptance: bool) -> PresentMode {

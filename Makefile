@@ -97,10 +97,12 @@ play: require-games
 	@test -n "$(ARGS)" || { echo "usage: make play <demoname>   e.g. make play demo0000"; exit 1; }
 	cd $(ROOT) && $(CARGO) run $(PROFILE_ARG) -p launcher -- play $(ARGS) $(ZONE_ARG) $(CMDS_ARG)
 
-# The bench. One process, two independent reports written at exit: where the
-# map load spent its time, and where a gameplay frame spends its time by span.
-# Both are in-process — no trace file and no Trace Processor — and both land in
-# iw4l-artifacts/bench/<stamp>.txt as well as on stdout.
+# The bench. One process, three independent reports written at exit: where the
+# map load spent its time, where a gameplay frame spends its time by span, and
+# what that frame asked the machine to do. All three are in-process — no trace
+# file and no Trace Processor — and land in iw4l-artifacts/bench/<stamp>.txt as
+# well as on stdout. The run's own directory gets report.txt, manifest.json and
+# summary.json beside the .pftrace, so a number can be read months later.
 #
 #   make bench demo0011            play a demo   (also: DEMO=demo0011)
 #   make bench ZONE=mp_boneyard    live map instead of a demo
@@ -170,9 +172,13 @@ bench-live: require-games
 
 # Alternating paired process benchmark. One binary and one script are used for
 # both arms; the runner requires >=5 measured pairs and reports a paired 95% CI.
+# VAR picks which recorder the on-arm turns on: IW4L_PERF (the Perfetto session,
+# the default) or IW4L_BENCH (the in-process recorder `make bench` reads). They
+# are separate costs and each needs its own pairs.
+PERF_OVERHEAD_VAR ?= IW4L_PERF
 bench-overhead: require-games
 	cd $(ROOT) && $(CARGO) build $(PROFILE_ARG) -p launcher
-	cd $(ROOT) && $(CARGO) run --quiet -p xtask -- perf-overhead --pairs $(PERF_OVERHEAD_PAIRS) --warmup-pairs $(PERF_OVERHEAD_WARMUP_PAIRS) --bin $(PROFILE_BIN) --zone $(or $(ZONE),$(ARGS),$(SCENARIO_ZONE)) --cmds '$(or $(CMDS),$(BENCH_LIVE_CMDS))'
+	cd $(ROOT) && $(CARGO) run --quiet -p xtask -- perf-overhead --pairs $(PERF_OVERHEAD_PAIRS) --warmup-pairs $(PERF_OVERHEAD_WARMUP_PAIRS) --bin $(PROFILE_BIN) --zone $(or $(ZONE),$(ARGS),$(SCENARIO_ZONE)) --cmds '$(or $(CMDS),$(BENCH_LIVE_CMDS))' --var $(or $(VAR),$(PERF_OVERHEAD_VAR))
 
 # Play the scripted match, then read player_tick events from the run's .pftrace.
 scenario: require-games
@@ -312,8 +318,9 @@ help:
 	@echo "make play <demo>  play iw4l-artifacts/demos/<demo>.iw4ldemo, then quit"
 	@echo "                  ZONE= overrides header"
 	@echo "                  CMDS='wait world; wait 5s; quit' mid-play"
-	@echo "make bench <demo>  the bench: map-load breakdown + frame time by span,"
-	@echo "                  printed at exit and written to iw4l-artifacts/bench/"
+	@echo "make bench <demo>  the bench: map-load breakdown, frame time by span,"
+	@echo "                  render/GPU/work counters; printed at exit, written to"
+	@echo "                  iw4l-artifacts/bench/ and the run dir as a package"
 	@echo "                  a goal is always a demo name; ZONE=mp_boneyard benches"
 	@echo "                  a live map instead, DEMO=demo0011 is the goal form"
 	@echo "                  same [profile.play] as map/play; PROFILE=release for LTO"

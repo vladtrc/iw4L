@@ -75,7 +75,11 @@ fn record_dealloc(size: u64) {
     s.dealloc_bytes.fetch_add(size, Ordering::Relaxed);
 }
 
-fn counting_enabled() -> bool {
+/// Whether the counting allocator is actually counting. It is off unless
+/// `IW4L_COUNTING_ALLOC` is set, so every figure derived from it is absent
+/// rather than zero on an ordinary run — and a caller that cannot tell those
+/// apart will report "no allocations" for "nobody was counting".
+pub fn counting_enabled() -> bool {
     static STATE: AtomicU8 = AtomicU8::new(2);
     match STATE.load(Ordering::Relaxed) {
         0 => false,

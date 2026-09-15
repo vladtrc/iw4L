@@ -10,15 +10,26 @@ impl Span {
     }
 
     pub fn enter(self) -> SpanGuard {
-        SpanGuard
+        self.begin();
+        SpanGuard { span: self }
     }
 }
 
 #[must_use = "the span closes when this guard drops"]
-pub struct SpanGuard;
+pub struct SpanGuard {
+    span: Span,
+}
+
+impl Drop for SpanGuard {
+    fn drop(&mut self) {
+        self.span.end();
+    }
+}
 
 pub use crate::vocabulary_types::Counter;
 
 impl Counter {
-    pub fn emit(self, _value: f64) {}
+    pub fn emit(self, value: f64) {
+        crate::stats::count(self, value);
+    }
 }

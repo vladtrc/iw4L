@@ -788,9 +788,23 @@ pub(crate) fn resume_lifecycle_commands(
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct DebugPosOverlay(pub bool);
 
-pub(crate) fn bookend_wall_frame(mut wall_open: Local<bool>) {
+/// The frame clock, and with it the one allocation figure that is per frame
+/// rather than per system: the process-wide count since the previous bookend.
+/// It is emitted where the clock closes so the count and the frame it belongs
+/// to are the same interval.
+pub(crate) fn bookend_wall_frame(mut wall_open: Local<bool>, mut allocations: Local<Option<u64>>) {
     if *wall_open {
         perf::Span::FramesWallFrameMs.end();
+    }
+    // Only when the allocator is actually counting: otherwise the total is a
+    // constant zero and the delta would publish "no allocations this frame",
+    // which is a different claim from "nobody counted".
+    if perf::stats::enabled() && diag::counting_enabled() {
+        let total = diag::process_allocations().process_allocations;
+        if let Some(previous) = *allocations {
+            perf::Counter::CounterProcessAllocations.emit(total.saturating_sub(previous) as f64);
+        }
+        *allocations = Some(total);
     }
     perf::Span::FramesWallFrameMs.begin();
     *wall_open = true;
