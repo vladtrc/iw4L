@@ -392,7 +392,7 @@ pub use prepared::{
     PreparedXModelWalkCensus, SessionCompass,
 };
 pub use progress::{
-    LoadLaneView, LoadOverflow, LoadProgress, LoadStage, peak_resident_bytes,
+    LoadLaneTiming, LoadLaneView, LoadOverflow, LoadProgress, LoadStage, peak_resident_bytes,
     process_resident_bytes,
 };
 pub use projectile_mesh_catalog::{

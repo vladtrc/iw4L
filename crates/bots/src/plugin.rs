@@ -41,6 +41,7 @@ impl Plugin for BotsPlugin {
                 (
                     drain_bot_add_queue,
                     reset_roster_on_match_torn_down,
+                    evict_bots_claiming_local_client,
                     boot_bots,
                     apply_bot_tp,
                 )
@@ -48,7 +49,8 @@ impl Plugin for BotsPlugin {
             )
             .add_systems(
                 FixedUpdate,
-                think_bots
+                (evict_bots_claiming_local_client, think_bots)
+                    .chain()
                     .in_set(AuthoritySet::Ingress)
                     .run_if(authority_should_tick),
             );
@@ -67,9 +69,29 @@ fn reset_roster_on_match_torn_down(
     *pool = BotClassPool::default();
 }
 
-fn drain_bot_add_queue(mut queue: ResMut<BotAddQueue>, mut roster: ResMut<BotRoster>) {
-    for count in queue.drain() {
-        let added = roster.add_bots(count);
+fn drain_bot_add_queue(
+    mut queue: ResMut<BotAddQueue>,
+    mut roster: ResMut<BotRoster>,
+    local: Res<LocalPresentClient>,
+    world: Option<Res<AuthorityWorld>>,
+) {
+    let requests = queue.drain();
+    if requests.is_empty() {
+        return;
+    }
+    let mut taken = vec![local.0];
+    if let Some(world) = world.as_ref() {
+        taken.extend(world.0.clients_scoreboard().into_iter().map(|(id, _)| id));
+    }
+    for count in requests {
+        let added = roster.add_bots(count, &taken);
+        if added.len() < count as usize {
+            diag::warn!(
+                Sim,
+                "bots: add {count} — only {} minted, the roster is full",
+                added.len()
+            );
+        }
         diag::info!(
             Sim,
             "bots: add {count} → clients {:?}",
@@ -78,11 +100,25 @@ fn drain_bot_add_queue(mut queue: ResMut<BotAddQueue>, mut roster: ResMut<BotRos
     }
 }
 
+// The link hands the local player its real id during signon, which can land
+// after a bot was already minted. A slot holding that id would make `is_bot`
+// claim the player, so retire it — loudly, because by then it is a bug.
+fn evict_bots_claiming_local_client(mut roster: ResMut<BotRoster>, local: Res<LocalPresentClient>) {
+    if !roster.is_bot(local.0) {
+        return;
+    }
+    roster.bots.retain(|bot| bot.id != local.0);
+    diag::warn!(
+        Sim,
+        "bots: retired the slot on client {} — that id is the local player",
+        local.0.0
+    );
+}
+
 fn boot_bots(
     mut roster: ResMut<BotRoster>,
     mut actions: ResMut<ClientActionInbox>,
     mut request_ids: ResMut<net::ActionRequestIds>,
-    local: Res<LocalPresentClient>,
     pool: Res<BotClassPool>,
 ) {
     if !pool.ready {
@@ -90,9 +126,6 @@ fn boot_bots(
     }
     let seed = roster.seed;
     for bot in &mut roster.bots {
-        if bot.id == local.0 {
-            continue;
-        }
         if bot.joined {
             continue;
         }
@@ -168,14 +201,9 @@ fn apply_bot_tp(
         .flatten();
     for request in requests {
         let ids: Vec<sim::ClientId> = match request.target {
-            BotTpTarget::All => roster
-                .bots
-                .iter()
-                .map(|b| b.id)
-                .filter(|id| *id != local.0)
-                .collect(),
+            BotTpTarget::All => roster.bots.iter().map(|b| b.id).collect(),
             BotTpTarget::Id(id) => {
-                if roster.is_bot(id) && id != local.0 {
+                if roster.is_bot(id) {
                     vec![id]
                 } else {
                     diag::warn!(Sim, "bots: tp skipped — client {} is not a bot", id.0);
@@ -243,7 +271,6 @@ struct ThinkBots<'w> {
     cmds: ResMut<'w, ClientCommandInbox>,
     hold: Res<'w, BotHold>,
     fire: ResMut<'w, BotFireQueue>,
-    local: Res<'w, LocalPresentClient>,
 }
 
 fn think_bots(mut p: ThinkBots) {
@@ -253,9 +280,6 @@ fn think_bots(mut p: ThinkBots) {
     let mut budget = TraceBudget::new(TRACE_QUOTA);
     let mut astar = ASTAR_QUOTA;
     for bot in &mut p.roster.bots {
-        if bot.id == p.local.0 {
-            continue;
-        }
         let mut queried = Budgeted {
             world: &mut p.world.0,
             budget: &mut budget,

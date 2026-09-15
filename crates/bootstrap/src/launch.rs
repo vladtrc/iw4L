@@ -21,7 +21,7 @@ use ui::{
 };
 
 use crate::args::{AcceptanceLaunch, LaunchMode};
-use crate::bench_load;
+use crate::bench;
 use crate::plugins::{add_runtime_plugins, add_runtime_plugins_with_role};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -462,7 +462,7 @@ fn run_map(
             progress: progress.clone(),
         })
         .insert_resource(LoadingScreen::new(
-            progress,
+            progress.clone(),
             loading_title,
             sim::host_game_mode_kind().display_name().to_owned(),
         ))
@@ -504,14 +504,14 @@ fn run_map(
     if let Some(capture) = CaptureRequest::from_env() {
         queue_launch_capture(&mut app, capture);
     }
-    let bench = bench_load::enabled();
+    let bench = bench::enabled();
     if bench {
-        bench_load::insert(&mut app, &zone, &config.artifacts);
+        bench::insert(&mut app, &zone, &config.artifacts, progress.clone());
     }
     app.run();
     let trace = flush_perf();
     if bench {
-        bench_load::print_summary(trace);
+        bench::finish(&config.artifacts, trace);
     }
 }
 

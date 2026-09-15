@@ -150,6 +150,47 @@ pub struct LoadLaneView {
     started: Option<Instant>,
 }
 
+/// One stage of a load, as the bench report reads it: when it opened relative
+/// to the first stage, how long it held, and what it cost in memory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoadLaneTiming {
+    pub label: String,
+    pub at: Duration,
+    pub elapsed: Duration,
+    pub done: u64,
+    pub total: u64,
+    pub running: bool,
+    pub rss_delta: Option<i64>,
+    pub heap_delta: Option<i64>,
+}
+
+impl LoadLaneTiming {
+    pub fn end(&self) -> Duration {
+        self.at + self.elapsed
+    }
+
+    /// The `rss=+NMiB heap=+NMiB` tail, empty when the platform reports neither.
+    pub fn mem_suffix(&self) -> String {
+        fn one(name: &str, delta: Option<i64>) -> String {
+            match delta {
+                Some(delta) => format!(" {name}={:+.0}MiB", delta as f64 / (1024.0 * 1024.0)),
+                None => String::new(),
+            }
+        }
+        format!(
+            "{}{}",
+            one("rss", self.rss_delta),
+            one("heap", self.heap_delta)
+        )
+    }
+}
+
+fn delta(started: Option<u64>, ended: Option<u64>) -> Option<i64> {
+    let started = i64::try_from(started?).ok()?;
+    let ended = i64::try_from(ended?).ok()?;
+    Some(ended - started)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadOverflow {
     Running(usize),
@@ -436,40 +477,60 @@ impl LoadProgress {
             .collect()
     }
 
-    pub fn timing_report(&self) -> Vec<String> {
+    /// Every stage this load opened, in the order it opened them, with the
+    /// window it occupied. Stages run in parallel on the load pool, so the
+    /// offsets are what says which of them overlapped and which one nobody
+    /// else was covering; `timing_report` is this, flattened to lines, and the
+    /// bench report is this, analysed.
+    pub fn lane_timings(&self) -> Vec<LoadLaneTiming> {
         let Ok(lanes) = self.0.lanes.lock() else {
             return Vec::new();
         };
-        let mut rows = Vec::with_capacity(lanes.len() + 1);
-        let mut total = Duration::ZERO;
-
-        let origin = lanes
+        let Some(origin) = lanes
             .iter()
             .filter(|lane| !lane.note)
             .map(|lane| lane.started)
-            .min();
-        for lane in lanes.iter().filter(|lane| !lane.note) {
-            let elapsed = lane.elapsed.unwrap_or_else(|| lane.started.elapsed());
-            total += elapsed;
-            let at_ms = origin.map_or(0.0, |origin| {
-                lane.started.saturating_duration_since(origin).as_secs_f32() * 1000.0
-            });
+            .min()
+        else {
+            return Vec::new();
+        };
+        lanes
+            .iter()
+            .filter(|lane| !lane.note)
+            .map(|lane| {
+                let ended_mem = lane.ended_mem.unwrap_or_else(MemSample::now);
+                LoadLaneTiming {
+                    label: lane.label.clone(),
+                    at: lane.started.saturating_duration_since(origin),
+                    elapsed: lane.elapsed.unwrap_or_else(|| lane.started.elapsed()),
+                    done: lane.done,
+                    total: lane.total,
+                    running: lane.elapsed.is_none(),
+                    rss_delta: delta(lane.started_mem.rss, ended_mem.rss),
+                    heap_delta: delta(lane.started_mem.heap, ended_mem.heap),
+                }
+            })
+            .collect()
+    }
+
+    pub fn timing_report(&self) -> Vec<String> {
+        let lanes = self.lane_timings();
+        let mut total = Duration::ZERO;
+        let mut rows = Vec::with_capacity(lanes.len() + 1);
+        for lane in &lanes {
+            total += lane.elapsed;
             let items = match lane.total {
                 0 if lane.done == 0 => String::new(),
                 0 => format!(" items={}", lane.done),
-                total => format!(" items={}/{total}", lane.done),
+                whole => format!(" items={}/{whole}", lane.done),
             };
-            let ended_mem = lane.ended_mem.unwrap_or_else(MemSample::now);
             rows.push(format!(
-                "load stage: {} at=+{at_ms:.0}ms {:.1}ms{items}{}{}",
+                "load stage: {} at=+{:.0}ms {:.1}ms{items}{}{}",
                 lane.label,
-                elapsed.as_secs_f32() * 1000.0,
-                MemSample::suffix(lane.started_mem, ended_mem),
-                if lane.elapsed.is_none() {
-                    " (still running)"
-                } else {
-                    ""
-                },
+                lane.at.as_secs_f32() * 1000.0,
+                lane.elapsed.as_secs_f32() * 1000.0,
+                lane.mem_suffix(),
+                if lane.running { " (still running)" } else { "" },
             ));
         }
         rows.push(format!(

@@ -66,10 +66,18 @@ pub fn drive_class_select_screen(
         }
         return;
     }
-    if admitted && matches!(*screen, AppScreen::Loading | AppScreen::MainMenu) && world_installed {
-        if let Some(loading) = loading.as_deref_mut() {
-            loading.finish();
-        }
+    if !admitted || !world_installed {
+        return;
+    }
+    // The overlay comes down on its own terms, the class-select hop on the
+    // screen's. A replay is already `InGame` by the time this runs — the first
+    // presented snapshot arms it in `ClientSet::Present`, one set ahead of here —
+    // and gating the overlay on the screen too left it up for the whole demo,
+    // hiding the world behind `UiLayer::Loading` and holding back map ambience.
+    if let Some(loading) = loading.as_deref_mut() {
+        loading.finish();
+    }
+    if matches!(*screen, AppScreen::Loading | AppScreen::MainMenu) {
         *screen = AppScreen::ClassSelect;
     }
 }

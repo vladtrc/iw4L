@@ -1,7 +1,9 @@
 # Native Perfetto
 
 Runtime observation is `iw4l-artifacts/runs/<uuid>/trace.pftrace`. Recording
-is off unless `IW4L_PERF=1` (`make bench-live` / `make bench-demo` / `make scenario` / `make chaos` / `make lifecycle-*` force it on).
+is off unless `IW4L_PERF=1` (`make bench` / `make bench-live` / `make scenario` /
+`make chaos` / `make lifecycle-*` force it on). Where the *run* spent its time,
+rather than one frame, is [`BENCH.md`](BENCH.md).
 
 ```bash
 make bench-live                            # record + compact p50/p90/p95/p99/hot-path report

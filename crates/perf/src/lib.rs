@@ -8,6 +8,7 @@ mod session;
 #[cfg(not(all(unix, feature = "native")))]
 #[path = "session_noop.rs"]
 mod session;
+pub mod stats;
 #[cfg(all(unix, feature = "native"))]
 mod vocabulary;
 #[cfg(not(all(unix, feature = "native")))]
@@ -22,4 +23,5 @@ pub use event::{
     world_ready,
 };
 pub use session::{RunMetadata, enabled, flush, start};
+pub use stats::{Anomalies, Phase, SpanStats};
 pub use vocabulary::{Counter, Span, SpanGuard};

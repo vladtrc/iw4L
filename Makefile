@@ -10,7 +10,7 @@ endif
 GOAL := $(firstword $(MAKECMDGOALS))
 ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
 
-.PHONY: map export-gltf play bench bench-demo bench-load bench-load-session bench-live bench-overhead bench-perf menu menu-shots scenario chaos lifecycle-all lifecycle-swap lifecycle-replace lifecycle-play-in lifecycle-demo-out lifecycle-demo-map launcher deploy logs loc clean help
+.PHONY: map export-gltf play bench bench-load-session bench-live bench-overhead bench-perf menu menu-shots scenario chaos lifecycle-all lifecycle-swap lifecycle-replace lifecycle-play-in lifecycle-demo-out lifecycle-demo-map launcher deploy logs loc clean help
 .PHONY: build-windows setup-windows release publish provision
 .PHONY: mr publish-check
 .PHONY: $(ARGS)
@@ -97,32 +97,40 @@ play: require-games
 	@test -n "$(ARGS)" || { echo "usage: make play <demoname>   e.g. make play demo0000"; exit 1; }
 	cd $(ROOT) && $(CARGO) run $(PROFILE_ARG) -p launcher -- play $(ARGS) $(ZONE_ARG) $(CMDS_ARG)
 
-# Play a demo, write one native Perfetto run directory, then print its compact
-# percentile/hot-path report. AutoNoVsync matches renderer acceptance; Fifo
-# measures the monitor refresh queue rather than the engine. This recipe never
-# creates an FPS SQLite dump.
+# The bench. One process, two independent reports written at exit: where the
+# map load spent its time, and where a gameplay frame spends its time by span.
+# Both are in-process — no trace file and no Trace Processor — and both land in
+# iw4l-artifacts/bench/<stamp>.txt as well as on stdout.
 #
-# Same `[profile.play]` binary as `make play` — one cache, no fat-LTO wait.
-# LTO numbers: `make bench-demo demo0010 PROFILE=release`.
-# `make bench` is the old name of this recipe.
-bench-demo: require-games
-	@test -n "$(ARGS)" || { echo "usage: make bench-demo <demoname>   e.g. make bench-demo demo0011"; exit 1; }
-	cd $(ROOT) && IW4L_PERF=1 IW4L_PRESENT_MODE=AutoNoVsync $(CARGO) run $(PROFILE_ARG) -p launcher -- play $(ARGS) $(ZONE_ARG) $(CMDS_ARG)
-	cd $(ROOT) && $(CARGO) run --quiet -p xtask -- bench
+#   make bench demo0011            play a demo   (also: DEMO=demo0011)
+#   make bench ZONE=mp_boneyard    live map instead of a demo
+#   make bench demo0011 PROFILE=release          the LTO binary
+#
+# A goal after `bench` is always a demo name, never a zone: one goal cannot
+# tell the two apart, and ZONE= already names a map. `--demo` cannot be
+# written on the command line — make would read it as a flag of its own —
+# so the demo is a goal or DEMO=, and ZONE= still overrides a demo's header.
+# IW4L_PERF is on as well, so `cargo xtask bench` can still read the .pftrace
+# afterwards for the per-frame view this report deliberately does not give.
+# Same [profile.play] binary as `make play`; AutoNoVsync matches renderer
+# acceptance, Fifo would measure the monitor's refresh queue instead.
+BENCH_DEMO ?= $(DEMO)
+# The live-map script has to serve both halves: load the map, then stay long
+# enough that section two has gameplay frames to count. `force_match_start`
+# skips the 20 s warmup the controls are frozen through (docs/RUN.md).
+BENCH_MAP_CMDS ?= wait world; spawn assault; wait ambient; force_match_start; wait 10s; quit
+BENCH_DEMO_CMDS ?=
+bench: require-games
+	@test -n "$(or $(BENCH_DEMO),$(ZONE),$(ARGS))" || { echo "usage: make bench <demo>            e.g. make bench demo0011"; echo "       make bench ZONE=<zone>       e.g. make bench ZONE=mp_boneyard"; exit 1; }
+	cd $(ROOT) && IW4L_BENCH_STARTED_NS=$$(date +%s%N) IW4L_BENCH=1 IW4L_PERF=1 IW4L_PRESENT_MODE=AutoNoVsync $(CARGO) run $(PROFILE_ARG) -p launcher -- $(BENCH_TARGET)
 
-bench: bench-demo
-
-# Map-load bench, not a demo. Wall time from launch to a settled screenshot
-# of the spawned map, for eyeballing that all geometry arrived. The launcher
-# queues the screenshot itself (screenshots/bench-load/<zone>.png) and prints
-# the picture path plus total and stage timings to stdout — no xtask second
-# step. Script waits AND exits (quit waits out the owed picture); CMDS=
-# replaces the waits.
-# Zone from ZONE= / ARGS (mp_boneyard).
-BENCH_LOAD_CMDS ?= wait world; spawn assault; wait ambient; quit
-bench-load: require-games
-	@test -n "$(or $(ZONE),$(ARGS))" || { echo "usage: make bench-load <zone>   e.g. make bench-load mp_rust"; echo "       make bench-load ZONE=iw5:mp_overwatch  (colon is a make pattern)"; exit 1; }
-	cd $(ROOT) && IW4L_BENCH_LOAD_STARTED_NS=$$(date +%s%N) IW4L_PERF=1 IW4L_BENCH_LOAD=1 IW4L_PRESENT_MODE=AutoNoVsync $(CARGO) run $(PROFILE_ARG) -p launcher -- map $(or $(ZONE),$(ARGS)) --cmds '$(or $(CMDS),$(BENCH_LOAD_CMDS))'
+# `play <demo>` when a demo was named, `map <zone>` otherwise. A demo carries
+# its own zone in the header, so ZONE= only overrides it.
+ifneq ($(BENCH_DEMO)$(ARGS),)
+BENCH_TARGET = play $(or $(BENCH_DEMO),$(ARGS)) $(ZONE_ARG) $(if $(or $(CMDS),$(BENCH_DEMO_CMDS)),--cmds '$(or $(CMDS),$(BENCH_DEMO_CMDS))')
+else
+BENCH_TARGET = map $(or $(ZONE),$(ARGS)) --cmds '$(or $(CMDS),$(BENCH_MAP_CMDS))'
+endif
 
 # One menu process, two synchronous loads. Engine markers exclude Cargo and
 # process startup; the external reader subtracts their monotonic timestamps.
@@ -304,17 +312,15 @@ help:
 	@echo "make play <demo>  play iw4l-artifacts/demos/<demo>.iw4ldemo, then quit"
 	@echo "                  ZONE= overrides header"
 	@echo "                  CMDS='wait world; wait 5s; quit' mid-play"
-	@echo "make bench-demo <demo>  play and write a native Perfetto run directory"
-	@echo "                  alias: make bench <demo>"
+	@echo "make bench <demo>  the bench: map-load breakdown + frame time by span,"
+	@echo "                  printed at exit and written to iw4l-artifacts/bench/"
+	@echo "                  a goal is always a demo name; ZONE=mp_boneyard benches"
+	@echo "                  a live map instead, DEMO=demo0011 is the goal form"
 	@echo "                  same [profile.play] as map/play; PROFILE=release for LTO"
-	@echo "                  then prints p50/p90/p95/p99 and hot paths from .pftrace"
 	@echo "make bench-live [zone]  live map: force start, fire/walk/yaw hold, 16 bots,"
 	@echo "                  wait 10s, then flush trace.pftrace (default mp_boneyard)"
 	@echo "                  ZONE=iw5:mp_overwatch  (colon cannot be a make goal)"
 	@echo "                  then prints p50/p90/p95/p99 and hot paths from .pftrace"
-	@echo "make bench-load <zone>  map-load bench: launch → spawn → settled screenshot"
-	@echo "                  prints the picture path + total/zone_walk/spawn_gpu/ambient/screenshot"
-	@echo "                  timings to stdout; eyeball the picture for full geometry"
 	@echo "make bench-load-session  menu → Hanoi → Underpass; engine mark intervals"
 	@echo "make bench-overhead  paired default-off/on runs of one built binary;"
 	@echo "                  PERF_OVERHEAD_PAIRS=10, alternating order, paired 95% CI"

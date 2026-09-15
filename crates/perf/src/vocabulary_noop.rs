@@ -1,8 +1,14 @@
 pub use crate::vocabulary_types::Span;
 
 impl Span {
-    pub fn begin(self) {}
-    pub fn end(self) {}
+    pub fn begin(self) {
+        crate::stats::begin(self);
+    }
+
+    pub fn end(self) {
+        crate::stats::end(self);
+    }
+
     pub fn enter(self) -> SpanGuard {
         SpanGuard
     }

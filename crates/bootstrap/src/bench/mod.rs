@@ -1,0 +1,223 @@
+//! `make bench`: one run, two independent reports.
+//!
+//! [`load_report`] is the cost of getting a map on screen; [`frame_report`] is
+//! the cost of a frame once it is there. They share a process and nothing else
+//! — either can be MISS while the other stands — and the split between them is
+//! the first playable frame, where the recorder switches phase.
+//!
+//! Both are printed to stdout at exit and written to
+//! `iw4l-artifacts/bench/<stamp>.txt`, so a run can be diffed against
+//! the one before it. Off unless `IW4L_BENCH` is set.
+
+mod frame_report;
+mod load_report;
+mod milestones;
+mod table;
+
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
+use assets::LoadProgress;
+use bevy::prelude::*;
+use render::diag::capture::{CaptureQueue, CaptureRequest};
+
+use crate::bench::milestones::Milestones;
+
+/// When the shell command was typed, when the recipe passes it. `make` stamps
+/// `IW4L_BENCH_STARTED_NS` so the report can charge cargo and process startup
+/// to the load instead of quietly starting the clock after them.
+static COMMAND_START: OnceLock<Instant> = OnceLock::new();
+
+/// Where the report is written, remembered so the exit hook can reach it.
+static ARTIFACTS: OnceLock<PathBuf> = OnceLock::new();
+
+/// The report is printed once, by whichever path gets there first.
+static REPORTED: AtomicBool = AtomicBool::new(false);
+
+/// Called before anything else in the process. Reads the environment once so no
+/// later code pays for a `getenv` per span.
+pub fn arm() {
+    perf::stats::arm();
+    if !enabled() {
+        return;
+    }
+    let now = Instant::now();
+    match std::env::var("IW4L_BENCH_STARTED_NS") {
+        Ok(stamp) => match shell_start(&stamp, now) {
+            Some(started) => {
+                let _ = COMMAND_START.set(started);
+            }
+            None => eprintln!(
+                "bench: IW4L_BENCH_STARTED_NS is not a unix nanosecond stamp; the report will time from process start"
+            ),
+        },
+        Err(std::env::VarError::NotPresent) => {}
+        Err(error) => eprintln!("bench: IW4L_BENCH_STARTED_NS: {error}"),
+    }
+}
+
+fn shell_start(stamp: &str, now: Instant) -> Option<Instant> {
+    let stamp = stamp.parse::<u128>().ok()?;
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .checked_sub(stamp)?;
+    now.checked_sub(std::time::Duration::from_nanos(
+        u64::try_from(elapsed).ok()?,
+    ))
+}
+
+/// Whether this process collects a bench report. The recorder in `perf` reads
+/// the same variable; this is the one answer both use.
+pub fn enabled() -> bool {
+    perf::stats::enabled()
+}
+
+/// Arm the milestone watcher and queue the settled screenshot of the spawned
+/// world. Called once, with the app assembled and the load request in place.
+///
+/// The capture waits for the loading overlay to come down, which a demo now
+/// does as soon as the first snapshot is presented — so it settles during the
+/// load, long before `quit` could be left owing it.
+pub fn insert(app: &mut App, zone: &str, artifacts: &Path, progress: LoadProgress) {
+    let screenshot = milestones::screenshot_path(artifacts, zone);
+    if let Some(parent) = screenshot.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        diag::error!(Launch, "bench: create {}: {error}", parent.display());
+        return;
+    }
+    let _ = std::fs::remove_file(&screenshot);
+    app.world_mut()
+        .get_resource_mut::<CaptureQueue>()
+        .expect("CaptureQueue: RenderPlugin must be added before the bench capture")
+        .push(CaptureRequest {
+            path: screenshot.clone(),
+            exit_after_capture: false,
+        });
+    diag::info!(Launch, "bench: screenshot {}", screenshot.display());
+    milestones::install(Milestones::new(zone.to_owned(), screenshot, progress));
+    let _ = ARTIFACTS.set(artifacts.to_path_buf());
+    arm_exit_hook();
+    app.add_systems(Last, milestones::poll);
+}
+
+/// Playing a demo ends in `std::process::exit` (`console::exit_replay_process`),
+/// so `App::run` never returns and nothing after it runs. Perfetto survives that
+/// on an `atexit` handler; the report needs the same one, or `make bench <demo>`
+/// would measure a whole run and print nothing.
+#[cfg(unix)]
+fn arm_exit_hook() {
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    if ARMED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    unsafe extern "C" {
+        fn atexit(callback: extern "C" fn()) -> i32;
+    }
+    extern "C" fn report_at_exit() {
+        let Some(artifacts) = ARTIFACTS.get() else {
+            return;
+        };
+        // This hook was armed after Perfetto's, and `atexit` runs last-armed
+        // first, so the trace is still open here; flushing it is what gives the
+        // heading a run directory to name. Flushing twice is a no-op.
+        let trace = perf::flush().ok().flatten();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            report(artifacts, trace);
+        }));
+    }
+    let _ = unsafe { atexit(report_at_exit) };
+}
+
+#[cfg(not(unix))]
+fn arm_exit_hook() {}
+
+/// Print both reports and write them next to the run. `trace` is the Perfetto
+/// run directory when one was recorded — the report names it rather than
+/// reading it, because the two are different tools over the same run.
+pub fn finish(artifacts: &Path, trace: Option<PathBuf>) {
+    report(artifacts, trace);
+}
+
+fn report(artifacts: &Path, trace: Option<PathBuf>) {
+    if REPORTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let lines = match milestones::with(|bench| {
+        bench.take_lane_snapshot();
+        let mut lines = Vec::new();
+        heading(&bench.zone, trace.as_deref(), &mut lines);
+        load_report::render(bench, COMMAND_START.get().copied(), &mut lines);
+        lines.push(String::new());
+        frame_report::render(&mut lines);
+        lines
+    }) {
+        Some(lines) => lines,
+        None => {
+            let mut lines = Vec::new();
+            heading("<none>", trace.as_deref(), &mut lines);
+            lines.push(
+                "[1/2] MAP LOAD: MISS — this run loaded no map, so there was nothing to time."
+                    .to_owned(),
+            );
+            lines.push(String::new());
+            frame_report::render(&mut lines);
+            lines
+        }
+    };
+
+    let mut lines = lines;
+    match write_report(artifacts, &lines) {
+        Ok(path) => lines.push(format!("report: {}", path.display())),
+        Err(error) => lines.push(format!("report: not written ({error})")),
+    }
+    for line in &lines {
+        diag::announce_stdout(line);
+    }
+    diag::info!(Launch, "bench: {} report lines", lines.len());
+}
+
+fn heading(zone: &str, trace: Option<&Path>, out: &mut Vec<String>) {
+    let rule = "=".repeat(96);
+    out.push(rule.clone());
+    out.push(format!(
+        "IW4L bench — zone={zone} command={:?}",
+        std::env::args().collect::<Vec<_>>().join(" ")
+    ));
+    match trace {
+        Some(dir) => out.push(format!(
+            "perfetto run: {} (`cargo xtask bench` reads it; this report does not)",
+            dir.join("trace.pftrace").display()
+        )),
+        None => out.push(
+            "perfetto run: none — IW4L_PERF was off, or the flush failed. The report below is in-process and does not need it."
+                .to_owned(),
+        ),
+    }
+    out.push(rule);
+    out.push(String::new());
+}
+
+fn write_report(artifacts: &Path, lines: &[String]) -> Result<PathBuf, String> {
+    let dir = artifacts.join("bench");
+    std::fs::create_dir_all(&dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let path = dir.join(format!("{}.txt", stamp()));
+    let mut body = lines.join("\n");
+    body.push('\n');
+    std::fs::write(&path, body).map_err(|error| format!("write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
+/// Seconds since the epoch, zero-padded: the reports sort by name in the order
+/// they were run, on every platform, with no date library.
+fn stamp() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0);
+    format!("{seconds:012}")
+}

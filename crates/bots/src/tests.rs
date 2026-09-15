@@ -398,9 +398,41 @@ fn budget_exhaust_is_not_a_miss() {
 #[test]
 fn roster_stops_at_twenty() {
     let mut roster = crate::BotRoster::default();
-    let first = roster.add_bots(20);
+    let first = roster.add_bots(20, &[]);
     assert_eq!(first.len(), MAX_HOST_BOTS as usize);
-    assert!(roster.add_bots(3).is_empty());
+    assert!(roster.add_bots(3, &[]).is_empty());
+}
+
+#[test]
+fn roster_steps_over_ids_real_clients_own() {
+    // The host holds ClientId(1) in a listen match: minting a bot onto it
+    // hands the roster the player themself.
+    let mut roster = crate::BotRoster::default();
+    let ids = roster.add_bots(3, &[ClientId(1), ClientId(3)]);
+
+    assert_eq!(ids, vec![ClientId(2), ClientId(4), ClientId(5)]);
+    assert!(!roster.is_bot(ClientId(1)), "the local player is not a bot");
+    assert!(!roster.is_bot(ClientId(3)));
+}
+
+#[test]
+fn roster_mints_every_bot_that_was_asked_for() {
+    let mut roster = crate::BotRoster::default();
+    let taken: Vec<ClientId> = (1..=4).map(ClientId).collect();
+
+    assert_eq!(roster.add_bots(10, &taken).len(), 10);
+    assert_eq!(roster.bots.len(), 10);
+    assert!(taken.iter().all(|id| !roster.is_bot(*id)));
+}
+
+#[test]
+fn roster_never_mints_an_id_twice() {
+    let mut roster = crate::BotRoster::default();
+    let first = roster.add_bots(4, &[]);
+    let second = roster.add_bots(4, &[]);
+
+    assert!(first.iter().all(|id| !second.contains(id)));
+    assert_eq!(roster.bots.len(), 8);
 }
 
 fn floor_world(extra: Vec<SimBrush>) -> SimWorld {
@@ -1821,7 +1853,7 @@ fn pmove_max_roster_walks_on_shared_budget() {
     let digest = world.content_digest();
     let graph = crate::nav::bake(&mut world, bounds, digest);
     let mut roster = BotRoster::default();
-    let ids = roster.add_bots(MAX_HOST_BOTS);
+    let ids = roster.add_bots(MAX_HOST_BOTS, &[]);
     assert_eq!(ids.len(), MAX_HOST_BOTS as usize);
     for (i, id) in ids.iter().enumerate() {
         let col = (i / 10) as f32;

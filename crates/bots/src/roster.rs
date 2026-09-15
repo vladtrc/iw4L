@@ -109,14 +109,20 @@ impl BotRoster {
         self.bots.iter().any(|bot| bot.id == id)
     }
 
-    pub fn add_bots(&mut self, count: u32) -> Vec<ClientId> {
+    // `taken` are the ids real clients already own. A bot minted onto one of
+    // them *is* that client as far as the roster is concerned: `is_bot` claims
+    // the player, and the slot is dead weight because no system can drive an
+    // id someone else is already playing.
+    pub fn add_bots(&mut self, count: u32, taken: &[ClientId]) -> Vec<ClientId> {
         let room = MAX_HOST_BOTS.saturating_sub(self.bots.len() as u32);
         let count = count.min(room);
+        let seed = self.seed;
         let mut added = Vec::with_capacity(count as usize);
         for i in 0..count {
-            let id = ClientId(self.next_client);
-            self.next_client = self.next_client.wrapping_add(1).max(1);
-            let brain = HostController::new(self.seed ^ (u64::from(id.0) << 32) ^ u64::from(i));
+            let Some(id) = self.claim_id(taken) else {
+                break;
+            };
+            let brain = HostController::new(seed ^ (u64::from(id.0) << 32) ^ u64::from(i));
             self.bots.push(BotSlot {
                 id,
                 brain,
@@ -126,5 +132,23 @@ impl BotRoster {
             added.push(id);
         }
         added
+    }
+
+    fn claim_id(&mut self, taken: &[ClientId]) -> Option<ClientId> {
+        // Only `bots + taken` ids are spoken for, so one candidate more than
+        // that always turns up a free one.
+        let candidates = self
+            .bots
+            .len()
+            .saturating_add(taken.len())
+            .saturating_add(1);
+        for _ in 0..candidates {
+            let id = ClientId(self.next_client);
+            self.next_client = self.next_client.wrapping_add(1).max(1);
+            if !taken.contains(&id) && !self.is_bot(id) {
+                return Some(id);
+            }
+        }
+        None
     }
 }

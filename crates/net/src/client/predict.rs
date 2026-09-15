@@ -376,6 +376,20 @@ impl ClientPrediction {
         Some((seq, cmd))
     }
 
+    /// Drop the unacknowledged history so the next snapshot is adopted whole —
+    /// the same recovery `MAX_UNACKED_SNAPSHOTS` performs, on demand. The
+    /// pending send window is deliberately left alone: the authority consumes a
+    /// client's commands in sequence, so a hole punched in that window wedges it
+    /// for good.
+    pub fn force_resync(&mut self) {
+        self.snapshots_since_ack = 0;
+        if self.history.is_empty() {
+            return;
+        }
+        self.history.clear();
+        self.metrics.forced_adopts += 1;
+    }
+
     pub fn retire_acks(&mut self, ack: Option<CmdSeq>) {
         if !self.armed {
             return;

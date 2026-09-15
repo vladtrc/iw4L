@@ -184,7 +184,7 @@ assertions_on_constants = "deny"
 # Measured and kept: wall p50 -5.7%, binary 183 MB -> 114 MB. Do not drop these
 # two lines without a new two-map A/B on the same protocol.
 #
-# Live recipes (`make map` / `play` / `bench-demo` / `bench-live` / …) do not use this profile.
+# Live recipes (`make map` / `play` / `bench` / `bench-live` / …) do not use this profile.
 # Fat LTO: `PROFILE=release` on a live target when the number must match S2-I11.
 # Fat LTO + one codegen unit stay on this profile only. `make deploy` does not
 # select it; that is `PROFILE=release`.
@@ -193,7 +193,7 @@ lto = true
 codegen-units = 1
 strip = "symbols"
 
-# The dev loop, including `make bench-demo` and the default Windows/master
+# The dev loop, including `make bench` and the default Windows/master
 # deploy path. Same opt-level as release (Bevy is unusable without it), minus
 # the two settings whose cost is paid at *link* time: fat LTO over the whole
 # dependency graph in one codegen unit is a single-threaded rustc at ~6.6 GB
@@ -208,7 +208,7 @@ strip = "symbols"
 # Separate profile rather than a relaxed `[profile.release]`: S2-I11's verdict
 # stands, and the binary its numbers describe has to stay buildable.
 # Frame-time cost of `play` vs `release` is NOT measured here — that A/B is
-# `make bench-demo` vs `make bench-demo PROFILE=release`.
+# `make bench <demo>` vs `make bench <demo> PROFILE=release`.
 [profile.play]
 inherits = "release"
 opt-level = 3

@@ -1,5 +1,5 @@
 pub mod args;
-pub mod bench_load;
+pub mod bench;
 mod frame_owner;
 mod launch;
 mod plugins;

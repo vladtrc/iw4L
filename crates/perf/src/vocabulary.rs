@@ -74,6 +74,7 @@ impl Span {
 
     #[inline]
     pub fn begin(self) {
+        crate::stats::begin(self);
         macro_rules! begin {
             ($category:literal, $name:literal) => {
                 perfetto_sdk::track_event_begin!($category, $name, |ctx: &mut EventContext| {
@@ -118,6 +119,7 @@ impl Span {
     }
     #[inline]
     pub fn end(self) {
+        crate::stats::end(self);
         macro_rules! end {
             ($category:literal) => {
                 perfetto_sdk::track_event_end!($category, |ctx: &mut EventContext| {

@@ -11,8 +11,8 @@ cargo run --profile play -p launcher -- map iw5:mp_overwatch --cmds '…'
 `make` passes no foreign flags through: in the `Makefile` it is `CMDS`, on the
 binary `--cmds`. The colon is a GNU make pattern, so `make map iw5:…` fails —
 write `make map ZONE=iw5:mp_overwatch` or use `cargo run`. Recipes: `make
-scenario`, `chaos`, `bench-demo`, `bench-live`, `lifecycle-*` (`*_CMDS` in the
-`Makefile`). Live recipes use `[profile.play]`; for LTO, `PROFILE=release`.
+scenario`, `chaos`, `bench` ([`BENCH.md`](BENCH.md)), `bench-live`, `lifecycle-*`
+(`*_CMDS` in the `Makefile`). Live recipes use `[profile.play]`; LTO is `PROFILE=release`.
 
 **Controls are frozen until the match starts.** `sim::step` allows movement only
 in `MatchPhase::Playing`; `hold +attack`, `+forward` and `move` do nothing before

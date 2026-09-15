@@ -21,7 +21,7 @@ pub use iwd::{
 };
 pub use namespace_trees::{NamespaceSoundIwd, NamespaceTree, NamespaceTrees};
 pub use progress::{
-    LoadLaneView, LoadOverflow, LoadProgress, LoadStage, peak_resident_bytes,
+    LoadLaneTiming, LoadLaneView, LoadOverflow, LoadProgress, LoadStage, peak_resident_bytes,
     process_resident_bytes,
 };
 pub use zone::{

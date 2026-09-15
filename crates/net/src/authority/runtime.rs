@@ -1469,7 +1469,9 @@ pub fn register_listen_runtime(app: &mut App) {
             .add_systems(
                 FixedUpdate,
                 (
-                    begin_fixed_census.before(AuthoritySet::Advance),
+                    begin_fixed_census
+                        .before(AuthoritySet::Advance)
+                        .before(frame::AuthorityEdge(0)),
                     advance_authority_clock.in_set(AuthoritySet::Advance),
                     ingress_authority.in_set(AuthoritySet::Ingress),
                     gather_authority_input.in_set(AuthoritySet::Gather),
@@ -1495,7 +1497,9 @@ pub fn register_listen_runtime(app: &mut App) {
         app.add_systems(
             FixedUpdate,
             (
-                begin_fixed_census.before(AuthoritySet::Advance),
+                begin_fixed_census
+                    .before(AuthoritySet::Advance)
+                    .before(frame::AuthorityEdge(0)),
                 advance_authority_clock.in_set(AuthoritySet::Advance),
                 ingress_authority.in_set(AuthoritySet::Ingress),
                 gather_authority_input.in_set(AuthoritySet::Gather),
