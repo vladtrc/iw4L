@@ -62,6 +62,15 @@ pub(crate) struct RuntimeFacts {
     /// different answers here are not comparable.
     pub(crate) pipelined_rendering: Option<bool>,
     pub(crate) compute_threads: Option<usize>,
+    /// Whether this binary was built with Bevy's own `tracing` spans on. Off
+    /// is the normal build and the one a timed run uses; on is a diagnostic
+    /// build where the spans inside the render graph — the `queue_submit`
+    /// around `RenderQueue::submit` among them — are recorded, and where the
+    /// frame times are the subscriber's as much as the runtime's.
+    ///
+    /// The flag is here so a report can never be read as if a submit had been
+    /// timed on a run that could not have timed it.
+    pub(crate) bevy_tracing: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +143,7 @@ pub(crate) fn build(facts: &RuntimeFacts, run_id: Option<&str>, artifacts: &Path
         "scheduling": {
             "pipelined_rendering": facts.pipelined_rendering,
             "compute_threads": facts.compute_threads,
+            "bevy_tracing": facts.bevy_tracing,
         },
         "threads": threads(),
         "pools": pools(facts),

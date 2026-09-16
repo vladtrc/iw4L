@@ -320,13 +320,13 @@ pub use match_load::{
 };
 pub use material_catalog::{
     AssetPointerIdentity, AssetRefDumpCensus, AuthoredImage, AuthoredMaterial, AuthoredShader,
-    AuthoredVertexDecl, CrossGameReason, CrossGameTechsetResolution, MaterialCatalog,
-    MaterialDefinitions, MaterialImageMemory, MaterialTextureBinding, OwnedMaterialPass,
-    OwnedShaderArgument, OwnedShaderRef, OwnedTechnique, OwnedTechniqueGraph, ShaderSourceCensus,
-    T5TechniqueOccupancy, TS_2D, TS_COLOR_MAP, TS_DETAIL_MAP, TS_FUNCTION, TS_NORMAL_MAP,
-    TS_SPECULAR_MAP, TS_T5_COLOR0_MAP, TS_T5_COLOR15_MAP, TS_T5_THROW_MAP, TS_WATER_MAP,
-    TechniqueSetFacts, TechniqueTable, TechsetKey, TechsetResolve, VertexDeclStreamCensus,
-    t5_feature_token_stripped,
+    AuthoredVertexDecl, CrossGameReason, CrossGameTechsetResolution, ImageVariantId,
+    MaterialCatalog, MaterialDefinitions, MaterialImageMemory, MaterialTextureBinding,
+    OwnedMaterialPass, OwnedShaderArgument, OwnedShaderRef, OwnedTechnique, OwnedTechniqueGraph,
+    ShaderSourceCensus, T5TechniqueOccupancy, TS_2D, TS_COLOR_MAP, TS_DETAIL_MAP, TS_FUNCTION,
+    TS_NORMAL_MAP, TS_SPECULAR_MAP, TS_T5_COLOR0_MAP, TS_T5_COLOR15_MAP, TS_T5_THROW_MAP,
+    TS_WATER_MAP, TechniqueSetFacts, TechniqueTable, TechsetKey, TechsetResolve,
+    VertexDeclStreamCensus, t5_feature_token_stripped,
 };
 pub use material_draw::{
     AlphaTest, ColorMapTransform, D3DCULL_CCW, D3DCULL_CW, D3DCULL_NONE, D3DRS_CULLMODE,
@@ -342,8 +342,8 @@ pub use material_images::{
     decode_dxt5nm_xy, decode_in_zone_builtin_images, decode_map_preview,
     decode_material_color_maps, decode_menu_background, decode_reflection_probe_cubemap,
     decode_ui_image, decode_ui_image_from_main, decode_zone_image_rgba, game_main_for_zone,
-    iwd_read_cost, last_image_working_set, mip_cache_cost, retail_lightmap_bake, retail_lit_color,
-    shared_variant_census,
+    iwd_entry_reads, iwd_read_cost, last_image_working_set, mip_cache_cost, retail_lightmap_bake,
+    retail_lit_color, shared_payload_copy_cost, shared_variant_census,
 };
 pub use menu_catalog::{
     CapturedStringTable, FontDef, HUD_CHROME_MENUS, ITEM_TYPE_BUTTON, ITEM_TYPE_TEXT, MenuCatalog,

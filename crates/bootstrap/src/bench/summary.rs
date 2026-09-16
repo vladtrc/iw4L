@@ -42,6 +42,7 @@ fn build(facts: &RuntimeFacts) -> Value {
             "unmatched_end": anomalies.unmatched_end,
             "reopened": anomalies.reopened,
             "misnested": anomalies.misnested,
+            "unattributed_counters": anomalies.unattributed_counters,
             "counters_never_sampled": perf::stats::counters_never_sampled()
                 .into_iter()
                 .map(|counter| counter.name())

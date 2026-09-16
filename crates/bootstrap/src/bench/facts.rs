@@ -117,6 +117,7 @@ pub(crate) fn collect(
         // thing that decides whether systems can overlap at all: how many
         // threads the compute pool was built with.
         compute_threads: ComputeTaskPool::try_get().map(|pool| pool.thread_num()),
+        bevy_tracing: cfg!(feature = "bevy-trace"),
     };
     let _ = FACTS.set(facts);
 }

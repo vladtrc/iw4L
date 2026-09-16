@@ -1,9 +1,14 @@
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use assets::LoadingScreen;
+use bevy::asset::RenderAssetUsages;
+use bevy::image::Image;
 use bevy::prelude::*;
-use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured};
+use bevy::tasks::IoTaskPool;
 use frame::{AppScreen, HasWorld};
 
 use render_frontend::prepare::scene::cull::DpvsFrameStats;
@@ -11,6 +16,14 @@ use render_frontend::prepare::scene::cull::DpvsFrameStats;
 pub const CAPTURE_SETTLE_FRAMES: u32 = 30;
 
 pub const CAPTURE_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// How long the exit path waits for a screenshot still being written.
+///
+/// A demo ends in `std::process::exit`, which kills the I/O workers wherever
+/// they are, so the file has to be finished before the process leaves. Bounded
+/// so that a stuck write costs the run a few seconds and a truthful log line
+/// rather than a hang.
+const CAPTURE_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureRequest {
@@ -116,17 +129,68 @@ impl PendingCapture {
     }
 }
 
+/// One finished write, as the worker that did it saw it.
+struct CaptureWrite {
+    path: PathBuf,
+    error: Option<String>,
+}
+
+/// Writes finished since the last frame looked. An `Arc` rather than a
+/// channel because the only thing crossing back is a handful of completions a
+/// frame, and the queue drains whatever is there.
+type CaptureWrites = Arc<Mutex<Vec<CaptureWrite>>>;
+
+/// Encodes and writes handed to a worker and not finished, process-wide.
+///
+/// The queue resource cannot see these at the moment that matters: a demo ends
+/// in `std::process::exit` from `Last`, and a system that reads `AppExit` may
+/// never run again. This is what the exit handler waits on.
+static WRITES_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Wait for the encodes still running, however the process is leaving.
+///
+/// Armed once, the first time a readback is handed over. Bounded: a stuck
+/// write costs the exit a few seconds rather than hanging it, and the file it
+/// was writing is then incomplete — which the queue's own report says.
+#[cfg(unix)]
+fn arm_write_drain_at_exit() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    if ARMED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    unsafe extern "C" {
+        fn atexit(callback: extern "C" fn()) -> i32;
+    }
+    extern "C" fn drain_writes() {
+        let until = std::time::Instant::now() + CAPTURE_DRAIN_LIMIT;
+        while WRITES_IN_FLIGHT.load(Ordering::Relaxed) > 0 && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    let _ = unsafe { atexit(drain_writes) };
+}
+
+#[cfg(not(unix))]
+fn arm_write_drain_at_exit() {}
+
 #[derive(Resource, Default)]
 pub struct CaptureQueue {
     pending: VecDeque<PendingCapture>,
 
     settled_frames: u32,
 
+    /// Readbacks handed to an I/O worker and not yet reported back. Lowered
+    /// when the worker says it finished, not when it was handed over: the
+    /// file does not exist until then, and `exit_after_drained` is waiting on
+    /// the file.
     writing: usize,
 
     write_completed: bool,
 
     exit_when_drained: bool,
+
+    writes: CaptureWrites,
 }
 
 impl CaptureQueue {
@@ -160,6 +224,59 @@ impl CaptureQueue {
         self.exit_when_drained = true;
         true
     }
+
+    /// Book every write a worker finished since the last look.
+    fn collect_writes(&mut self) {
+        let finished = std::mem::take(
+            &mut *self
+                .writes
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()),
+        );
+        for write in finished {
+            self.writing = self.writing.saturating_sub(1);
+            self.write_completed = true;
+            match write.error {
+                Some(error) => diag::error!(
+                    Launch,
+                    "screenshot: {} was not written: {error}",
+                    write.path.display()
+                ),
+                None => diag::info!(Launch, "screenshot: wrote {}", write.path.display()),
+            }
+        }
+    }
+}
+
+/// Encode and write one readback. Runs on an I/O worker, never on the frame.
+///
+/// The alpha channel carries brightness when HDR is on, so it is dropped
+/// rather than saved as opacity.
+fn write_capture(path: &Path, image: Image) -> Result<(), String> {
+    let dynamic = image
+        .try_into_dynamic()
+        .map_err(|error| format!("readback is not a saveable format: {error}"))?;
+    dynamic
+        .to_rgb8()
+        .save(path)
+        .map_err(|error| error.to_string())
+}
+
+/// What the observer leaves behind in the event once the pixels have been
+/// moved out of it. One texel, no allocation: the readback is tens of
+/// megabytes and copying it to get it off the frame would be most of what
+/// this change is removing.
+fn emptied_readback() -> Image {
+    Image::new_uninit(
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::empty(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -194,12 +311,13 @@ pub(crate) fn capture_frame(
         0
     };
 
+    queue.collect_writes();
     take_ready_capture(&mut commands, &mut queue, facts);
     // A capture is four things — the request waiting, the readback, the encode
-    // and the file write — and only the first two are over when the request
-    // leaves the queue. Holding the flag while anything is still writing keeps
-    // the encode and the write on the bill of the frames they actually ran in,
-    // which is where the worst-frame table was reading a blank.
+    // and the file write — and only the first two are on this thread at all.
+    // The flag stays up while a worker is still writing so that the frames a
+    // capture was in flight over are marked, and so a frame-performance pair
+    // can be read with those frames left out.
     perf::frames::set_state(
         perf::frames::flag::SCREENSHOT,
         !queue.pending.is_empty() || queue.writing > 0,
@@ -258,27 +376,63 @@ fn take_ready_capture(commands: &mut Commands, queue: &mut CaptureQueue, facts: 
                 waited
             );
             queue.writing += 1;
-            let mut save = save_to_disk(path);
+            arm_write_drain_at_exit();
+            let writes = queue.writes.clone();
             commands.spawn(Screenshot::primary_window()).observe(
-                move |captured: On<ScreenshotCaptured>, mut queue: ResMut<CaptureQueue>| {
-                    // The readback landed here; `save` encodes and writes it.
-                    // Both are on this frame, not on the one that asked.
+                move |mut captured: On<ScreenshotCaptured>| {
+                    // The readback landed here. What this frame pays is the
+                    // move of the pixels out of the event; the PNG encode and
+                    // the file write are an I/O worker's, and the completion
+                    // comes back through `writes`.
                     perf::frames::mark(perf::frames::flag::SCREENSHOT);
-                    save(captured);
-                    queue.writing -= 1;
-                    queue.write_completed = true;
+                    let image =
+                        std::mem::replace(&mut captured.event_mut().image, emptied_readback());
+                    let path = path.clone();
+                    let writes = writes.clone();
+                    WRITES_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    IoTaskPool::get()
+                        .spawn(async move {
+                            let error = write_capture(&path, image).err();
+                            writes
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .push(CaptureWrite { path, error });
+                            WRITES_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        })
+                        .detach();
                 },
             );
         }
     }
 }
 
+/// Finish what is still in flight before the process leaves, and say what
+/// could not be finished.
+///
+/// A worker mid-encode is simply gone once the process exits, and the file it
+/// was writing is absent or half a PNG. So the exit waits for the workers it
+/// started — bounded, because a stuck write must cost seconds and a log line,
+/// not the run. The same wait is armed on `atexit`, for the exits that leave
+/// without an `AppExit` anyone can read; this one is where it gets said.
 pub(crate) fn report_unwritten_captures(
-    queue: Res<CaptureQueue>,
+    mut queue: ResMut<CaptureQueue>,
     mut exit: MessageReader<AppExit>,
 ) {
     if exit.read().next().is_none() {
         return;
+    }
+    let until = std::time::Instant::now() + CAPTURE_DRAIN_LIMIT;
+    while queue.writing > 0 && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        queue.collect_writes();
+    }
+    if queue.writing > 0 {
+        diag::error!(
+            Launch,
+            "screenshot: {} write(s) had not finished after {}s — the files they were encoding are incomplete",
+            queue.writing,
+            CAPTURE_DRAIN_LIMIT.as_secs(),
+        );
     }
     for path in queue.pending_paths() {
         diag::error!(

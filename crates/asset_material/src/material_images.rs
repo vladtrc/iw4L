@@ -23,11 +23,16 @@ use crate::{
     TS_WATER_MAP,
 };
 
+/// The texels one archive entry decodes to.
+///
+/// The mip chain is one allocation with the levels laid out end to end, in the
+/// order an upload wants them, and `level_sizes` says where each one stops.
 struct DecodedMips {
     width: u32,
     height: u32,
 
-    levels: Vec<Vec<u8>>,
+    packed: Vec<u8>,
+    level_sizes: Vec<u32>,
     storage: MipStorage,
 }
 
@@ -41,34 +46,51 @@ enum MipStorage {
 
 impl DecodedMips {
     fn single(width: u32, height: u32, pixels: Vec<u8>) -> Self {
-        Self {
-            width,
-            height,
-            levels: vec![pixels],
-            storage: MipStorage::Rgba8,
-        }
+        Self::single_compressed(width, height, MipStorage::Rgba8, pixels)
     }
 
     fn single_compressed(width: u32, height: u32, storage: MipStorage, bytes: Vec<u8>) -> Self {
         Self {
             width,
             height,
-            levels: vec![bytes],
+            level_sizes: vec![bytes.len() as u32],
+            packed: bytes,
+            storage,
+        }
+    }
+
+    fn from_levels(width: u32, height: u32, storage: MipStorage, levels: Vec<Vec<u8>>) -> Self {
+        let mut packed = Vec::with_capacity(levels.iter().map(Vec::len).sum());
+        let mut level_sizes = Vec::with_capacity(levels.len());
+        for level in levels {
+            level_sizes.push(level.len() as u32);
+            packed.extend_from_slice(&level);
+        }
+        Self {
+            width,
+            height,
+            packed,
+            level_sizes,
             storage,
         }
     }
 
     fn level_count(&self) -> u32 {
-        self.levels.len() as u32
+        self.level_sizes.len() as u32
     }
 
-    fn packed(&self) -> Vec<u8> {
-        self.levels.concat()
+    /// The mip chain as the upload wants it. Borrowed: a second asker for the
+    /// same texels copies this once instead of decoding the entry again.
+    fn payload(&self) -> &[u8] {
+        &self.packed
+    }
+
+    fn into_payload(self) -> Vec<u8> {
+        self.packed
     }
 
     fn cache_encode(&self) -> Vec<u8> {
-        let payload = self.levels.iter().map(Vec::len).sum::<usize>();
-        let mut out = Vec::with_capacity(28 + 4 * self.levels.len() + payload);
+        let mut out = Vec::with_capacity(28 + 4 * self.level_sizes.len() + self.packed.len());
         out.extend_from_slice(MIP_MAGIC);
         out.extend_from_slice(&MIP_CACHE_FORMAT.to_le_bytes());
         out.extend_from_slice(&self.width.to_le_bytes());
@@ -80,10 +102,12 @@ impl DecodedMips {
             MipStorage::Bc3 => 3,
         });
         out.extend_from_slice(&[0, 0, 0]);
-        out.extend_from_slice(&(self.levels.len() as u32).to_le_bytes());
-        for level in &self.levels {
-            out.extend_from_slice(&(level.len() as u32).to_le_bytes());
-            out.extend_from_slice(level);
+        out.extend_from_slice(&(self.level_sizes.len() as u32).to_le_bytes());
+        let mut at = 0usize;
+        for &size in &self.level_sizes {
+            out.extend_from_slice(&size.to_le_bytes());
+            out.extend_from_slice(&self.packed[at..at + size as usize]);
+            at += size as usize;
         }
         out
     }
@@ -107,28 +131,32 @@ impl DecodedMips {
         };
         let level_count = u32::from_le_bytes(bytes[24..28].try_into().ok()?) as usize;
         let mut at = 28;
-        let mut levels = Vec::with_capacity(level_count);
+        let mut packed = Vec::with_capacity(bytes.len().saturating_sub(28));
+        let mut level_sizes = Vec::with_capacity(level_count);
         for _ in 0..level_count {
             let len = u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize;
             at += 4;
-            let level = bytes.get(at..at + len)?.to_vec();
+            packed.extend_from_slice(bytes.get(at..at + len)?);
             at += len;
-            levels.push(level);
+            level_sizes.push(len as u32);
         }
         Some(Self {
             width,
             height,
-            levels,
+            packed,
+            level_sizes,
             storage,
         })
     }
 
-    fn into_top_level_rgba8(self) -> Result<(u32, u32, Vec<u8>), String> {
-        let level0 = self
-            .levels
-            .into_iter()
-            .next()
-            .ok_or_else(|| "decoded image carries no mip level".to_owned())?;
+    fn into_top_level_rgba8(mut self) -> Result<(u32, u32, Vec<u8>), String> {
+        let top = *self
+            .level_sizes
+            .first()
+            .ok_or_else(|| "decoded image carries no mip level".to_owned())?
+            as usize;
+        self.packed.truncate(top);
+        let level0 = self.packed;
         let pixels = match self.storage {
             MipStorage::Rgba8 => level0,
             MipStorage::Bc1 => decode_blocks(&level0, self.width, self.height, PixelFormat::Bc1)?,
@@ -196,6 +224,13 @@ impl IwdIndex {
         ))
     }
 
+    /// Is this name a cubemap, and if so, its faces.
+    ///
+    /// The material's own `map_type` answers for a declared cubemap. For
+    /// everything else the answer is in the IWI usage byte, which is inside
+    /// the first thirty-two bytes of the entry — so a 2D image costs a header
+    /// here, not a full inflate of a payload the mip cache may already hold
+    /// decoded.
     fn decode_cubemap_if_skybox(
         &self,
         name: &str,
@@ -205,11 +240,20 @@ impl IwdIndex {
         let mut saw_skybox = false;
         let mut first_error = None;
         for candidate in candidates {
-            match candidate.read() {
-                Ok(bytes) => {
-                    if map_type != 5 && !IwiHeader::parse(&bytes).is_ok_and(|h| h.is_skybox()) {
+            if map_type != 5 {
+                match candidate.read_header(IWI_V8_HEADER_LEN) {
+                    Ok(header) if IwiHeader::parse(&header).is_ok_and(|h| h.is_skybox()) => {}
+                    Ok(_) => continue,
+                    Err(error) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
                         continue;
                     }
+                }
+            }
+            match candidate.read() {
+                Ok(bytes) => {
                     saw_skybox = true;
                     match decode_iwi_cubemap(&bytes) {
                         Ok(image) => return Some(Ok(image)),
@@ -264,12 +308,13 @@ pub fn decode_material_color_maps(
         match outcome {
             ImageOutcome::Decoded {
                 image_index,
-                image,
+                payload,
+                wrap,
                 variant,
                 ..
             } => {
                 let slot = &mut catalog.images[image_index];
-                slot.decoded = Some(own(image));
+                slot.decoded = Some(wrap_payload(&payload, wrap));
                 slot.decoded_variant = variant;
                 stats.decoded += 1;
             }
@@ -353,13 +398,14 @@ pub fn decode_color_or_2d_for_names(
     for outcome in decoded {
         if let ImageOutcome::Decoded {
             image_index,
-            image,
+            payload,
+            wrap,
             variant,
             ..
         } = outcome
         {
             let slot = &mut catalog.images[image_index];
-            slot.decoded = Some(own(image));
+            slot.decoded = Some(wrap_payload(&payload, wrap));
             slot.decoded_variant = variant;
             n += 1;
         }
@@ -452,13 +498,14 @@ pub fn decode_catalog_images_from_iwd(
     for outcome in decoded {
         if let ImageOutcome::Decoded {
             image_index,
-            image,
+            payload,
+            wrap,
             variant,
             ..
         } = outcome
         {
             let slot = &mut catalog.images[image_index];
-            slot.decoded = Some(own(image));
+            slot.decoded = Some(wrap_payload(&payload, wrap));
             slot.decoded_variant = variant;
             n += 1;
         }
@@ -501,7 +548,7 @@ pub fn decode_in_zone_builtin_images(catalog: &mut MaterialDefinitions) -> usize
             RenderAssetUsages::RENDER_WORLD,
         );
         gpu.texture_descriptor.mip_level_count = levels;
-        gpu.data = Some(mips.packed());
+        gpu.data = Some(mips.into_payload());
         gpu.sampler = ImageSampler::Descriptor(sampler_from_iw4(0, levels, false));
         image.decoded = Some(gpu);
         decoded += 1;
@@ -512,14 +559,15 @@ pub fn decode_in_zone_builtin_images(catalog: &mut MaterialDefinitions) -> usize
 enum ImageOutcome {
     Decoded {
         image_index: usize,
-        /// Shared rather than owned: two plans that resolved the same archive
-        /// entry with the same recipe get the same buffer, and only the rows
-        /// the merge keeps ever pay for a copy of it.
-        image: Arc<Image>,
+        /// The texels, which askers share. The `Image` around them is built
+        /// where it is placed, from `wrap`, because that is the object two
+        /// askers for one archive entry cannot share.
+        payload: Arc<PreparedPayload>,
+        wrap: WrapRecipe,
         /// Which prepared variant this is, when it came out of an archive.
         variant: Option<ImageVariantId>,
-        /// Another plan had already prepared this exact variant and this one
-        /// took its buffer instead of decoding again.
+        /// The texels came out of another asker's decode rather than this
+        /// one's read.
         shared: bool,
     },
     Missing {
@@ -532,21 +580,111 @@ enum ImageOutcome {
 
 type ImageRequest = (usize, (u8, bool, bool, bool));
 
-/// Prepared variants that are still alive somewhere, so a second plan asking
-/// for the same archive entry with the same recipe joins the first one's work
-/// instead of repeating it.
+/// The texels one archive entry decodes to, before anything is wrapped around
+/// them.
+///
+/// This is the object worth sharing. The `Image` built over it is not: it
+/// carries a `TextureFormat` and a sampler, and two materials that want the
+/// same file under a different colour space need different ones, so a registry
+/// keyed on the whole variant cannot share a decode between them.
+enum PreparedPayload {
+    Mips(DecodedMips),
+    Cubemap { size: u32, faces: Box<CubemapFaces> },
+}
+
+/// Everything an asker wraps around shared texels, and nothing that decides
+/// one of them.
+///
+/// The sampler is not a property of the image at all — this runtime binds a
+/// sampler state beside a texture, as the engine does — and the colour space
+/// picks `Rgba8Unorm` over `Rgba8UnormSrgb` for the same bytes. Keeping them
+/// here, out of the payload, is what lets one decode answer several askers.
+#[derive(Clone, Copy, Debug)]
+struct WrapRecipe {
+    sampler_state: u8,
+    is_normal: bool,
+    alpha_test_color: bool,
+    force_linear: bool,
+    use_srgb_reads: bool,
+}
+
+impl WrapRecipe {
+    fn of(
+        source: &AuthoredImage,
+        (sampler_state, is_normal, alpha_test_color, force_linear): (u8, bool, bool, bool),
+    ) -> Self {
+        Self {
+            sampler_state,
+            is_normal,
+            alpha_test_color,
+            force_linear,
+            use_srgb_reads: source.use_srgb_reads,
+        }
+    }
+
+    fn linear(self) -> bool {
+        self.is_normal || !self.use_srgb_reads || self.force_linear
+    }
+}
+
+impl PreparedPayload {
+    /// What holding this payload costs, which is what a second asker did not
+    /// have to decode.
+    fn bytes(&self) -> u64 {
+        match self {
+            Self::Mips(mips) => mips.packed.len() as u64,
+            Self::Cubemap { faces, .. } => faces.iter().map(|face| face.len() as u64).sum(),
+        }
+    }
+
+    /// Move the mip chain out, leaving the payload empty and giving up its
+    /// charge here rather than when the husk drops. `None` for a cubemap,
+    /// whose faces are packed rather than handed over.
+    fn take_packed(&mut self) -> Option<Vec<u8>> {
+        let Self::Mips(mips) = self else {
+            return None;
+        };
+        let packed = std::mem::take(&mut mips.packed);
+        RESIDENT_PAYLOAD_BYTES.fetch_sub(packed.len() as u64, Ordering::Relaxed);
+        Some(packed)
+    }
+
+    /// Take ownership of this payload's bytes against the resident total, and
+    /// hand back the only thing that can release them again.
+    ///
+    /// The charge belongs to the payload and not to the batch that asked for
+    /// it: two batches pointing at one buffer hold one allocation between
+    /// them, and charging it twice would hold plans back against memory nobody
+    /// had.
+    fn owned(self) -> Arc<Self> {
+        RESIDENT_PAYLOAD_BYTES.fetch_add(self.bytes(), Ordering::Relaxed);
+        Arc::new(self)
+    }
+}
+
+impl Drop for PreparedPayload {
+    fn drop(&mut self) {
+        let bytes = self.bytes();
+        if bytes > 0 {
+            RESIDENT_PAYLOAD_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Payloads that are still alive somewhere, so a second plan asking for the
+/// same archive entry joins the first one's work instead of repeating it.
 ///
 /// Weak on purpose. A strong map would keep every image the load ever touched
 /// resident for the life of the process — a gigabyte of it — to save work that
 /// only overlapping plans can save. An entry lives exactly as long as some
-/// batch or catalog row still holds the image, which is the window in which
+/// worker or image still holds the payload, which is the window in which
 /// sharing is worth anything.
-type Prepared = (std::sync::Mutex<PreparedVariants>, std::sync::Condvar);
+type Prepared = (std::sync::Mutex<PreparedPayloads>, std::sync::Condvar);
 
 #[derive(Default)]
-struct PreparedVariants {
-    live: HashMap<ImageVariantId, std::sync::Weak<Image>>,
-    decoding: HashSet<ImageVariantId>,
+struct PreparedPayloads {
+    live: HashMap<u64, std::sync::Weak<PreparedPayload>>,
+    decoding: HashSet<u64>,
 }
 
 fn prepared() -> &'static Prepared {
@@ -554,80 +692,90 @@ fn prepared() -> &'static Prepared {
     PREPARED.get_or_init(Default::default)
 }
 
-static SHARED_VARIANTS: AtomicU64 = AtomicU64::new(0);
+static SHARED_PAYLOADS: AtomicU64 = AtomicU64::new(0);
 static SHARED_BYTES: AtomicU64 = AtomicU64::new(0);
+static WRAPPED_BYTES: AtomicU64 = AtomicU64::new(0);
+static MOVED_BYTES: AtomicU64 = AtomicU64::new(0);
 
-/// Variants handed to a second asker instead of decoded again, and the bytes
-/// that saved.
+/// Payloads handed to a second asker instead of decoded again, and the decoded
+/// bytes that saved.
 pub fn shared_variant_census() -> (u64, u64) {
     (
-        SHARED_VARIANTS.load(Ordering::Relaxed),
+        SHARED_PAYLOADS.load(Ordering::Relaxed),
         SHARED_BYTES.load(Ordering::Relaxed),
     )
 }
 
-/// Prepare `variant` once, however many plans ask for it.
+/// Bytes copied out of a payload into an image, and bytes handed over without
+/// a copy.
+///
+/// What the wrapping costs, against what `shared_variant_census` says sharing
+/// saved: an `Image` owns its data, so an asker that is *not* the last holder
+/// of the payload pays one `memcpy` of the chain. The last one does not — the
+/// decode's own buffer becomes the image's — and the split between the two is
+/// what says whether the copying in this path is duplicate work or the first
+/// materialization of bytes nobody had yet.
+pub fn shared_payload_copy_cost() -> (u64, u64) {
+    (
+        WRAPPED_BYTES.load(Ordering::Relaxed),
+        MOVED_BYTES.load(Ordering::Relaxed),
+    )
+}
+
+/// Prepare the texels behind `payload` once, however many plans ask for them.
 ///
 /// The first asker decodes; the rest wait for it and take the buffer. Waiting
-/// here cannot deadlock: a worker that holds a variant is decoding, never
+/// here cannot deadlock: a worker that holds a payload is decoding, never
 /// waiting on another one, so the set of holders always drains.
+///
+/// The key is the payload half of the variant — the resolved archive entries
+/// and the map type — and not the whole of it. The colour space and the
+/// sampler decide the `Image` built over these bytes; they decide nothing
+/// about the bytes, so they must not decide whether the bytes are read again.
 fn share_or_decode(
-    variant: ImageVariantId,
-    image_index: usize,
-    decode: impl FnOnce() -> ImageOutcome,
-) -> ImageOutcome {
+    payload: u64,
+    decode: impl FnOnce() -> Result<PreparedPayload, ImageOutcome>,
+) -> Result<(Arc<PreparedPayload>, bool), ImageOutcome> {
     let (lock, signal) = prepared();
     let mut state = lock.lock().unwrap_or_else(|poison| poison.into_inner());
     loop {
-        if let Some(live) = state.live.get(&variant) {
-            if let Some(image) = live.upgrade() {
-                SHARED_VARIANTS.fetch_add(1, Ordering::Relaxed);
-                SHARED_BYTES.fetch_add(image_bytes(&image), Ordering::Relaxed);
-                return ImageOutcome::Decoded {
-                    image_index,
-                    image,
-                    variant: Some(variant),
-                    shared: true,
-                };
+        if let Some(live) = state.live.get(&payload) {
+            if let Some(prepared) = live.upgrade() {
+                SHARED_PAYLOADS.fetch_add(1, Ordering::Relaxed);
+                SHARED_BYTES.fetch_add(prepared.bytes(), Ordering::Relaxed);
+                return Ok((prepared, true));
             }
-            state.live.remove(&variant);
+            state.live.remove(&payload);
         }
-        if !state.decoding.contains(&variant) {
+        if !state.decoding.contains(&payload) {
             break;
         }
         state = signal
             .wait(state)
             .unwrap_or_else(|poison| poison.into_inner());
     }
-    state.decoding.insert(variant);
+    state.decoding.insert(payload);
     drop(state);
 
     // Held across the decode so that a panic in it wakes the askers waiting on
-    // this variant instead of parking them for the life of the process. It is
+    // this payload instead of parking them for the life of the process. It is
     // dropped *after* the result is published, so a waiter that wakes finds the
-    // image rather than an empty slot it would decode again.
-    let flight = Flight(variant);
-    let outcome = match decode() {
-        ImageOutcome::Decoded { image, .. } => {
-            lock.lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .live
-                .insert(variant, Arc::downgrade(&image));
-            ImageOutcome::Decoded {
-                image_index,
-                image,
-                variant: Some(variant),
-                shared: false,
-            }
-        }
-        gap => gap,
-    };
+    // payload rather than an empty slot it would decode again.
+    let flight = Flight(payload);
+    let prepared = decode().map(|prepared| {
+        let prepared = prepared.owned();
+        lock.lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .live
+            .insert(payload, Arc::downgrade(&prepared));
+        (prepared, false)
+    });
     drop(flight);
-    outcome
+    prepared
 }
 
-/// The claim on a variant while it is being decoded.
-struct Flight(ImageVariantId);
+/// The claim on a payload while it is being decoded.
+struct Flight(u64);
 
 impl Drop for Flight {
     fn drop(&mut self) {
@@ -721,85 +869,153 @@ fn decode_one_request(
             gap: format!("catalog image index {image_index} is out of bounds"),
         };
     };
+    let wrap = WrapRecipe::of(source, request);
     if source.payload.is_empty() {
         let name = crate::AssetRef::bare_name(source.name.as_str());
         if let Some(variant) = variant_of(index, source, name, request) {
-            return share_or_decode(variant, image_index, || {
-                decode_one_uncached(images, index, image_index, request)
-            });
+            return match share_or_decode(variant.payload, || prepare_payload(index, source, name)) {
+                Ok((payload, shared)) => ImageOutcome::Decoded {
+                    image_index,
+                    payload,
+                    wrap,
+                    variant: Some(variant),
+                    shared,
+                },
+                Err(gap) => gap,
+            };
         }
     }
-    decode_one_uncached(images, index, image_index, request)
+    match prepare_unshared(index, source) {
+        Ok(payload) => ImageOutcome::Decoded {
+            image_index,
+            payload: payload.owned(),
+            wrap,
+            variant: None,
+            shared: false,
+        },
+        Err(gap) => gap,
+    }
 }
 
-fn decode_one_uncached(
-    images: &[AuthoredImage],
+/// A payload nothing else can be asking for: an image whose body ships inside
+/// the zone, or a name the archives do not answer for at all.
+fn prepare_unshared(
     index: &IwdIndex,
-    image_index: usize,
-    (sampler_state, is_normal, alpha_test_color, force_linear): (u8, bool, bool, bool),
-) -> ImageOutcome {
-    let Some(source) = images.get(image_index) else {
-        return ImageOutcome::Missing {
-            gap: format!("catalog image index {image_index} is out of bounds"),
-        };
-    };
-    let decoded = if source.payload.is_empty() {
-        let name = crate::AssetRef::bare_name(source.name.as_str());
+    source: &AuthoredImage,
+) -> Result<PreparedPayload, ImageOutcome> {
+    if source.payload.is_empty() {
+        return prepare_payload(
+            index,
+            source,
+            crate::AssetRef::bare_name(source.name.as_str()),
+        );
+    }
+    decode_gfx_image(
+        &source.payload,
+        u32::from(source.width),
+        u32::from(source.height),
+        source.format,
+    )
+    .map(PreparedPayload::Mips)
+    .map_err(|error| ImageOutcome::Unsupported {
+        gap: format!("{}: {error}", source.name),
+    })
+}
 
-        if name.starts_with('$') {
-            return ImageOutcome::Missing {
-                gap: format!(
-                    "{} is a builtin alias with empty payload; body ships in code_post_gfx_mp",
-                    source.name
-                ),
-            };
-        }
-
-        if let Some(cubemap) = index.decode_cubemap_if_skybox(name, source.map_type) {
-            return match cubemap {
-                Ok((size, faces)) => ImageOutcome::Decoded {
-                    image_index,
-                    image: Arc::new(pack_material_cubemap(
-                        size,
-                        &faces,
-                        source.use_srgb_reads && !force_linear,
-                    )),
-                    variant: None,
-                    shared: false,
-                },
-                Err(error) => ImageOutcome::Unsupported {
-                    gap: format!("{}: {error}", source.name),
-                },
-            };
-        }
-        index.decode(name)
-    } else {
-        Some(decode_gfx_image(
-            &source.payload,
-            u32::from(source.width),
-            u32::from(source.height),
-            source.format,
-        ))
-    };
-    let Some(decoded) = decoded else {
-        return ImageOutcome::Missing {
-            gap: format!("{} is absent from IWD", source.name),
-        };
-    };
-    let mips = match decoded {
-        Ok(decoded) => decoded,
-        Err(error) => {
-            return ImageOutcome::Unsupported {
+/// Read and decode one name out of the archives, with nothing wrapped around
+/// the result.
+///
+/// Everything here is a function of the resolved archive entry and the map
+/// type — which is exactly what the sharing key is, so two askers that differ
+/// only in how they will use the texels run this once.
+fn prepare_payload(
+    index: &IwdIndex,
+    source: &AuthoredImage,
+    name: &str,
+) -> Result<PreparedPayload, ImageOutcome> {
+    if name.starts_with('$') {
+        return Err(ImageOutcome::Missing {
+            gap: format!(
+                "{} is a builtin alias with empty payload; body ships in code_post_gfx_mp",
+                source.name
+            ),
+        });
+    }
+    if let Some(cubemap) = index.decode_cubemap_if_skybox(name, source.map_type) {
+        return match cubemap {
+            Ok((size, faces)) => Ok(PreparedPayload::Cubemap {
+                size,
+                faces: Box::new(faces),
+            }),
+            Err(error) => Err(ImageOutcome::Unsupported {
                 gap: format!("{}: {error}", source.name),
-            };
-        }
-    };
-    let format = DecodedMips::texture_format(
-        mips.storage,
-        is_normal || !source.use_srgb_reads || force_linear,
-    );
-    let levels = mips.level_count();
+            }),
+        };
+    }
+    match index.decode(name) {
+        Some(Ok(mips)) => Ok(PreparedPayload::Mips(mips)),
+        Some(Err(error)) => Err(ImageOutcome::Unsupported {
+            gap: format!("{}: {error}", source.name),
+        }),
+        None => Err(ImageOutcome::Missing {
+            gap: format!("{} is absent from IWD", source.name),
+        }),
+    }
+}
 
+/// Build one asker's image around shared texels.
+///
+/// The copy is what an `Image` owning its data costs, and it is the whole of
+/// what a second asker pays: not the read, the inflate and the decode behind
+/// it. A discarded claim never reaches here at all.
+fn wrap_payload(payload: &PreparedPayload, wrap: WrapRecipe) -> Image {
+    let mips = match payload {
+        PreparedPayload::Cubemap { size, faces } => {
+            return pack_material_cubemap(*size, faces, wrap.use_srgb_reads && !wrap.force_linear);
+        }
+        PreparedPayload::Mips(mips) => mips,
+    };
+    WRAPPED_BYTES.fetch_add(mips.packed.len() as u64, Ordering::Relaxed);
+    wrap_mips(mips, mips.payload().to_vec(), wrap)
+}
+
+/// Build the image around texels nobody else is holding.
+///
+/// The last asker for a payload does not have to copy it: the buffer the
+/// decode produced becomes the buffer the `Image` owns, and the charge against
+/// the resident total moves with it. Where somebody else is still pointing at
+/// the payload this falls back to the copy, which is what that second asker's
+/// claim is worth.
+///
+/// The registry's `Weak` is left where it is. Taking it out first — so that
+/// nothing could upgrade it while the buffer is being taken — costs far more
+/// than it saves: a merge runs while the next plan is still decoding, and
+/// forgetting the entries there throws away most of the sharing. `Arc` already
+/// settles the race: whoever gets there first
+/// wins, and the loser either copies or decodes the entry again.
+fn wrap_owned_payload(payload: Arc<PreparedPayload>, wrap: WrapRecipe) -> Image {
+    let mut owned = match Arc::try_unwrap(payload) {
+        Ok(owned) => owned,
+        Err(shared) => return wrap_payload(&shared, wrap),
+    };
+    if !matches!(owned, PreparedPayload::Mips(_)) {
+        return wrap_payload(&owned, wrap);
+    }
+    let Some(packed) = owned.take_packed() else {
+        return wrap_payload(&owned, wrap);
+    };
+    MOVED_BYTES.fetch_add(packed.len() as u64, Ordering::Relaxed);
+    let PreparedPayload::Mips(mips) = &owned else {
+        unreachable!("the match above established this is a mip chain")
+    };
+    wrap_mips(mips, packed, wrap)
+}
+
+/// The image `mips` describes, over `data` — copied or moved, whichever the
+/// caller could afford.
+fn wrap_mips(mips: &DecodedMips, data: Vec<u8>, wrap: WrapRecipe) -> Image {
+    let format = DecodedMips::texture_format(mips.storage, wrap.linear());
+    let levels = mips.level_count();
     let mut image = Image::new_uninit(
         Extent3d {
             width: mips.width,
@@ -811,15 +1027,13 @@ fn decode_one_uncached(
         RenderAssetUsages::RENDER_WORLD,
     );
     image.texture_descriptor.mip_level_count = levels;
-    image.data = Some(mips.packed());
-    image.sampler =
-        ImageSampler::Descriptor(sampler_from_iw4(sampler_state, levels, alpha_test_color));
-    ImageOutcome::Decoded {
-        image_index,
-        image: Arc::new(image),
-        variant: None,
-        shared: false,
-    }
+    image.data = Some(data);
+    image.sampler = ImageSampler::Descriptor(sampler_from_iw4(
+        wrap.sampler_state,
+        levels,
+        wrap.alpha_test_color,
+    ));
+    image
 }
 
 pub fn decode_reflection_probe_cubemap(source: &AuthoredImage) -> Result<Image, String> {
@@ -1241,6 +1455,12 @@ pub fn iwd_read_cost() -> (f64, u64, f64) {
     asset_transport::iwd_read_cost()
 }
 
+/// Archive entries inflated whole, and entries inflated only far enough to
+/// read the thirty-two byte IWI header.
+pub fn iwd_entry_reads() -> (u64, u64) {
+    asset_transport::iwd_entry_reads()
+}
+
 fn decode_iwi_mips(bytes: &[u8]) -> Result<DecodedMips, String> {
     if bytes.len() >= IWI_V8_HEADER_LEN
         && bytes[..3] == *b"IWi"
@@ -1303,12 +1523,12 @@ fn decode_iwi_mips(bytes: &[u8]) -> Result<DecodedMips, String> {
             Err(_) => return single(),
         }
     }
-    Ok(DecodedMips {
-        width: header.width,
-        height: header.height,
-        levels,
+    Ok(DecodedMips::from_levels(
+        header.width,
+        header.height,
         storage,
-    })
+        levels,
+    ))
 }
 
 fn decode_wavelet_iwi(bytes: &[u8], header: IwiHeader) -> Result<DecodedMips, String> {
@@ -1343,12 +1563,12 @@ fn decode_wavelet_iwi(bytes: &[u8], header: IwiHeader) -> Result<DecodedMips, St
         let (_, _, rgba) = load_mip_level(d3d, w, h, pixel_format)?;
         levels.push(rgba);
     }
-    Ok(DecodedMips {
+    Ok(DecodedMips::from_levels(
         width,
         height,
+        MipStorage::Rgba8,
         levels,
-        storage: MipStorage::Rgba8,
-    })
+    ))
 }
 
 fn wavelet_d3d_pixel_format(format: u8) -> Result<PixelFormat, String> {
@@ -1819,12 +2039,18 @@ pub struct ImageDemandPlan {
 }
 
 /// One image this plan has ready, and how it got it.
+///
+/// The texels, not an image: the `Image` is built in `apply`, for the rows the
+/// merge keeps. A claim the merge drops is then a decode that was wasted and
+/// not also a copy, and two claims on one archive entry are one buffer until
+/// they are placed.
 struct PreparedImage {
     name: String,
-    image: Arc<Image>,
+    payload: Arc<PreparedPayload>,
+    wrap: WrapRecipe,
     variant: Option<ImageVariantId>,
-    /// Another plan had prepared this exact variant first; no decode was
-    /// repeated for it.
+    /// Another asker had prepared these texels first; no decode was repeated
+    /// for this one.
     shared: bool,
 }
 
@@ -1833,26 +2059,30 @@ pub struct DecodedImageBatch {
     plan: Option<u64>,
     decoded: Vec<PreparedImage>,
     pub stats: MaterialImageStats,
-    /// Bytes of `decoded`, charged against the decode budget until `apply`
-    /// hands them to the catalog or the batch is dropped.
-    held_bytes: u64,
+    /// Whether this batch is counted in [`UNAPPLIED_BATCHES`]. An empty plan
+    /// never enters the queue, and a batch must leave it exactly once.
+    queued: bool,
     /// Bytes this plan decoded itself, and bytes it took from another plan's
     /// work. Only the first is what the plan cost.
-    produced_bytes: u64,
-    shared_bytes: u64,
-    shared_variants: usize,
+    newly_prepared_bytes: u64,
+    reused_bytes: u64,
+    reused_variants: usize,
     claimed_rows: usize,
     canonical_variants: usize,
 }
 
 impl Drop for DecodedImageBatch {
-    /// A batch nobody applied still held its bytes against the budget. The
-    /// release belongs here rather than in `apply` alone, because a canceled
-    /// load drops batches without applying them and would otherwise leak the
-    /// budget for the rest of the process.
+    /// A result leaves the unapplied queue when it is applied *or* when it is
+    /// thrown away: a canceled load drops batches without applying them, and
+    /// leaving them counted would hold the next plan back against a queue that
+    /// no longer exists. The bytes themselves are the payloads' own charge and
+    /// are released when the last holder drops them, which is not necessarily
+    /// here.
     fn drop(&mut self) {
-        release_decode_budget(self.held_bytes);
-        self.held_bytes = 0;
+        if self.queued {
+            self.queued = false;
+            UNAPPLIED_BATCHES.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -1875,11 +2105,14 @@ pub struct ImageMergeCensus {
     pub discarded_decoded_bytes: u64,
     pub final_cpu_bytes: u64,
     /// Bytes this plan decoded itself, and bytes it took from a variant another
-    /// plan had already prepared. `produced_bytes` is what the plan cost;
-    /// `shared_bytes` is what it did not have to pay again.
-    pub produced_bytes: u64,
-    pub shared_bytes: u64,
-    pub shared_variants: usize,
+    /// plan had already prepared. `newly_prepared_bytes` is what the plan cost;
+    /// `reused_bytes` is what it did not have to pay again. Their sum is what
+    /// the plan *served*, which is a different quantity from either and from
+    /// the physical bytes the decode budget charges — that one counts each
+    /// distinct payload once, whoever asked for it.
+    pub newly_prepared_bytes: u64,
+    pub reused_bytes: u64,
+    pub reused_variants: usize,
     /// Of the discarded variants, how many the winning row had prepared from
     /// the identical variant — the same bytes twice — against how many were
     /// genuinely answered by a different source, and how many the merge
@@ -1888,15 +2121,15 @@ pub struct ImageMergeCensus {
     pub discarded_overridden: usize,
     pub discarded_inline: usize,
     /// Of the discards the census would otherwise call overridden, how many
-    /// decoded the *same payload* as the winner and differed only in the
-    /// colour space or the sampler wrapped around it: duplicate decodes that
-    /// sharing cannot catch while the wrapping lives inside the `Image`.
+    /// hold the *same payload* as the winner and differ only in the colour
+    /// space or the sampler wrapped around it. Sharing keys on the payload, so
+    /// these cost one copy of the chain rather than a second decode.
     pub discarded_same_payload: usize,
     /// A discarded name whose winner holds the same payload under a different
     /// wrapping.
     pub first_same_payload: Option<String>,
-    /// Of the same-variant discards, how many cost nothing because the buffer
-    /// was shared rather than decoded twice.
+    /// Of the same-variant discards, how many were served out of another
+    /// asker's decode rather than read and decoded a second time.
     pub discarded_shared: usize,
     /// Every discarded variant grouped by why the merge had no use for it.
     pub discard_reasons: Vec<(&'static str, usize)>,
@@ -1904,6 +2137,9 @@ pub struct ImageMergeCensus {
     /// A discarded name whose winner came from a different source, as evidence
     /// that the two are not the same image.
     pub first_override: Option<String>,
+    /// Every discarded claim grouped by who answered for it and what kind of
+    /// source they were, largest group first.
+    pub disputed_winners: Vec<DisputedWinner>,
 }
 
 impl ImageMergeCensus {
@@ -1940,13 +2176,14 @@ impl ImageMergeCensus {
     }
 }
 
-/// Decoded bytes that have been produced and not yet handed to a catalog.
+/// Decoded payload bytes resident right now: every prepared buffer alive in
+/// the process, each counted once whoever is pointing at it.
 ///
 /// Starting a decode earlier — which is the point of enqueueing a plan the
 /// moment it is ready — moves those bytes earlier too, and they sit in the
-/// process until the merge takes them. Without a ceiling, two plans that used
-/// to run one after the other now hold both peaks at once. This is that
-/// ceiling: a plan waits before it starts, never in the middle, so a worker
+/// process until the last holder lets go. Without a ceiling, two plans that
+/// would otherwise run one after the other hold both peaks at once. This is
+/// that ceiling: a plan waits before it starts, never in the middle, so a worker
 /// can never block on bytes only another worker in the same pool could free.
 ///
 /// It is a *starting* threshold and not a hard cap, and the two are different
@@ -1956,7 +2193,17 @@ impl ImageMergeCensus {
 /// cap would need reservation, splitting or eviction inside the decode, which
 /// is a different change; saying "ceiling" for this one is what made a run
 /// holding 886 MiB under a 768 MiB setting look like a bug.
-static UNAPPLIED_BYTES: AtomicU64 = AtomicU64::new(0);
+///
+/// This is resident memory, which is *not* the queue of results nobody has
+/// taken yet — [`UNAPPLIED_BATCHES`] is that one, and the two move
+/// independently: a payload two batches share is one allocation and two
+/// queued results, and a batch that has been applied still holds nothing
+/// while its payloads stay alive for whoever else asked.
+static RESIDENT_PAYLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Plans that finished and whose results nobody has applied yet. It is the
+/// admission gate's other half: one plan always runs, so the ceiling can
+/// throttle the load but never stop it.
 static UNAPPLIED_BATCHES: AtomicU64 = AtomicU64::new(0);
 
 /// How long a plan may be held back before it starts anyway.
@@ -1986,9 +2233,9 @@ pub fn decode_budget_bytes() -> u64 {
     })
 }
 
-/// Bytes decoded and not yet applied, right now.
+/// Decoded payload bytes resident right now, each distinct buffer once.
 pub fn unapplied_decoded_bytes() -> u64 {
-    UNAPPLIED_BYTES.load(Ordering::Relaxed)
+    RESIDENT_PAYLOAD_BYTES.load(Ordering::Relaxed)
 }
 
 /// Block until the unapplied bytes are under the ceiling, or until this is the
@@ -2003,36 +2250,23 @@ fn wait_for_decode_budget() -> (u64, bool) {
     let since = std::time::Instant::now();
     let mut waited = false;
     while UNAPPLIED_BATCHES.load(Ordering::Relaxed) > 0
-        && UNAPPLIED_BYTES.load(Ordering::Relaxed) >= budget
+        && RESIDENT_PAYLOAD_BYTES.load(Ordering::Relaxed) >= budget
     {
         if since.elapsed() >= BUDGET_WAIT_LIMIT {
             diag::warn!(
                 Zone,
-                "image decode budget: started a plan anyway after {:.1}s with {} MiB outstanding over the {} MiB threshold — the consumer is not joining finished plans ahead of this one",
+                "image decode budget: started a plan anyway after {:.1}s with {} MiB resident over the {} MiB threshold and {} finished result(s) unapplied",
                 since.elapsed().as_secs_f32(),
-                UNAPPLIED_BYTES.load(Ordering::Relaxed) >> 20,
+                RESIDENT_PAYLOAD_BYTES.load(Ordering::Relaxed) >> 20,
                 budget >> 20,
+                UNAPPLIED_BATCHES.load(Ordering::Relaxed),
             );
             break;
         }
         waited = true;
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    (UNAPPLIED_BYTES.load(Ordering::Relaxed), waited)
-}
-
-fn release_decode_budget(bytes: u64) {
-    if bytes == 0 {
-        return;
-    }
-    UNAPPLIED_BYTES.fetch_sub(bytes, Ordering::Relaxed);
-    UNAPPLIED_BATCHES.fetch_sub(1, Ordering::Relaxed);
-}
-
-/// Take the image out of its shared handle, copying only if someone else still
-/// holds it. The sole asker for a variant pays nothing for the sharing.
-fn own(image: Arc<Image>) -> Image {
-    Arc::try_unwrap(image).unwrap_or_else(|shared| (*shared).clone())
+    (RESIDENT_PAYLOAD_BYTES.load(Ordering::Relaxed), waited)
 }
 
 fn image_bytes(image: &Image) -> u64 {
@@ -2068,6 +2302,13 @@ impl ImageDemandPlan {
     /// Catalog rows that asked for one of those images.
     pub fn claimed_rows(&self) -> usize {
         self.claimed_rows
+    }
+
+    /// This plan's id, which is what the merge census names as the winner of a
+    /// disputed claim. Reported beside the plan's label so a census line can
+    /// be read without knowing the numbering.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     fn push(&mut self, image: AuthoredImage, request: (u8, bool, bool, bool)) {
@@ -2108,10 +2349,10 @@ impl ImageDemandPlan {
                         first_gap: Some(error),
                         ..Default::default()
                     },
-                    held_bytes: 0,
-                    produced_bytes: 0,
-                    shared_bytes: 0,
-                    shared_variants: 0,
+                    queued: false,
+                    newly_prepared_bytes: 0,
+                    reused_bytes: 0,
+                    reused_variants: 0,
                     claimed_rows: self.claimed_rows,
                     canonical_variants: self.demands.len(),
                 };
@@ -2131,14 +2372,15 @@ impl ImageDemandPlan {
         stage.total(work.len() as u64);
         let outcomes = decode_requests_in_parallel(&self.demands, index.as_ref(), &work, stage);
         let mut decoded = Vec::with_capacity(outcomes.len());
-        let mut produced_bytes = 0u64;
-        let mut shared_bytes = 0u64;
-        let mut shared_variants = 0usize;
+        let mut newly_prepared_bytes = 0u64;
+        let mut reused_bytes = 0u64;
+        let mut reused_variants = 0usize;
         for outcome in outcomes {
             match outcome {
                 ImageOutcome::Decoded {
                     image_index,
-                    image,
+                    payload,
+                    wrap,
                     variant,
                     shared,
                 } => {
@@ -2146,14 +2388,15 @@ impl ImageDemandPlan {
                         continue;
                     };
                     if shared {
-                        shared_bytes += image_bytes(&image);
-                        shared_variants += 1;
+                        reused_bytes += payload.bytes();
+                        reused_variants += 1;
                     } else {
-                        produced_bytes += image_bytes(&image);
+                        newly_prepared_bytes += payload.bytes();
                     }
                     decoded.push(PreparedImage {
                         name: source.name.as_str().to_owned(),
-                        image,
+                        payload,
+                        wrap,
                         variant,
                         shared,
                     });
@@ -2169,23 +2412,19 @@ impl ImageDemandPlan {
                 }
             }
         }
-        // Charged whole, shared buffers included: the ceiling is about how much
-        // the process is holding, and a buffer two batches point at is still
-        // resident until both let go of it.
-        let held_bytes = decoded
-            .iter()
-            .map(|prepared| image_bytes(&prepared.image))
-            .sum();
+        // The bytes are already charged, once per buffer, by the payloads
+        // themselves. What enters the queue here is the *result*: a finished
+        // plan nobody has applied, which is the other half of the admission
+        // gate and a different quantity from the memory.
         UNAPPLIED_BATCHES.fetch_add(1, Ordering::Relaxed);
-        UNAPPLIED_BYTES.fetch_add(held_bytes, Ordering::Relaxed);
         DecodedImageBatch {
             plan: Some(self.id),
             decoded,
             stats,
-            held_bytes,
-            produced_bytes,
-            shared_bytes,
-            shared_variants,
+            queued: true,
+            newly_prepared_bytes,
+            reused_bytes,
+            reused_variants,
             claimed_rows: self.claimed_rows,
             canonical_variants: self.demands.len(),
         }
@@ -2207,9 +2446,9 @@ impl DecodedImageBatch {
             canonical_variants: self.canonical_variants,
             prepared_variants: self.stats.decoded,
             duplicate_claims: self.claimed_rows.saturating_sub(self.canonical_variants),
-            produced_bytes: self.produced_bytes,
-            shared_bytes: self.shared_bytes,
-            shared_variants: self.shared_variants,
+            newly_prepared_bytes: self.newly_prepared_bytes,
+            reused_bytes: self.reused_bytes,
+            reused_variants: self.reused_variants,
             ..ImageMergeCensus::default()
         };
         let Some(id) = self.plan else {
@@ -2238,33 +2477,49 @@ impl DecodedImageBatch {
             let Some(prepared) = decoded.remove(&name) else {
                 continue;
             };
-            census.final_cpu_bytes += image_bytes(&prepared.image);
             let variant = prepared.variant;
             let mut indices = indices.into_iter();
             let Some(first) = indices.next() else {
                 continue;
             };
+            // Built here rather than at decode time: this is where it is
+            // known that a row wants it — and where, if nobody else is holding
+            // the texels, the buffer moves into the image instead of being
+            // copied into it.
+            let image = wrap_owned_payload(prepared.payload, prepared.wrap);
+            census.final_cpu_bytes += image_bytes(&image);
             for index in indices {
                 if let Some(slot) = catalog.images.get_mut(index) {
-                    slot.decoded = Some((*prepared.image).clone());
+                    slot.decoded = Some(image.clone());
                     slot.decoded_variant = variant;
+                    slot.decoded_by = Some(id);
                     census.filled_rows += 1;
                 }
             }
             if let Some(slot) = catalog.images.get_mut(first) {
-                slot.decoded = Some(own(prepared.image));
+                slot.decoded = Some(image);
                 slot.decoded_variant = variant;
+                slot.decoded_by = Some(id);
                 census.filled_rows += 1;
             }
         }
 
         let mut reasons: HashMap<&'static str, usize> = HashMap::new();
+        let mut disputed: HashMap<(&'static str, Option<u64>), (usize, String)> = HashMap::new();
         for (name, prepared) in decoded {
             census.discarded_variants += 1;
-            census.discarded_decoded_bytes += image_bytes(&prepared.image);
+            census.discarded_decoded_bytes += prepared.payload.bytes();
             census.first_discarded.get_or_insert_with(|| name.clone());
             *reasons.entry(discard_reason(catalog, &name)).or_default() += 1;
-            match winner_of(catalog, &name, prepared.variant) {
+            let (winner, by) = winner_of(catalog, &name, prepared.variant);
+            // Who answered for this name, not only that somebody did: a plan
+            // id and a source kind are what decides whether the claim could
+            // have been resolved before it was prepared.
+            let disputed = disputed
+                .entry((winner.kind(), by))
+                .or_insert((0usize, name.clone()));
+            disputed.0 += 1;
+            match winner {
                 Winner::SameVariant => {
                     census.discarded_same_variant += 1;
                     if prepared.shared {
@@ -2289,8 +2544,38 @@ impl DecodedImageBatch {
         census
             .discard_reasons
             .sort_by_key(|(reason, n)| (std::cmp::Reverse(*n), *reason));
+        census.disputed_winners = disputed
+            .into_iter()
+            .map(|((kind, by), (n, first))| DisputedWinner {
+                kind,
+                plan: by,
+                claims: n,
+                first,
+            })
+            .collect();
+        census
+            .disputed_winners
+            .sort_by(|a, b| b.claims.cmp(&a.claims).then(a.kind.cmp(b.kind)));
         census
     }
+}
+
+/// Who answered for the claims one plan prepared and the merge dropped.
+///
+/// A count by reason says how much work was thrown away; this says who threw
+/// it away and what kind of source they were, which is what decides whether
+/// the claim could have been resolved before it was prepared at all. A claim
+/// the winner answered from the same payload was never a second decode; one a
+/// genuinely different source answered was.
+#[derive(Clone, Debug)]
+pub struct DisputedWinner {
+    pub kind: &'static str,
+    /// The decode plan whose result the merged catalog kept, where one did.
+    /// `None` is an inline body, or a row nothing had answered.
+    pub plan: Option<u64>,
+    pub claims: usize,
+    /// One of the names, so the line can be chased in a log.
+    pub first: String,
 }
 
 /// Where the merged catalog's answer for a dropped claim came from.
@@ -2303,11 +2588,10 @@ impl DecodedImageBatch {
 enum Winner {
     /// The kept row holds the identical variant this plan prepared.
     SameVariant,
-    /// The kept row decoded the same payload and wrapped it differently: the
-    /// same texels were read twice, and only the colour space or the sampler
-    /// told the two claims apart. Avoidable work that sharing cannot take,
-    /// because the buffer that would be shared is inside an `Image` that
-    /// carries the wrapping with it.
+    /// The kept row holds the same payload under a different wrapping: the
+    /// colour space or the sampler told the two claims apart, and nothing
+    /// else did. Both were served from one decode; what the merge threw away
+    /// is the copy, not the read.
     SamePayload,
     /// The kept row holds a different payload: another source answered.
     OtherSource,
@@ -2317,22 +2601,40 @@ enum Winner {
     Unknown,
 }
 
-fn winner_of(catalog: &MaterialDefinitions, name: &str, ours: Option<ImageVariantId>) -> Winner {
+fn winner_of(
+    catalog: &MaterialDefinitions,
+    name: &str,
+    ours: Option<ImageVariantId>,
+) -> (Winner, Option<u64>) {
     let Some(kept) = catalog
         .images
         .iter()
         .find(|image| image.name.as_str() == name)
     else {
-        return Winner::Unknown;
+        return (Winner::Unknown, None);
     };
     if !kept.payload.is_empty() {
-        return Winner::InlineBody;
+        return (Winner::InlineBody, kept.decoded_by);
     }
-    match (kept.decoded_variant, ours) {
+    let winner = match (kept.decoded_variant, ours) {
         (Some(theirs), Some(ours)) if theirs == ours => Winner::SameVariant,
         (Some(theirs), Some(ours)) if theirs.payload == ours.payload => Winner::SamePayload,
         (Some(_), Some(_)) => Winner::OtherSource,
         _ => Winner::Unknown,
+    };
+    (winner, kept.decoded_by)
+}
+
+impl Winner {
+    /// What kind of source answered for the name, in the census's words.
+    const fn kind(&self) -> &'static str {
+        match self {
+            Self::SameVariant => "same variant",
+            Self::SamePayload => "same payload, other wrapping",
+            Self::OtherSource => "another source",
+            Self::InlineBody => "inline body",
+            Self::Unknown => "no winner recorded",
+        }
     }
 }
 
@@ -2420,12 +2722,13 @@ fn decode_inline(
         match outcome {
             ImageOutcome::Decoded {
                 image_index,
-                image,
+                payload,
+                wrap,
                 variant,
                 ..
             } => {
                 let slot = &mut catalog.images[image_index];
-                slot.decoded = Some(own(image));
+                slot.decoded = Some(wrap_payload(&payload, wrap));
                 slot.decoded_variant = variant;
                 stats.decoded += 1;
             }
@@ -2446,79 +2749,71 @@ fn decode_inline(
 mod tests {
     use super::*;
 
-    fn one_pixel() -> ImageOutcome {
-        let mut image = Image::new_uninit(
-            Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            TextureFormat::Rgba8Unorm,
-            RenderAssetUsages::RENDER_WORLD,
+    fn one_pixel() -> Result<PreparedPayload, ImageOutcome> {
+        Ok(PreparedPayload::Mips(DecodedMips::single(
+            1,
+            1,
+            vec![0, 0, 0, 255],
+        )))
+    }
+
+    fn prepared_of(
+        shared: Result<(Arc<PreparedPayload>, bool), ImageOutcome>,
+    ) -> (Arc<PreparedPayload>, bool) {
+        match shared {
+            Ok(prepared) => prepared,
+            Err(_) => panic!("expected a decoded payload"),
+        }
+    }
+
+    #[test]
+    fn one_payload_under_two_wrappings_is_read_once() {
+        // The colour space and the sampler are wrapped around the texels, not
+        // decoded into them, so a second asker that differs only there copies
+        // the chain rather than reading and decoding the whole entry again.
+        let key = 0x1234_5678;
+        let first = prepared_of(share_or_decode(key, one_pixel));
+        assert!(!first.1, "the first asker shared a payload nobody had");
+        let second = prepared_of(share_or_decode(key, || {
+            panic!("decoded the same payload twice")
+        }));
+        assert!(second.1, "the second asker decoded instead of sharing");
+        assert!(Arc::ptr_eq(&first.0, &second.0), "not the same texels");
+
+        let mut source = undecoded_row("~-white");
+        source.use_srgb_reads = true;
+        let colour = wrap_payload(&first.0, WrapRecipe::of(&source, (0, false, false, false)));
+        let normal = wrap_payload(&second.0, WrapRecipe::of(&source, (3, true, false, false)));
+        assert_eq!(colour.data, normal.data, "the texels differ");
+        assert_ne!(
+            colour.texture_descriptor.format, normal.texture_descriptor.format,
+            "the colour space is supposed to be the difference"
         );
-        image.data = Some(vec![0, 0, 0, 255]);
-        ImageOutcome::Decoded {
-            image_index: 0,
-            image: Arc::new(image),
-            variant: None,
-            shared: false,
-        }
-    }
-
-    fn arc_of(outcome: ImageOutcome) -> Arc<Image> {
-        match outcome {
-            ImageOutcome::Decoded { image, .. } => image,
-            _ => panic!("expected a decoded image"),
-        }
     }
 
     #[test]
-    fn the_same_payload_and_usage_is_prepared_once() {
-        let variant = ImageVariantId {
-            payload: 0xfeed_face,
-            usage: 7,
-        };
-        let first = share_or_decode(variant, 0, one_pixel);
-        let first = arc_of(first);
-        let second = share_or_decode(variant, 1, || panic!("decoded a variant twice"));
-        match second {
-            ImageOutcome::Decoded {
-                image_index,
-                image,
-                shared,
-                ..
-            } => {
-                assert!(shared, "the second asker decoded instead of sharing");
-                assert!(Arc::ptr_eq(&first, &image), "not the same buffer");
-                // The buffer is shared; the destination is the asker's own.
-                assert_eq!(image_index, 1);
-            }
-            _ => panic!("expected a decoded image"),
-        }
+    fn a_payload_nobody_holds_any_more_is_decoded_again() {
+        // The registry keeps weak handles, so the corpus does not stay resident
+        // for the life of the process once the batches holding it are gone.
+        let key = 0xdead_beef;
+        drop(prepared_of(share_or_decode(key, one_pixel)).0);
+        let again = prepared_of(share_or_decode(key, one_pixel));
+        assert!(!again.1, "shared a payload that nothing was holding");
     }
 
     #[test]
-    fn a_different_usage_over_the_same_payload_is_a_different_variant() {
-        // Same texels wanted as a colour map and as a normal map. The bytes
-        // are identical; the `Image` built around them is not, because it
-        // carries the colour space, so the two cannot share one buffer while
-        // the wrapping lives inside it.
-        let payload = 0x1234_5678;
-        let colour = arc_of(share_or_decode(
-            ImageVariantId { payload, usage: 0 },
-            0,
-            one_pixel,
-        ));
-        let normal = arc_of(share_or_decode(
-            ImageVariantId {
-                payload,
-                usage: 1 << 8,
-            },
-            0,
-            one_pixel,
-        ));
-        assert!(!Arc::ptr_eq(&colour, &normal));
+    fn a_decode_that_fails_does_not_park_the_next_asker() {
+        let key = 0x0bad_0bad;
+        let gap = share_or_decode(key, || {
+            Err(ImageOutcome::Missing {
+                gap: "absent".to_owned(),
+            })
+        });
+        assert!(matches!(gap, Err(ImageOutcome::Missing { .. })));
+        // The slot is free again, so the next asker decodes rather than waiting
+        // on a flight that will never publish.
+        let after = prepared_of(share_or_decode(key, one_pixel));
+        assert!(!after.1);
     }
 
     fn undecoded_row(name: &str) -> AuthoredImage {
@@ -2536,6 +2831,7 @@ mod tests {
             payload: Vec::new(),
             decoded: None,
             decoded_variant: None,
+            decoded_by: None,
             pending_decode: None,
         }
     }
@@ -2562,7 +2858,7 @@ mod tests {
         });
         assert!(matches!(
             winner_of(&catalog, "~-white", ours),
-            Winner::SamePayload
+            (Winner::SamePayload, _)
         ));
 
         let other = Some(ImageVariantId {
@@ -2571,43 +2867,7 @@ mod tests {
         });
         assert!(matches!(
             winner_of(&catalog, "~-white", other),
-            Winner::OtherSource
-        ));
-    }
-
-    #[test]
-    fn a_variant_nobody_holds_any_more_is_decoded_again() {
-        // The registry keeps weak handles, so the corpus does not stay resident
-        // for the life of the process once the batches holding it are gone.
-        let variant = ImageVariantId {
-            payload: 0xdead_beef,
-            usage: 0,
-        };
-        drop(arc_of(share_or_decode(variant, 0, one_pixel)));
-        let again = share_or_decode(variant, 0, one_pixel);
-        match again {
-            ImageOutcome::Decoded { shared, .. } => {
-                assert!(!shared, "shared a buffer that nothing was holding");
-            }
-            _ => panic!("expected a decoded image"),
-        }
-    }
-
-    #[test]
-    fn a_decode_that_fails_does_not_park_the_next_asker() {
-        let variant = ImageVariantId {
-            payload: 0x0bad_0bad,
-            usage: 0,
-        };
-        let gap = share_or_decode(variant, 0, || ImageOutcome::Missing {
-            gap: "absent".to_owned(),
-        });
-        assert!(matches!(gap, ImageOutcome::Missing { .. }));
-        // The slot is free again, so the next asker decodes rather than waiting
-        // on a flight that will never publish.
-        assert!(matches!(
-            share_or_decode(variant, 0, one_pixel),
-            ImageOutcome::Decoded { shared: false, .. }
+            (Winner::OtherSource, _)
         ));
     }
 }

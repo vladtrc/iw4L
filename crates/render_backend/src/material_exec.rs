@@ -288,6 +288,7 @@ fn overlay_draw_material(
     runtime: MaterialExecView<'_>,
     draw: &RetainedDrawItem,
     scratch: &mut RuntimeCodeSources,
+    need: OverlayCodeNeed,
 ) {
     let inv_image_height = runtime.frame.inv_image_height;
     scratch.begin_overlay();
@@ -313,7 +314,7 @@ fn overlay_draw_material(
                 smodel_code_world_from_local(&draw.kind),
                 runtime.clip_from_world,
                 runtime.view_from_world,
-                OverlayCodeNeed::ALL,
+                need,
             );
 
             overlay_smodel_tess_code_constants(
@@ -321,7 +322,7 @@ fn overlay_draw_material(
                 lighting_handle,
                 inv_image_height,
                 packed_lighting,
-                OverlayCodeNeed::ALL,
+                need,
             );
         }
         RetainedDrawKind::XModel {
@@ -336,7 +337,7 @@ fn overlay_draw_material(
                 world_from_local,
                 runtime.clip_from_world,
                 runtime.view_from_world,
-                OverlayCodeNeed::ALL,
+                need,
             );
 
             overlay_smodel_tess_code_constants(
@@ -344,7 +345,7 @@ fn overlay_draw_material(
                 lighting_handle,
                 inv_image_height,
                 packed_lighting,
-                OverlayCodeNeed::ALL,
+                need,
             );
             let object_id = dpvs_iw4::GfxDrawSurf { packed: draw.key }.object_id();
             if host_viewmodel_render_fx_flags(object_id) != 0
@@ -377,7 +378,7 @@ fn overlay_draw_material(
                 lighting_handle,
                 inv_image_height,
                 None,
-                OverlayCodeNeed::ALL,
+                need,
             );
         }
         RetainedDrawKind::MarkMesh {
@@ -388,7 +389,7 @@ fn overlay_draw_material(
                 lighting_handle,
                 inv_image_height,
                 None,
-                OverlayCodeNeed::ALL,
+                need,
             );
         }
         _ => {}
@@ -455,15 +456,24 @@ fn overlay_draw_obj_only(
     }
 }
 
+/// Fill the overlay sources this draw's material will read.
+///
+/// `need` is what the shell this run is about to bind says it reads. A shell
+/// that has been seen before answers that question *before* the overlay is
+/// built, which is the point: a world-view-projection nobody samples is a
+/// matrix multiply, a transpose and an allocation for a value that is then
+/// dropped. When the shell is new the need is unknown and everything is
+/// filled — once per shell per generation, and that miss is what teaches it.
 fn overlay_draw_execution(
     runtime: MaterialExecView<'_>,
     draw: &RetainedDrawItem,
     scratch: &mut RuntimeCodeSources,
     overlay: OverlayMode,
+    need: OverlayCodeNeed,
 ) {
     match overlay {
-        OverlayMode::Full => overlay_draw_material(runtime, draw, scratch),
-        OverlayMode::ObjOnly => overlay_draw_obj_only(runtime, draw, scratch, OverlayCodeNeed::ALL),
+        OverlayMode::Full => overlay_draw_material(runtime, draw, scratch, need),
+        OverlayMode::ObjOnly => overlay_draw_obj_only(runtime, draw, scratch, need),
     }
 }
 
@@ -540,6 +550,12 @@ pub struct MaterialRunCensus {
     pub refused: u32,
     pub shell_hits: u32,
     pub shell_misses: u32,
+    /// Code-constant writes the overlay made for this list, and how many of
+    /// its runs knew what the shell reads before building it. A run that does
+    /// not know fills everything; the two together are what says whether the
+    /// writes fell because less is computed or because less was drawn.
+    pub overlay_const_writes: u32,
+    pub overlay_need_known: u32,
 }
 
 #[derive(Debug, Default)]
@@ -553,8 +569,19 @@ pub struct MaterialRunExecutor {
 
     run_serial: u64,
     census: MaterialRunCensus,
-    shells: HashMap<ShellInternKey, Arc<StableMaterialShell>>,
+    shells: HashMap<ShellInternKey, ShellEntry>,
     shell_generation: Option<MaterialGenerationId>,
+}
+
+/// A material shell kept across runs, and what it reads.
+///
+/// The need is a property of the shell — the code constants its passes bind —
+/// so it is stored where the shell is and answers before the overlay for every
+/// draw after the first of its kind.
+#[derive(Debug)]
+struct ShellEntry {
+    shell: Arc<StableMaterialShell>,
+    need: OverlayCodeNeed,
 }
 
 impl std::fmt::Debug for RunState {
@@ -662,9 +689,23 @@ impl MaterialRunExecutor {
         };
         self.last_overlay = Some(overlay_key);
         let recycled = self.run.take().map(|run| run.execution);
-        overlay_draw_execution(view, draw, &mut self.scratch, overlay);
+        // Before the overlay, not after: the shell a run will bind is decided
+        // by the share key alone, so what it reads is known while there is
+        // still a chance not to compute the rest. `retain_shells_for` comes
+        // first because a shell from a previous material generation answers
+        // for a material that is gone.
         self.retain_shells_for(view.catalog.generation_id);
         let shell_key = ShellInternKey::from_share(share);
+        let known_need = self.shells.get(&shell_key).map(|entry| entry.need);
+        let need = known_need.unwrap_or(OverlayCodeNeed::ALL);
+        let writes_before = self.scratch.const_writes();
+        overlay_draw_execution(view, draw, &mut self.scratch, overlay, need);
+        self.census.overlay_const_writes = self.census.overlay_const_writes.saturating_add(
+            u32::try_from(self.scratch.const_writes() - writes_before).unwrap_or(u32::MAX),
+        );
+        if known_need.is_some() {
+            self.census.overlay_need_known = self.census.overlay_need_known.saturating_add(1);
+        }
         let execution = {
             let Self {
                 shells,
@@ -676,10 +717,10 @@ impl MaterialRunExecutor {
                 base: view.code_sources,
                 overlay: scratch,
             };
-            if let Some(shell) = shells.get(&shell_key) {
+            if let Some(entry) = shells.get(&shell_key) {
                 census.shell_hits = census.shell_hits.saturating_add(1);
                 let mut execution = recycled.unwrap_or_else(MaterialExecution::vacant);
-                match execution.rebind_into(shell, &sources) {
+                match execution.rebind_into(&entry.shell, &sources) {
                     Ok(()) => Ok(execution),
                     Err(cause) => Err(cause),
                 }
@@ -695,7 +736,13 @@ impl MaterialRunExecutor {
                     vertex_type,
                 )
                 .map(|execution| {
-                    shells.insert(shell_key, Arc::clone(execution.shell_arc()));
+                    shells.insert(
+                        shell_key,
+                        ShellEntry {
+                            shell: Arc::clone(execution.shell_arc()),
+                            need: overlay_need_from_execution(&execution),
+                        },
+                    );
                     execution
                 })
             }

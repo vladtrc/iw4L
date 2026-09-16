@@ -7,6 +7,16 @@ description = "Composition root: assembles the bevy App for menu / map / play ru
 
 [features]
 bevy-debug = ["bevy/debug", "bevy/track_location"]
+# Bevy's own `tracing` spans, written as a Chrome trace beside the binary.
+#
+# Off by default and never on in a timed run: the subscriber costs the frame
+# it measures. It exists because the spans inside bevy's render graph — the
+# `queue_submit` around `RenderQueue::submit`, the ones inside
+# `RenderContext::apply` — are the only place a submit can be timed from, and
+# this runtime's own Perfetto capture does not contain them. A diagnostic run
+# on this feature is what turns "the interval across bevy's submit set was
+# long" into a statement about where the time went.
+bevy-trace = ["bevy/trace", "bevy/trace_chrome"]
 
 [dependencies]
 bevy.workspace = true

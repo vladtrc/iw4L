@@ -281,10 +281,12 @@ pub(crate) fn spawn_world(
         let gap_ms = job.slice_gap_ms(std::time::Instant::now());
         diag::info!(
             World,
-            "world spawn slice: phase=images done={}/{} skipped={} {:.1}ms gap={gap_ms:.1}ms handed_bytes={} total_handed={} largest_step={:.1}ms/{}B (budget 40ms; bytes are handed to Assets<Image>, not copied to the GPU)",
+            "world spawn slice: phase=images done={}/{} skipped={} reused_handles={}/{}B {:.1}ms gap={gap_ms:.1}ms handed_bytes={} total_handed={} largest_step={:.1}ms/{}B (budget 40ms; bytes are handed to Assets<Image>, not copied to the GPU; a reused handle is a slot whose variant was already an asset)",
             job.images.done,
             job.images.total,
             job.images.skipped,
+            job.images.reused_handles,
+            job.images.reused_handle_bytes,
             job.last_work_ms,
             job.images.handed_bytes - bytes_before,
             job.images.handed_bytes,

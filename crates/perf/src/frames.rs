@@ -32,6 +32,12 @@
 //! frame, so two schedules running at once on two threads cover the wall once
 //! between them instead of twice each. `wall_ns - covered_ns` is therefore a
 //! real remainder and cannot go negative, which `wall - sum(roots)` could.
+//!
+//! Which spans are roots is declared by [`Span::coverage_root`], not read off
+//! a per-thread stack at the moment each closed: a schedule span opens in one
+//! system and closes in another, and an executor that runs those two on
+//! different workers left the span root on neither thread and its whole
+//! interval outside the union.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -60,15 +66,20 @@ pub mod flag {
     pub const DOF: u32 = 1 << 4;
     /// A teardown ran: despawn, zone drop, cache eviction.
     pub const CLEANUP: u32 = 1 << 5;
+    /// The row was closed at exit rather than by the frame clock. Its wall is
+    /// as much of the frame as the process lived through and is not a frame
+    /// time; its span columns are what that much of the frame ran.
+    pub const PARTIAL: u32 = 1 << 6;
 
     /// Every flag with the name the report and the CSV use for it.
-    pub const ALL: [(u32, &str); 6] = [
+    pub const ALL: [(u32, &str); 7] = [
         (LOADING, "loading"),
         (WARMUP, "warmup"),
         (SCREENSHOT, "screenshot"),
         (WEAPON, "weapon"),
         (DOF, "dof"),
         (CLEANUP, "cleanup"),
+        (PARTIAL, "partial"),
     ];
 }
 
@@ -100,6 +111,15 @@ pub struct FrameRow {
     /// The union of the root spans' intervals, clipped to the wall. Counted
     /// once where they overlap, so this is never more than `wall_ns`.
     pub covered_ns: u64,
+    /// The same union with the render thread left out: what the main world's
+    /// schedules covered on their own.
+    ///
+    /// `main_covered_ns + spans_ns[render_thread] - covered_ns` is the time
+    /// the render thread and a main schedule were both inside this frame —
+    /// real overlap, read off the intervals, and not inferred from which frame
+    /// a render stage says it originated in. Serialised rendering leaves it at
+    /// zero; it is what a pipelining A/B is read on.
+    pub main_covered_ns: u64,
     /// Span time that ran before this frame's wall began, in spans that ended
     /// inside it. It is not in `spans_ns` and not in `covered_ns`; it is what
     /// this frame inherited from the ones before it.
@@ -150,7 +170,24 @@ static CARRIED_NS: AtomicU64 = AtomicU64::new(0);
 static CARRIED_SPANS: AtomicU32 = AtomicU32::new(0);
 
 /// The intervals the root spans covered, merged as they arrive.
-static COVER: Mutex<Cover> = Mutex::new(Cover::EMPTY);
+static COVER: Mutex<Coverage> = Mutex::new(Coverage::EMPTY);
+
+/// The frame's coverage, twice: every root, and the main world's roots alone.
+///
+/// One lock for the pair. The difference between the two answers whether the
+/// render thread ran beside a main schedule or after it, which is the whole
+/// question a pipelining A/B asks.
+struct Coverage {
+    all: Cover,
+    main: Cover,
+}
+
+impl Coverage {
+    const EMPTY: Self = Self {
+        all: Cover::EMPTY,
+        main: Cover::EMPTY,
+    };
+}
 
 /// Root span intervals kept per frame. A frame has one root per schedule per
 /// thread — four or five in practice — so this is generous, and running out
@@ -310,8 +347,8 @@ pub(crate) fn open(at_ns: u64) {
 ///
 /// `start_ns`/`end_ns` are the span's own interval; what is booked is its
 /// intersection with the frame, and the part that ran before the frame opened
-/// goes to `carried_in_ns`. `root` — the span had no open parent on its own
-/// thread — also puts the clipped interval into the coverage union.
+/// goes to `carried_in_ns`. `root` — [`Span::coverage_root`], declared and not
+/// observed — also puts the clipped interval into the coverage union.
 #[inline]
 pub(crate) fn add_span(span: Span, start_ns: u64, end_ns: u64, root: bool) {
     if !enabled() {
@@ -327,10 +364,11 @@ pub(crate) fn add_span(span: Span, start_ns: u64, end_ns: u64, root: bool) {
         CARRIED_SPANS.fetch_add(1, Ordering::Relaxed);
     }
     if root && inside > 0 {
-        COVER
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .add(inside_from, end_ns);
+        let mut cover = COVER.lock().unwrap_or_else(|poison| poison.into_inner());
+        cover.all.add(inside_from, end_ns);
+        if span != Span::RenderRenderThreadMs {
+            cover.main.add(inside_from, end_ns);
+        }
     }
     if span == Span::RenderRenderThreadMs {
         RENDER_THREAD.store(slot(), Ordering::Relaxed);
@@ -344,6 +382,59 @@ pub(crate) fn add_counter(counter: Counter, stored: u64) {
     }
     COUNTER_SUM[counter as usize].fetch_add(stored, Ordering::Relaxed);
     COUNTER_N[counter as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+/// The index the frame that is open now will carry once it closes.
+///
+/// Work that runs on another thread and is only reported back a frame or two
+/// later reads this when it *starts* and hands it back with the result, so the
+/// value lands on the row whose wall it was inside. Without it the render
+/// stage timings sit one row late, and a spike reads against the frame after
+/// the one that paid for it.
+#[inline]
+pub fn open_index() -> u64 {
+    CLOSED.load(Ordering::Relaxed)
+}
+
+/// Charge a counter to the frame that carried `index`, not to the open one.
+///
+/// Returns whether the row was found: a frame the table dropped, or one closed
+/// before the recorder was armed, cannot be charged and the sample is left out
+/// rather than moved to a row it did not happen in.
+pub(crate) fn add_counter_at(index: u64, counter: Counter, stored: u64) -> bool {
+    if !enabled() {
+        return false;
+    }
+    let closed = CLOSED.load(Ordering::Relaxed);
+    if index == closed {
+        // Still open: the accumulators are this frame's, which is where an
+        // in-frame sample goes anyway.
+        add_counter(counter, stored);
+        return true;
+    }
+    if index > closed {
+        return false;
+    }
+    let mut table = TABLE.lock().unwrap_or_else(|poison| poison.into_inner());
+    // Rows are pushed in index order with no gaps, so the index *is* the slot
+    // until the table fills; the check is what makes that an assumption the
+    // code can survive being wrong about.
+    let at = usize::try_from(index).ok().filter(|at| {
+        table
+            .get(*at)
+            .is_some_and(|row: &FrameRow| row.index == index)
+    });
+    let at = match at {
+        Some(at) => at,
+        None => match table.binary_search_by_key(&index, |row| row.index) {
+            Ok(at) => at,
+            Err(_) => return false,
+        },
+    };
+    let row = &mut table[at];
+    row.counters[counter as usize] += stored;
+    row.counter_samples[counter as usize] += 1;
+    true
 }
 
 /// Raise a [`flag`] for the frame that is open now. Cleared when it closes.
@@ -395,10 +486,12 @@ pub(crate) fn close(start_ns: u64, end_ns: u64, phase: u8) {
         counter_samples[counter as usize] = COUNTER_N[counter as usize].swap(0, Ordering::Relaxed);
     }
     let tick = REPLAY_TICK.load(Ordering::Relaxed);
-    let (covered_ns, coverage_overflow) = COVER
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .drain(start_ns, end_ns);
+    let (covered_ns, main_covered_ns, coverage_overflow) = {
+        let mut cover = COVER.lock().unwrap_or_else(|poison| poison.into_inner());
+        let (covered_ns, all_overflow) = cover.all.drain(start_ns, end_ns);
+        let (main_covered_ns, main_overflow) = cover.main.drain(start_ns, end_ns);
+        (covered_ns, main_covered_ns, all_overflow || main_overflow)
+    };
     // The next frame's wall starts where this one ended, so a span that closes
     // between the two is charged to the frame it actually ran in.
     FRAME_OPEN_AT.store(end_ns, Ordering::Relaxed);
@@ -414,6 +507,7 @@ pub(crate) fn close(start_ns: u64, end_ns: u64, phase: u8) {
         replay_tick: (tick != u64::MAX).then_some(tick),
         spans_ns,
         covered_ns: covered_ns.min(end_ns.saturating_sub(start_ns)),
+        main_covered_ns: main_covered_ns.min(end_ns.saturating_sub(start_ns)),
         carried_in_ns: CARRIED_NS.swap(0, Ordering::Relaxed),
         carried_spans: CARRIED_SPANS.swap(0, Ordering::Relaxed),
         coverage_overflow,
@@ -458,7 +552,11 @@ pub fn counter_column(counter: Counter) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::Cover;
+    use super::{Counter, Cover};
+
+    /// The recorder is process-global, so the one test that arms it and closes
+    /// frames holds this while it does.
+    static RECORDER: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn covered(intervals: &[(u64, u64)], from: u64, to: u64) -> (u64, bool) {
         let mut cover = Cover::EMPTY;
@@ -495,6 +593,41 @@ mod tests {
     fn coverage_never_exceeds_the_window_it_is_read_over() {
         let (ns, _) = covered(&[(0, 1_000)], 100, 200);
         assert_eq!(ns, 100);
+    }
+
+    #[test]
+    fn a_counter_reported_late_lands_on_the_frame_it_was_measured_in() {
+        // The render stage timings are published by the render app and read by
+        // the main world a frame later, so a sample that does not name the
+        // frame it was measured in lands on the row after the one that paid it.
+        let _guard = RECORDER.lock().unwrap_or_else(|poison| poison.into_inner());
+        super::arm(true);
+        let first = super::open_index();
+        super::close(0, 1_000, 1);
+        super::close(1_000, 2_000, 1);
+
+        assert!(super::add_counter_at(
+            first,
+            Counter::RenderGraphSubmitIntervalMs,
+            75
+        ));
+        let rows = super::snapshot().rows;
+        let row = |index: u64| {
+            rows.iter()
+                .find(|row| row.index == index)
+                .expect("the row this test closed")
+                .counters[Counter::RenderGraphSubmitIntervalMs as usize]
+        };
+        assert_eq!(row(first), 75, "the sample missed the frame it ran in");
+        assert_eq!(row(first + 1), 0, "the sample landed a frame late");
+
+        // A frame the table never kept is left out rather than charged to
+        // whatever is open now.
+        assert!(!super::add_counter_at(
+            u64::MAX - 1,
+            Counter::RenderGraphSubmitIntervalMs,
+            5
+        ));
     }
 
     #[test]

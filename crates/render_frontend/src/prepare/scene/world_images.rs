@@ -159,6 +159,16 @@ pub struct WorldImageUpload {
 
     pub pipeline_smodel_materials: Arc<std::collections::HashSet<u16>>,
     exact_images: Vec<Option<Image>>,
+    exact_variants: Vec<Option<assets::ImageVariantId>>,
+    /// One asset per prepared variant. Two catalog slots that hold the same
+    /// variant hold byte-identical images with the same sampler and colour
+    /// space; giving each its own `Assets<Image>` entry uploads the same
+    /// texture twice and keeps two copies of it resident, so the second slot
+    /// takes a clone of the first one's handle and drops its own copy.
+    exact_by_variant: std::collections::HashMap<assets::ImageVariantId, Handle<Image>>,
+    /// Slots that took another slot's handle, and the bytes that saved.
+    pub reused_handles: u32,
+    pub reused_handle_bytes: u64,
     exact_handles: Vec<Option<Handle<Image>>>,
     exact_at: usize,
     probes: Vec<Option<Image>>,
@@ -236,6 +246,11 @@ impl WorldImageUpload {
                 .collect(),
         );
         self.exact_images = std::mem::take(&mut scene.exact_material_images);
+        self.exact_variants = std::mem::take(&mut scene.exact_material_variants);
+        self.exact_variants.resize(self.exact_images.len(), None);
+        self.exact_by_variant.clear();
+        self.reused_handles = 0;
+        self.reused_handle_bytes = 0;
         self.exact_handles = vec![None; self.exact_images.len()];
         self.reachable_exact = reachable_exact_image_slots(
             &scene.runtime_material_catalog,
@@ -346,7 +361,23 @@ impl WorldImageUpload {
             let bytes = image.as_ref().map(image_bytes).unwrap_or(0);
             self.handed_bytes += bytes;
             let step = std::time::Instant::now();
-            self.exact_handles[self.exact_at] = image.map(|image| images.add(image));
+            let variant = self.exact_variants[self.exact_at];
+            self.exact_handles[self.exact_at] = image.map(|image| {
+                // A slot whose variant is already an asset takes that handle
+                // and lets its own copy go: the two are the same texels under
+                // the same sampler, and a second `add` is a second texture.
+                let Some(variant) = variant else {
+                    return images.add(image);
+                };
+                if let Some(handle) = self.exact_by_variant.get(&variant) {
+                    self.reused_handles = self.reused_handles.saturating_add(1);
+                    self.reused_handle_bytes = self.reused_handle_bytes.saturating_add(bytes);
+                    return handle.clone();
+                }
+                let handle = images.add(image);
+                self.exact_by_variant.insert(variant, handle.clone());
+                handle
+            });
             self.note_step(step.elapsed(), bytes);
             self.exact_at += 1;
             self.done = self.done.saturating_add(1);

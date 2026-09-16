@@ -61,6 +61,10 @@ pub struct AuthoredImage {
     /// Which variant `decoded` is, when it came from a plan. `None` means it
     /// was decoded from this row's own inline payload or never decoded.
     pub decoded_variant: Option<ImageVariantId>,
+    /// Which decode plan filled `decoded`. `None` means an inline body or a
+    /// row nothing has answered yet. It is what lets the merge census say
+    /// *who* won a disputed name rather than only that somebody did.
+    pub decoded_by: Option<u64>,
 
     pub pending_decode: Option<u64>,
 }
@@ -1364,6 +1368,7 @@ impl MaterialCatalog {
             payload,
             decoded: None,
             decoded_variant: None,
+            decoded_by: None,
             pending_decode: None,
         }))
     }
@@ -2337,6 +2342,7 @@ impl MaterialCatalog {
             payload,
             decoded: None,
             decoded_variant: None,
+            decoded_by: None,
             pending_decode: None,
         }))
     }
@@ -2649,6 +2655,7 @@ impl MaterialCatalog {
             payload,
             decoded: None,
             decoded_variant: None,
+            decoded_by: None,
             pending_decode: None,
         }))
     }

@@ -137,9 +137,14 @@ pub struct JobRow {
     pub outstanding_at_decode: Option<u64>,
     pub waited_for_budget: bool,
     pub source_bytes: Option<u64>,
-    /// Every byte the job prepared, whether or not the merge kept it. This is
-    /// what the work cost; `retained_bytes` is what it bought.
-    pub produced_bytes: Option<u64>,
+    /// Bytes this job prepared itself, whether or not the merge kept them.
+    /// This is what the work cost; `retained_bytes` is what it bought.
+    pub prepared_bytes: Option<u64>,
+    /// Bytes the job served out of a payload another job had already prepared.
+    /// Nothing was decoded for these and nothing was allocated twice; they are
+    /// here so that `prepared + reused` — what the job *served* — is a sum a
+    /// reader can take rather than a number that silently includes both.
+    pub reused_bytes: Option<u64>,
     pub output_bytes: Option<u64>,
     /// Bytes the merged catalog kept, and bytes it threw away. The pair is the
     /// whole point of the merge-before-decode question.
@@ -222,7 +227,8 @@ pub fn open(kind: JobKind) -> Job {
         outstanding_at_decode: None,
         waited_for_budget: false,
         source_bytes: None,
-        produced_bytes: None,
+        prepared_bytes: None,
+        reused_bytes: None,
         output_bytes: None,
         retained_bytes: None,
         discarded_bytes: None,
@@ -361,11 +367,18 @@ impl Job {
         self
     }
 
-    /// Everything the job prepared, kept or not. Recorded by the worker rather
-    /// than derived at join, so `produced = retained + discarded` is a check on
-    /// the merge's accounting and not a definition of it.
-    pub fn produced(self, bytes: u64) -> Self {
-        self.edit(|row| row.produced_bytes = Some(bytes));
+    /// What the job prepared itself and what it took from another job's work,
+    /// kept or not. Recorded by the worker rather than derived at join, so
+    /// `prepared + reused = retained + discarded` is a check on the merge's
+    /// accounting and not a definition of it.
+    ///
+    /// The two are separate because only the first is work. Adding them into
+    /// one "produced" column reports a plan against bytes it never decoded.
+    pub fn prepared(self, newly: u64, reused: u64) -> Self {
+        self.edit(|row| {
+            row.prepared_bytes = Some(newly);
+            row.reused_bytes = Some(reused);
+        });
         self
     }
 

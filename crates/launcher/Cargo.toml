@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [features]
 bevy-debug = ["bootstrap/bevy-debug"]
+bevy-trace = ["bootstrap/bevy-trace"]
 
 [dependencies]
 diag.workspace = true

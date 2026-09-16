@@ -346,6 +346,12 @@ pub fn fx_glass_def_color_rgba(def: &[u8; FX_GLASS_DEF]) -> [u8; 4] {
 
 pub const FX_GLASS_VERT_SCALE: f32 = 0.03125;
 
+pub const FX_GLASS_SHATTERED_SCALE: f32 = 48.0;
+
+pub fn fx_glass_apply_shattered_uv(uv: [f32; 2], scale: f32) -> [f32; 2] {
+    [uv[0] * scale, uv[1] * scale]
+}
+
 pub fn fx_unit_quat_to_axis(q: [f32; 4]) -> [[f32; 3]; 3] {
     let [x, y, z, w] = q;
     let x2 = x + x;

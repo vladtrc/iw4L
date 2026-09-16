@@ -21,11 +21,22 @@ so the deltas do not add up. Match audio is split by decoder, in worker time.
 **[2/3] Frame time** — every typed span from [`PERF.md`](PERF.md) as a tree, for
 the frames *after* the first playable one, then the rows: first seconds against
 steady state (exact percentiles), the worst frames, and `unclassified` — wall
-minus the **union** of the parentless spans, so two threads inside one
-nanosecond cover it once and the remainder is never clamped. A span is charged
-by intersection: a task spanning four frames shows its part in each and the rest
-as `carried in`. Nesting comes from each thread's own stack, and the report
-counts frames where a span still outlives its parent.
+minus the **union** of the frame's declared top-level spans, so two threads
+inside one nanosecond cover it once and the remainder is never clamped. A span
+is charged by intersection: a task spanning four frames shows its part in each
+and the rest as `carried in`. The frame clock closes and reopens at the top of
+`First`, before anything else runs, so every main-phase interval falls wholly
+inside one frame; the frame the process exits from is closed at exit and its
+row carries `partial`. Which spans are roots is declared, not read off a
+thread's stack — an executor is free to run a schedule's `begin` and its `end`
+on different workers, and the report counts those as `migrated`. Nesting is
+still observed, and the report counts frames where a span outlives its parent.
+
+`main/render overlap` is the part of the wall a main schedule and the render
+thread were both inside, from their intervals. It is zero whenever rendering is
+serialised, which is the default; `IW4L_PIPELINED_RENDERING=1` runs the render
+world a frame behind on its own thread instead, and `scheduling` in the
+manifest says which branch a run took.
 
 **[3/3] Counters** — render stages, the bodies inside `Present` and `Ui`, the
 HUD schedule gaps, GPU passes, per-frame work. A `*_schedule_interval` is a gap
@@ -42,9 +53,17 @@ The run's own directory, beside the `trace.pftrace`:
   An absent fact is `null`, never a default;
 * `summary.json` — spans, counters and audio totals as data;
 * `frames.csv` — one row per frame: each span's overlap with it, every counter,
-  `covered_ns`, `carried_in_ns`, flags, thread slots. GPU counters are
-  `delivered_*`: a timestamp arrives frames after the work that queued it;
+  `covered_ns`, `main_covered_ns`, `carried_in_ns`, flags, thread slots. GPU
+  counters are `delivered_*`: a timestamp arrives frames after the work that
+  queued it;
 * `load_jobs.csv` — one row per load job: `discovered → plan_ready → enqueued →
   started → decode_started → finished → joined`. `budget_wait_ms` is a worker
-  held by the image memory threshold, `decode_ms` the work; `produced_bytes` is
-  all the job prepared, against what the merge kept and threw away.
+  held by the image memory threshold, `decode_ms` the work; `prepared_bytes` is
+  what the job decoded itself and `reused_bytes` what it served out of another
+  job's payload without decoding anything, against what the merge kept and threw
+  away. Only `prepared_bytes` is work.
+
+A diagnostic build with `--features bevy-trace` writes Bevy's own `tracing`
+spans — the ones inside the render graph, `queue_submit` among them — as a
+Chrome trace. It costs the frame it measures, so it is never a timed run;
+`scheduling.bevy_tracing` in the manifest says whether a run was one.

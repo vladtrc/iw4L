@@ -868,6 +868,10 @@ pub(super) struct ExactColourSubmitCensus {
 
     pub shell_misses_n: Option<u32>,
 
+    pub overlay_const_writes_n: Option<u32>,
+
+    pub overlay_need_known_n: Option<u32>,
+
     set_bind_group_n: Option<u32>,
 
     pub set_state_n: Option<u32>,

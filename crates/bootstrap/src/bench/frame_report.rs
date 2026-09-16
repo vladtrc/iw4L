@@ -326,12 +326,21 @@ fn silent_spans(out: &mut Vec<String>) {
 
 fn anomalies(out: &mut Vec<String>) {
     let anomalies = perf::stats::anomalies();
-    if anomalies.unmatched_end == 0 && anomalies.reopened == 0 && anomalies.misnested == 0 {
+    if anomalies.unmatched_end == 0
+        && anomalies.reopened == 0
+        && anomalies.misnested == 0
+        && anomalies.migrated == 0
+        && anomalies.unattributed_counters == 0
+    {
         return;
     }
     out.push(String::new());
     out.push(format!(
-        "  recorder: {} span ends closed nothing, {} spans were opened while already open — those instances are missing from the numbers above. {} closed while something they did not enclose was still open under them, so the parent column named for those is the enclosing scope and not a call.",
-        anomalies.unmatched_end, anomalies.reopened, anomalies.misnested
+        "  recorder: {} span ends closed nothing, {} spans were opened while already open — those instances are missing from the numbers above. {} closed while something they did not enclose was still open under them, so the parent column named for those is the enclosing scope and not a call. {} closed on a thread their begin never ran on — the executor moved the two systems apart, so no thread could name what they opened inside; their own timings stand and the coverage below does not depend on them, because its roots are declared rather than observed. {} counter samples named the frame they were measured in and found no row for it; they are in the histograms and in no row.",
+        anomalies.unmatched_end,
+        anomalies.reopened,
+        anomalies.misnested,
+        anomalies.migrated,
+        anomalies.unattributed_counters
     ));
 }

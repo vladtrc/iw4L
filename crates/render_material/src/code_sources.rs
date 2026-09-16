@@ -13,6 +13,10 @@ pub struct RuntimeCodeSources {
     overlay_mode: bool,
     written_const: Vec<u16>,
     written_tex: Vec<u32>,
+    /// Every code-constant write this source has taken. See [`const_writes`].
+    ///
+    /// [`const_writes`]: RuntimeCodeSources::const_writes
+    const_writes: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -150,7 +154,18 @@ impl RuntimeCodeSources {
         self.set_constant_rows(index, &rows);
     }
 
+    /// Code-constant writes since this source was created.
+    ///
+    /// Monotonic and never reset, so a caller measures a stretch of work by
+    /// the difference across it. It counts writes, not live slots: writing the
+    /// same constant twice is two, which is the number a caller trying to stop
+    /// computing values nobody reads is asking about.
+    pub fn const_writes(&self) -> u64 {
+        self.const_writes
+    }
+
     pub fn set_constant_rows(&mut self, index: u16, rows: &[[u32; 4]]) {
+        self.const_writes += 1;
         self.note_const_write(index);
         let index = usize::from(index);
         if self.constants.len() <= index {

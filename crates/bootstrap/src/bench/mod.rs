@@ -148,6 +148,11 @@ fn arm_exit_hook() {
         let Some(artifacts) = ARTIFACTS.get() else {
             return;
         };
+        // Close the open frame before the trace is flushed, so the last wall
+        // has an end event in the trace as well as a row in the table. Closed
+        // after the flush, its Perfetto slice stays open and every span of
+        // that frame reads as falling outside every wall.
+        perf::stats::close_open_frame();
         // This hook was armed after Perfetto's, and `atexit` runs last-armed
         // first, so the trace is still open here; flushing it is what gives the
         // heading a run directory to name. Flushing twice is a no-op.
@@ -173,6 +178,13 @@ fn report(artifacts: &Path, trace: Option<PathBuf>) {
     if REPORTED.swap(true, Ordering::SeqCst) {
         return;
     }
+    // The clock opens a frame at the top of `First` and closes it at the top
+    // of the next one, so the frame the process exits from has never been
+    // closed. Closing it here is what puts its spans in a row; the row carries
+    // `partial`, because its wall is how far the frame got and not a frame
+    // time to compare against the others. The exit hook has usually done this
+    // already, before flushing the trace; closing a closed clock does nothing.
+    perf::stats::close_open_frame();
     let lines = match milestones::with(|bench| {
         bench.take_lane_snapshot();
         let mut lines = Vec::new();

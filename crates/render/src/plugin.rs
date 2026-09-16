@@ -3,7 +3,7 @@ use frame::configure_render_sets;
 use net::ClientSet;
 
 use crate::diag::capture::{CaptureQueue, capture_frame, report_unwritten_captures};
-use crate::diag::frame_spans::{register_postupdate_span, register_preupdate_span};
+use crate::diag::frame_spans::register_frame_spans;
 use crate::diag::render_frame_diag::{register_render_frame_diag, sample_render_frame_diag};
 
 pub struct RenderPlugin;
@@ -37,8 +37,7 @@ impl Plugin for RenderPlugin {
         crate::diag::acceptance::register_acceptance_systems(app);
         register_render_frame_diag(app);
         app.add_systems(Update, sample_render_frame_diag.in_set(ClientSet::Diag));
-        register_preupdate_span(app);
-        register_postupdate_span(app);
+        register_frame_spans(app);
         app.init_resource::<CaptureQueue>().add_systems(
             Update,
             (capture_frame, report_unwritten_captures)

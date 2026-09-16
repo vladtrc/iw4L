@@ -57,8 +57,21 @@ pub enum Counter {
     CounterSubmittedBatches,
 
     RenderGraphRenderMs,
-    RenderGraphSubmitMs,
+    /// The wall between the last system of the render graph's `Render` set and
+    /// the first of its `Finish` set: bevy's `submit_pending_command_buffers`
+    /// — which finishes every pending encoder *and* calls `Queue::submit` —
+    /// plus `handle_uncovered_swap_chains`, plus whatever the executor ran in
+    /// the gaps. Not a `Queue::submit` body, and not addable to anything.
+    RenderGraphSubmitIntervalMs,
+    /// Command buffers and unfinished encoders waiting when that interval
+    /// began: what the one number above had to finish and submit.
+    RenderGraphSubmitPendingN,
     RenderGraphPresentMs,
+
+    /// Code-constant writes the material overlay made for the colour list.
+    /// Work the frame did to fill values a shader may or may not read; it
+    /// falls when a run knows what its shell reads before filling them.
+    CounterOverlayConstWrites,
 
     RenderSubmitSunMs,
     RenderSubmitGatherMs,
@@ -180,6 +193,32 @@ impl Span {
             Self::TocUi => "Ui",
         }
     }
+
+    /// Whether this span is a top-level scope of the frame, declared here
+    /// rather than observed.
+    ///
+    /// The frame's coverage is the union of these, clipped to the wall, and
+    /// `wall - covered` is the time nothing accounted for. Reading "was
+    /// anything else open under it on this thread" instead would make the
+    /// answer depend on which worker the executor ran a `begin` and its `end`
+    /// on: `PreUpdate` opens in `First` and closes in `RunFixedMainLoop`, and
+    /// when those land on different threads the span is root on neither — its
+    /// whole interval falls out of the union and the remainder counts it as
+    /// unclassified.
+    ///
+    /// The four schedule spans do not overlap each other and the render
+    /// thread's does not nest in any of them, so their union is the frame's
+    /// covered time whatever thread each was observed on.
+    pub const fn coverage_root(self) -> bool {
+        matches!(
+            self,
+            Self::FramesPreupdateMs
+                | Self::FramesFixedMs
+                | Self::FramesUpdateMs
+                | Self::FramesPostupdateMs
+                | Self::RenderRenderThreadMs
+        )
+    }
 }
 
 /// What a counter's value means, so the report can label it and refuse to add
@@ -212,8 +251,10 @@ impl Counter {
         Self::CounterProcessAllocations,
         Self::CounterSubmittedBatches,
         Self::RenderGraphRenderMs,
-        Self::RenderGraphSubmitMs,
+        Self::RenderGraphSubmitIntervalMs,
+        Self::RenderGraphSubmitPendingN,
         Self::RenderGraphPresentMs,
+        Self::CounterOverlayConstWrites,
         Self::RenderSubmitSunMs,
         Self::RenderSubmitGatherMs,
         Self::RenderSubmitPrepareMs,
@@ -261,8 +302,10 @@ impl Counter {
             Self::CounterProcessAllocations => "process_allocations",
             Self::CounterSubmittedBatches => "batches",
             Self::RenderGraphRenderMs => "graph_render",
-            Self::RenderGraphSubmitMs => "graph_submit",
+            Self::RenderGraphSubmitIntervalMs => "graph_submit_schedule_interval",
+            Self::RenderGraphSubmitPendingN => "graph_submit_pending",
             Self::RenderGraphPresentMs => "graph_present",
+            Self::CounterOverlayConstWrites => "overlay_const_writes",
             Self::RenderSubmitSunMs => "submit_sun",
             Self::RenderSubmitGatherMs => "submit_gather",
             Self::RenderSubmitPrepareMs => "submit_prepare",
@@ -300,7 +343,7 @@ impl Counter {
     pub const fn unit(self) -> Unit {
         match self {
             Self::RenderGraphRenderMs
-            | Self::RenderGraphSubmitMs
+            | Self::RenderGraphSubmitIntervalMs
             | Self::RenderGraphPresentMs
             | Self::RenderSubmitSunMs
             | Self::RenderSubmitGatherMs

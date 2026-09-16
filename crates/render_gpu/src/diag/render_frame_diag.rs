@@ -5,13 +5,22 @@ use bevy::diagnostic::{DiagnosticPath, DiagnosticsStore};
 use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
 use bevy::render::pipelined_rendering::RenderExtractApp;
-use bevy::render::renderer::{RenderGraph, RenderGraphSystems};
+use bevy::render::renderer::{PendingCommandBuffers, RenderGraph, RenderGraphSystems};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 const RENDER_FRAME_LOG_EVERY: u32 = 64;
 
 #[derive(Clone, Default)]
 pub(crate) struct RenderFrameSample {
+    /// The frame that was open when this render frame's extract began — the
+    /// frame whose wall the render work ran inside. The main world reads the
+    /// finished sample a frame or more later, so without this the stage
+    /// timings land on whichever row happened to be open when they arrived.
+    origin_frame: u64,
+    /// Which render frame this is. The main world reads the published sample
+    /// whether or not a new one was published, and emitting the same
+    /// measurement again would count one piece of work twice.
+    sequence: u64,
     extract_ms: Option<f32>,
     thread_closed: bool,
     extract_commands_ms: Option<f32>,
@@ -65,7 +74,9 @@ pub(crate) struct RenderFrameSample {
 
     pub(crate) graph_render_ms: Option<f32>,
 
+    /// The wall across bevy's whole submit set, not a `Queue::submit` body.
     pub(crate) graph_submit_ms: Option<f32>,
+    pub(crate) graph_submit_pending_n: Option<u32>,
 
     pub(crate) graph_present_ms: Option<f32>,
     pub(crate) wgpu_floor_encode_ms: Option<f32>,
@@ -213,10 +224,14 @@ pub(crate) struct RenderFrameSample {
 pub(crate) struct SharedRenderStages {
     working: RenderFrameSample,
     completed: Option<RenderFrameSample>,
+    /// The sequence of the last sample whose counters were emitted.
+    consumed: u64,
 }
 
 impl SharedRenderStages {
     fn begin_render_frame(&mut self) {
+        let sequence = self.working.sequence + 1;
+        let origin_frame = perf::frames::open_index();
         let floor = (
             self.working.wgpu_floor_encode_ms,
             self.working.wgpu_floor_finish_ms,
@@ -226,6 +241,8 @@ impl SharedRenderStages {
             self.working.wgpu_floor_binds,
         );
         self.working = RenderFrameSample::default();
+        self.working.sequence = sequence;
+        self.working.origin_frame = origin_frame;
         self.working.wgpu_floor_encode_ms = floor.0;
         self.working.wgpu_floor_finish_ms = floor.1;
         self.working.wgpu_floor_submit_ms = floor.2;
@@ -365,6 +382,7 @@ pub struct RenderFrameDiag {
     pub graph_render_ms: Option<f32>,
 
     pub graph_submit_ms: Option<f32>,
+    pub graph_submit_pending_n: Option<u32>,
 
     pub graph_present_ms: Option<f32>,
 
@@ -760,12 +778,38 @@ stage_timer!(
     graph_render_end,
     graph_render_ms
 );
-stage_timer!(
-    GraphSubmitStageTimer,
-    graph_submit_start,
-    graph_submit_end,
-    graph_submit_ms
-);
+#[derive(Resource, Default)]
+struct GraphSubmitStageTimer(Option<Instant>);
+
+/// What bevy's submit is about to be handed, taken where the graph's render
+/// systems have all flushed and nothing has been submitted yet.
+///
+/// The interval this opens covers `submit_pending_command_buffers` — which
+/// finishes every pending encoder and then calls `Queue::submit` — and
+/// `handle_uncovered_swap_chains`. Both are bevy's, both are exclusive
+/// systems, and neither can be timed from outside; the count is what says
+/// whether a long interval had many encoders to finish or one submit that
+/// blocked.
+fn graph_submit_start(
+    mut timer: ResMut<GraphSubmitStageTimer>,
+    pending: Res<PendingCommandBuffers>,
+    slot: Res<SharedRenderStagesSlot>,
+) {
+    timer.0 = Some(Instant::now());
+    if let Ok(mut guard) = slot.0.lock() {
+        guard.graph_submit_pending_n = Some(pending.len() as u32);
+    }
+}
+
+fn graph_submit_end(timer: Res<GraphSubmitStageTimer>, slot: Res<SharedRenderStagesSlot>) {
+    let Some(started) = timer.0 else {
+        return;
+    };
+    let ms = started.elapsed().as_secs_f32() * 1000.0;
+    if let Ok(mut guard) = slot.0.lock() {
+        guard.graph_submit_ms = Some(ms);
+    }
+}
 
 #[derive(Resource, Default)]
 struct GraphPresentMark(Option<Instant>);
@@ -1072,7 +1116,18 @@ pub fn sample_render_frame_diag(
     visible_meshes: Query<(&Mesh3d, &ViewVisibility)>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
 ) {
-    if let Ok(guard) = slot.0.lock() {
+    if let Ok(mut guard) = slot.0.lock() {
+        // The published sample is read every main frame; its counters belong
+        // to the render frame that produced it, once, and to the frame row
+        // that render frame ran inside. The HUD fields below are the last
+        // known value either way.
+        let fresh = guard
+            .completed
+            .as_ref()
+            .is_some_and(|sample| sample.sequence != guard.consumed);
+        if let Some(sequence) = guard.completed.as_ref().map(|sample| sample.sequence) {
+            guard.consumed = sequence;
+        }
         if let Some(sample) = guard.completed.as_ref() {
             diag.render_extract_ms = sample.extract_ms;
             diag.render_extract_commands_ms = sample.extract_commands_ms;
@@ -1101,15 +1156,25 @@ pub fn sample_render_frame_diag(
             diag.diag_xmodel_n = sample.diag_xmodel_n;
             diag.graph_render_ms = sample.graph_render_ms;
             diag.graph_submit_ms = sample.graph_submit_ms;
+            diag.graph_submit_pending_n = sample.graph_submit_pending_n;
             diag.graph_present_ms = sample.graph_present_ms;
 
-            for (counter, value) in [
-                (perf::Counter::RenderGraphRenderMs, sample.graph_render_ms),
-                (perf::Counter::RenderGraphSubmitMs, sample.graph_submit_ms),
-                (perf::Counter::RenderGraphPresentMs, sample.graph_present_ms),
-            ] {
-                if let Some(value) = value {
-                    counter.emit(f64::from(value));
+            if fresh {
+                for (counter, value) in [
+                    (perf::Counter::RenderGraphRenderMs, sample.graph_render_ms),
+                    (
+                        perf::Counter::RenderGraphSubmitIntervalMs,
+                        sample.graph_submit_ms,
+                    ),
+                    (perf::Counter::RenderGraphPresentMs, sample.graph_present_ms),
+                ] {
+                    if let Some(value) = value {
+                        counter.emit_at(f64::from(value), sample.origin_frame);
+                    }
+                }
+                if let Some(pending) = sample.graph_submit_pending_n {
+                    perf::Counter::RenderGraphSubmitPendingN
+                        .emit_at(f64::from(pending), sample.origin_frame);
                 }
             }
             diag.wgpu_floor_encode_ms = sample.wgpu_floor_encode_ms;
@@ -1169,14 +1234,19 @@ pub fn sample_render_frame_diag(
             diag.spot_shadow_gpu_miss = sample.spot_shadow_gpu_miss;
             diag.spot_shadow_gpu_cause = sample.spot_shadow_gpu_cause.clone();
             diag.spot_shadow_slot_n = sample.spot_shadow_slot_n;
-            if let Some(value) = sample.spot_shadow_gpu {
-                perf::Counter::SpotShadowGpu.emit(f64::from(value));
-            }
-            if let Some(value) = sample.spot_shadow_gpu_miss {
-                perf::Counter::SpotShadowGpuMiss.emit(f64::from(value));
-            }
-            if let Some(value) = sample.spot_shadow_slot_n {
-                perf::Counter::SpotShadowSlotN.emit(f64::from(value));
+            if fresh {
+                for (counter, value) in [
+                    (perf::Counter::SpotShadowGpu, sample.spot_shadow_gpu),
+                    (
+                        perf::Counter::SpotShadowGpuMiss,
+                        sample.spot_shadow_gpu_miss,
+                    ),
+                    (perf::Counter::SpotShadowSlotN, sample.spot_shadow_slot_n),
+                ] {
+                    if let Some(value) = value {
+                        counter.emit_at(f64::from(value), sample.origin_frame);
+                    }
+                }
             }
             diag.sun_shadow_submit_ms = sample.sun_shadow_submit_ms;
             diag.sun_shadow_prepare_ms = sample.sun_shadow_prepare_ms;

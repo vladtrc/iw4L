@@ -22,7 +22,8 @@ use perf::{Counter, Span};
 pub(crate) fn write_frames(path: &Path, frames: &Frames) -> Result<(), String> {
     let mut out = String::with_capacity(256 * (frames.rows.len() + 1));
     let mut header = String::from(
-        "frame,phase,start_ns,end_ns,wall_ns,covered_ns,carried_in_ns,carried_spans,\
+        "frame,phase,start_ns,end_ns,wall_ns,covered_ns,main_covered_ns,\
+         carried_in_ns,carried_spans,\
          coverage_overflow,main_thread,render_thread,replay_tick,flags",
     );
     for span in Span::ALL {
@@ -45,7 +46,7 @@ pub(crate) fn write_frames(path: &Path, frames: &Frames) -> Result<(), String> {
 fn write_frame(out: &mut String, row: &FrameRow) {
     let _ = write!(
         out,
-        "{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         row.index,
         if row.phase == 0 { "load" } else { "live" },
         row.start_ns,
@@ -54,6 +55,10 @@ fn write_frame(out: &mut String, row: &FrameRow) {
         // The union of the root spans clipped to the wall, so `wall_ns -
         // covered_ns` is the unattributed remainder and never negative.
         row.covered_ns,
+        // The same union without the render thread: `main_covered_ns +
+        // render_thread_ns - covered_ns` is how much of this frame the two
+        // ran at the same time.
+        row.main_covered_ns,
         row.carried_in_ns,
         row.carried_spans,
         u8::from(row.coverage_overflow),
@@ -121,7 +126,7 @@ pub(crate) fn write_jobs(path: &Path, jobs: &Jobs, origin: Instant) -> Result<()
          finished_ms,joined_ms,\
          ready_to_enqueue_ms,queue_delay_ms,budget_wait_ms,decode_ms,service_ms,\
          completed_to_join_ms,budget_waited,outstanding_at_decode,\
-         items,source_bytes,produced_bytes,output_bytes,retained_bytes,discarded_bytes,\
+         items,source_bytes,prepared_bytes,reused_bytes,output_bytes,retained_bytes,discarded_bytes,\
          rss_at_finish,cache_result,discard_reason\n",
     );
     for row in &jobs.rows {
@@ -156,7 +161,7 @@ fn write_job(out: &mut String, row: &JobRow, origin: Instant) {
     let bytes = |value: Option<u64>| value.map_or_else(String::new, |value| value.to_string());
     let _ = writeln!(
         out,
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         row.id,
         row.deps
             .iter()
@@ -188,7 +193,8 @@ fn write_job(out: &mut String, row: &JobRow, origin: Instant) {
         bytes(row.outstanding_at_decode),
         bytes(row.items),
         bytes(row.source_bytes),
-        bytes(row.produced_bytes),
+        bytes(row.prepared_bytes),
+        bytes(row.reused_bytes),
         bytes(row.output_bytes),
         bytes(row.retained_bytes),
         bytes(row.discarded_bytes),

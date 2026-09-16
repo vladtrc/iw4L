@@ -222,8 +222,24 @@ impl Counter {
     }
 
     #[inline]
+    /// Emit a value measured inside a frame that has already closed.
+    ///
+    /// `frame` is [`crate::frames::open_index`] as it was when the work
+    /// started. The Perfetto counter track is the same either way — it carries
+    /// its own timestamp — and only the frame row moves.
+    pub fn emit_at(self, value: f64, frame: u64) {
+        crate::stats::count_at(self, value, frame);
+        self.emit_track(value);
+    }
+
+    #[inline]
     pub fn emit(self, value: f64) {
         crate::stats::count(self, value);
+        self.emit_track(value);
+    }
+
+    #[inline]
+    fn emit_track(self, value: f64) {
         macro_rules! emit {
             ($category:literal) => {{
                 if !perfetto_sdk::track_event_category_enabled!($category) {

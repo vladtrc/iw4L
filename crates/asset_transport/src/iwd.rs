@@ -26,7 +26,18 @@ impl IwdFile {
     }
 
     pub fn read(&self) -> Result<Vec<u8>, String> {
-        read_indexed_entry(self)
+        ENTRY_PAYLOAD_READS.fetch_add(1, Ordering::Relaxed);
+        read_indexed_entry(self, None)
+    }
+
+    /// Inflate at most `limit` bytes of the entry.
+    ///
+    /// A header is a fixed prefix, and deflate stops where the reader stops:
+    /// asking whether an image is a cubemap costs the first block of it, not
+    /// the megabyte behind it.
+    pub fn read_header(&self, limit: usize) -> Result<Vec<u8>, String> {
+        ENTRY_HEADER_READS.fetch_add(1, Ordering::Relaxed);
+        read_indexed_entry(self, Some(limit))
     }
 }
 
@@ -269,15 +280,22 @@ impl Drop for ArchiveLease {
     }
 }
 
+static ENTRY_PAYLOAD_READS: AtomicU64 = AtomicU64::new(0);
+static ENTRY_HEADER_READS: AtomicU64 = AtomicU64::new(0);
+
 static IWD_DIRECTORY_NS: AtomicU64 = AtomicU64::new(0);
 static IWD_DIRECTORY_OPENS: AtomicU64 = AtomicU64::new(0);
 static IWD_INFLATE_NS: AtomicU64 = AtomicU64::new(0);
 
-fn read_indexed_entry(file: &IwdFile) -> Result<Vec<u8>, String> {
-    read_pooled_entry(&file.archive, &file.entry)
+fn read_indexed_entry(file: &IwdFile, limit: Option<usize>) -> Result<Vec<u8>, String> {
+    read_pooled_entry(&file.archive, &file.entry, limit)
 }
 
-fn read_pooled_entry(archive_path: &Path, entry_name: &str) -> Result<Vec<u8>, String> {
+fn read_pooled_entry(
+    archive_path: &Path,
+    entry_name: &str,
+    limit: Option<usize>,
+) -> Result<Vec<u8>, String> {
     let mut lease = ArchiveLease::take(archive_path)?;
     let archive = lease
         .archive
@@ -287,10 +305,15 @@ fn read_pooled_entry(archive_path: &Path, entry_name: &str) -> Result<Vec<u8>, S
     let mut entry = archive
         .by_name(entry_name)
         .map_err(|error| format!("cannot read {entry_name}: {error}"))?;
-    let mut bytes = Vec::with_capacity(entry.size() as usize);
-    entry
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("cannot read {entry_name}: {error}"))?;
+    let want = limit.map_or(entry.size() as usize, |limit| {
+        limit.min(entry.size() as usize)
+    });
+    let mut bytes = Vec::with_capacity(want);
+    let read = match limit {
+        Some(limit) => entry.take(limit as u64).read_to_end(&mut bytes),
+        None => entry.read_to_end(&mut bytes),
+    };
+    read.map_err(|error| format!("cannot read {entry_name}: {error}"))?;
     IWD_INFLATE_NS.fetch_add(inflate_at.elapsed().as_nanos() as u64, Ordering::Relaxed);
     Ok(bytes)
 }
@@ -304,6 +327,15 @@ pub fn cached_iwd_dirs() -> Vec<PathBuf> {
         .collect::<Vec<_>>();
     dirs.sort();
     dirs
+}
+
+/// Entries inflated whole, and entries inflated only far enough to read a
+/// header.
+pub fn iwd_entry_reads() -> (u64, u64) {
+    (
+        ENTRY_PAYLOAD_READS.load(Ordering::Relaxed),
+        ENTRY_HEADER_READS.load(Ordering::Relaxed),
+    )
 }
 
 pub fn iwd_read_cost() -> (f64, u64, f64) {
@@ -468,6 +500,6 @@ impl IwdSoundIndex {
 
     pub fn read_sound(&self, relative: &str) -> Option<Result<Vec<u8>, String>> {
         let (archive, entry) = self.sounds.get(&sound_key(relative))?;
-        Some(read_pooled_entry(archive, entry))
+        Some(read_pooled_entry(archive, entry, None))
     }
 }

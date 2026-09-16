@@ -51,9 +51,33 @@ pub const FX_GLASS_LANDING_CELL: f32 = 64.0;
 
 pub const FX_GLASS_LANDING_AGGREGATE_MSEC: i32 = 100;
 
+pub const FX_GLASS_STATE_FLAG_DAMAGED: u16 = 1;
+
 pub const FX_GLASS_STATE_FLAG_SHATTERED: u16 = 2;
 
 pub const FX_GLASS_STATE_FLAG_CHILD_CLEAR: u16 = 4;
+
+pub const FX_GLASS_SHATTER_FX_32: &str = "code/glass_shatter_32x32";
+
+pub const FX_GLASS_SHATTER_FX_64: &str = "code/glass_shatter_64x64";
+
+pub const FX_GLASS_SHATTER_FX_PIECE: &str = "code/glass_shatter_piece";
+
+pub fn fx_glass_shatter_fx_name(landing: bool) -> &'static str {
+    if landing {
+        FX_GLASS_SHATTER_FX_PIECE
+    } else {
+        FX_GLASS_SHATTER_FX_64
+    }
+}
+
+pub fn fx_glass_shatter_fx_fallback(landing: bool) -> Option<&'static str> {
+    if landing {
+        None
+    } else {
+        Some(FX_GLASS_SHATTER_FX_32)
+    }
+}
 
 pub const FX_GLASS_LINEAR_VEL_MIN: f32 = 200.0;
 

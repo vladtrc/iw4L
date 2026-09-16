@@ -60,7 +60,54 @@ pub(crate) fn render(out: &mut Vec<String>) {
     settle(&live, out);
     worst(&live, out);
     unclassified(&live, out);
+    overlap(&live, out);
     nesting(&live, out);
+}
+
+/// How much of the frame the render thread and a main schedule were both
+/// inside.
+///
+/// Read off the intervals, not off which frame a render stage says it came
+/// from: a stage that names its origin frame says where its work belongs, not
+/// that the work ran inside that frame's wall. Serialised rendering leaves
+/// this at zero whatever else is true, so it is the line that says whether a
+/// pipelined run actually overlapped anything — and it is not a saving on its
+/// own, because both halves are competing for the same cores.
+fn overlap(live: &[&FrameRow], out: &mut Vec<String>) {
+    let render: u64 = live
+        .iter()
+        .map(|row| row.spans_ns[Span::RenderRenderThreadMs as usize])
+        .sum();
+    if render == 0 {
+        return;
+    }
+    let both: u64 = live
+        .iter()
+        .map(|row| {
+            row.main_covered_ns
+                .saturating_add(row.spans_ns[Span::RenderRenderThreadMs as usize])
+                .saturating_sub(row.covered_ns)
+        })
+        .sum();
+    let frames = live.len() as u64;
+    let overlapped = live
+        .iter()
+        .filter(|row| {
+            row.main_covered_ns
+                .saturating_add(row.spans_ns[Span::RenderRenderThreadMs as usize])
+                > row.covered_ns
+        })
+        .count();
+    out.push(String::new());
+    out.push(format!(
+        "  main/render overlap: {} per frame on average, in {overlapped} of {frames} frames — the part of the wall a main schedule and the render thread were both inside. The render thread itself is {} per frame.",
+        ms(both / frames),
+        ms(render / frames),
+    ));
+    out.push(
+        "  measured from the intervals, not from the frame a render stage names as its origin: the second says where the work belongs, not that it ran inside that frame's wall. Serialised rendering reads zero here whatever else is true."
+            .to_owned(),
+    );
 }
 
 /// The first seconds against the rest. Exact, not histogram midpoints: these
@@ -215,7 +262,7 @@ fn state(row: &FrameRow) -> String {
 fn unclassified(live: &[&FrameRow], out: &mut Vec<String>) {
     let roots: Vec<Span> = stats::snapshot(perf::Phase::Live)
         .into_iter()
-        .filter(|row| row.span != Span::FramesWallFrameMs && row.parent.is_none())
+        .filter(|row| row.span.coverage_root())
         .map(|row| row.span)
         .collect();
     let total: u64 = live
@@ -226,7 +273,7 @@ fn unclassified(live: &[&FrameRow], out: &mut Vec<String>) {
     let truncated = live.iter().filter(|row| row.coverage_overflow).count();
     out.push(String::new());
     out.push(format!(
-        "  unclassified: {} per frame on average — frame wall minus the union of the intervals the parentless spans were open for ({}).",
+        "  unclassified: {} per frame on average — frame wall minus the union of the intervals the frame's declared top-level spans were open for ({}).",
         ms(total / live.len() as u64),
         if roots.is_empty() {
             "none took a sample".to_owned()

@@ -4,7 +4,8 @@ use std::sync::Arc;
 use asset_iw4::size::GFX_PACKED_VERTEX;
 use bevy::prelude::*;
 use fx_iw4::{
-    FX_GLASS_SHARD_LIFETIME_MSEC, FX_GLASS_STATE_FLAG_SHATTERED, fx_glass_def_color_rgba,
+    FX_GLASS_SHARD_LIFETIME_MSEC, FX_GLASS_SHATTERED_SCALE, FX_GLASS_STATE_FLAG_DAMAGED,
+    FX_GLASS_STATE_FLAG_SHATTERED, fx_glass_apply_shattered_uv, fx_glass_def_color_rgba,
     fx_glass_emit_slab, fx_glass_intact_verts, fx_glass_place_origin, fx_glass_place_quat,
     fx_glass_scale_color_alpha, fx_glass_slab_counts, fx_glass_state_def_index,
     fx_glass_state_flags, fx_glass_state_init_index, fx_glass_state_vert_count,
@@ -314,7 +315,8 @@ impl GfxGlassMeshPlan {
             return;
         };
         let flags = fx_glass_state_flags(state);
-        let use_shattered = applied_state == 1 || (flags & FX_GLASS_STATE_FLAG_SHATTERED) != 0;
+        let use_shattered = applied_state == 1
+            || (flags & (FX_GLASS_STATE_FLAG_SHATTERED | FX_GLASS_STATE_FLAG_DAMAGED)) != 0;
         let Some(edge) = glass.material_edge(def_i, use_shattered) else {
             self.skipped_name = self.skipped_name.saturating_add(1);
             *last_why = Some("missing_material_edge");
@@ -349,6 +351,11 @@ impl GfxGlassMeshPlan {
             return;
         };
         cpu.truncate(wrote);
+        if use_shattered {
+            for vert in &mut cpu {
+                vert.uv = fx_glass_apply_shattered_uv(vert.uv, FX_GLASS_SHATTERED_SCALE);
+            }
+        }
         let (need_v, need_i) = fx_glass_slab_counts(wrote, half_thickness);
         if need_v == 0
             || self.vertices.len() + need_v > GFX_GLASS_MESH_VERT_LIMIT

@@ -519,6 +519,8 @@ pub(super) fn draw_exact_colour(
         census.obj_binds_n = Some(colour_run_census.obj_binds);
         census.shell_hits_n = Some(colour_run_census.shell_hits);
         census.shell_misses_n = Some(colour_run_census.shell_misses);
+        census.overlay_const_writes_n = Some(colour_run_census.overlay_const_writes);
+        census.overlay_need_known_n = Some(colour_run_census.overlay_need_known);
         census.smodel_reuse_n = Some(0);
         census.xmodel_reuse_n = Some(0);
         if census.gpu_prepared.is_none() {
@@ -631,12 +633,14 @@ pub(super) fn draw_exact_colour(
             }
             diag::warn!(
                 World,
-                "drawsurf production gpu submit: material_runs={} pass_setups={} obj_binds={} shell_hits={} shell_misses={} ready_draws={ready_draws} refused_draws={refused_draws} exec_refused={exec_refused} authored_state={authored_state:?} unsupported_state={unsupported_state:?} exec_causes={} submit_cause={} submit_cause2={} prepared={} xmodel_prepared={xmodel_draws} codemesh_prepared={codemesh_draws} markmesh_prepared={markmesh_draws} glassmesh_prepared={glassmesh_draws} floatz_blit={floatz_blit} resolved_scene_copy={resolved_scene_copy} viewmodel_held={viewmodel_held} scene_tables(before_linear,before_srgb,after_linear,after_srgb)(2d,cube,3d,samplers)={:?} texture_table_rebuilds={} shadow_table={:?} cached_slot_words={} tex_bind(hit,miss)=({},{}) constant_bind_groups={} indirect(folded,batches,uploaded_words)=({},{},{}) last={last_refusal:?}",
+                "drawsurf production gpu submit: material_runs={} pass_setups={} obj_binds={} shell_hits={} shell_misses={} overlay_const_writes={} overlay_need_known={} ready_draws={ready_draws} refused_draws={refused_draws} exec_refused={exec_refused} authored_state={authored_state:?} unsupported_state={unsupported_state:?} exec_causes={} submit_cause={} submit_cause2={} prepared={} xmodel_prepared={xmodel_draws} codemesh_prepared={codemesh_draws} markmesh_prepared={markmesh_draws} glassmesh_prepared={glassmesh_draws} floatz_blit={floatz_blit} resolved_scene_copy={resolved_scene_copy} viewmodel_held={viewmodel_held} scene_tables(before_linear,before_srgb,after_linear,after_srgb)(2d,cube,3d,samplers)={:?} texture_table_rebuilds={} shadow_table={:?} cached_slot_words={} tex_bind(hit,miss)=({},{}) constant_bind_groups={} indirect(folded,batches,uploaded_words)=({},{},{}) last={last_refusal:?}",
                 colour_run_census.material_runs,
                 colour_run_census.pass_setups,
                 colour_run_census.obj_binds,
                 colour_run_census.shell_hits,
                 colour_run_census.shell_misses,
+                colour_run_census.overlay_const_writes,
+                colour_run_census.overlay_need_known,
                 rank_pair_map(&refusals.exec, 2)
                     .as_deref()
                     .unwrap_or("none"),
@@ -676,6 +680,10 @@ pub(super) fn copy_submit_prepare_ms(
         (perf::Counter::CounterBindGroup0, census.set_bind_group0_n),
         (perf::Counter::CounterBindGroup1, census.set_bind_group1_n),
         (perf::Counter::CounterCmdState, census.set_state_n),
+        (
+            perf::Counter::CounterOverlayConstWrites,
+            census.overlay_const_writes_n,
+        ),
         (perf::Counter::CounterMultiDraws, census.multi_draw_n),
         (
             perf::Counter::CounterMultiDrawCommands,

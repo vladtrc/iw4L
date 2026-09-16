@@ -32,4 +32,8 @@ impl Counter {
     pub fn emit(self, value: f64) {
         crate::stats::count(self, value);
     }
+
+    pub fn emit_at(self, value: f64, frame: u64) {
+        crate::stats::count_at(self, value, frame);
+    }
 }

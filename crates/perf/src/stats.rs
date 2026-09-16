@@ -110,6 +110,12 @@ static COUNTERS: [[Histogram; Counter::COUNT]; Phase::COUNT] =
 static COUNTER_REJECTED: [AtomicU64; Counter::COUNT] =
     [const { AtomicU64::new(0) }; Counter::COUNT];
 
+/// Samples that named the frame they were measured in and found no row for it.
+/// Counted rather than charged to whatever frame is open, which would put a
+/// render stage's cost on the row after the one that paid it.
+static COUNTER_UNATTRIBUTED: [AtomicU64; Counter::COUNT] =
+    [const { AtomicU64::new(0) }; Counter::COUNT];
+
 /// When each span opened, as nanoseconds since [`BASE`] plus one; zero is
 /// closed. Global rather than thread-local on purpose: Bevy runs `FixedUpdate`,
 /// `PreUpdate` and `PostUpdate` on the task pool, so a span's begin and its end
@@ -124,9 +130,14 @@ static OPEN_AT: [AtomicU64; Span::COUNT] = [const { AtomicU64::new(0) }; Span::C
 /// Nesting is a property of a call stack, and a call stack belongs to a thread.
 /// Reading the innermost span out of the global table instead made the render
 /// thread's spans the parents of whatever the main thread opened next, which is
-/// how a schedule-level span acquired a child it never called. A span that
-/// opens with nothing under it on its own thread is a root, and roots are what
-/// the frame's coverage union is built from.
+/// how a schedule-level span acquired a child it never called.
+///
+/// What this stack is *not* is where the frame's coverage roots come from. A
+/// schedule span opens in one system and closes in another, and the executor
+/// is free to run those on two different workers: the close then finds nothing
+/// to pop here and the open is left behind for the rest of the process,
+/// adopting every span that thread opens afterwards. [`Span::coverage_root`]
+/// declares the roots instead, and [`prune`] drops what a migration left here.
 ///
 /// Sixteen is deeper than the tree gets; overflowing it loses the parent name
 /// for that one span rather than corrupting the stack.
@@ -139,6 +150,11 @@ thread_local! {
 
 /// Spans that closed on a thread where they were not the innermost open span.
 static MISNESTED: AtomicU64 = AtomicU64::new(0);
+
+/// Spans whose `end` ran on a thread their `begin` never touched. The executor
+/// moved the two systems apart; the span's own timing is unaffected, and what
+/// it costs is the parent this thread could have named for it.
+static MIGRATED: AtomicU64 = AtomicU64::new(0);
 
 /// The zero of the recorder's clock, fixed by [`arm`] before the first span.
 static BASE: OnceLock<Instant> = OnceLock::new();
@@ -233,35 +249,65 @@ pub(crate) fn end(span: Span) {
     if span == Span::FramesWallFrameMs {
         crate::frames::close(started, now, phase_index() as u8);
     } else {
-        crate::frames::add_span(span, started, now, pop(span));
+        pop(span);
+        crate::frames::add_span(span, started, now, span.coverage_root());
     }
 }
 
-/// Take `span` off this thread's stack and say whether it was a root — nothing
-/// else was open under it here.
+/// Close the frame clock if it is still open, so the last frame of the run is
+/// a row like every other one.
+///
+/// The clock closes and reopens at the top of `First`, which means the frame a
+/// run exits from has never been closed: its spans sit in the accumulators and
+/// reach no row. Called once, from whoever is about to read the table.
+/// `partial` is raised on the row, because the frame was cut at exit and its
+/// wall is not a frame time anyone can compare.
+pub fn close_open_frame() {
+    if !enabled() || OPEN_AT[Span::FramesWallFrameMs as usize].load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    crate::frames::mark(crate::frames::flag::PARTIAL);
+    Span::FramesWallFrameMs.end();
+}
+
+/// Take `span` off this thread's stack, so the spans opened after it are not
+/// left claiming it as their parent.
 ///
 /// A span that is not on top closed out of order, which the Perfetto side would
 /// show as a crossed pair. It is counted and removed wherever it sits rather
 /// than left behind to become a false parent for the rest of the frame.
 ///
-/// A span that is not on this thread's stack at all opened somewhere else, or
-/// deeper than [`DEPTH`]. It is not treated as a root: claiming its interval
-/// covers the frame would hide unattributed time behind a span this thread
-/// cannot vouch for, and unclassified time that is too large is a hole the
-/// reader can see while one that is too small is a hole nobody finds.
+/// A span that is not on this thread's stack at all opened somewhere else — a
+/// schedule whose `begin` and `end` the executor ran on two workers — or
+/// deeper than [`DEPTH`]. That is counted too, and costs nothing but the
+/// parent this thread could have named: what the frame's coverage is built
+/// from is declared by [`Span::coverage_root`], not read out of here.
 #[inline]
-fn pop(span: Span) -> bool {
+fn pop(span: Span) {
     STACK.with(|stack| {
         let mut stack = stack.borrow_mut();
+        prune(&mut stack);
         let Some(at) = stack.iter().rposition(|open| *open == span) else {
-            return false;
+            MIGRATED.fetch_add(1, Ordering::Relaxed);
+            return;
         };
         if at + 1 != stack.len() {
             MISNESTED.fetch_add(1, Ordering::Relaxed);
         }
         stack.remove(at);
-        at == 0
-    })
+    });
+}
+
+/// Drop spans this thread opened and another one closed.
+///
+/// [`OPEN_AT`] is the process-wide answer to "is this span open at all", and a
+/// zero there means somebody closed it. Without this the entry stays on the
+/// thread that opened it for the rest of the run and becomes the parent of
+/// every span that thread opens next — which is how `PreUpdate`, opened in
+/// `First` and closed in `RunFixedMainLoop`, comes to contain `Update`.
+#[inline]
+fn prune(stack: &mut Vec<Span>) {
+    stack.retain(|span| OPEN_AT[*span as usize].load(Ordering::Relaxed) != 0);
 }
 
 /// The span this one is opening inside: the innermost still open *on this
@@ -269,7 +315,11 @@ fn pop(span: Span) -> bool {
 /// enclosing span belongs to another one.
 #[inline]
 fn innermost_open() -> Option<Span> {
-    STACK.with(|stack| stack.borrow().last().copied())
+    STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        prune(&mut stack);
+        stack.last().copied()
+    })
 }
 
 fn remember_parent(span: Span, parent: Option<Span>) {
@@ -287,13 +337,33 @@ fn remember_parent(span: Span, parent: Option<Span>) {
 /// sees the value whether or not a trace is being written.
 #[inline]
 pub(crate) fn count(counter: Counter, value: f64) {
-    if !enabled() {
+    let Some(stored) = store(counter, value) else {
         return;
+    };
+    crate::frames::add_counter(counter, stored);
+}
+
+/// Record a counter against the frame it was measured in rather than the one
+/// that happened to be open when it was reported.
+pub(crate) fn count_at(counter: Counter, value: f64, frame: u64) {
+    let Some(stored) = store(counter, value) else {
+        return;
+    };
+    if !crate::frames::add_counter_at(frame, counter, stored) {
+        COUNTER_UNATTRIBUTED[counter as usize].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Into the histogram, and out with what the frame row stores. `None` when the
+/// value was rejected or nothing is recording.
+fn store(counter: Counter, value: f64) -> Option<u64> {
+    if !enabled() {
+        return None;
     }
     let phase = phase_index();
     if !value.is_finite() || value < 0.0 {
         COUNTER_REJECTED[counter as usize].fetch_add(1, Ordering::Relaxed);
-        return;
+        return None;
     }
     let stored = match counter.unit() {
         Unit::Milliseconds => value * 1e6,
@@ -301,7 +371,7 @@ pub(crate) fn count(counter: Counter, value: f64) {
     };
     let stored = stored as u64;
     COUNTERS[phase][counter as usize].record(stored);
-    crate::frames::add_counter(counter, stored);
+    Some(stored)
 }
 
 #[inline]
@@ -547,6 +617,15 @@ pub struct Anomalies {
     /// Spans that closed while something they did not enclose was still open
     /// under them on the same thread.
     pub misnested: u64,
+    /// Spans whose `begin` and `end` ran on different threads, so no thread
+    /// could name the span they opened inside. Their own timings stand; the
+    /// frame's coverage does not depend on them, because the roots are
+    /// declared.
+    pub migrated: u64,
+    /// Counter samples that named the frame they ran in and found no row for
+    /// it — the frame was dropped, or closed before the recorder was armed.
+    /// They are in the histograms and in no row.
+    pub unattributed_counters: u64,
 }
 
 pub fn anomalies() -> Anomalies {
@@ -554,6 +633,11 @@ pub fn anomalies() -> Anomalies {
         unmatched_end: UNMATCHED_END.load(Ordering::Relaxed),
         reopened: REOPENED.load(Ordering::Relaxed),
         misnested: MISNESTED.load(Ordering::Relaxed),
+        migrated: MIGRATED.load(Ordering::Relaxed),
+        unattributed_counters: COUNTER_UNATTRIBUTED
+            .iter()
+            .map(|n| n.load(Ordering::Relaxed))
+            .sum(),
     }
 }
 

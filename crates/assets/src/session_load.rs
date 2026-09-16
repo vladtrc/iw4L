@@ -859,9 +859,11 @@ pub async fn load_prepared_match(
         let first_gap = batch.stats.first_gap.clone();
         let census = batch.apply(&mut global);
         job.bytes(None, Some(census.final_cpu_bytes))
-            // What the plan prepared, not what survived: `retained + discarded`
-            // is a check on this number and never its definition.
-            .produced(census.produced_bytes + census.shared_bytes)
+            // What the plan prepared and what it served out of another plan's
+            // work, kept apart: only the first is work this plan did. What
+            // survived is `retained + discarded`, a check on the pair and never
+            // its definition.
+            .prepared(census.newly_prepared_bytes, census.reused_bytes)
             .merged(
                 census.final_cpu_bytes,
                 census.discarded_decoded_bytes,
@@ -872,20 +874,43 @@ pub async fn load_prepared_match(
                 census.filled_rows, census.already_decoded, census.discarded_variants,
             ));
         report.push(format!(
-            "{label} image demand: claimed_rows={} canonical_variants={} prepared_variants={} duplicate_claims={} final_cpu_bytes={} produced_bytes={} shared_variants={} shared_bytes={} discarded_decoded_bytes={} discarded_same_payload={}",
+            "{label} image demand: claimed_rows={} canonical_variants={} prepared_variants={} duplicate_claims={} final_cpu_bytes={} newly_prepared_bytes={} reused_variants={} reused_bytes={} discarded_decoded_bytes={} discarded_same_payload={}",
             census.claimed_rows,
             census.canonical_variants,
             census.prepared_variants,
             census.duplicate_claims,
             census.final_cpu_bytes,
-            census.produced_bytes,
-            census.shared_variants,
-            census.shared_bytes,
+            census.newly_prepared_bytes,
+            census.reused_variants,
+            census.reused_bytes,
             census.discarded_decoded_bytes,
             census.discarded_same_payload,
         ));
         if let Some(line) = census.discard_line() {
             report.push(format!("{label} image discard: {line}"));
+        }
+        // Who answered for the claims this plan prepared and the merge threw
+        // away. A count by reason says how much was wasted; this says by
+        // whom, which is what decides whether the claim could have been
+        // resolved before it was prepared.
+        if !census.disputed_winners.is_empty() {
+            report.push(format!(
+                "{label} image dispute: {}",
+                census
+                    .disputed_winners
+                    .iter()
+                    .map(|winner| format!(
+                        "{}={} won_by={} first={}",
+                        winner.kind,
+                        winner.claims,
+                        winner
+                            .plan
+                            .map_or_else(|| "none".to_owned(), |plan| format!("plan{plan}")),
+                        winner.first,
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
         }
         if let Some(gap) = first_gap {
             report.push(format!("{label} claimed image gap: {gap}"));
@@ -1298,6 +1323,10 @@ pub async fn load_prepared_match(
     let (mip_hit, mip_miss, mip_io_ms) = crate::mip_cache_cost();
     report.push(format!(
         "mip cache: hit={mip_hit} miss={mip_miss} io={mip_io_ms:.0}ms"
+    ));
+    let (payload_reads, header_reads) = crate::iwd_entry_reads();
+    report.push(format!(
+        "IWD entry reads: payload={payload_reads} header-only={header_reads} (a header answers whether an image is a cubemap; a payload read is the whole entry inflated)"
     ));
     if let Some(draw) = world.draw.as_ref() {
         let world_mats = draw.batches.iter().filter_map(|batch| {
@@ -1763,6 +1792,15 @@ fn spawn_image_plan(
     job: load_jobs::Job,
 ) -> Option<PendingImages> {
     let plan = plan.filter(|plan| !plan.is_empty())?;
+    // The census names the winner of a disputed claim by plan id, so the id
+    // and the label are printed together once, here, where both are known.
+    diag::info!(
+        Zone,
+        "image plan: plan{} is {label} ({} canonical variants, {} claimed rows)",
+        plan.id(),
+        plan.canonical_variants(),
+        plan.claimed_rows(),
+    );
     let job = job
         .canonical(label)
         .items(plan.canonical_variants() as u64)

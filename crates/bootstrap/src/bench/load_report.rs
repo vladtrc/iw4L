@@ -43,8 +43,11 @@ pub(crate) fn render(bench: &Milestones, command_start: Option<Instant>, out: &m
 /// `service` used to be one number for "a worker had the job", which folded
 /// together the memory ceiling holding a worker back and the decoding itself.
 /// They have opposite fixes: the first is a scheduling parameter, the second is
-/// the decoder. `budget wait` and `decode` are those two, `produced` is what
-/// the plan prepared and `discarded` the part of it the merge had no row for.
+/// the decoder. `budget wait` and `decode` are those two; `prepared` is what
+/// the plan decoded itself, `reused` what it served out of another plan's
+/// payload without decoding anything, and `discarded` the part of the two the
+/// merge had no row for. Only `prepared` is work, so only `prepared` belongs
+/// next to `decode`.
 fn image_plans(out: &mut Vec<String>) {
     let jobs = assets::load_jobs::snapshot();
     let plans: Vec<_> = jobs
@@ -66,7 +69,8 @@ fn image_plans(out: &mut Vec<String>) {
             ("budget wait", Align::Right),
             ("decode", Align::Right),
             ("done→join", Align::Right),
-            ("produced", Align::Right),
+            ("prepared", Align::Right),
+            ("reused", Align::Right),
             ("kept", Align::Right),
             ("discarded", Align::Right),
         ],
@@ -86,7 +90,8 @@ fn image_plans(out: &mut Vec<String>) {
             gap(row.started_at, row.decode_started_at),
             gap(row.decode_started_at, row.finished_at),
             gap(row.finished_at, row.joined_at),
-            size(row.produced_bytes),
+            size(row.prepared_bytes),
+            size(row.reused_bytes),
             size(row.retained_bytes),
             size(row.discarded_bytes),
         ]);
@@ -98,17 +103,27 @@ fn image_plans(out: &mut Vec<String>) {
         plans.len()
     ));
     let (shared, shared_bytes) = assets::shared_variant_census();
+    let (copied, moved) = assets::shared_payload_copy_cost();
     if shared > 0 {
         out.push(format!(
-            "  {shared} prepared variants ({}) were answered out of another plan's work instead of being decoded a second time — same archive entry, same variant.",
+            "  {shared} payloads ({}) were answered out of another asker's decode instead of being read and decoded a second time. Sharing is keyed on the resolved archive entries and the map type, so a different colour space or sampler no longer costs a decode.",
             mib(shared_bytes),
         ));
     } else {
         out.push(
-            "  no prepared variant was shared between plans: every plan resolved its own archive entries, so what one plan discarded was not another's decode repeated."
+            "  no payload was shared between askers: every one resolved its own archive entries, so what one plan discarded was not another's decode repeated."
                 .to_owned(),
         );
     }
+    out.push(format!(
+        "  placing the images moved {} out of the decode's own buffers and copied {}: the last asker for a payload takes it, and only an asker somebody else is still pointing at pays the memcpy. The copied figure is duplicate materialization; the moved one is bytes that had to exist either way.",
+        mib(moved),
+        mib(copied),
+    ));
+    let (payload_reads, header_reads) = assets::iwd_entry_reads();
+    out.push(format!(
+        "  {payload_reads} archive entries were inflated whole and {header_reads} only as far as the IWI header, which is where the cubemap question is answered. A 2D image whose mips the prepared cache already holds is a header read and no payload read at all."
+    ));
 }
 
 fn waterfall(bench: &Milestones, command_start: Option<Instant>, out: &mut Vec<String>) {

@@ -190,6 +190,11 @@ fn pump_playback(
                     clock.tick = played.snapshot.tick.0;
                     clock.time_ms = ServerTime::from_tick(played.snapshot.tick).ms();
                 }
+                // What this frame is about to present. Two runs of the same
+                // clip at different frame rates land on different frame
+                // indices, so wall time cannot pair their frames and the demo
+                // state can.
+                perf::frames::set_replay_tick(u64::from(played.snapshot.tick.0));
                 received.0.push_back(ReceivedTick {
                     snapshot: played.snapshot,
                     frame: played.frame,

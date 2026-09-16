@@ -155,6 +155,12 @@ pub struct WorldScene {
 
     pub exact_material_images: Vec<Option<Image>>,
 
+    /// Which prepared variant each of those images is, where it came from a
+    /// decode plan. Two slots carrying the same variant hold byte-identical
+    /// images under the same sampler and colour space, so the upload gives
+    /// them one asset and a cloned handle instead of two textures.
+    pub exact_material_variants: Vec<Option<assets::ImageVariantId>>,
+
     pub exact_material_names: Vec<String>,
     pub lightmaps: Vec<Option<WorldLightmap>>,
     pub reflection_probes: Vec<Option<Image>>,
@@ -662,6 +668,7 @@ impl WorldScene {
                 crate::assemble::drawsurf::RuntimeMaterialCatalog::default(),
             ),
             exact_material_images: Vec::new(),
+            exact_material_variants: Vec::new(),
             exact_material_names: Vec::new(),
             lightmaps: Vec::new(),
             reflection_probes: Vec::new(),
@@ -749,6 +756,7 @@ impl WorldScene {
                 crate::assemble::drawsurf::RuntimeMaterialCatalog::default(),
             ),
             exact_material_images: Vec::new(),
+            exact_material_variants: Vec::new(),
             exact_material_names: Vec::new(),
             lightmaps: draw.lightmaps,
             reflection_probes: draw.reflection_probes,
@@ -1064,6 +1072,11 @@ pub fn world_scene_from_draw(
         .images
         .iter_mut()
         .map(|image| image.decoded.take())
+        .collect::<Vec<_>>();
+    let exact_material_variants = global_materials
+        .images
+        .iter()
+        .map(|image| image.decoded_variant)
         .collect::<Vec<_>>();
     let exact_material_names: Vec<String> = global_materials
         .images
@@ -1489,6 +1502,7 @@ pub fn world_scene_from_draw(
         WorldScene::stamp_surface_materials(cull, &scene.runtime_material_catalog)?;
     }
     scene.exact_material_images = exact_material_images;
+    scene.exact_material_variants = exact_material_variants;
     scene.exact_material_names = exact_material_names;
     diag::info!(
         World,

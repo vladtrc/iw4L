@@ -13,8 +13,9 @@ use fx::{
 };
 use fx_iw4::{
     FX_ELEM_VEL_LOCAL, FX_ELEM_VEL_WORLD, FX_GLASS_SHATTER_FX_PER_FRAME, fx_elem_run_mode,
-    fx_elem_spawn_offset_mode, fx_laser_from_tag_orientation, fx_tail_anchor_origin,
-    fx_tail_sprite_axes, fx_tail_sprite_full_extent,
+    fx_elem_spawn_offset_mode, fx_glass_shatter_fx_fallback, fx_glass_shatter_fx_name,
+    fx_laser_from_tag_orientation, fx_tail_anchor_origin, fx_tail_sprite_axes,
+    fx_tail_sprite_full_extent,
 };
 use net::{
     AuthorityLoadHold, CEntity, CEntitySlots, CgPlayerDrawGate, CgameActive, ClientPredictionState,
@@ -249,6 +250,7 @@ fn tick_fx_non_dependent_update(
         );
     }
     let mut shatter_fx = 0u32;
+    let mut pending_fx = Vec::new();
     for ev in host.0.glass.take_events() {
         if !ev.play_oneshot {
             continue;
@@ -272,6 +274,7 @@ fn tick_fx_non_dependent_update(
             origin_inches: Some(ev.origin),
             snd_ent: Some(fx_iw4::FX_ENTITYNUM_WORLD),
         }));
+        pending_fx.push(ev);
     }
     let Some(catalog) = catalog else {
         return;
@@ -287,6 +290,36 @@ fn tick_fx_non_dependent_update(
     let _fx_update = perf::Span::HostFxUpdateCpuMs.enter();
 
     elem_infos.0.sync(&catalog.0);
+    if !pending_fx.is_empty() {
+        let world = fx_world.view();
+        let scene = world.as_ref().map(|s| s as &dyn FxScene);
+        for ev in pending_fx {
+            let axis = axis_from_hit_normal(ev.normal);
+            let name = fx_glass_shatter_fx_name(ev.landing);
+            let spawned = play_named_oriented_in_world(
+                &mut host.0,
+                &catalog.0,
+                &elem_infos.0,
+                name,
+                ev.origin,
+                axis,
+                scene,
+            );
+            if spawned.is_none()
+                && let Some(fallback) = fx_glass_shatter_fx_fallback(ev.landing)
+            {
+                let _ = play_named_oriented_in_world(
+                    &mut host.0,
+                    &catalog.0,
+                    &elem_infos.0,
+                    fallback,
+                    ev.origin,
+                    axis,
+                    scene,
+                );
+            }
+        }
+    }
     tick_fx_non_dependent(
         &mut host.0,
         &catalog.0,

@@ -81,6 +81,7 @@ pub struct FxGlassSystemHost {
 pub struct GlassPresentationEvent {
     pub pane: u32,
     pub origin: [f32; 3],
+    pub normal: [f32; 3],
     pub cause: u8,
     pub play_oneshot: bool,
     pub landing: bool,
@@ -572,7 +573,7 @@ impl FxGlassSystemHost {
                 self.free(piece);
             }
             self.compact_geo();
-            self.push_break_event(piece, origin, play_oneshot, cause, revision);
+            self.push_break_event(piece, origin, axis[2], play_oneshot, cause, revision);
             self.moved = true;
             return true;
         }
@@ -585,7 +586,7 @@ impl FxGlassSystemHost {
             cause,
         );
         self.compact_geo();
-        self.push_break_event(piece, origin, play_oneshot, cause, revision);
+        self.push_break_event(piece, origin, axis[2], play_oneshot, cause, revision);
         self.moved = true;
         true
     }
@@ -594,6 +595,7 @@ impl FxGlassSystemHost {
         &mut self,
         pane: u32,
         origin: [f32; 3],
+        normal: [f32; 3],
         play_oneshot: bool,
         cause: u8,
         revision: u32,
@@ -616,6 +618,7 @@ impl FxGlassSystemHost {
         self.pending_events.push(GlassPresentationEvent {
             pane,
             origin,
+            normal,
             cause,
             play_oneshot,
             landing: false,
@@ -1013,11 +1016,11 @@ impl FxGlassSystemHost {
                         match mode {
                             CONTACT_BOUNCE => {
                                 if hit.normal[2] > 0.7 {
-                                    self.note_landing(hit.end);
+                                    self.note_landing(hit.end, hit.normal);
                                 }
                                 if self.bounce_used.get(piece).copied().unwrap_or(false) {
                                     if hit.normal[2] > 0.7 {
-                                        self.note_landing(hit.end);
+                                        self.note_landing(hit.end, hit.normal);
                                         if self.settled_count() >= FX_GLASS_SETTLED_CAP {
                                             expired.push(piece as u32);
                                         } else {
@@ -1037,7 +1040,7 @@ impl FxGlassSystemHost {
                                             }
                                         }
                                     } else {
-                                        self.note_landing(hit.end);
+                                        self.note_landing(hit.end, hit.normal);
                                         expired.push(piece as u32);
                                     }
                                     killed = true;
@@ -1089,7 +1092,7 @@ impl FxGlassSystemHost {
                                 continue;
                             }
                             _ => {
-                                self.note_landing(hit.end);
+                                self.note_landing(hit.end, hit.normal);
                                 expired.push(piece as u32);
                                 killed = true;
                                 break;
@@ -1168,7 +1171,7 @@ impl FxGlassSystemHost {
         None
     }
 
-    fn note_landing(&mut self, origin: [f32; 3]) {
+    fn note_landing(&mut self, origin: [f32; 3], normal: [f32; 3]) {
         let cell = [
             (origin[0] / FX_GLASS_LANDING_CELL) as i32,
             (origin[1] / FX_GLASS_LANDING_CELL) as i32,
@@ -1184,6 +1187,7 @@ impl FxGlassSystemHost {
         self.pending_events.push(GlassPresentationEvent {
             pane: 0,
             origin,
+            normal,
             cause: 0,
             play_oneshot: true,
             landing: true,
@@ -1550,6 +1554,7 @@ mod tests {
         let events = host.take_events();
         assert_eq!(events.len(), 1);
         assert!(!events[0].play_oneshot);
+        assert!((events[0].normal[2] - 1.0).abs() < 1e-4);
     }
 
     #[test]
@@ -1728,9 +1733,9 @@ mod tests {
         ));
         assert_eq!(host.take_events().len(), 1);
         assert_eq!(host.last_event_revision[0], 4);
-        host.push_break_event(0, [0.0; 3], true, 0, 4);
+        host.push_break_event(0, [0.0; 3], [0.0, 0.0, 1.0], true, 0, 4);
         assert!(host.take_events().is_empty());
-        host.push_break_event(0, [0.0; 3], true, 0, 5);
+        host.push_break_event(0, [0.0; 3], [0.0, 0.0, 1.0], true, 0, 5);
         assert_eq!(host.take_events().len(), 1);
     }
 

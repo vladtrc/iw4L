@@ -26,14 +26,13 @@ use crate::bench::table::{Align, Table};
 
 /// CPU stage timings, in the order the work happens rather than by size: a
 /// reader is looking for where a stage grew, and the sequence is the context.
-const CPU_MS: [Counter; 8] = [
+const CPU_MS: [Counter; 7] = [
     Counter::RenderSubmitPrepareMs,
     Counter::RenderSubmitGatherMs,
     Counter::RenderSubmitArenaMs,
     Counter::RenderSubmitRecordMs,
     Counter::RenderSubmitSunMs,
     Counter::RenderGraphRenderMs,
-    Counter::RenderGraphSubmitMs,
     Counter::RenderGraphPresentMs,
 ];
 
@@ -68,15 +67,18 @@ const PHASE_MS: [Counter; 5] = [
 /// the schedule put something there — it is not evidence that the HUD system
 /// on either side of it was slow, and reading it as one is how an earlier
 /// iteration set out to rewrite a HUD whose bodies were short.
-const SCHEDULE_MS: [Counter; 2] = [
+const SCHEDULE_MS: [Counter; 3] = [
     Counter::HudSurfacesScheduleMs,
     Counter::HudStageMaxScheduleMs,
+    Counter::RenderGraphSubmitIntervalMs,
 ];
 
 /// Per-frame work: what the CPU asked the GPU to do, and what it allocated
 /// doing it.
-const WORK: [Counter; 12] = [
+const WORK: [Counter; 14] = [
     Counter::HudTessJobs,
+    Counter::RenderGraphSubmitPendingN,
+    Counter::CounterOverlayConstWrites,
     Counter::CounterDraws,
     Counter::CounterDipsColour,
     Counter::CounterDipsSun,
@@ -123,9 +125,17 @@ pub(crate) fn render(wall: &SpanStats, out: &mut Vec<String>) {
     );
 
     out.push(String::new());
-    out.push("  HUD schedule gaps, wall (ms)".to_owned());
+    out.push("  schedule gaps, wall (ms)".to_owned());
     ms_table(&stats, &SCHEDULE_MS, wall, frames, Share::Frame, out);
     hud_stage(&stats, out);
+    out.push(
+        "    `graph_submit_schedule_interval` is the wall from the end of the render graph's Render set to the start of its Finish set. Inside it are two of bevy's own exclusive systems — `submit_pending_command_buffers`, which finishes every pending encoder and then calls `Queue::submit`, and `handle_uncovered_swap_chains` — and whatever else the executor put there. It is not a `Queue::submit` body; `graph_submit_pending` in the work table is how many buffers and unfinished encoders it was handed."
+            .to_owned(),
+    );
+    out.push(
+        "    and the count does not say where the time went: it sums finished buffers and unfinished encoders, and says nothing about how many commands or resources each carries, what `finish` costs, what locks or callbacks the driver serviced, or whether the thread was descheduled. The span that would answer it is bevy's own `queue_submit`, around `RenderQueue::submit` and after the buffers have been taken; this capture does not contain it. A build with the `bevy-trace` feature records it, and `scheduling.bevy_tracing` in the manifest says whether this run was one — a run where it reads false cannot have measured a submit body whatever this interval shows."
+            .to_owned(),
+    );
 
     out.push(String::new());
     out.push(

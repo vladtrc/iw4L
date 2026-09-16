@@ -5,7 +5,7 @@ use replay::{ReplayDiagnostics, ReplayPlayback};
 use session::{PendingConsoleLines, StartupCommands};
 
 use crate::debug_move::update_showpos_overlay;
-use crate::feature_dispatch::{DebugPosOverlay, bookend_wall_frame};
+use crate::feature_dispatch::DebugPosOverlay;
 use crate::plugin::ConsoleCommandQueue;
 use crate::{ConsoleLine, ConsoleQueue};
 
@@ -94,11 +94,10 @@ pub(crate) fn register_diagnostics_mirror(app: &mut App) {
     app.add_systems(
         Update,
         (
-            bookend_wall_frame,
             mirror_runtime_diagnostics,
             drain_pending_console_lines,
             finish_replay_playback,
-            update_showpos_overlay.after(bookend_wall_frame),
+            update_showpos_overlay,
         )
             .in_set(ClientSet::Diag),
     );
