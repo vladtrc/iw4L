@@ -19,20 +19,29 @@ pub const TS_T5_COLOR0_MAP: u8 = 0x0C;
 pub const TS_T5_COLOR15_MAP: u8 = 0x1B;
 pub const TS_T5_THROW_MAP: u8 = 0x1C;
 
-/// Which prepared variant a decoded image is: the source bytes it came from
-/// and the recipe applied to them.
+/// Which prepared variant a decoded image is: the bytes it decodes to, and the
+/// image built around those bytes.
 ///
 /// Two claims on the same *name* are not the same image — IW4, IW5 and T5 each
 /// ship their own `hud_teamcaret` — so a name is not enough to say whether one
 /// plan's decode could have answered another's. This is, and it travels on the
 /// row so the merge can say which of the two happened to a claim it dropped:
 /// the same bytes prepared twice, or a genuine override by another source.
+///
+/// The two halves are separate because only one of them is the decode. The
+/// payload is what `decode` reads and produces; `usage` is everything the
+/// decoded bytes are then wrapped in. A claim that matches on `payload` and
+/// differs on `usage` wanted the very same texels — it is repeated work, and
+/// the census has to be able to say so rather than call it another source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ImageVariantId {
-    /// Digest of the resolved archive entries the decode read, in order.
-    pub source: u64,
-    /// The decode options that change the prepared payload.
-    pub recipe: u32,
+    /// Digest of everything that decides a byte of the decoded payload: the
+    /// resolved archive entries the decode reads, in order, and the map type,
+    /// which chooses between the 2D and the cubemap decode.
+    pub payload: u64,
+    /// The options that change no byte of the payload but do change the image
+    /// wrapped around it: the view's colour space and the sampler.
+    pub usage: u32,
 }
 
 #[derive(Clone, Debug)]

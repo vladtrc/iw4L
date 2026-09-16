@@ -676,13 +676,18 @@ fn decode_requests_in_parallel(
     .collect()
 }
 
-/// What a decode reads and what it does to it, as one identity.
+/// What a decode reads and what is built around the result, as one identity.
 ///
-/// The source half is the ordered list of archive entries the decode would
+/// The payload half is the ordered list of archive entries the decode would
 /// try, by CRC, size and name — not the image's name, which three games spell
-/// the same and fill differently. The recipe half is every option that changes
-/// the prepared payload: two rows that want the same entry as a normal map and
-/// as a colour map are two variants and must not share a buffer.
+/// the same and fill differently — plus the map type, because a cubemap and a
+/// 2D image read the same entry into different bytes.
+///
+/// The usage half is the rest, and none of it reaches `image.data`: a colour
+/// space picks `Rgba8Unorm` over `Rgba8UnormSrgb` for the same texels, and a
+/// sampler is not a property of the image at all. Keeping it in the identity
+/// is what lets the merge tell "the same texels, wanted twice" from "another
+/// game shipped a different image under this name".
 fn variant_of(
     index: &IwdIndex,
     source: &AuthoredImage,
@@ -690,22 +695,19 @@ fn variant_of(
     (sampler_state, is_normal, alpha_test_color, force_linear): (u8, bool, bool, bool),
 ) -> Option<ImageVariantId> {
     let candidates = index.0.image_candidates(name)?;
-    let mut digest = crate::fnv1a64(name.as_bytes());
+    let mut payload = crate::fnv1a64(name.as_bytes());
     for candidate in candidates {
-        digest = crate::fnv1a64_more(digest, &candidate.crc32().to_le_bytes());
-        digest = crate::fnv1a64_more(digest, &candidate.size().to_le_bytes());
-        digest = crate::fnv1a64_more(digest, candidate.entry().as_bytes());
+        payload = crate::fnv1a64_more(payload, &candidate.crc32().to_le_bytes());
+        payload = crate::fnv1a64_more(payload, &candidate.size().to_le_bytes());
+        payload = crate::fnv1a64_more(payload, candidate.entry().as_bytes());
     }
-    let recipe = u32::from(sampler_state)
+    payload = crate::fnv1a64_more(payload, &[source.map_type]);
+    let usage = u32::from(sampler_state)
         | u32::from(is_normal) << 8
         | u32::from(alpha_test_color) << 9
         | u32::from(force_linear) << 10
-        | u32::from(source.use_srgb_reads) << 11
-        | u32::from(source.map_type) << 12;
-    Some(ImageVariantId {
-        source: digest,
-        recipe,
-    })
+        | u32::from(source.use_srgb_reads) << 11;
+    Some(ImageVariantId { payload, usage })
 }
 
 fn decode_one_request(
@@ -1879,12 +1881,20 @@ pub struct ImageMergeCensus {
     pub shared_bytes: u64,
     pub shared_variants: usize,
     /// Of the discarded variants, how many the winning row had prepared from
-    /// the *same* source and recipe — the same bytes twice — against how many
-    /// were genuinely answered by a different source, and how many the merge
+    /// the identical variant — the same bytes twice — against how many were
+    /// genuinely answered by a different source, and how many the merge
     /// answered from an inline body.
     pub discarded_same_variant: usize,
     pub discarded_overridden: usize,
     pub discarded_inline: usize,
+    /// Of the discards the census would otherwise call overridden, how many
+    /// decoded the *same payload* as the winner and differed only in the
+    /// colour space or the sampler wrapped around it: duplicate decodes that
+    /// sharing cannot catch while the wrapping lives inside the `Image`.
+    pub discarded_same_payload: usize,
+    /// A discarded name whose winner holds the same payload under a different
+    /// wrapping.
+    pub first_same_payload: Option<String>,
     /// Of the same-variant discards, how many cost nothing because the buffer
     /// was shared rather than decoded twice.
     pub discarded_shared: usize,
@@ -1909,16 +1919,20 @@ impl ImageMergeCensus {
             .collect::<Vec<_>>()
             .join(" ");
         Some(format!(
-            "{} variants, {} bytes ({} same source+recipe of which {} cost nothing by sharing, {} overridden by another source, {} by an inline body): {reasons}{}{}",
+            "{} variants, {} bytes ({} same variant of which {} cost nothing by sharing, {} same payload under another wrapping, {} overridden by another source, {} by an inline body): {reasons}{}{}{}",
             self.discarded_variants,
             self.discarded_decoded_bytes,
             self.discarded_same_variant,
             self.discarded_shared,
+            self.discarded_same_payload,
             self.discarded_overridden,
             self.discarded_inline,
             self.first_discarded
                 .as_ref()
                 .map_or_else(String::new, |name| format!(" first={name}")),
+            self.first_same_payload
+                .as_ref()
+                .map_or_else(String::new, |name| format!(" first_same_payload={name}")),
             self.first_override
                 .as_ref()
                 .map_or_else(String::new, |name| format!(" first_override={name}")),
@@ -2257,6 +2271,12 @@ impl DecodedImageBatch {
                         census.discarded_shared += 1;
                     }
                 }
+                Winner::SamePayload => {
+                    census.discarded_same_payload += 1;
+                    census
+                        .first_same_payload
+                        .get_or_insert_with(|| name.clone());
+                }
                 Winner::OtherSource => {
                     census.discarded_overridden += 1;
                     census.first_override.get_or_insert(name);
@@ -2281,9 +2301,15 @@ impl DecodedImageBatch {
 /// images under one name, where preparing both and keeping one is a
 /// *scheduling* question and not a duplicate at all.
 enum Winner {
-    /// The kept row holds the same source and recipe this plan prepared.
+    /// The kept row holds the identical variant this plan prepared.
     SameVariant,
-    /// The kept row holds a different variant: another source answered.
+    /// The kept row decoded the same payload and wrapped it differently: the
+    /// same texels were read twice, and only the colour space or the sampler
+    /// told the two claims apart. Avoidable work that sharing cannot take,
+    /// because the buffer that would be shared is inside an `Image` that
+    /// carries the wrapping with it.
+    SamePayload,
+    /// The kept row holds a different payload: another source answered.
     OtherSource,
     /// The kept row carries its own inline body.
     InlineBody,
@@ -2304,6 +2330,7 @@ fn winner_of(catalog: &MaterialDefinitions, name: &str, ours: Option<ImageVarian
     }
     match (kept.decoded_variant, ours) {
         (Some(theirs), Some(ours)) if theirs == ours => Winner::SameVariant,
+        (Some(theirs), Some(ours)) if theirs.payload == ours.payload => Winner::SamePayload,
         (Some(_), Some(_)) => Winner::OtherSource,
         _ => Winner::Unknown,
     }
@@ -2447,10 +2474,10 @@ mod tests {
     }
 
     #[test]
-    fn the_same_source_and_recipe_is_prepared_once() {
+    fn the_same_payload_and_usage_is_prepared_once() {
         let variant = ImageVariantId {
-            source: 0xfeed_face,
-            recipe: 7,
+            payload: 0xfeed_face,
+            usage: 7,
         };
         let first = share_or_decode(variant, 0, one_pixel);
         let first = arc_of(first);
@@ -2472,19 +2499,21 @@ mod tests {
     }
 
     #[test]
-    fn a_different_recipe_over_the_same_source_is_a_different_variant() {
-        // Same archive entry wanted as a colour map and as a normal map: two
-        // prepared payloads, and sharing one between them would be wrong.
-        let source = 0x1234_5678;
+    fn a_different_usage_over_the_same_payload_is_a_different_variant() {
+        // Same texels wanted as a colour map and as a normal map. The bytes
+        // are identical; the `Image` built around them is not, because it
+        // carries the colour space, so the two cannot share one buffer while
+        // the wrapping lives inside it.
+        let payload = 0x1234_5678;
         let colour = arc_of(share_or_decode(
-            ImageVariantId { source, recipe: 0 },
+            ImageVariantId { payload, usage: 0 },
             0,
             one_pixel,
         ));
         let normal = arc_of(share_or_decode(
             ImageVariantId {
-                source,
-                recipe: 1 << 8,
+                payload,
+                usage: 1 << 8,
             },
             0,
             one_pixel,
@@ -2492,13 +2521,67 @@ mod tests {
         assert!(!Arc::ptr_eq(&colour, &normal));
     }
 
+    fn undecoded_row(name: &str) -> AuthoredImage {
+        AuthoredImage {
+            name: crate::AssetRef::decode(name),
+            map_type: 0,
+            semantic: 0,
+            category: 0,
+            use_srgb_reads: false,
+            width: 1,
+            height: 1,
+            depth: 1,
+            level_count: 1,
+            format: 21,
+            payload: Vec::new(),
+            decoded: None,
+            decoded_variant: None,
+            pending_decode: None,
+        }
+    }
+
+    #[test]
+    fn a_winner_holding_the_same_texels_is_not_an_override() {
+        // The sampler and the colour space are not the image: this runtime's
+        // texture table binds a sampler state beside a texture, not inside it.
+        // So two claims that differ only there read the same archive entry into
+        // the same bytes, and calling that an override hides a duplicate decode
+        // behind a number that says there is nothing to share.
+        let mut catalog = MaterialDefinitions::default();
+        let mut kept = undecoded_row("~-white");
+        kept.decoded = Some(Image::default());
+        kept.decoded_variant = Some(ImageVariantId {
+            payload: 11,
+            usage: 0,
+        });
+        catalog.images.push(kept);
+
+        let ours = Some(ImageVariantId {
+            payload: 11,
+            usage: 1 << 8,
+        });
+        assert!(matches!(
+            winner_of(&catalog, "~-white", ours),
+            Winner::SamePayload
+        ));
+
+        let other = Some(ImageVariantId {
+            payload: 22,
+            usage: 0,
+        });
+        assert!(matches!(
+            winner_of(&catalog, "~-white", other),
+            Winner::OtherSource
+        ));
+    }
+
     #[test]
     fn a_variant_nobody_holds_any_more_is_decoded_again() {
         // The registry keeps weak handles, so the corpus does not stay resident
         // for the life of the process once the batches holding it are gone.
         let variant = ImageVariantId {
-            source: 0xdead_beef,
-            recipe: 0,
+            payload: 0xdead_beef,
+            usage: 0,
         };
         drop(arc_of(share_or_decode(variant, 0, one_pixel)));
         let again = share_or_decode(variant, 0, one_pixel);
@@ -2513,8 +2596,8 @@ mod tests {
     #[test]
     fn a_decode_that_fails_does_not_park_the_next_asker() {
         let variant = ImageVariantId {
-            source: 0x0bad_0bad,
-            recipe: 0,
+            payload: 0x0bad_0bad,
+            usage: 0,
         };
         let gap = share_or_decode(variant, 0, || ImageOutcome::Missing {
             gap: "absent".to_owned(),

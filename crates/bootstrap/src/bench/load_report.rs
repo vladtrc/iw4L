@@ -100,7 +100,7 @@ fn image_plans(out: &mut Vec<String>) {
     let (shared, shared_bytes) = assets::shared_variant_census();
     if shared > 0 {
         out.push(format!(
-            "  {shared} prepared variants ({}) were answered out of another plan's work instead of being decoded a second time — same archive entry, same recipe.",
+            "  {shared} prepared variants ({}) were answered out of another plan's work instead of being decoded a second time — same archive entry, same variant.",
             mib(shared_bytes),
         ));
     } else {

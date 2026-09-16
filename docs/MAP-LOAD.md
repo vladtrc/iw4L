@@ -27,8 +27,8 @@ goes **before** the map — its techset tables are needed before
 (world, one material population, clip, weapons, catalogs and `PreparedMap`).
 
 A walk enqueues its own image plan the moment it is ready, and the catalog keeps
-one row per image name. Two plans resolving the *same* archive entry with the
-same recipe share one decode; a name three games spell alike but fill
+one row per image name. Two plans resolving the *same* archive entry into the
+same payload share one decode; a name three games spell alike but fill
 differently is an override, not a duplicate, and `load_jobs.csv`
 ([`BENCH.md`](BENCH.md)) counts the two apart. The per-game adapter is
 `assets::lane` (`ZoneGame` → iw4/iw5/t5); a lane gap is a typed `LaneGap`, never

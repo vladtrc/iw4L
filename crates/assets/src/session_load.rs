@@ -872,7 +872,7 @@ pub async fn load_prepared_match(
                 census.filled_rows, census.already_decoded, census.discarded_variants,
             ));
         report.push(format!(
-            "{label} image demand: claimed_rows={} canonical_variants={} prepared_variants={} duplicate_claims={} final_cpu_bytes={} produced_bytes={} shared_variants={} shared_bytes={} discarded_decoded_bytes={}",
+            "{label} image demand: claimed_rows={} canonical_variants={} prepared_variants={} duplicate_claims={} final_cpu_bytes={} produced_bytes={} shared_variants={} shared_bytes={} discarded_decoded_bytes={} discarded_same_payload={}",
             census.claimed_rows,
             census.canonical_variants,
             census.prepared_variants,
@@ -882,6 +882,7 @@ pub async fn load_prepared_match(
             census.shared_variants,
             census.shared_bytes,
             census.discarded_decoded_bytes,
+            census.discarded_same_payload,
         ));
         if let Some(line) = census.discard_line() {
             report.push(format!("{label} image discard: {line}"));
