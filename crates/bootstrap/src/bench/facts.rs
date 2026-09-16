@@ -118,6 +118,7 @@ pub(crate) fn collect(
         // threads the compute pool was built with.
         compute_threads: ComputeTaskPool::try_get().map(|pool| pool.thread_num()),
         bevy_tracing: cfg!(feature = "bevy-trace"),
+        frame_latency_requested: crate::plugins::frame_latency(),
     };
     let _ = FACTS.set(facts);
 }

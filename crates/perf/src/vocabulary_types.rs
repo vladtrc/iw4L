@@ -67,6 +67,15 @@ pub enum Counter {
     /// began: what the one number above had to finish and submit.
     RenderGraphSubmitPendingN,
     RenderGraphPresentMs,
+    /// How long the state this render frame drew had been extracted by the
+    /// time the render graph finished with it, and how many main frames the
+    /// main world had opened since. Zero frames behind is a render world
+    /// running in line with the main one; one or more is a pipelined render
+    /// world drawing an older state. Neither is input-to-photon: it stops
+    /// where the graph does, one step before the present call, and the
+    /// compositor and the display are further outside still.
+    RenderPresentedStateAgeMs,
+    RenderPresentedFramesBehind,
 
     /// Code-constant writes the material overlay made for the colour list.
     /// Work the frame did to fill values a shader may or may not read; it
@@ -254,6 +263,8 @@ impl Counter {
         Self::RenderGraphSubmitIntervalMs,
         Self::RenderGraphSubmitPendingN,
         Self::RenderGraphPresentMs,
+        Self::RenderPresentedStateAgeMs,
+        Self::RenderPresentedFramesBehind,
         Self::CounterOverlayConstWrites,
         Self::RenderSubmitSunMs,
         Self::RenderSubmitGatherMs,
@@ -305,6 +316,8 @@ impl Counter {
             Self::RenderGraphSubmitIntervalMs => "graph_submit_schedule_interval",
             Self::RenderGraphSubmitPendingN => "graph_submit_pending",
             Self::RenderGraphPresentMs => "graph_present",
+            Self::RenderPresentedStateAgeMs => "presented_state_age",
+            Self::RenderPresentedFramesBehind => "presented_frames_behind",
             Self::CounterOverlayConstWrites => "overlay_const_writes",
             Self::RenderSubmitSunMs => "submit_sun",
             Self::RenderSubmitGatherMs => "submit_gather",
@@ -345,6 +358,7 @@ impl Counter {
             Self::RenderGraphRenderMs
             | Self::RenderGraphSubmitIntervalMs
             | Self::RenderGraphPresentMs
+            | Self::RenderPresentedStateAgeMs
             | Self::RenderSubmitSunMs
             | Self::RenderSubmitGatherMs
             | Self::RenderSubmitPrepareMs

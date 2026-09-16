@@ -719,8 +719,12 @@ impl ZoneLane for Iw5Lane {
         let mut pending_images = None;
         if decode_color_maps {
             let stage = progress.stage("planning IW5 common_mp material images");
-            let (inline, plan) =
-                crate::material_images::plan_material_color_maps(path, &mut materials, &stage);
+            let (inline, plan) = crate::material_images::plan_material_color_maps(
+                path,
+                &mut materials,
+                &stage,
+                crate::session_load::load_pool(),
+            );
             report.push(format!(
                 "common_mp IW5 IWD color maps: {} claimed for the merged pool, {} in-zone bodies decoded here ({} missing, {} unsupported)",
                 plan.len(),

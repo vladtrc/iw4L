@@ -6,9 +6,13 @@ use super::residency::GpuStream;
 
 const ARG_WORDS: usize = 5;
 
+/// Whether this run asked for the indirect path.
+///
+/// Read once, through the same rule as every other switch a paired run is
+/// alternated across: `IW4L_MULTI_DRAW=0` turns it off.
 pub(super) fn multi_draw_requested() -> bool {
     static REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *REQUESTED.get_or_init(|| std::env::var_os("IW4L_MULTI_DRAW").is_some())
+    *REQUESTED.get_or_init(|| perf::switch("IW4L_MULTI_DRAW"))
 }
 
 #[derive(bevy::prelude::Resource, Default)]

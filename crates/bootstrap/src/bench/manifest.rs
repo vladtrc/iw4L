@@ -62,6 +62,12 @@ pub(crate) struct RuntimeFacts {
     /// different answers here are not comparable.
     pub(crate) pipelined_rendering: Option<bool>,
     pub(crate) compute_threads: Option<usize>,
+    /// Frames the surface was *asked* to let the CPU run ahead of the GPU.
+    /// wgpu treats it as a hint and a backend may clamp it — on Vulkan it is
+    /// tied to the swapchain image count — so this is the request and not the
+    /// grant, and a pair of runs across it is only comparable on what each one
+    /// asked for.
+    pub(crate) frame_latency_requested: u32,
     /// Whether this binary was built with Bevy's own `tracing` spans on. Off
     /// is the normal build and the one a timed run uses; on is a diagnostic
     /// build where the spans inside the render graph — the `queue_submit`
@@ -143,6 +149,7 @@ pub(crate) fn build(facts: &RuntimeFacts, run_id: Option<&str>, artifacts: &Path
         "scheduling": {
             "pipelined_rendering": facts.pipelined_rendering,
             "compute_threads": facts.compute_threads,
+            "frame_latency_requested": facts.frame_latency_requested,
             "bevy_tracing": facts.bevy_tracing,
         },
         "threads": threads(),

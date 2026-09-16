@@ -108,6 +108,48 @@ fn overlap(live: &[&FrameRow], out: &mut Vec<String>) {
         "  measured from the intervals, not from the frame a render stage names as its origin: the second says where the work belongs, not that it ran inside that frame's wall. Serialised rendering reads zero here whatever else is true."
             .to_owned(),
     );
+    presented_age(out);
+}
+
+/// How old the state on the screen was, as far as the process can see it.
+///
+/// The other half of the pipelining pair. Overlap is what it buys; this is
+/// what it costs: the render world presents a frame it extracted while the
+/// main world was somewhere earlier, and the image that reaches the surface
+/// was built from that older state. Read at the render graph's Finish set,
+/// the last point in the schedule that still belongs to this image: bevy
+/// presents after the whole graph schedule returns, so the present itself is
+/// outside this measurement and so is everything after it — the compositor,
+/// the queue behind it and the panel. It is not input-to-photon, and
+/// `desired_maximum_frame_latency` is a hint the backend may clamp, so how
+/// many frames the GPU is really allowed in flight is not in here either.
+fn presented_age(out: &mut Vec<String>) {
+    let stats = perf::stats::counter_snapshot(perf::Phase::Live);
+    let find = |counter: perf::Counter| {
+        stats
+            .iter()
+            .find(|row| row.counter == counter)
+            .filter(|row| row.samples > 0)
+    };
+    let (Some(age), Some(behind)) = (
+        find(perf::Counter::RenderPresentedStateAgeMs),
+        find(perf::Counter::RenderPresentedFramesBehind),
+    ) else {
+        return;
+    };
+    out.push(format!(
+        "  presented state age: p50 {:.2} ms, p99 {:.2} ms, max {:.2} ms from extract to the end of the render graph, {:.2} main frames behind on average (p99 {:.0}), over {} presented frames.",
+        age.p50,
+        age.p99,
+        age.max,
+        behind.avg(),
+        behind.p99,
+        age.samples,
+    ));
+    out.push(
+        "  it ends where the render graph does, one step before bevy presents: the present call itself, the compositor and the display are all outside it, so this is the age of the state the graph finished with and never an input-to-photon latency."
+            .to_owned(),
+    );
 }
 
 /// The first seconds against the rest. Exact, not histogram midpoints: these

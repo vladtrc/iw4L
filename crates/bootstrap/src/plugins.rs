@@ -65,7 +65,7 @@ pub fn assemble_listen_app() -> App {
 
 pub fn default_plugins_with_quiet_log(mut window: WindowPlugin) -> bevy::app::PluginGroupBuilder {
     if let Some(primary) = window.primary_window.as_mut() {
-        primary.desired_maximum_frame_latency = core::num::NonZeroU32::new(1);
+        primary.desired_maximum_frame_latency = core::num::NonZeroU32::new(frame_latency());
     }
     let mut wgpu = WgpuSettings::default();
     wgpu.features |= WgpuFeatures::TEXTURE_FORMAT_16BIT_NORM
@@ -109,14 +109,41 @@ const PIPELINED_RENDERING_ENV: &str = "IW4L_PIPELINED_RENDERING";
 /// The manifest records which branch a run took, so a report never has to be
 /// read against a guess about it.
 fn pipelined_rendering() -> bool {
-    match std::env::var(PIPELINED_RENDERING_ENV) {
-        Ok(value) => {
-            let value = value.trim();
-            !(value.is_empty()
-                || value == "0"
-                || value.eq_ignore_ascii_case("false")
-                || value.eq_ignore_ascii_case("off"))
+    perf::switch(PIPELINED_RENDERING_ENV)
+}
+
+const FRAME_LATENCY_ENV: &str = "IW4L_FRAME_LATENCY";
+
+/// How many frames the surface is asked to let the CPU run ahead of the GPU.
+///
+/// wgpu calls this a hint and the backend is free to clamp it: on Vulkan it is
+/// bound to the number of swapchain images, so a run that asked for two did
+/// not necessarily get two, and only a measurement says which. One is the
+/// default because it is what the runtime shipped; the variable exists so the
+/// other arm needs no rebuild, and the manifest records the number that was
+/// asked for — never the number the driver granted, which this process cannot
+/// read back.
+///
+/// The value is a count, not a switch: anything unparseable or zero is the
+/// default, and says so rather than silently picking an arm. Read once, so the
+/// window and the manifest cannot disagree and the complaint is made once.
+pub(crate) fn frame_latency() -> u32 {
+    const DEFAULT: u32 = 1;
+    static FRAMES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *FRAMES.get_or_init(|| {
+        let Some(asked) = std::env::var_os(FRAME_LATENCY_ENV) else {
+            return DEFAULT;
+        };
+        match asked.to_str().map(str::trim).and_then(|v| v.parse().ok()) {
+            Some(frames) if frames > 0 => frames,
+            _ => {
+                diag::warn!(
+                    Launch,
+                    "{FRAME_LATENCY_ENV}={} is not a frame count; using {DEFAULT}",
+                    asked.to_string_lossy(),
+                );
+                DEFAULT
+            }
         }
-        Err(_) => false,
-    }
+    })
 }

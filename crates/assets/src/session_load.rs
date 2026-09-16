@@ -471,10 +471,13 @@ pub async fn load_prepared_match(
             // The runtime common_mp walk is synchronous here, so its plan is
             // handed over the instant the walk puts it down rather than at the
             // bottom of the function.
-            common_images = spawn_image_plan(
+            // Held, not enqueued: every one of this plan's disputed claims
+            // was answered by a donor, and the donors have not finished. It
+            // decodes once the merged catalog can say which of its claims are
+            // still its own.
+            common_images = hold_image_plan(
                 "common_mp FPV",
                 census.pending_images.take(),
-                &progress,
                 common_images_job,
             );
             shared_surfaces = census.shared_surfaces;
@@ -847,79 +850,24 @@ pub async fn load_prepared_match(
             .unwrap_or_else(|| "missing".into()),
     ));
 
-    for pending in [t5_images, foreign_images, bundle_images, common_images]
+    // The donors first, and only then the plan that claims the same names
+    // they do. Its claims are resolved against the catalog they leave behind
+    // rather than against the one it was built from, which is why it waited.
+    for pending in [t5_images, foreign_images, bundle_images]
         .into_iter()
         .flatten()
     {
-        let job = pending.job;
-        let (label, batch) = pending.join().await;
-        let requested = batch.stats.requested;
-        let missing = batch.stats.missing;
-        let unsupported = batch.stats.unsupported;
-        let first_gap = batch.stats.first_gap.clone();
-        let census = batch.apply(&mut global);
-        job.bytes(None, Some(census.final_cpu_bytes))
-            // What the plan prepared and what it served out of another plan's
-            // work, kept apart: only the first is work this plan did. What
-            // survived is `retained + discarded`, a check on the pair and never
-            // its definition.
-            .prepared(census.newly_prepared_bytes, census.reused_bytes)
-            .merged(
-                census.final_cpu_bytes,
-                census.discarded_decoded_bytes,
-                census.discard_line(),
-            );
-        report.push(format!(
-                "{label} claimed images: {}/{requested} into the merged pool ({} already decoded by an earlier source, {missing} missing, {unsupported} unsupported, {} claimed rows dropped by the merge)",
-                census.filled_rows, census.already_decoded, census.discarded_variants,
-            ));
-        report.push(format!(
-            "{label} image demand: claimed_rows={} canonical_variants={} prepared_variants={} duplicate_claims={} final_cpu_bytes={} newly_prepared_bytes={} reused_variants={} reused_bytes={} discarded_decoded_bytes={} discarded_same_payload={}",
-            census.claimed_rows,
-            census.canonical_variants,
-            census.prepared_variants,
-            census.duplicate_claims,
-            census.final_cpu_bytes,
-            census.newly_prepared_bytes,
-            census.reused_variants,
-            census.reused_bytes,
-            census.discarded_decoded_bytes,
-            census.discarded_same_payload,
-        ));
-        if let Some(line) = census.discard_line() {
-            report.push(format!("{label} image discard: {line}"));
-        }
-        // Who answered for the claims this plan prepared and the merge threw
-        // away. A count by reason says how much was wasted; this says by
-        // whom, which is what decides whether the claim could have been
-        // resolved before it was prepared.
-        if !census.disputed_winners.is_empty() {
-            report.push(format!(
-                "{label} image dispute: {}",
-                census
-                    .disputed_winners
-                    .iter()
-                    .map(|winner| format!(
-                        "{}={} won_by={} first={}",
-                        winner.kind,
-                        winner.claims,
-                        winner
-                            .plan
-                            .map_or_else(|| "none".to_owned(), |plan| format!("plan{plan}")),
-                        winner.first,
-                    ))
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            ));
-        }
-        if let Some(gap) = first_gap {
-            report.push(format!("{label} claimed image gap: {gap}"));
-        }
+        apply_image_batch(&mut global, pending, &mut report).await;
+    }
+    if let Some(held) = common_images
+        && let Some(pending) = held.prune_then_enqueue(&mut global, &progress, &mut report)
+    {
+        apply_image_batch(&mut global, pending, &mut report).await;
     }
 
     if let Ok(path) = &zone_ff {
         let stage = progress.stage("decoding merged material images");
-        match crate::decode_material_color_maps(path, &mut global, &stage) {
+        match crate::decode_material_color_maps(path, &mut global, &stage, load_pool()) {
             Ok(stats) => report.push(format!(
                 "merged material images: {}/{} decoded, {} missing, {} unsupported",
                 stats.decoded, stats.requested, stats.missing, stats.unsupported
@@ -997,6 +945,7 @@ pub async fn load_prepared_match(
                 &mut global,
                 requested,
                 &stage,
+                load_pool(),
             ) {
                 Ok(n) => report.push(format!(
                     "IWD light attenuation: decoded {n} of {want} GfxLightDef images (Image_LoadFromIwi; empty payload is not a host ramp)"
@@ -1020,6 +969,7 @@ pub async fn load_prepared_match(
             &mut global,
             common_tracers.named_materials(),
             &stage,
+            load_pool(),
         ) {
             Ok(n) => report.push(format!(
                 "tracer beam images after absorb: {n} TS_COLOR_MAP/TS_2D decoded"
@@ -1212,6 +1162,7 @@ pub async fn load_prepared_match(
                     &mut global,
                     missing.iter(),
                     &stage,
+                    load_pool(),
                 ) {
                     Ok(n) => report.push(format!(
                         "fx elem 2d images after absorb: {n} TS_COLOR_MAP/TS_2D decoded"
@@ -1720,8 +1671,8 @@ fn walk_foreign_material_common(
     ) else {
         return (MaterialCatalog::default(), None, report);
     };
-    let pending_images =
-        spawn_image_plan("IW5 common_mp", census.pending_images.take(), progress, job);
+    let pending_images = hold_image_plan("IW5 common_mp", census.pending_images.take(), job)
+        .map(|held| held.enqueue(progress));
     let materials = census.material_population;
     report.extend(census.report);
     report.push(format!(
@@ -1762,6 +1713,85 @@ fn capture_common_zone(
     }
 }
 
+/// Join one image plan, merge it into the catalog and write its census down.
+///
+/// Separate from the caller because the plans are no longer one list: the
+/// donors are applied first so that the plan claiming the same names can be
+/// pruned against the result, and both halves merge a batch exactly the same
+/// way.
+async fn apply_image_batch(
+    global: &mut crate::MaterialDefinitions,
+    pending: PendingImages,
+    report: &mut Vec<String>,
+) {
+    let job = pending.job;
+    let (label, batch) = pending.join().await;
+    let requested = batch.stats.requested;
+    let missing = batch.stats.missing;
+    let unsupported = batch.stats.unsupported;
+    let first_gap = batch.stats.first_gap.clone();
+    let census = batch.apply(global);
+    job.bytes(None, Some(census.final_cpu_bytes))
+        // What the plan prepared and what it served out of another plan's
+        // work, kept apart: only the first is work this plan did. What
+        // survived is `retained + discarded`, a check on the pair and never
+        // its definition.
+        .prepared(census.newly_prepared_bytes, census.reused_bytes)
+        .merged(
+            census.final_cpu_bytes,
+            census.discarded_decoded_bytes,
+            census.discard_line(),
+        );
+    report.push(format!(
+            "{label} claimed images: {}/{requested} into the merged pool ({} already decoded by an earlier source, {missing} missing, {unsupported} unsupported, {} claimed rows dropped by the merge)",
+            census.filled_rows, census.already_decoded, census.discarded_variants,
+        ));
+    report.push(format!(
+        "{label} image demand: claimed_rows={} canonical_variants={} prepared_variants={} duplicate_claims={} pruned_variants={} pruned_rows={} final_cpu_bytes={} newly_prepared_bytes={} reused_variants={} reused_bytes={} discarded_decoded_bytes={} discarded_same_payload={}",
+        census.claimed_rows,
+        census.canonical_variants,
+        census.prepared_variants,
+        census.duplicate_claims,
+        census.pruned_variants,
+        census.pruned_rows,
+        census.final_cpu_bytes,
+        census.newly_prepared_bytes,
+        census.reused_variants,
+        census.reused_bytes,
+        census.discarded_decoded_bytes,
+        census.discarded_same_payload,
+    ));
+    if let Some(line) = census.discard_line() {
+        report.push(format!("{label} image discard: {line}"));
+    }
+    // Who answered for the claims this plan prepared and the merge threw
+    // away. A count by reason says how much was wasted; this says by
+    // whom, which is what decides whether the claim could have been
+    // resolved before it was prepared.
+    if !census.disputed_winners.is_empty() {
+        report.push(format!(
+            "{label} image dispute: {}",
+            census
+                .disputed_winners
+                .iter()
+                .map(|winner| format!(
+                    "{}={} won_by={} first={}",
+                    winner.kind,
+                    winner.claims,
+                    winner
+                        .plan
+                        .map_or_else(|| "none".to_owned(), |plan| format!("plan{plan}")),
+                    winner.first,
+                ))
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+    }
+    if let Some(gap) = first_gap {
+        report.push(format!("{label} claimed image gap: {gap}"));
+    }
+}
+
 /// An image plan already on the pool, and the job row that records when it got
 /// there. The producer owns both from the moment its plan is ready: the walk
 /// that discovers the demand hands it over itself rather than carrying it back
@@ -1779,18 +1809,27 @@ impl PendingImages {
     }
 }
 
-/// Put a ready plan on the load pool now.
+/// A plan whose walk has finished, holding the job row that records when it
+/// did.
 ///
 /// `job` is opened by the producer when it starts looking, so the row carries
 /// the whole story: discovered → ready → enqueued → started → finished →
 /// joined. The gap this exists to expose is `ready → enqueued`; a timer that
-/// starts when a worker picks the job up cannot see it at all.
-fn spawn_image_plan(
+/// starts when a worker picks the job up cannot see it at all — and a plan
+/// that waits for the catalog before it decodes spends that whole wait here,
+/// in the open, rather than inside a decode timer.
+struct HeldImagePlan {
+    label: &'static str,
+    plan: ImageDemandPlan,
+    job: load_jobs::Job,
+}
+
+/// Take a finished walk's plan, if it wants anything at all.
+fn hold_image_plan(
     label: &'static str,
     plan: Option<ImageDemandPlan>,
-    progress: &LoadProgress,
     job: load_jobs::Job,
-) -> Option<PendingImages> {
+) -> Option<HeldImagePlan> {
     let plan = plan.filter(|plan| !plan.is_empty())?;
     // The census names the winner of a disputed claim by plan id, so the id
     // and the label are printed together once, here, where both are known.
@@ -1804,19 +1843,76 @@ fn spawn_image_plan(
     let job = job
         .canonical(label)
         .items(plan.canonical_variants() as u64)
-        .plan_ready()
-        .enqueued();
-    let progress = progress.clone();
+        .plan_ready();
+    Some(HeldImagePlan { label, plan, job })
+}
 
-    let task = load_pool().spawn(async move {
-        job.started();
-        let stage = progress.stage(format!("decoding {label} material images"));
-        let batch = plan.run(&stage, job);
-        drop(stage);
-        job.finished();
-        (label, batch)
-    });
-    Some(PendingImages { job, task })
+impl HeldImagePlan {
+    /// Put the plan on the load pool now, with every claim it made.
+    fn enqueue(self, progress: &LoadProgress) -> PendingImages {
+        let Self { label, plan, job } = self;
+        let job = job.enqueued();
+        let progress = progress.clone();
+        let task = load_pool().spawn(async move {
+            job.started();
+            let stage = progress.stage(format!("decoding {label} material images"));
+            // The plan splits itself across this same pool. The worker this
+            // task is on joins that scope rather than blocking on it, so a
+            // plan does not cost a load worker to supervise it.
+            let batch = plan.run(&stage, job, load_pool());
+            drop(stage);
+            job.finished();
+            (label, batch)
+        });
+        PendingImages { job, task }
+    }
+
+    /// Resolve the plan's claims against the merged catalog, then decode what
+    /// is left of it.
+    ///
+    /// The catalog has to be one every rival plan has already applied into: a
+    /// row still carrying this plan's id with nothing decoded in it is a row
+    /// this plan will fill, and a name with no such row left is a decode whose
+    /// result the merge would count and throw away. Asked earlier, the same
+    /// question cuts names a plan still in flight is about to release.
+    ///
+    /// Returns `None` when nothing survives, which is a plan that never runs
+    /// rather than an empty one that does.
+    fn prune_then_enqueue(
+        mut self,
+        catalog: &mut crate::MaterialDefinitions,
+        progress: &LoadProgress,
+        report: &mut Vec<String>,
+    ) -> Option<PendingImages> {
+        let resolving = std::time::Instant::now();
+        self.plan.prune_to(catalog);
+        let resolved_ms = resolving.elapsed().as_secs_f32() * 1000.0;
+        let (variants, rows) = self.plan.pruned();
+        // The cost of asking is on the line beside what it saved: this runs
+        // on the consumer, between the last donor's apply and the decode, so
+        // it is serial time the walk pays whatever the decode then skips.
+        report.push(format!(
+            "{} image claims resolved before decode: {} of {} variants cut ({rows} claimed rows), {} left to decode, {resolved_ms:.1}ms to resolve",
+            self.label,
+            variants,
+            self.plan.canonical_variants(),
+            self.plan.len(),
+        ));
+        if self.plan.is_empty() {
+            // Nothing left to decode means nothing will ever call `apply`, and
+            // `apply` is what hands the claimed rows back. Do it here instead,
+            // or the rows keep a mark saying a decode is owed on them and the
+            // stages after this one skip every name the plan had claimed.
+            let released = self.plan.release_claims(catalog);
+            report.push(format!(
+                "{} image plan dropped before decode: every claim was answered elsewhere, {released} claimed rows handed back",
+                self.label,
+            ));
+            self.job.items(0).enqueued().started().finished().joined();
+            return None;
+        }
+        Some(self.enqueue(progress))
+    }
 }
 
 enum ForeignCommonWork {
@@ -1884,12 +1980,8 @@ fn walk_iw5_weapon_bundle(
     // Patch A. The bundle's images used to wait here until the consumer had
     // finished the synchronous `common_mp` walk and got round to unpacking
     // this tuple — 2.4 s of ready work with nobody holding it.
-    let pending_images = spawn_image_plan(
-        "IW5 weapon bundle",
-        census.pending_images.take(),
-        progress,
-        job,
-    );
+    let pending_images = hold_image_plan("IW5 weapon bundle", census.pending_images.take(), job)
+        .map(|held| held.enqueue(progress));
     report.extend(census.report);
     report.push(format!(
         "iw5 weapons: path={} ids={} gun_named={} fpv={} world_guns={} xanims={} materials={}",
@@ -1942,8 +2034,8 @@ fn walk_shared_iw5_common(
     // One capture serves the material seed and the weapon bundle, so there is
     // one plan here, not two: the donor is walked once and its images are
     // claimed once.
-    let pending_images =
-        spawn_image_plan("IW5 common_mp", census.pending_images.take(), progress, job);
+    let pending_images = hold_image_plan("IW5 common_mp", census.pending_images.take(), job)
+        .map(|held| held.enqueue(progress));
     report.extend(census.report);
     let materials = census.material_population;
     report.push(format!(
@@ -2073,8 +2165,8 @@ fn walk_t5_weapon_common(
         }
     };
     let mut census = lane(image.game).load_common_mp(&donor, &image, progress, true, material_seed);
-    let pending_images =
-        spawn_image_plan("T5 common_mp", census.pending_images.take(), progress, job);
+    let pending_images = hold_image_plan("T5 common_mp", census.pending_images.take(), job)
+        .map(|held| held.enqueue(progress));
     report.extend(census.report);
     report.push(format!(
         "t5 weapon common: path={} weapons={} fpv={} world_guns={} materials={} xanims={} fx={}",

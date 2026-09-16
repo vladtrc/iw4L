@@ -116,6 +116,8 @@ pub(crate) fn render(wall: &SpanStats, out: &mut Vec<String>) {
             .to_owned(),
     );
 
+    age_table(&stats, frames, out);
+
     out.push(String::new());
     out.push("  inside Present and Ui, CPU (ms)".to_owned());
     ms_table(&stats, &PHASE_MS, wall, frames, Share::Frame, out);
@@ -163,6 +165,69 @@ pub(crate) fn render(wall: &SpanStats, out: &mut Vec<String>) {
     never_sampled(out);
 }
 
+/// How old the state on the surface was, in its own table because every column
+/// the other tables carry would be a lie here.
+///
+/// `presented_state_age` is when the work happened, not how long anything
+/// took, so it has no `per frame` and no `%frame`: an age divided by a frame
+/// is not a share of one, and among the render stages it reads as one — which
+/// is the input-to-photon reading the frame section forbids.
+/// `presented_frames_behind` is the same quantity counted in frames, so it
+/// belongs beside it rather than in the work table, where its `total` would be
+/// a sum of the number one.
+///
+/// Silent when the counter never fired at all, which is a run that presented
+/// nothing rather than a run that presented in line with the main world: a
+/// serialised run still has an age here, it just answers zero frames behind.
+/// A MISS row would read as a measurement that came back empty rather than as
+/// a question the run never asked.
+fn age_table(stats: &[CounterStats], frames: u64, out: &mut Vec<String>) {
+    let Some(age) = find(stats, Counter::RenderPresentedStateAgeMs) else {
+        return;
+    };
+    out.push(String::new());
+    out.push("  presented state age (ms) — when, not how long".to_owned());
+    let mut table = Table::new(
+        4,
+        &[
+            ("counter", Align::Left),
+            ("n", Align::Right),
+            ("n/frame", Align::Right),
+            ("avg", Align::Right),
+            ("p50", Align::Right),
+            ("p95", Align::Right),
+            ("p99", Align::Right),
+            ("max", Align::Right),
+        ],
+    );
+    debug_assert_eq!(age.unit, Unit::Milliseconds);
+    table.row([
+        age.counter.name().to_owned(),
+        age.samples.to_string(),
+        opt2(age.per_frame_samples(frames)),
+        num2(age.avg()),
+        num2(age.p50),
+        num2(age.p95),
+        num2(age.p99),
+        num2(age.max),
+    ]);
+    table.render(out);
+    out.push(
+        "    the wall from this frame's extract — the main world stalled, so nothing moved across it — to the render graph's Finish set. It is not input-to-photon: the compositor, the queue behind it and the panel are all outside this process, and `desired_maximum_frame_latency` is a hint the backend may clamp, so how many frames the GPU is really allowed in flight is not in here either."
+            .to_owned(),
+    );
+    match find(stats, Counter::RenderPresentedFramesBehind) {
+        Some(behind) => out.push(format!(
+            "    `presented_frames_behind` on the same frames: p50 {:.0}, max {:.0}. It is the age in frames rather than in milliseconds — zero is a render world running in line with the main one, and one or more is a pipelined render world presenting an older state. Read it as the arm the run took, not as a distribution: with pipelining on it is the same number nearly every frame.",
+            behind.p50, behind.max,
+        )),
+        None => out.push(
+            "    `presented_frames_behind` MISS — nobody counted, which is not the same as zero frames behind."
+                .to_owned(),
+        ),
+    }
+}
+
 /// Which HUD slice was the largest, not only how large. An index is not a
 /// duration and has no business in a millisecond table, so it gets a sentence:
 /// the reader who has just seen a HUD stage take a third of the frame should
@@ -191,6 +256,10 @@ fn hud_stage(stats: &[CounterStats], out: &mut Vec<String>) {
 fn untabled(stats: &[CounterStats], out: &mut Vec<String>) {
     let tabled: Vec<Counter> = CPU_MS
         .into_iter()
+        .chain([
+            Counter::RenderPresentedStateAgeMs,
+            Counter::RenderPresentedFramesBehind,
+        ])
         .chain(PHASE_MS)
         .chain(SCHEDULE_MS)
         .chain(GPU_MS)

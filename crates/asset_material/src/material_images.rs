@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
 };
-use bevy::tasks::{ComputeTaskPool, TaskPool};
+use bevy::tasks::TaskPool;
 
 use crate::material_catalog::TS_2D;
 use crate::progress::LoadStage;
@@ -289,6 +289,7 @@ pub fn decode_material_color_maps(
     zone_ff: &Path,
     catalog: &mut MaterialDefinitions,
     stage: &LoadStage,
+    pool: &TaskPool,
 ) -> Result<MaterialImageStats, String> {
     let main = game_main_for_zone(zone_ff)?;
     let index = IwdIndex::open(&main)?;
@@ -302,7 +303,7 @@ pub fn decode_material_color_maps(
     stage.total(work.len() as u64);
 
     let images = &catalog.images;
-    let decoded = decode_requests_in_parallel(images, index.as_ref(), &work, stage);
+    let decoded = decode_requests_in_parallel(images, index.as_ref(), &work, stage, pool);
 
     for outcome in decoded {
         match outcome {
@@ -384,6 +385,7 @@ pub fn decode_color_or_2d_for_names(
     catalog: &mut MaterialDefinitions,
     names: impl IntoIterator<Item = impl AsRef<str>>,
     stage: &LoadStage,
+    pool: &TaskPool,
 ) -> Result<usize, String> {
     let work = requested_named_2d_slots(catalog, names);
     if work.is_empty() {
@@ -393,7 +395,7 @@ pub fn decode_color_or_2d_for_names(
     let index = IwdIndex::open(&main)?;
     stage.total(work.len() as u64);
     let images = &catalog.images;
-    let decoded = decode_requests_in_parallel(images, index.as_ref(), &work, stage);
+    let decoded = decode_requests_in_parallel(images, index.as_ref(), &work, stage, pool);
     let mut n = 0usize;
     for outcome in decoded {
         if let ImageOutcome::Decoded {
@@ -470,6 +472,7 @@ pub fn decode_catalog_images_from_iwd(
     catalog: &mut MaterialDefinitions,
     images: impl IntoIterator<Item = (usize, u8)>,
     stage: &LoadStage,
+    pool: &TaskPool,
 ) -> Result<usize, String> {
     let mut seen = std::collections::BTreeSet::new();
     let mut work: Vec<ImageRequest> = Vec::new();
@@ -493,7 +496,7 @@ pub fn decode_catalog_images_from_iwd(
     let index = IwdIndex::open(&main)?;
     stage.total(work.len() as u64);
     let catalog_images = &catalog.images;
-    let decoded = decode_requests_in_parallel(catalog_images, index.as_ref(), &work, stage);
+    let decoded = decode_requests_in_parallel(catalog_images, index.as_ref(), &work, stage, pool);
     let mut n = 0usize;
     for outcome in decoded {
         if let ImageOutcome::Decoded {
@@ -788,17 +791,23 @@ impl Drop for Flight {
     }
 }
 
+/// Decode this work on the pool the caller names.
+///
+/// The pool is a parameter because the right one is the loader's, and
+/// `asset_material` cannot ask for it: the dependency runs the other way.
+/// `ComputeTaskPool` is the frame's pool, with its own thread count and its
+/// own affinity; a load stage that decodes on it runs on the frame's threads
+/// and competes with the frame for them.
 fn decode_requests_in_parallel(
     images: &[AuthoredImage],
     index: &IwdIndex,
     work: &[ImageRequest],
     stage: &LoadStage,
+    pool: &TaskPool,
 ) -> Vec<ImageOutcome> {
     if work.is_empty() {
         return Vec::new();
     }
-    let pool = ComputeTaskPool::get_or_init(TaskPool::default);
-
     let chunk_size = work.len().div_ceil(pool.thread_num().max(1)).clamp(1, 64);
 
     pool.scope(|scope| {
@@ -2036,6 +2045,13 @@ pub struct ImageDemandPlan {
     /// is the normal case — several materials share an image — and the
     /// difference is what `duplicate_claims` reports.
     claimed_rows: usize,
+    /// Demands [`Self::prune_to`] dropped because the merged catalog had
+    /// already been answered for them. They are still claims this plan made,
+    /// so they stay in `canonical_variants`; what they are not is work, and
+    /// the census names them on their own rather than letting them fall into
+    /// the gap between two other numbers.
+    pruned_variants: usize,
+    pruned_rows: usize,
 }
 
 /// One image this plan has ready, and how it got it.
@@ -2069,6 +2085,8 @@ pub struct DecodedImageBatch {
     reused_variants: usize,
     claimed_rows: usize,
     canonical_variants: usize,
+    pruned_variants: usize,
+    pruned_rows: usize,
 }
 
 impl Drop for DecodedImageBatch {
@@ -2099,6 +2117,13 @@ pub struct ImageMergeCensus {
     pub canonical_variants: usize,
     pub prepared_variants: usize,
     pub duplicate_claims: usize,
+    /// Claims the plan gave up before decoding, because the merged catalog was
+    /// already answered for the name. Its own number: it is neither a
+    /// duplicate claim — two rows wanting one image — nor a discard, which is
+    /// a decode that happened and was thrown away. `canonical_variants` still
+    /// counts them, so `canonical - pruned` is what the decode was asked for.
+    pub pruned_variants: usize,
+    pub pruned_rows: usize,
     pub filled_rows: usize,
     pub already_decoded: usize,
     pub discarded_variants: usize,
@@ -2282,6 +2307,8 @@ impl ImageDemandPlan {
             demands: Vec::new(),
             requests: Vec::new(),
             claimed_rows: 0,
+            pruned_variants: 0,
+            pruned_rows: 0,
         }
     }
 
@@ -2293,10 +2320,78 @@ impl ImageDemandPlan {
         self.demands.is_empty()
     }
 
-    /// Distinct images this plan will decode. `len` is the same number; this
-    /// is the name the census uses for it.
+    /// Distinct images this plan claimed. Not what it will decode once it has
+    /// been pruned — `len` is that — because the claims it gave up are what a
+    /// reader is comparing the decode against.
     pub fn canonical_variants(&self) -> usize {
-        self.demands.len()
+        self.demands.len() + self.pruned_variants
+    }
+
+    /// Demands and rows dropped before the decode, because the merged catalog
+    /// already holds an answer for the name.
+    pub fn pruned(&self) -> (usize, usize) {
+        (self.pruned_variants, self.pruned_rows)
+    }
+
+    /// Drop every demand whose claim the merge will not take.
+    ///
+    /// `apply` fills exactly the rows that still carry this plan's id and have
+    /// nothing decoded in them; a name with no such row left is a decode whose
+    /// result `apply` would count and throw away. The two predicates are the
+    /// same one, deliberately: what survives here is what would have survived
+    /// there, so pruning changes when the question is asked and not what the
+    /// merged catalog ends up holding.
+    ///
+    /// It is only true of a catalog that is finished with this plan's rivals.
+    /// Called against a catalog another plan is still going to apply into, it
+    /// would cut names that plan is about to release.
+    pub fn prune_to(&mut self, catalog: &MaterialDefinitions) {
+        let id = self.id;
+        let mut wanted: HashMap<&str, usize> = HashMap::new();
+        for image in &catalog.images {
+            if image.pending_decode == Some(id) && image.decoded.is_none() {
+                *wanted.entry(image.name.as_str()).or_default() += 1;
+            }
+        }
+        let mut kept_rows = 0usize;
+        let mut index = 0usize;
+        while index < self.demands.len() {
+            match wanted.get(self.demands[index].name.as_str()) {
+                Some(rows) => {
+                    kept_rows += rows;
+                    index += 1;
+                }
+                None => {
+                    self.demands.swap_remove(index);
+                    self.requests.swap_remove(index);
+                    self.pruned_variants += 1;
+                }
+            }
+        }
+        self.pruned_rows = self.claimed_rows.saturating_sub(kept_rows);
+    }
+
+    /// Hand back every row this plan still holds a claim on, and say how many
+    /// there were.
+    ///
+    /// `apply` is what normally does this: it clears `pending_decode` on every
+    /// row carrying the plan's id, whether or not the plan had anything to put
+    /// there. A plan that [`Self::prune_to`] emptied never reaches `apply`, so
+    /// without this its rows keep a mark saying a decode is owed on them —
+    /// and [`requested_color_map_slots`] and [`requested_named_2d_slots`] read
+    /// that mark as "somebody else is already handling this name" and skip the
+    /// row. Every row still marked here was answered by another plan, which is
+    /// why the plan is empty; the count is that plan's `already_decoded`.
+    pub fn release_claims(&self, catalog: &mut MaterialDefinitions) -> usize {
+        let id = self.id;
+        let mut released = 0usize;
+        for image in &mut catalog.images {
+            if image.pending_decode == Some(id) {
+                image.pending_decode = None;
+                released += 1;
+            }
+        }
+        released
     }
 
     /// Catalog rows that asked for one of those images.
@@ -2331,7 +2426,12 @@ impl ImageDemandPlan {
     /// Decode this plan's images. `job` is the row this work reports into, and
     /// it is stamped *after* the memory ceiling lets the plan through, so the
     /// decode timer measures decoding and the wait before it is its own column.
-    pub fn run(self, stage: &LoadStage, job: asset_transport::Job) -> DecodedImageBatch {
+    pub fn run(
+        self,
+        stage: &LoadStage,
+        job: asset_transport::Job,
+        pool: &TaskPool,
+    ) -> DecodedImageBatch {
         if self.demands.is_empty() {
             return DecodedImageBatch::default();
         }
@@ -2354,7 +2454,9 @@ impl ImageDemandPlan {
                     reused_bytes: 0,
                     reused_variants: 0,
                     claimed_rows: self.claimed_rows,
-                    canonical_variants: self.demands.len(),
+                    canonical_variants: self.canonical_variants(),
+                    pruned_variants: self.pruned_variants,
+                    pruned_rows: self.pruned_rows,
                 };
             }
         };
@@ -2370,7 +2472,8 @@ impl ImageDemandPlan {
             ..Default::default()
         };
         stage.total(work.len() as u64);
-        let outcomes = decode_requests_in_parallel(&self.demands, index.as_ref(), &work, stage);
+        let outcomes =
+            decode_requests_in_parallel(&self.demands, index.as_ref(), &work, stage, pool);
         let mut decoded = Vec::with_capacity(outcomes.len());
         let mut newly_prepared_bytes = 0u64;
         let mut reused_bytes = 0u64;
@@ -2426,7 +2529,9 @@ impl ImageDemandPlan {
             reused_bytes,
             reused_variants,
             claimed_rows: self.claimed_rows,
-            canonical_variants: self.demands.len(),
+            canonical_variants: self.canonical_variants(),
+            pruned_variants: self.pruned_variants,
+            pruned_rows: self.pruned_rows,
         }
     }
 }
@@ -2446,6 +2551,8 @@ impl DecodedImageBatch {
             canonical_variants: self.canonical_variants,
             prepared_variants: self.stats.decoded,
             duplicate_claims: self.claimed_rows.saturating_sub(self.canonical_variants),
+            pruned_variants: self.pruned_variants,
+            pruned_rows: self.pruned_rows,
             newly_prepared_bytes: self.newly_prepared_bytes,
             reused_bytes: self.reused_bytes,
             reused_variants: self.reused_variants,
@@ -2661,11 +2768,12 @@ pub fn plan_material_color_maps(
     zone_ff: &Path,
     catalog: &mut MaterialDefinitions,
     stage: &LoadStage,
+    pool: &TaskPool,
 ) -> (MaterialImageStats, ImageDemandPlan) {
     let mut plan = ImageDemandPlan::new(zone_ff);
     let requested = requested_color_map_slots(catalog);
     let inline = claim(catalog, &mut plan, requested);
-    let stats = decode_inline(catalog, &inline, stage);
+    let stats = decode_inline(catalog, &inline, stage, pool);
     (stats, plan)
 }
 
@@ -2697,16 +2805,18 @@ pub fn plan_color_or_2d_for_names(
     catalog: &mut MaterialDefinitions,
     names: impl IntoIterator<Item = impl AsRef<str>>,
     stage: &LoadStage,
+    pool: &TaskPool,
 ) -> usize {
     let requested = requested_named_2d_slots(catalog, names);
     let inline = claim(catalog, plan, requested);
-    decode_inline(catalog, &inline, stage).decoded
+    decode_inline(catalog, &inline, stage, pool).decoded
 }
 
 fn decode_inline(
     catalog: &mut MaterialDefinitions,
     work: &[ImageRequest],
     stage: &LoadStage,
+    pool: &TaskPool,
 ) -> MaterialImageStats {
     let mut stats = MaterialImageStats {
         requested: work.len(),
@@ -2718,7 +2828,7 @@ fn decode_inline(
 
     let index = IwdIndex(Arc::new(asset_transport::IwdIndex::default()));
     let images = &catalog.images;
-    for outcome in decode_requests_in_parallel(images, &index, work, stage) {
+    for outcome in decode_requests_in_parallel(images, &index, work, stage, pool) {
         match outcome {
             ImageOutcome::Decoded {
                 image_index,
@@ -2869,5 +2979,113 @@ mod tests {
             winner_of(&catalog, "~-white", other),
             (Winner::OtherSource, _)
         ));
+    }
+    /// A row in each of the four states a claim can be in by the time the
+    /// merged catalog is finished with this plan's rivals, and the one
+    /// question `prune_to` is allowed to answer: would `apply` have filled it?
+    ///
+    /// The two predicates are meant to be the same one — `apply` fills the
+    /// rows still carrying the plan's id with nothing decoded in them, and
+    /// `prune_to` keeps exactly the demands those rows name. Written as an
+    /// equivalence rather than as four expected names so that an edit to
+    /// either side that drifts from the other fails here instead of showing up
+    /// as an image that never arrives.
+    #[test]
+    fn pruning_keeps_exactly_what_the_merge_would_have_filled() {
+        let mut catalog = MaterialDefinitions::default();
+        let mut plan = ImageDemandPlan::new(Path::new("zone.ff"));
+        let id = plan.id;
+
+        // Claimed by this plan and still unanswered: the decode is this plan's
+        // to do.
+        catalog.images.push(undecoded_row("wanted"));
+        // Two rows share one name. One of them was answered elsewhere; the
+        // other still wants it, so the name survives and only the row is lost.
+        catalog.images.push(undecoded_row("shared"));
+        catalog.images.push(undecoded_row("shared"));
+        // Claimed by this plan, then decoded by a donor that got there first:
+        // `apply` would count it `already_decoded` and throw this decode away.
+        catalog.images.push(undecoded_row("beaten"));
+        // A rival plan overwrote the claim, so this row is not this plan's to
+        // fill at all.
+        catalog.images.push(undecoded_row("stolen"));
+
+        // The same two steps `claim` takes: mark the row as owed to this plan,
+        // and hand the plan a copy of it to decode from.
+        for image in &mut catalog.images {
+            image.pending_decode = Some(id);
+            let mut owned = image.clone();
+            owned.decoded = None;
+            plan.push(owned, (0, false, false, false));
+        }
+        assert_eq!(
+            plan.len(),
+            4,
+            "four distinct names claimed across five rows"
+        );
+        assert_eq!(plan.claimed_rows(), 5);
+
+        catalog.images[2].decoded = Some(Image::default());
+        catalog.images[3].decoded = Some(Image::default());
+        catalog.images[4].pending_decode = Some(id + 1);
+
+        plan.prune_to(&catalog);
+
+        let would_fill: std::collections::BTreeSet<String> = catalog
+            .images
+            .iter()
+            .filter(|image| image.pending_decode == Some(id) && image.decoded.is_none())
+            .map(|image| image.name.as_str().to_owned())
+            .collect();
+        let survived: std::collections::BTreeSet<String> = plan
+            .demands
+            .iter()
+            .map(|demand| demand.name.as_str().to_owned())
+            .collect();
+        assert_eq!(
+            survived, would_fill,
+            "the decode and the merge disagree about who owns which name"
+        );
+
+        // `canonical_variants` still counts the claims the plan gave up, so a
+        // reader comparing the decode against what was asked for has both.
+        assert_eq!(plan.canonical_variants(), 4);
+        assert_eq!(
+            plan.pruned(),
+            (2, 3),
+            "beaten and stolen, plus the answered `shared` row"
+        );
+        assert_eq!(plan.len(), 2);
+    }
+
+    /// Nothing survives, so nobody ever calls `apply` — and `apply` is what
+    /// hands the rows back. Without `release_claims` they keep a mark that the
+    /// stages after this one read as "somebody else is handling this name".
+    #[test]
+    fn a_plan_that_prunes_to_nothing_still_releases_its_rows() {
+        let mut catalog = MaterialDefinitions::default();
+        let mut plan = ImageDemandPlan::new(Path::new("zone.ff"));
+        let id = plan.id;
+
+        catalog.images.push(undecoded_row("beaten"));
+        let mut owned = catalog.images[0].clone();
+        owned.decoded = None;
+        catalog.images[0].pending_decode = Some(id);
+        plan.push(owned, (0, false, false, false));
+
+        catalog.images[0].decoded = Some(Image::default());
+        plan.prune_to(&catalog);
+        assert!(
+            plan.is_empty(),
+            "a name a donor answered is not this plan's work"
+        );
+
+        assert_eq!(plan.release_claims(&mut catalog), 1);
+        assert_eq!(catalog.images[0].pending_decode, None);
+        assert_eq!(
+            plan.release_claims(&mut catalog),
+            0,
+            "releasing twice must not double-count"
+        );
     }
 }

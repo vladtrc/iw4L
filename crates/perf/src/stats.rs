@@ -183,18 +183,7 @@ pub fn enabled() -> bool {
 }
 
 fn env_enabled() -> bool {
-    match std::env::var(ENV) {
-        Ok(value)
-            if value.is_empty()
-                || value == "0"
-                || value.eq_ignore_ascii_case("false")
-                || value.eq_ignore_ascii_case("off") =>
-        {
-            false
-        }
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    crate::switch::on(ENV)
 }
 
 /// Everything recorded from here on belongs to [`Phase::Live`]. Called once the

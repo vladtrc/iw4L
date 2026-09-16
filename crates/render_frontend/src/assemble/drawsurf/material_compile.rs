@@ -49,6 +49,22 @@ fn compile_one_job(catalog: &RuntimeMaterialCatalog, job: CompileJob) -> PassOut
     }
 }
 
+/// Compile every job, in chunks, on the load pool.
+///
+/// The load pool's workers set their affinity to the process CPUs when they
+/// spawn, and they already exist. A thread spawned here would inherit the
+/// coordinator's affinity instead — on the paced path below that is an
+/// `AsyncComputeTaskPool` worker, confined to that pool's share of the CPUs.
+///
+/// The results keep the order of `jobs` whatever order the chunks finish in:
+/// `TaskPool::scope` returns one `Vec` per task in the order the tasks were
+/// spawned, and every task here is spawned directly from this closure.
+///
+/// The cooperative policy is explicit and off: the calling thread waits for
+/// the chunks instead of ticking the pool's queue. It is the narrow-affinity
+/// thread in the paced case, and in the synchronous one it is the main thread
+/// in the middle of world spawn — neither is somewhere unrelated load work
+/// should be pulled onto.
 fn compile_jobs_parallel(
     catalog: Arc<RuntimeMaterialCatalog>,
     jobs: Vec<CompileJob>,
@@ -60,27 +76,24 @@ fn compile_jobs_parallel(
     let nthreads = assets::load_workers().clamp(1, jobs.len());
     let chunk_len = jobs.len().div_ceil(nthreads);
 
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .chunks(chunk_len)
-            .map(|chunk| {
+    assets::load_pool()
+        .scope_with_executor(false, None, |scope| {
+            for chunk in jobs.chunks(chunk_len) {
                 let catalog = Arc::clone(&catalog);
                 let progress = Arc::clone(&progress);
-                scope.spawn(move || {
+                scope.spawn(async move {
                     let mut out = Vec::with_capacity(chunk.len());
                     for &job in chunk {
                         out.push(compile_one_job(&catalog, job));
                         progress.fetch_add(1, Ordering::Relaxed);
                     }
                     out
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| handle.join().expect("compile worker"))
-            .collect()
-    })
+                });
+            }
+        })
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 fn log_catalog_generation(catalog: &RuntimeMaterialCatalog) {

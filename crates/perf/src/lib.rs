@@ -11,6 +11,7 @@ mod session;
 #[path = "session_noop.rs"]
 mod session;
 pub mod stats;
+mod switch;
 #[cfg(all(unix, feature = "native"))]
 mod vocabulary;
 #[cfg(not(all(unix, feature = "native")))]
@@ -25,6 +26,7 @@ pub use event::{
     world_ready,
 };
 pub use session::{RunMetadata, enabled, flush, start};
+pub use switch::on as switch;
 
 /// Whether *any* recorder is listening: the Perfetto session (`IW4L_PERF`) or
 /// the in-process bench statistics (`IW4L_BENCH`). Census code that only asked

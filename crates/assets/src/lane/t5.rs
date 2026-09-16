@@ -212,7 +212,12 @@ impl ZoneLane for T5Lane {
         let map_xmodels = std::mem::take(&mut sink.map_xmodels);
         let bodies = std::mem::take(&mut sink.bodies);
         let fpv_meshes = std::mem::take(&mut sink.fpv_meshes);
-        match decode_material_color_maps(path, &mut materials, &stage) {
+        match decode_material_color_maps(
+            path,
+            &mut materials,
+            &stage,
+            crate::session_load::load_pool(),
+        ) {
             Ok(stats) => {
                 report.push(format!(
                 "IWD color/normal maps: {}/{} decoded, {} missing, {} unsupported from {} archives",
@@ -696,8 +701,12 @@ impl ZoneLane for T5Lane {
         let mut pending_images = None;
         if decode_color_maps {
             let stage = progress.stage("planning T5 common_mp material images");
-            let (inline, plan) =
-                crate::material_images::plan_material_color_maps(path, &mut materials, &stage);
+            let (inline, plan) = crate::material_images::plan_material_color_maps(
+                path,
+                &mut materials,
+                &stage,
+                crate::session_load::load_pool(),
+            );
             report.push(format!(
                 "common_mp T5 IWD color maps: {} claimed for the merged pool, {} in-zone bodies decoded here ({} missing, {} unsupported)",
                 plan.len(),

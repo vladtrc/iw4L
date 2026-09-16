@@ -10,12 +10,7 @@ pub struct RunMetadata {
 }
 
 pub fn enabled() -> bool {
-    std::env::var(ENV).is_ok_and(|value| {
-        !value.is_empty()
-            && value != "0"
-            && !value.eq_ignore_ascii_case("false")
-            && !value.eq_ignore_ascii_case("off")
-    })
+    crate::switch::on(ENV)
 }
 
 pub fn start(_metadata: RunMetadata) -> Result<Option<PathBuf>, String> {

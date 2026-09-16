@@ -134,6 +134,18 @@ fn image_bytes(image: &Image) -> u64 {
         .unwrap_or(0)
 }
 
+/// Every image one lightmap page hands over, summed. A page is six `add`s, and
+/// `handed_bytes`, `bytes_total` and the budget that paces the overlay frames
+/// are all owed all six of them.
+fn lightmap_page_bytes(page: &super::world::WorldLightmap) -> u64 {
+    page.primary_image.as_ref().map_or(0, image_bytes)
+        + page.secondary_image.as_ref().map_or(0, image_bytes)
+        + page.secondary_b_image.as_ref().map_or(0, image_bytes)
+        + image_bytes(&page.ambient_image)
+        + image_bytes(&page.directional_image)
+        + image_bytes(&page.sun_mask_image)
+}
+
 #[derive(Default)]
 pub struct WorldImageUpload {
     pub done: u32,
@@ -142,6 +154,9 @@ pub struct WorldImageUpload {
     /// server takes the image here, the render world turns it into a texture
     /// some frames later, and the driver copies it later still. Calling this
     /// "uploaded" is how a handoff rate gets reported as a transfer rate.
+    ///
+    /// A slot that takes another slot's handle hands nothing over and is not
+    /// in here; its bytes are `reused_handle_bytes`.
     pub handed_bytes: u64,
     pub bytes_total: u64,
     /// The longest single handoff, and how big it was. A frame budget can only
@@ -297,7 +312,13 @@ impl WorldImageUpload {
             .flatten()
             .map(image_bytes)
             .sum::<u64>()
-            + self.probes.iter().flatten().map(image_bytes).sum::<u64>();
+            + self.probes.iter().flatten().map(image_bytes).sum::<u64>()
+            + self
+                .lightmaps
+                .iter()
+                .flatten()
+                .map(lightmap_page_bytes)
+                .sum::<u64>();
         self.exact_at = 0;
         self.probe_at = 0;
         self.lightmap_at = 0;
@@ -359,8 +380,8 @@ impl WorldImageUpload {
                 continue;
             }
             let bytes = image.as_ref().map(image_bytes).unwrap_or(0);
-            self.handed_bytes += bytes;
             let step = std::time::Instant::now();
+            let mut handed = bytes;
             let variant = self.exact_variants[self.exact_at];
             self.exact_handles[self.exact_at] = image.map(|image| {
                 // A slot whose variant is already an asset takes that handle
@@ -372,13 +393,17 @@ impl WorldImageUpload {
                 if let Some(handle) = self.exact_by_variant.get(&variant) {
                     self.reused_handles = self.reused_handles.saturating_add(1);
                     self.reused_handle_bytes = self.reused_handle_bytes.saturating_add(bytes);
+                    // Nothing was handed to the asset server: the slot took a
+                    // handle that already existed.
+                    handed = 0;
                     return handle.clone();
                 }
                 let handle = images.add(image);
                 self.exact_by_variant.insert(variant, handle.clone());
                 handle
             });
-            self.note_step(step.elapsed(), bytes);
+            self.handed_bytes += handed;
+            self.note_step(step.elapsed(), handed);
             self.exact_at += 1;
             self.done = self.done.saturating_add(1);
             stepped = true;
@@ -409,6 +434,7 @@ impl WorldImageUpload {
                 return false;
             }
             let page = self.lightmaps[self.lightmap_at].take();
+            let bytes = page.as_ref().map_or(0, lightmap_page_bytes);
             let step = std::time::Instant::now();
             self.lightmap_handles[self.lightmap_at] = page.map(|lightmap| {
                 diag::info!(
@@ -432,8 +458,11 @@ impl WorldImageUpload {
                 }
             });
             // One lightmap page is six adds and they cannot be split, so the
-            // page is the indivisible unit here, not the image.
-            self.note_step(step.elapsed(), 0);
+            // page is the indivisible unit here, not the image — and its bytes
+            // are the six summed, which is what the budget has to be told
+            // about even though it cannot stop in the middle of them.
+            self.handed_bytes += bytes;
+            self.note_step(step.elapsed(), bytes);
             if self.lightmap_handles[self.lightmap_at].is_some() {
                 self.done = self.done.saturating_add(1);
             }

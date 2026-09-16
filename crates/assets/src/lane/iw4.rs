@@ -1076,6 +1076,7 @@ impl ZoneLane for Iw4Lane {
                 path,
                 &mut material_population,
                 &stage,
+                crate::session_load::load_pool(),
             );
             report.push(format!(
                 "common_mp materials: {} claimed for the merged pool, {} in-zone bodies decoded here ({} missing, {} unsupported)",
@@ -1089,6 +1090,7 @@ impl ZoneLane for Iw4Lane {
                 &mut material_population,
                 sink.tracers.named_materials(),
                 &stage,
+                crate::session_load::load_pool(),
             );
             report.push(format!(
                 "common_mp tracer beam images: {tracer_inline} in-zone TS_COLOR_MAP/TS_2D decoded, rest claimed"
@@ -1104,6 +1106,7 @@ impl ZoneLane for Iw4Lane {
                 &mut material_population,
                 fx_2d_names,
                 &stage,
+                crate::session_load::load_pool(),
             );
             report.push(format!(
                 "common_mp fx elem 2d images: {fx_inline} in-zone TS_COLOR_MAP/TS_2D decoded, rest claimed"
@@ -1304,7 +1307,7 @@ fn decode_map_material_images(
     glass_names: Vec<String>,
 ) -> Vec<String> {
     let mut report = Vec::new();
-    match decode_material_color_maps(path, catalog, &stage) {
+    match decode_material_color_maps(path, catalog, &stage, crate::session_load::load_pool()) {
         Ok(stats) => {
             report.push(format!(
                 "IWD color/normal maps: {}/{} decoded, {} missing, {} unsupported from {} archives",
@@ -1321,7 +1324,13 @@ fn decode_map_material_images(
     }
     let mut names = fx_name_hints;
     names.extend(glass_names.iter().cloned());
-    match crate::material_images::decode_color_or_2d_for_names(path, catalog, names, &stage) {
+    match crate::material_images::decode_color_or_2d_for_names(
+        path,
+        catalog,
+        names,
+        &stage,
+        crate::session_load::load_pool(),
+    ) {
         Ok(n) => report.push(format!(
             "fx elem 2d images: {n} TS_COLOR_MAP/TS_2D decoded (unique Bound names)"
         )),

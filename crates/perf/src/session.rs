@@ -45,18 +45,7 @@ static STATE: Mutex<Option<SessionState>> = Mutex::new(None);
 static ATEXIT_ARMED: AtomicBool = AtomicBool::new(false);
 
 pub fn enabled() -> bool {
-    match std::env::var(ENV) {
-        Ok(value)
-            if value.is_empty()
-                || value == "0"
-                || value.eq_ignore_ascii_case("false")
-                || value.eq_ignore_ascii_case("off") =>
-        {
-            false
-        }
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    crate::switch::on(ENV)
 }
 
 pub fn start(metadata: RunMetadata) -> Result<Option<PathBuf>, String> {

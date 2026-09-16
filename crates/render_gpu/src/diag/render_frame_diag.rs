@@ -17,6 +17,21 @@ pub(crate) struct RenderFrameSample {
     /// finished sample a frame or more later, so without this the stage
     /// timings land on whichever row happened to be open when they arrived.
     origin_frame: u64,
+    /// When this render frame's extract began: the moment the state it
+    /// presents was taken out of the main world, with the main world stalled
+    /// so nothing moved between the two.
+    origin_extracted_at: Option<Instant>,
+    /// How old that state was when the render graph finished with it, and how
+    /// many main frames had been opened since it was taken. Serialised
+    /// rendering answers zero frames behind; a pipelined render world answers
+    /// one or more, which is the cost the throughput result is paid for in.
+    ///
+    /// It ends where the graph does. Bevy presents after the `RenderGraph`
+    /// schedule returns, so the present call is already outside this, and the
+    /// compositor and the display are outside the process entirely: it is not
+    /// input-to-photon and must never be read as it.
+    pub(crate) presented_state_age_ms: Option<f32>,
+    pub(crate) presented_frames_behind: Option<u32>,
     /// Which render frame this is. The main world reads the published sample
     /// whether or not a new one was published, and emitting the same
     /// measurement again would count one piece of work twice.
@@ -243,6 +258,7 @@ impl SharedRenderStages {
         self.working = RenderFrameSample::default();
         self.working.sequence = sequence;
         self.working.origin_frame = origin_frame;
+        self.working.origin_extracted_at = Some(Instant::now());
         self.working.wgpu_floor_encode_ms = floor.0;
         self.working.wgpu_floor_finish_ms = floor.1;
         self.working.wgpu_floor_submit_ms = floor.2;
@@ -385,6 +401,10 @@ pub struct RenderFrameDiag {
     pub graph_submit_pending_n: Option<u32>,
 
     pub graph_present_ms: Option<f32>,
+    /// How old the drawn state was when the render graph finished with it, and
+    /// how many main frames the main world had opened since it was extracted.
+    pub presented_state_age_ms: Option<f32>,
+    pub presented_frames_behind: Option<u32>,
 
     pub wgpu_floor_encode_ms: Option<f32>,
     pub wgpu_floor_finish_ms: Option<f32>,
@@ -814,8 +834,23 @@ fn graph_submit_end(timer: Res<GraphSubmitStageTimer>, slot: Res<SharedRenderSta
 #[derive(Resource, Default)]
 struct GraphPresentMark(Option<Instant>);
 
-fn graph_present_mark(mut mark: ResMut<GraphPresentMark>) {
-    mark.0 = Some(Instant::now());
+fn graph_present_mark(mut mark: ResMut<GraphPresentMark>, slot: Res<SharedRenderStagesSlot>) {
+    let now = Instant::now();
+    mark.0 = Some(now);
+    // The last set of the graph, which is the latest point in the schedule
+    // that still belongs to *this* image: bevy presents after the whole
+    // `RenderGraph` schedule returns, from `render_system`, where no system of
+    // ours runs. So this is close to the present and deliberately not it.
+    let open = perf::frames::open_index();
+    if let Ok(mut guard) = slot.0.lock() {
+        let origin = guard.working.origin_frame;
+        guard.working.presented_frames_behind =
+            Some(u32::try_from(open.saturating_sub(origin)).unwrap_or(u32::MAX));
+        if let Some(extracted) = guard.working.origin_extracted_at {
+            guard.working.presented_state_age_ms =
+                Some(now.duration_since(extracted).as_secs_f32() * 1000.0);
+        }
+    }
 }
 
 fn stamp_graph_present(mark: Res<GraphPresentMark>, slot: Res<SharedRenderStagesSlot>) {
@@ -1158,6 +1193,8 @@ pub fn sample_render_frame_diag(
             diag.graph_submit_ms = sample.graph_submit_ms;
             diag.graph_submit_pending_n = sample.graph_submit_pending_n;
             diag.graph_present_ms = sample.graph_present_ms;
+            diag.presented_state_age_ms = sample.presented_state_age_ms;
+            diag.presented_frames_behind = sample.presented_frames_behind;
 
             if fresh {
                 for (counter, value) in [
@@ -1167,6 +1204,10 @@ pub fn sample_render_frame_diag(
                         sample.graph_submit_ms,
                     ),
                     (perf::Counter::RenderGraphPresentMs, sample.graph_present_ms),
+                    (
+                        perf::Counter::RenderPresentedStateAgeMs,
+                        sample.presented_state_age_ms,
+                    ),
                 ] {
                     if let Some(value) = value {
                         counter.emit_at(f64::from(value), sample.origin_frame);
@@ -1175,6 +1216,10 @@ pub fn sample_render_frame_diag(
                 if let Some(pending) = sample.graph_submit_pending_n {
                     perf::Counter::RenderGraphSubmitPendingN
                         .emit_at(f64::from(pending), sample.origin_frame);
+                }
+                if let Some(behind) = sample.presented_frames_behind {
+                    perf::Counter::RenderPresentedFramesBehind
+                        .emit_at(f64::from(behind), sample.origin_frame);
                 }
             }
             diag.wgpu_floor_encode_ms = sample.wgpu_floor_encode_ms;
