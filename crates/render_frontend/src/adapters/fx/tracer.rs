@@ -34,7 +34,7 @@ pub(crate) fn present_tracer_beams(
     let view_fwd = cam_tf.forward().to_array();
     let created = tan_half_fov.and_then(|(tx, ty)| {
         if tx > 0.0 && ty > 0.0 {
-            let axis = [view_fwd, cam_tf.right().to_array(), cam_tf.up().to_array()];
+            let axis = [view_fwd, cam_tf.left().to_array(), cam_tf.up().to_array()];
             Some(fx_create_clip_matrix(view_pos, axis, tx, ty))
         } else {
             None

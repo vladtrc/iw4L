@@ -92,7 +92,6 @@ impl Plugin for RenderPreparePlugin {
                     arm_world_spawn_on_install.before(spawn_world),
                     spawn_world,
                     spawn_world_finish.after(spawn_world),
-                    publish_dyn_atpoint_lookup.after(spawn_world),
                     crate::assemble::drawsurf::tess::glass::apply_cg_glass_tess
                         .after(spawn_world)
                         .after(WorkerCmdSet::FxNonDependent),
@@ -204,17 +203,26 @@ impl Plugin for RenderPreparePlugin {
                     .in_set(ClientSet::Load),
             );
 
+        app.add_systems(
+            Update,
+            publish_dyn_atpoint_lookup
+                .after(SessionSwapApplied)
+                .after(shutdown_world_on_teardown)
+                .in_set(ClientSet::Load),
+        );
         register_world_gpu_ready(app);
         crate::prepare::scene::cell_frustum_cmds::register_cell_frustum_cmds(app);
     }
 }
 
 fn publish_dyn_atpoint_lookup(
+    mut installed: MessageReader<frame::MatchInstalled>,
     scene: Res<WorldScene>,
     mut lookup: ResMut<render_scene::DynAtPointLookup>,
     mut cells: ResMut<render_scene::WorldDpvsCells>,
 ) {
-    if scene.is_changed() {
+    // Static tables are complete when the install transaction publishes this message.
+    if installed.read().count() != 0 {
         scene.publish_dyn_atpoint(&mut lookup);
         scene.publish_dpvs_cells(&mut cells);
     }

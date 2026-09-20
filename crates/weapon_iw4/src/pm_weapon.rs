@@ -823,6 +823,7 @@ pub fn pm_weapon_ordinary(
         &mut cmd.weap_flags,
         &mut cmd.pm_flags,
         cmd.pm_type,
+        delayed_action,
     ) {
         return Some(melee);
     }

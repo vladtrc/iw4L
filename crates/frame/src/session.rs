@@ -377,3 +377,7 @@ pub struct HudInputView {
     pub menu_open: bool,
     pub action_slot_keys: [Option<String>; 4],
 }
+
+/// Authority navigation is prepared while the loading screen is still active.
+#[derive(bevy::prelude::Resource, Default)]
+pub struct BotNavigationReady(pub bool);

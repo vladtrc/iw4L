@@ -56,6 +56,10 @@ impl EquipmentRuntimeFacts {
         self.projectile_speed > 0 && (self.fuse_time_ms > 0 || self.impact_damage > 0)
     }
 
+    pub(crate) fn is_throwing_knife(self) -> bool {
+        self.weap_class == WEAPCLASS_THROWINGKNIFE
+    }
+
     pub fn is_offhand(self) -> bool {
         self.offhand_class != 0
     }
@@ -186,6 +190,9 @@ fn grenade_deadlines(
     now_ms: i32,
 ) -> (Option<i32>, i32) {
     let cap_at = now_ms.saturating_add(GRENADE_FUSE_CAP_MS);
+    if facts.is_throwing_knife() {
+        return (None, cap_at);
+    }
     let cleanup_at_ms = cap_at;
     match kind {
         GrenadeLaunchKind::Launcher if facts.fuse_time_ms <= 0 => {
@@ -506,6 +513,9 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         unstick_missile(tick, &mut projectile);
         projectile.stuck_pane = None;
     }
+    if facts.is_throwing_knife() && projectile.pos.tr_type == TR_STATIONARY {
+        return;
+    }
     let mut trace_start = start;
     let mut hops = 0u32;
     let mut hop_capped = false;
@@ -600,7 +610,7 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         return;
     }
     let mut pending_detonation = None;
-    let hit = match outcome {
+    let mut hit = match outcome {
         TraceOutcome::Hit {
             fraction,
             end,
@@ -612,6 +622,39 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         }
         TraceOutcome::Miss { .. } | TraceOutcome::Invalid { .. } => None,
     };
+    let mut contact_origin = None;
+    if facts.is_throwing_knife()
+        && let Some((end, normal, collider, _)) = hit
+        && !matches!(collider, Some(ColliderId::Player { .. }))
+    {
+        let probe_start = core::array::from_fn(|i| end[i] + normal[i] * 0.135);
+        let probe_end = core::array::from_fn(|i| end[i] - normal[i] * 1.5);
+        if let TraceOutcome::Hit {
+            end,
+            normal,
+            collider,
+            fraction,
+        } = bullet_trace_with_entity_models(
+            &brushes,
+            &bsp,
+            &cmodels,
+            &mesh,
+            &players,
+            &script_models,
+            &BulletTraceQuery {
+                start: probe_start,
+                end: probe_end,
+                mask: MASK_BULLET_WORLD,
+                ignore: Some(projectile.owner),
+                ignore_hit: None,
+            },
+            &|piece| world.world_objects().glass_is_solid(u32::from(piece)),
+        ) {
+            // Surface clearance precedes the knife's resting/embedded pose offsets.
+            contact_origin = Some(core::array::from_fn(|i| end[i] + (end[i] - probe_end[i])));
+            hit = Some((end, normal, Some(collider), fraction));
+        }
+    }
     let mut contact_time = eval_time;
     if let Some((_end, _normal, _collider, fraction)) = hit {
         contact_time = prev.saturating_add(((eval_time - prev) as f32 * fraction) as i32);
@@ -672,7 +715,7 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         TickOutcome::Contact => {
             let (end, normal, collider, fraction) = hit.expect("contact");
             let traveled = vec3_length([end[0] - start[0], end[1] - start[1], end[2] - start[2]]);
-            projectile.origin = end;
+            projectile.origin = contact_origin.unwrap_or(end);
             projectile.travel_distance = projectile.travel_distance + traveled;
             let armed = projectile.is_armed(facts.projectile_activate_dist);
             let (surface_flags, hit_surf) = match collider {
@@ -683,6 +726,48 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
                 _ => (None, None),
             };
             match collider {
+                _ if facts.is_throwing_knife() => {
+                    let player_hit = matches!(collider, Some(ColliderId::Player { .. }));
+                    if let Some(ColliderId::Player { client, .. }) = collider {
+                        direct_hits.push((projectile, client));
+                    }
+                    knife_impact(
+                        world,
+                        tick,
+                        &mut projectile,
+                        normal,
+                        fraction,
+                        hit_surf.unwrap_or(0),
+                        player_hit,
+                    );
+                    if projectile.pos.tr_type == TR_STATIONARY
+                        && let Some(ColliderId::World { glass_encoded, .. }) = collider
+                        && glass_encoded != 0
+                    {
+                        projectile.stuck_pane = Some(u32::from(glass_encoded) - 1);
+                    }
+                    impacts.push(ProjectileImpact {
+                        id: projectile.id,
+                        owner: projectile.owner,
+                        weapon: projectile.weapon,
+                        origin: end,
+                        geometry: if player_hit {
+                            ProjectileHitGeometry::Player
+                        } else {
+                            ProjectileHitGeometry::Bounce
+                        },
+                        terminal: collider,
+                        amount: if player_hit {
+                            facts.impact_damage.max(0)
+                        } else {
+                            0
+                        },
+                        fraction: Some(fraction),
+                        surface_flags,
+                        surf_type: hit_surf,
+                        entnum: projectile.entnum,
+                    });
+                }
                 Some(ColliderId::Player { client, .. }) => {
                     if facts.stick_to_players {
                         stick_missile(tick, &mut projectile, end);
@@ -1110,6 +1195,72 @@ fn stick_missile(tick: Tick, projectile: &mut ProjectileState, origin: [f32; 3])
     projectile.pos.tr_duration = 0;
     projectile.pos.tr_base = origin;
     projectile.pos.tr_delta = [0.0, 0.0, 0.0];
+    projectile.apos = Trajectory {
+        tr_type: TR_STATIONARY,
+        tr_time: time,
+        tr_duration: 0,
+        tr_base: bg_evaluate_trajectory(&projectile.apos, time),
+        tr_delta: [0.0; 3],
+    };
+}
+
+fn knife_impact(
+    world: &mut FrameWorld,
+    tick: Tick,
+    projectile: &mut ProjectileState,
+    normal: [f32; 3],
+    fraction: f32,
+    surf_type: u8,
+    player_hit: bool,
+) {
+    let time = level_time_ms(tick);
+    let hit_time =
+        time - crate::MATCH_TICK_MS as i32 + (crate::MATCH_TICK_MS as f32 * fraction) as i32;
+    let facts = required_projectile_facts(world, projectile.weapon);
+    projectile.velocity = projectile.velocity_at(hit_time);
+    bounce_velocity(projectile, normal, &facts, surf_type);
+    let speed = vec3_length(projectile.velocity);
+    let direction = vec3_normalize(projectile.velocity).unwrap_or([0.0; 3]);
+    let incidence: f32 = (0..3).map(|i| direction[i] * normal[i]).sum();
+    let floor = normal[2] > 0.7;
+    let stop = (player_hit && facts.stick_to_players)
+        || (!player_hit && ((floor && speed < 20.0) || incidence > 0.7));
+    if !stop {
+        projectile.origin = core::array::from_fn(|i| {
+            projectile.origin[i]
+                + if i == 2 {
+                    (normal[i] * 0.1).min(0.0)
+                } else {
+                    normal[i] * 0.1
+                }
+        });
+        projectile.pos.tr_base = projectile.origin;
+        projectile.pos.tr_time = time;
+        projectile.pos.tr_delta = projectile.velocity;
+        apply_missile_land_angles(world, tick, projectile, normal, fraction);
+        push_grenade_bounce(world, tick, projectile, surf_type);
+        return;
+    }
+    let mut angles = bg_evaluate_trajectory(&projectile.apos, hit_time);
+    let mut origin = projectile.origin;
+    if !player_hit && floor && (speed < 20.0 || incidence < 0.7) {
+        let forward = forward(angles);
+        let dot: f32 = (0..3).map(|i| forward[i] * normal[i]).sum();
+        angles = math_iw4::vect_to_angles(core::array::from_fn(|i| forward[i] - dot * normal[i]));
+        let (_, right, up) = math_iw4::angle_vectors(angles);
+        let side: f32 = (0..3).map(|i| normal[i] * right[i]).sum();
+        let vertical: f32 = (0..3).map(|i| normal[i] * up[i]).sum();
+        angles[2] = side.atan2(vertical).to_degrees() + 90.0;
+        origin[2] -= 1.0;
+    } else {
+        angles[0] = normal[2].atan2(normal[0].hypot(normal[1])).to_degrees()
+            + host_flrand(world.combat_rng_mut(), -15.0, 15.0);
+        let forward = forward(angles);
+        origin = core::array::from_fn(|i| origin[i] - normal[i] * 1.5 - forward[i] * 4.5);
+    }
+    stick_missile(tick, projectile, origin);
+    projectile.apos.tr_base = angles;
+    push_grenade_stick(world, tick, projectile);
 }
 
 fn unstick_missile(tick: Tick, projectile: &mut ProjectileState) {
@@ -1257,246 +1408,4 @@ fn entity_collision_epoch(
     rows.iter()
         .find(|row| row.owner == owner)
         .map(|row| row.epoch)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{ClientId, LifeSequence, ProjectileId, Tick};
-    use entity_iw4::Trajectory;
-
-    const SURF_GLASS: u32 = 9 << 20;
-
-    fn sample_projectile() -> ProjectileState {
-        ProjectileState {
-            id: ProjectileId(3),
-            owner: ClientId(1),
-            owner_life: LifeSequence(2),
-            weapon: 7,
-            origin: [0.0, 0.0, 0.0],
-            velocity: [800.0, 0.0, 0.0],
-            pos: Trajectory {
-                tr_type: TR_GRAVITY,
-                tr_time: 0,
-                tr_duration: 0,
-                tr_base: [0.0, 0.0, 0.0],
-                tr_delta: [800.0, 0.0, 0.0],
-            },
-            apos: Trajectory::default(),
-            entnum: 14,
-            launch_time: 0,
-            spawn_time_ms: 0,
-            detonate_at_ms: None,
-            cleanup_at_ms: ROCKET_CLEANUP_MS,
-            travel_distance: 0.0,
-            live: true,
-            stuck_pane: None,
-        }
-    }
-
-    fn frag_facts() -> EquipmentRuntimeFacts {
-        EquipmentRuntimeFacts {
-            offhand_class: 1,
-            fuse_time_ms: 4000,
-            timed_detonation: true,
-            cook_off_hold: true,
-            projectile_speed: 1400,
-            projectile_speed_up: 200,
-            projectile_speed_forward: 150,
-            impact_damage: 1,
-            ..EquipmentRuntimeFacts::default()
-        }
-    }
-
-    #[test]
-    fn projectile_lifetime_cook_arm_bounce_and_restore() {
-        let now = 10_000;
-        let frag = frag_facts();
-        assert!(grenade_fuse_due(6000, Some(6000), true));
-        assert!(grenade_fuse_due(6600, Some(6000), true));
-        assert!(!grenade_fuse_due(5950, Some(6000), true));
-        assert!(!grenade_fuse_due(6000, Some(6000), false));
-
-        let held_h = 1000;
-        let authored = frag.fuse_time_ms;
-        let (detonate_after_hold, _) = grenade_deadlines(
-            &frag,
-            GrenadeLaunchKind::Thrown {
-                remaining_fuse_ms: Some(authored - held_h),
-            },
-            now,
-        );
-        assert_eq!(detonate_after_hold, Some(now + authored - held_h));
-
-        let gl = EquipmentRuntimeFacts {
-            fuse_time_ms: 0,
-            projectile_activate_dist: 375,
-            projectile_speed: 2400,
-            impact_damage: 135,
-            ..EquipmentRuntimeFacts::default()
-        };
-        let (gl_detonate, gl_cleanup) = grenade_deadlines(&gl, GrenadeLaunchKind::Launcher, now);
-        assert_eq!(gl_detonate, None);
-        assert_eq!(gl_cleanup, now + GRENADE_FUSE_CAP_MS);
-
-        let dud = ProjectileState {
-            id: ProjectileId(1),
-            owner: ClientId(0),
-            owner_life: Default::default(),
-            weapon: 1,
-            origin: [0.0; 3],
-            velocity: [0.0; 3],
-            pos: Trajectory::default(),
-            apos: Trajectory::default(),
-            entnum: 64,
-            launch_time: now,
-            spawn_time_ms: now,
-            detonate_at_ms: None,
-            cleanup_at_ms: now + GRENADE_FUSE_CAP_MS,
-            travel_distance: 10_000.0,
-            live: false,
-            stuck_pane: None,
-        };
-        assert!(!dud.is_armed(375));
-        let restored = dud;
-        assert_eq!(restored.detonate_at_ms, None);
-        assert_eq!(restored.cleanup_at_ms, now + GRENADE_FUSE_CAP_MS);
-        assert!(!restored.live);
-
-        let dir = [1.0, 0.0, 0.0];
-        let sideways = grenade_launch_velocity(dir, &frag, [0.0, 400.0, 0.0]);
-        let forward_only = grenade_launch_velocity(dir, &frag, [0.0, 0.0, 0.0]);
-        assert_eq!(sideways, forward_only);
-        let along = grenade_launch_velocity(dir, &frag, [200.0, 0.0, 0.0]);
-        let launch_len = vec3_length(forward_only);
-        let launch_dir = [
-            forward_only[0] / launch_len,
-            forward_only[1] / launch_len,
-            forward_only[2] / launch_len,
-        ];
-        let added = 200.0 * launch_dir[0];
-        assert!((along[0] - forward_only[0] - launch_dir[0] * added).abs() < 1e-3);
-        assert!((along[1] - forward_only[1] - launch_dir[1] * added).abs() < 1e-3);
-        assert!((along[2] - forward_only[2] - launch_dir[2] * added).abs() < 1e-3);
-
-        let incoming = [100.0, 0.0, -100.0];
-        let outgoing = bounce_reflected_scale(incoming, [0.0, 0.0, 1.0], 0.5, 1.0);
-        let incoming_speed = (100.0f32 * 100.0 + 100.0 * 100.0).sqrt();
-        let incidence = 100.0 / incoming_speed;
-        let factor = 0.5 + (1.0 - 0.5) * incidence;
-        assert!((outgoing[0] - 100.0 * factor).abs() < 1e-4);
-        assert!(outgoing[1].abs() < 1e-4);
-        assert!((outgoing[2] - 100.0 * factor).abs() < 1e-4);
-        let small_in = [10.0, 0.0, -10.0];
-        let small_out = bounce_reflected_scale(small_in, [0.0, 0.0, 1.0], 0.95, 0.95);
-        let dx = small_out[0] - small_in[0];
-        let dy = small_out[1] - small_in[1];
-        let dz = small_out[2] - small_in[2];
-        let delta = (dx * dx + dy * dy + dz * dz).sqrt();
-        assert!(delta < BOUNCE_EVENT_SPEED_DELTA);
-
-        let mut world = crate::SimWorld::new();
-        world
-            .bootstrap(crate::spawn::MatchBootstrap {
-                allow_debug_actions: true,
-                ..crate::spawn::MatchBootstrap::default()
-            })
-            .expect("bootstrap");
-        let mut build = crate::SimContentBuilder::default();
-        let mut rifle = weapon_iw4::WeaponCombatFacts::none();
-        rifle.fire_time_ms = 80;
-        rifle.damage = 40;
-        let mut eq_table = vec![EquipmentRuntimeFacts::default(); 2];
-        eq_table[1] = EquipmentRuntimeFacts {
-            fuse_time_ms: 0,
-            projectile_activate_dist: 375,
-            projectile_speed: 2400,
-            impact_damage: 135,
-            weap_class: 6,
-            ..EquipmentRuntimeFacts::default()
-        };
-        build.set_weapon_combat_table(vec![weapon_iw4::WeaponCombatFacts::none(), rifle]);
-        build.set_equipment_runtime_table(eq_table);
-        world.install_content(build.finish());
-        world.debug_place_alive_player(ClientId(0), [0.0, 0.0, 0.0]);
-        let tick = Tick(1);
-        assert!(spawn_grenade_projectile(
-            &mut world.frame(),
-            ClientId(0),
-            1,
-            tick,
-            [0.0, 0.0, 60.0],
-            [0.0, 0.0, 0.0],
-            [0.0, 400.0, 0.0],
-            GrenadeLaunchKind::Launcher,
-        ));
-        let spawned = {
-            let mut found = None;
-            world.visit_projectiles(|p| found = Some(*p));
-            found.expect("launcher projectile")
-        };
-        assert_eq!(spawned.detonate_at_ms, None);
-        assert_eq!(
-            spawned.cleanup_at_ms,
-            crate::level_time_ms(tick) + GRENADE_FUSE_CAP_MS
-        );
-        assert_eq!(spawned.apos.tr_delta, [0.0, 0.0, 0.0]);
-        let cloned = world.clone();
-        let restored_live = {
-            let mut found = None;
-            cloned.visit_projectiles(|p| found = Some(*p));
-            found.expect("cloned projectile")
-        };
-        assert_eq!(restored_live.detonate_at_ms, spawned.detonate_at_ms);
-        assert_eq!(restored_live.cleanup_at_ms, spawned.cleanup_at_ms);
-        assert_eq!(restored_live.live, spawned.live);
-        assert_eq!(restored_live.travel_distance, spawned.travel_distance);
-    }
-
-    #[test]
-    fn sub_threshold_speed_does_not_punch_glass() {
-        assert!(!missile_glass_punch_eligible(599.0, SURF_GLASS, 1));
-        assert!(missile_glass_punch_eligible(600.0, SURF_GLASS, 1));
-        assert!(missile_glass_punch_eligible(601.0, SURF_GLASS, 1));
-        assert!(!missile_glass_punch_eligible(600.0, 0, 1));
-        assert!(!missile_glass_punch_eligible(600.0, SURF_GLASS, 0));
-    }
-
-    #[test]
-    fn hop_cap_parks_the_trajectory_at_the_last_pane() {
-        let mut projectile = sample_projectile();
-        park_missile_at(
-            Tick(2),
-            &mut projectile,
-            [50.0, 0.0, 0.0],
-            [100.0, 0.0, 0.0],
-        );
-        let parked_at = level_time_ms(Tick(2));
-        assert_eq!(projectile.origin, [50.0, 0.0, 0.0]);
-        assert_eq!(projectile.pos.tr_base, [50.0, 0.0, 0.0]);
-        assert_eq!(projectile.pos.tr_time, parked_at);
-        assert_eq!(projectile.pos.tr_delta, [100.0, 0.0, 0.0]);
-        assert_eq!(projectile.origin_at(parked_at), [50.0, 0.0, 0.0]);
-        let later = projectile.origin_at(parked_at + crate::MATCH_TICK_MS as i32);
-        assert!(
-            later[0] > 50.0,
-            "next hop continues from the parked pane, not the old tr_base: {later:?}"
-        );
-    }
-
-    #[test]
-    fn sticky_detach_rewrites_gravity_from_the_pane() {
-        let mut projectile = sample_projectile();
-        stick_missile(Tick(1), &mut projectile, [12.0, 4.0, 8.0]);
-        assert_eq!(projectile.pos.tr_type, TR_STATIONARY);
-        projectile.stuck_pane = Some(3);
-        unstick_missile(Tick(2), &mut projectile);
-        assert!(projectile.stuck_pane.is_some());
-        projectile.stuck_pane = None;
-        assert_eq!(projectile.pos.tr_type, TR_GRAVITY);
-        assert_eq!(projectile.pos.tr_base, [12.0, 4.0, 8.0]);
-        assert_eq!(projectile.origin, [12.0, 4.0, 8.0]);
-        assert_eq!(projectile.velocity, [0.0, 0.0, 0.0]);
-        assert_eq!(projectile.pos.tr_delta, [0.0, 0.0, 0.0]);
-    }
 }

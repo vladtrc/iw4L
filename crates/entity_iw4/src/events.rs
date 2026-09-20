@@ -247,6 +247,7 @@ pub fn cg_entity_event_action(
         | EntityEventKind::PULLBACK_WEAPON
         | EntityEventKind::RECHAMBER_WEAPON
         | EntityEventKind::PREP_OFFHAND
+        | EntityEventKind::USE_OFFHAND
         | EntityEventKind::MELEE_SWIPE
         | EntityEventKind::MELEE_HIT
         | EntityEventKind::MELEE_MISS => EntityEventAction::Sound,
@@ -255,8 +256,7 @@ pub fn cg_entity_event_action(
         | EntityEventKind::FIRE_WEAPON_LASTSHOT
         | EntityEventKind::FIRE_WEAPON_LEFT
         | EntityEventKind::FIRE_WEAPON_LASTSHOT_LEFT
-        | EntityEventKind::SV_FIRE_WEAPON
-        | EntityEventKind::USE_OFFHAND => EntityEventAction::WeaponFire,
+        | EntityEventKind::SV_FIRE_WEAPON => EntityEventAction::WeaponFire,
         EntityEventKind::EJECT_BRASS | EntityEventKind::EJECT_BRASS_LEFT => {
             EntityEventAction::EjectBrass
         }

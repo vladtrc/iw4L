@@ -185,7 +185,8 @@ assertions_on_constants = "deny"
 # two lines without a new two-map A/B on the same protocol.
 #
 # Live recipes (`make map` / `play` / `bench` / `bench-live` / …) do not use this profile.
-# Fat LTO: `PROFILE=release` on a live target when the number must match S2-I11.
+# Fat LTO: `PROFILE=release` on a live target when the number must match the
+# LTO binary's.
 # Fat LTO + one codegen unit stay on this profile only. `make deploy` does not
 # select it; that is `PROFILE=release`.
 [profile.release]
@@ -197,7 +198,7 @@ strip = "symbols"
 # deploy path. Same opt-level as release (Bevy is unusable without it), minus
 # the two settings whose cost is paid at *link* time: fat LTO over the whole
 # dependency graph in one codegen unit is a single-threaded rustc at ~6.6 GB
-# that reruns after an edit in any crate. S2-I11 timed that link at 13m03s.
+# that reruns after an edit in any crate. That link was timed at 13m03s.
 # That link, not the game, is what `make play` was waiting on.
 #
 # `lto = false` keeps crate-local ThinLTO; `"off"` is not required.
@@ -205,8 +206,8 @@ strip = "symbols"
 # profile cache. Strip lives here, not in RUSTFLAGS: env RUSTFLAGS override
 # target rustflags and would split the play/release fingerprint.
 #
-# Separate profile rather than a relaxed `[profile.release]`: S2-I11's verdict
-# stands, and the binary its numbers describe has to stay buildable.
+# Separate profile rather than a relaxed `[profile.release]`: the release
+# binary the published numbers describe has to stay buildable.
 # Frame-time cost of `play` vs `release` is NOT measured here — that A/B is
 # `make bench <demo>` vs `make bench <demo> PROFILE=release`.
 [profile.play]

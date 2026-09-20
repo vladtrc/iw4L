@@ -1,6 +1,5 @@
 use crate::flags::{
-    FX_ELEM_RUN_MASK, FX_ELEM_RUN_NONE_ORIGIN, FX_ELEM_RUN_RELATIVE_TO_EFFECT,
-    FX_ELEM_RUN_RELATIVE_TO_OFFSET, fx_elem_run_mode,
+    FX_ELEM_RUN_RELATIVE_TO_EFFECT, FX_ELEM_RUN_RELATIVE_TO_SPAWN, fx_elem_run_mode,
 };
 use crate::origin::{
     FX_ELEM_SPAWN_OFFSET_SPHERE, fx_apply_spawn_origin, fx_elem_spawn_relative,
@@ -41,7 +40,7 @@ pub struct FxOrientSpawnParams {
 pub fn fx_get_orientation(
     flags: i32,
     effect_now: &FxOrientFrame,
-    effect_alt: &FxOrientFrame,
+    effect_at_spawn: &FxOrientFrame,
     spawn: Option<FxOrientSpawnParams>,
 ) -> FxOrientation {
     let mode = fx_elem_run_mode(flags);
@@ -50,35 +49,35 @@ pub fn fx_get_orientation(
             origin: [0.0; 3],
             axis: FxOrientFrame::IDENTITY.axis,
         },
+        m if m == FX_ELEM_RUN_RELATIVE_TO_SPAWN => FxOrientation {
+            origin: effect_at_spawn.origin,
+            axis: effect_at_spawn.axis,
+        },
         m if m == FX_ELEM_RUN_RELATIVE_TO_EFFECT => FxOrientation {
             origin: effect_now.origin,
             axis: effect_now.axis,
         },
-        m if m == FX_ELEM_RUN_RELATIVE_TO_OFFSET => FxOrientation {
-            origin: effect_alt.origin,
-            axis: effect_alt.axis,
-        },
         _ => {
             let Some(sp) = spawn else {
                 return FxOrientation {
-                    origin: effect_now.origin,
-                    axis: effect_now.axis,
+                    origin: effect_at_spawn.origin,
+                    axis: effect_at_spawn.axis,
                 };
             };
-            fx_get_orientation_spawn_built(flags, effect_now, sp)
+            fx_get_orientation_spawn_built(flags, effect_at_spawn, sp)
         }
     }
 }
 
 fn fx_get_orientation_spawn_built(
     flags: i32,
-    effect_now: &FxOrientFrame,
+    effect_at_spawn: &FxOrientFrame,
     sp: FxOrientSpawnParams,
 ) -> FxOrientation {
     let relative = fx_elem_spawn_relative(flags);
     let mut origin = fx_apply_spawn_origin(
-        effect_now.origin,
-        effect_now.axis,
+        effect_at_spawn.origin,
+        effect_at_spawn.axis,
         sp.spawn_origin,
         sp.seed,
         relative,
@@ -86,7 +85,7 @@ fn fx_get_orientation_spawn_built(
     let mut offset = [0.0f32; 3];
     fx_offset_spawn_origin(
         &mut offset,
-        effect_now.axis,
+        effect_at_spawn.axis,
         flags,
         sp.spawn_offset_radius[0],
         sp.spawn_offset_radius[1],
@@ -127,6 +126,5 @@ fn fx_get_orientation_spawn_built(
         [forward, right, up]
     };
 
-    let _ = (FX_ELEM_RUN_MASK, FX_ELEM_RUN_NONE_ORIGIN);
     FxOrientation { origin, axis }
 }

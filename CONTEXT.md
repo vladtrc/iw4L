@@ -67,8 +67,8 @@ context/
 ```
 context/artifacts/2026-01-20-example/
   README.md                              living surface: header, one line, pointer to the current slice
-  ITERATION-1-OWNERSHIP-AUDIT-FINAL.md   a slice that needed no extra files
-  ITERATION-2-REVISIONS-PART/            a slice that did
+  1-OWNERSHIP-AUDIT-FINAL.md   a slice that needed no extra files
+  2-REVISIONS-PART/            a slice that did
     README.md
     before.log
     after.log
@@ -83,7 +83,7 @@ its own `README.md`, and every rule here applies to it recursively.
 Every file or folder an agent produces inside an artifact is named
 
 ```
-ITERATION-<N>-<MEANINGFUL-NAME>-<SUFFIX>
+<N>-<MEANINGFUL-NAME>-<SUFFIX>
 ```
 
 `<N>` is the iteration number within this artifact. `<MEANINGFUL-NAME>` says
@@ -137,7 +137,7 @@ next: what comes next # required for planned / active / blocked
 
 One line about what this is.
 
-Current slice: [ITERATION-12-CLIENT-UX-READY](ITERATION-12-CLIENT-UX-READY/README.md).
+Current slice: [12-CLIENT-UX-READY](12-CLIENT-UX-READY/README.md).
 ```
 
 `status` is the artifact's lifecycle; the suffix is whose move it is. They
@@ -147,7 +147,7 @@ generated index: the artifact READMEs are the index.
 
 ### The journal is not rewritten
 
-Closed `ITERATION-*` files are a **journal, not a wiki.** New understanding does
+Closed `<N>-*` files are a **journal, not a wiki.** New understanding does
 not fix an old file. An intermediate formulation that turned out to be wrong
 stays exactly where it is, so the next agent sees how the understanding moved
 instead of smooth text pretending we always knew.
@@ -157,7 +157,7 @@ instead of smooth text pretending we always knew.
 * **do update** the artifact `README.md`: header (`status` / `updated` /
   `next`), the one line, the pointer to the current slice. The README is the
   living surface;
-* new work is a **new file** — `ITERATION-N+1-<NAME>-<SUFFIX>`. A correction to
+* new work is a **new file** — `<N+1>-<NAME>-<SUFFIX>`. A correction to
   an earlier slice lives there, as "what the previous slice got wrong";
 * living maps (`docs/*`, a `PLAN.md`, a `WHATS-LEFT.md`) describe the present
   state, not the journal. Those are updated. The iterations are not.
@@ -194,7 +194,7 @@ Out:
 
 Stays: a test that would have caught the bug this iteration fixed, and a probe
 somebody will rerun to reproduce a measurement — and that one lives in the
-artifact (`ITERATION-N-…/probe.rs.txt`), not in `crates/`.
+artifact (`<N>-…/probe.rs.txt`), not in `crates/`.
 
 Deleting a probe does not delete the evidence. The artifact keeps the output,
 the log and the verdict, which is what the next agent reads anyway; the

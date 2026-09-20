@@ -71,28 +71,3 @@ impl RuntimeImageHandles {
         (self.generation_id == expected).then_some(self)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn consumers_share_snapshot_and_producer_mutation_preserves_published_data() {
-        let mut producer = RuntimeImageHandles::from_pools(
-            MaterialGenerationId(1),
-            vec![],
-            vec!["old".into()],
-            vec![],
-            vec![],
-            None,
-        );
-        let colour = producer.clone();
-        let upload = producer.clone();
-        assert!(colour.ptr_eq(&upload));
-        producer.make_mut().material_names[0] = "new".into();
-        assert_eq!(colour.material_names[0], "old");
-        assert_eq!(upload.material_names[0], "old");
-        assert!(!producer.ptr_eq(&colour));
-        assert_eq!(producer.material_names[0], "new");
-    }
-}

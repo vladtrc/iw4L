@@ -1830,8 +1830,18 @@ impl WeaponCatalog {
         let leftover_anim_overrides = leftover_iw5_anim_overrides(stream, &geometry);
         apply_leftover_default_anim_overrides(&mut sz_xanims, &leftover_anim_overrides);
         self.entries.push(CatalogWeapon {
-            reticle_center_slot: None,
-            reticle_side_slot: None,
+            reticle_center_slot: leftover_iw5_asset_slot(
+                stream,
+                geometry.weap_def,
+                fastfile_iw5::size::WEAPON_DEF_RETICLE_CENTER_OFF,
+                560,
+            ),
+            reticle_side_slot: leftover_iw5_asset_slot(
+                stream,
+                geometry.weap_def,
+                fastfile_iw5::size::WEAPON_DEF_RETICLE_SIDE_OFF,
+                568,
+            ),
             name: name.to_owned(),
             weap_def: geometry.weap_def.map(iw5_ptr_key),
             display_name_key: geometry
@@ -1932,8 +1942,16 @@ impl WeaponCatalog {
             .map(|arr| read_sz_xanims_t5(stream, arr))
             .unwrap_or([const { None }; WEAPON_ANIM_COUNT]);
         self.entries.push(CatalogWeapon {
-            reticle_center_slot: None,
-            reticle_side_slot: None,
+            reticle_center_slot: leftover_t5_asset_slot(
+                stream,
+                geometry.weap_def,
+                fastfile_t5::size::WEAPON_DEF_RETICLE_CENTER_OFF,
+            ),
+            reticle_side_slot: leftover_t5_asset_slot(
+                stream,
+                geometry.weap_def,
+                fastfile_t5::size::WEAPON_DEF_RETICLE_SIDE_OFF,
+            ),
             name: name.to_owned(),
             weap_def: geometry.weap_def.map(|p| (p.block, p.offset)),
             display_name_key: geometry
@@ -2937,11 +2955,146 @@ fn capture_iw5_body_facts(
         ads_in_rate: geometry.ads_in_rate,
         ads_out_rate: geometry.ads_out_rate,
         impact_type: geometry.impact_type,
+        kick: WeaponKickFacts {
+            f_ads_view_kick_center_speed: geometry.ads_view_kick_center_speed,
+            f_hip_view_kick_center_speed: geometry.hip_view_kick_center_speed,
+            ..Default::default()
+        },
         ..WeaponBodyFacts::default()
     };
     let Some(body) = geometry.weap_def else {
         return facts;
     };
+    facts.kick.gun_max_pitch = f32_at_iw5(stream, body, sz::WEAPON_DEF_GUN_MAX_PITCH_OFF, 1496);
+    facts.kick.gun_max_yaw = f32_at_iw5(stream, body, sz::WEAPON_DEF_GUN_MAX_YAW_OFF, 1500);
+    facts.kick.ads_gun_kick_reduced_kick_bullets = i32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_ADS_GUN_KICK_REDUCED_KICK_BULLETS_OFF,
+        1828,
+    );
+    facts.kick.ads_gun_kick_reduced_kick_percent = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_ADS_GUN_KICK_REDUCED_KICK_PERCENT_OFF,
+        1832,
+    );
+    facts.kick.ads_gun_kick_pitch_min = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_ADS_GUN_KICK_PITCH_MIN_OFF,
+        1836,
+    );
+    facts.kick.ads_gun_kick_pitch_max = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_ADS_GUN_KICK_PITCH_MAX_OFF,
+        1840,
+    );
+    facts.kick.ads_gun_kick_yaw_min =
+        f32_at_iw5(stream, body, sz::WEAPON_DEF_ADS_GUN_KICK_YAW_MIN_OFF, 1844);
+    facts.kick.ads_gun_kick_yaw_max =
+        f32_at_iw5(stream, body, sz::WEAPON_DEF_ADS_GUN_KICK_YAW_MAX_OFF, 1848);
+    facts.kick.ads_gun_kick_accel =
+        f32_at_iw5(stream, body, sz::WEAPON_DEF_ADS_GUN_KICK_ACCEL_OFF, 1852);
+    facts.kick.ads_gun_kick_speed_max = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_ADS_GUN_KICK_SPEED_MAX_OFF,
+        1856,
+    );
+    facts.kick.ads_gun_kick_speed_decay = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_ADS_GUN_KICK_SPEED_DECAY_OFF,
+        1860,
+    );
+    facts.kick.ads_gun_kick_static_decay = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_ADS_GUN_KICK_STATIC_DECAY_OFF,
+        1864,
+    );
+    facts.kick.ads_view_kick_pitch_min = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_ADS_VIEW_KICK_PITCH_MIN_OFF,
+        1868,
+    );
+    facts.kick.ads_view_kick_pitch_max = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_ADS_VIEW_KICK_PITCH_MAX_OFF,
+        1872,
+    );
+    facts.kick.ads_view_kick_yaw_min =
+        f32_at_iw5(stream, body, sz::WEAPON_DEF_ADS_VIEW_KICK_YAW_MIN_OFF, 1876);
+    facts.kick.ads_view_kick_yaw_max =
+        f32_at_iw5(stream, body, sz::WEAPON_DEF_ADS_VIEW_KICK_YAW_MAX_OFF, 1880);
+    facts.kick.hip_gun_kick_reduced_kick_bullets = i32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_HIP_GUN_KICK_REDUCED_KICK_BULLETS_OFF,
+        1896,
+    );
+    facts.kick.hip_gun_kick_reduced_kick_percent = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_HIP_GUN_KICK_REDUCED_KICK_PERCENT_OFF,
+        1900,
+    );
+    facts.kick.hip_gun_kick_pitch_min = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_HIP_GUN_KICK_PITCH_MIN_OFF,
+        1904,
+    );
+    facts.kick.hip_gun_kick_pitch_max = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_HIP_GUN_KICK_PITCH_MAX_OFF,
+        1908,
+    );
+    facts.kick.hip_gun_kick_yaw_min =
+        f32_at_iw5(stream, body, sz::WEAPON_DEF_HIP_GUN_KICK_YAW_MIN_OFF, 1912);
+    facts.kick.hip_gun_kick_yaw_max =
+        f32_at_iw5(stream, body, sz::WEAPON_DEF_HIP_GUN_KICK_YAW_MAX_OFF, 1916);
+    facts.kick.hip_gun_kick_accel =
+        f32_at_iw5(stream, body, sz::WEAPON_DEF_HIP_GUN_KICK_ACCEL_OFF, 1920);
+    facts.kick.hip_gun_kick_speed_max = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_HIP_GUN_KICK_SPEED_MAX_OFF,
+        1924,
+    );
+    facts.kick.hip_gun_kick_speed_decay = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_HIP_GUN_KICK_SPEED_DECAY_OFF,
+        1928,
+    );
+    facts.kick.hip_gun_kick_static_decay = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_HIP_GUN_KICK_STATIC_DECAY_OFF,
+        1932,
+    );
+    facts.kick.hip_view_kick_pitch_min = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_HIP_VIEW_KICK_PITCH_MIN_OFF,
+        1936,
+    );
+    facts.kick.hip_view_kick_pitch_max = f32_at_iw5(
+        stream,
+        body,
+        sz::WEAPON_DEF_HIP_VIEW_KICK_PITCH_MAX_OFF,
+        1940,
+    );
+    facts.kick.hip_view_kick_yaw_min =
+        f32_at_iw5(stream, body, sz::WEAPON_DEF_HIP_VIEW_KICK_YAW_MIN_OFF, 1944);
+    facts.kick.hip_view_kick_yaw_max =
+        f32_at_iw5(stream, body, sz::WEAPON_DEF_HIP_VIEW_KICK_YAW_MAX_OFF, 1948);
     facts.ammo_counter_clip = i32_at_iw5(stream, body, sz::WEAPON_DEF_AMMO_COUNTER_CLIP_OFF, 836);
     facts.start_ammo = i32_at_iw5(stream, body, sz::WEAPON_DEF_START_AMMO_OFF, 840);
     facts.i_reticle_side_size = i32_at_iw5(stream, body, sz::WEAPON_DEF_RETICLE_SIDE_SIZE_OFF, 580);

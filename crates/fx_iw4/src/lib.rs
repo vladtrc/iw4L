@@ -15,6 +15,9 @@ mod elem_def;
 mod emit;
 mod flags;
 mod glass;
+mod glass_crack;
+mod glass_geo;
+mod glass_shard;
 mod glass_shatter;
 mod gravity;
 mod impact;
@@ -109,8 +112,8 @@ pub use emit::{
     fx_emit_unpack_residual_start, fx_process_emitting_schedule,
 };
 pub use flags::{
-    FX_ELEM_DIE_ON_TOUCH, FX_ELEM_RUN_MASK, FX_ELEM_RUN_NONE_ORIGIN,
-    FX_ELEM_RUN_RELATIVE_TO_EFFECT, FX_ELEM_RUN_RELATIVE_TO_OFFSET, FX_ELEM_RUNNER_USES_RAND_ROT,
+    FX_ELEM_DIE_ON_TOUCH, FX_ELEM_RUN_MASK, FX_ELEM_RUN_RELATIVE_TO_EFFECT,
+    FX_ELEM_RUN_RELATIVE_TO_OFFSET, FX_ELEM_RUN_RELATIVE_TO_SPAWN, FX_ELEM_RUNNER_USES_RAND_ROT,
     FX_ELEM_SPAWN_FRUSTUM_CULL, FX_ELEM_UPDATE_HAS_VEL_GRAPH, FX_ELEM_USE_COLLISION,
     FX_ELEM_USE_MODEL_PHYSICS, FX_ELEM_VEL_LOCAL, FX_ELEM_VEL_WORLD, fx_elem_dies_on_touch,
     fx_elem_run_mode, fx_elem_skips_position_update, fx_elem_spawn_frustum_cull,
@@ -129,17 +132,17 @@ pub use glass::{
     FX_GLASS_STATE_FAN_DATA_COUNT, FX_GLASS_STATE_FLAGS, FX_GLASS_STATE_GEO_DATA_START,
     FX_GLASS_STATE_HOLE_DATA_COUNT, FX_GLASS_STATE_INIT_INDEX, FX_GLASS_STATE_SUPPORT_MASK,
     FX_GLASS_STATE_VERT_COUNT, FX_GLASS_TRACE_INTERVAL_MSEC, FX_GLASS_VERT_SCALE,
-    FxGlassIntactVert, FxGlassResetPiece, FxGlassSlabVert, fx_glass_alloc_piece,
-    fx_glass_apply_shattered_uv, fx_glass_ballistic_origin, fx_glass_clear_in_use,
-    fx_glass_def_color_rgba, fx_glass_def_tex_vecs, fx_glass_dynamics_avel,
-    fx_glass_dynamics_fall_time, fx_glass_dynamics_init_row, fx_glass_dynamics_phys_obj,
-    fx_glass_dynamics_software_launch, fx_glass_dynamics_vel, fx_glass_emit_slab,
-    fx_glass_free_piece, fx_glass_geo_vert, fx_glass_in_use_mask, fx_glass_in_use_word,
-    fx_glass_init_origin, fx_glass_intact_fan_indices, fx_glass_intact_verts, fx_glass_is_in_use,
-    fx_glass_last_trace_tick, fx_glass_pack_geo_vert, fx_glass_place_next_free,
-    fx_glass_place_origin, fx_glass_place_quat, fx_glass_place_set_next_free,
-    fx_glass_place_set_origin, fx_glass_place_set_quat, fx_glass_reset_copy_geo,
-    fx_glass_reset_copy_piece, fx_glass_reset_free_list, fx_glass_set_in_use, fx_glass_slab_counts,
+    FxGlassIntactVert, FxGlassResetPiece, FxGlassSlabVert, FxGlassVertXform, fx_glass_alloc_piece,
+    fx_glass_ballistic_origin, fx_glass_clear_in_use, fx_glass_def_color_rgba,
+    fx_glass_def_tex_vecs, fx_glass_dynamics_avel, fx_glass_dynamics_fall_time,
+    fx_glass_dynamics_init_row, fx_glass_dynamics_phys_obj, fx_glass_dynamics_software_launch,
+    fx_glass_dynamics_vel, fx_glass_emit_slab, fx_glass_free_piece, fx_glass_geo_vert,
+    fx_glass_in_use_mask, fx_glass_in_use_word, fx_glass_init_origin, fx_glass_intact_verts,
+    fx_glass_is_in_use, fx_glass_last_trace_tick, fx_glass_pack_geo_vert, fx_glass_piece_tex_vecs,
+    fx_glass_piece_verts, fx_glass_place_next_free, fx_glass_place_origin, fx_glass_place_quat,
+    fx_glass_place_radius, fx_glass_place_set_next_free, fx_glass_place_set_origin,
+    fx_glass_place_set_quat, fx_glass_reset_copy_geo, fx_glass_reset_copy_piece,
+    fx_glass_reset_free_list, fx_glass_set_in_use, fx_glass_slab_counts,
     fx_glass_software_rotate_quat, fx_glass_software_trace_due, fx_glass_state_area_x2,
     fx_glass_state_crack_count, fx_glass_state_def_index, fx_glass_state_fan_count,
     fx_glass_state_flags, fx_glass_state_geo_span, fx_glass_state_geo_start,
@@ -147,28 +150,39 @@ pub use glass::{
     fx_glass_state_set_geo_start, fx_glass_state_set_support_mask, fx_glass_state_support_mask,
     fx_glass_state_vert_count, fx_glass_trace_phase, fx_unit_quat_to_axis,
 };
+pub use glass_crack::{
+    FX_GLASS_CRACK_BRANCH_MAX, FX_GLASS_CRACK_EDGE_MAX, FX_GLASS_CRACK_LOOP_MAX,
+    FX_GLASS_CRACK_PT_MAX, FX_GLASS_EDGE_BORDER, FX_GLASS_EDGE_CRACK, FX_GLASS_EDGE_NONE,
+    FX_GLASS_EDGE_SUPPORTED, FxGlassClipSegment, FxGlassCrackBranch, FxGlassCrackEdge,
+    FxGlassCrackLoop, FxGlassCrackRand, FxGlassCrackWalk, FxGlassCrackWork,
+};
+pub use glass_geo::{
+    FX_GLASS_CRACK_VERT_FREE, FX_GLASS_SHARD_CRACK_MAX, FX_GLASS_SHARD_GEO_MAX,
+    FX_GLASS_SHARD_HOLE_MAX, FX_GLASS_SHARD_TRI_MAX, FX_GLASS_SHARD_VERT_MAX, FxGlassGeoCrack,
+    FxGlassGeoSpan, FxGlassPieceGeo, fx_glass_clamp_to_piece, fx_glass_contour_area_x2,
+    fx_glass_decode_geo, fx_glass_encode_fans, fx_glass_fan_word_count, fx_glass_geo_count,
+    fx_glass_pack_crack_header, fx_glass_pack_geo_count, fx_glass_pack_verts,
+    fx_glass_point_in_contour, fx_glass_point_in_piece, fx_glass_tri_count, fx_glass_triangulate,
+};
+pub use glass_shard::{FX_GLASS_SHARD_MAX, FxGlassShard, fx_glass_extract_shards};
 pub use glass_shatter::{
     FX_GLASS_ACCENT_BOUNCE_CAP, FX_GLASS_AIRBORNE_CAP, FX_GLASS_AIRBORNE_PER_BREAK,
     FX_GLASS_ANGULAR_VEL_MAX, FX_GLASS_ANGULAR_VEL_MIN, FX_GLASS_CATCHUP_STEPS,
-    FX_GLASS_FRINGE_MAX_PIECES, FX_GLASS_FRINGE_MAXCOVERAGE, FX_GLASS_FRINGE_MAXSIZE,
-    FX_GLASS_LANDING_AGGREGATE_MSEC, FX_GLASS_LANDING_CELL, FX_GLASS_LINEAR_VEL_MAX,
-    FX_GLASS_LINEAR_VEL_MIN, FX_GLASS_MAX_PIECES_PER_FRAME, FX_GLASS_MOTION_STEP_MSEC,
-    FX_GLASS_PENDING_MAX_MSEC, FX_GLASS_PENDING_MIN_MSEC, FX_GLASS_PENDING_SUPPORT_FRAC,
-    FX_GLASS_RESTITUTION, FX_GLASS_SETTLED_CAP, FX_GLASS_SETTLED_FADE_MSEC,
-    FX_GLASS_SETTLED_LIFETIME_MSEC, FX_GLASS_SHARD_LIFETIME_MSEC, FX_GLASS_SHARD_MAXSIZE,
-    FX_GLASS_SHATTER_BRANCH_SCALE, FX_GLASS_SHATTER_FX_32, FX_GLASS_SHATTER_FX_64,
-    FX_GLASS_SHATTER_FX_PER_FRAME, FX_GLASS_SHATTER_FX_PIECE, FX_GLASS_SHATTER_TWO_PI,
-    FX_GLASS_SPLIT_MAX_CHILDREN, FX_GLASS_SPLIT_MAX_VERTS, FX_GLASS_SPLIT_OP_CAP,
-    FX_GLASS_SPLIT_QUEUE_CAP, FX_GLASS_STATE_FLAG_CHILD_CLEAR, FX_GLASS_STATE_FLAG_DAMAGED,
-    FX_GLASS_STATE_FLAG_SHATTERED, FxGlassRadialSplit, FxGlassSplitLoop, fx_glass_centroid,
-    fx_glass_child_support, fx_glass_chord_split, fx_glass_clamp_impact, fx_glass_cross3,
-    fx_glass_fringe_cap, fx_glass_fringe_prune_knock_order, fx_glass_interior_angle_step,
-    fx_glass_interior_branch_count, fx_glass_launch_avel, fx_glass_launch_dir, fx_glass_lerp_range,
-    fx_glass_life_fade, fx_glass_loop_area_x2, fx_glass_needs_size_split, fx_glass_normalize3,
-    fx_glass_piece_speed_scale, fx_glass_point_in_convex, fx_glass_radial_split,
-    fx_glass_recenter_loop, fx_glass_scale_color_alpha, fx_glass_shard_size_cap,
-    fx_glass_shatter_fx_fallback, fx_glass_shatter_fx_name, fx_glass_shatter_rand,
-    fx_glass_splitmix64, fx_glass_support_frac,
+    FX_GLASS_FRINGE_MAXCOVERAGE, FX_GLASS_FRINGE_MAXSIZE, FX_GLASS_LANDING_AGGREGATE_MSEC,
+    FX_GLASS_LANDING_CELL, FX_GLASS_LINEAR_VEL_MAX, FX_GLASS_LINEAR_VEL_MIN,
+    FX_GLASS_MAX_PIECES_PER_FRAME, FX_GLASS_MOTION_STEP_MSEC, FX_GLASS_PENDING_MAX_MSEC,
+    FX_GLASS_PENDING_MIN_MSEC, FX_GLASS_PENDING_SUPPORT_FRAC, FX_GLASS_RESTITUTION,
+    FX_GLASS_SETTLED_CAP, FX_GLASS_SETTLED_FADE_MSEC, FX_GLASS_SETTLED_LIFETIME_MSEC,
+    FX_GLASS_SHARD_LIFETIME_MSEC, FX_GLASS_SHARD_MAXSIZE, FX_GLASS_SHATTER_BRANCH_SCALE,
+    FX_GLASS_SHATTER_FX_32, FX_GLASS_SHATTER_FX_64, FX_GLASS_SHATTER_FX_PER_FRAME,
+    FX_GLASS_SHATTER_FX_PIECE, FX_GLASS_SHATTER_TWO_PI, FX_GLASS_SPLIT_OP_CAP,
+    FX_GLASS_STATE_FLAG_CHILD_CLEAR, FX_GLASS_STATE_FLAG_DAMAGED, FX_GLASS_STATE_FLAG_SIMPLE,
+    fx_glass_centroid, fx_glass_cross3, fx_glass_fringe_cap, fx_glass_interior_branch_count,
+    fx_glass_launch_avel, fx_glass_launch_dir, fx_glass_lerp_range, fx_glass_life_fade,
+    fx_glass_loop_area_x2, fx_glass_needs_size_split, fx_glass_normalize3,
+    fx_glass_piece_speed_scale, fx_glass_recenter_offset, fx_glass_scale_color_alpha,
+    fx_glass_shard_size_cap, fx_glass_shatter_fx_fallback, fx_glass_shatter_fx_name,
+    fx_glass_shatter_rand, fx_glass_splitmix64, fx_glass_support_frac,
 };
 pub use gravity::{
     FX_GRAVITY, fx_elem_gravity_accel_z, fx_elem_gravity_accel_z_sampled,

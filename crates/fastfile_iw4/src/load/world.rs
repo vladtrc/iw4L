@@ -226,6 +226,183 @@ pub(super) fn load_gameworld_mp(s: &mut ZoneStream<'_>) -> Result<()> {
     s.pop()
 }
 
+/// `GameWorldSp`: name + inline `PathData` + inline `VehicleTrack` + glass ptr.
+///
+/// Only the stream advance matters here (single-player pathfinding and
+/// vehicle data the runtime never consumes): node `Links`, tree children and
+/// track branches are walked so the cursor lands past the asset. Script
+/// strings inside `pathnode_constant_t` are u16 indices, never followed.
+pub(super) fn load_gameworld_sp(s: &mut ZoneStream<'_>) -> Result<()> {
+    let p = s.alloc_load(4, s.layout(sz::GAME_WORLD_SP, 112))?;
+    s.push(XFILE_BLOCK_VIRTUAL)?;
+    follow_name(s, p, 0)?;
+
+    load_path_data(s, p.at(s.layout(4, 8)))?;
+    load_vehicle_track(s, p.at(s.layout(44, 88)))?;
+    load_glass_ptr(s, p, s.layout(48, 104))?;
+
+    s.pop()
+}
+
+fn load_path_data(s: &mut ZoneStream<'_>, path: Ptr) -> Result<()> {
+    let node_count = s.u32_at(path, 0)? as usize;
+    let vis_bytes = s.i32_at(path, s.layout(24, 48))?.max(0) as usize;
+    let tree_count = s.i32_at(path, s.layout(32, 64))?.max(0) as usize;
+    let node_stride = s.layout(sz::PATH_NODE, 168);
+
+    if let Some(nodes) = s.follow_array(path, s.layout(4, 8), 4, node_stride, node_count)? {
+        let link_field = s.layout(60, 64);
+        for i in 0..node_count {
+            let node = nodes.at(i * node_stride);
+            let link_count = s.u16_at(node, 56)? as usize;
+            s.follow_array(node, link_field, 4, sz::PATH_LINK, link_count)?;
+        }
+    }
+
+    // basenodes live in the runtime block: zero-filled, no stream bytes.
+    runtime_array(s, path, s.layout(8, 16), 16, sz::PATH_BASENODE, node_count)?;
+
+    s.plain_array(path, s.layout(12, 32), 2, 2, node_count)?;
+    s.plain_array(path, s.layout(16, 40), 2, 2, node_count)?;
+    s.plain_array(path, s.layout(20, 56), 1, 1, vis_bytes)?;
+
+    if let Some(tree) = s.follow_array(
+        path,
+        s.layout(28, 72),
+        4,
+        s.layout(sz::PATHNODE_TREE, 24),
+        tree_count,
+    )? {
+        for i in 0..tree_count {
+            load_pathnode_tree(s, tree.at(i * s.layout(sz::PATHNODE_TREE, 24)))?;
+        }
+    }
+    Ok(())
+}
+
+fn load_pathnode_tree(s: &mut ZoneStream<'_>, t: Ptr) -> Result<()> {
+    let axis = s.i32_at(t, 0)?;
+    let union_off = s.layout(8, 8);
+    if axis >= 0 {
+        let width = s.pointer_bytes();
+        for k in 0..2 {
+            if s.begin_body(t.at(union_off + k * width))? {
+                let child = s.alloc_load(4, s.layout(sz::PATHNODE_TREE, 24))?;
+                load_pathnode_tree(s, child)?;
+            }
+        }
+    } else {
+        let count = s.i32_at(t, union_off)?.max(0) as usize;
+        s.follow_array(t, s.layout(12, 16), 2, 2, count)?;
+    }
+    Ok(())
+}
+
+fn load_vehicle_track(s: &mut ZoneStream<'_>, track: Ptr) -> Result<()> {
+    let segment_count = s.u32_at(track, s.layout(4, 8))? as usize;
+    if let Some(segments) = s.follow_array(
+        track,
+        0,
+        4,
+        s.layout(sz::VEHICLE_SEGMENT, 72),
+        segment_count,
+    )? {
+        for i in 0..segment_count {
+            load_vehicle_segment(s, segments.at(i * s.layout(sz::VEHICLE_SEGMENT, 72)))?;
+        }
+    }
+    Ok(())
+}
+
+fn load_vehicle_segment(s: &mut ZoneStream<'_>, seg: Ptr) -> Result<()> {
+    follow_name(s, seg, 0)?;
+    let sector_count = s.u32_at(seg, s.layout(8, 16))? as usize;
+    if let Some(sectors) = s.follow_array(
+        seg,
+        s.layout(4, 8),
+        4,
+        s.layout(sz::VEHICLE_SECTOR, 72),
+        sector_count,
+    )? {
+        for i in 0..sector_count {
+            let sector = sectors.at(i * s.layout(sz::VEHICLE_SECTOR, 72));
+            let obstacle_count = s.u32_at(sector, s.layout(56, 64))? as usize;
+            s.plain_array(
+                sector,
+                s.layout(52, 56),
+                4,
+                sz::VEHICLE_OBSTACLE,
+                obstacle_count,
+            )?;
+        }
+    }
+    // Branch lists hold pointers to fellow segments (shared ⇒ bare offsets).
+    for (field, count_off) in [
+        (s.layout(12, 24), s.layout(16, 32)),
+        (s.layout(20, 40), s.layout(24, 48)),
+    ] {
+        let branch_count = s.u32_at(seg, count_off)? as usize;
+        if let Some(branches) = s.follow_array(
+            seg,
+            field,
+            s.pointer_bytes(),
+            s.pointer_bytes(),
+            branch_count,
+        )? {
+            for k in 0..branch_count {
+                if s.begin_body(branches.at(k * s.pointer_bytes()))? {
+                    let target = s.alloc_load(4, s.layout(sz::VEHICLE_SEGMENT, 72))?;
+                    load_vehicle_segment(s, target)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pointer form of `G_GlassData`, shared with `GameWorldMp`'s inline variant.
+fn load_glass_ptr(s: &mut ZoneStream<'_>, p: Ptr, field: usize) -> Result<()> {
+    if !s.begin_body(p.at(field))? {
+        return Ok(());
+    }
+    let glass = s.alloc_load(4, s.layout(sz::G_GLASS_DATA, 144))?;
+    let piece_count = s.u32_at(glass, s.layout(4, 8))? as usize;
+    let name_count = s.u32_at(glass, s.layout(12, 16))? as usize;
+    s.plain_array(glass, 0, 4, sz::G_GLASS_PIECE, piece_count)?;
+    if s.begin_body(glass.at(s.layout(16, 24)))? {
+        let stride = s.layout(sz::G_GLASS_NAME, 24);
+        let names = s.alloc_load(4, stride * name_count)?;
+        for i in 0..name_count {
+            let g = names.at(i * stride);
+            follow_name(s, g, 0)?;
+            let count = s.u16_at(g, s.layout(6, 10))? as usize;
+            s.plain_array(g, s.layout(8, 16), 2, 2, count)?;
+        }
+    }
+    Ok(())
+}
+
+/// `AddonMapEnts`: the `MapEnts` head (name, entity string, triggers) with no
+/// stages. Exists so small ops zones (`so_*`, asset 0) walk past it.
+pub(super) fn load_addonmapents(s: &mut ZoneStream<'_>) -> Result<()> {
+    let p = s.alloc_load(4, s.layout(sz::ADDON_MAP_ENTS, 72))?;
+    let entity_chars = s.i32_at(p, s.layout(8, 16))?.max(0) as usize;
+
+    s.push(XFILE_BLOCK_VIRTUAL)?;
+    follow_name(s, p, 0)?;
+    s.plain_array(p, s.layout(4, 8), 1, 1, entity_chars)?;
+
+    let triggers = p.at(s.layout(12, 24));
+    let model_count = s.i32_at(triggers, 0)?.max(0) as usize;
+    let hull_count = s.i32_at(triggers, s.layout(8, 16))?.max(0) as usize;
+    let slab_count = s.i32_at(triggers, s.layout(16, 32))?.max(0) as usize;
+    s.plain_array(triggers, s.layout(4, 8), 4, sz::TRIGGER_MODEL, model_count)?;
+    s.plain_array(triggers, s.layout(12, 24), 4, sz::TRIGGER_HULL, hull_count)?;
+    s.plain_array(triggers, s.layout(20, 40), 4, sz::TRIGGER_SLAB, slab_count)?;
+
+    s.pop()
+}
+
 pub(super) fn load_mapents(s: &mut ZoneStream<'_>) -> Result<()> {
     let p = s.alloc_load(4, s.layout(sz::MAP_ENTS, 88))?;
     let entity_chars = s.i32_at(p, s.layout(8, 16))?.max(0) as usize;

@@ -1,6 +1,6 @@
 use fx_iw4::{
-    FX_ELEM_AT_REST_NONE, FX_ELEM_RUN_NONE_ORIGIN, FX_ELEM_RUN_RELATIVE_TO_EFFECT,
-    FX_ELEM_RUN_RELATIVE_TO_OFFSET, FX_ELEM_RUNNER_USES_RAND_ROT, FX_ELEM_TYPE_SPARK_CLOUD,
+    FX_ELEM_AT_REST_NONE, FX_ELEM_RUN_RELATIVE_TO_EFFECT, FX_ELEM_RUN_RELATIVE_TO_OFFSET,
+    FX_ELEM_RUN_RELATIVE_TO_SPAWN, FX_ELEM_RUNNER_USES_RAND_ROT, FX_ELEM_TYPE_SPARK_CLOUD,
     FX_ELEM_TYPE_SPARK_FOUNTAIN, FX_ELEM_TYPE_TRAIL, FX_RAND_CH_DELAY, FX_RAND_CH_LIFE,
     FX_RAND_CH_ONESHOT_COUNT, FX_SPARK_CLOUD_HANDLE_NONE, FX_WARN_ELEM_LIMIT, FxElemType,
     fx_elem_random_seed, fx_elem_run_mode, fx_looping_catchup_begin, fx_looping_spawn_schedule,
@@ -331,11 +331,11 @@ fn elem_spawn_origin(
     life_idx: u32,
 ) -> [f32; 3] {
     match fx_elem_run_mode(elem_def.flags) {
-        FX_ELEM_RUN_NONE_ORIGIN => [0.0; 3],
+        FX_ELEM_RUN_RELATIVE_TO_OFFSET => [0.0; 3],
         _ => {
             let o = spawn_origin_world(elem_def, effect_origin, effect_axis, life_idx);
             let run = fx_elem_run_mode(elem_def.flags);
-            if run == FX_ELEM_RUN_RELATIVE_TO_EFFECT || run == FX_ELEM_RUN_RELATIVE_TO_OFFSET {
+            if run == FX_ELEM_RUN_RELATIVE_TO_SPAWN || run == FX_ELEM_RUN_RELATIVE_TO_EFFECT {
                 fx_world_delta_to_local(o, effect_origin, effect_axis)
             } else {
                 o

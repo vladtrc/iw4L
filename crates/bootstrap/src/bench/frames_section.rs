@@ -13,8 +13,8 @@
 //!   the top-level spans is the time the recorder could not attribute to
 //!   anything, and it is the honest measure of how far the instrumentation
 //!   reaches. A union rather than a sum, because two schedules running at once
-//!   on two threads cover the wall once between them — summing them is what
-//!   used to drive the remainder negative and have it clamped to zero.
+//!   on two threads cover the wall once between them, and summing them instead
+//!   drives the remainder negative.
 
 use perf::frames::{FrameRow, flag};
 use perf::{Span, stats};

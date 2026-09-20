@@ -34,10 +34,13 @@ differently is an override, not a duplicate, and `load_jobs.csv`
 `assets::lane` (`ZoneGame` → iw4/iw5/t5); a lane gap is a typed `LaneGap`, never
 silence.
 
-Installing it is `session::match_apply`, in two halves. Preflight builds a
-`MatchInstallPlan` — mode, doors, objectives, scene conversion, drawable world —
+Installing it is `session::match_apply`. Preflight builds a `MatchInstallPlan` — mode, doors, objectives, scene conversion, drawable world —
 and publishes nothing until it hands one over. Commit publishes it, boots the
-sim and writes `MatchInstalled`.
+sim and writes `MatchInstalled`. The authority then prepares bot navigation on
+`load_pool()` from a world snapshot; admission waits for `BotNavigationReady`.
+The walk graph is cached (`nav`), keyed by the content digest with the bake's
+schema and hull, so the second start of a map reads it back instead of walking
+the grid again; a match teardown drops the in-memory copy, not the file.
 
 ## Cache, and poking it: `iw4l-artifacts/cache/<kind>/<prefix>/<key>`
 
@@ -45,6 +48,6 @@ Content-addressed leaf in `asset_transport::artifact_cache` (`cache_get` /
 `cache_put`, `fnv1a64`). A miss is silent — the caller computes the value anyway
 — and a hit must be the **same bytes** a miss would have written. The key names
 every input; if the encoder changed, bump the format word. Live kinds: `mips`,
-`wgsl`, `localize` and `xwma_pcm`, whose miss is a batched `ffmpeg`.
+`wgsl`, `localize`, `nav` and `xwma_pcm`, whose miss is a batched `ffmpeg`.
 `IW4L_GAMES` holds the game trees; no folder name is hardcoded. Live it is `make
 map mp_boneyard` ([`RUN.md`](RUN.md)), with stages in `LoadProgress`.

@@ -435,6 +435,7 @@ pub enum SpawnReject {
     NoAuthoredCandidates,
     NoGroundHit,
     StartSolid,
+    Occupied,
     UnsupportedCoverage,
     AllRejected,
 }
@@ -445,6 +446,7 @@ impl SpawnReject {
             Self::NoAuthoredCandidates => "no_authored_candidates",
             Self::NoGroundHit => "no_ground_hit",
             Self::StartSolid => "start_solid",
+            Self::Occupied => "occupied",
             Self::UnsupportedCoverage => "unsupported_coverage",
             Self::AllRejected => "all_rejected",
         }
@@ -543,6 +545,16 @@ pub(crate) fn decide_spawn_seeded_report(
         spawn_team,
         world.use_start_spawns(),
     );
+    let start_candidates = candidates.clone();
+    if world.use_start_spawns() && kind.is_team() {
+        for index in
+            spawn_candidate_indices_for(&world.bootstrap_ref().spawns, kind, spawn_team, false)
+        {
+            if !candidates.contains(&index) {
+                candidates.push(index);
+            }
+        }
+    }
     let blocked: Vec<String> = world.world_objects().blocked_spawn_areas().to_vec();
     candidates.retain(|index| {
         let spawn = &world.bootstrap_ref().spawns[*index];
@@ -621,13 +633,24 @@ pub(crate) fn decide_spawn_seeded_report(
             .then_with(|| a.1.cmp(&b.1))
     });
 
-    let order = order_by_score_bands(&scored, rng);
+    let mut order = order_by_score_bands(&scored, rng);
+    if world.use_start_spawns() {
+        order.sort_by_key(|index| !start_candidates.contains(index));
+    }
     let mut report = SpawnAttemptReport::default();
     for &source_index in &order {
         report.tried += 1;
         let point = &spawns[source_index];
         match ground_spawn(world, point.origin) {
             Ok(traced_origin) => {
+                if avoid.iter().any(|other| {
+                    (other[0] - traced_origin[0]).abs() < PLAYER_MAXS[0] - PLAYER_MINS[0]
+                        && (other[1] - traced_origin[1]).abs() < PLAYER_MAXS[1] - PLAYER_MINS[1]
+                        && (other[2] - traced_origin[2]).abs() < PLAYER_MAXS[2] - PLAYER_MINS[2]
+                }) {
+                    report.rejected.push((source_index, SpawnReject::Occupied));
+                    continue;
+                }
                 report.accepted = Some(SpawnDecision {
                     classname: point.classname.clone(),
                     source_index,

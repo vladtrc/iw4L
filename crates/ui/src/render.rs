@@ -29,7 +29,6 @@ pub(crate) struct FocusHelpText;
 #[derive(Component, Clone, Copy, Debug)]
 pub(crate) struct SliderControl {
     pub key: crate::SettingKey,
-    pub value: f32,
     pub min: f32,
     pub max: f32,
 }
@@ -221,20 +220,8 @@ fn spawn_widget(
     if let Some(help) = &widget.help {
         node.insert(WidgetHelp(help.clone()));
     }
-    if let Content::Slider {
-        value,
-        min,
-        max,
-        key,
-        ..
-    } = widget.content
-    {
-        node.insert(SliderControl {
-            key,
-            value,
-            min,
-            max,
-        });
+    if let Content::Slider { min, max, key, .. } = widget.content {
+        node.insert(SliderControl { key, min, max });
     }
     if let WidgetAnimation::ScrollX {
         period_seconds,
@@ -470,16 +457,39 @@ fn spawn_control_content(
         }
         _ => ("", ""),
     };
+    let value_x = width
+        * if matches!(widget.content, Content::Bind { .. }) {
+            0.72
+        } else {
+            0.48
+        };
+    let fit = |text: &str, available: f32| {
+        let measured = if let Some((def, _, _, _)) = font_atlas {
+            let scale = crate::retail_font::r_normalized_text_scale(
+                def.pixel_height,
+                widget.style.text_scale,
+            ) * contain;
+            text.chars()
+                .filter_map(|ch| def.glyph(ch as u32))
+                .map(|glyph| glyph.dx as f32 * scale)
+                .sum::<f32>()
+        } else {
+            text.chars().count() as f32 * font_px * 0.6
+        };
+        (available / measured.max(1.0)).min(1.0)
+    };
+    let label_fit = fit(left, value_x - 12.0 * contain);
+    let value_fit = fit(right, width - value_x - 4.0 * contain);
     spawn_control_text(
         row,
         left,
         font,
-        font_px,
+        font_px * label_fit,
         color,
         6.0,
         font_atlas,
         contain,
-        widget.style.text_scale,
+        widget.style.text_scale * label_fit,
         height,
     );
     if !right.is_empty() {
@@ -487,12 +497,12 @@ fn spawn_control_content(
             row,
             right,
             font,
-            font_px,
+            font_px * value_fit,
             color,
-            width * 0.48,
+            value_x,
             font_atlas,
             contain,
-            widget.style.text_scale,
+            widget.style.text_scale * value_fit,
             height,
         );
     }

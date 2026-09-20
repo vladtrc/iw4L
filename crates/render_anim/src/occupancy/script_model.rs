@@ -92,6 +92,7 @@ struct ScriptOwnerRow {
     camera_hidden: bool,
     lighting_origin: [f32; 3],
     lookup_fallback: u8,
+    caster_bound: render_scene::XModelCasterBound,
 }
 
 #[derive(Resource, Default)]
@@ -680,6 +681,7 @@ fn pose_script_models(
             camera_hidden: sphere_behind_frustum(origin, radius, &planes),
             lighting_origin: owner.lighting_origin,
             lookup_fallback: atpoint.fallback(owner.lighting_origin, box_half),
+            caster_bound: render_scene::XModelCasterBound { origin, radius },
         });
     }
     persist.by_id.retain(|id, _| live_ids.contains(id));
@@ -921,6 +923,7 @@ fn commit_script_model_draw_plan(
                 packed_lighting: None,
                 is_scope: false,
                 scene_entnum: row.entnum,
+                caster_bound: Some(row.caster_bound),
             });
         }
     }

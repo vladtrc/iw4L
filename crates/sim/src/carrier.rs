@@ -208,22 +208,6 @@ impl SimWorld {
         self.frame().retire_client(id);
     }
 
-    pub fn debug_place_alive_player(&mut self, id: ClientId, origin: [f32; 3]) {
-        self.frame().debug_place_alive_player(id, origin);
-    }
-
-    pub fn debug_set_held_ammo(&mut self, id: ClientId, clip: i32, stock: i32) {
-        self.frame().debug_set_held_ammo(id, clip, stock);
-    }
-
-    pub fn debug_set_team(&mut self, id: ClientId, team: i32) {
-        self.frame().debug_set_team(id, team);
-    }
-
-    pub fn debug_mark_dead(&mut self, id: ClientId) {
-        self.frame().debug_mark_dead(id);
-    }
-
     pub fn set_origin(&mut self, id: ClientId, origin: [f32; 3]) -> bool {
         self.frame().set_origin(id, origin)
     }

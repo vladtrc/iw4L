@@ -159,7 +159,7 @@ pub fn tick_tracer_beams(world: &mut TracerWorld, clock: FxMsec) {
     world.pool.free_expired(clock);
     world.queued.clear();
     for tr in world.pool.live() {
-        let head = bg_evaluate_trajectory(
+        let begin = bg_evaluate_trajectory(
             &Trajectory {
                 tr_time: tr.pos_tr_time,
                 tr_type: tr.pos_tr_type,
@@ -171,9 +171,9 @@ pub fn tick_tracer_beams(world: &mut TracerWorld, clock: FxMsec) {
         );
         let dir = fx_vec3_normalize(tr.pos_tr_delta);
         let start_from_base = [
-            head[0] - tr.pos_tr_base[0],
-            head[1] - tr.pos_tr_base[1],
-            head[2] - tr.pos_tr_base[2],
+            begin[0] - tr.pos_tr_base[0],
+            begin[1] - tr.pos_tr_base[1],
+            begin[2] - tr.pos_tr_base[2],
         ];
         let length_from_base =
             start_from_base[0] * dir[0] + start_from_base[1] * dir[1] + start_from_base[2] * dir[2];
@@ -182,18 +182,18 @@ pub fn tick_tracer_beams(world: &mut TracerWorld, clock: FxMsec) {
         if beam_len <= 0.0 {
             continue;
         }
-        let tail = [
-            head[0] - dir[0] * beam_len,
-            head[1] - dir[1] * beam_len,
-            head[2] - dir[2] * beam_len,
+        let end = [
+            begin[0] + dir[0] * beam_len,
+            begin[1] + dir[1] * beam_len,
+            begin[2] + dir[2] * beam_len,
         ];
         if world.queued.len() >= FX_BEAM_ADD_CAP {
             break;
         }
         world.queued.push(QueuedBeam {
             tess: FxBeamTess {
-                begin: tail,
-                end: head,
+                begin,
+                end,
                 begin_radius: tr.beam_width,
                 end_radius: tr.beam_width,
                 colors: tr.colors,

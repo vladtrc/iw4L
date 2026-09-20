@@ -1,5 +1,5 @@
 use bevy::picking::{
-    events::{Drag, Out, Over, Pointer, Press},
+    events::{Out, Over, Pointer, Press},
     pointer::PointerButton,
 };
 use bevy::prelude::*;
@@ -321,7 +321,7 @@ pub(crate) fn sync_hover_and_nav(
     let top = stack.names.last().map(String::as_str);
     let options_browsing = top == Some("options");
     let class_browsing = top == Some("class_setup");
-    let class_paging = class_browsing && classes.is_item_picker();
+    let class_paging = class_browsing && classes.is_picker();
     let mut dirs = Vec::new();
     let mut accept = false;
     for cmd in cmds.read() {
@@ -432,10 +432,16 @@ pub(crate) fn drive_control_axes(
     mut shell: MessageReader<MenuShellCmd>,
     focus: Res<Focus>,
     controls: Query<(&Focusable, &WidgetControl)>,
-    sliders: Query<&SliderControl>,
-    mut drags: MessageReader<Pointer<Drag>>,
+    sliders: Query<(
+        &Focusable,
+        &SliderControl,
+        &ComputedNode,
+        &UiGlobalTransform,
+    )>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut dragging: Local<Option<String>>,
     mut intents: MessageWriter<UiIntent>,
-    stack: Res<crate::retail_menu::RetailMenuStack>,
 ) {
     let mut horizontal = 0i32;
     if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::KeyA) {
@@ -453,9 +459,7 @@ pub(crate) fn drive_control_axes(
             };
         }
     }
-    let options_browsing = stack.names.last().map(String::as_str) == Some("options");
     if horizontal != 0
-        && !options_browsing
         && let Some(id) = focus.widget.as_deref()
         && let Some((_, control)) = controls.iter().find(|(widget, _)| widget.id == id)
     {
@@ -485,14 +489,37 @@ pub(crate) fn drive_control_axes(
             _ => {}
         }
     }
-    for drag in drags.read() {
-        if let Ok(slider) = sliders.get(drag.entity) {
-            let span = slider.max - slider.min;
+    if !mouse.pressed(MouseButton::Left) {
+        *dragging = None;
+        return;
+    }
+    if mouse.just_pressed(MouseButton::Left) {
+        *dragging = windows
+            .single()
+            .ok()
+            .and_then(Window::physical_cursor_position)
+            .and_then(|cursor| {
+                sliders.iter().find_map(|(widget, _, node, transform)| {
+                    let local = transform.try_inverse()?.transform_point2(cursor);
+                    let half = node.size() * 0.5;
+                    (half.x > 0.0 && local.abs().cmple(half).all()).then(|| widget.id.clone())
+                })
+            });
+    }
+    if let Some(id) = dragging.as_deref()
+        && let Some((_, slider, node, transform)) =
+            sliders.iter().find(|(widget, _, _, _)| widget.id == id)
+        && let Ok(window) = windows.single()
+        && let Some(cursor) = window.physical_cursor_position()
+        && let Some(inverse) = transform.try_inverse()
+    {
+        let width = node.size().x;
+        if width > 0.0 {
+            let x = inverse.transform_point2(cursor).x + width * 0.5;
+            let fraction = ((x - width * 0.48) / (width * 0.38)).clamp(0.0, 1.0);
             intents.write(UiIntent::SetSetting {
                 key: slider.key,
-                value: SettingValue::Float(
-                    (slider.value + drag.distance.x / 250.0 * span).clamp(slider.min, slider.max),
-                ),
+                value: SettingValue::Float(slider.min + fraction * (slider.max - slider.min)),
             });
         }
     }

@@ -66,9 +66,8 @@ impl FxModelDrawPlan {
     }
 
     /// Empties a staging plan for this frame's rebuild, keeping its allocations
-    /// and its revisions. This is not a publication: it used to bump the
-    /// revision on every frame whether or not the rebuild that followed changed
-    /// anything, which is what forced the merge to re-hash the rows instead.
+    /// and its revisions. This is not a publication: the revision moves when the
+    /// rebuild that follows changes something, never because a frame passed.
     pub fn clear(&mut self) {
         self.vertices.clear();
         self.indices.clear();

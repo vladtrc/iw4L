@@ -81,7 +81,7 @@ impl Motor {
     pub fn drive(&mut self, obs: &BotObservation, intent: &BotIntent, dt_ms: i32) -> UserCmd {
         if !self.armed {
             self.yaw = obs.self_state.viewangles[1];
-            self.pitch = obs.self_state.viewangles[0];
+            self.pitch = angle_subtract(obs.self_state.viewangles[0], 0.0);
             self.armed = true;
         }
         let dt = dt_ms.max(1) as f32;
@@ -126,6 +126,10 @@ impl Motor {
             ];
             (forwardmove, rightmove) = wish_to_move(self.yaw, wish);
         }
+        // A requested weapon has to survive the whole change: the simulator
+        // settles a dropping hand back to ready when the command asks for the
+        // weapon it is already lowering.
+        let weapon = intent.weapon.unwrap_or(obs.self_state.weapon);
         let mut cmd = UserCmd {
             server_time: obs.time_ms,
             angles: [
@@ -135,8 +139,8 @@ impl Motor {
             ],
             forwardmove,
             rightmove,
-            weapon: obs.self_state.weapon,
-            weapon_mapped: obs.self_state.weapon,
+            weapon,
+            weapon_mapped: weapon,
             ..UserCmd::default()
         };
         if intent.fire && self.weapon_on_target(obs, intent) {
@@ -147,6 +151,18 @@ impl Motor {
         }
         if intent.reload {
             cmd.buttons |= buttons::RELOAD;
+        }
+        if intent.sprint
+            && walking
+            && intent.move_mode == MoveMode::Walk
+            && forwardmove > 110
+            && rightmove.abs() < 45
+            && !intent.fire
+            && !intent.use_button
+            && !intent.reload
+            && !intent.crouch
+        {
+            cmd.buttons |= buttons::SPRINT;
         }
         if intent.crouch {
             cmd.buttons |= buttons::CROUCH;
@@ -165,7 +181,11 @@ impl Motor {
 }
 
 fn look_angles(from: [f32; 3], to: [f32; 3]) -> [f32; 3] {
-    math_iw4::vect_to_angles([to[0] - from[0], to[1] - from[1], to[2] - from[2]])
+    let mut angles = math_iw4::vect_to_angles([to[0] - from[0], to[1] - from[1], to[2] - from[2]]);
+    // vect_to_angles wraps upward pitch into [0, 360); the motor clamps
+    // and compares pitch in the signed range.
+    angles[0] = angle_subtract(angles[0], 0.0);
+    angles
 }
 
 fn slew_yaw(current: f32, desire: f32, vel: f32, dt: f32) -> (f32, f32) {

@@ -380,3 +380,164 @@ fn load_client_triggers(s: &mut ZoneStream<'_>, ct: Ptr) -> Result<()> {
     s.plain_array(ct, s.layout(0x38, 112), 2, 2, trigger_count)?;
     Ok(())
 }
+
+/// `AddonMapEnts`: the `MapEnts` head (name, entity string, triggers) plus a
+/// shared `ClipInfo` and per-sub-model clip infos and brush models. Exists so
+/// SP/SO zones (blocker at asset 0) walk past it.
+pub(super) fn load_addonmapents(s: &mut ZoneStream<'_>) -> Result<()> {
+    s.walk_stage = "addon_map_ents";
+    let p = s.alloc_load(4, s.layout(sz::ADDON_MAP_ENTS, 104))?;
+    let entity_chars = s.i32_at(p, s.layout(8, 16))?.max(0) as usize;
+    let submodel_count = s.u32_at(p, s.layout(40, 80))? as usize;
+
+    s.push(XFILE_BLOCK_VIRTUAL)?;
+    follow_name(s, p, 0)?;
+    s.plain_array(p, s.layout(4, 8), 1, 1, entity_chars)?;
+
+    load_map_triggers(s, p.at(s.layout(0xc, 24)))?;
+    // Asset-level ClipInfo contents stay in VIRTUAL with the rest of the
+    // asset (mirroring load_clipmap's main info, which would not fit TEMP
+    // either); only per-cmodel infos use the TEMP-scoped helper below.
+    if s.begin_body(p.at(s.layout(36, 72)))? {
+        let info = s.alloc_load(4, s.layout(sz::CLIP_INFO, 128))?;
+        s.fixup_slot(p.at(s.layout(36, 72)), info)?;
+        load_clip_info(s, info)?;
+    }
+
+    let cmodel = s.layout(sz::CMODEL2, 80);
+    if let Some(cmodels) = s.plain_array(p, s.layout(44, 88), 4, cmodel, submodel_count)? {
+        for i in 0..submodel_count {
+            load_clip_info_ptr(s, cmodels.at(i * cmodel + s.layout(28, 32)))?;
+        }
+    }
+    s.plain_array(p, s.layout(48, 96), 4, sz::GFX_BRUSH_MODEL, submodel_count)?;
+
+    s.pop()
+}
+
+/// `PathData` (`aipaths` asset): standalone SP pathfinding. Same walk as the
+/// T5/Map variant — node `Links`, runtime basenodes, chain maps, vis bytes,
+/// node tree — with IW5's own node stride (136/160). Script strings inside
+/// `pathnode_constant_t` are u16 indices, never followed.
+pub(super) fn load_pathdata(s: &mut ZoneStream<'_>) -> Result<()> {
+    s.walk_stage = "path_data";
+    let p = s.alloc_load(4, s.layout(sz::PATH_DATA, 88))?;
+    let node_count = s.u32_at(p, s.layout(4, 8))? as usize;
+    let vis_bytes = s.i32_at(p, s.layout(28, 56))?.max(0) as usize;
+    let tree_count = s.i32_at(p, s.layout(36, 72))?.max(0) as usize;
+    // 168 on x64: constant + dynamic + transient, then 8 bytes of zero padding,
+    // the same shape the IW4 path node has.
+    let node_stride = s.layout(sz::PATH_NODE, 168);
+
+    s.push(XFILE_BLOCK_VIRTUAL)?;
+    follow_name(s, p, 0)?;
+
+    if let Some(nodes) = s.follow_array(p, s.layout(8, 16), 4, node_stride, node_count)? {
+        let link_field = s.layout(60, 64);
+        for i in 0..node_count {
+            let node = nodes.at(i * node_stride);
+            let link_count = s.u16_at(node, 56)? as usize;
+            s.follow_array(node, link_field, 4, sz::PATH_LINK, link_count)?;
+        }
+    }
+
+    runtime_array(s, p, s.layout(12, 24), 16, sz::PATH_BASENODE, node_count)?;
+    s.plain_array(p, s.layout(20, 40), 2, 2, node_count)?;
+    s.plain_array(p, s.layout(24, 48), 2, 2, node_count)?;
+    s.plain_array(p, s.layout(32, 64), 1, 1, vis_bytes)?;
+
+    let tree_stride = s.layout(sz::PATHNODE_TREE, 24);
+    if let Some(trees) = s.follow_array(p, s.layout(40, 80), 4, tree_stride, tree_count)? {
+        for i in 0..tree_count {
+            load_pathdata_tree(s, trees.at(i * tree_stride))?;
+        }
+    }
+
+    s.pop()
+}
+
+fn load_pathdata_tree(s: &mut ZoneStream<'_>, t: Ptr) -> Result<()> {
+    let axis = s.i32_at(t, 0)?;
+    let union_off = s.layout(8, 8);
+    if axis >= 0 {
+        let width = s.pointer_bytes();
+        for k in 0..2 {
+            if s.begin_body(t.at(union_off + k * width))? {
+                let child = s.alloc_load(4, s.layout(sz::PATHNODE_TREE, 24))?;
+                load_pathdata_tree(s, child)?;
+            }
+        }
+    } else {
+        let count = s.i32_at(t, union_off)?.max(0) as usize;
+        s.follow_array(t, s.layout(12, 16), 2, 2, count)?;
+    }
+    Ok(())
+}
+
+/// `VehicleTrack`: named segment table with sector/branch graphs. Only the
+/// stream advance matters (branch targets are reusable aliases).
+pub(super) fn load_vehicletrack(s: &mut ZoneStream<'_>) -> Result<()> {
+    s.walk_stage = "vehicle_track";
+    let p = s.alloc_load(4, s.layout(sz::VEHICLE_TRACK, 24))?;
+    let segment_count = s.u32_at(p, s.layout(8, 16))? as usize;
+
+    s.push(XFILE_BLOCK_VIRTUAL)?;
+    follow_name(s, p, 0)?;
+    if let Some(segments) = s.follow_array(
+        p,
+        s.layout(4, 8),
+        4,
+        s.layout(sz::VEHICLE_SEGMENT, 72),
+        segment_count,
+    )? {
+        for i in 0..segment_count {
+            load_vehicle_segment(s, segments.at(i * s.layout(sz::VEHICLE_SEGMENT, 72)))?;
+        }
+    }
+    s.pop()
+}
+
+fn load_vehicle_segment(s: &mut ZoneStream<'_>, seg: Ptr) -> Result<()> {
+    follow_name(s, seg, 0)?;
+    let sector_count = s.u32_at(seg, s.layout(8, 16))? as usize;
+    if let Some(sectors) = s.follow_array(
+        seg,
+        s.layout(4, 8),
+        4,
+        s.layout(sz::VEHICLE_SECTOR, 72),
+        sector_count,
+    )? {
+        for i in 0..sector_count {
+            let sector = sectors.at(i * s.layout(sz::VEHICLE_SECTOR, 72));
+            let obstacle_count = s.u32_at(sector, s.layout(56, 64))? as usize;
+            s.plain_array(
+                sector,
+                s.layout(52, 56),
+                4,
+                sz::VEHICLE_OBSTACLE,
+                obstacle_count,
+            )?;
+        }
+    }
+    for (field, count_off) in [
+        (s.layout(12, 24), s.layout(16, 32)),
+        (s.layout(20, 40), s.layout(24, 48)),
+    ] {
+        let branch_count = s.u32_at(seg, count_off)? as usize;
+        if let Some(branches) = s.follow_array(
+            seg,
+            field,
+            s.pointer_bytes(),
+            s.pointer_bytes(),
+            branch_count,
+        )? {
+            for k in 0..branch_count {
+                if s.begin_body(branches.at(k * s.pointer_bytes()))? {
+                    let target = s.alloc_load(4, s.layout(sz::VEHICLE_SEGMENT, 72))?;
+                    load_vehicle_segment(s, target)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}

@@ -94,9 +94,12 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
     let kill_icon_name = if kill_icon_fresh {
         s.latest_material().and_then(|g| g.name)
     } else {
-        match s.ptr_at(p, s.layout(72, 96))? {
-            ZonePtr::Offset(q) => match s.ptr_at(s.resolve_alias(q), 0)? {
-                ZonePtr::Offset(n) => Some(s.resolve_alias(n)),
+        // The icon target can dangle (unsettled TEMP alias, e.g. SP turret
+        // kill icons): the name is catalog garnish, so a bad read resolves to
+        // `None` instead of aborting the walk. Stream position is untouched.
+        match s.ptr_at(p, s.layout(72, 96)) {
+            Ok(ZonePtr::Offset(q)) => match s.ptr_at(s.resolve_alias(q), 0) {
+                Ok(ZonePtr::Offset(n)) => Some(s.resolve_alias(n)),
                 _ => None,
             },
             _ => None,
@@ -107,9 +110,9 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
     let dpad_icon_name = if dpad_icon_fresh {
         s.latest_material().and_then(|g| g.name)
     } else {
-        match s.ptr_at(p, s.layout(76, 104))? {
-            ZonePtr::Offset(q) => match s.ptr_at(s.resolve_alias(q), 0)? {
-                ZonePtr::Offset(n) => Some(s.resolve_alias(n)),
+        match s.ptr_at(p, s.layout(76, 104)) {
+            Ok(ZonePtr::Offset(q)) => match s.ptr_at(s.resolve_alias(q), 0) {
+                Ok(ZonePtr::Offset(n)) => Some(s.resolve_alias(n)),
                 _ => None,
             },
             _ => None,

@@ -35,3 +35,22 @@ impl Default for Task {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ActionStage {
+    #[default]
+    Approach,
+    Position,
+    Interact,
+    Hold,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Decision {
+    /// Hunt, investigate, fight, recover, objective utilities, in stable tie order.
+    pub scores: [f32; 5],
+    pub stage: ActionStage,
+    pub objective: Option<crate::observation::ModeObjective>,
+}

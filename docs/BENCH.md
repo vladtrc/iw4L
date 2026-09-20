@@ -34,9 +34,10 @@ still observed, and the report counts frames where a span outlives its parent.
 
 `main/render overlap` is the part of the wall a main schedule and the render
 thread were both inside, from their intervals. It is zero whenever rendering is
-serialised, which is the default; `IW4L_PIPELINED_RENDERING=1` runs the render
-world a frame behind on its own thread instead, and `scheduling` in the
-manifest says which branch a run took.
+serialised (`IW4L_PIPELINED_RENDERING=0`). By default the render world runs
+one frame behind on its own thread. Extraction remains a synchronised boundary;
+`scheduling` in the manifest records the mode. Compare completed render cadence
+and `presented_state_age` alongside main-loop wall time.
 
 **[3/3] Counters** — render stages, the bodies inside `Present` and `Ui`, the
 HUD schedule gaps, GPU passes, per-frame work. A `*_schedule_interval` is a gap

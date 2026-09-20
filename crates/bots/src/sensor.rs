@@ -3,19 +3,34 @@ use sim::{ClientId, ClientLifecycle, Snapshot};
 
 use crate::observation::{
     BotObservation, Contact, DEFAULT_OBJECTIVE_RADIUS, KnowledgeSource, ModeObjective, SelfState,
+    Visibility, WeaponAction, WeaponSlot,
 };
-use crate::query::{SightSample, WorldQuery};
+use crate::query::{QuerySubsystem, SightSample, WorldQuery};
 
 pub const SIGHT_RANGE_IN: f32 = 5906.0;
 pub const SIGHT_FOV_DEG: f32 = 90.0;
 const PROBE_CHEST_Z: f32 = 48.0;
 const PROBE_HEAD_Z: f32 = 64.0;
 const PROBE_FEET_Z: f32 = 8.0;
+/// Perception's share of the shared quota, so routing and firing keep theirs.
+const SIGHT_PROBES: u32 = 6;
 
 pub fn observe(
     snapshot: &Snapshot,
     bot: ClientId,
     world: &mut impl WorldQuery,
+) -> Option<BotObservation> {
+    observe_focused(snapshot, bot, world, None)
+}
+
+/// `focus` is the client the bot has already committed to. It is probed before
+/// the rotation spends the same allowance on acquisition candidates, so a
+/// committed target is the last thing perception gives up, not the first.
+pub fn observe_focused(
+    snapshot: &Snapshot,
+    bot: ClientId,
+    world: &mut impl WorldQuery,
+    focus: Option<ClientId>,
 ) -> Option<BotObservation> {
     let meta = snapshot.meta.for_client(bot)?;
     let ps = snapshot
@@ -24,7 +39,9 @@ pub fn observe(
         .find(|(id, _)| *id == bot)
         .map(|(_, ps)| ps)?;
     let team = meta.client_state_team;
+    world.enter(QuerySubsystem::Perception);
     let self_state = SelfState {
+        life_sequence: meta.life_sequence,
         id: bot,
         lifecycle: meta.lifecycle,
         origin: ps.origin,
@@ -34,12 +51,25 @@ pub fn observe(
         health: ps.health,
         weapon: ps.weapon as u16,
         weapon_class: world.weapon_class(ps.weapon as u16),
+        weapon_action: WeaponAction::from_weaponstate(ps.weaponstate_primary),
         ammo_clip: meta.ammo_clip,
         ammo_stock: meta.ammo_stock,
         team,
     };
+    let inventory = own_inventory(ps, meta, world);
     let mut seen = Vec::new();
-    if meta.lifecycle == ClientLifecycle::Alive {
+    let mut unsensed = Vec::new();
+    if meta.lifecycle != ClientLifecycle::Alive {
+        // A bot that is not alive performs no probe, so it makes no negative
+        // observation either.
+        unsensed.extend(
+            snapshot
+                .players
+                .iter()
+                .map(|(id, _)| *id)
+                .filter(|id| *id != bot),
+        );
+    } else {
         let eye = [
             ps.origin[0],
             ps.origin[1],
@@ -52,7 +82,13 @@ pub fn observe(
         ];
         let (forward, _, _) = angle_vectors(ps.viewangles);
         let half = (SIGHT_FOV_DEG * 0.5).to_radians().cos();
-        for (id, other) in &snapshot.players {
+        // Rotate probes so occluded clients at the front of the snapshot cannot
+        // monopolize perception.
+        let mut probes = SIGHT_PROBES;
+        let count = snapshot.players.len();
+        let start = (snapshot.tick.0 as usize / 2 + bot.0 as usize) % count.max(1);
+        for index in probe_order(snapshot, start, count, focus) {
+            let (id, other) = &snapshot.players[index];
             if *id == bot {
                 continue;
             }
@@ -65,17 +101,25 @@ pub fn observe(
             if snapshot.meta.kind.is_team() && other_meta.client_state_team == team {
                 continue;
             }
+            // Out of range or outside the cone is a complete answer on its own;
+            // only a client that needed a probe it did not get is unsensed.
             if !in_range_and_fov(ps.origin, other.origin, forward, half) {
                 continue;
             }
-            if probe_visible(world, bot, eye, other.origin, *id) {
-                seen.push(Contact {
+            if probes == 0 {
+                unsensed.push(*id);
+                continue;
+            }
+            match probe_visible(world, bot, eye, other.origin, *id, &mut probes) {
+                Visibility::Seen => seen.push(Contact {
                     id: *id,
                     origin: other.origin,
                     source: KnowledgeSource::CurrentlySeen,
                     seen_tick: snapshot.tick.0,
                     confidence: 1.0,
-                });
+                }),
+                Visibility::NotSeen => {}
+                Visibility::Unknown => unsensed.push(*id),
             }
         }
     }
@@ -84,7 +128,9 @@ pub fn observe(
         tick: snapshot.tick.0,
         time_ms: snapshot.tick.0 as i32 * 50,
         self_state,
+        inventory,
         seen,
+        unsensed,
         events: Vec::new(),
         objective: objectives
             .iter()
@@ -105,60 +151,183 @@ fn in_range_and_fov(from: [f32; 3], to: [f32; 3], forward: [f32; 3], min_dot: f3
     dir[0] * forward[0] + dir[1] * forward[1] + dir[2] * forward[2] >= min_dot
 }
 
+/// The bot's own carried weapons with the ammunition the match state holds for
+/// them. Enemy inventories and positions are never read here.
+fn own_inventory(
+    ps: &playerstate_iw4::PlayerState,
+    meta: &sim::ClientSnapshotMeta,
+    world: &impl WorldQuery,
+) -> Vec<WeaponSlot> {
+    ps.weapons
+        .iter()
+        .copied()
+        .filter(|&id| id > 0)
+        .filter_map(|id| {
+            let weapon = u16::try_from(id).ok()?;
+            let facts = world.weapon_facts(weapon)?;
+            let (clip, stock) = meta
+                .ammo_by_weapon
+                .iter()
+                .find(|(owned, _, _)| *owned == id as u32)
+                .map_or((0, 0), |(_, clip, stock)| (*clip, *stock));
+            Some(WeaponSlot {
+                weapon,
+                class: world.weapon_class(weapon),
+                facts,
+                clip,
+                stock,
+            })
+        })
+        .collect()
+}
+
+/// Snapshot indices in the order perception spends its allowance: the committed
+/// target first, then the tick's rotation.
+fn probe_order(
+    snapshot: &Snapshot,
+    start: usize,
+    count: usize,
+    focus: Option<ClientId>,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..count).map(|offset| (start + offset) % count).collect();
+    if let Some(focus) = focus
+        && let Some(at) = order
+            .iter()
+            .position(|index| snapshot.players[*index].0 == focus)
+    {
+        let first = order.remove(at);
+        order.insert(0, first);
+    }
+    order
+}
+
 fn probe_visible(
     world: &mut impl WorldQuery,
     bot: ClientId,
     eye: [f32; 3],
     origin: [f32; 3],
     target: ClientId,
-) -> bool {
+    remaining: &mut u32,
+) -> Visibility {
     let probes = [
         [origin[0], origin[1], origin[2] + PROBE_CHEST_Z],
         [origin[0], origin[1], origin[2] + PROBE_HEAD_Z],
         [origin[0], origin[1], origin[2] + PROBE_FEET_Z],
     ];
+    // One positive probe settles the question; a negative one settles it only
+    // when every probe actually ran and came back classified.
+    let mut complete = true;
     for probe in probes {
+        if *remaining == 0 {
+            return Visibility::Unknown;
+        }
+        *remaining -= 1;
         match world.sight_ray(eye, probe, bot) {
-            SightSample::Clear => return true,
-            SightSample::HitPlayer { client, .. } if client == target => return true,
-            SightSample::Unknown | SightSample::Blocked { .. } | SightSample::HitPlayer { .. } => {}
+            Ok(SightSample::Clear) => return Visibility::Seen,
+            Ok(SightSample::HitPlayer { client, .. }) if client == target => {
+                return Visibility::Seen;
+            }
+            Err(_) => {
+                // The shared quota is gone; stop attributing denials to this bot.
+                *remaining = 0;
+                return Visibility::Unknown;
+            }
+            Ok(SightSample::Unknown) => complete = false,
+            Ok(_) => {}
         }
     }
-    false
+    if complete {
+        Visibility::NotSeen
+    } else {
+        Visibility::Unknown
+    }
 }
 
 fn public_objectives(snapshot: &Snapshot, bot: ClientId, team: i32) -> Vec<ModeObjective> {
-    snapshot
-        .meta
-        .objectives
+    use crate::observation::{ObjectiveAction, TeamRole};
+    use gamemode_iw4::dd;
+    let state = &snapshot.meta.objectives;
+    let mut result: Vec<_> = state
         .flags
         .iter()
         .filter(|f| f.owner as i32 != team)
         .map(|f| ModeObjective {
+            id: f.id,
             origin: f.origin,
             touching: f.users.contains(&bot),
-            use_button: false,
-            radius: DEFAULT_OBJECTIVE_RADIUS,
+            progress: f.progress,
+            ..ModeObjective::at(f.origin)
         })
-        .chain(
-            snapshot
-                .meta
-                .objectives
-                .bombs
-                .iter()
-                .filter(|b| {
-                    !b.destroyed
-                        && (b.planted_at_ms.is_some()
-                            != (snapshot.meta.objectives.attackers as i32 == team))
+        .collect();
+    if state.round_end_at_ms.is_some() || state.match_over {
+        return result;
+    }
+    for b in state.bombs.iter().filter(|b| !b.destroyed) {
+        let attack = state.attackers as i32 == team;
+        let action = match (attack, b.planted_at_ms.is_some()) {
+            (true, false) => ObjectiveAction::Plant,
+            (false, true) => ObjectiveAction::Defuse,
+            _ => ObjectiveAction::Defend,
+        };
+        // Public teammates only; keep an active user assigned until interrupted.
+        let actor = b
+            .user
+            .filter(|id| {
+                snapshot.meta.for_client(*id).is_some_and(|m| {
+                    m.lifecycle == ClientLifecycle::Alive && m.client_state_team == team
                 })
-                .map(|b| ModeObjective {
-                    origin: b.view.origin,
-                    touching: b.view.users.contains(&bot),
-                    use_button: true,
-                    radius: DEFAULT_OBJECTIVE_RADIUS,
-                }),
-        )
-        .collect()
+            })
+            .or_else(|| {
+                snapshot
+                    .players
+                    .iter()
+                    .filter(|(id, _)| {
+                        snapshot.meta.for_client(*id).is_some_and(|m| {
+                            m.lifecycle == ClientLifecycle::Alive && m.client_state_team == team
+                        })
+                    })
+                    .min_by(|(ia, a), (ib, c)| {
+                        (!b.view.users.contains(ia))
+                            .cmp(&(!b.view.users.contains(ib)))
+                            .then_with(|| {
+                                dist2(a.origin, b.view.origin)
+                                    .total_cmp(&dist2(c.origin, b.view.origin))
+                            })
+                            .then_with(|| ia.0.cmp(&ib.0))
+                    })
+                    .map(|(id, _)| *id)
+            });
+        let interaction_ms = match action {
+            ObjectiveAction::Plant => dd::PLANT_MS,
+            ObjectiveAction::Defuse => dd::DEFUSE_MS,
+            _ => 0,
+        };
+        result.push(ModeObjective {
+            id: b.view.id,
+            round: state.round,
+            action,
+            active_user: b.user,
+            role: if actor == Some(bot) {
+                TeamRole::Actor
+            } else {
+                TeamRole::Cover
+            },
+            origin: b.view.origin,
+            touching: b.view.users.contains(&bot),
+            use_button: interaction_ms > 0 && actor == Some(bot),
+            remaining_ms: Some(b.planted_at_ms.map_or(state.round_remaining_ms, |at| {
+                dd::fuse_remaining_ms(snapshot.tick.0.saturating_mul(50).saturating_sub(at))
+            })),
+            interaction_ms,
+            progress: if b.user == Some(bot) {
+                b.view.progress
+            } else {
+                0.0
+            },
+            radius: DEFAULT_OBJECTIVE_RADIUS,
+        });
+    }
+    result
 }
 
 fn dist2(a: [f32; 3], b: [f32; 3]) -> f32 {

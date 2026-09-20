@@ -55,8 +55,13 @@ pub fn film_sources(
         .map_err(|_| PostFxSourceRefusal::InvalidDimensions { width, height })?;
     let height_i32 = i32::try_from(height)
         .map_err(|_| PostFxSourceRefusal::InvalidDimensions { width, height })?;
-    let projection = hud_iw4::r_cmd_buf_set_2d_projection(width_i32, height_i32)
+    let mut projection = hud_iw4::r_cmd_buf_set_2d_projection(width_i32, height_i32)
         .ok_or(PostFxSourceRefusal::InvalidDimensions { width, height })?;
+    // Fullscreen quads must cover wgpu's half-integer pixel centers. The D3D9
+    // projection shifts the right/bottom edges onto the last pixel centers,
+    // leaving clear texels that subsequent blur passes spread into the image.
+    projection[12] = -1.0;
+    projection[13] = 1.0;
     let mut sources = RuntimeCodeSources::default();
     sources.set_constant(
         CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0,

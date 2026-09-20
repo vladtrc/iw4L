@@ -61,6 +61,25 @@ pub const FX_SPARK_FOUNTAIN_DEF: usize = 52;
 pub const COM_WORLD: usize = 16;
 pub const COM_PRIMARY_LIGHT: usize = 68;
 pub const GAME_WORLD_MP: usize = 8;
+// GameWorldSp header: name + inline PathData + inline VehicleTrack + glass ptr.
+// x86 = 4 + 40 + 8 + 4; x64 layout() value lives at the use site.
+pub const GAME_WORLD_SP: usize = 56;
+pub const PATH_DATA: usize = 40;
+// Path node: constant + dynamic + transient. x86 is 64 + 44 + 28 = 136, x64
+// is 72 + 48 + 40 and 8 bytes of zero padding = 168. Nothing in the tail is
+// followed, so only the stride matters to the stream.
+pub const PATH_NODE: usize = 136;
+pub const PATH_LINK: usize = 12;
+pub const PATH_BASENODE: usize = 16;
+// pathnode_tree_t: axis + dist + { child[2] | { nodeCount, nodes } }.
+pub const PATHNODE_TREE: usize = 16;
+// VehicleTrackSegment: name + sectors + counts + branch ptrs + edge + length.
+pub const VEHICLE_SEGMENT: usize = 44;
+pub const VEHICLE_SECTOR: usize = 60;
+pub const VEHICLE_OBSTACLE: usize = 12;
+// AddonMapEnts header: name + entity string + count + inline MapTriggers
+// (same trigger layout as MapEnts, no stages).
+pub const ADDON_MAP_ENTS: usize = 36;
 pub const G_GLASS_DATA: usize = 128;
 pub const G_GLASS_PIECE: usize = 12;
 pub const G_GLASS_NAME: usize = 12;

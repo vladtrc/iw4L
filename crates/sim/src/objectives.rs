@@ -168,7 +168,7 @@ pub(crate) fn sync_dom(world: &mut FrameWorld) {
     world.objectives.scores = [0, scores.axis, scores.allies];
 }
 
-fn touching(origin: [f32; 3], site: &BombSite) -> bool {
+pub(crate) fn touching(origin: [f32; 3], site: &BombSite) -> bool {
     let mid: [f32; 3] = std::array::from_fn(|i| {
         origin[i]
             + (crate::bullet_collision::PLAYER_MAXS[i] + crate::bullet_collision::PLAYER_MINS[i])

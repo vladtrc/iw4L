@@ -2,30 +2,33 @@ use fx_iw4::{
     FX_GLASS_ACCENT_BOUNCE_CAP, FX_GLASS_AIRBORNE_CAP, FX_GLASS_AIRBORNE_PER_BREAK,
     FX_GLASS_ANGULAR_VEL_MAX, FX_GLASS_ANGULAR_VEL_MIN, FX_GLASS_CATCHUP_STEPS,
     FX_GLASS_FALL_GRAVITY, FX_GLASS_FALL_TIME_NEVER, FX_GLASS_FREE_SENTINEL,
-    FX_GLASS_FRINGE_MAX_PIECES, FX_GLASS_GEOMETRY_DATA, FX_GLASS_LANDING_AGGREGATE_MSEC,
-    FX_GLASS_LANDING_CELL, FX_GLASS_LINEAR_VEL_MAX, FX_GLASS_LINEAR_VEL_MIN,
-    FX_GLASS_MOTION_STEP_MSEC, FX_GLASS_PENDING_MAX_MSEC, FX_GLASS_PENDING_MIN_MSEC,
-    FX_GLASS_PENDING_SUPPORT_FRAC, FX_GLASS_PIECE_DYNAMICS, FX_GLASS_PIECE_PLACE,
-    FX_GLASS_PIECE_STATE, FX_GLASS_RESTITUTION, FX_GLASS_SETTLED_CAP, FX_GLASS_SETTLED_FADE_MSEC,
-    FX_GLASS_SETTLED_LIFETIME_MSEC, FX_GLASS_SHARD_LIFETIME_MSEC, FX_GLASS_SHATTER_TWO_PI,
-    FX_GLASS_SPLIT_MAX_CHILDREN, FX_GLASS_SPLIT_OP_CAP, FX_GLASS_STATE_AREA_X2,
-    FX_GLASS_STATE_FLAG_CHILD_CLEAR, FX_GLASS_STATE_FLAG_SHATTERED, FX_GLASS_VERT_SCALE,
-    FxGlassRadialSplit, fx_glass_alloc_piece, fx_glass_ballistic_origin, fx_glass_centroid,
-    fx_glass_child_support, fx_glass_chord_split, fx_glass_clamp_impact, fx_glass_def_tex_vecs,
-    fx_glass_dynamics_avel, fx_glass_dynamics_fall_time, fx_glass_dynamics_init_row,
-    fx_glass_dynamics_phys_obj, fx_glass_dynamics_software_launch, fx_glass_dynamics_vel,
-    fx_glass_free_piece, fx_glass_fringe_cap, fx_glass_fringe_prune_knock_order, fx_glass_geo_vert,
-    fx_glass_interior_branch_count, fx_glass_is_in_use, fx_glass_launch_avel, fx_glass_launch_dir,
-    fx_glass_lerp_range, fx_glass_life_fade, fx_glass_loop_area_x2, fx_glass_needs_size_split,
-    fx_glass_normalize3, fx_glass_pack_geo_vert, fx_glass_piece_speed_scale, fx_glass_place_origin,
-    fx_glass_place_quat, fx_glass_place_set_origin, fx_glass_place_set_quat, fx_glass_radial_split,
-    fx_glass_recenter_loop, fx_glass_reset_copy_geo, fx_glass_reset_copy_piece,
+    FX_GLASS_GEOMETRY_DATA, FX_GLASS_LANDING_AGGREGATE_MSEC, FX_GLASS_LANDING_CELL,
+    FX_GLASS_LINEAR_VEL_MAX, FX_GLASS_LINEAR_VEL_MIN, FX_GLASS_MOTION_STEP_MSEC,
+    FX_GLASS_PENDING_MAX_MSEC, FX_GLASS_PENDING_MIN_MSEC, FX_GLASS_PENDING_SUPPORT_FRAC,
+    FX_GLASS_PIECE_DYNAMICS, FX_GLASS_PIECE_PLACE, FX_GLASS_PIECE_STATE, FX_GLASS_RESTITUTION,
+    FX_GLASS_SETTLED_CAP, FX_GLASS_SETTLED_FADE_MSEC, FX_GLASS_SETTLED_LIFETIME_MSEC,
+    FX_GLASS_SHARD_LIFETIME_MSEC, FX_GLASS_SHARD_MAX, FX_GLASS_SPLIT_OP_CAP,
+    FX_GLASS_STATE_AREA_X2, FX_GLASS_STATE_FLAG_CHILD_CLEAR, FX_GLASS_STATE_FLAG_DAMAGED,
+    FX_GLASS_STATE_FLAG_SIMPLE, FX_GLASS_VERT_SCALE, FxGlassCrackRand, FxGlassCrackWork,
+    FxGlassPieceGeo, FxGlassShard, fx_glass_alloc_piece, fx_glass_ballistic_origin,
+    fx_glass_clamp_to_piece, fx_glass_cross3, fx_glass_decode_geo, fx_glass_dynamics_avel,
+    fx_glass_dynamics_fall_time, fx_glass_dynamics_init_row, fx_glass_dynamics_phys_obj,
+    fx_glass_dynamics_software_launch, fx_glass_dynamics_vel, fx_glass_extract_shards,
+    fx_glass_free_piece, fx_glass_fringe_cap, fx_glass_is_in_use, fx_glass_launch_avel,
+    fx_glass_launch_dir, fx_glass_lerp_range, fx_glass_life_fade, fx_glass_loop_area_x2,
+    fx_glass_needs_size_split, fx_glass_normalize3, fx_glass_piece_speed_scale,
+    fx_glass_piece_tex_vecs, fx_glass_place_origin, fx_glass_place_quat, fx_glass_place_radius,
+    fx_glass_place_set_origin, fx_glass_place_set_quat, fx_glass_point_in_piece,
+    fx_glass_recenter_offset, fx_glass_reset_copy_geo, fx_glass_reset_copy_piece,
     fx_glass_reset_free_list, fx_glass_set_in_use, fx_glass_software_rotate_quat,
     fx_glass_splitmix64, fx_glass_state_area_x2, fx_glass_state_def_index, fx_glass_state_flags,
     fx_glass_state_geo_span, fx_glass_state_geo_start, fx_glass_state_set_flags,
     fx_glass_state_set_geo_start, fx_glass_state_set_support_mask, fx_glass_state_support_mask,
-    fx_glass_state_vert_count, fx_glass_support_frac, fx_unit_quat_to_axis,
+    fx_glass_support_frac, fx_unit_quat_to_axis,
 };
+
+/// The shortest crack the graph will cut, as a fraction of the piece's bounding radius.
+const FX_GLASS_CRACK_LENGTH_MIN_FRAC: f32 = 0.75;
 
 pub struct FxGlassInitTables<'a> {
     pub piece_limit: u32,
@@ -382,30 +385,172 @@ impl FxGlassSystemHost {
         self.need_to_compact = false;
     }
 
-    fn piece_outline(
-        &self,
-        piece: u32,
-    ) -> Option<([u8; FX_GLASS_PIECE_STATE], [[i16; 2]; 32], usize)> {
+    /// One piece's stored geometry: the outer contour, its holes, its open cracks and
+    /// the triangulation that spans them.
+    fn piece_geo(&self, piece: u32) -> Option<([u8; FX_GLASS_PIECE_STATE], FxGlassPieceGeo)> {
         let state = self.piece_states.get(piece as usize).copied()?;
-        let vert_n = usize::from(fx_glass_state_vert_count(&state));
-        let start = usize::from(fx_glass_state_geo_start(&state));
-        if vert_n < 3 || vert_n > 32 {
-            return None;
+        let geo = fx_glass_decode_geo(&state, &self.geo_data)?;
+        Some((state, geo))
+    }
+
+    /// Runs the crack graph over one piece's contour and returns the shards it leaves.
+    ///
+    /// A planar half-edge graph with one circular chain per face, cracks walked with
+    /// deflection and retry, then face extraction into shard geometry that keeps
+    /// holes, open cracks and a fan.
+    fn crack_piece(
+        &mut self,
+        outer: &[[i16; 2]],
+        support: u32,
+        impact: [f32; 2],
+        out: &mut [FxGlassShard],
+        retry_unsplit: bool,
+    ) -> usize {
+        let mut work = Box::new(FxGlassCrackWork::default());
+        if !work.init_from_loop(outer, support) {
+            return 0;
         }
-        let end = start.saturating_add(vert_n);
-        let geo = self.geo_data.get(start..end)?;
-        let mut outline = [[0i16; 2]; 32];
-        for (dst, word) in outline.iter_mut().take(vert_n).zip(geo.iter()) {
-            *dst = fx_glass_geo_vert(word);
+        // The graph draws from the shared effect random table, seeded off the host
+        // stream so a replayed shot re-cracks the same way.
+        let seed = self.shatter_seed;
+        let _ = self.next_rand();
+        work.rand = FxGlassCrackRand::from_seed(seed);
+        work.impact_pos = [
+            impact[0] * FX_GLASS_VERT_SCALE,
+            impact[1] * FX_GLASS_VERT_SCALE,
+        ];
+        let mut mins = [f32::INFINITY; 2];
+        let mut maxs = [f32::NEG_INFINITY; 2];
+        for v in outer {
+            mins[0] = mins[0].min(f32::from(v[0]));
+            mins[1] = mins[1].min(f32::from(v[1]));
+            maxs[0] = maxs[0].max(f32::from(v[0]));
+            maxs[1] = maxs[1].max(f32::from(v[1]));
         }
-        Some((state, outline, vert_n))
+        let w = (maxs[0] - mins[0]) * FX_GLASS_VERT_SCALE;
+        let h = (maxs[1] - mins[1]) * FX_GLASS_VERT_SCALE;
+        let radius = 0.5 * (w * w + h * h).sqrt();
+        work.original_radius = radius;
+        work.crack_length_min = radius * FX_GLASS_CRACK_LENGTH_MIN_FRAC;
+        work.crack_length_max = radius;
+        // Bound unsuccessful attempts by contour complexity. A connected face
+        // must get another chance to split before the fringe coverage policy runs.
+        let attempts = if retry_unsplit {
+            1 + (outer.len() * 2).max(10)
+        } else {
+            1
+        };
+        for attempt in 0..attempts {
+            work.create_cracks();
+            let n = fx_glass_extract_shards(&work, out);
+            if n != 1 || attempt + 1 == attempts {
+                return n;
+            }
+            // An open crack can leave the entire face connected. Keep its graph
+            // and try again from the border before applying the fringe area cap.
+            let vertex = (self.next_rand() * outer.len() as f32) as usize;
+            let p = outer[vertex.min(outer.len() - 1)];
+            work.impact_pos = [
+                f32::from(p[0]) * FX_GLASS_VERT_SCALE,
+                f32::from(p[1]) * FX_GLASS_VERT_SCALE,
+            ];
+        }
+        0
+    }
+
+    pub fn hit_segment(&mut self, start: [f32; 3], end: [f32; 3], seed: u64) -> usize {
+        let delta = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+        if !start.iter().chain(end.iter()).all(|v| v.is_finite()) {
+            return 0;
+        }
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let mut hits = Vec::new();
+        for piece in 0..self.piece_limit {
+            if !self.is_in_use(piece) {
+                continue;
+            }
+            let Some((state, pgeo)) = self.piece_geo(piece) else {
+                continue;
+            };
+            if fx_glass_state_flags(&state) & FX_GLASS_STATE_FLAG_SIMPLE == 0 {
+                continue;
+            }
+            let place = self
+                .draw_place(piece as usize)
+                .unwrap_or(self.piece_places[piece as usize]);
+            let origin = fx_glass_place_origin(&place);
+            let axis = fx_unit_quat_to_axis(fx_glass_place_quat(&place));
+            let denominator = dot(delta, axis[2]);
+            if denominator.abs() < 1e-6 {
+                continue;
+            }
+            let offset = [
+                origin[0] - start[0],
+                origin[1] - start[1],
+                origin[2] - start[2],
+            ];
+            let fraction = dot(offset, axis[2]) / denominator;
+            if fraction <= 0.0 || fraction > 1.0 {
+                continue;
+            }
+            let hit = [
+                start[0] + delta[0] * fraction,
+                start[1] + delta[1] * fraction,
+                start[2] + delta[2] * fraction,
+            ];
+            let local = [hit[0] - origin[0], hit[1] - origin[1], hit[2] - origin[2]];
+            if fx_glass_point_in_piece(
+                &pgeo,
+                [
+                    dot(local, axis[0]) / FX_GLASS_VERT_SCALE,
+                    dot(local, axis[1]) / FX_GLASS_VERT_SCALE,
+                ],
+            ) {
+                hits.push((fraction, piece, self.generation[piece as usize], hit, place));
+            }
+        }
+        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut count = 0;
+        // Capture hits before allocating descendants so one segment cannot hit its own fragments.
+        for (_, piece, generation, hit, place) in hits.into_iter().take(5) {
+            if !self.is_in_use(piece) || self.generation[piece as usize] != generation {
+                continue;
+            }
+            self.piece_places[piece as usize] = place;
+            if self.shatter_caused(
+                piece,
+                hit,
+                delta,
+                Some(seed ^ u64::from(piece)),
+                true,
+                true,
+                0,
+                0,
+            ) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn damage(&mut self, piece: u32) {
+        if !self.is_in_use(piece) {
+            return;
+        }
+        if let Some(state) = self.piece_states.get_mut(piece as usize) {
+            fx_glass_state_set_flags(
+                state,
+                fx_glass_state_flags(state) | FX_GLASS_STATE_FLAG_DAMAGED,
+            );
+            self.moved = true;
+        }
     }
 
     fn mark_shattered(&mut self, piece: u32) {
         if let Some(state) = self.piece_states.get_mut(piece as usize) {
             fx_glass_state_set_flags(
                 state,
-                fx_glass_state_flags(state) | FX_GLASS_STATE_FLAG_SHATTERED,
+                fx_glass_state_flags(state) | FX_GLASS_STATE_FLAG_SIMPLE,
             );
         }
     }
@@ -429,13 +574,15 @@ impl FxGlassSystemHost {
             return false;
         }
         self.compact_geo();
+        let event_pane = self.source_pane[piece as usize];
         let idx = piece as usize;
         let Some(place) = self.piece_places.get(idx).copied() else {
             return false;
         };
-        let Some((state, outline, vert_n)) = self.piece_outline(piece) else {
+        let Some((state, pgeo)) = self.piece_geo(piece) else {
             return false;
         };
+        let simple = fx_glass_state_flags(&state) & FX_GLASS_STATE_FLAG_SIMPLE != 0;
         let origin = fx_glass_place_origin(&place);
         let axis = fx_unit_quat_to_axis(fx_glass_place_quat(&place));
         let delta = [hit[0] - origin[0], hit[1] - origin[1], hit[2] - origin[2]];
@@ -450,7 +597,7 @@ impl FxGlassSystemHost {
             if a > 0.0 {
                 a
             } else {
-                fx_glass_loop_area_x2(&outline[..vert_n])
+                fx_glass_loop_area_x2(pgeo.outer())
             }
         };
         let launch_dir = fx_glass_launch_dir(dir, axis[2]);
@@ -472,7 +619,7 @@ impl FxGlassSystemHost {
                 finals.extend(work.drain(..));
                 break;
             }
-            let Some((cur_state, cur_outline, cur_n)) = self.piece_outline(cur) else {
+            let Some((cur_state, cur_geo)) = self.piece_geo(cur) else {
                 continue;
             };
             let area = {
@@ -480,11 +627,17 @@ impl FxGlassSystemHost {
                 if a > 0.0 {
                     a
                 } else {
-                    fx_glass_loop_area_x2(&cur_outline[..cur_n])
+                    fx_glass_loop_area_x2(cur_geo.outer())
                 }
             };
             let supported = fx_glass_state_support_mask(&cur_state) != 0;
-            let must_split = first || fx_glass_needs_size_split(area, original_area, supported);
+            // The graph is seeded from a single contour, so a shard that already
+            // encloses a hole is left as it is rather than losing that hole to a
+            // re-crack.
+            let can_split = first || cur_geo.hole_n == 0;
+            let must_split = can_split
+                && (first
+                    || (!simple && fx_glass_needs_size_split(area, original_area, supported)));
             let was_first = first;
             first = false;
             if !must_split {
@@ -492,51 +645,37 @@ impl FxGlassSystemHost {
                 continue;
             }
             ops += 1;
-            let loops: Vec<fx_iw4::FxGlassSplitLoop> = if was_first {
-                let split_impact = fx_glass_clamp_impact(&cur_outline[..cur_n], local);
-                let rand01 = self.next_rand();
-                let branch_n = fx_glass_interior_branch_count(rand01);
-                let angle0 = self.next_rand() * FX_GLASS_SHATTER_TWO_PI;
-                let mut ray_jitter = [0.5f32; FX_GLASS_SPLIT_MAX_CHILDREN];
-                for jitter in ray_jitter.iter_mut().take(branch_n as usize) {
-                    *jitter = self.next_rand();
-                }
-                fx_glass_radial_split(
-                    &cur_outline[..cur_n],
-                    FxGlassRadialSplit {
-                        impact: split_impact,
-                        branch_n,
-                        angle0,
-                        ray_jitter,
-                    },
-                )
-                .into_iter()
-                .filter(|l| l.vert_n >= 3)
-                .collect()
+            // The first pass cracks from the round the player fired; a later pass is a
+            // piece too big to stand, which breaks about a point of its own.
+            let want = if was_first {
+                local
             } else {
-                let along_x = self.next_rand() >= 0.5;
-                fx_glass_chord_split(&cur_outline[..cur_n], self.next_rand(), along_x)
-                    .into_iter()
-                    .filter(|l| l.vert_n >= 3)
-                    .collect()
+                let outer = cur_geo.outer();
+                let vertex = (self.next_rand() * outer.len() as f32) as usize;
+                let p = outer[vertex.min(outer.len() - 1)];
+                [f32::from(p[0]), f32::from(p[1])]
             };
+            let split_impact = fx_glass_clamp_to_piece(&cur_geo, want);
             let parent_support = fx_glass_state_support_mask(&cur_state);
+            let mut shards = vec![FxGlassShard::default(); FX_GLASS_SHARD_MAX];
+            let shard_n = self.crack_piece(
+                cur_geo.outer(),
+                parent_support,
+                split_impact,
+                &mut shards,
+                !simple && fx_glass_needs_size_split(area, original_area, supported),
+            );
             let Some(cur_place) = self.piece_places.get(cur as usize).copied() else {
                 continue;
             };
             let mut spawned_this = Vec::new();
-            for child in &loops {
-                let support = fx_glass_child_support(
-                    &cur_outline[..cur_n],
-                    parent_support,
-                    &child.verts[..child.vert_n as usize],
-                );
-                match self.emit_child(cur as usize, &cur_place, &cur_state, child, support) {
+            for shard in &shards[..shard_n] {
+                match self.emit_child(cur as usize, &cur_place, &cur_state, shard) {
                     Some(id) => spawned_this.push(id),
                     None => {
                         self.compact_geo();
                         if let Some(id) =
-                            self.emit_child(cur as usize, &cur_place, &cur_state, child, support)
+                            self.emit_child(cur as usize, &cur_place, &cur_state, shard)
                         {
                             spawned_this.push(id);
                         }
@@ -544,6 +683,9 @@ impl FxGlassSystemHost {
                 }
             }
             if spawned_this.is_empty() {
+                if simple {
+                    return false;
+                }
                 if was_first || cur == piece {
                     self.free(cur);
                 } else {
@@ -559,7 +701,8 @@ impl FxGlassSystemHost {
                 };
                 let child_area = fx_glass_state_area_x2(child_state);
                 let child_support = fx_glass_state_support_mask(child_state) != 0;
-                if child_area + 1.0 < area
+                if !simple
+                    && child_area + 1.0 < area
                     && fx_glass_needs_size_split(child_area, original_area, child_support)
                 {
                     work.push(id);
@@ -573,20 +716,26 @@ impl FxGlassSystemHost {
                 self.free(piece);
             }
             self.compact_geo();
-            self.push_break_event(piece, origin, axis[2], play_oneshot, cause, revision);
+            self.push_break_event(event_pane, origin, axis[2], play_oneshot, cause, revision);
             self.moved = true;
             return true;
         }
         self.prune_fringe_and_launch(
             &finals,
-            original_area,
+            if simple {
+                f32::MAX
+            } else {
+                fx_glass_fringe_cap(original_area)
+            },
             launch_dir,
+            hit,
+            fx_glass_place_radius(&place),
             axis,
             launch_airborne,
             cause,
         );
         self.compact_geo();
-        self.push_break_event(piece, origin, axis[2], play_oneshot, cause, revision);
+        self.push_break_event(event_pane, origin, axis[2], play_oneshot, cause, revision);
         self.moved = true;
         true
     }
@@ -629,8 +778,10 @@ impl FxGlassSystemHost {
     fn prune_fringe_and_launch(
         &mut self,
         children: &[u32],
-        original_area: f32,
+        retained_area_limit: f32,
         dir: [f32; 3],
+        hit: [f32; 3],
+        radius: f32,
         axis: [[f32; 3]; 3],
         launch_airborne: bool,
         cause: u8,
@@ -650,13 +801,12 @@ impl FxGlassSystemHost {
                 retained += areas[i];
             }
         }
-        let cap = fx_glass_fringe_cap(original_area);
-        let order = fx_glass_fringe_prune_knock_order(&areas, &supports);
-        for slot in order.iter().take(n) {
-            if retained <= cap {
+        let mut order: Vec<usize> = (0..n).filter(|&i| supports[i] != 0).collect();
+        order.sort_by(|&a, &b| areas[b].total_cmp(&areas[a]));
+        for &i in &order {
+            if retained <= retained_area_limit {
                 break;
             }
-            let i = *slot as usize;
             if i >= n || supports[i] == 0 {
                 continue;
             }
@@ -664,19 +814,6 @@ impl FxGlassSystemHost {
             supports[i] = 0;
             if let Some(state) = self.piece_states.get_mut(children[i] as usize) {
                 fx_glass_state_set_support_mask(state, 0);
-            }
-        }
-        let mut kept = 0u32;
-        for i in 0..n {
-            if supports[i] == 0 {
-                continue;
-            }
-            kept = kept.saturating_add(1);
-            if kept as usize > FX_GLASS_FRINGE_MAX_PIECES {
-                supports[i] = 0;
-                if let Some(state) = self.piece_states.get_mut(children[i] as usize) {
-                    fx_glass_state_set_support_mask(state, 0);
-                }
             }
         }
         let mut accents = 0u32;
@@ -687,7 +824,7 @@ impl FxGlassSystemHost {
                 let verts = self
                     .piece_states
                     .get(idx)
-                    .map(|s| fx_glass_state_vert_count(s))
+                    .map(fx_iw4::fx_glass_state_vert_count)
                     .unwrap_or(1);
                 let frac = fx_glass_support_frac(*support, verts);
                 if frac < FX_GLASS_PENDING_SUPPORT_FRAC {
@@ -716,7 +853,7 @@ impl FxGlassSystemHost {
             if bounce {
                 accents = accents.saturating_add(1);
             }
-            self.launch_software_shard(children[i], areas[i], dir, axis, cause);
+            self.launch_software_shard(children[i], areas[i], dir, hit, radius, axis, cause);
             if self.is_in_use(children[i]) {
                 launched = launched.saturating_add(1);
             }
@@ -735,6 +872,8 @@ impl FxGlassSystemHost {
         piece: u32,
         area_x2: f32,
         dir: [f32; 3],
+        hit: [f32; 3],
+        radius: f32,
         axis: [[f32; 3]; 3],
         cause: u8,
     ) {
@@ -756,26 +895,27 @@ impl FxGlassSystemHost {
             fx_glass_launch_dir(dir, axis[2])
         };
         let mut vel = [dir[0] * speed, dir[1] * speed, dir[2] * speed];
-        if !collapse {
-            if let Some((_, outline, vert_n)) = self.piece_outline(piece) {
-                let c = fx_glass_centroid(&outline[..vert_n]);
-                let push = [
-                    axis[0][0] * c[0] + axis[1][0] * c[1],
-                    axis[0][1] * c[0] + axis[1][1] * c[1],
-                    axis[0][2] * c[0] + axis[1][2] * c[1],
-                ];
-                if let Some(p) = fx_glass_normalize3(push) {
-                    let extra = speed * 0.15;
-                    vel[0] += p[0] * extra;
-                    vel[1] += p[1] * extra;
-                    vel[2] += p[2] * extra;
-                }
+        let origin = fx_glass_place_origin(&self.piece_places[piece as usize]);
+        let offset = [origin[0] - hit[0], origin[1] - hit[1], origin[2] - hit[2]];
+        if !collapse && radius > 0.0 {
+            let spread = speed * 0.5 / radius;
+            for k in 0..3 {
+                vel[k] += offset[k] * spread;
             }
         }
         let ang_r = self.next_rand();
         let ang =
             fx_glass_lerp_range(FX_GLASS_ANGULAR_VEL_MIN, FX_GLASS_ANGULAR_VEL_MAX, ang_r) * scale;
-        let avel = fx_glass_launch_avel(dir, axis, ang);
+        let avel = if !collapse && let Some(radial) = fx_glass_normalize3(offset) {
+            let side = if dir.iter().zip(axis[2]).map(|(a, b)| a * b).sum::<f32>() < 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            fx_glass_cross3(axis[2], radial).map(|v| v * ang * side)
+        } else {
+            fx_glass_launch_avel(dir, axis, ang)
+        };
         if let Some(row) = self.piece_dynamics.get_mut(piece as usize) {
             fx_glass_dynamics_software_launch(row, self.time, vel, avel);
         }
@@ -873,19 +1013,20 @@ impl FxGlassSystemHost {
             if mask.count_ones() != 1 {
                 continue;
             }
-            let bit = mask.trailing_zeros() as usize;
+            let bit = mask.leading_zeros() as usize;
             let Some(place) = self.piece_places.get(piece).copied() else {
                 continue;
             };
             let axis = fx_unit_quat_to_axis(fx_glass_place_quat(&place));
             let axis_e = self
-                .piece_outline(piece as u32)
-                .and_then(|(_, outline, vert_n)| {
+                .piece_geo(piece as u32)
+                .and_then(|(_, pgeo)| {
+                    let vert_n = pgeo.vert_n;
                     if vert_n < 2 || bit >= vert_n {
                         return None;
                     }
-                    let a = outline[bit];
-                    let b = outline[(bit + 1) % vert_n];
+                    let a = pgeo.verts[bit];
+                    let b = pgeo.verts[(bit + 1) % vert_n];
                     let origin = fx_glass_place_origin(&place);
                     let wa = local_to_world(origin, axis, a);
                     let wb = local_to_world(origin, axis, b);
@@ -931,7 +1072,7 @@ impl FxGlassSystemHost {
                 .get(piece as usize)
                 .map(|p| fx_unit_quat_to_axis(fx_glass_place_quat(p)))
                 .unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
-            self.launch_software_shard(piece, area, [0.0, 0.0, -1.0], axis, 2);
+            self.launch_software_shard(piece, area, [0.0, 0.0, -1.0], [0.0; 3], 0.0, axis, 2);
             if let Some(mode) = self.contact_mode.get_mut(piece as usize) {
                 *mode = CONTACT_DISAPPEAR;
             }
@@ -1144,12 +1285,9 @@ impl FxGlassSystemHost {
         if !accent {
             return None;
         }
-        let Some((_, outline, vert_n)) = self.piece_outline(piece) else {
-            return None;
-        };
-        let Some(place) = self.piece_places.get(piece as usize) else {
-            return None;
-        };
+        let (_, pgeo) = self.piece_geo(piece)?;
+        let vert_n = pgeo.vert_n;
+        let place = self.piece_places.get(piece as usize)?;
         let axis = fx_unit_quat_to_axis(fx_glass_place_quat(place));
         let delta = [
             next[0] - origin[0],
@@ -1162,7 +1300,7 @@ impl FxGlassSystemHost {
         }
         for k in 0..samples {
             let i = k * vert_n / samples;
-            let p = local_to_world(origin, axis, outline[i]);
+            let p = local_to_world(origin, axis, pgeo.verts[i]);
             let q = [p[0] + delta[0], p[1] + delta[1], p[2] + delta[2]];
             if let Some(hit) = world.sweep(p, q) {
                 return Some(hit);
@@ -1200,11 +1338,18 @@ impl FxGlassSystemHost {
         parent: usize,
         parent_place: &[u8; FX_GLASS_PIECE_PLACE],
         parent_state: &[u8; FX_GLASS_PIECE_STATE],
-        loop_i: &fx_iw4::FxGlassSplitLoop,
-        support: u32,
+        shard: &FxGlassShard,
     ) -> Option<u32> {
-        let vert = loop_i.vert_n;
-        let child = self.alloc(vert, 0, 0, 0);
+        let vert = shard.vert_count;
+        if vert < 3 {
+            return None;
+        }
+        let child = self.alloc(
+            vert,
+            shard.hole_data_count,
+            shard.crack_data_count,
+            shard.fan_data_count,
+        );
         if child == FX_GLASS_FREE_SENTINEL {
             return None;
         }
@@ -1221,22 +1366,28 @@ impl FxGlassSystemHost {
             state[..0x0c].copy_from_slice(&parent_state[..0x0c]);
             state[0x0c..0x0e].copy_from_slice(&parent_state[0x0c..0x0e]);
             state[0x10] = parent_state[0x10];
-            fx_glass_state_set_support_mask(state, support);
+            fx_glass_state_set_support_mask(state, shard.support_mask);
             let flags = (fx_glass_state_flags(parent_state) & !FX_GLASS_STATE_FLAG_CHILD_CLEAR)
-                | FX_GLASS_STATE_FLAG_SHATTERED;
+                | FX_GLASS_STATE_FLAG_SIMPLE;
             fx_glass_state_set_flags(state, flags);
-            let area = fx_glass_loop_area_x2(&loop_i.verts[..vert as usize]);
+            // The graph works in packed grid units and already netted each shard's
+            // holes out of its area; piece state carries it in world units.
+            let area = shard.area_x2 * FX_GLASS_VERT_SCALE * FX_GLASS_VERT_SCALE;
             let bytes = area.to_le_bytes();
             state[FX_GLASS_STATE_AREA_X2..FX_GLASS_STATE_AREA_X2 + 4].copy_from_slice(&bytes);
             state[fx_iw4::FX_GLASS_STATE_VERT_COUNT] = vert;
-            state[fx_iw4::FX_GLASS_STATE_HOLE_DATA_COUNT] = 0;
-            state[fx_iw4::FX_GLASS_STATE_CRACK_DATA_COUNT] = 0;
-            state[fx_iw4::FX_GLASS_STATE_FAN_DATA_COUNT] = 0;
+            state[fx_iw4::FX_GLASS_STATE_HOLE_DATA_COUNT] = shard.hole_data_count;
+            state[fx_iw4::FX_GLASS_STATE_CRACK_DATA_COUNT] = shard.crack_data_count;
+            state[fx_iw4::FX_GLASS_STATE_FAN_DATA_COUNT] = shard.fan_data_count;
             let gs = geo_start.to_le_bytes();
             state[fx_iw4::FX_GLASS_STATE_GEO_DATA_START] = gs[0];
             state[fx_iw4::FX_GLASS_STATE_GEO_DATA_START + 1] = gs[1];
         }
-        let mut verts = loop_i.verts;
+        // Piece geometry is stored about the piece origin, so the shard moves onto its
+        // own centroid and the origin and texture offset follow it.
+        let mut shard = *shard;
+        let c = [shard.centroid[0].round(), shard.centroid[1].round()];
+        shard.recenter([c[0] as i16, c[1] as i16]);
         let parent_origin = fx_glass_place_origin(parent_place);
         let axis = fx_unit_quat_to_axis(fx_glass_place_quat(parent_place));
         let uv0 = [
@@ -1257,10 +1408,9 @@ impl FxGlassSystemHost {
         let tex = self
             .defs
             .get(def_i)
-            .map(fx_glass_def_tex_vecs)
+            .map(|def| fx_glass_piece_tex_vecs(def, fx_glass_state_flags(parent_state)))
             .unwrap_or([[0.0, 0.0], [0.0, 0.0]]);
-        let (new_origin, new_uv) =
-            fx_glass_recenter_loop(&mut verts, vert as usize, parent_origin, axis, uv0, tex);
+        let (new_origin, new_uv) = fx_glass_recenter_offset(c, parent_origin, axis, uv0, tex);
         if let Some(place) = self.piece_places.get_mut(cidx) {
             fx_glass_place_set_origin(place, new_origin);
         }
@@ -1269,9 +1419,9 @@ impl FxGlassSystemHost {
             state[4..8].copy_from_slice(&new_uv[1].to_le_bytes());
         }
         let start = usize::from(geo_start);
-        for (i, v) in verts.iter().take(vert as usize).enumerate() {
-            if let Some(word) = self.geo_data.get_mut(start + i) {
-                *word = fx_glass_pack_geo_vert(v[0], v[1]);
+        for (i, word) in shard.geo().iter().enumerate() {
+            if let Some(dst) = self.geo_data.get_mut(start + i) {
+                *dst = *word;
             }
         }
         let parent_dyn = self
@@ -1295,659 +1445,5 @@ impl FxGlassSystemHost {
             *src = parent_pane;
         }
         Some(child)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use fx_iw4::{
-        FX_GLASS_AIRBORNE_PER_BREAK, FX_GLASS_CATCHUP_STEPS, FX_GLASS_DYN_FALL_TIME,
-        FX_GLASS_DYN_VEL, FX_GLASS_FALL_GRAVITY, FX_GLASS_FALL_TIME_NEVER, FX_GLASS_INIT_AREA_X2,
-        FX_GLASS_INIT_DEF_INDEX, FX_GLASS_INIT_ORIGIN, FX_GLASS_INIT_PIECE_STATE,
-        FX_GLASS_INIT_SUPPORT_MASK, FX_GLASS_INIT_VERT_COUNT, FX_GLASS_MOTION_STEP_MSEC,
-        FX_GLASS_SETTLED_FADE_MSEC, FX_GLASS_SETTLED_LIFETIME_MSEC, FX_GLASS_STATE_FLAG_SHATTERED,
-        fx_glass_ballistic_origin, fx_glass_dynamics_fall_time, fx_glass_dynamics_software_launch,
-        fx_glass_dynamics_vel, fx_glass_pack_geo_vert, fx_glass_place_origin, fx_glass_place_quat,
-        fx_glass_place_set_origin, fx_glass_state_flags, fx_glass_state_set_support_mask,
-    };
-
-    fn write_f32(bytes: &mut [u8], off: usize, v: f32) {
-        bytes[off..off + 4].copy_from_slice(&v.to_le_bytes());
-    }
-
-    fn square_host(half: i16, support: u32, piece_limit: u32, geo_limit: u32) -> FxGlassSystemHost {
-        let mut init = [0u8; FX_GLASS_INIT_PIECE_STATE];
-        write_f32(&mut init, 12, 1.0);
-        write_f32(&mut init, FX_GLASS_INIT_ORIGIN, 0.0);
-        write_f32(&mut init, FX_GLASS_INIT_ORIGIN + 4, 0.0);
-        write_f32(&mut init, FX_GLASS_INIT_ORIGIN + 8, 0.0);
-        init[FX_GLASS_INIT_SUPPORT_MASK..FX_GLASS_INIT_SUPPORT_MASK + 4]
-            .copy_from_slice(&support.to_le_bytes());
-        let verts = [[-half, -half], [half, -half], [half, half], [-half, half]];
-        let area = fx_glass_loop_area_x2(&verts);
-        write_f32(&mut init, FX_GLASS_INIT_AREA_X2, area);
-        init[FX_GLASS_INIT_DEF_INDEX] = 0;
-        init[FX_GLASS_INIT_VERT_COUNT] = 4;
-        let geo = [
-            fx_glass_pack_geo_vert(verts[0][0], verts[0][1]),
-            fx_glass_pack_geo_vert(verts[1][0], verts[1][1]),
-            fx_glass_pack_geo_vert(verts[2][0], verts[2][1]),
-            fx_glass_pack_geo_vert(verts[3][0], verts[3][1]),
-        ];
-        let def = [0u8; fx_iw4::FX_GLASS_DEF];
-        let mut host = FxGlassSystemHost::default();
-        host.reset(FxGlassInitTables {
-            piece_limit,
-            geo_data_limit: geo_limit,
-            init_states: &[init],
-            init_geo: &geo,
-            defs: &[def],
-        });
-        host
-    }
-
-    fn in_use_count(host: &FxGlassSystemHost) -> u32 {
-        (0..host.piece_limit).filter(|p| host.is_in_use(*p)).count() as u32
-    }
-
-    #[test]
-    fn shatter_consumes_parent_and_emits_children() {
-        let mut host = square_host(160, 0xffff, 32, 256);
-        assert!(host.is_in_use(0));
-        assert!(host.shatter(0, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]));
-        assert!(!host.is_in_use(0));
-        assert!(in_use_count(&host) >= 2);
-        for p in 0..host.piece_limit {
-            if !host.is_in_use(p) {
-                continue;
-            }
-            let flags = fx_glass_state_flags(&host.piece_states[p as usize]);
-            assert_ne!(flags & FX_GLASS_STATE_FLAG_SHATTERED, 0);
-        }
-    }
-
-    #[test]
-    fn shatter_outside_hit_and_zero_dir_still_flies() {
-        let mut host = square_host(160, 0, 16, 128);
-        assert!(host.shatter(0, [999.0, 999.0, 999.0], [0.0, 0.0, 0.0]));
-        let mut flying = 0u32;
-        for p in 0..host.piece_limit {
-            if !host.is_in_use(p) {
-                continue;
-            }
-            let dyn_row = host.piece_dynamics[p as usize];
-            let fall = i32::from_le_bytes(
-                dyn_row[FX_GLASS_DYN_FALL_TIME..FX_GLASS_DYN_FALL_TIME + 4]
-                    .try_into()
-                    .unwrap(),
-            );
-            if fall == FX_GLASS_FALL_TIME_NEVER {
-                continue;
-            }
-            let vx = f32::from_le_bytes(
-                dyn_row[FX_GLASS_DYN_VEL..FX_GLASS_DYN_VEL + 4]
-                    .try_into()
-                    .unwrap(),
-            );
-            let vy = f32::from_le_bytes(
-                dyn_row[FX_GLASS_DYN_VEL + 4..FX_GLASS_DYN_VEL + 8]
-                    .try_into()
-                    .unwrap(),
-            );
-            let vz = f32::from_le_bytes(
-                dyn_row[FX_GLASS_DYN_VEL + 8..FX_GLASS_DYN_VEL + 12]
-                    .try_into()
-                    .unwrap(),
-            );
-            assert!(vx * vx + vy * vy + vz * vz > 0.0);
-            flying += 1;
-        }
-        assert!(flying >= 1);
-    }
-
-    #[test]
-    fn oversized_pane_keeps_splitting() {
-        let mut host = square_host(2000, 0, 64, 1024);
-        let original = fx_glass_state_area_x2(&host.piece_states[0]);
-        assert!(original > 300.0);
-        assert!(host.shatter(0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
-        let mut max_area = 0.0f32;
-        let mut n = 0u32;
-        for p in 0..host.piece_limit {
-            if !host.is_in_use(p) {
-                continue;
-            }
-            n += 1;
-            max_area = max_area.max(fx_glass_state_area_x2(&host.piece_states[p as usize]));
-        }
-        assert!(n >= 4, "got {n} pieces");
-        assert!(max_area < original, "{max_area} vs {original}");
-    }
-
-    #[test]
-    fn compact_reclaims_geo_after_shatter() {
-        let mut host = square_host(160, 0, 16, 64);
-        let before = host.geo_data_count;
-        assert!(host.shatter(0, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]));
-        let mut span = 0u32;
-        for p in 0..host.piece_limit {
-            if host.is_in_use(p) {
-                span += fx_glass_state_geo_span(&host.piece_states[p as usize]);
-            }
-        }
-        assert_eq!(host.geo_data_count, span);
-        assert!(host.geo_data_count <= before + 24);
-        assert!(!host.need_to_compact);
-    }
-
-    #[test]
-    fn flying_shards_despawn_after_lifetime() {
-        let mut host = square_host(160, 0, 16, 128);
-        host.time = 10;
-        host.prev_time = 10;
-        assert!(host.shatter(0, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]));
-        assert!(in_use_count(&host) >= 1);
-        host.advance(10 + FX_GLASS_SHARD_LIFETIME_MSEC + 1);
-        assert_eq!(in_use_count(&host), 0);
-    }
-
-    struct Floor;
-    impl GlassWorldTrace for Floor {
-        fn sweep(&self, start: [f32; 3], end: [f32; 3]) -> Option<GlassWorldContact> {
-            if end[2] >= start[2] {
-                return None;
-            }
-            let target = 0.0f32;
-            if start[2] <= target && end[2] <= target {
-                return Some(GlassWorldContact {
-                    fraction: 0.0,
-                    end: [start[0], start[1], target],
-                    normal: [0.0, 0.0, 1.0],
-                    startsolid: true,
-                    pane: None,
-                });
-            }
-            if start[2] > target && end[2] <= target {
-                let t = (start[2] - target) / (start[2] - end[2]);
-                Some(GlassWorldContact {
-                    fraction: t.clamp(0.0, 1.0),
-                    end: [
-                        start[0] + (end[0] - start[0]) * t,
-                        start[1] + (end[1] - start[1]) * t,
-                        target,
-                    ],
-                    normal: [0.0, 0.0, 1.0],
-                    startsolid: false,
-                    pane: None,
-                })
-            } else {
-                None
-            }
-        }
-    }
-
-    #[test]
-    fn shards_disappear_on_floor_contact() {
-        let mut host = square_host(160, 0, 16, 128);
-        host.time = 10;
-        host.prev_time = 10;
-        assert!(host.shatter(0, [0.0, 0.0, 8.0], [0.0, 0.0, -1.0]));
-        host.advance_in_world(10 + 2000, Some(&Floor));
-        for p in 0..host.piece_limit {
-            if !host.is_in_use(p) {
-                continue;
-            }
-            let mode = host
-                .contact_mode
-                .get(p as usize)
-                .copied()
-                .unwrap_or(CONTACT_NONE);
-            if mode == CONTACT_DISAPPEAR {
-                panic!("disappear-on-contact shard survived floor");
-            }
-        }
-    }
-
-    #[test]
-    fn shatter_children_recenter_off_parent_origin() {
-        let mut host = square_host(160, 0, 32, 256);
-        let parent = fx_glass_place_origin(&host.piece_places[0]);
-        assert!(host.shatter(0, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]));
-        let mut moved = 0u32;
-        for p in 0..host.piece_limit {
-            if !host.is_in_use(p) {
-                continue;
-            }
-            let origin = fx_glass_place_origin(&host.piece_places[p as usize]);
-            let dx = origin[0] - parent[0];
-            let dy = origin[1] - parent[1];
-            if dx * dx + dy * dy > 1.0 {
-                moved += 1;
-            }
-        }
-        assert!(moved >= 1);
-        assert!(!host.take_events().is_empty());
-    }
-
-    #[test]
-    fn late_shatter_opens_hole_without_airborne() {
-        let mut host = square_host(160, 0xffff, 32, 256);
-        assert!(host.shatter_caused(
-            0,
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            Some(1),
-            false,
-            false,
-            1,
-            1
-        ));
-        assert!(!host.is_in_use(0));
-        for p in 0..host.piece_limit {
-            if !host.is_in_use(p) {
-                continue;
-            }
-            let fall = fx_glass_dynamics_fall_time(&host.piece_dynamics[p as usize]);
-            assert_eq!(fall, FX_GLASS_FALL_TIME_NEVER);
-        }
-        let events = host.take_events();
-        assert_eq!(events.len(), 1);
-        assert!(!events[0].play_oneshot);
-        assert!((events[0].normal[2] - 1.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn seek_replay_launches_shards_without_oneshot() {
-        let mut host = square_host(160, 0, 32, 256);
-        assert!(host.shatter_caused(
-            0,
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            Some(1),
-            true,
-            false,
-            0,
-            1
-        ));
-        let events = host.take_events();
-        assert_eq!(events.len(), 1);
-        assert!(!events[0].play_oneshot);
-        let airborne = (0..host.piece_limit)
-            .filter(|p| {
-                host.is_in_use(*p)
-                    && fx_glass_dynamics_fall_time(&host.piece_dynamics[*p as usize])
-                        != FX_GLASS_FALL_TIME_NEVER
-            })
-            .count();
-        assert!(
-            airborne >= 1,
-            "seek within airborne life still launches shards"
-        );
-    }
-
-    #[test]
-    fn durable_seed_repeats_child_origins() {
-        const SHATTER_SEED: u64 = 7;
-        let mut a = square_host(160, 0, 32, 256);
-        let mut b = square_host(160, 0, 32, 256);
-        assert!(a.shatter_caused(
-            0,
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            Some(SHATTER_SEED),
-            true,
-            true,
-            0,
-            1
-        ));
-        assert!(b.shatter_caused(
-            0,
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            Some(SHATTER_SEED),
-            true,
-            true,
-            0,
-            1
-        ));
-        let origins_a: Vec<_> = (0..a.piece_limit)
-            .filter(|p| a.is_in_use(*p))
-            .map(|p| fx_glass_place_origin(&a.piece_places[p as usize]))
-            .collect();
-        let origins_b: Vec<_> = (0..b.piece_limit)
-            .filter(|p| b.is_in_use(*p))
-            .map(|p| fx_glass_place_origin(&b.piece_places[p as usize]))
-            .collect();
-        assert_eq!(origins_a, origins_b);
-    }
-
-    #[test]
-    fn delete_frees_descendants_of_the_pane() {
-        let mut host = square_host(160, 0, 32, 256);
-        assert!(host.shatter(0, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]));
-        let kids = (0..host.piece_limit).filter(|p| host.is_in_use(*p)).count();
-        assert!(kids >= 1);
-        host.free_pane(0);
-        let left = (0..host.piece_limit).filter(|p| host.is_in_use(*p)).count();
-        assert_eq!(left, 0);
-    }
-
-    #[test]
-    fn collapse_falls_instead_of_flying_along_the_normal() {
-        let mut host = square_host(160, 0, 32, 256);
-        assert!(host.shatter_caused(
-            0,
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            Some(2),
-            true,
-            true,
-            2,
-            1
-        ));
-        let mut falling = 0u32;
-        for p in 0..host.piece_limit {
-            if !host.is_in_use(p) {
-                continue;
-            }
-            let vel = fx_glass_dynamics_vel(&host.piece_dynamics[p as usize]);
-            let horiz = vel[0] * vel[0] + vel[1] * vel[1];
-            if vel[2] < 0.0 && horiz < vel[2] * vel[2] {
-                falling += 1;
-            }
-        }
-        assert!(falling >= 1);
-    }
-
-    #[test]
-    fn pending_single_support_tilts_before_release() {
-        let mut host = square_host(160, 1, 32, 256);
-        fx_glass_state_set_support_mask(&mut host.piece_states[0], 1);
-        host.time = 10;
-        host.prev_time = 10;
-        host.release_at[0] = 2_000;
-        let before = fx_glass_place_quat(&host.piece_places[0]);
-        host.advance(410);
-        let after = fx_glass_place_quat(&host.piece_places[0]);
-        assert_ne!(before, after);
-        assert!(host.is_in_use(0));
-        assert_eq!(host.release_at[0], 2_000);
-    }
-
-    #[test]
-    fn floor_contact_emits_an_aggregated_landing() {
-        struct AlwaysFloor;
-        impl GlassWorldTrace for AlwaysFloor {
-            fn sweep(&self, start: [f32; 3], end: [f32; 3]) -> Option<GlassWorldContact> {
-                Some(GlassWorldContact {
-                    fraction: 0.5,
-                    end: [(start[0] + end[0]) * 0.5, (start[1] + end[1]) * 0.5, 0.0],
-                    normal: [0.0, 0.0, 1.0],
-                    startsolid: false,
-                    pane: None,
-                })
-            }
-        }
-        let mut host = square_host(160, 0, 16, 128);
-        if let Some(place) = host.piece_places.get_mut(0) {
-            fx_glass_place_set_origin(place, [0.0, 0.0, 32.0]);
-        }
-        host.time = 10;
-        host.prev_time = 10;
-        assert!(host.shatter(0, [0.0, 0.0, 32.0], [0.0, 0.0, -1.0]));
-        let _ = host.take_events();
-        host.advance_in_world(10 + 200, Some(&AlwaysFloor));
-        let landings = host.take_events().into_iter().filter(|e| e.landing).count();
-        assert!(landings >= 1);
-        assert!(landings <= 4);
-    }
-
-    #[test]
-    fn free_clears_source_pane_and_bumps_generation() {
-        let mut host = square_host(160, 0, 32, 256);
-        assert!(host.shatter(0, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]));
-        let kid = (0..host.piece_limit)
-            .find(|p| host.is_in_use(*p))
-            .expect("child");
-        let generation = host.generation[kid as usize];
-        host.free(kid);
-        assert!(!host.is_in_use(kid));
-        assert_eq!(host.source_pane[kid as usize], u32::MAX);
-        assert_eq!(host.generation[kid as usize], generation.wrapping_add(1));
-        assert_eq!(host.release_at[kid as usize], 0);
-    }
-
-    #[test]
-    fn same_revision_does_not_emit_a_second_break_event() {
-        let mut host = square_host(160, 0, 32, 256);
-        assert!(host.shatter_caused(
-            0,
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            Some(1),
-            true,
-            true,
-            0,
-            4
-        ));
-        assert_eq!(host.take_events().len(), 1);
-        assert_eq!(host.last_event_revision[0], 4);
-        host.push_break_event(0, [0.0; 3], [0.0, 0.0, 1.0], true, 0, 4);
-        assert!(host.take_events().is_empty());
-        host.push_break_event(0, [0.0; 3], [0.0, 0.0, 1.0], true, 0, 5);
-        assert_eq!(host.take_events().len(), 1);
-    }
-
-    fn first_airborne(host: &FxGlassSystemHost) -> usize {
-        (0..host.piece_limit as usize)
-            .find(|&p| {
-                host.is_in_use(p as u32)
-                    && fx_glass_dynamics_fall_time(&host.piece_dynamics[p])
-                        != FX_GLASS_FALL_TIME_NEVER
-            })
-            .expect("airborne shard")
-    }
-
-    #[test]
-    fn leftover_does_not_simulate_and_draw_place_extrapolates() {
-        let mut host = square_host(160, 0, 32, 256);
-        host.time = 10;
-        host.prev_time = 10;
-        assert!(host.shatter_caused(
-            0,
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            Some(1),
-            true,
-            true,
-            0,
-            1
-        ));
-        let piece = first_airborne(&host);
-        let sim0 = fx_glass_place_origin(&host.piece_places[piece]);
-        let vel = fx_glass_dynamics_vel(&host.piece_dynamics[piece]);
-        let fall = fx_glass_dynamics_fall_time(&host.piece_dynamics[piece]);
-        host.advance(18);
-        assert_eq!(host.motion_accum_msec, 8);
-        assert_eq!(fx_glass_place_origin(&host.piece_places[piece]), sim0);
-        let draw = fx_glass_place_origin(&host.draw_place(piece).expect("place"));
-        let expect = fx_glass_ballistic_origin(sim0, vel, fall, 10, 18, FX_GLASS_FALL_GRAVITY);
-        assert_eq!(draw, expect);
-        assert_ne!(draw, sim0);
-        host.advance(26);
-        assert_eq!(host.motion_accum_msec, 0);
-        assert_ne!(fx_glass_place_origin(&host.piece_places[piece]), sim0);
-    }
-
-    #[test]
-    fn hitch_matches_four_full_steps() {
-        let mut short = square_host(160, 0, 32, 256);
-        let mut hitch = square_host(160, 0, 32, 256);
-        short.time = 10;
-        short.prev_time = 10;
-        hitch.time = 10;
-        hitch.prev_time = 10;
-        assert!(short.shatter_caused(
-            0,
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            Some(7),
-            true,
-            true,
-            0,
-            1
-        ));
-        assert!(hitch.shatter_caused(
-            0,
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            Some(7),
-            true,
-            true,
-            0,
-            1
-        ));
-        let span = FX_GLASS_MOTION_STEP_MSEC * FX_GLASS_CATCHUP_STEPS;
-        short.advance(10 + span);
-        hitch.advance(10 + 2000);
-        assert_eq!(short.motion_accum_msec, 0);
-        assert_eq!(hitch.motion_accum_msec, 0);
-        let origins_short: Vec<_> = (0..short.piece_limit)
-            .filter(|p| short.is_in_use(*p))
-            .map(|p| fx_glass_place_origin(&short.piece_places[p as usize]))
-            .collect();
-        let origins_hitch: Vec<_> = (0..hitch.piece_limit)
-            .filter(|p| hitch.is_in_use(*p))
-            .map(|p| fx_glass_place_origin(&hitch.piece_places[p as usize]))
-            .collect();
-        assert_eq!(origins_short, origins_hitch);
-        assert!(!origins_short.is_empty());
-    }
-
-    #[test]
-    fn settled_fade_drops_in_the_last_quarter_second() {
-        let mut host = square_host(160, 0, 32, 256);
-        host.time = 10;
-        host.prev_time = 10;
-        assert!(host.shatter_caused(
-            0,
-            [0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            Some(1),
-            true,
-            true,
-            0,
-            1
-        ));
-        let piece = first_airborne(&host);
-        host.contact_mode[piece] = CONTACT_SETTLED;
-        fx_glass_dynamics_software_launch(
-            &mut host.piece_dynamics[piece],
-            10,
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
-        );
-        host.time = 10 + FX_GLASS_SETTLED_LIFETIME_MSEC - FX_GLASS_SETTLED_FADE_MSEC / 2;
-        let fade = host.piece_fade(piece);
-        assert!((fade - 0.5).abs() < 1e-5, "{fade}");
-        assert_eq!(host.piece_fade(0), 1.0);
-    }
-
-    #[test]
-    fn startsolid_in_source_pane_does_not_kill() {
-        struct OwnPane;
-        impl GlassWorldTrace for OwnPane {
-            fn sweep(&self, start: [f32; 3], _end: [f32; 3]) -> Option<GlassWorldContact> {
-                Some(GlassWorldContact {
-                    fraction: 0.0,
-                    end: start,
-                    normal: [0.0, 0.0, 1.0],
-                    startsolid: true,
-                    pane: Some(0),
-                })
-            }
-        }
-        let mut host = square_host(160, 0, 32, 256);
-        host.time = 10;
-        host.prev_time = 10;
-        assert!(host.shatter(0, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]));
-        let before = in_use_count(&host);
-        assert!(before >= 1);
-        host.advance_in_world(10 + FX_GLASS_MOTION_STEP_MSEC, Some(&OwnPane));
-        assert_eq!(in_use_count(&host), before);
-    }
-
-    #[test]
-    fn startsolid_in_world_still_kills() {
-        struct WorldSolid;
-        impl GlassWorldTrace for WorldSolid {
-            fn sweep(&self, start: [f32; 3], _end: [f32; 3]) -> Option<GlassWorldContact> {
-                Some(GlassWorldContact {
-                    fraction: 0.0,
-                    end: start,
-                    normal: [0.0, 0.0, 1.0],
-                    startsolid: true,
-                    pane: None,
-                })
-            }
-        }
-        let mut host = square_host(160, 0, 16, 128);
-        host.time = 10;
-        host.prev_time = 10;
-        assert!(host.shatter(0, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]));
-        assert!(in_use_count(&host) >= 1);
-        host.advance_in_world(10 + FX_GLASS_MOTION_STEP_MSEC, Some(&WorldSolid));
-        for p in 0..host.piece_limit {
-            if !host.is_in_use(p) {
-                continue;
-            }
-            let mode = host
-                .contact_mode
-                .get(p as usize)
-                .copied()
-                .unwrap_or(CONTACT_NONE);
-            if mode == CONTACT_DISAPPEAR || mode == CONTACT_BOUNCE {
-                panic!("airborne shard survived world startsolid");
-            }
-        }
-    }
-
-    #[test]
-    fn one_break_does_not_keep_more_than_sixty_four_airborne() {
-        let mut host = square_host(2000, 0, 128, 4096);
-        assert!(host.shatter(0, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]));
-        let airborne = (0..host.piece_limit)
-            .filter(|p| host.is_airborne(*p as usize))
-            .count();
-        assert!(
-            airborne <= FX_GLASS_AIRBORNE_PER_BREAK as usize,
-            "airborne {airborne}"
-        );
-        assert!(airborne >= 1);
-    }
-
-    #[test]
-    fn settled_piece_does_not_keep_falling() {
-        let mut host = square_host(160, 0, 32, 256);
-        host.time = 10;
-        host.prev_time = 10;
-        assert!(host.shatter(0, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]));
-        let piece = first_airborne(&host);
-        host.contact_mode[piece] = CONTACT_SETTLED;
-        fx_glass_dynamics_software_launch(
-            &mut host.piece_dynamics[piece],
-            10,
-            [0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0],
-        );
-        if let Some(place) = host.piece_places.get_mut(piece) {
-            fx_glass_place_set_origin(place, [0.0, 0.0, 32.0]);
-        }
-        let before = fx_glass_place_origin(&host.piece_places[piece]);
-        host.advance(10 + 200);
-        assert!(host.is_in_use(piece as u32));
-        assert_eq!(fx_glass_place_origin(&host.piece_places[piece]), before);
-        assert_eq!(host.contact_mode[piece], CONTACT_SETTLED);
     }
 }

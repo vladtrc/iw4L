@@ -399,6 +399,9 @@ pub(crate) fn finish_impact_marks(
     if against_models {
         super::entity_mark::queue(host, marks);
     }
+    if against_world {
+        complete_glass_marks(host, scene);
+    }
     let want_world = against_world && pose_from_fx_host(host).is_some();
     let want_models = against_models && pose_from_fx_host_models(host).is_some();
     let spatial = pose_from_fx_host(host).or_else(|| pose_from_fx_host_models(host));
@@ -562,6 +565,165 @@ fn complete_world_generate(host: &mut FxSystemHost, scene: &WorldScene, def_inde
             host.note_world_go_fire();
         }
         None => host.note_world_go_skip(def_index),
+    }
+}
+
+fn complete_glass_marks(host: &mut FxSystemHost, scene: &WorldScene) {
+    use fx_iw4::{FX_GLASS_STATE_FLAG_SIMPLE, fx_glass_state_def_index, fx_glass_state_flags};
+
+    let Some(glass) = scene.fx_glass.as_ref() else {
+        return;
+    };
+    let Some(pose) = pose_from_fx_host(host) else {
+        return;
+    };
+    let (origin, radius) = (pose.origin, pose.radius);
+    let Some(axis) = pose.axis else { return };
+    let Some(material) = pose_material(host, MarkFragmentsAgainst::Models).map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(native_color) = host.last_decal_color else {
+        return;
+    };
+    let mark_bits = mark_material_surface_bits(scene, &material);
+    let planes = marks_iw4::fx_mark_fragment_clip_planes(origin, axis, radius);
+    let mut vertices = [fx_iw4::FxGlassIntactVert {
+        xyz: [0.0; 3],
+        uv: [0.0; 2],
+    }; 32];
+    let mut fragment = [marks_iw4::FxWorldMarkPoint {
+        xyz: [0.0; 3],
+        weights: [0.0; 3],
+    }; marks_iw4::R_MARK_CHOP_MAX_POINTS];
+    let mut tris =
+        vec![marks_iw4::FxMarkStagingTri::ZERO; marks_iw4::R_MARK_FRAGMENTS_MAX_TRIS as usize];
+    let mut points =
+        vec![marks_iw4::FxMarkStagingPoint::ZERO; marks_iw4::R_MARK_FRAGMENTS_MAX_POINTS as usize];
+    for piece in 0..host.glass.init_piece_count as usize {
+        if !host.glass.is_in_use(piece as u32) {
+            continue;
+        }
+        let mut context = [0u8; 7];
+        context[0] = 4;
+        context[1] = marks_iw4::GFX_SURFACE_LIGHTMAP_NONE;
+        context[2..4].copy_from_slice(&(piece as u16).to_le_bytes());
+        let state = &host.glass.piece_states[piece];
+        if fx_glass_state_flags(state) & FX_GLASS_STATE_FLAG_SIMPLE != 0 {
+            continue;
+        }
+        let def_index = fx_glass_state_def_index(state) as usize;
+        let Some(def) = glass.defs.get(def_index) else {
+            continue;
+        };
+        let Some((name, _)) = glass.def_materials.get(def_index) else {
+            continue;
+        };
+        let Some(receiver) = runtime_material_by_name(scene, name) else {
+            continue;
+        };
+        if !marks_iw4::fx_mark_include_in_world_clip(marks_iw4::fx_mark_allow(
+            Some(receiver.info_game_flags),
+            receiver.surface_type_bits,
+            mark_bits,
+        )) {
+            continue;
+        }
+        let place = &host.glass.piece_places[piece];
+        let Some(n) =
+            fx_iw4::fx_glass_intact_verts(place, state, &host.glass.geo_data, def, &mut vertices)
+        else {
+            continue;
+        };
+        let pane_axis = fx_iw4::fx_unit_quat_to_axis(fx_iw4::fx_glass_place_quat(place));
+        let pane_origin = fx_iw4::fx_glass_place_origin(place);
+        let plane_distance: f32 = (0..3)
+            .map(|k| (origin[k] - pane_origin[k]) * pane_axis[2][k])
+            .sum();
+        let facing = pane_axis[2]
+            .iter()
+            .zip(axis[0])
+            .map(|(a, b)| a * b)
+            .sum::<f32>();
+        let side = if plane_distance.abs() > 0.001 {
+            plane_distance
+        } else {
+            facing
+        };
+        let normal = pane_axis[2].map(|v| if side < 0.0 { -v } else { v });
+        let thickness = host.glass.half_thickness.get(piece).copied().unwrap_or(0.0);
+        for vertex in &mut vertices[..n] {
+            for k in 0..3 {
+                vertex.xyz[k] += normal[k] * thickness;
+            }
+        }
+        let mut used_tri = 0;
+        let mut used_point = 0;
+        let mut overflow = false;
+        for i in 1..n - 1 {
+            let v0 = vertices[0].xyz;
+            let mut v1 = vertices[i].xyz;
+            let mut v2 = vertices[i + 1].xyz;
+            if marks_iw4::fx_mark_is_triangle_rejected(normal, v0, v1, v2) {
+                std::mem::swap(&mut v1, &mut v2);
+            }
+            if marks_iw4::fx_mark_is_triangle_rejected(normal, v0, v1, v2) {
+                continue;
+            }
+            let count =
+                marks_iw4::fx_mark_chop_world_triangle_points(&planes, v0, v1, v2, &mut fragment);
+            if count < 3 {
+                continue;
+            }
+            match marks_iw4::fx_mark_emit_brush_fragment(
+                used_tri,
+                used_point,
+                marks_iw4::R_MARK_FRAGMENTS_MAX_TRIS,
+                marks_iw4::R_MARK_FRAGMENTS_MAX_POINTS,
+                &fragment[..count as usize],
+                [0.0; 2],
+                [0.0; 2],
+                [0.0; 2],
+                normal,
+                normal,
+                normal,
+                context,
+                &mut tris,
+                &mut points,
+            ) {
+                Ok((t, p)) => {
+                    used_tri = t;
+                    used_point = p;
+                }
+                Err(_) => {
+                    overflow = true;
+                    break;
+                }
+            }
+        }
+        if used_tri == 0 || overflow {
+            continue;
+        }
+        let req = FxAllocMarkRequest {
+            any_marks: true,
+            tri_count: used_tri,
+            point_count: used_point,
+            origin,
+            radius,
+            tex_coord_axis: axis[1],
+            native_color,
+            material: 0,
+            frame_count: host.frame_stamp,
+            first_tri_context: first_tri_context(&tris[0]),
+        };
+        if let Some(handle) = host.marks.alloc_mark_from_go_callback(
+            req,
+            &tris[..used_tri as usize],
+            &points[..used_point as usize],
+        ) {
+            host.marks.set_material_name(handle, Some(&material));
+            host.last_mark_alloc_slot = Some(handle);
+        }
     }
 }
 

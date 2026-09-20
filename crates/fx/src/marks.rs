@@ -279,17 +279,13 @@ impl FxMarksSystemHost {
             .and_then(|m| m.as_ref())
     }
 
-    pub fn hide_marks_overlapping(&mut self, origin: [f32; 3], radius: f32) -> u32 {
+    pub fn hide_glass_marks(&mut self, piece: u16) -> u32 {
         let mut hidden = 0u32;
         for slot in 0..self.constructed.len() {
             let Some(mark) = self.constructed[slot] else {
                 continue;
             };
-            let dx = mark.origin[0] - origin[0];
-            let dy = mark.origin[1] - origin[1];
-            let dz = mark.origin[2] - origin[2];
-            let reach = mark.radius + radius;
-            if dx * dx + dy * dy + dz * dz > reach * reach {
+            if mark.context as u8 != 4 || (mark.context >> 16) as u16 != piece {
                 continue;
             }
             self.recycle_tri_chain(mark.tris);
@@ -340,7 +336,7 @@ impl FxMarksSystemHost {
             let Some(mark) = self.constructed[slot as usize] else {
                 continue;
             };
-            if !fx_mark_context_is_world_list(mark.context as u8) {
+            if !fx_mark_context_is_world_list(mark.context as u8) && mark.context as u8 != 4 {
                 continue;
             }
             if self
@@ -488,40 +484,5 @@ impl FxMarksSystemHost {
                 req.receivers.fx_marks_smodels,
             ),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn mark_at(origin: [f32; 3]) -> FxMarkConstructed {
-        FxMarkConstructed {
-            frame_count_drawn: 0,
-            frame_count_alloced: 1,
-            origin,
-            radius: 4.0,
-            tex_coord_axis: [0.0, 0.0, 1.0],
-            native_color: 0,
-            material: 0,
-            context: 0,
-            tri_count: 1,
-            point_count: 3,
-            tris: 0,
-            points: 0,
-        }
-    }
-
-    #[test]
-    fn hide_marks_overlapping_drops_only_the_vanished_surface() {
-        let mut host = FxMarksSystemHost::init();
-        host.constructed[0] = Some(mark_at([0.0, 0.0, 0.0]));
-        host.constructed[1] = Some(mark_at([1000.0, 0.0, 0.0]));
-        host.live = 2;
-        let hidden = host.hide_marks_overlapping([0.0, 0.0, 0.0], 16.0);
-        assert_eq!(hidden, 1);
-        assert!(host.constructed[0].is_none());
-        assert!(host.constructed[1].is_some());
-        assert_eq!(host.live, 1);
     }
 }

@@ -33,7 +33,7 @@ home, and diagnostic files sit on your disk until you attach them to a report.
 | shaders | Retail D3D9 SM3 tokens translated to WGSL, so no DirectX at runtime. |
 | rendering | One sorted drawsurf list; only the tess emitters fork per surface type. |
 | physics | Fixed 17 ms step on its own accumulator. Framerate changes nothing about how a body falls. |
-| simulation | One `TickInput → sim::step → Snapshot` funnel for server, prediction, replay and the determinism test. |
+| simulation | One `TickInput → sim::step → Snapshot` funnel for server, prediction and replay. |
 | network | Custom p2p wire over UDP: deltas, reliability, reconciliation. A QUIC master only introduces peers. |
 | platforms | Linux and a portable Windows build. |
 

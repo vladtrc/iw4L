@@ -15,9 +15,9 @@ pub const FX_ELEM_UPDATE_HAS_VEL_GRAPH: i32 = 0x0600_0000;
 pub const FX_ELEM_USE_MODEL_PHYSICS: i32 = 0x0800_0000;
 
 pub const FX_ELEM_RUN_MASK: i32 = 0xc0;
-pub const FX_ELEM_RUN_RELATIVE_TO_EFFECT: i32 = 0x40;
-pub const FX_ELEM_RUN_RELATIVE_TO_OFFSET: i32 = 0x80;
-pub const FX_ELEM_RUN_NONE_ORIGIN: i32 = 0xc0;
+pub const FX_ELEM_RUN_RELATIVE_TO_SPAWN: i32 = 0x40;
+pub const FX_ELEM_RUN_RELATIVE_TO_EFFECT: i32 = 0x80;
+pub const FX_ELEM_RUN_RELATIVE_TO_OFFSET: i32 = 0xc0;
 
 #[inline]
 pub const fn fx_elem_run_mode(flags: i32) -> i32 {

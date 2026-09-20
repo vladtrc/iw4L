@@ -175,6 +175,13 @@ pub fn play_pellet_segment(
     combat: &mut CombatFxDump,
     scene: Option<&dyn FxScene>,
 ) {
+    host.0.glass.hit_segment(
+        seg_start,
+        seg_end,
+        (u64::from(correlation) << 32)
+            ^ (u64::from(attacker_entity_num as u32) << 16)
+            ^ u64::from(pellet),
+    );
     combat.last_surf = Some(i64::from(surf_type));
     combat.last_surf_flags = Some(i64::from(surface_flags));
     combat.last_surf_name = SURFACE_TYPE_NAMES

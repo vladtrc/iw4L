@@ -185,7 +185,13 @@ pub(crate) fn options_pointer_widget_is_active(state: &OptionsState, id: &str) -
     match state.depth {
         OptionsDepth::ResolutionPicker => options_widget_is_active(state, id),
         _ if state.name_buffer.is_some() => options_widget_is_active(state, id),
-        _ => id.starts_with("options/tab/") || options_widget_is_active(state, id),
+        _ => {
+            let mut visible = state.clone();
+            if visible.depth == OptionsDepth::Sections {
+                visible.depth = OptionsDepth::SectionRows;
+            }
+            id.starts_with("options/tab/") || options_widget_is_active(&visible, id)
+        }
     }
 }
 
@@ -239,10 +245,19 @@ pub(crate) fn drive_options_navigation(
         .and_then(|id| id.strip_prefix("options/tab/"))
         .and_then(|raw| raw.parse::<u8>().ok())
         .and_then(OptionsTab::from_u8)
-        && (state.tab != tab || state.depth != OptionsDepth::Sections)
+        && state.tab != tab
     {
         state.tab = tab;
         state.depth = OptionsDepth::Sections;
+        state.touch();
+    }
+
+    if state.depth == OptionsDepth::Sections
+        && focus.widget.as_deref().is_some_and(|id| {
+            !id.starts_with("options/tab/") && options_pointer_widget_is_active(&state, id)
+        })
+    {
+        state.depth = OptionsDepth::SectionRows;
         state.touch();
     }
 
@@ -252,7 +267,19 @@ pub(crate) fn drive_options_navigation(
         left |= matches!(command, MenuShellCmd::Nav(NavDir::Left));
         right |= matches!(command, MenuShellCmd::Nav(NavDir::Right));
     }
-    if left && state.name_buffer.is_none() {
+    if left
+        && state.name_buffer.is_none()
+        && !matches!(
+            focus.widget.as_deref(),
+            Some(
+                "options/volume"
+                    | "options/sensitivity"
+                    | "options/fullscreen"
+                    | "options/vsync"
+                    | "options/invert_mouse"
+            )
+        )
+    {
         if let Some(parent) = state.go_parent() {
             focus.widget = Some(parent);
         }
@@ -459,8 +486,20 @@ pub(crate) fn apply_window_settings(
     settings: Res<frame::GameSettings>,
     present_override: Option<Res<PresentModeOverride>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut applied: Local<Option<(frame::DisplayResolution, bool, PresentMode)>>,
 ) {
-    if !settings.is_changed() {
+    let present_mode = present_override.map_or_else(
+        || {
+            if settings.vsync {
+                PresentMode::AutoVsync
+            } else {
+                PresentMode::AutoNoVsync
+            }
+        },
+        |mode| mode.0,
+    );
+    let display = (settings.resolution, settings.fullscreen, present_mode);
+    if applied.as_ref() == Some(&display) {
         return;
     }
     let Ok(mut window) = windows.single_mut() else {
@@ -474,16 +513,8 @@ pub(crate) fn apply_window_settings(
     } else {
         bevy::window::WindowMode::Windowed
     };
-    window.present_mode = present_override.map_or_else(
-        || {
-            if settings.vsync {
-                PresentMode::AutoVsync
-            } else {
-                PresentMode::AutoNoVsync
-            }
-        },
-        |mode| mode.0,
-    );
+    window.present_mode = present_mode;
+    *applied = Some(display);
 }
 
 pub(crate) fn edit_player_name(

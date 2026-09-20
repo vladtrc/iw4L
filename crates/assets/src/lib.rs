@@ -229,7 +229,7 @@ pub use cac_stats::{
 };
 pub use clip_collision::{
     ClipBrush, ClipCollision, ClipCollisionError, ClipMapMaterial, ClipPlacedStaticModel,
-    ClipSightScratch, ClipSweepHit, MASK_PLAYER_SOLID, XModelCollCatalog, attach_iw5_static_models,
+    ClipSweepHit, MASK_PLAYER_SOLID, XModelCollCatalog, attach_iw5_static_models,
     attach_static_models, build_clip_collision, build_iw5_clip_collision, build_t5_clip_collision,
     gate_leafbrush_index_fits,
 };

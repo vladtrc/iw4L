@@ -1,28 +1,99 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use bevy::tasks::{Task, futures_lite::future};
 use net::{
     AUTHORITY_MS, AuthorityClock, AuthorityWorld, ClientActionInbox, ClientCommandInbox,
-    LocalPresentClient, authority_should_tick, look_angles_from_degrees,
+    LocalPresentClient, ReliableEventHub, authority_should_tick, look_angles_from_degrees,
 };
 use sim::{ClassId, ClientAction, ClientLifecycle, SimWorld, Tick};
 
-use crate::nav::{self, NAV_HULL, NAV_SCHEMA, NavGraph};
-use crate::query::{Budgeted, TraceBudget};
+use crate::nav::{self, NAV_HULL, NAV_SCHEMA, NavGraph, RouteStats};
+use crate::query::{Budgeted, QueryCounters, QuerySubsystem, TraceBudget};
 use crate::roster::{
     BotAddQueue, BotClassPool, BotFireQueue, BotHold, BotRoster, BotTpQueue, BotTpTarget,
     BotTpWhere,
 };
 use crate::sensor;
 use crate::unique_loadout::pick_class_id;
-use frame::{AuthoritySet, MatchTornDown};
+use frame::{AuthoritySet, BotNavigationReady, ClientSet, HasWorld, MatchTornDown, RuntimeRole};
 
 const VIEW_PITCH_DOWN: f32 = 85.0;
 const TRACE_QUOTA: u32 = 96;
 const ASTAR_QUOTA: u32 = 2048;
+/// Ten seconds of authority ticks between aggregates. Compact enough to leave
+/// in a match, coarse enough not to be a per-query log in the hot path.
+const METER_PERIOD_TICKS: u32 = 200;
 
 #[derive(Resource, Default)]
 struct BotNav {
     graph: NavGraph,
+    pending: Option<(u64, Task<NavGraph>)>,
+}
+
+/// Where the shared quota went and whether pending work actually advanced.
+/// Reported per window; not a per-query trace.
+#[derive(Resource, Default)]
+struct BotMeter {
+    queries: QueryCounters,
+    controller_us: u64,
+    ticks: u32,
+    stuck_peak: usize,
+    live_peak: usize,
+    max_age: u32,
+    max_starved: u32,
+    /// Route totals at the last report, so the line carries this window's work.
+    routes_at_report: RouteStats,
+}
+
+impl BotMeter {
+    fn report(&mut self, totals: RouteStats, bots: usize) {
+        let was = self.routes_at_report;
+        let routes = RouteStats {
+            completed: totals.completed.saturating_sub(was.completed),
+            terminal: totals.terminal.saturating_sub(was.terminal),
+            cancelled: totals.cancelled.saturating_sub(was.cancelled),
+            discarded_attachments: totals
+                .discarded_attachments
+                .saturating_sub(was.discarded_attachments),
+            denied_slices: totals.denied_slices.saturating_sub(was.denied_slices),
+            ..RouteStats::default()
+        };
+        self.routes_at_report = totals;
+        let per = |row: &[u32; QuerySubsystem::COUNT]| {
+            QuerySubsystem::ALL
+                .iter()
+                .map(|s| format!("{}={}", s.label(), row[s.index()]))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        diag::info!(
+            Sim,
+            "bots: window={} bots={bots} attempted[{}] denied[{}] primitives={} \
+             routes done={} terminal={} cancelled={} discarded={} denied_slices={} \
+             age={} starve={} live_peak={} stuck_peak={} controller_us={}",
+            self.ticks,
+            per(&self.queries.attempted),
+            per(&self.queries.denied),
+            self.queries.primitives,
+            routes.completed,
+            routes.terminal,
+            routes.cancelled,
+            routes.discarded_attachments,
+            routes.denied_slices,
+            self.max_age,
+            self.max_starved,
+            self.live_peak,
+            self.stuck_peak,
+            self.controller_us,
+        );
+        self.queries = QueryCounters::ZERO;
+        self.controller_us = 0;
+        self.ticks = 0;
+        self.stuck_peak = 0;
+        self.live_peak = 0;
+        self.max_age = 0;
+        self.max_starved = 0;
+    }
 }
 
 pub struct BotsPlugin;
@@ -36,16 +107,23 @@ impl Plugin for BotsPlugin {
             .init_resource::<BotTpQueue>()
             .init_resource::<BotFireQueue>()
             .init_resource::<BotNav>()
+            .init_resource::<BotNavigationReady>()
+            .init_resource::<BotMeter>()
             .add_systems(
                 Update,
                 (
                     drain_bot_add_queue,
-                    reset_roster_on_match_torn_down,
                     evict_bots_claiming_local_client,
                     boot_bots,
                     apply_bot_tp,
                 )
                     .chain(),
+            )
+            .add_systems(
+                Update,
+                (reset_roster_on_match_torn_down, prepare_navigation)
+                    .chain()
+                    .in_set(ClientSet::Load),
             )
             .add_systems(
                 FixedUpdate,
@@ -61,12 +139,16 @@ fn reset_roster_on_match_torn_down(
     mut torn: MessageReader<MatchTornDown>,
     mut roster: ResMut<BotRoster>,
     mut pool: ResMut<BotClassPool>,
+    mut nav: ResMut<BotNav>,
+    mut ready: ResMut<BotNavigationReady>,
 ) {
     if torn.read().len() == 0 {
         return;
     }
     *roster = BotRoster::default();
     *pool = BotClassPool::default();
+    *nav = BotNav::default();
+    ready.0 = false;
 }
 
 fn drain_bot_add_queue(
@@ -266,28 +348,44 @@ fn apply_bot_tp(
 struct ThinkBots<'w> {
     clock: Res<'w, AuthorityClock>,
     world: ResMut<'w, AuthorityWorld>,
-    nav: ResMut<'w, BotNav>,
+    nav: Res<'w, BotNav>,
     roster: ResMut<'w, BotRoster>,
     cmds: ResMut<'w, ClientCommandInbox>,
     hold: Res<'w, BotHold>,
     fire: ResMut<'w, BotFireQueue>,
+    reliable: ResMut<'w, ReliableEventHub>,
+    meter: ResMut<'w, BotMeter>,
 }
 
 fn think_bots(mut p: ThinkBots) {
-    refresh_nav(&mut p.world.0, &mut p.nav.graph);
+    // A bot has no client reading its reliable channel to ack it, so nothing
+    // else ever drains it — leave this out and match broadcasts (deaths, hit
+    // markers, ...) overflow the queue and the bot gets retired as if its
+    // connection had died.
+    for bot in &p.roster.bots {
+        p.reliable.ack_all(bot.id);
+    }
+    if p.roster.bots.is_empty() {
+        p.fire.drain();
+        return;
+    }
+
     let snapshot = p.world.0.snapshot(Tick(p.clock.tick.saturating_sub(1)));
     let fires = p.fire.drain();
     let mut budget = TraceBudget::new(TRACE_QUOTA);
     let mut astar = ASTAR_QUOTA;
-    for bot in &mut p.roster.bots {
-        let mut queried = Budgeted {
-            world: &mut p.world.0,
-            budget: &mut budget,
-        };
-        let Some(obs) = sensor::observe(&snapshot, bot.id, &mut queried) else {
+    let count = p.roster.bots.len();
+    let start = (p.clock.tick as usize / 2) % count.max(1);
+    let mut controller_us = 0u64;
+    for offset in 0..count {
+        let bot = &mut p.roster.bots[(start + offset) % count];
+        let mut queried = Budgeted::new(&mut p.world.0, &mut budget);
+        let focus = bot.brain.focus_target();
+        let Some(obs) = sensor::observe_focused(&snapshot, bot.id, &mut queried, focus) else {
             continue;
         };
         if obs.self_state.lifecycle != ClientLifecycle::Alive {
+            bot.brain.cancel_navigation();
             continue;
         }
         let mut cmd = if p.hold.0 {
@@ -300,6 +398,7 @@ fn think_bots(mut p: ThinkBots) {
             cmd.weapon_mapped = obs.self_state.weapon;
             cmd
         } else {
+            let started = std::time::Instant::now();
             let mut cmd = bot.brain.drive_nav(
                 &obs,
                 &mut queried,
@@ -307,6 +406,7 @@ fn think_bots(mut p: ThinkBots) {
                 &mut astar,
                 AUTHORITY_MS,
             );
+            controller_us += started.elapsed().as_micros() as u64;
             cmd.server_time = p.clock.time_ms;
             cmd
         };
@@ -318,16 +418,159 @@ fn think_bots(mut p: ThinkBots) {
         }
         p.cmds.push(bot.id, None, cmd, None);
     }
+    if count == 0 {
+        return;
+    }
+    // Only a bot with a movement task that did not move counts as stuck; a
+    // hold, an interaction or waiting to respawn is not a navigation failure.
+    let tick = p.clock.tick;
+    let mut routes = RouteStats::default();
+    let mut stuck = 0;
+    let mut live = 0;
+    let (mut age, mut starved) = (0, 0);
+    for bot in &p.roster.bots {
+        let stats = bot.brain.route_stats();
+        routes.completed += stats.completed;
+        routes.terminal += stats.terminal;
+        routes.cancelled += stats.cancelled;
+        routes.discarded_attachments += stats.discarded_attachments;
+        routes.denied_slices += stats.denied_slices;
+        let (bot_age, bot_starved) = bot.brain.route_age();
+        if bot_age != 0 {
+            live += 1;
+        }
+        age = age.max(bot_age);
+        starved = starved.max(bot_starved);
+        stuck += usize::from(bot.brain.stuck(tick));
+    }
+    let meter = &mut p.meter;
+    meter.queries.merge(&budget.counters);
+    meter.controller_us += controller_us;
+    meter.ticks += 1;
+    meter.stuck_peak = meter.stuck_peak.max(stuck);
+    meter.live_peak = meter.live_peak.max(live);
+    meter.max_age = meter.max_age.max(age);
+    meter.max_starved = meter.max_starved.max(starved);
+    if meter.ticks >= METER_PERIOD_TICKS {
+        meter.report(routes, count);
+    }
 }
 
-fn refresh_nav(world: &mut SimWorld, graph: &mut NavGraph) {
+fn prepare_navigation(
+    world: Option<Res<AuthorityWorld>>,
+    installed: Option<Res<HasWorld>>,
+    role: Res<RuntimeRole>,
+    mut nav: ResMut<BotNav>,
+    mut ready: ResMut<BotNavigationReady>,
+    loading: Option<Res<assets::LoadingScreen>>,
+) {
+    if !matches!(*role, RuntimeRole::Listen | RuntimeRole::Dedicated) {
+        ready.0 = true;
+        return;
+    }
+    if !installed.is_some_and(|installed| installed.0) {
+        return;
+    }
+    let Some(world) = world else {
+        return;
+    };
+    ready.0 = refresh_nav(&world.0, &mut nav, loading.as_deref());
+}
+
+fn refresh_nav(
+    world: &SimWorld,
+    nav: &mut BotNav,
+    loading: Option<&assets::LoadingScreen>,
+) -> bool {
+    let digest = world.content_digest();
+    if nav.graph.digest == digest && nav.graph.schema == NAV_SCHEMA && nav.graph.hull == NAV_HULL {
+        return true;
+    }
+    if let Some((pending_digest, task)) = nav.pending.as_mut()
+        && *pending_digest == digest
+    {
+        if let Some(graph) = future::block_on(future::poll_once(task)) {
+            nav.graph = graph;
+            nav.pending = None;
+            return true;
+        }
+        return false;
+    }
+    let stage = loading.map(|loading| loading.progress.stage("preparing bot navigation"));
+    let mut snapshot = world.clone();
+    let generation = nav.graph.generation.wrapping_add(1);
+    nav.pending = Some((
+        digest,
+        assets::load_pool().spawn(async move {
+            let _stage = stage;
+            let mut graph = navigation_for(&mut snapshot, digest);
+            graph.generation = generation;
+            graph
+        }),
+    ));
+    false
+}
+
+const NAV_CACHE_KIND: &str = "nav";
+
+/// The digest, schema and hull that decide in-memory reuse are the whole key,
+/// so the same map read back from disk is the same graph the walk would bake.
+fn nav_cache_key(digest: u64) -> String {
+    format!("{digest:016x}-{NAV_SCHEMA}-{NAV_HULL:08x}")
+}
+
+/// Walking the grid costs seconds of load, and a match teardown drops the graph
+/// with the roster, so the second start of a map would pay it again. Keep the
+/// bake in the artifact cache under its own key and only walk on a miss.
+fn navigation_for(world: &mut SimWorld, digest: u64) -> NavGraph {
+    let key = nav_cache_key(digest);
+    if let Some(graph) = assets::cache_get(NAV_CACHE_KIND, &key)
+        .as_deref()
+        .and_then(NavGraph::cache_decode)
+        && graph.digest == digest
+        && graph.schema == NAV_SCHEMA
+        && graph.hull == NAV_HULL
+    {
+        diag::info!(
+            Sim,
+            "bots: navigation read from cache: {} nodes, {} drops{}",
+            graph.nodes.len(),
+            graph.drops,
+            if graph.truncated { ", truncated" } else { "" }
+        );
+        return graph;
+    }
+    let started = std::time::Instant::now();
+    let mut graph = NavGraph::default();
+    bake_navigation(world, &mut graph);
+    diag::info!(
+        Sim,
+        "bots: navigation prepared in {:.1}ms on worker",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    if let Err(error) = assets::cache_put(NAV_CACHE_KIND, &key, &graph.cache_encode()) {
+        diag::warn!(Sim, "bots: navigation cache store {key}: {error}");
+    }
+    graph
+}
+
+fn bake_navigation(world: &mut SimWorld, graph: &mut NavGraph) {
     let digest = world.content_digest();
     if graph.digest == digest && graph.schema == NAV_SCHEMA && graph.hull == NAV_HULL {
         return;
     }
-    let seeds = world.authored_spawn_origins();
+    let generation = graph.generation.wrapping_add(1);
+    let mut seeds = world.authored_spawn_origins();
+    seeds.extend(world.objectives.bombs.iter().map(|site| site.view.origin));
+    seeds.extend(
+        world
+            .use_objects()
+            .iter()
+            .map(|object| object.script_origin),
+    );
     let Some(bounds) = nav::playable_bounds(world.clip_brushes(), &seeds) else {
         *graph = NavGraph {
+            generation,
             digest,
             schema: NAV_SCHEMA,
             hull: NAV_HULL,
@@ -336,6 +579,7 @@ fn refresh_nav(world: &mut SimWorld, graph: &mut NavGraph) {
         return;
     };
     *graph = nav::bake_seeded(world, bounds, digest, &seeds);
+    graph.generation = generation;
 }
 
 fn aim_viewangles(from: [f32; 3], target: [f32; 3]) -> [f32; 3] {

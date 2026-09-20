@@ -121,6 +121,7 @@ pub fn step_phys_world0(
         .as_deref()
         .filter(|clock| clock.started())
         .map(CgFrameClock::time);
+    let mut advanced_ms = 0;
     if let Some(now) = now {
         match world.last_time {
             None => world.last_time = Some(now),
@@ -152,6 +153,7 @@ pub fn step_phys_world0(
                     advanced += step;
                 }
                 world.last_time = Some(last + advanced);
+                advanced_ms = advanced;
             }
         }
     }
@@ -159,7 +161,7 @@ pub fn step_phys_world0(
     let mut sleep = Vec::new();
     for (entity, body) in world.bodies.iter_mut() {
         if body.on_ground && body.vel.length() < SLEEP_SPEED {
-            body.asleep_ms = body.asleep_ms.saturating_add(MSEC_STEP);
+            body.asleep_ms = body.asleep_ms.saturating_add(advanced_ms);
             if body.asleep_ms >= SLEEP_MS {
                 sleep.push(*entity);
             }

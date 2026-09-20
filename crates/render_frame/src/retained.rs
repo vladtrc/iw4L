@@ -72,6 +72,8 @@ pub enum RetainedDrawKind {
     },
 
     MarkMesh {
+        /// Glass decals share the late scene pass with their receiver.
+        glass: bool,
         draw: u32,
         material: u32,
         packed: bool,

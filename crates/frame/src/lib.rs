@@ -20,10 +20,11 @@ pub use script_notify::{
     register_script_notify,
 };
 pub use session::{
-    AdmissionKey, AppScreen, CacWeaponOffer, ClassSelectHandoff, HasWorld, HostClassLoadouts,
-    HostClassSlot, HudInputView, LaunchIdentity, LaunchReport, LifeEndCause, LifeEnded,
-    LifeStartReason, LifeStarted, LocalLoadKey, MapLoadApproved, MapLoadFailed, MatchInstalled,
-    MatchKey, MatchTornDown, RuntimeRole, TeardownReason, UiDraw, ViewSubject, WorldGeneration,
+    AdmissionKey, AppScreen, BotNavigationReady, CacWeaponOffer, ClassSelectHandoff, HasWorld,
+    HostClassLoadouts, HostClassSlot, HudInputView, LaunchIdentity, LaunchReport, LifeEndCause,
+    LifeEnded, LifeStartReason, LifeStarted, LocalLoadKey, MapLoadApproved, MapLoadFailed,
+    MatchInstalled, MatchKey, MatchTornDown, RuntimeRole, TeardownReason, UiDraw, ViewSubject,
+    WorldGeneration,
 };
 pub use settings::{DisplayResolution, GameSettings};
 pub use ui_sound::{UiPlayMusic, UiPlaySound, UiStopMusic, register_ui_sound};

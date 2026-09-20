@@ -5,6 +5,7 @@ pub enum PathOutcome {
     Blocked,
     Unreachable,
     BudgetExhausted,
+    IncompleteGraph,
     ProgressLost,
 }
 
@@ -13,6 +14,7 @@ pub enum MoveMode {
     Hold,
     Walk,
     Drop,
+    BreakGlass,
     Mantle,
     Ladder,
 }
@@ -27,6 +29,10 @@ pub struct BotIntent {
     pub use_button: bool,
     pub reload: bool,
     pub crouch: bool,
+    pub sprint: bool,
+    /// The weapon the command asks for. `None` keeps the observed weapon; a
+    /// selection is held through every phase of the change, not pulsed once.
+    pub weapon: Option<u16>,
     pub path: PathOutcome,
 }
 
@@ -41,6 +47,8 @@ impl Default for BotIntent {
             use_button: false,
             reload: false,
             crouch: false,
+            sprint: false,
+            weapon: None,
             path: PathOutcome::None,
         }
     }

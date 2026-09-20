@@ -25,10 +25,23 @@ impl DynAtPointLookup {
     }
 
     pub fn fallback(&self, mid: [f32; 3], box_half: Option<[f32; 3]>) -> u8 {
-        match self.walk_trace(mid, box_half) {
-            Some(trace) => trace.walk as u8,
-            None => LIGHT_GRID_ATPOINT_EMPTY_PRIMARY,
+        let (Some(half), Some(regions)) = (box_half, self.light_region_hulls.as_ref()) else {
+            return LIGHT_GRID_ATPOINT_EMPTY_PRIMARY;
+        };
+        for (i, (light, hulls)) in self
+            .primary_light_cull
+            .iter()
+            .zip(regions)
+            .enumerate()
+            .skip(self.sun_primary_light_count.saturating_add(1) as usize)
+        {
+            if !lighting_iw4::cull_box_from_primary_light(light, mid, half)
+                && !region_culls_box(hulls, light.origin, mid, half)
+            {
+                return i as u8;
+            }
         }
+        0
     }
 
     #[must_use]
@@ -47,69 +60,47 @@ impl DynAtPointLookup {
         half: [f32; 3],
         mut on_bit: impl FnMut(u32, bool),
     ) -> u8 {
-        let Some(region_lists) = self.light_region_hulls.as_ref() else {
-            return lighting_iw4::dyn_ent_primary_light_link(
-                &self.primary_light_cull,
-                self.sun_primary_light_count,
-                None,
-                mid,
-                half,
-                |light, set| on_bit(light, set),
-            )
-            .closest;
-        };
-        let hulls: Vec<Vec<LightRegionHull<'_>>> = region_lists
+        let mut closest = 0;
+        let mut best = lighting_iw4::DYN_ENT_PRIMARY_LIGHT_LINK_DIST2_INIT;
+        for (i, light) in self
+            .primary_light_cull
             .iter()
-            .map(|list| {
-                list.iter()
-                    .map(|h| LightRegionHull {
-                        kdop_mid: h.kdop_mid,
-                        kdop_half: h.kdop_half,
-                        axes: &h.axes,
-                    })
-                    .collect()
-            })
-            .collect();
-        let refs: Vec<lighting_iw4::LightRegionHulls<'_>> =
-            hulls.iter().map(|v| v.as_slice()).collect();
-        lighting_iw4::dyn_ent_primary_light_link(
-            &self.primary_light_cull,
-            self.sun_primary_light_count,
-            Some(&refs),
-            mid,
-            half,
-            |light, set| on_bit(light, set),
-        )
-        .closest
+            .enumerate()
+            .skip(self.sun_primary_light_count.saturating_add(1) as usize)
+        {
+            let region = self
+                .light_region_hulls
+                .as_ref()
+                .and_then(|regions| regions.get(i));
+            let set = !lighting_iw4::cull_box_from_primary_light(light, mid, half)
+                && region.is_some_and(|hulls| !region_culls_box(hulls, light.origin, mid, half));
+            on_bit(i as u32, set);
+            if set {
+                let distance = lighting_iw4::dyn_ent_primary_light_link_dist2(light.origin, mid);
+                if distance < best {
+                    best = distance;
+                    closest = i as u8;
+                }
+            }
+        }
+        closest
     }
+}
 
-    fn walk_trace(
-        &self,
-        mid: [f32; 3],
-        box_half: Option<[f32; 3]>,
-    ) -> Option<lighting_iw4::NonSunPrimaryWalkTrace> {
-        let half = box_half?;
-        let region_lists = self.light_region_hulls.as_ref()?;
-        let hulls: Vec<Vec<LightRegionHull<'_>>> = region_lists
-            .iter()
-            .map(|list| {
-                list.iter()
-                    .map(|h| LightRegionHull {
-                        kdop_mid: h.kdop_mid,
-                        kdop_half: h.kdop_half,
-                        axes: &h.axes,
-                    })
-                    .collect()
-            })
-            .collect();
-        let refs: Vec<lighting_iw4::LightRegionHulls<'_>> =
-            hulls.iter().map(|v| v.as_slice()).collect();
-        Some(lighting_iw4::non_sun_primary_light_walk_trace(
-            &self.primary_light_cull,
-            self.sun_primary_light_count,
-            Some(&refs),
-            mid,
-            half,
-        ))
-    }
+fn region_culls_box(
+    hulls: &[assets::WorldLightRegionHull],
+    origin: [f32; 3],
+    mid: [f32; 3],
+    half: [f32; 3],
+) -> bool {
+    lighting_iw4::light_region_culls_box(
+        hulls.iter().map(|h| LightRegionHull {
+            kdop_mid: h.kdop_mid,
+            kdop_half: h.kdop_half,
+            axes: &h.axes,
+        }),
+        origin,
+        mid,
+        half,
+    )
 }

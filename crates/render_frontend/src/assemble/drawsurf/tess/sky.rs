@@ -89,6 +89,7 @@ pub fn build_sky_model_draw_plan(
             packed_lighting: None,
             is_scope: false,
             scene_entnum: None,
+            caster_bound: None,
         });
     }
     diag::info!(

@@ -572,16 +572,25 @@ pub fn update_effect_trails(
     camera_origin: [f32; 3],
     mut on_trail_def: impl FnMut(&str, u8) -> Option<FxElemDefInfo>,
 ) {
-    let (def_name, mut handle, begin, end) = match host.effect_at(effect_slot) {
-        Some(e) if e.ring_resident => (
-            e.def_name.clone(),
-            e.first_trail_handle,
-            e.frame_when_played(),
-            e.frame_now(),
-        ),
-        _ => return,
-    };
+    let (def_name, mut handle, begin, end, distance, looping, msec_begin) =
+        match host.effect_at(effect_slot) {
+            Some(e) if e.ring_resident => (
+                e.def_name.clone(),
+                e.first_trail_handle,
+                FxOrientFrame {
+                    origin: e.origin_last,
+                    axis: e.axis_last,
+                },
+                e.frame_now(),
+                e.distance,
+                e.status & fx_iw4::FX_STATUS_HAS_PENDING_LOOP_ELEMS != 0,
+                e.msec_begin,
+            ),
+            _ => return,
+        };
 
+    let distance_delta = fx_iw4::fx_vec3_distance(begin.origin, end.origin);
+    let arc_delta = fx_iw4::fx_effect_orient_arc(begin.axis, end.axis);
     while handle != FX_TRAIL_HANDLE_NONE {
         let Some(trail_slot) = trail_slot_for_handle(handle) else {
             break;
@@ -590,6 +599,11 @@ pub fn update_effect_trails(
             break;
         };
         let next = trail.next_trail_handle;
+        if !looping && (prev_msec != msec_begin || trail.first_elem_handle != FX_TRAIL_HANDLE_NONE)
+        {
+            handle = next;
+            continue;
+        }
         let trail_def_index = trail.def_index as u8;
         let def_index = i32::from(trail_def_index);
         if def_index_begin <= def_index && def_index < def_index_end {
@@ -601,26 +615,42 @@ pub fn update_effect_trails(
                 continue;
             };
 
-            update_trail(
-                host,
-                effect_slot,
-                handle,
-                elem_def,
-                begin.origin,
-                begin.axis,
-                prev_msec,
-                0.0,
-            );
-            if prev_msec < msec_now {
+            if host.trails[trail_slot].first_elem_handle == FX_TRAIL_HANDLE_NONE {
+                update_trail(
+                    host,
+                    effect_slot,
+                    handle,
+                    elem_def,
+                    begin.origin,
+                    begin.axis,
+                    prev_msec,
+                    distance,
+                );
+            } else if looping && prev_msec < msec_now {
+                // Replace the moving endpoint; only split samples stay in the history.
+                let last = host.trails[trail_slot].last_elem_handle;
+                let mut prev = host.trails[trail_slot].first_elem_handle;
+                while let Some(slot) = trail_elem_slot_for_handle(prev) {
+                    let next = host.trail_elems[slot].next_trail_elem_handle;
+                    if next == last {
+                        free_trail_elem(host, effect_slot, trail_slot, last, prev);
+                        host.trails[trail_slot].sequence =
+                            host.trails[trail_slot].sequence.wrapping_sub(1);
+                        break;
+                    }
+                    prev = next;
+                }
+            }
+            if looping && prev_msec < msec_now {
                 let leftover_in = host.trails[trail_slot].split_leftover;
                 let split = fx_trail_split_window(
                     leftover_in,
                     elem_def.inv_split_time,
                     (msec_now - prev_msec) as f32,
                     elem_def.inv_split_dist,
-                    0.0,
+                    distance_delta,
                     elem_def.inv_split_arc_dist,
-                    0.0,
+                    arc_delta,
                 );
                 let (leftover, extra) = match split {
                     FxTrailSplit::Hold { leftover } => (leftover, 0),
@@ -652,7 +682,7 @@ pub fn update_effect_trails(
                                 sample_origin,
                                 sample_axis,
                                 msec,
-                                0.0,
+                                distance + distance_delta * t,
                             );
                         }
                     }
@@ -665,7 +695,7 @@ pub fn update_effect_trails(
                     end.origin,
                     end.axis,
                     msec_now,
-                    0.0,
+                    distance + distance_delta,
                 );
             }
         }
@@ -717,7 +747,7 @@ pub fn apply_partial_last_trail_spawn_dist(
         let last = trail.last_elem_handle;
         let def_index = trail.def_index as u8;
         let elem_def = on_trail_def(def_name.as_str(), def_index);
-        if prev_msec == msec_now {
+        {
             let mut prev = FX_TRAIL_HANDLE_NONE;
             let mut still_prefix = true;
             let mut cur = trail.first_elem_handle;
@@ -756,7 +786,10 @@ pub fn apply_partial_last_trail_spawn_dist(
                 handle = next_trail;
                 continue;
             }
-        } else if let Some(def) = elem_def {
+        }
+        if prev_msec != msec_now
+            && let Some(def) = elem_def
+        {
             let (vel_local, vel_world) = on_trail_vel_graphs(def_name.as_str(), def_index);
             let mut prev_elem = FX_TRAIL_HANDLE_NONE;
             let mut cur = host.trails[trail_slot].first_elem_handle;
@@ -797,7 +830,6 @@ pub fn apply_partial_last_trail_spawn_dist(
             {
                 if let Some(elem) = host.trail_elems.get_mut(elem_slot).filter(|e| e.occupied) {
                     elem.spawn_dist = spawn_dist;
-                    elem.msec_begin = msec_now;
                     if let Some(elem_def) = elem_def {
                         let seed = fx_trail_random_seed(random_seed, elem.sequence as i8);
                         elem.origin = fx_spawn_origin_world(

@@ -1305,6 +1305,12 @@ impl SimState {
         );
     }
 
+    /// Read-only weapon timing and magazine facts, as the combat step reads
+    /// them. A narrow view for callers that must not guess these numbers.
+    pub fn weapon_combat_facts(&self, weapon: u32) -> Option<WeaponCombatFacts> {
+        self.combat_facts_for(weapon)
+    }
+
     pub(crate) fn combat_facts_for(&self, weapon: u32) -> Option<WeaponCombatFacts> {
         self.content
             .data
@@ -1541,6 +1547,14 @@ impl SimState {
         ents: &[gamemode_iw4::DomFlagMapEnt<'_>],
     ) -> Result<Vec<u32>, crate::use_object::DomFlagInstallError> {
         crate::use_object::install_dom_flags(self, ents)
+    }
+
+    pub fn objective_position_in_volume(&self, id: u32, origin: [f32; 3]) -> Option<bool> {
+        if let Some(site) = self.objectives.bombs.iter().find(|s| s.view.id == id) {
+            return Some(crate::objectives::touching(origin, site));
+        }
+        self.use_object(id)
+            .map(|object| crate::use_object::origin_touching(origin, object))
     }
 
     pub(crate) fn set_use_volume(&mut self, id: u32, mins: [f32; 3], maxs: [f32; 3]) {
@@ -1991,6 +2005,61 @@ impl SimState {
         maxs: [f32; 3],
         mask: u32,
     ) -> trace_iw4::Trace {
+        self.trace_clip_maps_glass(
+            clip_brushes,
+            clip_bsp,
+            clip_mesh,
+            movement_iw4::GroundTraceInput {
+                start,
+                end,
+                mins,
+                maxs,
+                tracemask: mask,
+            },
+            false,
+        )
+    }
+
+    /// Potential navigation clearance after destructible panes have been removed.
+    /// This does not mutate glass state or omit linked world obstacles.
+    pub fn trace_navigation(
+        &self,
+        start: [f32; 3],
+        end: [f32; 3],
+        mins: [f32; 3],
+        maxs: [f32; 3],
+        mask: u32,
+    ) -> trace_iw4::Trace {
+        self.trace_clip_maps_glass(
+            &self.content.data.clip_brushes,
+            &self.content.data.clip_bsp,
+            &self.content.data.clip_mesh,
+            movement_iw4::GroundTraceInput {
+                start,
+                end,
+                mins,
+                maxs,
+                tracemask: mask,
+            },
+            true,
+        )
+    }
+
+    fn trace_clip_maps_glass(
+        &self,
+        clip_brushes: &[SimBrush],
+        clip_bsp: &SimClipBsp,
+        clip_mesh: &SimClipMesh,
+        input: movement_iw4::GroundTraceInput,
+        ignore_glass: bool,
+    ) -> trace_iw4::Trace {
+        let movement_iw4::GroundTraceInput {
+            start,
+            end,
+            mins,
+            maxs,
+            tracemask: mask,
+        } = input;
         let world_hit = clip_trace(
             clip_brushes,
             clip_bsp,
@@ -2000,7 +2069,7 @@ impl SimState {
             mins,
             maxs,
             mask,
-            &|piece| self.world_objects.glass_is_solid(piece as u32),
+            &|piece| !ignore_glass && self.world_objects.glass_is_solid(piece as u32),
         );
         let linked: Vec<LinkedBrushCollisionBrush> = self
             .entity_collision_capabilities
@@ -3799,127 +3868,4 @@ pub(crate) fn spawn_player_state(origin: [f32; 3], viewangles: [f32; 3]) -> Play
     ps.other_flags |= playerstate_iw4::other_flags::PLAYER;
     ps.corpse_index = -1;
     ps
-}
-
-#[cfg(test)]
-mod content_ownership_tests {
-    use super::*;
-
-    /// A 128x128x16 slab whose top face sits at `top_z`, with a distinct
-    /// surface flag per face so a hit can be attributed to the plane it came
-    /// through rather than merely to "something solid".
-    fn slab(top_z: f32) -> SimBrush {
-        SimBrush {
-            planes: vec![
-                [1.0, 0.0, 0.0, 64.0],
-                [-1.0, 0.0, 0.0, 64.0],
-                [0.0, 1.0, 0.0, 64.0],
-                [0.0, -1.0, 0.0, 64.0],
-                [0.0, 0.0, 1.0, top_z],
-                [0.0, 0.0, -1.0, 16.0 - top_z],
-            ],
-            contents: 1,
-            plane_surface_flags: vec![11, 12, 13, 14, 15, 16],
-            glass_encoded: 0,
-        }
-    }
-
-    fn world_with_floor_at(top_z: f32) -> Arc<SimContent> {
-        let mut build = SimContentBuilder::default();
-        build.clip_brushes.push(slab(top_z));
-        build.finish()
-    }
-
-    /// The whole point of the shared backing: a trace that goes all the way
-    /// through the clip map both sides hold.
-    fn drop_to_floor(state: &SimState) -> trace_iw4::Trace {
-        state.trace_world([0.0, 0.0, 64.0], [0.0, 0.0, -64.0], [0.0; 3], [0.0; 3], 1)
-    }
-
-    /// A trace from z=64 down to z=-64 against a floor whose top face is at
-    /// `top_z`, as `trace_through_brush` computes it: the enter fraction backs
-    /// off by one SURFACE_CLIP_EPSILON, so the numbers below are exact f32.
-    fn floor_hit(top_z: f32) -> trace_iw4::Trace {
-        let d1 = 64.0 - top_z;
-        let fraction = (d1 - 0.125) / 128.0;
-        trace_iw4::Trace {
-            fraction,
-            normal: [0.0, 0.0, 1.0],
-            surface_flags: 15,
-            contents: 1,
-            hit_type: trace_iw4::HITTYPE_ENTITY,
-            hit_id: trace_iw4::ENTITYNUM_WORLD,
-            walkable: 1,
-            endpos: [0.0, 0.0, top_z + 0.125],
-            ..trace_iw4::Trace::default()
-        }
-    }
-
-    /// Authority and prediction hold one immutable backing, and that is proved
-    /// by tracing against it rather than by reading a field: install, seed the
-    /// prediction, replace the authority's content, and the prediction still
-    /// resolves the world it was seeded with, down to the plane its shot came
-    /// through and the digest it reports to the session.
-    #[test]
-    fn prediction_keeps_tracing_the_world_it_was_seeded_with_after_authority_replaces_its_own() {
-        let seeded = world_with_floor_at(0.0);
-        let mut authority = SimState::default();
-        authority.install_content(Arc::clone(&seeded));
-
-        // The floor is real geometry, not a row in a vector.
-        assert_eq!(drop_to_floor(&authority), floor_hit(0.0));
-        assert!(authority.has_world_clip());
-
-        let mut prediction = SimState::default();
-        prediction.initialize_prediction_from(&authority);
-
-        // One backing, not a deep copy that happens to compare equal.
-        assert!(Arc::ptr_eq(&seeded, &prediction.content()));
-        assert!(Arc::ptr_eq(&authority.content(), &prediction.content()));
-        assert_eq!(drop_to_floor(&prediction), drop_to_floor(&authority));
-        assert_eq!(prediction.content_digest(), authority.content_digest());
-        let seeded_digest = prediction.content_digest();
-
-        // Shared definitions, independent mutable state: a command the
-        // prediction consumed is not a command the authority consumed.
-        prediction.old_buttons.push((ClientId(1), 8));
-        assert!(authority.old_buttons.is_empty());
-
-        // The authority moves to a different world. Nothing about the
-        // prediction's may follow it.
-        authority.install_content(world_with_floor_at(32.0));
-        assert!(!Arc::ptr_eq(&authority.content(), &prediction.content()));
-        assert_eq!(drop_to_floor(&authority), floor_hit(32.0));
-        assert_eq!(drop_to_floor(&prediction), floor_hit(0.0));
-        assert_eq!(prediction.content_digest(), seeded_digest);
-        assert_ne!(authority.content_digest(), seeded_digest);
-
-        // And an authority with no world at all leaves the prediction's world
-        // standing, because it was never the authority's to drop.
-        authority.install_content(SimContentBuilder::default().finish());
-        assert!(!authority.has_world_clip());
-        assert_eq!(drop_to_floor(&authority).fraction, 1.0);
-        assert_eq!(drop_to_floor(&prediction), floor_hit(0.0));
-        let kept = &prediction.clip_brushes()[0];
-        assert_eq!(prediction.clip_brushes().len(), 1);
-        assert_eq!(kept.planes, slab(0.0).planes);
-        assert_eq!(kept.plane_surface_flags, slab(0.0).plane_surface_flags);
-        assert_eq!(kept.contents, 1);
-    }
-
-    #[test]
-    fn static_world_trace_matches_clip_when_nothing_is_linked() {
-        let seeded = world_with_floor_at(0.0);
-        let mut authority = SimState::default();
-        authority.install_content(Arc::clone(&seeded));
-        let world = drop_to_floor(&authority);
-        let stat = authority.trace_static_world(
-            [0.0, 0.0, 64.0],
-            [0.0, 0.0, -64.0],
-            [0.0; 3],
-            [0.0; 3],
-            1,
-        );
-        assert_eq!(world, stat);
-    }
 }

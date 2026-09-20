@@ -1942,6 +1942,7 @@ dependencies = [
  "net",
  "playerstate_iw4",
  "sim",
+ "weapon_iw4",
 ]
 
 [[package]]

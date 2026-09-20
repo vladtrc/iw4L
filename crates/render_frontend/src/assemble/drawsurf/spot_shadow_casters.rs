@@ -253,6 +253,9 @@ fn retained_xmodel_for_marked_in(
     index: &RetainedIdentityIndex<'_>,
 ) -> Vec<RetainedDrawItem> {
     let mut out = Vec::new();
+    if index.xmodel.is_empty() {
+        return out;
+    }
     for draw in plan_draws {
         if !spot_shadow_xmodel_is_caster(mark_row, draw.scene_entnum) {
             continue;
@@ -414,6 +417,16 @@ pub fn fill_spot_shadow_caster_plan(
         return;
     };
     let fe = spot_shadow_emit_frontend(&choose, &lights, lights.len() as u32, 0.0, false);
+    // Selection updates history even when no light emits a shadow this frame.
+    // Visibility and caster indices only have consumers in emitted slots.
+    if fe
+        .slots
+        .iter()
+        .take(SPOT_SHADOW_SM_LIGHT_CAP)
+        .all(Option::is_none)
+    {
+        return;
+    }
     let word_n = spot_shadow_primary_vis_word_count(
         1,
         lighting_iw4::SPOT_SHADOW_CFG_INDEX_ENTS,
@@ -482,6 +495,18 @@ pub fn fill_spot_shadow_caster_plan(
         occ.models.len()
     ];
     let identity = RetainedIdentityIndex::new(retained);
+    // A scene entity can own many surfaces. Resolve them once in draw order;
+    // each shadow slot then visits only that entity's retained surfaces.
+    let mut xmodel_by_entity = HashMap::<u32, Vec<RetainedDrawItem>>::new();
+    if !identity.xmodel.is_empty() {
+        for draw in draws {
+            if let Some(entnum) = draw.scene_entnum
+                && let Some(&item) = identity.xmodel(draw.surface, draw.object_id)
+            {
+                xmodel_by_entity.entry(entnum).or_default().push(item);
+            }
+        }
+    }
     for slot in fe.slots.iter().take(SPOT_SHADOW_SM_LIGHT_CAP) {
         let Some(slot) = slot else {
             continue;
@@ -634,7 +659,7 @@ pub fn fill_spot_shadow_caster_plan(
             cam,
             Some(pose_ok.as_slice()),
         );
-        if let (Some(scene), Some(xmodel)) = (gfx, xmodel) {
+        if let (Some(scene), Some(_)) = (gfx, xmodel) {
             let mut idxs = [0u32; 512];
             let vis_n = spot_shadow_tess_scene_dobj_indices(
                 &dobj_vis,
@@ -646,16 +671,12 @@ pub fn fill_spot_shadow_caster_plan(
                 let Some(dobj) = scene.scene_dobjs.get(si as usize) else {
                     continue;
                 };
-                let mut row = [0u8; lighting_iw4::SPOT_SHADOW_ENT_MARK_LEN];
-                lighting_iw4::spot_shadow_mark_ent(
-                    &mut row,
-                    render_frontend::scene_info_entnum(dobj.info),
-                );
-                items.extend(retained_xmodel_for_marked_in(
-                    &row,
-                    &xmodel.draws,
-                    &identity,
-                ));
+                let entnum = render_frontend::scene_info_entnum(dobj.info);
+                if entnum < SPOT_SHADOW_ENT_MARK_LEN as u32
+                    && let Some(draws) = xmodel_by_entity.get(&entnum)
+                {
+                    items.extend_from_slice(draws);
+                }
             }
             let mut model_vis = [0u8; lighting_iw4::SPOT_SHADOW_SCENE_MODEL_VIS_STRIDE
                 * lighting_iw4::SPOT_SHADOW_SM_LIGHT_CAP];
@@ -681,16 +702,12 @@ pub fn fill_spot_shadow_caster_plan(
                 let Some(model) = scene.scene_models.get(si as usize) else {
                     continue;
                 };
-                let mut row = [0u8; lighting_iw4::SPOT_SHADOW_ENT_MARK_LEN];
-                lighting_iw4::spot_shadow_mark_ent(
-                    &mut row,
-                    render_frontend::scene_info_entnum(model.info),
-                );
-                items.extend(retained_xmodel_for_marked_in(
-                    &row,
-                    &xmodel.draws,
-                    &identity,
-                ));
+                let entnum = render_frontend::scene_info_entnum(model.info);
+                if entnum < SPOT_SHADOW_ENT_MARK_LEN as u32
+                    && let Some(draws) = xmodel_by_entity.get(&entnum)
+                {
+                    items.extend_from_slice(draws);
+                }
             }
         }
         if let Some(xmodel) = xmodel {

@@ -2,10 +2,9 @@
 //!
 //! A number without a manifest is not a measurement, it is an anecdote. Two
 //! runs differing by 3 ms mean nothing until the reader knows they were the
-//! same binary, the same map, the same present mode and the same cache state —
-//! and the most expensive mistake in this repository's history of benchmarking
-//! is comparing a report against source that was never the source it was built
-//! from.
+//! same binary, the same map, the same present mode and the same cache state.
+//! A report read against source that was never the source it was built from is
+//! worse than no report.
 //!
 //! So every field here is one of three things and says which:
 //!

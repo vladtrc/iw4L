@@ -1010,6 +1010,7 @@ pub(crate) fn update_command_context_code_sources(
                     up: up.to_array(),
                     tan_half_fov_x: tx,
                     tan_half_fov_y: ty,
+                    z_near: prepared.near,
                 },
                 world_mid,
                 world_half,

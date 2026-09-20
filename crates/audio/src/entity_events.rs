@@ -50,6 +50,7 @@ fn selected_alias<'a>(
         EntityEventKind::PREP_OFFHAND => {
             (WeaponSoundSlot::Pullback, WeaponSoundSlot::PullbackPlayer)
         }
+        EntityEventKind::USE_OFFHAND => (WeaponSoundSlot::Fire, WeaponSoundSlot::FirePlayer),
         EntityEventKind::RECHAMBER_WEAPON => {
             (WeaponSoundSlot::Rechamber, WeaponSoundSlot::RechamberPlayer)
         }
@@ -114,6 +115,7 @@ fn cg_entity_event_sound(
             | EntityEventKind::WEAPON_ALT
             | EntityEventKind::PULLBACK_WEAPON
             | EntityEventKind::PREP_OFFHAND
+            | EntityEventKind::USE_OFFHAND
             | EntityEventKind::RECHAMBER_WEAPON
             | EntityEventKind::MELEE_SWIPE
             | EntityEventKind::MELEE_HIT
@@ -138,6 +140,23 @@ fn cg_entity_event_sound(
             Audio,
             "audio: entity sound weapon is unavailable (typed gap)"
         );
+        return;
+    }
+    // Offhand view sounds may be authored entirely as animation notetracks.
+    // A missing player alias must not fall back to the world throw sound.
+    if event == EntityEventKind::USE_OFFHAND
+        && weapons
+            .0
+            .authored_weapon_sound(
+                sound.event.payload.weapon,
+                if player_view {
+                    WeaponSoundSlot::FirePlayer
+                } else {
+                    WeaponSoundSlot::Fire
+                },
+            )
+            .is_none()
+    {
         return;
     }
     let Some((namespace, alias)) = bank.as_deref().and_then(|bank| {

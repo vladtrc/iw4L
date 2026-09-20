@@ -119,6 +119,7 @@ impl Plugin for MenuPlugin {
                 Update,
                 (
                     (
+                        sync_class_select_shell,
                         tear_down_menu_when_disabled,
                         ensure_main_open,
                         follow_public_join.run_if(resource_exists::<net::PendingMasterMenuAction>),
@@ -316,6 +317,27 @@ fn upload_menu_background(
     commands.remove_resource::<PendingMenuBgPixels>();
 }
 
+fn sync_class_select_shell(
+    overlay: Res<crate::ClassSelectOverlayOpen>,
+    highlight: Res<crate::ClassSelectHighlight>,
+    mut enabled: ResMut<MenuEnabled>,
+    mut stack: ResMut<RetailMenuStack>,
+    mut focus: ResMut<Focus>,
+    mut owned: Local<bool>,
+) {
+    if overlay.0 && !*owned {
+        stack.names.clear();
+        stack.names.push("ingame_class".into());
+        focus.widget = Some(format!("class_setup/slot/{}", highlight.0));
+        enabled.0 = true;
+        *owned = true;
+    } else if !overlay.0 && *owned {
+        stack.names.clear();
+        enabled.0 = false;
+        *owned = false;
+    }
+}
+
 fn tear_down_menu_when_disabled(
     enabled: Res<MenuEnabled>,
     mut commands: Commands,
@@ -342,6 +364,10 @@ struct ShellExtras<'w> {
     settings: Res<'w, frame::GameSettings>,
     options: Res<'w, OptionsState>,
     bindings: Res<'w, BindingView>,
+    class_phase: Res<'w, crate::ClassSelectPhase>,
+    class_status: Res<'w, crate::ClassSelectStatus>,
+    class_store: Res<'w, SessionClassStore>,
+    class_icons: Res<'w, crate::ClassSelectIconCache>,
 }
 
 fn window_layout_key(windows: &Query<&Window, With<PrimaryWindow>>) -> Option<(u32, u32, u32)> {
@@ -381,7 +407,11 @@ fn bump_shell_revision(
             .master_bridge
             .as_ref()
             .is_some_and(|value| value.is_changed());
-    if extras.scratch.is_changed()
+    if extras.class_phase.is_changed()
+        || extras.class_status.is_changed()
+        || extras.class_store.is_changed()
+        || extras.class_icons.is_changed()
+        || extras.scratch.is_changed()
         || extras.catalog.is_changed()
         || extras.maps.is_changed()
         || extras.bg.is_changed()

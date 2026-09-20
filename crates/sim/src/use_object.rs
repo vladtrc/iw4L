@@ -529,8 +529,12 @@ fn is_really_alive(world: &crate::world::SimState, id: ClientId, ps: &PlayerStat
 }
 
 fn is_touching(ps: &PlayerState, object: &UseObject) -> bool {
+    origin_touching(ps.origin, object)
+}
+
+pub(crate) fn origin_touching(origin: [f32; 3], object: &UseObject) -> bool {
     if let Some([radius, height]) = object.cylinder {
-        let mid = std::array::from_fn(|i| ps.origin[i] + (PLAYER_MINS[i] + PLAYER_MAXS[i]) * 0.5);
+        let mid = std::array::from_fn(|i| origin[i] + (PLAYER_MINS[i] + PLAYER_MAXS[i]) * 0.5);
         let half = std::array::from_fn(|i| (PLAYER_MAXS[i] - PLAYER_MINS[i]) * 0.5);
         return gamemode_iw4::use_bind::cylinder_contact(
             mid,
@@ -541,7 +545,7 @@ fn is_touching(ps: &PlayerState, object: &UseObject) -> bool {
         );
     }
     aabb_overlap(
-        ps.origin,
+        origin,
         PLAYER_MINS,
         PLAYER_MAXS,
         [0.0, 0.0, 0.0],

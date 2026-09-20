@@ -192,7 +192,7 @@ pub const EV_DISPATCH_REGISTRY: &[EntityEventRow] = &[
     EntityEventRow {
         retail_name: "EV_USE_OFFHAND",
         event: EntityEventKind::USE_OFFHAND,
-        dispatch: EntityEventDispatch::Observer(EntityEventAction::WeaponFire),
+        dispatch: EntityEventDispatch::Observer(EntityEventAction::Sound),
     },
     EntityEventRow {
         retail_name: "EV_MELEE_HIT",

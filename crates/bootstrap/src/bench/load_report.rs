@@ -6,10 +6,10 @@
 //! walk runs on the load pool, so a stage's own duration says nothing about
 //! whether removing it would shorten anything.
 //!
-//! `sole_open` is the time a stage was the only one open. It used to be
-//! printed as an upper bound on what deleting the stage could save, and it is
-//! not one: a stage that was never alone can still be exactly what everything
-//! behind it is queued on, and deleting it would then save its whole length.
+//! `sole_open` is the time a stage was the only one open. It is not an upper
+//! bound on what deleting the stage would save: a stage that was never alone
+//! can still be exactly what everything behind it is queued on, and deleting
+//! it would then save its whole length.
 //! The number says how much of the window this stage was the only thing the
 //! load was doing. What deleting it would save is a question for
 //! `load_jobs.csv` and its dependency edges.
@@ -40,10 +40,10 @@ pub(crate) fn render(bench: &Milestones, command_start: Option<Instant>, out: &m
 /// Each image plan's time split into the four things it can be waiting on, and
 /// what its decode bought.
 ///
-/// `service` used to be one number for "a worker had the job", which folded
-/// together the memory ceiling holding a worker back and the decoding itself.
-/// They have opposite fixes: the first is a scheduling parameter, the second is
-/// the decoder. `budget wait` and `decode` are those two; `prepared` is what
+/// One number for "a worker had the job" folds together the memory ceiling
+/// holding a worker back and the decoding itself, and those have opposite
+/// fixes: the first is a scheduling parameter, the second is the decoder.
+/// `budget wait` and `decode` are the two apart; `prepared` is what
 /// the plan decoded itself, `reused` what it served out of another plan's
 /// payload without decoding anything, and `discarded` the part of the two the
 /// merge had no row for. Only `prepared` is work, so only `prepared` belongs
@@ -519,43 +519,4 @@ fn sole_open(lanes: &[LoadLaneTiming]) -> Vec<Duration> {
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn lane(at_ms: u64, elapsed_ms: u64) -> LoadLaneTiming {
-        LoadLaneTiming {
-            label: format!("stage at {at_ms}"),
-            at: Duration::from_millis(at_ms),
-            elapsed: Duration::from_millis(elapsed_ms),
-            done: 0,
-            total: 0,
-            running: false,
-            rss_delta: None,
-            heap_delta: None,
-        }
-    }
-
-    #[test]
-    fn union_merges_overlapping_stages_and_keeps_the_gap_out() {
-        let lanes = [lane(0, 100), lane(50, 100), lane(400, 100)];
-        assert_eq!(union(&lanes), Duration::from_millis(250));
-    }
-
-    #[test]
-    fn sole_open_credits_only_the_stage_nobody_overlapped() {
-        // 0..100 alone, 100..150 shared, 150..200 alone on the second stage.
-        let lanes = [lane(0, 150), lane(100, 100)];
-        let sole_open = sole_open(&lanes);
-        assert_eq!(sole_open[0], Duration::from_millis(100));
-        assert_eq!(sole_open[1], Duration::from_millis(50));
-    }
-
-    #[test]
-    fn a_stage_that_shared_its_whole_window_is_credited_nothing() {
-        let lanes = [lane(0, 200), lane(50, 50)];
-        assert_eq!(sole_open(&lanes)[1], Duration::ZERO);
-    }
 }

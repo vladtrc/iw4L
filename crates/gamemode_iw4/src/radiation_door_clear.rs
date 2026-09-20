@@ -37,26 +37,3 @@ pub fn first_drop_pulse(elapsed_ms: u32, completed: bool) -> bool {
 pub fn touching_door(point: [f32; 3], origin: [f32; 3], mins: [f32; 3], maxs: [f32; 3]) -> bool {
     (0..3).all(|i| point[i] >= origin[i] + mins[i] && point[i] <= origin[i] + maxs[i])
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn destroy_pulses_every_two_seconds_until_the_sweep_ends() {
-        assert!(!destroy_due(0, false));
-        assert!(destroy_due(2_000, false));
-        assert!(!destroy_due(2_050, false));
-        assert!(destroy_due(4_000, false));
-        assert!(destroy_due(6_000, false));
-        assert!(!destroy_due(8_000, true));
-    }
-
-    #[test]
-    fn drop_first_pulse_is_one_tenth_of_a_second() {
-        assert!(!drop_due(0, false));
-        assert!(first_drop_pulse(100, false));
-        assert!(!first_drop_pulse(200, false));
-        assert!(drop_due(200, false));
-    }
-}

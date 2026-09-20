@@ -1,10 +1,9 @@
-//! Section three: the counters, which until now only ever reached a trace.
+//! Section three: the counters.
 //!
 //! `Counter::emit` writes a Perfetto counter track, and the bench report is a
-//! different tool over the same run — so every render-stage timing, every GPU
-//! pass and every draw census was invisible to `make bench` unless someone
-//! opened the `.pftrace`. The recorder now keeps them, and this is where they
-//! are read back.
+//! different tool over the same run, so the recorder keeps every render-stage
+//! timing, every GPU pass and every draw census as well. This is where they are
+//! read back, without anyone opening the `.pftrace`.
 //!
 //! Three rules the tables here exist to keep:
 //!
@@ -65,8 +64,7 @@ const PHASE_MS: [Counter; 5] = [
 /// `.chain()` fixes the order of the HUD systems and promises nothing about
 /// what the executor runs in the gaps between them. A wide gap therefore says
 /// the schedule put something there — it is not evidence that the HUD system
-/// on either side of it was slow, and reading it as one is how an earlier
-/// iteration set out to rewrite a HUD whose bodies were short.
+/// on either side of it was slow.
 const SCHEDULE_MS: [Counter; 3] = [
     Counter::HudSurfacesScheduleMs,
     Counter::HudStageMaxScheduleMs,

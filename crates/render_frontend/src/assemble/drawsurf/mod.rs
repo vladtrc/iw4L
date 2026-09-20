@@ -26,6 +26,7 @@ pub mod spot_shadow_casters;
 pub mod state;
 pub mod sun_effects;
 pub mod sun_shadow;
+mod sun_shadow_clip;
 mod t5_fog;
 pub mod tess;
 mod wgsl_disk_cache;

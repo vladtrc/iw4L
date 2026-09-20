@@ -1715,7 +1715,7 @@ fn capture_common_zone(
 
 /// Join one image plan, merge it into the catalog and write its census down.
 ///
-/// Separate from the caller because the plans are no longer one list: the
+/// Separate from the caller because the plans are not one list: the
 /// donors are applied first so that the plan claiming the same names can be
 /// pruned against the result, and both halves merge a batch exactly the same
 /// way.
@@ -1977,9 +1977,9 @@ fn walk_iw5_weapon_bundle(
     ) else {
         return (Iw5WeaponBundle::default(), None, report);
     };
-    // Patch A. The bundle's images used to wait here until the consumer had
-    // finished the synchronous `common_mp` walk and got round to unpacking
-    // this tuple — 2.4 s of ready work with nobody holding it.
+    // The producer enqueues the bundle's images itself. Left for the consumer,
+    // they wait out the synchronous `common_mp` walk and the unpacking of this
+    // tuple: seconds of ready decode work with nobody holding it.
     let pending_images = hold_image_plan("IW5 weapon bundle", census.pending_images.take(), job)
         .map(|held| held.enqueue(progress));
     report.extend(census.report);

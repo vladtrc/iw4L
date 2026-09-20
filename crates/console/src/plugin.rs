@@ -11,7 +11,7 @@ use bevy::{
     prelude::*,
     text::{EditableText, FontCx, LayoutCx, TextCursorStyle, TextEdit, TextLayoutInfo},
     ui::{ComputedUiRenderTargetInfo, UiGlobalTransform},
-    window::{CursorGrabMode, CursorOptions, PrimaryWindow},
+    window::{CursorEntered, CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused},
 };
 use frame::{AppScreen, HasWorld};
 use input_iw4::{SCRIPT_KEYNUM, cl_input_cmd, cl_key_event, command_names, key_up_command_id};
@@ -504,12 +504,33 @@ fn publish_client_action_input(
     }
 }
 
+/// Hold the pointer for as long as gameplay owns it, and take it back whenever
+/// the window does.
+///
+/// The grab is not ours alone to keep: a compositor drops the constraint when
+/// the window loses focus or the pointer leaves the surface, and `bevy_winit`
+/// says as much — it re-requests the grab on every change to `CursorOptions`
+/// precisely because its cache "can change through external means". Asking for
+/// the mode we already hold is a no-op inside winit, so regaining focus first
+/// releases the grab and lets the next frame take it again. Without that bounce
+/// a window that came back from an alt-tab, an overview or a notification keeps
+/// a `Locked` label over a pointer nothing is holding, and on a compositor that
+/// only reports relative motion to a held pointer the view stops turning while
+/// every key, and the console, still work.
 fn sync_cursor_grab(
     console: Res<ConsoleState>,
     menu: Option<Res<MenuEnabled>>,
     screen: Option<Res<AppScreen>>,
+    mut focused: MessageReader<WindowFocused>,
+    mut entered: MessageReader<CursorEntered>,
     mut windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
+    let mut returned = false;
+    for ev in focused.read() {
+        returned |= ev.focused;
+    }
+    returned |= entered.read().count() > 0;
+
     let menu_open = menu.map(|m| m.0).unwrap_or(false);
     let in_game = screen
         .as_ref()
@@ -523,9 +544,15 @@ fn sync_cursor_grab(
     } else {
         CursorGrabMode::None
     };
+    if returned && want != CursorGrabMode::None && cursor.grab_mode == want {
+        // Drop it visibly held but actually loose, and re-take it next frame.
+        // The cursor stays hidden across the gap, so the player sees nothing.
+        cursor.grab_mode = CursorGrabMode::None;
+        return;
+    }
     if cursor.grab_mode != want {
         cursor.grab_mode = want;
-        cursor.visible = !grab;
+        cursor.visible = want == CursorGrabMode::None;
         let grab_label = if grab { "locked" } else { "none" };
         diag::event!(Input, Debug, "cursor", "cursor grab={grab_label}");
     }

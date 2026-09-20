@@ -103,6 +103,7 @@ pub fn register_missile_systems(app: &mut App) {
             publish_missile_dobj_poses
                 .after(occupy_missile_scene_ents)
                 .after(frame::WorkerCmdSet::SkinModel)
+                .before(frame::WorkerCmdSet::FxRemaining)
                 .in_set(frame::ClientSet::Present),
         )
         .add_systems(
@@ -375,6 +376,13 @@ fn append_missile_draws(
             model: row.name.clone(),
         });
         let world_from_local = missile_world_from_local(row.origin, row.angles);
+        let caster_bound = entry
+            .skel
+            .radius
+            .map(|radius| render_scene::XModelCasterBound {
+                origin: row.origin,
+                radius: radius.max(1.0),
+            });
         for (surface, material) in surfaces_idx {
             draws.push(XModelSurfaceDraw {
                 surface,
@@ -389,6 +397,7 @@ fn append_missile_draws(
                 packed_lighting: None,
                 is_scope: false,
                 scene_entnum: Some(entnum),
+                caster_bound,
             });
         }
     }

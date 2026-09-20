@@ -87,15 +87,19 @@ impl ViewmodelController {
             ACTION_GOAL_TIME_SECS,
         );
 
-        if this.weapon.ads_overlay == AdsOverlayConvention::PlayAdsAnim {
-            if let Some(clip) = this.weapon.clip(WeaponAnimSlot::AdsDown).cloned() {
-                this.set_weight(WeaponAnimSlot::AdsDown, ACTIVE_GOAL_WEIGHT, 0.0);
-                this.tree
-                    .set_time(WeaponAnimSlot::AdsDown.index(), clip.duration())
-                    .expect("ads down index is within tree");
-            } else if this.weapon.clip(WeaponAnimSlot::AdsUp).is_some() {
-                this.set_weight(WeaponAnimSlot::AdsUp, ACTIVE_GOAL_WEIGHT, 0.0);
-            }
+        // Bones animated only by ADS clips still need their lowered pose at the hip.
+        if let Some(clip) = this.weapon.clip(WeaponAnimSlot::AdsDown).cloned() {
+            this.set_weight(WeaponAnimSlot::AdsDown, ACTIVE_GOAL_WEIGHT, 0.0);
+            this.tree
+                .set_time(WeaponAnimSlot::AdsDown.index(), clip.duration())
+                .expect("ads down index is within tree");
+            this.tree
+                .set_rate(WeaponAnimSlot::AdsDown.index(), 0.0)
+                .expect("ads down index is within tree");
+        } else if this.weapon.ads_overlay == AdsOverlayConvention::PlayAdsAnim
+            && this.weapon.clip(WeaponAnimSlot::AdsUp).is_some()
+        {
+            this.set_weight(WeaponAnimSlot::AdsUp, ACTIVE_GOAL_WEIGHT, 0.0);
         }
         this
     }
@@ -308,7 +312,11 @@ impl ViewmodelController {
                 WeaponState::SprintOut,
                 positive_ms(self.weapon.sprint_drop_time_ms),
             ),
-            WeaponAnimSlot::Melee | WeaponAnimSlot::MeleeCharge => (WeaponState::Ready, None),
+            WeaponAnimSlot::Melee => (WeaponState::Ready, positive_ms(self.weapon.melee_time_ms)),
+            WeaponAnimSlot::MeleeCharge => (
+                WeaponState::Ready,
+                positive_ms(self.weapon.melee_charge_time_ms),
+            ),
             WeaponAnimSlot::Idle | WeaponAnimSlot::EmptyIdle => (WeaponState::Ready, None),
             WeaponAnimSlot::AdsUp | WeaponAnimSlot::AdsDown => (WeaponState::Ready, None),
         }

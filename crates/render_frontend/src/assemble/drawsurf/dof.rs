@@ -1,8 +1,7 @@
 use bevy::prelude::*;
 
 /// What the ADS autofocus sweep is allowed to focus on: the same solid-world
-/// contents the sight trace uses. Every other `sweep_box` caller names its
-/// mask; this one used to pass the bits bare.
+/// contents the sight trace uses. Every `sweep_box` caller names its mask.
 const AUTOFOCUS_CLIPMASK: u32 = 0x0080_6c31;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

@@ -1,6 +1,5 @@
 //! Process plumbing for the ship commands: tool checks, timed steps, ssh and
-//! rsync. Everything here used to be shell boilerplate rather than deployment —
-//! `set -euo pipefail`, `command -v`, `$SECONDS` and a fixed `SSH_OPTS` array.
+//! rsync.
 
 use std::io::Write as _;
 use std::path::Path;

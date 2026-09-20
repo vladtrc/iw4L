@@ -29,21 +29,21 @@ ZONE ?=
 ZONE_ARG = $(if $(ZONE),--zone $(ZONE),)
 
 # Live recipes use `[profile.play]` (Cargo.toml): release opt-level without
-# the fat-LTO link. PROFILE=release is the LTO binary (S2-I11). `make deploy`
+# the fat-LTO link. PROFILE=release is the LTO binary. `make deploy`
 # uses this same PROFILE (default play); prod/dev is the publish channel.
 PROFILE ?= play
 PROFILE_ARG = --profile $(PROFILE)
 RELEASE ?=
 CARGO = cargo
 
-# G-LIVE-1. Jump on the spawn pad (open sky) before +forward carries under cover.
+# The scripted match. Jump on the spawn pad (open sky) before +forward carries under cover.
 # Trailing wait lets the automatic reload finish. `quit` flushes `.pftrace`.
 SCENARIO_ZONE ?= mp_boneyard
 SCENARIO_CMDS ?= wait world; spawn assault; force_match_start; hold +attack; bot add 3; wait 3s; press +gostand; hold +forward; wait 5s; wait 4s; quit
-# G-LIVE-2. Truck 234 roof looking down + 7 bots RPG into the floor. Local does
-# not fire: I4 `hold +attack` made the truck splash a suicide (no killcam).
-# Bots fire twice so the dump ring contains missiles. Does not replace
-# SCENARIO_CMDS (A/B/C). Five-number move/tp only — pitch 85 is the test.
+# Truck 234 roof looking down + 7 bots RPG into the floor. Local does not fire:
+# `hold +attack` made the truck splash a suicide, which has no killcam.
+# Bots fire twice so the dump ring contains missiles. It does not replace
+# SCENARIO_CMDS. Five-number move/tp only — pitch 85 is the test.
 # Gate: T1/R1/R2/T6/K0/K1/K2/K3/K4/K6/K7/L1/F1/C1/P1/P2.
 CHAOS_CMDS ?= wait world; spawn assault; wait 2s; move -1066 1391 7 174 85; wait 1s; bot add 7; bot hold on; wait 3s; bot tp 1 -1066 1391 127 174 85; bot tp 2 -1073 1362 80 174 85; bot tp 3 519 -44 16 61 85; bot tp 4 528 -14 16 61 85; bot tp 5 62 915 80 180 85; bot tp 6 62 900 80 180 85; bot tp 7 80 915 80 180 85; bot give 1 rpg; bot give 2 rpg; bot give 3 rpg; bot give 4 rpg; bot give 5 rpg; bot give 6 rpg; bot give 7 rpg; wait 1s; bot fire all; wait 3s; bot fire all; wait 12s; quit
 # Live trace run (not a demo). `force_match_start` so holds are not frozen in
@@ -280,9 +280,6 @@ logs:
 #   make mr fmt FILES='crates/foo/src/a.rs'   rustfmt exactly those paths.
 #                         Empty / dir / non-rs refuse: `cargo fmt --all`
 #                         rewrites files this branch does not own.
-#
-# The refusals above are gated on throwaway repos by `cargo test -p xtask
-# --test mrs` — run that after touching xtask/src/mrs.rs.
 FILES ?=
 # What a push would publish: nothing under `context/`, no `.env`, no key, no
 # piece of a game install, and no retail offsets left over in the code. It is a
@@ -333,8 +330,8 @@ help:
 	@echo "                  PERF_OVERHEAD_PAIRS=10, alternating order, paired 95% CI"
 	@echo "make bench-perf   same live run under perf record (needs the perf package),"
 	@echo "                  [profile.perf] binary, perf.data under iw4l-artifacts/perf"
-	@echo "make scenario     G-LIVE-1: play the scripted match, then gate its .pftrace"
-	@echo "make chaos        G-LIVE-2: truck + RPG into the floor, then gate the .pftrace"
+	@echo "make scenario     play the scripted match, then gate its .pftrace"
+	@echo "make chaos        truck + RPG into the floor, then gate the .pftrace"
 	@echo "make lifecycle-all  run and gate all five occupancy transition recipes"
 	@echo "make lifecycle-swap  LIFECYCLE-SWAP: boneyard → disconnect → rust, then .pftrace"
 	@echo "make lifecycle-replace  map over map: boneyard → map mp_rust, no disconnect"

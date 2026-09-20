@@ -155,7 +155,7 @@ pub fn register_dyn_ent_systems(app: &mut App) {
         .add_systems(
             Update,
             (
-                link_dyn_ent_cells,
+                link_dyn_ent_cells.after(dyn_ent_phys::step_phys_world0),
                 cull_dyn_ent_cell_models
                     .after(link_dyn_ent_cells)
                     .after(frame::WorkerCmdSet::CellStatic),
@@ -174,10 +174,7 @@ pub fn register_dyn_ent_systems(app: &mut App) {
 pub use dyn_ent_phys::{DynEntPhysClip, DynEntPhysImpulse, DynEntPhysWorld};
 
 pub fn sphere_behind_frustum(origin: [f32; 3], radius: f32, planes: &[[f32; 4]]) -> bool {
-    planes.iter().any(|plane| {
-        plane[0] * origin[0] + plane[1] * origin[1] + plane[2] * origin[2] + plane[3] + radius
-            <= 0.0
-    })
+    render_scene::XModelCasterBound { origin, radius }.outside(planes)
 }
 
 pub fn fpv_frustum_planes(
@@ -697,6 +694,10 @@ fn append_dynent_draws(
                 lookup_fallback,
             })
         });
+        let caster_bound = row.radius.map(|radius| render_scene::XModelCasterBound {
+            origin: row.world_from_local.w_axis.truncate().to_array(),
+            radius: radius.max(1.0),
+        });
         let object_id = XMODEL_OBJECT_ID_DYNENT_BASE.saturating_add(drawn);
         drawn = drawn.saturating_add(1);
         owners.push(DynEntOwnerDraw {
@@ -719,6 +720,7 @@ fn append_dynent_draws(
                 packed_lighting: None,
                 is_scope: false,
                 scene_entnum: None,
+                caster_bound,
             });
         }
     }

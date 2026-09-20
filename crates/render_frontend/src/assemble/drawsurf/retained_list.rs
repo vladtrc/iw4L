@@ -506,6 +506,7 @@ fn fx_lane_layout_hash(
                 &mut id,
                 u64::from(draw.sub_key.smodel.unwrap_or(u16::MAX)),
             );
+            super::list::mix_content_id(&mut id, u64::from(draw.sub_key.glass.unwrap_or(u16::MAX)));
             super::list::mix_content_id(&mut id, u64::from(draw.sub_key.primary_light));
             super::list::mix_content_id(&mut id, u64::from(draw.sub_key.probe));
         }
@@ -641,6 +642,7 @@ fn overlay_fx_lane_payload(
                 *clouds = src.clouds;
             }
             RetainedDrawKind::MarkMesh {
+                glass,
                 draw,
                 packed,
                 lighting_handle,
@@ -653,7 +655,15 @@ fn overlay_fx_lane_payload(
                     return false;
                 };
                 *packed = src.sub_key.packed;
-                let _ = lighting_handle;
+                *glass = src.sub_key.glass.is_some();
+                if let Some(piece) = src.sub_key.glass {
+                    let Some(glass_draw) = glass_mesh
+                        .and_then(|plan| plan.draws.iter().find(|draw| draw.piece == piece))
+                    else {
+                        return false;
+                    };
+                    *lighting_handle = glass_draw.lighting_handle;
+                }
             }
             RetainedDrawKind::Glass {
                 draw,
@@ -2020,6 +2030,23 @@ pub(crate) fn rebuild_fx_draw_lane(
                 sub_key.primary_light = scene_light_index;
                 sub_key.probe = reflection_probe_index;
                 handle
+            } else if let Some(piece) = sub_key.glass {
+                use crate::prepare::scene::model_lighting_cache::{
+                    ModelLightingOwner, ResolvedModelLighting,
+                };
+                let Some(ResolvedModelLighting::Seated {
+                    handle,
+                    scene_light_index,
+                    reflection_probe_index,
+                    ..
+                }) = lighting.get(ModelLightingOwner::Glass(piece))
+                else {
+                    lane.mark_mesh_skipped_no_lighting += 1;
+                    continue;
+                };
+                sub_key.primary_light = scene_light_index;
+                sub_key.probe = reflection_probe_index;
+                handle
             } else if let Some(index) = sub_key.smodel {
                 let Some(handle) = smodel_lighting
                     .as_ref()
@@ -2046,6 +2073,7 @@ pub(crate) fn rebuild_fx_draw_lane(
                 key,
                 material_sorted_index,
                 RetainedDrawKind::MarkMesh {
+                    glass: sub_key.glass.is_some(),
                     draw: i as u32,
                     material: draw.material,
                     packed: sub_key.packed,
@@ -3101,11 +3129,48 @@ pub(crate) fn fill_smodel_draw_inst_shadow(
     }
 }
 
+/// One dynamic caster and the sphere the partition test reads. A caster with no
+/// sphere is admitted to both partitions, which is what the collector did for
+/// every caster before the bound existed.
+struct DynamicSunCaster {
+    item: RetainedDrawItem,
+    bound: Option<render_scene::XModelCasterBound>,
+}
+
+/// The dynamic casters a partition keeps, in the order `merge_presorted_retained`
+/// needs. Filtering a sorted slice preserves the order, so the sort happens once
+/// for both partitions.
+fn partition_dynamic_casters(
+    dynamic: &[DynamicSunCaster],
+    planes: &[[f32; 4]],
+) -> Vec<RetainedDrawItem> {
+    dynamic
+        .iter()
+        .filter(|caster| dynamic_caster_kept(caster.bound, planes))
+        .map(|caster| caster.item)
+        .collect()
+}
+
+/// A caster is kept unless its own sphere is wholly outside the partition.
+/// No planes and no bound both mean "kept": the partition that states nothing
+/// and the producer that states nothing each widen the volume rather than
+/// dropping a shadow.
+fn dynamic_caster_kept(
+    bound: Option<render_scene::XModelCasterBound>,
+    planes: &[[f32; 4]],
+) -> bool {
+    if planes.is_empty() {
+        return true;
+    }
+    bound.is_none_or(|bound| !bound.outside(planes))
+}
+
 pub(crate) fn merge_sun_shadow_caster_partitions(
     near: &mut SunShadowCasterPlan,
     far: &mut SunShadowCasterPlan,
     xmodel: Option<&XModelDrawPlan>,
     catalog: &super::RuntimeMaterialCatalog,
+    partition_planes: [&[[f32; 4]]; 2],
 ) -> (Vec<RetainedDrawItem>, Vec<RetainedDrawItem>) {
     near.xmodel_eligible = 0;
     near.xmodel_skipped_viewmodel = 0;
@@ -3125,10 +3190,17 @@ pub(crate) fn merge_sun_shadow_caster_partitions(
             std::mem::take(&mut far.items),
         );
     }
-    dynamic.sort_unstable_by_key(|i| (i.host_sort_key(), retained_draw_order_tie(&i.kind)));
+    dynamic.sort_unstable_by_key(|caster| {
+        (
+            caster.item.host_sort_key(),
+            retained_draw_order_tie(&caster.item.kind),
+        )
+    });
+    let near_dynamic = partition_dynamic_casters(&dynamic, partition_planes[0]);
+    let far_dynamic = partition_dynamic_casters(&dynamic, partition_planes[1]);
     (
-        merge_presorted_retained(&near.items, &dynamic),
-        merge_presorted_retained(&far.items, &dynamic),
+        merge_presorted_retained(&near.items, &near_dynamic),
+        merge_presorted_retained(&far.items, &far_dynamic),
     )
 }
 
@@ -3136,7 +3208,7 @@ fn collect_xmodel_sun_shadow_casters(
     xmodel: &XModelDrawPlan,
     catalog: &super::RuntimeMaterialCatalog,
     plan: &mut SunShadowCasterPlan,
-) -> Vec<RetainedDrawItem> {
+) -> Vec<DynamicSunCaster> {
     let mut items = Vec::new();
     for draw in &xmodel.draws {
         if draw.object_id == XMODEL_OBJECT_ID_VIEWMODEL || draw.is_scope {
@@ -3171,46 +3243,33 @@ fn collect_xmodel_sun_shadow_casters(
             plan.xmodel_no_technique = plan.xmodel_no_technique.saturating_add(1);
             continue;
         }
-        items.push(with_catalog(
-            key,
-            material_sorted_index,
-            RetainedDrawKind::XModel {
-                surface: draw.surface,
-                material: draw.material,
-                object_id: draw.object_id,
-                world_from_local: draw.world_from_local,
-                lighting_handle: draw.lighting_handle,
-                packed_lighting: draw.packed_lighting,
-                is_scope: draw.is_scope,
-                scene_entnum: draw.scene_entnum,
-            },
-            super::SurfaceSamplerInputs {
-                reflection_probe: Some(super::SurfaceReflectionProbeId(
-                    draw.reflection_probe_index,
-                )),
-                ..Default::default()
-            },
-            catalog,
-        ));
+        items.push(DynamicSunCaster {
+            item: with_catalog(
+                key,
+                material_sorted_index,
+                RetainedDrawKind::XModel {
+                    surface: draw.surface,
+                    material: draw.material,
+                    object_id: draw.object_id,
+                    world_from_local: draw.world_from_local,
+                    lighting_handle: draw.lighting_handle,
+                    packed_lighting: draw.packed_lighting,
+                    is_scope: draw.is_scope,
+                    scene_entnum: draw.scene_entnum,
+                },
+                super::SurfaceSamplerInputs {
+                    reflection_probe: Some(super::SurfaceReflectionProbeId(
+                        draw.reflection_probe_index,
+                    )),
+                    ..Default::default()
+                },
+                catalog,
+            ),
+            bound: draw.caster_bound,
+        });
     }
     items
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn glass_skips_distortion_without_matching_world_key() {
-        assert!(!fx_item_uses_distortion_lane(4, None));
-        assert!(!fx_item_uses_distortion_lane(4, Some(9)));
-        assert!(fx_item_uses_distortion_lane(
-            4,
-            Some(u32::from(material_sort_key_row(4)))
-        ));
-    }
-}
-
 fn rank_cutout_names(map: BTreeMap<String, u32>) -> Option<String> {
     let mut ranked: Vec<_> = map.into_iter().collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));

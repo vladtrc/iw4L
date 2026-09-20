@@ -417,6 +417,13 @@ fn append_item_draws(
             model: row.name.clone(),
         });
         let world_from_local = item_world_from_local(row.origin, row.angles);
+        let caster_bound = entry
+            .skel
+            .radius
+            .map(|radius| render_scene::XModelCasterBound {
+                origin: row.origin,
+                radius: radius.max(1.0),
+            });
         for &(surface, material) in &plan.assets[asset_index].surfaces {
             draws.push(XModelSurfaceDraw {
                 surface,
@@ -431,6 +438,7 @@ fn append_item_draws(
                 packed_lighting: None,
                 is_scope: false,
                 scene_entnum: Some(row.entnum),
+                caster_bound,
             });
         }
         perf::item(entity_iw4::ET_ITEM, None, None, Some("posed"));

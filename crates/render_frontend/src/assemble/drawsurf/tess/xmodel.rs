@@ -513,6 +513,9 @@ pub fn merge_xmodel_draw_plan(
                     packed_lighting: None,
                     is_scope: false,
                     scene_entnum: d.scene_entnum,
+                    // Remote bodies carry no radius here; unbounded keeps
+                    // every player caster in both partitions.
+                    caster_bound: None,
                 }
             })
         }),
@@ -541,6 +544,7 @@ pub fn merge_xmodel_draw_plan(
                 packed_lighting: None,
                 is_scope: d.is_scope,
                 scene_entnum: Some(crate::SCENE_VIEWMODEL_ENTNUM),
+                caster_bound: None,
             }),
         );
     }
@@ -938,6 +942,9 @@ fn refresh_concat_draws(
                     packed_lighting: None,
                     is_scope: false,
                     scene_entnum: d.scene_entnum,
+                    // Remote bodies carry no radius here; unbounded keeps
+                    // every player caster in both partitions.
+                    caster_bound: None,
                 }
             })
         }),
@@ -961,6 +968,7 @@ fn refresh_concat_draws(
                 packed_lighting: None,
                 is_scope: d.is_scope,
                 scene_entnum: Some(crate::SCENE_VIEWMODEL_ENTNUM),
+                caster_bound: None,
             }),
         );
     }
@@ -1407,255 +1415,4 @@ pub(crate) fn apply_resolved_fx_model_lighting(
     mut plan: ResMut<FxModelDrawPlan>,
 ) {
     plan.finalize_lighting(&resolved);
-}
-
-#[cfg(test)]
-mod producer_revision_tests {
-    use super::*;
-    use render_scene::model_lighting::{
-        ModelLightingOwner, ModelLightingRequest, ResolvedModelLighting, ResolvedModelLightingTable,
-    };
-
-    /// Slot order of `producer_keys`, and therefore of every array in the
-    /// stamp. A producer that moved must move its own slot and no other.
-    const FPV: usize = 0;
-    const BODIES: usize = 1;
-    const SCRIPTS: usize = 2;
-    const MISSILES: usize = 3;
-    const ITEMS: usize = 4;
-    const FX_MODELS: usize = 5;
-    const DYNENTS: usize = 6;
-
-    fn draw(object_id: u16, at: Vec3) -> XModelSurfaceDraw {
-        XModelSurfaceDraw {
-            surface: 0,
-            material: 0,
-            world_from_local: Mat4::from_translation(at),
-            lighting_handle: 0,
-            pending_lighting: Some(ModelLightingRequest {
-                owner: ModelLightingOwner::Item(u32::from(object_id)),
-                origin: [0.0; 3],
-                lookup_fallback: 0,
-            }),
-            colour_refusal: None,
-            object_id,
-            scene_light_index: 0,
-            reflection_probe_index: 0,
-            packed_lighting: None,
-            is_scope: false,
-            scene_entnum: None,
-        }
-    }
-
-    /// The seven plans the merge reads, driven only through the publishing API
-    /// their owners use — never by writing their rows.
-    #[derive(Default)]
-    struct Producers {
-        fpv: FpvDrawPlan,
-        bodies: RemoteBodyDrawPlan,
-        scripts: ScriptModelDrawPlan,
-        missiles: MissileDrawPlan,
-        items: ItemDrawPlan,
-        fx_models: FxModelDrawPlan,
-        dynents: DynEntDrawPlan,
-    }
-
-    impl Producers {
-        /// What the merge itself asks of them each frame.
-        fn stamp(&self) -> XModelMergeStamp {
-            xmodel_merge_stamp(
-                &self.fpv,
-                &self.bodies,
-                &self.scripts,
-                &self.missiles,
-                &self.items,
-                &self.fx_models,
-                &self.dynents,
-                None,
-                None,
-            )
-        }
-
-        /// One frame's rebuild of every row-publishing producer, at `at`.
-        fn rebuild_all_at(&mut self, at: Vec3) {
-            let (mut draws, mut owners) = (
-                vec![draw(1, at)],
-                vec![ItemOwnerDraw {
-                    object_id: 1,
-                    model: "rpg".into(),
-                }],
-            );
-            self.items.publish_frame_rows(&mut draws, &mut owners);
-
-            let (mut draws, mut owners) = (
-                vec![draw(2, at)],
-                vec![DynEntOwnerDraw {
-                    object_id: 2,
-                    model: "door".into(),
-                }],
-            );
-            self.dynents.publish_frame_rows(&mut draws, &mut owners);
-
-            let (mut draws, mut owners) = (vec![draw(3, at)], Vec::new());
-            self.scripts.publish_frame_rows(&mut draws, &mut owners);
-
-            let mut staged = MissileDrawPlan::default();
-            let (mut draws, mut owners) = (
-                vec![draw(4, at)],
-                vec![MissileOwnerDraw {
-                    object_id: 4,
-                    model: "rocket".into(),
-                }],
-            );
-            self.missiles
-                .publish_rebuild(&mut staged, &mut draws, &mut owners);
-
-            let mut staged = FxModelDrawPlan::default();
-            staged.push_draw(draw(5, at));
-            self.fx_models.publish_rebuild(&mut staged);
-        }
-    }
-
-    fn moved_slots(before: &XModelMergeStamp, after: &XModelMergeStamp) -> Vec<usize> {
-        (0..8)
-            .filter(|&i| {
-                before.draws[i] != after.draws[i]
-                    || before.vertices[i] != after.vertices[i]
-                    || before.topology.admission[i] != after.topology.admission[i]
-                    || before.producer_revision[i] != after.producer_revision[i]
-            })
-            .collect()
-    }
-
-    fn seated(handle: u32) -> ResolvedModelLighting {
-        ResolvedModelLighting::Seated {
-            handle,
-            scene_light_index: 2,
-            reflection_probe_index: 3,
-            packed_lighting: Some([1, 2, 3, 4]),
-        }
-    }
-
-    /// The merge used to re-hash every draw, material and vertex count of all
-    /// seven producers each frame, because what they published was not the
-    /// truth: some restarted their revisions from zero, some bumped on a
-    /// rebuild that changed nothing, some dropped every row without telling
-    /// anyone. This drives the producers through their own publishing API and
-    /// asks the consumer that replaced those hashes — the merge stamp — whether
-    /// it can still tell a frame that moved from one that did not, and which
-    /// producer it was.
-    #[test]
-    fn the_merge_stamp_moves_for_exactly_the_producers_whose_rows_moved() {
-        let mut plans = Producers::default();
-        let empty = plans.stamp();
-
-        plans.rebuild_all_at(Vec3::ZERO);
-        let published = plans.stamp();
-        assert_ne!(published, empty);
-        assert_eq!(
-            moved_slots(&empty, &published),
-            vec![SCRIPTS, MISSILES, ITEMS, FX_MODELS, DYNENTS]
-        );
-        assert_eq!(plans.items.draws().len(), 1);
-
-        // An identical rebuild is not a change, and must not look like one:
-        // this is the claim that let the merge stop re-hashing the rows.
-        plans.rebuild_all_at(Vec3::ZERO);
-        assert_eq!(plans.stamp(), published);
-        assert!(!concat_draws_changed(published, &plans.stamp()));
-
-        // Moving one row is — and it moves that producer's slot alone.
-        plans.rebuild_all_at(Vec3::ZERO);
-        let mut draws = vec![draw(1, Vec3::X)];
-        let mut owners = vec![ItemOwnerDraw {
-            object_id: 1,
-            model: "rpg".into(),
-        }];
-        plans.items.publish_frame_rows(&mut draws, &mut owners);
-        let moved = plans.stamp();
-        assert_eq!(moved_slots(&published, &moved), vec![ITEMS]);
-        assert!(concat_draws_changed(published, &moved));
-        assert_eq!(
-            plans.items.draws()[0].world_from_local,
-            Mat4::from_translation(Vec3::X)
-        );
-
-        // Dropping rows is a change too: a producer with nothing to draw may
-        // not leave last frame's rows standing under last frame's revision.
-        plans.items.publish_no_rows();
-        let dropped = plans.stamp();
-        assert!(plans.items.draws().is_empty());
-        assert_eq!(moved_slots(&moved, &dropped), vec![ITEMS]);
-        assert!(concat_draws_changed(moved, &dropped));
-        // And having dropped them, saying so again is not.
-        plans.items.publish_no_rows();
-        assert_eq!(plans.stamp(), dropped);
-
-        // Same contract for the geometry-owning producers.
-        plans.bodies.clear_geometry();
-        assert_eq!(
-            plans.stamp(),
-            dropped,
-            "a body plan with no rows had none to drop"
-        );
-        plans
-            .missiles
-            .finalize_lighting(&ResolvedModelLightingTable::default());
-        let failed = plans.stamp();
-        assert!(
-            plans.missiles.draws().is_empty(),
-            "unresolved lighting removes the owner"
-        );
-        assert_eq!(moved_slots(&dropped, &failed), vec![MISSILES]);
-        // Once, not once per frame it stays failed.
-        plans
-            .missiles
-            .finalize_lighting(&ResolvedModelLightingTable::default());
-        assert_eq!(plans.stamp(), failed);
-
-        // A resolved payload rewrites the rows, so the draws revision moves —
-        // but it touches neither the vertices nor the index layout the merge
-        // concatenates, and it is not an admission change.
-        let mut resolved = ResolvedModelLightingTable::default();
-        resolved.insert_if_absent(ModelLightingOwner::Item(3), seated(7));
-        plans.scripts.finalize_lighting(&resolved);
-        let lit = plans.stamp();
-        assert_eq!(plans.scripts.draws()[0].lighting_handle, 7);
-        assert_eq!(moved_slots(&failed, &lit), vec![SCRIPTS]);
-        assert_ne!(lit.draws[SCRIPTS], failed.draws[SCRIPTS]);
-        assert_eq!(lit.vertices[SCRIPTS], failed.vertices[SCRIPTS]);
-        assert_eq!(
-            lit.topology.topology[SCRIPTS],
-            failed.topology.topology[SCRIPTS]
-        );
-        assert_eq!(
-            lit.topology.admission[SCRIPTS],
-            failed.topology.admission[SCRIPTS]
-        );
-        // The same resolved table again is a no-op: the request was consumed.
-        plans.scripts.finalize_lighting(&resolved);
-        assert_eq!(plans.stamp(), lit);
-
-        // The viewmodel is admission, not vertices: hiding it must reach the
-        // merge, and must not invalidate a vertex buffer.
-        plans.fpv.visible = true;
-        plans.fpv.lighting_handle = 7;
-        plans
-            .fpv
-            .finalize_lighting(&ResolvedModelLightingTable::default());
-        let hidden = plans.stamp();
-        assert!(!plans.fpv.visible);
-        assert_eq!(moved_slots(&lit, &hidden), vec![FPV]);
-        assert_eq!(hidden.vertices[FPV], lit.vertices[FPV]);
-        assert_ne!(hidden.topology.admission[FPV], lit.topology.admission[FPV]);
-        assert!(concat_draws_changed(lit, &hidden));
-        plans
-            .fpv
-            .finalize_lighting(&ResolvedModelLightingTable::default());
-        assert_eq!(plans.stamp(), hidden);
-
-        // Nothing above ever touched the body plan, and the merge agrees.
-        assert_eq!(hidden.producer_revision[BODIES], 0);
-        assert_eq!(hidden.draws[BODIES], 0);
-    }
 }

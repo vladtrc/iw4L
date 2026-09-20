@@ -334,6 +334,19 @@ impl ReliableEventHub {
         }
     }
 
+    // For a client with no wire that will ever read this queue and ack it
+    // back (a host-driven bot), draining it here is the only ack it gets.
+    // Left unacked, broadcast events (deaths, hit markers, ...) pile up past
+    // `MAX_PENDING_RELIABLE` and the peer looks like an overflowed connection
+    // — which gets it retired as if it had disconnected.
+    pub fn ack_all(&mut self, client: sim::ClientId) {
+        if let Some(queue) = self.queues.get_mut(&client)
+            && let Some(&(seq, _)) = queue.pending().last()
+        {
+            queue.ack(seq);
+        }
+    }
+
     pub fn retire(&mut self, client: sim::ClientId) {
         self.queues.remove(&client);
     }

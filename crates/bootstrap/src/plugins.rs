@@ -94,22 +94,11 @@ pub fn default_plugins_with_quiet_log(mut window: WindowPlugin) -> bevy::app::Pl
 
 const PIPELINED_RENDERING_ENV: &str = "IW4L_PIPELINED_RENDERING";
 
-/// Whether the render world runs a frame behind the main world on its own
-/// thread, instead of in line with it.
-///
-/// Off by default, and this is the only thing the switch moves: the executors,
-/// the pool sizes, the affinity, the resolution and the asset paths are the
-/// same either way, so a pair of runs across it is a measurement of pipelining
-/// and not of five things at once. Both branches compete for the same cores,
-/// `extract` stays a serialised boundary in both, and the render frame the
-/// pipelined mode presents is a frame older — which is why the pair is read on
-/// completed render cadence, `extract_wait` and the age of the presented state
-/// as well as on the main loop's wall.
-///
-/// The manifest records which branch a run took, so a report never has to be
-/// read against a guess about it.
+/// Overlap rendering with the next main frame. Extraction remains the ownership
+/// boundary; the bounded render channel permits one outstanding frame.
+/// Set IW4L_PIPELINED_RENDERING=0 for synchronous presentation.
 fn pipelined_rendering() -> bool {
-    perf::switch(PIPELINED_RENDERING_ENV)
+    std::env::var_os(PIPELINED_RENDERING_ENV).is_none() || perf::switch(PIPELINED_RENDERING_ENV)
 }
 
 const FRAME_LATENCY_ENV: &str = "IW4L_FRAME_LATENCY";

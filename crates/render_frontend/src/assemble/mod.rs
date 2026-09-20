@@ -20,6 +20,7 @@ impl Plugin for RenderAssemblePlugin {
             Update,
             crate::assemble::drawsurf::tess::smodel::build_smodel_gpu_plan
                 .after(crate::prepare::scene::spawn::spawn_world_finish)
+                .before(frame::WorkerCmdSet::CellStatic)
                 .in_set(net::ClientSet::Present),
         );
         app.add_systems(
@@ -64,6 +65,7 @@ impl Plugin for RenderAssemblePlugin {
             crate::assemble::drawsurf::rebuild_static_draw_lane
                 .after(crate::prepare::scene::cull::apply_dpvs_cull)
                 .after(crate::prepare::scene::smodel_lighting::update_smodel_lighting)
+                .after(frame::WorkerCmdSet::SmodelCache)
                 .after(crate::assemble::drawsurf::ingest_drawsurf_list)
                 .after(crate::assemble::drawsurf::update_command_context_code_sources)
                 .in_set(net::ClientSet::Present),
@@ -76,10 +78,14 @@ impl Plugin for RenderAssemblePlugin {
                     .after(crate::assemble::drawsurf::update_command_context_code_sources),
                 crate::assemble::drawsurf::bake_sun_shadow_casters
                     .after(crate::assemble::drawsurf::open_frame_products)
+                    .after(crate::assemble::drawsurf::rebuild_xmodel_draw_lane)
+                    .after(frame::WorkerCmdSet::SmodelCache)
                     .after(crate::prepare::scene::cull::apply_dpvs_cull)
                     .after(crate::prepare::scene::smodel_lighting::update_smodel_lighting),
                 crate::assemble::drawsurf::bake_spot_shadow_casters
                     .after(crate::assemble::drawsurf::open_frame_products)
+                    .after(crate::assemble::drawsurf::rebuild_xmodel_draw_lane)
+                    .after(crate::prepare::scene::gfx_scene::snapshot_spot_shadow_occupancy)
                     .after(crate::prepare::scene::cull::apply_dpvs_cull)
                     .after(crate::assemble::drawsurf::rebuild_static_draw_lane),
                 crate::assemble::drawsurf::execute_sun_product

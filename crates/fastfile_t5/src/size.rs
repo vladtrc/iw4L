@@ -342,6 +342,16 @@ pub const GFX_HERO_LIGHT: usize = 56;
 pub const GFX_HERO_LIGHT_TREE: usize = 24;
 
 pub const GAME_WORLD_MP: usize = 44;
+// GameWorldSp: same { name, PathData } shell as the MP variant.
+pub const GAME_WORLD_SP: usize = 44;
+// XGlobals: name + five ints + clear color. No pointers.
+pub const XGLOBALS: usize = 40;
+// EmblemSet header: counts interleaved with table pointers.
+pub const EMBLEM_SET: usize = 44;
+pub const EMBLEM_LAYER: usize = 12;
+pub const EMBLEM_CATEGORY: usize = 8;
+pub const EMBLEM_ICON: usize = 40;
+pub const EMBLEM_BACKGROUND: usize = 24;
 pub const PATH_DATA: usize = 40;
 pub const PATH_DATA_OFF: usize = 4;
 pub const PATH_NODE: usize = 128;

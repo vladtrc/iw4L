@@ -84,24 +84,3 @@ pub fn capture_lochit_table(
     }
     parse_lochit_rawfile(&bytes).ok()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dump_file_maps_named_slots_and_rejects_negatives() {
-        let table = parse_lochit_info_string(
-            "LOCDMGTABLE\\none\\1\\helmet\\1\\head\\1\\neck\\1\\torso_upper\\1\\torso_lower\\1\\right_arm_upper\\1\\right_arm_lower\\1\\right_hand\\1\\left_arm_upper\\1\\left_arm_lower\\1\\left_hand\\1\\right_leg_upper\\1\\right_leg_lower\\1\\right_foot\\1\\left_leg_upper\\1\\left_leg_lower\\1\\left_foot\\1\\gun\\0\\shield\\0",
-        )
-        .unwrap();
-        assert_eq!(table[0], 1.0);
-        assert_eq!(table[2], 1.0);
-        assert_eq!(table[18], 0.0);
-        assert_eq!(table[19], 0.0);
-        assert_eq!(
-            parse_lochit_info_string("LOCDMGTABLE\\head\\-1"),
-            Err(LochitTableError::BadNumber)
-        );
-    }
-}

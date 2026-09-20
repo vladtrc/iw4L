@@ -255,7 +255,7 @@ pub fn pm_weapon_offhand_start(hand: &mut WeaponHandState, cmd: &mut WeaponCmd) 
     hand.weaponstate = WeaponState::OffhandStart as i32;
     hand.weapon_time = fire_time;
 
-    hand.weapon_delay = fire_delay.max(fire_time).max(1);
+    hand.weapon_delay = fire_delay;
     cmd.weap_flags |= weap_flags::OFFHAND_VIEW;
     if cmd.pm_type < 8 {
         pm_start_weapon_anim(&mut hand.weap_anim, weap_anim_event::FIRE);
@@ -316,14 +316,19 @@ pub fn pm_weapon_advance_offhand(
     if hand.hand_index != 0 {
         return None;
     }
+    let cancel = matches!(
+        WeaponState::from_i32(hand.weaponstate),
+        Ok(WeaponState::OffhandInit | WeaponState::OffhandPrepare)
+    ) && offhand_hold_cancel_requested(cmd);
+    if cancel {
+        pm_weapon_offhand_end(hand, cmd);
+        cmd.offhand.grenade_time_left = 0;
+        return None;
+    }
+    if !delayed_action && (hand.weapon_time > 0 || hand.weapon_delay > 0) {
+        return None;
+    }
     match WeaponState::from_i32(hand.weaponstate) {
-        Ok(WeaponState::OffhandInit) | Ok(WeaponState::OffhandPrepare)
-            if offhand_hold_cancel_requested(cmd) =>
-        {
-            pm_weapon_offhand_end(hand, cmd);
-            cmd.offhand.grenade_time_left = 0;
-            None
-        }
         Ok(WeaponState::OffhandInit) if hand.weapon_time <= 0 => {
             pm_weapon_offhand_prepare(hand, cmd)
         }
@@ -339,7 +344,7 @@ pub fn pm_weapon_advance_offhand(
             }
             None
         }
-        Ok(WeaponState::OffhandStart) if hand.weapon_time <= 0 => {
+        Ok(WeaponState::OffhandStart) => {
             if delayed_action {
                 pm_weapon_offhand_throw(hand, cmd)
             } else {

@@ -497,7 +497,7 @@ fn arg_keys(processor: &std::path::Path, trace: &Path) -> Result<Vec<String>, St
 }
 
 pub fn scenario_gate(root: &Path, trace_arg: Option<PathBuf>) -> bool {
-    crate::hr("scenario — G-LIVE-1: a scripted live match, read back out of .pftrace");
+    crate::hr("scenario — a scripted live match, read back out of .pftrace");
     let path = match crate::perfetto_query::resolve_trace(root, trace_arg.as_deref()) {
         Ok(path) => path,
         Err(error) => {

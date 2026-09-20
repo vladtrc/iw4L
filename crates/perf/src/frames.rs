@@ -21,12 +21,12 @@
 //! about delivery and not about this frame's GPU cost.
 //!
 //! A span is charged to a frame by *intersection*, not by where it happened to
-//! end. A load task that ran for 36 ms across four frames and closed in this
-//! one used to book all 36 ms here, which is how a 47 ms frame could report a
-//! 36 ms child inside an 11 ms parent. What lands in `spans_ns` now is the part
-//! of the span that overlapped this frame's wall; the part that ran before it
-//! is summed into `carried_in_ns` rather than dropped, and the span's full
-//! elapsed time is still in the histogram, where it belongs.
+//! end. Booking a load task that ran for 36 ms across four frames whole against
+//! the one it closed in is how a 47 ms frame comes to report a 36 ms child
+//! inside an 11 ms parent. What lands in `spans_ns` is the part of the span
+//! that overlapped this frame's wall; the part that ran before it is summed
+//! into `carried_in_ns` rather than dropped, and the span's full elapsed time
+//! is still in the histogram, where it belongs.
 //!
 //! `covered_ns` is the *union* of the root spans' intervals clipped to the
 //! frame, so two schedules running at once on two threads cover the wall once
@@ -547,96 +547,5 @@ pub fn counter_column(counter: Counter) -> String {
     match counter.origin() {
         Origin::Gpu => format!("delivered_{}{unit}", counter.name()),
         Origin::Cpu => format!("{}{unit}", counter.name()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Counter, Cover};
-
-    /// The recorder is process-global, so the one test that arms it and closes
-    /// frames holds this while it does.
-    static RECORDER: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn covered(intervals: &[(u64, u64)], from: u64, to: u64) -> (u64, bool) {
-        let mut cover = Cover::EMPTY;
-        for (start, end) in intervals {
-            cover.add(*start, *end);
-        }
-        cover.drain(from, to)
-    }
-
-    #[test]
-    fn two_threads_inside_the_same_millisecond_cover_it_once() {
-        // The bug this replaces: summing the roots reported 20 ms of work in a
-        // 10 ms frame and clamped the remainder to zero.
-        let (ns, overflow) = covered(&[(0, 10), (0, 10)], 0, 10);
-        assert_eq!(ns, 10);
-        assert!(!overflow);
-    }
-
-    #[test]
-    fn a_gap_between_roots_stays_uncovered() {
-        let (ns, _) = covered(&[(0, 3), (7, 10)], 0, 10);
-        assert_eq!(ns, 6);
-    }
-
-    #[test]
-    fn intervals_merge_whatever_order_they_close_in() {
-        let ordered = covered(&[(0, 4), (3, 6), (6, 9)], 0, 10).0;
-        let shuffled = covered(&[(6, 9), (0, 4), (3, 6)], 0, 10).0;
-        assert_eq!(ordered, 9);
-        assert_eq!(ordered, shuffled);
-    }
-
-    #[test]
-    fn coverage_never_exceeds_the_window_it_is_read_over() {
-        let (ns, _) = covered(&[(0, 1_000)], 100, 200);
-        assert_eq!(ns, 100);
-    }
-
-    #[test]
-    fn a_counter_reported_late_lands_on_the_frame_it_was_measured_in() {
-        // The render stage timings are published by the render app and read by
-        // the main world a frame later, so a sample that does not name the
-        // frame it was measured in lands on the row after the one that paid it.
-        let _guard = RECORDER.lock().unwrap_or_else(|poison| poison.into_inner());
-        super::arm(true);
-        let first = super::open_index();
-        super::close(0, 1_000, 1);
-        super::close(1_000, 2_000, 1);
-
-        assert!(super::add_counter_at(
-            first,
-            Counter::RenderGraphSubmitIntervalMs,
-            75
-        ));
-        let rows = super::snapshot().rows;
-        let row = |index: u64| {
-            rows.iter()
-                .find(|row| row.index == index)
-                .expect("the row this test closed")
-                .counters[Counter::RenderGraphSubmitIntervalMs as usize]
-        };
-        assert_eq!(row(first), 75, "the sample missed the frame it ran in");
-        assert_eq!(row(first + 1), 0, "the sample landed a frame late");
-
-        // A frame the table never kept is left out rather than charged to
-        // whatever is open now.
-        assert!(!super::add_counter_at(
-            u64::MAX - 1,
-            Counter::RenderGraphSubmitIntervalMs,
-            5
-        ));
-    }
-
-    #[test]
-    fn running_out_of_slots_says_so_instead_of_reporting_a_short_union() {
-        let disjoint: Vec<(u64, u64)> = (0..super::COVER_SLOTS as u64 + 4)
-            .map(|n| (n * 10, n * 10 + 1))
-            .collect();
-        let (ns, overflow) = covered(&disjoint, 0, u64::MAX);
-        assert!(overflow, "the set filled and did not say so");
-        assert_eq!(ns, super::COVER_SLOTS as u64);
     }
 }

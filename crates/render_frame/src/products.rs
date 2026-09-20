@@ -43,11 +43,10 @@ impl SourceRevisions {
 }
 
 /// Hands a rebuilt row list to the plan that owns it and answers the one
-/// question a consumer used to answer by re-hashing the payload: did this
-/// rebuild change anything? The comparison happens here, at the owner, once —
-/// not once per consumer per frame — so `SourceRevisions` becomes the whole
-/// truth about the rows and nobody downstream has to look at them to find out
-/// whether they moved.
+/// question its consumers have about it: did this rebuild change anything? The
+/// comparison happens here, at the owner, once — not once per consumer per
+/// frame — so `SourceRevisions` is the whole truth about the rows and nobody
+/// downstream has to look at them to find out whether they moved.
 ///
 /// `rebuilt` comes back empty with its allocation intact, ready for the next
 /// frame; the rows it carried are now the published ones.

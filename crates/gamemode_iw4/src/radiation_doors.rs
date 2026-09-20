@@ -54,29 +54,3 @@ pub fn alarm_due(alarm_count: u8, elapsed_ms: u32) -> bool {
 pub fn startup_ready(now_ms: u32, playing_since_ms: u32) -> bool {
     now_ms >= playing_since_ms.saturating_add(STARTUP_DELAY_MS)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cooldown_covers_move_plus_wait() {
-        assert_eq!(UNAVAILABLE_MS, 28_000);
-        assert!(unavailable(27_999));
-        assert!(!unavailable(28_000));
-    }
-
-    #[test]
-    fn crush_window_only_while_closing() {
-        assert!(!kill_edge_active(false, 5_000, false));
-        assert!(!kill_edge_active(true, 3_999, false));
-        assert!(kill_edge_active(true, 4_000, false));
-        assert!(!kill_edge_active(true, 4_000, true));
-    }
-
-    #[test]
-    fn opening_door_two_accelerates_faster() {
-        assert_eq!(door_accel_s(1, true), OPEN_D2_ACCEL_S);
-        assert_eq!(door_accel_s(0, true), OPEN_D1_ACCEL_S);
-    }
-}

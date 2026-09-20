@@ -428,7 +428,7 @@ fn pending_collide_for_elem(
     })
 }
 
-pub(crate) fn apply_update_effect_partial_trail_arc(
+pub(crate) fn apply_update_effect_partial_trails(
     host: &mut FxSystemHost,
     slot: usize,
     prev_msec: i32,
@@ -454,17 +454,13 @@ pub(crate) fn apply_update_effect_partial_trail_arc(
         return;
     }
     let looping = (e.status & FX_STATUS_HAS_PENDING_LOOP_ELEMS) != 0;
-    let arc = if looping {
-        fx_iw4::fx_effect_orient_arc(e.axis_last, e.axis)
-    } else {
-        0.0
-    };
+    let distance = e.distance + fx_iw4::fx_vec3_distance(e.origin_last, e.origin);
     crate::trail::apply_partial_last_trail_spawn_dist(
         host,
         slot,
         prev_msec,
         msec_now,
-        arc,
+        distance,
         looping,
         on_trail_def,
         on_trail_trace,
@@ -529,7 +525,7 @@ fn apply_effect_partial(
             &mut *on_trail_def,
         );
 
-        apply_update_effect_partial_trail_arc(
+        apply_update_effect_partial_trails(
             host,
             slot,
             prev_msec,

@@ -150,3 +150,50 @@ pub(super) fn load_map_ents(s: &mut ZoneStream<'_>) -> Result<()> {
     });
     Ok(())
 }
+
+/// `XGlobals`: video/resolution globals. Pointer-free scalar block.
+pub(super) fn load_xglobals(s: &mut ZoneStream<'_>) -> Result<()> {
+    let p = s.alloc_load(4, sz::XGLOBALS)?;
+    s.push(XFILE_BLOCK_VIRTUAL)?;
+    follow_name(s, p, 0)?;
+    s.pop()
+}
+
+/// `EmblemSet`: layer/category/icon/background tables. Icons hold `Image`
+/// pointers, backgrounds `Material` pointers; categories are string pairs.
+pub(super) fn load_emblem_set(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink) -> Result<()> {
+    let p = s.alloc_load(4, sz::EMBLEM_SET)?;
+    let layer_count = s.i32_at(p, 4)?.max(0) as usize;
+    let category_count = s.i32_at(p, 12)?.max(0) as usize;
+    let icon_count = s.i32_at(p, 20)?.max(0) as usize;
+    let background_count = s.i32_at(p, 28)?.max(0) as usize;
+    let background_lookup_count = s.i32_at(p, 36)?.max(0) as usize;
+
+    s.push(XFILE_BLOCK_VIRTUAL)?;
+    always_array(s, p.at(8), 4, sz::EMBLEM_LAYER * layer_count)?;
+    if let Some(categories) = always_array(s, p.at(16), 4, sz::EMBLEM_CATEGORY * category_count)? {
+        for i in 0..category_count {
+            let row = categories.at(i * sz::EMBLEM_CATEGORY);
+            follow_name(s, row, 0)?;
+            follow_name(s, row, 4)?;
+        }
+    }
+    if let Some(icons) = always_array(s, p.at(24), 4, sz::EMBLEM_ICON * icon_count)? {
+        for i in 0..icon_count {
+            let row = icons.at(i * sz::EMBLEM_ICON);
+            asset_ptr_at(s, links, AssetType::Image, row.at(0))?;
+            follow_name(s, row, 4)?;
+        }
+    }
+    if let Some(backgrounds) =
+        always_array(s, p.at(32), 4, sz::EMBLEM_BACKGROUND * background_count)?
+    {
+        for i in 0..background_count {
+            let row = backgrounds.at(i * sz::EMBLEM_BACKGROUND);
+            asset_ptr_at(s, links, AssetType::Material, row.at(0))?;
+            follow_name(s, row, 4)?;
+        }
+    }
+    always_array(s, p.at(40), 2, 2 * background_lookup_count)?;
+    s.pop()
+}

@@ -338,43 +338,6 @@ impl FrameWorld<'_> {
         }
     }
 
-    pub fn debug_place_alive_player(&mut self, id: ClientId, origin: [f32; 3]) {
-        if !self.cheats_enabled() {
-            return;
-        }
-        let ps = crate::world::spawn_player_state(origin, [0.0, 0.0, 0.0]);
-        *self.ensure_player(id) = ps;
-        self.client_meta_mut(id).lifecycle = ClientLifecycle::Alive;
-        self.link_player_standing_area(id);
-    }
-
-    pub fn debug_set_held_ammo(&mut self, id: ClientId, clip: i32, stock: i32) {
-        if !self.cheats_enabled() {
-            return;
-        }
-        let meta = self.client_meta_mut(id);
-        meta.ammo_clip = clip;
-        meta.ammo_stock = stock;
-    }
-
-    pub fn debug_set_team(&mut self, id: ClientId, team: i32) {
-        if !self.cheats_enabled() {
-            return;
-        }
-        self.client_meta_mut(id).client_state_team = team;
-    }
-
-    pub fn debug_mark_dead(&mut self, id: ClientId) {
-        if !self.cheats_enabled() {
-            return;
-        }
-        if let Some(ps) = self.player_mut(id) {
-            ps.health = 0;
-        }
-        self.client_meta_mut(id).lifecycle = ClientLifecycle::Dead;
-        self.unlink_player_area(id);
-    }
-
     pub fn set_origin(&mut self, id: ClientId, origin: [f32; 3]) -> bool {
         let old_origin = {
             let Some(ps) = self.player_mut(id) else {

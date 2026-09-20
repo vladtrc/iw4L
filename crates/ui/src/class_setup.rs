@@ -314,57 +314,56 @@ impl ClassLoadoutCatalog {
         self
     }
 
-    pub fn categories_for(&self, row: ClassEditRow) -> Vec<assets::CacAuthoredCategory> {
-        let mut cats: Vec<_> = self
-            .offers(row)
-            .iter()
-            .filter_map(|offer| {
-                offer
+    pub fn categories_for(&self, row: ClassEditRow) -> Vec<ClassPickerFolder> {
+        let mut folders = Vec::new();
+        for offer in self.offers(row) {
+            let Ok(key) = assets::AssetKey::parse(&offer.key) else {
+                continue;
+            };
+            let category = if matches!(row, ClassEditRow::Primary | ClassEditRow::Secondary) {
+                let Some(category) = offer
                     .item_group
                     .as_deref()
                     .and_then(assets::cac_category_from_item_group)
-            })
-            .collect();
-        cats.sort();
-        cats.dedup();
-        cats
+                else {
+                    continue;
+                };
+                Some(category)
+            } else {
+                None
+            };
+            let folder = ClassPickerFolder {
+                namespace: key.namespace,
+                category,
+            };
+            if !folders.contains(&folder) {
+                folders.push(folder);
+            }
+        }
+        folders.sort_by_key(|folder| (folder.namespace.as_str(), folder.category));
+        folders
     }
 
-    pub fn keys_in_category(
-        &self,
-        row: ClassEditRow,
-        category: assets::CacAuthoredCategory,
-    ) -> Vec<String> {
+    pub fn keys_in_category(&self, row: ClassEditRow, folder: ClassPickerFolder) -> Vec<String> {
         self.offers(row)
             .iter()
             .filter(|offer| {
-                offer
-                    .item_group
-                    .as_deref()
-                    .and_then(assets::cac_category_from_item_group)
-                    == Some(category)
+                assets::AssetKey::parse(&offer.key)
+                    .is_ok_and(|key| key.namespace == folder.namespace)
+                    && folder.category.is_none_or(|category| {
+                        offer
+                            .item_group
+                            .as_deref()
+                            .and_then(assets::cac_category_from_item_group)
+                            == Some(category)
+                    })
             })
             .map(|offer| offer.key.clone())
             .collect()
     }
 
-    pub fn spans_namespaces(&self, row: ClassEditRow) -> bool {
-        let mut seen: Option<assets::AssetNamespace> = None;
-        for offer in self.offers(row) {
-            let Ok(key) = assets::AssetKey::parse(&offer.key) else {
-                continue;
-            };
-            match seen {
-                None => seen = Some(key.namespace),
-                Some(first) if first != key.namespace => return true,
-                Some(_) => {}
-            }
-        }
-        false
-    }
-
     pub fn uses_categories(row: ClassEditRow) -> bool {
-        matches!(row, ClassEditRow::Primary | ClassEditRow::Secondary)
+        row.perk_slot().is_none()
     }
 
     pub fn attachment_variants(&self, row: ClassEditRow, weapon: &str) -> &[String] {
@@ -474,6 +473,21 @@ impl ClassSlotState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClassPickerFolder {
+    pub namespace: assets::AssetNamespace,
+    pub category: Option<assets::CacAuthoredCategory>,
+}
+
+impl ClassPickerFolder {
+    pub fn slug(self) -> String {
+        match self.category {
+            Some(category) => format!("{}:{}", self.namespace.as_str(), category.slug()),
+            None => self.namespace.as_str().to_owned(),
+        }
+    }
+}
+
 #[derive(Resource, Clone, Debug)]
 pub struct ClassSetupScratch {
     pub selected: usize,
@@ -483,7 +497,7 @@ pub struct ClassSetupScratch {
 
     pub editing_attachment: Option<ClassEditRow>,
 
-    pub picker_category: Option<assets::CacAuthoredCategory>,
+    pub picker_category: Option<ClassPickerFolder>,
     pub picker_page: usize,
 
     pub rename_buffer: Option<String>,
@@ -659,7 +673,7 @@ impl ClassSetupScratch {
     pub fn pick_category(
         &mut self,
         catalog: &ClassLoadoutCatalog,
-        category: assets::CacAuthoredCategory,
+        category: ClassPickerFolder,
     ) -> bool {
         let Some(row) = self.editing else {
             return false;
@@ -684,11 +698,8 @@ impl ClassSetupScratch {
         }
     }
 
-    pub(crate) fn is_item_picker(&self) -> bool {
-        self.editing_attachment.is_some()
-            || self.editing.is_some_and(|row| {
-                !ClassLoadoutCatalog::uses_categories(row) || self.picker_category.is_some()
-            })
+    pub(crate) fn is_picker(&self) -> bool {
+        self.editing_attachment.is_some() || self.editing.is_some()
     }
 
     pub fn pick(&mut self, catalog: &ClassLoadoutCatalog, value: String) -> bool {
@@ -732,6 +743,10 @@ pub(crate) fn class_widget_is_active(scratch: &ClassSetupScratch, id: &str) -> b
     }
     if let Some(row) = scratch.editing {
         return id == "class_setup/pick_cancel"
+            || matches!(
+                id,
+                "class_setup/pick/page_prev" | "class_setup/pick/page_next"
+            )
             || if ClassLoadoutCatalog::uses_categories(row) && scratch.picker_category.is_none() {
                 id.starts_with("class_setup/cat/")
             } else {
@@ -839,7 +854,10 @@ pub fn apply_cac_intent(
         UiIntent::CacPick(value) => scratch.pick(catalog, value.clone()),
         UiIntent::CacResetClass => scratch.reset_class(),
         UiIntent::CacPickCategory(raw) => {
-            let Some(category) = assets::CacAuthoredCategory::from_u8(*raw) else {
+            let Some(category) = scratch
+                .editing
+                .and_then(|row| catalog.categories_for(row).get(*raw as usize).copied())
+            else {
                 return false;
             };
             scratch.pick_category(catalog, category)
@@ -855,7 +873,11 @@ pub fn apply_cac_intent(
                     .len()
                     + 1
             } else if let Some(row) = scratch.editing {
-                scratch.picker_options(catalog, row).len()
+                if ClassLoadoutCatalog::uses_categories(row) && scratch.picker_category.is_none() {
+                    catalog.categories_for(row).len()
+                } else {
+                    scratch.picker_options(catalog, row).len()
+                }
             } else {
                 return false;
             };
@@ -878,7 +900,24 @@ pub fn apply_cac_intent(
             true
         }
         UiIntent::CacCancelEdit => {
+            let folder_page = if scratch.editing_attachment.is_none() {
+                scratch
+                    .editing
+                    .zip(scratch.picker_category)
+                    .and_then(|(row, folder)| {
+                        catalog
+                            .categories_for(row)
+                            .iter()
+                            .position(|candidate| *candidate == folder)
+                    })
+                    .map(|index| index / PICKER_PAGE_SIZE)
+            } else {
+                None
+            };
             scratch.cancel_edit();
+            if let Some(page) = folder_page {
+                scratch.picker_page = page;
+            }
             true
         }
         _ => false,
@@ -903,7 +942,18 @@ pub(crate) fn apply_cac_intents(
                         format!("class_setup/attachment/{}", start - 1)
                     }
                 } else {
-                    format!("class_setup/pick/{start}")
+                    if let Some(row) = scratch.editing
+                        && ClassLoadoutCatalog::uses_categories(row)
+                        && scratch.picker_category.is_none()
+                    {
+                        catalog
+                            .categories_for(row)
+                            .get(start)
+                            .map(|folder| format!("class_setup/cat/{}", folder.slug()))
+                            .unwrap_or_else(|| "class_setup/pick_cancel".into())
+                    } else {
+                        format!("class_setup/pick/{start}")
+                    }
                 });
             } else if let Some(target) = target {
                 focus.widget = Some(target);
@@ -934,7 +984,7 @@ pub(crate) fn drive_cac_pages(
     {
         return;
     }
-    if !scratch.is_item_picker() {
+    if scratch.editing.is_none() && scratch.editing_attachment.is_none() {
         return;
     }
     if keys.just_pressed(KeyCode::ArrowLeft) || keys.just_pressed(KeyCode::PageUp) || scroll > 0.0 {

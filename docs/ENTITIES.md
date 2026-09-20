@@ -11,7 +11,7 @@ pub fn step(world: &mut SimWorld, tick: Tick, input: &TickInput,
             msec: i32, reason: StepReason) -> Snapshot;
 ```
 
-Headless, prediction, replay and the determinism test call exactly this one.
+Headless, prediction and replay call exactly this one.
 `msec` is the step length; time enters **only** as an argument. The shape of
 the funnel is [`SIM-STEP.md`](SIM-STEP.md), the code `crates/sim/src/lib.rs`.
 
@@ -43,8 +43,7 @@ and leaves transport to `net`.
 * `session` — standing the match up and tearing it down (`MatchInstalled` /
   `MatchTornDown`); `net` — wire, deltas, prediction; `bots` — host-only
   controllers that observe through a sensor adapter, walk a ClipMap-baked graph
-  and enter the same `TickInput`. Geometric `sim::step` scenes in `bots` tests
-  check maplessly that a `UserCmd` moves.
+  and enter the same `TickInput`.
 
 Snapshots publish the **semantics** of DObj composition, never runtime trees or
 posed vertices ([`ANIM.md`](ANIM.md)).

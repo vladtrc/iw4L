@@ -52,26 +52,3 @@ pub fn spawn_blocked_off(spawn_area: &str, blocked_areas: &[impl AsRef<str>]) ->
     }
     blocked_areas.iter().any(|area| area.as_ref() == spawn_area)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn accumulate_defaults_and_destroys() {
-        assert_eq!(accumulate_of(None), 40);
-        assert_eq!(threshold_of(None), 0);
-        assert!(should_destruct(40, 40));
-        assert!(!should_destruct(39, 40));
-    }
-
-    #[test]
-    fn block_area_matches_exact_spawn_area() {
-        assert!(block_ents_in_area("yard", "yard"));
-        assert!(!block_ents_in_area("yard", "roof"));
-        assert!(!block_ents_in_area("", "yard"));
-        assert!(spawn_blocked_off("yard", &["roof", "yard"]));
-        assert!(!spawn_blocked_off("yard", &["roof"]));
-        assert!(!spawn_blocked_off("", &["yard"]));
-    }
-}

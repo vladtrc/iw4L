@@ -16,6 +16,9 @@ pub struct Host<'a> {
     pub in_game: bool,
     pub match_info: Option<&'a InGameMenuInfo>,
     pub class_store: Option<&'a crate::SessionClassStore>,
+    pub class_pending: bool,
+    pub class_status: Option<&'a str>,
+    pub initial_class_select: bool,
     pub maps: &'a [String],
 
     pub menus: Option<&'a MenuCatalog>,
@@ -38,6 +41,9 @@ impl<'a> Host<'a> {
             in_game: false,
             match_info: None,
             class_store: None,
+            class_pending: false,
+            class_status: None,
+            initial_class_select: false,
             menus: None,
             loc: None,
             classes: None,
@@ -1162,7 +1168,7 @@ const MOVEMENT_BINDS: &[(u32, &str)] = &[
 
 const ACTION_BINDS: &[(u32, &str)] = &[
     (1, "Fire Weapon"),
-    (13, "Aim Down the Sight"),
+    (57, "Aim Down the Sight"),
     (51, "Reload"),
     (66, "Switch Weapon"),
     (3, "Melee"),
@@ -1623,19 +1629,7 @@ fn slider(
     key: crate::SettingKey,
     help: &str,
 ) -> Widget {
-    let next = (value + step).min(max);
-    let mut widget = button(
-        id,
-        x,
-        y,
-        250.0,
-        20.0,
-        " ",
-        vec![ScreenCmd::Emit(UiIntent::SetSetting {
-            key,
-            value: crate::SettingValue::Float(next),
-        })],
-    );
+    let mut widget = button(id, x, y, 250.0, 20.0, " ", Vec::new());
     widget.content = Content::Slider {
         label: label.to_owned(),
         value,
@@ -1682,7 +1676,7 @@ fn bind_control(
         id,
         x,
         y,
-        260.0,
+        350.0,
         18.0,
         " ",
         vec![ScreenCmd::Emit(UiIntent::BeginBinding { id: command_id })],
@@ -1794,6 +1788,17 @@ impl<'a> CacTables<'a> {
             .filter(|image| !image.is_empty())
             .map(|image| cac_material_iwd_stem(&image).to_owned())
             .unwrap_or_default()
+    }
+
+    fn folder_caption(&self, folder: crate::class_setup::ClassPickerFolder) -> String {
+        match folder.category {
+            Some(category) => format!(
+                "{}:{}",
+                folder.namespace.as_str(),
+                self.category_caption(category)
+            ),
+            None => folder.namespace.as_str().to_owned(),
+        }
     }
 
     fn category_caption(&self, category: assets::CacAuthoredCategory) -> String {
@@ -2458,7 +2463,7 @@ fn class_attachment_picker(
     let variants = catalog.attachment_variants(row, weapon);
     let mut crumbs = vec![tables.edit_row_caption(row)];
     if let Some(category) = scratch.picker_category {
-        crumbs.push(tables.category_caption(category));
+        crumbs.push(tables.folder_caption(category));
     }
     crumbs.push(tables.weapon_caption(weapon));
     let popup = Popup {
@@ -2571,7 +2576,7 @@ fn class_setup_picker(
             Vec::new()
         };
     if let Some(category) = scratch.picker_category {
-        crumbs.push(tables.category_caption(category));
+        crumbs.push(tables.folder_caption(category));
     }
     if !categories.is_empty() {
         let popup = Popup {
@@ -2582,24 +2587,32 @@ fn class_setup_picker(
         }
         .placed(opened_from);
         let mut widgets = popup.chrome("class_setup/pick");
-        for (index, category) in categories.iter().enumerate() {
-            widgets.push(popup.row(
+        let start = scratch.picker_page * crate::class_setup::PICKER_PAGE_SIZE;
+        for (index, category) in categories
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(crate::class_setup::PICKER_PAGE_SIZE)
+        {
+            let mut folder_row = popup.row(
                 &format!("class_setup/cat/{}", category.slug()),
-                index,
-                &tables.category_caption(*category),
+                index - start,
+                &tables.folder_caption(*category),
                 vec![
                     ScreenCmd::PlaySound("mouse_click".into()),
-                    ScreenCmd::Emit(UiIntent::CacPickCategory(category.as_u8())),
+                    ScreenCmd::Emit(UiIntent::CacPickCategory(index as u8)),
                 ],
-            ));
+            );
+            folder_row.rect.w = 380.0;
+            widgets.push(folder_row);
         }
+        widgets.extend(popup.pages("class_setup/pick", scratch.picker_page));
         widgets.push(hidden_cancel("class_setup/pick_cancel"));
         return widgets;
     }
 
     let options = scratch.picker_options(catalog, row);
     let weapon_row = row.perk_slot().is_none();
-    let tag_games = weapon_row && catalog.spans_namespaces(row);
     let popup = Popup {
         y: 0.0,
         rows: options.len().max(1),
@@ -2624,16 +2637,7 @@ fn class_setup_picker(
         if !(start..start + crate::class_setup::PICKER_PAGE_SIZE).contains(&index) {
             continue;
         }
-        let mut caption = tables.row_caption(row, option);
-        if tag_games
-            && let Ok(key) = assets::AssetKey::parse(option)
-            && key.namespace != assets::AssetNamespace::Iw4
-        {
-            caption = format!(
-                "{caption} ({})",
-                key.namespace.as_str().to_ascii_uppercase()
-            );
-        }
+        let caption = tables.row_caption(row, option);
         widgets.push(popup.row(
             &format!("class_setup/pick/{index}"),
             index - start,
@@ -3226,7 +3230,7 @@ fn ingame_class(host: Host<'_>) -> Screen {
                 &slot.name,
                 vec![ScreenCmd::Emit(UiIntent::SelectClass(index as i32))],
             );
-            if slot.lock_reason.is_some() {
+            if slot.lock_reason.is_some() || host.class_pending {
                 row.focusable = false;
                 row.on_activate.clear();
                 row.style.fore_color = [0.4, 0.4, 0.4, 1.0];
@@ -3237,5 +3241,31 @@ fn ingame_class(host: Host<'_>) -> Screen {
                 .extend(class_preview_card(index, slot, tables));
         }
     }
+    if host.initial_class_select {
+        screen
+            .widgets
+            .retain(|widget| widget.id != "ingame_options/back");
+        screen.on_back.clear();
+    }
+    if let Some(status) = host
+        .class_status
+        .or(host.class_pending.then_some("Choosing class…"))
+    {
+        screen.widgets.push(label(
+            "ingame_class/status",
+            32.0,
+            404.0,
+            340.0,
+            28.0,
+            0.3,
+            status,
+        ));
+    }
+    for widget in &mut screen.widgets {
+        if !widget.id.starts_with("ingame_options/") {
+            widget.style.canvas = crate::model::Canvas::Wide;
+        }
+    }
+
     screen
 }

@@ -609,6 +609,25 @@ pub const G_GLASS_DATA: usize = 128;
 pub const G_GLASS_PIECE: usize = 12;
 pub const G_GLASS_NAME: usize = 12;
 
+// AddonMapEnts header: name + entity string + count + inline MapTriggers +
+// ClipInfo ptr + sub-model counts/arrays.
+pub const ADDON_MAP_ENTS: usize = 52;
+// cmodel2_t: Bounds + radius + ClipInfo ptr + leaf.
+pub const CMODEL2: usize = 72;
+// PathData (aipaths asset): name + counts + node/tree arrays.
+pub const PATH_DATA: usize = 44;
+// VehicleTrack asset: name + segment table.
+pub const VEHICLE_TRACK: usize = 12;
+pub const VEHICLE_SEGMENT: usize = 44;
+pub const VEHICLE_SECTOR: usize = 60;
+pub const VEHICLE_OBSTACLE: usize = 12;
+// pathnode_t x86 = constant(64) + dynamic(44) + transient(28). Constant
+// script-strings are u16 indices, never followed.
+pub const PATH_NODE: usize = 136;
+pub const PATH_LINK: usize = 12;
+pub const PATH_BASENODE: usize = 16;
+pub const PATHNODE_TREE: usize = 16;
+
 pub mod fx_elem {
     pub const TRAIL: u8 = 3;
     pub const SPARK_FOUNTAIN: u8 = 6;
@@ -622,3 +641,36 @@ pub mod fx_elem {
         matches!(t, 0 | 1 | 2 | TRAIL | 4 | 5 | SPARK_FOUNTAIN)
     }
 }
+
+pub const WEAPON_COMPLETE_ADS_VIEW_KICK_CENTER_SPEED_OFF: usize = 0x6c;
+pub const WEAPON_COMPLETE_HIP_VIEW_KICK_CENTER_SPEED_OFF: usize = 0x70;
+pub const WEAPON_DEF_GUN_MAX_PITCH_OFF: usize = 0x474;
+pub const WEAPON_DEF_GUN_MAX_YAW_OFF: usize = 0x478;
+pub const WEAPON_DEF_ADS_GUN_KICK_REDUCED_KICK_BULLETS_OFF: usize = 0x584;
+pub const WEAPON_DEF_ADS_GUN_KICK_REDUCED_KICK_PERCENT_OFF: usize = 0x588;
+pub const WEAPON_DEF_ADS_GUN_KICK_PITCH_MIN_OFF: usize = 0x58c;
+pub const WEAPON_DEF_ADS_GUN_KICK_PITCH_MAX_OFF: usize = 0x590;
+pub const WEAPON_DEF_ADS_GUN_KICK_YAW_MIN_OFF: usize = 0x594;
+pub const WEAPON_DEF_ADS_GUN_KICK_YAW_MAX_OFF: usize = 0x598;
+pub const WEAPON_DEF_ADS_GUN_KICK_ACCEL_OFF: usize = 0x59c;
+pub const WEAPON_DEF_ADS_GUN_KICK_SPEED_MAX_OFF: usize = 0x5a0;
+pub const WEAPON_DEF_ADS_GUN_KICK_SPEED_DECAY_OFF: usize = 0x5a4;
+pub const WEAPON_DEF_ADS_GUN_KICK_STATIC_DECAY_OFF: usize = 0x5a8;
+pub const WEAPON_DEF_ADS_VIEW_KICK_PITCH_MIN_OFF: usize = 0x5ac;
+pub const WEAPON_DEF_ADS_VIEW_KICK_PITCH_MAX_OFF: usize = 0x5b0;
+pub const WEAPON_DEF_ADS_VIEW_KICK_YAW_MIN_OFF: usize = 0x5b4;
+pub const WEAPON_DEF_ADS_VIEW_KICK_YAW_MAX_OFF: usize = 0x5b8;
+pub const WEAPON_DEF_HIP_GUN_KICK_REDUCED_KICK_BULLETS_OFF: usize = 0x5c8;
+pub const WEAPON_DEF_HIP_GUN_KICK_REDUCED_KICK_PERCENT_OFF: usize = 0x5cc;
+pub const WEAPON_DEF_HIP_GUN_KICK_PITCH_MIN_OFF: usize = 0x5d0;
+pub const WEAPON_DEF_HIP_GUN_KICK_PITCH_MAX_OFF: usize = 0x5d4;
+pub const WEAPON_DEF_HIP_GUN_KICK_YAW_MIN_OFF: usize = 0x5d8;
+pub const WEAPON_DEF_HIP_GUN_KICK_YAW_MAX_OFF: usize = 0x5dc;
+pub const WEAPON_DEF_HIP_GUN_KICK_ACCEL_OFF: usize = 0x5e0;
+pub const WEAPON_DEF_HIP_GUN_KICK_SPEED_MAX_OFF: usize = 0x5e4;
+pub const WEAPON_DEF_HIP_GUN_KICK_SPEED_DECAY_OFF: usize = 0x5e8;
+pub const WEAPON_DEF_HIP_GUN_KICK_STATIC_DECAY_OFF: usize = 0x5ec;
+pub const WEAPON_DEF_HIP_VIEW_KICK_PITCH_MIN_OFF: usize = 0x5f0;
+pub const WEAPON_DEF_HIP_VIEW_KICK_PITCH_MAX_OFF: usize = 0x5f4;
+pub const WEAPON_DEF_HIP_VIEW_KICK_YAW_MIN_OFF: usize = 0x5f8;
+pub const WEAPON_DEF_HIP_VIEW_KICK_YAW_MAX_OFF: usize = 0x5fc;

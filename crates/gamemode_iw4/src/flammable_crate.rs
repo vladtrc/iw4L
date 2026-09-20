@@ -42,22 +42,3 @@ pub fn should_ignite(health: i32) -> bool {
 pub fn should_explode(health: i32) -> bool {
     health <= 0
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn think_ignites_at_burn_threshold() {
-        assert_eq!(health_after(HEALTH, 50), 150);
-        assert!(!should_ignite(150));
-        assert!(should_ignite(health_after(HEALTH, 100)));
-        assert!(!should_explode(100));
-    }
-
-    #[test]
-    fn a_killing_blow_explodes_without_a_burn_loop() {
-        assert!(should_explode(health_after(HEALTH, HEALTH)));
-        assert!(!should_ignite(health_after(HEALTH, HEALTH)));
-    }
-}

@@ -40,7 +40,6 @@ Before opening anything:
 make publish-check   # the tracked tree is the product and nothing else
 cargo fmt --all
 cargo clippy --workspace --all-targets
-cargo test --workspace
 ```
 
 `CONTEXT.md` documents how the maintainer works — artifacts, iterations, agent

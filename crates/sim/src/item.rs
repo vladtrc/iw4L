@@ -703,7 +703,74 @@ fn primary_count(world: &FrameWorld, ps: &PlayerState) -> usize {
         .count()
 }
 
-fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Option<DroppedItem> {
+#[derive(Clone, Copy)]
+struct UseItem {
+    number: i32,
+    weapon: u32,
+    knife: bool,
+}
+
+fn knife_has_ammo_room(world: &FrameWorld, ps: &PlayerState, weapon: u32) -> bool {
+    if !ps.weapons.contains(&(weapon as i32)) {
+        return false;
+    }
+    let Some(facts) = world
+        .equipment_facts_for(weapon)
+        .filter(|f| f.is_throwing_knife())
+    else {
+        return false;
+    };
+    let (clip, _, _) = ammo_from_ps(world, ps, weapon);
+    clip < facts.clip_size
+}
+
+fn grab_knife(world: &mut FrameWorld, walker: ClientId, number: i32, tick: Tick) {
+    let Some(projectile) = world.projectile_by_number(number) else {
+        return;
+    };
+    let Some(mut ps) = world.player(walker).copied() else {
+        return;
+    };
+    if projectile.pos.tr_type != TR_STATIONARY
+        || !knife_has_ammo_room(world, &ps, projectile.weapon)
+    {
+        return;
+    }
+    let weapon = projectile.weapon;
+    let (clip, left, stock) = ammo_from_ps(world, &ps, weapon);
+    set_ammo_on_ps(world, &mut ps, weapon, clip + 1, left, stock);
+    *world.player_mut(walker).expect("picker exists") = ps;
+    let meta = world.client_meta_mut(walker);
+    meta.set_ammo(weapon, clip + 1, stock);
+    meta.mirror_held_ammo(ps.weapon);
+    world.remove_projectile_by_number(number);
+    world.free_dynamic_entity_number(number);
+    world.item_pickups_mut().push(ItemPickupRecord {
+        picker: walker.0 as i32,
+        weapon,
+        from_entnum: number,
+        clip_r: 1,
+        clip_l: 0,
+        stock: 0,
+        swapped_entnum: ENTITYNUM_NONE,
+        picker_pm_type: ps.pm_type,
+    });
+    world.push_entity_event(
+        tick,
+        crate::EventAudience::All,
+        entity_iw4::EntityEventKind::AMMO_PICKUP,
+        crate::EntityEventPayload {
+            number: walker.0 as i32,
+            event_parm: weapon as i32,
+            weapon,
+            origin: ps.origin,
+            ..Default::default()
+        },
+    );
+    perf::pickup(ps.pm_type);
+}
+
+fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Option<UseItem> {
     if !walker_can_touch(world, walker, ps)
         || ps.pm_flags & (4 | 0x4000) != 0
         || (16..=20).contains(&ps.weaponstate_primary)
@@ -730,7 +797,7 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
         ps.origin[2] + ps.view_height_current,
     ];
     let (forward, _, _) = angle_vectors(ps.viewangles);
-    let mut best: Option<(f32, DroppedItem)> = None;
+    let mut best: Option<(f32, UseItem)> = None;
     for number in world.dropped_item_numbers_sorted() {
         let Some(item) = world.dropped_item_by_number(number) else {
             continue;
@@ -761,9 +828,53 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
         }
         let score = distance + (1.0 - (dot + 1.0) * 0.5) * 256.0;
         if best.as_ref().is_none_or(|(old, _)| score < *old) {
-            best = Some((score, item));
+            best = Some((
+                score,
+                UseItem {
+                    number: item.state.number,
+                    weapon: item.state.index as u32,
+                    knife: false,
+                },
+            ));
         }
     }
+    world.visit_projectiles(|projectile| {
+        if projectile.pos.tr_type != TR_STATIONARY
+            || !knife_has_ammo_room(world, ps, projectile.weapon)
+        {
+            return;
+        }
+        let from_player: [f32; 3] = core::array::from_fn(|i| projectile.origin[i] - ps.origin[i]);
+        if from_player.iter().map(|v| v * v).sum::<f32>() > 90.0 * 90.0 {
+            return;
+        }
+        let delta: [f32; 3] = core::array::from_fn(|i| projectile.origin[i] - eye[i]);
+        let distance = delta.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if distance > 160.0
+            || world
+                .trace_world(eye, projectile.origin, [0.0; 3], [0.0; 3], 0x11)
+                .fraction
+                < 1.0
+        {
+            return;
+        }
+        let dot = if distance > 0.0 {
+            (0..3).map(|i| forward[i] * delta[i] / distance).sum()
+        } else {
+            0.0
+        };
+        let score = distance + (1.0 - (dot + 1.0) * 0.5) * 256.0 - 512.0;
+        if best.as_ref().is_none_or(|(old, _)| score < *old) {
+            best = Some((
+                score,
+                UseItem {
+                    number: projectile.entnum,
+                    weapon: projectile.weapon,
+                    knife: true,
+                },
+            ));
+        }
+    });
     best.map(|(_, item)| item)
 }
 
@@ -788,7 +899,7 @@ pub(crate) fn phase_use_items(
         let selected_ref = selected.map(|item| {
             world
                 .entity_kernel()
-                .current_ref(item.state.number)
+                .current_ref(item.number)
                 .expect("occupied item")
         });
         let meta = world.client_meta_mut(id);
@@ -801,7 +912,12 @@ pub(crate) fn phase_use_items(
         let pending = meta.item_use_entity;
         let ready = now - meta.item_use_spawn_ms >= 500;
         if held && ready && pending.is_some() && selected_ref == pending {
-            grab_number(world, id, pending.expect("pending item").number());
+            let item = selected.expect("selected use item");
+            if item.knife {
+                grab_knife(world, id, item.number, tick);
+            } else {
+                grab_number(world, id, item.number);
+            }
             world.client_meta_mut(id).item_use_entity = None;
         }
         let selected = selected_item(
@@ -809,12 +925,11 @@ pub(crate) fn phase_use_items(
             id,
             &world.player(id).copied().expect("client exists"),
         );
-        let dual = selected.is_some_and(|item| {
-            gsc_give_weapon_is_akimbo(world.weapon_script_name(item.state.index as u32))
-        });
+        let dual = selected
+            .is_some_and(|item| gsc_give_weapon_is_akimbo(world.weapon_script_name(item.weapon)));
         if let Some(ps) = world.player_mut(id) {
-            ps.cursor_hint = selected.map_or(0, |item| item.state.index + 4);
-            ps.cursor_hint_ent_index = selected.map_or(ENTITYNUM_NONE, |item| item.state.number);
+            ps.cursor_hint = selected.map_or(0, |item| item.weapon as i32 + 4);
+            ps.cursor_hint_ent_index = selected.map_or(ENTITYNUM_NONE, |item| item.number);
             ps.cursor_hint_string = -1;
             ps.cursor_hint_dual_wield = i32::from(dual);
         }

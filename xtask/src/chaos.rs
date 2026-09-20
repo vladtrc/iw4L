@@ -105,7 +105,7 @@ struct RemoteRow {
 }
 
 pub fn chaos_gate(root: &Path, trace: Option<PathBuf>) -> bool {
-    crate::hr("chaos — G-LIVE-2: truck + RPG into the floor, .pftrace");
+    crate::hr("chaos — truck + RPG into the floor, .pftrace");
     let path = match resolve_trace(root, trace.as_deref()) {
         Ok(path) => path,
         Err(error) => {
@@ -391,7 +391,7 @@ fn truck_death_clip_claim(t: &Trace) -> Claim {
 fn combat_kill_claim(t: &Trace) -> Claim {
     let mut claim = Claim::new(
         "K0",
-        "local died to someone else (not suicide) — I3 killcam path, not handleSuicideDeath",
+        "local died to someone else (not suicide) — the killcam path, not a suicide",
     );
     let local_deaths = t.deaths.iter().filter(|d| d.victim == 0).count();
     claim.check(
@@ -420,7 +420,7 @@ fn combat_kill_claim(t: &Trace) -> Claim {
 fn dead_claim(t: &Trace) -> Claim {
     let mut claim = Claim::new(
         "K1",
-        "local Dead lasts ≥1.5s then Alive (I3 spawnClient after killcam)",
+        "local Dead lasts ≥1.5s then Alive (respawn after the killcam)",
     );
     let lives = local_lives(&t.ticks);
     if lives.is_empty() {
@@ -457,7 +457,7 @@ fn seat_claim(t: &Trace) -> Claim {
         .count();
     claim.check(
         on_dead > 0,
-        format!("seat_applied=1 on local Dead={on_dead} (I3; Alive seat is I2 refuse)"),
+        format!("seat_applied=1 on local Dead={on_dead} (an Alive seat is refused)"),
     );
     claim
 }

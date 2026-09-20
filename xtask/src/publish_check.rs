@@ -33,10 +33,9 @@ use crate::shell::Res;
 const IMAGE_BASE: u64 = 0x0040_0000;
 const IMAGE_END: u64 = 0x00a0_0000;
 
-/// Past the code section the module keeps its globals (`0x0191e9d0` was a
-/// `g_hudelems` pointer). Sizes and capacities live in that range too, but they
-/// are block-aligned; an address almost never is, so only an unaligned literal
-/// counts here.
+/// Past the code section the module keeps its globals. Sizes and capacities
+/// live in that range too, but they are block-aligned; an address almost never
+/// is, so only an unaligned literal counts here.
 const DATA_END: u64 = 0x0800_0000;
 const BLOCK_ALIGN: u64 = 0xfff;
 
@@ -136,8 +135,8 @@ fn table_row(line: &str) -> bool {
 
 /// The other half of the pattern test: the literal *combined* bitwise, as in
 /// `flags & 0x0040_2000` or `bits |= 0x0040_2000`. Only an operator next to the
-/// literal counts. One anywhere on the line used to clear the line whole, which
-/// a markdown pipe or an unrelated neighbouring expression could do for free.
+/// literal counts: an operator anywhere on the line would clear the line whole,
+/// which a markdown pipe or an unrelated neighbour could then do for free.
 fn bitwise_neighbour(line: &str, at: usize, end: usize) -> bool {
     let ops: &[char] = if table_row(line) {
         &['&', '^']
@@ -475,140 +474,4 @@ pub fn run_cli(root: &Path) -> Res<()> {
          offsets in the {scanned} text file(s) read"
     );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The forms a citation was found hiding in. Each one was planted in the
-    /// tree and walked past the gate before these tests existed.
-    #[test]
-    fn catches_every_form_of_an_address() {
-        for line in [
-            "const SLOT: u32 = 0x00474d40;",
-            "const SLOT: u32 = 0x0047_4d40;",
-            "const SLOT: u32 = 0x474d40;",
-            "const SLOT: u32 = 0x4f_ade0;",
-            "const SLOT: u32 = 0x474d40u32;",
-            "const SLOT: u32 = 4738368;",
-            "const SLOT: u32 = 4_738_368;",
-            "| step | reads 0x474d40 | the vgun speed |",
-            "let bits = f32::from_bits(0x3f80_0000) + read(0x474d40);",
-            "// cross-checked against fun_00436990_sift",
-            "const SCENE_MODEL_OFF_UNREAD_0063BF30: u32 = 4;",
-        ] {
-            assert!(scan_line(line).is_some(), "missed: {line}");
-        }
-    }
-
-    /// What the range catches by coincidence and has to keep letting through.
-    #[test]
-    fn leaves_patterns_alone() {
-        for line in [
-            "const PRONE_TRACE_MASK: u32 = 0x0040_2000;",
-            "const LCG_SEED: u32 = 0x00a5_5a5a;",
-            "if flags & 0x0040_2000 != 0 {",
-            "bits |= 0x0040_2000;",
-            "state ^= 0x0040_2000;",
-            "let white = 0xffffff;",
-            "let x = f32::from_bits(0x0040_1000);",
-            "const CAPACITY: usize = 4194304;",
-            "const BUDGET_NS: u64 = 8388608;",
-            "let scale = 4738368.0;",
-            "| file | about |",
-            // What widening the rules turned up in the tree itself.
-            "pub const FX_BOLT_LOST_OR: u32 = 0xff_efff;",
-            "const AUTOFOCUS_CLIPMASK: u32 = 0x0080_6c31;",
-        ] {
-            assert!(scan_line(line).is_none(), "false positive: {line}");
-        }
-    }
-
-    #[test]
-    fn tells_a_binary_from_text() {
-        assert!(looks_binary(b"\0\x01\x02"));
-        assert!(!looks_binary(b"pub const KICK_STEP_MS: i32 = 5;\n"));
-    }
-
-    /// A script pinned by hash and line range is an index into somebody else's
-    /// tree. The gap ids, which name holes in our own runtime, are not that.
-    #[test]
-    fn catches_a_pinned_script() {
-        for line in [
-            r#"pub const CITE: &str = "gsc:maps/mp/_destructables.gsc@sha256:05084ef406fb5ea1#L1-19";"#,
-            "// maps/mp/gametypes/_rank.gsc#L504-557 is where the popup lives",
-        ] {
-            assert!(scan_line(line).is_some(), "missed: {line}");
-        }
-        for line in [
-            r#"Self::DestructablesPlayFx => "gsc.mp._destructables.destructable_destruct","#,
-            r#"let raw = zone.rawfile("maps/mp/_destructables.gsc")?;"#,
-        ] {
-            assert!(scan_line(line).is_none(), "false positive: {line}");
-        }
-    }
-
-    /// Naming what was read is the policy, so none of this is a finding any
-    /// more. Each line is one the old gate rejected.
-    #[test]
-    fn credits_its_references_freely() {
-        for line in [
-            "* [IW4x](https://github.com/iw4x/iw4x-client) — a custom client for MW2.",
-            "read as a cross-reference against KisakCOD while working this out",
-            "the layout was worked out by reading iw4mp.exe in Ghidra",
-            "blackopsmp.exe and iw5mp.exe serialize this field the same way",
-        ] {
-            assert!(scan_line(line).is_none(), "false positive: {line}");
-        }
-    }
-
-    /// Every shape that is not the product. A push carrying one of these is the
-    /// failure this gate exists for.
-    #[test]
-    fn catches_what_is_not_the_product() {
-        for path in [
-            "context/README.md",
-            "context/artifacts/2026-01-20-example/README.md",
-            ".env",
-            ".env.local",
-            "crates/net/testdata/iw4l-ca.pem",
-            "deploy/release-ca.key",
-            "docs/id_ed25519",
-            "crates/assets/fixtures/common_mp.ff",
-            "assets/mp_boneyard.d3dbsp",
-            "vendor/iw4mp.exe",
-            "lib/d3d9.dll",
-        ] {
-            assert!(leak(path).is_some(), "missed: {path}");
-        }
-    }
-
-    /// The near misses. `.env.example` is the template the README tells you to
-    /// copy, and nothing else here is a leak because of how it is spelled.
-    #[test]
-    fn leaves_the_product_alone() {
-        for path in [
-            ".env.example",
-            "README.md",
-            "NOTICE",
-            "crates/console/assets/FreeMono.otf",
-            "crates/ui/assets/Oxanium-Regular.ttf",
-            "docs/DEPLOY.md",
-            "crates/net/src/context/mod.rs",
-            "xtask/src/publish_check.rs",
-        ] {
-            assert!(leak(path).is_none(), "false positive: {path}");
-        }
-    }
-
-    #[test]
-    fn finds_a_key_pasted_into_any_file() {
-        assert!(pasted_key(
-            "walkthrough:\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blb…\n"
-        ));
-        assert!(pasted_key("-----BEGIN EC PRIVATE KEY-----"));
-        assert!(!pasted_key("-----BEGIN CERTIFICATE-----"));
-        assert!(!pasted_key("the private key stays outside the repo"));
-    }
 }

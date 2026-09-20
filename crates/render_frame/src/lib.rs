@@ -54,8 +54,9 @@ pub use retained::{
 };
 pub use sun_effects::{SunEffectsDef, SunEffectsFrame, angular_lerp};
 pub use sun_shadow::{
-    SUN_SHADOW_CASTER_TECH, SUN_SHADOW_FORCED_PROFILE, SUN_SHADOW_PARTITION_COUNT,
-    SunShadowAtlasProfile, SunShadowCasterLists, SunShadowForcedFrame, SunShadowPartition,
-    SunShadowPartitionLists, SunShadowReceiverConstants, SunShadowViewport,
+    SUN_SHADOW_CASTER_TECH, SUN_SHADOW_FORCED_PROFILE, SUN_SHADOW_MAX_CLIP_PLANES,
+    SUN_SHADOW_PARTITION_COUNT, SunShadowAtlasProfile, SunShadowCasterLists, SunShadowClipPlanes,
+    SunShadowForcedFrame, SunShadowPartition, SunShadowPartitionLists, SunShadowReceiverConstants,
+    SunShadowViewport,
 };
 pub use texture_bind::TextureBindIdentity;

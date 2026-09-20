@@ -67,6 +67,10 @@ use crate::{
 };
 use weapon_iw4::WEAPTYPE_GRENADE;
 
+// Resolve muzzle tags after this frame's weapon poses, before advancing FX.
+#[derive(Message)]
+struct BulletHitFx(sim::EntityEventPayload);
+
 struct FxFrameTransaction {
     outcome: FxFrameOutcome,
     _present_span: perf::SpanGuard,
@@ -93,7 +97,8 @@ impl FxSceneAccess<'_> {
 }
 
 pub(crate) fn register_combat_fx_systems(app: &mut App) {
-    app.init_resource::<crate::assemble::drawsurf::GfxGlassMeshPlan>()
+    app.add_message::<BulletHitFx>()
+        .init_resource::<crate::assemble::drawsurf::GfxGlassMeshPlan>()
         .init_resource::<crate::assemble::drawsurf::CgGlassTable>()
         .add_systems(Update, latch_authority_load_hold.in_set(ClientSet::Load))
         .add_systems(
@@ -120,7 +125,15 @@ pub(crate) fn register_combat_fx_systems(app: &mut App) {
                 .after(frame::WorkerCmdSet::FxRemaining)
                 .in_set(frame::WorkerCmdSet::FxVerts),
         )
-        .add_systems(Update, drain_pellet_fx.in_set(ClientSet::Effects))
+        .add_systems(
+            Update,
+            (drain_bullet_hit_fx, drain_pellet_fx)
+                .chain()
+                .after(render_anim::occupancy::fpv_present::publish_fpv_dobj_pose)
+                .after(frame::WorkerCmdSet::SkinModel)
+                .before(frame::WorkerCmdSet::FxNonDependent)
+                .in_set(ClientSet::Present),
+        )
         .add_systems(
             Update,
             tick_missile_present_state.in_set(ClientSet::Effects),
@@ -169,11 +182,13 @@ fn queue_tag_lasers(
 }
 
 fn latch_authority_load_hold(
+    navigation: Option<Res<frame::BotNavigationReady>>,
     scene: Option<Res<WorldScene>>,
     mut hold: Option<ResMut<AuthorityLoadHold>>,
 ) {
     if let Some(hold) = hold.as_mut() {
-        hold.0 = scene.is_some() && !scene.as_ref().is_some_and(|scene| scene.spawned);
+        hold.0 = (scene.is_some() && !scene.as_ref().is_some_and(|scene| scene.spawned))
+            || navigation.is_some_and(|ready| !ready.0);
     }
 }
 
@@ -1218,6 +1233,13 @@ fn fill_fx_model_plan(
             quat,
             Vec3::from_array(instance.origin),
         );
+        let caster_bound = entry
+            .skel
+            .radius
+            .map(|radius| render_scene::XModelCasterBound {
+                origin: instance.origin,
+                radius: (radius * instance.scale.abs()).max(1.0),
+            });
         for (surface, material) in asset_surfaces {
             plan.push_draw(crate::assemble::drawsurf::tess::xmodel::XModelSurfaceDraw {
                 surface,
@@ -1232,6 +1254,7 @@ fn fill_fx_model_plan(
                 packed_lighting: None,
                 is_scope: false,
                 scene_entnum: None,
+                caster_bound,
             });
         }
     }
@@ -2621,8 +2644,12 @@ fn cg_play_fx(
     }
 }
 
-fn cg_play_fx_bullet_hit(
-    hit: On<net::EntityBulletHit>,
+fn cg_play_fx_bullet_hit(hit: On<net::EntityBulletHit>, mut hits: MessageWriter<BulletHitFx>) {
+    hits.write(BulletHitFx(hit.event.payload));
+}
+
+fn drain_bullet_hit_fx(
+    mut hits: MessageReader<BulletHitFx>,
     world_bolts: Query<&crate::adapters::anim::remote_body::RemoteFxBolts>,
     fpv_bolts: Res<crate::adapters::anim::fpv_present::FpvBoltTargets>,
     slots: Res<CEntitySlots>,
@@ -2639,40 +2666,42 @@ fn cg_play_fx_bullet_hit(
     mut combat: ResMut<CombatFxDump>,
     fx_world: FxSceneAccess,
 ) {
-    let payload = hit.event.payload;
+    for hit in hits.read() {
+        let payload = hit.0;
 
-    let previous_mark_entity = host.0.spawn_mark_entity;
-    host.0.spawn_mark_entity = u16::try_from(payload.other_entity_num)
-        .ok()
-        .filter(|&n| u32::from(n) < fx_iw4::FX_ENTITYNUM_WORLD);
-    play_pellet_segment(
-        payload.attacker_entity_num,
-        payload.weapon,
-        payload.correlation,
-        0,
-        payload.origin2,
-        payload.origin,
-        payload.direction,
-        payload.surf_type,
-        payload.surface_flags,
-        payload.event_parm as u32,
-        &world_bolts,
-        &fpv_bolts,
-        &slots,
-        catalog.as_deref(),
-        &mut elem_infos.0,
-        impact_fx.as_deref(),
-        weapons.as_deref(),
-        tracers.as_deref(),
-        &mut tracer_world,
-        &mut gate,
-        local.0.0 as i32,
-        &mut host,
-        &mut cursor,
-        &mut combat,
-        fx_world.view().as_ref().map(|s| s as &dyn FxScene),
-    );
-    host.0.spawn_mark_entity = previous_mark_entity;
+        let previous_mark_entity = host.0.spawn_mark_entity;
+        host.0.spawn_mark_entity = u16::try_from(payload.other_entity_num)
+            .ok()
+            .filter(|&n| u32::from(n) < fx_iw4::FX_ENTITYNUM_WORLD);
+        play_pellet_segment(
+            payload.attacker_entity_num,
+            payload.weapon,
+            payload.correlation,
+            0,
+            payload.origin2,
+            payload.origin,
+            payload.direction,
+            payload.surf_type,
+            payload.surface_flags,
+            payload.event_parm as u32,
+            &world_bolts,
+            &fpv_bolts,
+            &slots,
+            catalog.as_deref(),
+            &mut elem_infos.0,
+            impact_fx.as_deref(),
+            weapons.as_deref(),
+            tracers.as_deref(),
+            &mut tracer_world,
+            &mut gate,
+            local.0.0 as i32,
+            &mut host,
+            &mut cursor,
+            &mut combat,
+            fx_world.view().as_ref().map(|s| s as &dyn FxScene),
+        );
+        host.0.spawn_mark_entity = previous_mark_entity;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

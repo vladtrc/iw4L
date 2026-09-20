@@ -49,6 +49,9 @@ pub(crate) struct RetailPaintCtx<'w> {
     local: Option<Res<'w, net::LocalPresentClient>>,
     team_icons: Option<Res<'w, assets::SessionTeamIcons>>,
     class_store: Res<'w, crate::SessionClassStore>,
+    class_phase: Res<'w, crate::ClassSelectPhase>,
+    class_status: Res<'w, crate::ClassSelectStatus>,
+    class_icons: Res<'w, crate::ClassSelectIconCache>,
     strings: Option<Res<'w, assets::PreparedLocalizedStrings>>,
 }
 
@@ -85,7 +88,10 @@ pub(crate) fn spawn_retail_shell(
     if stack.names.is_empty() {
         open_named(catalog, stack, "main", play_music, maps);
     }
-    let in_game = *paint.app_screen == frame::AppScreen::InGame;
+    let in_game = matches!(
+        *paint.app_screen,
+        frame::AppScreen::InGame | frame::AppScreen::ClassSelect
+    );
     let loc = if in_game {
         paint.strings.as_deref().map_or(loc, |strings| &strings.0)
     } else {
@@ -154,6 +160,9 @@ pub(crate) fn spawn_retail_shell(
         in_game,
         match_info: in_game.then_some(&match_info),
         class_store: Some(&paint.class_store),
+        class_pending: paint.class_phase.is_pending(),
+        class_status: paint.class_status.0.as_deref(),
+        initial_class_select: *paint.app_screen == frame::AppScreen::ClassSelect,
         maps,
         menus: Some(catalog),
         loc: Some(loc),
@@ -176,6 +185,15 @@ pub(crate) fn spawn_retail_shell(
             );
         }
         stack.visible_exp_gap_said = true;
+    }
+    for (stem, handle) in &paint.class_icons.images {
+        if let Some(image) = paint.images.get(handle) {
+            paint
+                .cache
+                .sizes
+                .insert(stem.clone(), (image.width(), image.height()));
+            paint.cache.handles.insert(stem.clone(), handle.clone());
+        }
     }
     let games = paint.games.as_ref().and_then(|g| g.0.as_deref());
     for screen in &screens {
@@ -292,7 +310,12 @@ pub(crate) fn sync_frontend_music(
     mut play_music: MessageWriter<UiPlayMusic>,
     mut stop_music: MessageWriter<UiStopMusic>,
 ) {
-    if !enabled.0 || *screen == frame::AppScreen::InGame {
+    if !enabled.0
+        || matches!(
+            *screen,
+            frame::AppScreen::InGame | frame::AppScreen::ClassSelect
+        )
+    {
         if stack.music_started {
             stop_music.write(UiStopMusic);
             stack.music_started = false;
@@ -755,6 +778,7 @@ pub(crate) fn handle_menu_back(
     mut options: ResMut<crate::OptionsState>,
     mut bindings: ResMut<crate::BindingView>,
     mut scratch: ResMut<ClassSetupScratch>,
+    loadout: Res<ClassLoadoutCatalog>,
     mut focus: ResMut<crate::nav::Focus>,
 ) {
     let Some(catalog) = catalog else {
@@ -779,6 +803,9 @@ pub(crate) fn handle_menu_back(
         }
         return;
     }
+    if *occupancy.screen == frame::AppScreen::ClassSelect {
+        return;
+    }
     if back && stack.names.last().map(String::as_str) == Some("ingame_options") {
         stack.names.pop();
         occupancy.enabled.0 = false;
@@ -787,7 +814,7 @@ pub(crate) fn handle_menu_back(
     }
     let class_left = left
         && stack.names.last().map(String::as_str) == Some("class_setup")
-        && !scratch.is_item_picker();
+        && !scratch.is_picker();
     if !back && !class_left {
         return;
     }
@@ -818,7 +845,7 @@ pub(crate) fn handle_menu_back(
             }
             if scratch.editing.is_some() || scratch.editing_attachment.is_some() {
                 let target = crate::class_setup::cancel_edit_focus_target(&scratch);
-                scratch.cancel_edit();
+                apply_cac_intent(&mut scratch, &loadout, &UiIntent::CacCancelEdit);
                 if let Some(target) = target {
                     focus.widget = Some(target);
                 }

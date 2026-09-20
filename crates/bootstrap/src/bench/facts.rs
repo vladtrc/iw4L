@@ -99,9 +99,9 @@ pub(crate) fn collect(
             .max_by_key(|(width, height)| u64::from(*width) * u64::from(*height)),
         // Not the same as the target: a camera with a viewport draws into part
         // of the surface, and the passes and the postfx chain are sized by this
-        // one. Printing only the target is how a manifest headed 2880x1800 sat
-        // next to a postfx log reading 2880x1688 with nothing to say which the
-        // workload was.
+        // one. Printing only the target leaves the manifest and the postfx log
+        // naming different resolutions, with nothing to say which the workload
+        // was.
         view_extent: cameras
             .iter()
             .filter_map(|camera| camera.physical_viewport_size())

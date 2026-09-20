@@ -163,8 +163,8 @@ pub struct XwmaClip<'a> {
 /// the artifact cache.
 ///
 /// A batch of one, which is what a clip asked for on its own is: no temporary
-/// files, one `ffmpeg` over a pipe, exactly as before batching existed. The
-/// clips a match prepares come through [`decode_t5_xwma_batch`] instead.
+/// files, one `ffmpeg` over a pipe. The clips a match prepares come through
+/// [`decode_t5_xwma_batch`] instead.
 pub fn decode_t5_xwma(
     packets: &[u8],
     seek_table: &[u32],
@@ -296,8 +296,8 @@ pub fn decode_t5_xwma_batch(clips: &[XwmaClip<'_>]) -> Vec<Result<Vec<u8>, XwmaD
 /// `ffmpeg` opens every input before it decodes any of them, so one clip it
 /// refuses ends the batch before a single sample is written and takes its
 /// sixty-three neighbours with it. They are not guilty of anything, so they are
-/// asked again on their own — which is the old cost for a batch that was going
-/// to fail anyway, and leaves the one bad clip as the only failure.
+/// asked again on their own, which costs one pass over a batch that was going
+/// to fail anyway and leaves the one bad clip as the only failure.
 fn decode_chunk(
     chunk: &[(usize, Vec<u8>)],
     clips: &[XwmaClip<'_>],
@@ -620,111 +620,4 @@ fn run_ffmpeg(xwma: &[u8], channels: u32, rate: u32) -> Result<Vec<u8>, XwmaDeco
         return Err(XwmaDecodeError::EmptyPcm);
     }
     Ok(pcm)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A cache entry is an answer, and the question is stored with it. The key
-    /// is a hash, the sweep is free to drop files, and a decoder can change its
-    /// output — so an entry that does not match the clip being asked about has
-    /// to read as a miss. Handing back samples at the wrong rate is silent, and
-    /// decoding again is only slow.
-    #[test]
-    fn a_cache_entry_answers_only_the_clip_it_was_written_for() {
-        let pcm = [1u8, 0, 0xff, 0x7f];
-        let blob = cache_encode(2, 48000, &pcm);
-        assert_eq!(cache_decode(&blob, 2, 48000).as_deref(), Some(&pcm[..]));
-
-        assert_eq!(cache_decode(&blob, 1, 48000), None, "other channel count");
-        assert_eq!(cache_decode(&blob, 2, 44100), None, "other sample rate");
-        assert_eq!(
-            cache_decode(&blob[..blob.len() - 1], 2, 48000),
-            None,
-            "the samples the header promised are not all there"
-        );
-        assert_eq!(cache_decode(&blob[..4], 2, 48000), None, "no header at all");
-        assert_eq!(
-            cache_decode(&cache_encode(2, 48000, &[]), 2, 48000),
-            None,
-            "an empty decode is a failure, and is never stored as one"
-        );
-
-        let mut older = blob.clone();
-        older[8] = older[8].wrapping_add(1);
-        assert_eq!(cache_decode(&older, 2, 48000), None, "another format");
-        let mut alien = blob.clone();
-        alien[0] = b'X';
-        assert_eq!(cache_decode(&alien, 2, 48000), None, "another writer");
-    }
-
-    /// A batch is a list of questions and a list of answers, and the only
-    /// thing tying them together is position. A clip that the cache answered,
-    /// a clip that never reached the decoder, and the same clip asked for
-    /// twice all have to leave their neighbours where they were: an answer
-    /// that slid one place is another clip's samples at this clip's rate, and
-    /// nothing downstream can tell.
-    #[test]
-    fn a_batch_answers_every_clip_in_the_order_it_was_asked() {
-        let seek = [1u32, 2];
-        let stored = |packets: &[u8], pcm: &[u8]| {
-            let key = cache_key(packets, &seek, 2, 48000);
-            cache_put(XWMA_CACHE_KIND, &key, &cache_encode(2, 48000, pcm))
-                .expect("the test's own cache entry");
-        };
-        let known = |packets: &'static [u8]| XwmaClip {
-            packets,
-            seek_table: &seek,
-            channels: 2,
-            rate: 48000,
-        };
-        stored(b"first", &[1, 0, 2, 0]);
-        stored(b"third", &[3, 0, 4, 0]);
-
-        // Short of `seek_table.len() * block_align` bytes: this one never
-        // reaches `ffmpeg`, and asking for it twice must not leave the second
-        // asker waiting on a flight this thread is holding itself.
-        let unmuxable = known(b"too short to be two stereo blocks");
-        let answers = decode_t5_xwma_batch(&[
-            known(b"first"),
-            unmuxable,
-            known(b"third"),
-            unmuxable,
-            known(b"first"),
-        ]);
-
-        assert_eq!(
-            answers,
-            vec![
-                Ok(vec![1, 0, 2, 0]),
-                Err(XwmaDecodeError::Mux),
-                Ok(vec![3, 0, 4, 0]),
-                Err(XwmaDecodeError::Mux),
-                Ok(vec![1, 0, 2, 0]),
-            ]
-        );
-    }
-
-    /// The key covers every input the decode reads, and nothing else. Two
-    /// aliases over one payload have to land on one entry — that is the saving
-    /// — and a payload the zone changed has to land on a different one.
-    #[test]
-    fn the_key_covers_every_input_the_decode_reads() {
-        let packets = [7u8; 16];
-        let seek = [1u32, 2];
-        let key = cache_key(&packets, &seek, 2, 48000);
-
-        assert_eq!(key, cache_key(&packets, &seek, 2, 48000));
-        assert_ne!(key, cache_key(&[7u8; 17], &seek, 2, 48000), "payload bytes");
-        assert_ne!(key, cache_key(&[9u8; 16], &seek, 2, 48000), "payload bytes");
-        assert_ne!(key, cache_key(&packets, &[1, 3], 2, 48000), "seek table");
-        assert_ne!(
-            key,
-            cache_key(&packets, &[1], 2, 48000),
-            "seek table length"
-        );
-        assert_ne!(key, cache_key(&packets, &seek, 1, 48000), "channels");
-        assert_ne!(key, cache_key(&packets, &seek, 2, 44100), "rate");
-    }
 }

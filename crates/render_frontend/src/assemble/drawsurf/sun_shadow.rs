@@ -1,5 +1,9 @@
+pub use super::sun_shadow_clip::{
+    SunShadowClipInput, SunShadowFrustumRays, sun_shadow_clip_planes, sun_shadow_frustum_rays,
+};
 pub use render_frame::{
-    SUN_SHADOW_FORCED_PROFILE, SunShadowForcedFrame, SunShadowPartition, SunShadowReceiverConstants,
+    SUN_SHADOW_FORCED_PROFILE, SunShadowClipPlanes, SunShadowForcedFrame, SunShadowPartition,
+    SunShadowReceiverConstants,
 };
 pub use render_frame::{SUN_SHADOW_PARTITION_COUNT, SunShadowAtlasProfile, SunShadowViewport};
 
@@ -323,6 +327,8 @@ pub struct SunShadowCamera {
     pub up: [f32; 3],
     pub tan_half_fov_x: f32,
     pub tan_half_fov_y: f32,
+
+    pub z_near: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -332,45 +338,41 @@ struct SunShadowProjectionFit {
     min_forward_dot: f32,
 }
 
+/// The four corner rays of the camera frustum, in the winding the arc
+/// classification expects: adjacent indices share a frustum edge.
+fn sun_shadow_corner_rays(camera: SunShadowCamera) -> [[f32; 3]; 4] {
+    let fwd = bevy::math::Vec3::from_array(camera.forward);
+    let right = bevy::math::Vec3::from_array(camera.right);
+    let up = bevy::math::Vec3::from_array(camera.up);
+    let mut rays = [[0.0f32; 3]; 4];
+    for (index, (sx, sy)) in [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)]
+        .into_iter()
+        .enumerate()
+    {
+        let p = fwd + right * (sx * camera.tan_half_fov_x) + up * (sy * camera.tan_half_fov_y);
+        let p = if p.length_squared() > 1e-12 {
+            p.normalize()
+        } else {
+            fwd
+        };
+        rays[index] = p.to_array();
+    }
+    rays
+}
+
 fn sun_shadow_projection_fit(
+    rays: &SunShadowFrustumRays,
     view_forward: [f32; 3],
-    view_right: [f32; 3],
-    view_up: [f32; 3],
-    sun_right: [f32; 3],
-    sun_up: [f32; 3],
-    tan_half_fov_x: f32,
-    tan_half_fov_y: f32,
     pixels_per_tile: f32,
 ) -> SunShadowProjectionFit {
     let fwd = bevy::math::Vec3::from_array(view_forward);
-    let right = bevy::math::Vec3::from_array(view_right);
-    let up = bevy::math::Vec3::from_array(view_up);
-    let sun_r = bevy::math::Vec3::from_array(sun_right);
-    let sun_u = bevy::math::Vec3::from_array(sun_up);
-    let mut min_x = 0.0f32;
-    let mut max_x = 0.0f32;
-    let mut min_y = 0.0f32;
-    let mut max_y = 0.0f32;
-    let mut min_forward_dot = f32::INFINITY;
-    for sx in [-1.0, 1.0] {
-        for sy in [-1.0, 1.0] {
-            let p = fwd + right * (sx * tan_half_fov_x) + up * (sy * tan_half_fov_y);
-            let p = if p.length_squared() > 1e-12 {
-                p.normalize()
-            } else {
-                fwd
-            };
-            let x = -p.dot(sun_r);
-            let y = p.dot(sun_u);
-            min_x = min_x.min(x);
-            max_x = max_x.max(x);
-            min_y = min_y.min(y);
-            max_y = max_y.max(y);
-            min_forward_dot = min_forward_dot.min(p.dot(fwd));
-        }
-    }
-    let mins = [min_x, min_y];
-    let maxs = [max_x, max_y];
+    let min_forward_dot = rays
+        .world_rays
+        .iter()
+        .map(|ray| bevy::math::Vec3::from_array(*ray).dot(fwd))
+        .fold(f32::INFINITY, f32::min);
+    let mins = rays.mins;
+    let maxs = rays.maxs;
     let mut pixel_center = [0.0; 2];
     let mut scale = [0.0; 2];
     for axis in 0..2 {
@@ -438,21 +440,19 @@ pub fn forced_fallback_frame(
 ) -> SunShadowForcedFrame {
     let profile = SUN_SHADOW_FORCED_PROFILE;
     let axes = sun_axes_from_dir(sun_direction);
+    let packed_axes = sun_shadow_packed_axes_from_light_dir([
+        -sun_direction[0],
+        -sun_direction[1],
+        -sun_direction[2],
+    ]);
     let view_origin = camera.origin;
     let org = view_org_in_sun_proj(view_origin, axes);
     let sample_near = SM_SUN_SAMPLE_SIZE_NEAR_DEFAULT;
     let sample_far = sample_near * SM_SUN_PARTITION_RATIO;
     let sample_size = [sample_near, sample_far];
-    let fit = sun_shadow_projection_fit(
-        camera.forward,
-        camera.right,
-        camera.up,
-        axes[1],
-        axes[2],
-        camera.tan_half_fov_x,
-        camera.tan_half_fov_y,
-        profile.partition_size() as f32,
-    );
+    let corner_rays = sun_shadow_corner_rays(camera);
+    let rays = sun_shadow_frustum_rays(corner_rays, packed_axes);
+    let fit = sun_shadow_projection_fit(&rays, camera.forward, profile.partition_size() as f32);
     let snapped = [
         snap_sun_proj_origin(org, sample_near),
         snap_sun_proj_origin(org, sample_far),
@@ -479,6 +479,7 @@ pub fn forced_fallback_frame(
             width: 0,
             height: 0,
         },
+        clip_planes: SunShadowClipPlanes::EMPTY,
     }; 2];
     for (i, partition) in partitions.iter_mut().enumerate() {
         let view = sun_shadow_view_matrix(axes, snapped[i]);
@@ -504,6 +505,25 @@ pub fn forced_fallback_frame(
         sample_size,
     };
     let partition_fraction_world = setup.partition_fraction(view_origin, camera.forward);
+
+    let clip_planes = sun_shadow_clip_planes(
+        &SunShadowClipInput {
+            packed_axes,
+            camera_origin: view_origin,
+            camera_forward: camera.forward,
+            camera_near_distance: camera.z_near,
+            near_shadow_min_distance: near_shadow_min_dist,
+            shadow_origin: org,
+            shadow_origin_pixel_center: fit.pixel_center,
+            snapped_shadow_origin: snapped,
+            sample_size,
+            useful_size: profile.partition_size(),
+        },
+        &rays,
+    );
+    for (partition, planes) in partitions.iter_mut().zip(clip_planes) {
+        partition.clip_planes = planes;
+    }
 
     let receiver_clip = partitions[0].clip_from_world
         * bevy::math::Mat4::from_translation(bevy::math::Vec3::from_array(view_origin));

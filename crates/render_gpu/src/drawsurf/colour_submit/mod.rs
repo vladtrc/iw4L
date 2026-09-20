@@ -3848,7 +3848,10 @@ struct SunCodeSite {
 }
 
 struct SunArenaSlot {
-    world_from_local: Mat4,
+    /// Index into `ResidentSunCommands::placements`. Slots that share a
+    /// placement share one world-view-projection, and the partition patch
+    /// computes it once for the whole group.
+    placement: u32,
     sites: Vec<SunCodeSite>,
 }
 
@@ -3860,10 +3863,14 @@ struct ResidentSunCommands {
     world_draws: Vec<PreparedExactDraw>,
     smodel_draws: Vec<PreparedExactDraw>,
     slots: Vec<SunArenaSlot>,
+    placements: Vec<Mat4>,
+    placement_index: HashMap<[u32; 16], u32>,
+    placement_wvp: Vec<[[u32; 4]; 4]>,
     bytes: Vec<u8>,
 
     dirty: Vec<ArenaDirty>,
     resident_slots: usize,
+    resident_placements: usize,
     resident_bytes: usize,
 
     refused: u32,
@@ -3880,6 +3887,8 @@ impl ResidentSunCommands {
         self.world_n = world.len();
         self.smodel_n = smodel.len();
         self.slots.clear();
+        self.placements.clear();
+        self.placement_index.clear();
         self.bytes.clear();
         self.refused = 0;
         let mut seen = HashMap::new();
@@ -3896,13 +3905,30 @@ impl ResidentSunCommands {
         self.world_draws = world_draws;
         self.smodel_draws = smodel_draws;
         self.resident_slots = self.slots.len();
+        self.resident_placements = self.placements.len();
         self.resident_bytes = self.bytes.len();
     }
 
     fn open_frame(&mut self) {
         self.slots.truncate(self.resident_slots);
+        self.placements.truncate(self.resident_placements);
+        let resident = u32::try_from(self.resident_placements).unwrap_or(u32::MAX);
+        self.placement_index.retain(|_, index| *index < resident);
         self.bytes.truncate(self.resident_bytes);
         self.dirty.clear();
+    }
+
+    /// Placements repeat: every world surface is at the identity, and a static
+    /// model's surfaces share one transform. The index makes the patch below
+    /// one matrix product per distinct placement instead of one per slot.
+    fn placement_for(&mut self, world_key: [u32; 16], world_from_local: Mat4) -> u32 {
+        if let Some(&index) = self.placement_index.get(&world_key) {
+            return index;
+        }
+        let index = u32::try_from(self.placements.len()).expect("sun placement index fits u32");
+        self.placements.push(world_from_local);
+        self.placement_index.insert(world_key, index);
+        index
     }
 
     fn push_flush(
@@ -3938,10 +3964,8 @@ impl ResidentSunCommands {
                         start: vertex_off,
                         end: self.bytes.len(),
                     });
-                    self.slots.push(SunArenaSlot {
-                        world_from_local: flush.world_from_local,
-                        sites,
-                    });
+                    let placement = self.placement_for(world_key, flush.world_from_local);
+                    self.slots.push(SunArenaSlot { placement, sites });
                     seen.insert(key, base);
                     base
                 }
@@ -3957,13 +3981,18 @@ impl ResidentSunCommands {
     fn patch_sun_registers(&mut self, partition: &SunShadowPartition) {
         let projection = super::code_transpose_matrix_row4(partition.projection);
         let polygon_offset = [partition.polygon_offset.map(f32::to_bits)];
+        let mut wvp = std::mem::take(&mut self.placement_wvp);
+        wvp.clear();
+        wvp.extend(self.placements.iter().map(|world_from_local| {
+            super::code_transpose_matrix_row4(partition.clip_from_world * *world_from_local)
+        }));
         for slot in &self.slots {
-            let wvp = super::code_transpose_matrix_row4(
-                partition.clip_from_world * slot.world_from_local,
-            );
+            let Some(placement_wvp) = wvp.get(slot.placement as usize) else {
+                continue;
+            };
             for site in &slot.sites {
                 let rows: &[[u32; 4]] = match site.index {
-                    super::CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0 => &wvp,
+                    super::CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0 => &placement_wvp[..],
                     render_backend::overlay::CODE_TRANSPOSE_PROJECTION => &projection,
                     super::CODE_SHADOWMAP_POLYGON_OFFSET => &polygon_offset,
                     _ => continue,
@@ -3979,6 +4008,7 @@ impl ResidentSunCommands {
                 }
             }
         }
+        self.placement_wvp = wvp;
     }
 }
 
@@ -5639,6 +5669,7 @@ impl ExactPrepare<'_> {
             && (item.camera_region == Some(asset_iw4::CAMERA_REGION_EMISSIVE)
                 || matches!(item.kind, RetainedDrawKind::CodeMesh { .. })
                 || matches!(item.kind, RetainedDrawKind::Glass { .. })
+                || matches!(item.kind, RetainedDrawKind::MarkMesh { glass: true, .. })
                 || execution_binds_code_texture(execution, CODE_TEXTURE_RESOLVED_POST_SUN)
                 || execution_binds_code_texture(execution, CODE_TEXTURE_FLOATZ));
         let kind = item.kind;
@@ -5944,50 +5975,55 @@ impl ExactPrepare<'_> {
                 let port_gpu = &pipeline_res.ports[port_index];
                 let texture_slots =
                     self.bind_hit_textures(executable, surface, after_scene_resolve)?;
-                let (constants, constant_base) = if identity_placement_kind(&kind) {
-                    let constants = self
-                        .run_pack
-                        .pack(pass_index, &port_gpu.port, executable, &mut self.cost)
-                        .map_err(GpuSubmitRefusal::ConstantPack)?;
-                    match self.arena.as_deref_mut() {
-                        Some(arena) => (None, Some(arena.base_for(&constants, &texture_slots))),
-                        None => (Some(constants), None),
-                    }
-                } else if let Some(arena) = self.arena.as_deref_mut() {
-                    let overlay = place_code.and_then(|c| c.pass(pass_index)).unwrap_or(&[]);
-                    let (base, interned) = arena
-                        .append_hit(
-                            &port_gpu.port,
-                            executable,
-                            overlay,
-                            &texture_slots,
-                            key,
-                            pass_index as u32,
-                        )
-                        .map_err(GpuSubmitRefusal::ConstantPack)?;
-                    if interned {
-                        self.cost.note_intern_hit();
+                // Shadow placement is applied after preparation, independently for each
+                // light and object. Its unplaced banks belong to the material run.
+                let unplaced_shadow = matches!(self.textures, PrepareTextureTables::Shadow { .. })
+                    && place_code.is_none();
+                let (constants, constant_base) =
+                    if identity_placement_kind(&kind) || unplaced_shadow {
+                        let constants = self
+                            .run_pack
+                            .pack(pass_index, &port_gpu.port, executable, &mut self.cost)
+                            .map_err(GpuSubmitRefusal::ConstantPack)?;
+                        match self.arena.as_deref_mut() {
+                            Some(arena) => (None, Some(arena.base_for(&constants, &texture_slots))),
+                            None => (Some(constants), None),
+                        }
+                    } else if let Some(arena) = self.arena.as_deref_mut() {
+                        let overlay = place_code.and_then(|c| c.pass(pass_index)).unwrap_or(&[]);
+                        let (base, interned) = arena
+                            .append_hit(
+                                &port_gpu.port,
+                                executable,
+                                overlay,
+                                &texture_slots,
+                                key,
+                                pass_index as u32,
+                            )
+                            .map_err(GpuSubmitRefusal::ConstantPack)?;
+                        if interned {
+                            self.cost.note_intern_hit();
+                        } else {
+                            self.cost.note_intern_miss();
+                            self.cost.note_pack_seed(true);
+                        }
+                        (None, Some(base))
                     } else {
-                        self.cost.note_intern_miss();
-                        self.cost.note_pack_seed(true);
-                    }
-                    (None, Some(base))
-                } else {
-                    let mut packed = port_gpu
-                        .port
-                        .pack_hit(executable)
-                        .map_err(GpuSubmitRefusal::ConstantPack)?;
-                    if let Some(overlay) = place_code.and_then(|c| c.pass(pass_index)) {
-                        overlay_packed_code_on_banks(
-                            &mut packed.vertex,
-                            &mut packed.pixel,
-                            overlay,
-                        )
-                        .map_err(GpuSubmitRefusal::ConstantPack)?;
-                    }
-                    self.cost.note_pack_seed(executable.local_banks.is_some());
-                    (Some(Arc::new(packed)), None)
-                };
+                        let mut packed = port_gpu
+                            .port
+                            .pack_hit(executable)
+                            .map_err(GpuSubmitRefusal::ConstantPack)?;
+                        if let Some(overlay) = place_code.and_then(|c| c.pass(pass_index)) {
+                            overlay_packed_code_on_banks(
+                                &mut packed.vertex,
+                                &mut packed.pixel,
+                                overlay,
+                            )
+                            .map_err(GpuSubmitRefusal::ConstantPack)?;
+                        }
+                        self.cost.note_pack_seed(executable.local_banks.is_some());
+                        (Some(Arc::new(packed)), None)
+                    };
                 let (depth_min, depth_max) = if target.forward_z {
                     (0.0, 1.0)
                 } else {
@@ -6048,6 +6084,32 @@ fn refill_arena_uploaded(uploaded: &mut Vec<u8>, identity: &[u8], placed: &[u8],
     uploaded.extend_from_slice(placed);
 }
 
+/// Refill `[start, end)` of the staging copy from the three regions behind it:
+/// the identity span, the zero padding up to `reserved`, then the placed span.
+/// Same result as writing the range one byte at a time, in whole-slice copies.
+fn refill_uploaded_span(
+    uploaded: &mut [u8],
+    identity: &[u8],
+    placed: &[u8],
+    reserved: usize,
+    start: usize,
+    end: usize,
+) {
+    let identity_end = end.min(identity.len());
+    if start < identity_end {
+        uploaded[start..identity_end].copy_from_slice(&identity[start..identity_end]);
+    }
+    let pad_start = start.max(identity.len());
+    let pad_end = end.min(reserved);
+    if pad_start < pad_end {
+        uploaded[pad_start..pad_end].fill(0);
+    }
+    let placed_start = start.max(reserved);
+    if placed_start < end {
+        uploaded[placed_start..end]
+            .copy_from_slice(&placed[placed_start - reserved..end - reserved]);
+    }
+}
 fn grow_identity_reserved(current: usize, needed: usize) -> usize {
     if needed <= current {
         current
@@ -6492,15 +6554,7 @@ fn upload_packed_arena<'a>(
                 else {
                     continue;
                 };
-                for i in start..end {
-                    arena.uploaded[i] = if i < identity.len() {
-                        identity[i]
-                    } else if i < reserved {
-                        0
-                    } else {
-                        placed[i - reserved]
-                    };
-                }
+                refill_uploaded_span(&mut arena.uploaded, identity, placed, reserved, start, end);
                 write_buffer_range(
                     queue,
                     arena.buffer.as_ref().expect("constant arena exists"),

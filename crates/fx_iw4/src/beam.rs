@@ -163,10 +163,10 @@ pub fn fx_infinite_perspective_matrix(tan_half_x: f32, tan_half_y: f32, z_near: 
         0.0,
         0.0,
         k,
-        -z_near * k,
-        0.0,
-        0.0,
         1.0,
+        0.0,
+        0.0,
+        -z_near * k,
         0.0,
     ]
 }

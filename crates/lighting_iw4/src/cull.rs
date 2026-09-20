@@ -293,26 +293,25 @@ pub fn light_region_culls_point(
     true
 }
 
-pub fn light_region_culls_box(
-    hulls: &[LightRegionHull<'_>],
+pub fn light_region_culls_box<'a, H: core::borrow::Borrow<LightRegionHull<'a>>>(
+    hulls: impl IntoIterator<Item = H>,
     light_origin: [f32; 3],
     box_mid: [f32; 3],
     box_half: [f32; 3],
 ) -> bool {
-    if hulls.is_empty() {
-        return false;
-    }
     let local = [
         box_mid[0] - light_origin[0],
         box_mid[1] - light_origin[1],
         box_mid[2] - light_origin[2],
     ];
+    let mut any = false;
     for hull in hulls {
-        if !cull_box_from_light_region_hull(hull, local, box_half) {
+        any = true;
+        if !cull_box_from_light_region_hull(hull.borrow(), local, box_half) {
             return false;
         }
     }
-    true
+    any
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

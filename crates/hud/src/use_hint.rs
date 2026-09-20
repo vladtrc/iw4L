@@ -159,7 +159,11 @@ pub(crate) fn update(
                         .is_some_and(|f| f.inventory_type == 0)
             })
             .count();
-        let key = if primary_count < 2 {
+        let offhand = weapons
+            .0
+            .facts_of(weapon)
+            .is_some_and(|f| f.offhand_class != 0);
+        let key = if offhand || primary_count < 2 {
             "PLATFORM_PICKUPNEWWEAPON"
         } else {
             "PLATFORM_SWAPWEAPONS"

@@ -164,7 +164,8 @@ fn remember_ads_overlay(
         _ => None,
     };
     let view_model_name = first_view_model_name(s, links, att);
-    let (ads_zoom_fov, ads_zoom_in_frac, ads_zoom_out_frac) = ads_settings_zoom(s, att);
+    let ads_settings = ads_settings_zoom(s, att);
+    let (ads_zoom_fov, ads_zoom_in_frac, ads_zoom_out_frac) = ads_settings.unwrap_or_default();
     s.set_latest_attachment_overlay(crate::zone::AttachmentOverlayGeometry {
         overlay_name,
         overlay_lowres_name,
@@ -176,6 +177,7 @@ fn remember_ads_overlay(
         height,
         reticle,
         thermal,
+        ads_settings_present: ads_settings.is_some(),
         ads_zoom_fov,
         ads_zoom_in_frac,
         ads_zoom_out_frac,
@@ -205,16 +207,16 @@ fn first_view_model_name(s: &ZoneStream<'_>, links: &dyn AssetLinkSink, att: Ptr
     }
 }
 
-fn ads_settings_zoom(s: &ZoneStream<'_>, att: Ptr) -> (f32, f32, f32) {
+fn ads_settings_zoom(s: &ZoneStream<'_>, att: Ptr) -> Option<(f32, f32, f32)> {
     let body = match s.ptr_at(att, s.layout(sz::ATTACH_ADS_SETTINGS_OFF, 136)) {
         Ok(ZonePtr::Offset(q)) => s.resolve_alias(q),
-        _ => return (0.0, 0.0, 0.0),
+        _ => return None,
     };
-    (
+    Some((
         s.f32_at(body, sz::ATT_ADS_ZOOM_FOV_OFF).unwrap_or(0.0),
         s.f32_at(body, sz::ATT_ADS_ZOOM_IN_FRAC_OFF).unwrap_or(0.0),
         s.f32_at(body, sz::ATT_ADS_ZOOM_OUT_FRAC_OFF).unwrap_or(0.0),
-    )
+    ))
 }
 
 fn overlay_shader_name_at(s: &ZoneStream<'_>, overlay_body: Ptr, off: usize) -> Option<Ptr> {

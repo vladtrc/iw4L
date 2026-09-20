@@ -179,11 +179,10 @@ pub struct HudTessPass {
 
 /// What the HUD tess flush systems' own bodies cost this frame.
 ///
-/// The bench report used to read the HUD's cost off the gap between two
-/// `hud_stage_close` systems. A gap between two systems is the executor's to
-/// fill: `.chain()` fixes their order and promises nothing about what runs in
-/// between, so that number was the schedule's, not the HUD's. These two are
-/// taken inside the functions, so they are.
+/// Taken inside the functions, not off the gap between two systems: a gap is
+/// the executor's to fill — `.chain()` fixes the order of the HUD systems and
+/// promises nothing about what runs between them — so it measures the schedule
+/// rather than the HUD.
 static BODY_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static JOBS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 

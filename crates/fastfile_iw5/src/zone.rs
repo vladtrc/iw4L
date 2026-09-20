@@ -319,6 +319,7 @@ struct AttachmentOverlayRec {
     height: f32,
     reticle: i32,
     thermal: bool,
+    ads_settings_present: bool,
     ads_zoom_fov: f32,
     ads_zoom_in_frac: f32,
     ads_zoom_out_frac: f32,
@@ -341,6 +342,7 @@ impl AttachmentOverlayRec {
         height: 0.0,
         reticle: 0,
         thermal: false,
+        ads_settings_present: false,
         ads_zoom_fov: 0.0,
         ads_zoom_in_frac: 0.0,
         ads_zoom_out_frac: 0.0,
@@ -360,6 +362,7 @@ impl AttachmentOverlayRec {
             height: self.height,
             reticle: self.reticle,
             thermal: self.thermal,
+            ads_settings_present: self.ads_settings_present,
             ads_zoom_fov: self.ads_zoom_fov,
             ads_zoom_in_frac: self.ads_zoom_in_frac,
             ads_zoom_out_frac: self.ads_zoom_out_frac,
@@ -384,6 +387,7 @@ pub struct AttachmentOverlayGeometry {
     pub reticle: i32,
     pub thermal: bool,
 
+    pub ads_settings_present: bool,
     pub ads_zoom_fov: f32,
     pub ads_zoom_in_frac: f32,
     pub ads_zoom_out_frac: f32,
@@ -406,6 +410,9 @@ pub struct WeaponGeometry {
     pub hide_tags: Option<Ptr>,
 
     pub sz_xanims: Option<Ptr>,
+
+    pub ads_view_kick_center_speed: f32,
+    pub hip_view_kick_center_speed: f32,
 
     pub ads_zoom_fov: f32,
 
@@ -1263,6 +1270,7 @@ impl<'a> ZoneStream<'a> {
             height: geometry.height,
             reticle: geometry.reticle,
             thermal: geometry.thermal,
+            ads_settings_present: geometry.ads_settings_present,
             ads_zoom_fov: geometry.ads_zoom_fov,
             ads_zoom_in_frac: geometry.ads_zoom_in_frac,
             ads_zoom_out_frac: geometry.ads_zoom_out_frac,

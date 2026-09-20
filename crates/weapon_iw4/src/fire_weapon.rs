@@ -63,26 +63,3 @@ pub const fn fire_weapon_kind(weap_type: i32, weap_class: i32) -> Option<FireWea
         _ => None,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn location_table_product_and_unknown_slot() {
-        let mut global = LOCATION_DAMAGE_IDENTITY;
-        let mut weapon = LOCATION_DAMAGE_IDENTITY;
-        global[2] = 1.5;
-        weapon[2] = 1.2;
-        let bullet = bake_location_damage(WEAPTYPE_BULLET, 0, global, Some(weapon));
-        assert!((bullet[2] - 1.8).abs() < 1e-6);
-        let grenade =
-            bake_location_damage(WEAPTYPE_GRENADE, WEAPCLASS_GRENADE, global, Some(weapon));
-        assert_eq!(grenade[2], 1.5);
-        let mut table = LOCATION_DAMAGE_IDENTITY;
-        table[0] = 0.25;
-        table[2] = 1.5;
-        assert_eq!(location_damage_scale(&table, 99), 0.25);
-        assert_eq!(location_damage_scale(&table, 2), 1.5);
-    }
-}

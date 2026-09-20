@@ -94,6 +94,17 @@ pub(super) fn load_game_world_mp(s: &mut ZoneStream<'_>) -> Result<()> {
     s.pop()
 }
 
+/// `GameWorldSp`: same `{ name, PathData }` shell as the MP variant (OAT
+/// `GameWorldSp.txt` walks the identical `PathData`, including the
+/// `nodeCount + 128` overallocation).
+pub(super) fn load_game_world_sp(s: &mut ZoneStream<'_>) -> Result<()> {
+    let p = s.alloc_load(4, sz::GAME_WORLD_SP)?;
+    s.push(XFILE_BLOCK_VIRTUAL)?;
+    follow_name(s, p, 0)?;
+    load_path_data(s, p.at(sz::PATH_DATA_OFF))?;
+    s.pop()
+}
+
 fn load_path_data(s: &mut ZoneStream<'_>, p: Ptr) -> Result<()> {
     let node_count = s.u32_at(p, 0)? as usize;
     let node_alloc = node_count + 128;

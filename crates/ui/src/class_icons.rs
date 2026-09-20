@@ -5,6 +5,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::ImageSampler;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::tasks::{AsyncComputeTaskPool, Task, futures_lite::future};
 
 use crate::class_presets::default_presets;
 use crate::class_setup::picker_icon_stems;
@@ -25,18 +26,38 @@ impl ClassSelectIconCache {
     }
 }
 
+type DecodedClassIcons = Vec<(String, Image)>;
+
 pub fn warm_class_select_icons(
     root: Res<UiAssetRoot>,
     mut cache: ResMut<ClassSelectIconCache>,
     mut images: ResMut<Assets<Image>>,
+    mut pending: Local<Option<Task<DecodedClassIcons>>>,
 ) {
     if cache.warmed {
         return;
     }
-    let Some(games) = root.0.as_ref() else {
+    if let Some(task) = pending.as_mut() {
+        if let Some(decoded) = future::block_on(future::poll_once(task)) {
+            for (stem, image) in decoded {
+                cache.images.insert(stem, images.add(image));
+            }
+            // Publish completion only with the images so the open menu rebuilds.
+            cache.warmed = true;
+            *pending = None;
+        }
+        return;
+    }
+    let Some(games) = root.0.clone() else {
         return;
     };
-    cache.warmed = true;
+    // Archive discovery and decoding must not hold up window event processing.
+    *pending =
+        Some(AsyncComputeTaskPool::get().spawn(async move { decode_class_select_icons(&games) }));
+}
+
+fn decode_class_select_icons(games: &std::path::Path) -> DecodedClassIcons {
+    let started = std::time::Instant::now();
     let mut stems = Vec::new();
     for preset in default_presets() {
         if let Some(stem) = cac_weapon_image(preset.primary) {
@@ -69,22 +90,17 @@ pub fn warm_class_select_icons(
     stems.sort_unstable();
     stems.dedup();
     for stem in picker_icon_stems() {
-        if !stems.iter().any(|s| *s == stem) {
+        if !stems.contains(&stem) {
             stems.push(stem);
         }
     }
 
-    let mut loaded = 0usize;
+    let mut decoded = Vec::new();
     let mut missing = 0usize;
     for stem in stems {
-        if cache.images.contains_key(stem) {
-            continue;
-        }
         match assets::decode_ui_image(games, stem) {
             Ok(Some((width, height, pixels))) => {
-                let handle = images.add(rgba_ui_image(width, height, pixels));
-                cache.images.insert(stem.to_owned(), handle);
-                loaded += 1;
+                decoded.push((stem.to_owned(), rgba_ui_image(width, height, pixels)));
             }
             Ok(None) => {
                 missing += 1;
@@ -95,10 +111,13 @@ pub fn warm_class_select_icons(
             }
         }
     }
-    diag::warn!(
+    diag::info!(
         Ui,
-        "class icons: warmed {loaded} from IWD ({missing} missing)"
+        "class icons: decoded {} from IWD ({missing} missing) in {:.1}ms on worker",
+        decoded.len(),
+        started.elapsed().as_secs_f64() * 1000.0
     );
+    decoded
 }
 
 pub(crate) fn rgba_ui_image(width: u32, height: u32, pixels: Vec<u8>) -> Image {

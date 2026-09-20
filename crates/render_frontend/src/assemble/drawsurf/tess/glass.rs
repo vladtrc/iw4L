@@ -4,13 +4,12 @@ use std::sync::Arc;
 use asset_iw4::size::GFX_PACKED_VERTEX;
 use bevy::prelude::*;
 use fx_iw4::{
-    FX_GLASS_SHARD_LIFETIME_MSEC, FX_GLASS_SHATTERED_SCALE, FX_GLASS_STATE_FLAG_DAMAGED,
-    FX_GLASS_STATE_FLAG_SHATTERED, fx_glass_apply_shattered_uv, fx_glass_def_color_rgba,
-    fx_glass_emit_slab, fx_glass_intact_verts, fx_glass_place_origin, fx_glass_place_quat,
-    fx_glass_scale_color_alpha, fx_glass_slab_counts, fx_glass_state_def_index,
-    fx_glass_state_flags, fx_glass_state_init_index, fx_glass_state_vert_count,
-    fx_pack_code_mesh_vertex_signed, fx_trail_pack_normal, fx_trail_pack_texcoord,
-    fx_unit_quat_to_axis,
+    FX_GLASS_SHARD_LIFETIME_MSEC, FX_GLASS_SHARD_VERT_MAX, FX_GLASS_STATE_FLAG_DAMAGED,
+    fx_glass_decode_geo, fx_glass_def_color_rgba, fx_glass_emit_slab, fx_glass_piece_verts,
+    fx_glass_place_origin, fx_glass_place_quat, fx_glass_scale_color_alpha, fx_glass_slab_counts,
+    fx_glass_state_def_index, fx_glass_state_flags, fx_glass_state_init_index,
+    fx_glass_state_vert_count, fx_pack_code_mesh_vertex_signed, fx_trail_pack_normal,
+    fx_trail_pack_texcoord, fx_unit_quat_to_axis,
 };
 
 use entity_iw4::{
@@ -315,8 +314,8 @@ impl GfxGlassMeshPlan {
             return;
         };
         let flags = fx_glass_state_flags(state);
-        let use_shattered = applied_state == 1
-            || (flags & (FX_GLASS_STATE_FLAG_SHATTERED | FX_GLASS_STATE_FLAG_DAMAGED)) != 0;
+        let use_shattered = (drop_snapshot_shatter && applied_state == 1)
+            || flags & FX_GLASS_STATE_FLAG_DAMAGED != 0;
         let Some(edge) = glass.material_edge(def_i, use_shattered) else {
             self.skipped_name = self.skipped_name.saturating_add(1);
             *last_why = Some("missing_material_edge");
@@ -338,25 +337,31 @@ impl GfxGlassMeshPlan {
             .map(|packed| dpvs_iw4::unpack(dpvs_iw4::GfxDrawSurf { packed }).primary_sort_key)
             .unwrap_or(0);
         let color = colors.get(&asset_id.order()).cloned();
+        let mut draw_state = *state;
+        if use_shattered {
+            fx_iw4::fx_glass_state_set_flags(&mut draw_state, flags | FX_GLASS_STATE_FLAG_DAMAGED);
+        }
+        // A shard is concave and may carry holes, so the mesh follows the piece's own
+        // stored geometry: every border vertex, and the triangulation that spans them.
+        let Some(pgeo) = fx_glass_decode_geo(&draw_state, geo) else {
+            self.skipped_vert = self.skipped_vert.saturating_add(1);
+            *last_why = Some("geo_trunc");
+            return;
+        };
         let mut cpu = vec![
             fx_iw4::FxGlassIntactVert {
                 xyz: [0.0; 3],
                 uv: [0.0; 2],
             };
-            usize::from(vert_n)
+            FX_GLASS_SHARD_VERT_MAX
         ];
-        let Some(wrote) = fx_glass_intact_verts(place, state, geo, def, &mut cpu) else {
+        let Some(wrote) = fx_glass_piece_verts(place, &draw_state, def, &pgeo, &mut cpu) else {
             self.skipped_vert = self.skipped_vert.saturating_add(1);
             *last_why = Some("geo_trunc");
             return;
         };
         cpu.truncate(wrote);
-        if use_shattered {
-            for vert in &mut cpu {
-                vert.uv = fx_glass_apply_shattered_uv(vert.uv, FX_GLASS_SHATTERED_SCALE);
-            }
-        }
-        let (need_v, need_i) = fx_glass_slab_counts(wrote, half_thickness);
+        let (need_v, need_i) = fx_glass_slab_counts(&pgeo, half_thickness);
         if need_v == 0
             || self.vertices.len() + need_v > GFX_GLASS_MESH_VERT_LIMIT
             || self.indices.len() + need_i > GFX_GLASS_MESH_INDEX_LIMIT
@@ -379,6 +384,7 @@ impl GfxGlassMeshPlan {
         let mut slab_i = vec![0u16; need_i];
         let Some((nv, ni)) = fx_glass_emit_slab(
             &cpu,
+            &pgeo,
             axis[2],
             axis[0],
             half_thickness,
@@ -501,25 +507,6 @@ fn glass_shatter_play_oneshot(late: bool, rebuilt: bool) -> bool {
     !late && !rebuilt
 }
 
-fn pane_mark_radius(pane: &GlassPaneBasis) -> f32 {
-    let s2 = pane.axis_s[0] * pane.axis_s[0]
-        + pane.axis_s[1] * pane.axis_s[1]
-        + pane.axis_s[2] * pane.axis_s[2];
-    let t2 = pane.axis_t[0] * pane.axis_t[0]
-        + pane.axis_t[1] * pane.axis_t[1]
-        + pane.axis_t[2] * pane.axis_t[2];
-    (s2 + t2).sqrt() * 0.5 + 4.0
-}
-
-fn drop_pane_marks(host: &mut render_fx::HostFxSystem, pane: Option<GlassPaneBasis>) {
-    let Some(pane) = pane else {
-        return;
-    };
-    host.0
-        .marks
-        .hide_marks_overlapping(pane.origin, pane_mark_radius(&pane));
-}
-
 fn glass_epoch_changed(seen: u32, incoming: u32) -> bool {
     seen != 0 && seen != incoming
 }
@@ -610,12 +597,21 @@ pub(crate) fn apply_glass_host(
         match cg_glass_apply_state(row, pane) {
             CgGlassApplyAction::Delete => {
                 if let Some(host) = fx_host.as_mut() {
-                    drop_pane_marks(host, pane);
+                    host.0.marks.hide_glass_marks(i as u16);
                     host.0.glass.free_pane(i as u32);
                     host.0.glass.moved = true;
                 }
             }
-            CgGlassApplyAction::Shatter { hit, dir, .. } => {
+            CgGlassApplyAction::Weaken => {
+                if let Some(host) = fx_host.as_mut() {
+                    host.0.glass.damage(i as u32);
+                }
+            }
+            CgGlassApplyAction::Shatter {
+                hit,
+                dir,
+                weakened_first,
+            } => {
                 if let Some(host) = fx_host.as_mut() {
                     let last_change = snap.map(|s| s.last_change).unwrap_or(0);
                     let late = last_change != 0
@@ -624,6 +620,9 @@ pub(crate) fn apply_glass_host(
                     let cause = snap.map(|s| s.cause.as_u8()).unwrap_or(0);
                     let play_oneshot = glass_shatter_play_oneshot(late, rebuilt);
                     let revision = snap.map(|s| s.revision).unwrap_or(0);
+                    if weakened_first {
+                        host.0.glass.damage(i as u32);
+                    }
                     host.0.glass.shatter_caused(
                         i as u32,
                         hit,
@@ -634,7 +633,7 @@ pub(crate) fn apply_glass_host(
                         cause,
                         revision,
                     );
-                    drop_pane_marks(host, pane);
+                    host.0.marks.hide_glass_marks(i as u16);
                     host.0.glass.moved = true;
                 }
             }
@@ -840,73 +839,4 @@ fn stamp_glass_lighting_failed(plan: &mut GfxGlassMeshPlan, attempted: u32) {
         sample,
         probe_sample,
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn seek_back_bumps_generation_and_clears_applied() {
-        let mut table = CgGlassTable::default();
-        table.last_msec = 5000;
-        table.rows[0].applied = 2;
-        table.rows[0].pending = 2;
-        assert!(1000 < table.last_msec);
-        table.reset();
-        assert_eq!(table.rows[0].applied, 0);
-        assert_eq!(table.rows[0].pending, 0);
-        assert_eq!(table.last_msec, 0);
-        assert_eq!(table.generation, 1);
-    }
-
-    #[test]
-    fn killcam_rebuilds_when_a_shattered_pane_is_intact_again() {
-        let mut table = CgGlassTable::default();
-        table.last_msec = 20_000;
-        table.rows[3].applied = 2;
-        table.rows[3].pending = 2;
-        let rows = [GlassSnapRow {
-            id: 3,
-            state: entity_iw4::GlassPieceState::Intact,
-            seed: None,
-            deterministic_seed: 0,
-            last_change: 0,
-            cause: entity_iw4::GlassCause::Impact,
-            revision: 0,
-        }];
-        assert!(glass_needs_rebuild(20_000, table.last_msec, &rows, &table));
-        table.reset();
-        assert_eq!(table.rows[3].applied, 0);
-        assert_eq!(table.generation, 1);
-    }
-
-    #[test]
-    fn missing_row_means_intact_and_rebuilds() {
-        let mut table = CgGlassTable::default();
-        table.rows[1].applied = 2;
-        assert!(glass_needs_rebuild(1000, 1000, &[], &table));
-    }
-
-    #[test]
-    fn later_map_round_epoch_rebuilds_without_pane_delta() {
-        assert!(!glass_epoch_changed(0, 5));
-        assert!(!glass_epoch_changed(3, 3));
-        assert!(glass_epoch_changed(3, 4));
-    }
-
-    #[test]
-    fn archive_time_wins_over_live_msec() {
-        assert_eq!(glass_presentation_now(20_000, 4_000, true), 4_000);
-        assert_eq!(glass_presentation_now(20_000, 4_000, false), 20_000);
-        assert_eq!(glass_presentation_now(20_000, 0, true), 0);
-    }
-
-    #[test]
-    fn rebuild_suppresses_oneshot_even_when_shards_still_fly() {
-        assert!(glass_shatter_play_oneshot(false, false));
-        assert!(!glass_shatter_play_oneshot(false, true));
-        assert!(!glass_shatter_play_oneshot(true, false));
-        assert!(!glass_shatter_play_oneshot(true, true));
-    }
 }

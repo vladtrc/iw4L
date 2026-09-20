@@ -403,9 +403,8 @@ fn apply_fpv_plan(
 
 /// The rows a producer rebuilds every frame, handed to the plan that publishes
 /// them. The plan answers whether anything moved, and that answer is the only
-/// thing downstream is entitled to ask: the merge used to re-hash every draw of
-/// every producer to find out, which made the published revision a suggestion
-/// rather than a fact.
+/// thing downstream is entitled to ask — no consumer re-hashes the rows to find
+/// out for itself.
 macro_rules! publish_frame_rows {
     ($plan:ty, $draw:ty, $owner:ty) => {
         impl $plan {

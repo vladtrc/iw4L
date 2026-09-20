@@ -7,7 +7,7 @@ writes `AuthorityWorld`, decodes no assets.
 | crate | owns |
 |---|---|
 | `render_frontend` | `prepare/` scene, view, cull (`scene/{world,spawn,cull,camera}.rs`, `scene/gfx_scene.rs` anim-submission bridge, `worker_cmds.rs`); `adapters/` occupancy out of anim and FX; `assemble/` frame products (`drawsurf/{retained_list,frame_products,material_runtime}.rs`, `drawsurf/tess/`) |
-| `render_scene` | occupancy storage: lighting request/result, frustum planes, camera pose. `render_anim` / `render_fx` produce the poses and FX |
+| `render_scene` | occupancy storage: lighting request/result, frustum planes, camera pose. Static light lookup and BSP cells publish on `MatchInstalled` and clear on teardown; frame culling does not republish them. `render_anim` / `render_fx` produce the poses and FX |
 | `render_frame` | the immutable frame-product snapshot at the frontend ↔ GPU border (`SourceRevisions`, `PackedSegments`, pure packing) |
 | `render_material`, `render_backend` | the material tables; the list views |
 | `render` | composition, `extract.rs`, `diag/` |

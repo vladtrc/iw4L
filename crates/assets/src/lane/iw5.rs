@@ -474,10 +474,8 @@ impl ZoneLane for Iw5Lane {
                                     })
                                     .collect();
                             let (tiles, census) = if let Some(ref clip_map) = clip {
-                                let scratch = clip_map.sight_scratch();
                                 let clear = |start: [f32; 3], end: [f32; 3]| {
                                     clip_map.box_sight_clear(
-                                        &scratch,
                                         start,
                                         end,
                                         LIGHT_GRID_SIGHT_CONTENT_MASK,

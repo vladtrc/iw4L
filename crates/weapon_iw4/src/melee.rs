@@ -303,11 +303,12 @@ pub fn pm_weapon_advance_melee(
     weap_flags: &mut u32,
     pm_flags_word: &mut u32,
     pm_type: i32,
+    delayed_action: bool,
 ) -> Option<crate::WeaponTickEvent> {
     let Ok(ws) = WeaponState::from_i32(hand.weaponstate) else {
         return None;
     };
-    if hand.weapon_time > 0 {
+    if !delayed_action && (hand.weapon_time > 0 || hand.weapon_delay > 0) {
         return None;
     }
     match ws {

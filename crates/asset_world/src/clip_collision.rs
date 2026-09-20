@@ -14,20 +14,7 @@ pub struct ClipBrush {
     pub glass_encoded: u16,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct ClipBspNode {
-    pub plane: [f32; 4],
-
-    pub children: [i32; 2],
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ClipBspLeaf {
-    pub first_brush: u32,
-    pub num_brushes: u16,
-    pub first_coll_aabb_index: u16,
-    pub coll_aabb_count: u16,
-}
+pub use clipmap_iw4::{ClipLeaf as ClipBspLeaf, ClipNode as ClipBspNode};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ClipCmodel {
@@ -188,48 +175,18 @@ impl clipmap_iw4::BrushView for ClipBrush {
     }
 }
 
-pub struct ClipSightScratch {
-    nodes: Vec<clipmap_iw4::ClipNode>,
-    leaves: Vec<clipmap_iw4::ClipLeaf>,
-}
-
 impl ClipCollision {
-    pub fn sight_scratch(&self) -> ClipSightScratch {
-        ClipSightScratch {
-            nodes: self
-                .nodes
-                .iter()
-                .map(|n| clipmap_iw4::ClipNode {
-                    plane: n.plane,
-                    children: n.children,
-                })
-                .collect(),
-            leaves: self
-                .leaves
-                .iter()
-                .map(|l| clipmap_iw4::ClipLeaf {
-                    first_brush: l.first_brush,
-                    num_brushes: l.num_brushes,
-                    first_coll_aabb_index: l.first_coll_aabb_index,
-                    coll_aabb_count: l.coll_aabb_count,
-                })
-                .collect(),
+    fn map_ref(&self) -> clipmap_iw4::ClipMapRef<'_, ClipBrush> {
+        clipmap_iw4::ClipMapRef {
+            nodes: &self.nodes,
+            leaves: &self.leaves,
+            leafbrushes: &self.leafbrushes,
+            brushes: &self.brushes,
         }
     }
 
-    pub fn box_sight_clear(
-        &self,
-        scratch: &ClipSightScratch,
-        start: [f32; 3],
-        end: [f32; 3],
-        mask: u32,
-    ) -> bool {
-        let map = clipmap_iw4::ClipMapRef {
-            nodes: &scratch.nodes,
-            leaves: &scratch.leaves,
-            leafbrushes: &self.leafbrushes,
-            brushes: &self.brushes,
-        };
+    pub fn box_sight_clear(&self, start: [f32; 3], end: [f32; 3], mask: u32) -> bool {
+        let map = self.map_ref();
         let ext = clipmap_iw4::TraceExtents::new(start, end, [0.0; 3], [0.0; 3], mask);
         let mesh = self.mesh.as_ref().as_ref();
         let trace = clipmap_iw4::trace_brush_and_mesh(&map, &mesh, &ext, &|_piece| true);
@@ -244,13 +201,7 @@ impl ClipCollision {
         maxs: [f32; 3],
         mask: u32,
     ) -> ClipSweepHit {
-        let scratch = self.sight_scratch();
-        let map = clipmap_iw4::ClipMapRef {
-            nodes: &scratch.nodes,
-            leaves: &scratch.leaves,
-            leafbrushes: &self.leafbrushes,
-            brushes: &self.brushes,
-        };
+        let map = self.map_ref();
         let ext = clipmap_iw4::TraceExtents::new(start, end, mins, maxs, mask);
         let mesh = self.mesh.as_ref().as_ref();
         let trace = clipmap_iw4::trace_brush_and_mesh(&map, &mesh, &ext, &|_piece| true);

@@ -1146,10 +1146,8 @@ pub(crate) fn bake_sun_shadow_casters(
         fill_vis_in_place(&mut sun_smodel_vis[0], smodel_n);
         fill_vis_in_place(&mut sun_smodel_vis[1], smodel_n);
         *sun_draw_cell_n = 0;
-        let planes0 =
-            super::clip_from_world_frustum_planes(sun_frame.partitions[0].clip_from_world);
-        let planes1 =
-            super::clip_from_world_frustum_planes(sun_frame.partitions[1].clip_from_world);
+        let planes0 = sun_frame.partitions[0].clip_planes;
+        let planes1 = sun_frame.partitions[1].clip_planes;
         let dpvs = &cull.dpvs;
         let cell_vis = cull.cell_vis.as_slice();
         let cell_vis_all = cull.cell_vis_all;
@@ -1162,7 +1160,7 @@ pub(crate) fn bake_sun_shadow_casters(
                 scope.spawn(async {
                     crate::prepare::scene::cull::add_world_surfaces_frustum_only(
                         dpvs,
-                        &planes0,
+                        planes0.as_slice(),
                         cell_vis,
                         cell_vis_all,
                         &mut surf_near[0],
@@ -1173,7 +1171,7 @@ pub(crate) fn bake_sun_shadow_casters(
                 scope.spawn(async {
                     crate::prepare::scene::cull::add_world_surfaces_frustum_only(
                         dpvs,
-                        &planes1,
+                        planes1.as_slice(),
                         cell_vis,
                         cell_vis_all,
                         &mut surf_far[0],
@@ -1266,6 +1264,7 @@ pub(crate) fn bake_sun_shadow_casters(
             &mut far,
             xmodel_plan.as_deref(),
             &generation.catalog,
+            [planes0.as_slice(), planes1.as_slice()],
         );
         let sun_near_n = ordered0.len();
         ordered0.extend(ordered1);

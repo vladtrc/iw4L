@@ -913,6 +913,8 @@ pub(crate) fn shutdown_world_on_teardown(
     mut membership: Option<ResMut<DynEntCellBits>>,
     mut present: ResMut<render_scene::WorldPresentFacts>,
     mut tess: ResMut<render_scene::TessMaterials>,
+    mut lookup: ResMut<render_scene::DynAtPointLookup>,
+    mut cells: ResMut<render_scene::WorldDpvsCells>,
 ) {
     if torn.read().count() == 0 {
         return;
@@ -925,15 +927,8 @@ pub(crate) fn shutdown_world_on_teardown(
     }
     *present = render_scene::WorldPresentFacts::default();
     *tess = render_scene::TessMaterials::default();
-    if torn.read().count() == 0 {
-        return;
-    }
-    if let Some(scene) = scene.as_mut() {
-        scene.shutdown_world();
-    }
-    if let Some(membership) = membership.as_mut() {
-        **membership = DynEntCellBits::default();
-    }
+    lookup.clear();
+    *cells = render_scene::WorldDpvsCells::default();
     let spawned = scene.as_ref().map(|s| i64::from(s.spawned)).unwrap_or(0);
     perf::world_hold(spawned, 0, 0);
     diag::info!(

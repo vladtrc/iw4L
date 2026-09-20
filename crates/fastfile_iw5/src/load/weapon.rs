@@ -167,12 +167,12 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
     if picked.ads_zoom_fov > 0.0 {
         ads_zoom_fov = picked.ads_zoom_fov;
     }
-    let (ads_zoom_in_frac, ads_zoom_out_frac) =
-        if picked.ads_zoom_in_frac > 0.0 || picked.ads_zoom_out_frac > 0.0 {
-            (picked.ads_zoom_in_frac, picked.ads_zoom_out_frac)
-        } else {
-            (ads_zoom_in_frac, ads_zoom_out_frac)
-        };
+    // Zero windows are authored: the overlay switches at full ADS.
+    let (ads_zoom_in_frac, ads_zoom_out_frac) = if picked.ads_settings_present {
+        (picked.ads_zoom_in_frac, picked.ads_zoom_out_frac)
+    } else {
+        (ads_zoom_in_frac, ads_zoom_out_frac)
+    };
     let display_name = match s.ptr_at(p, s.layout(8, 16))? {
         ZonePtr::Offset(q) => Some(s.resolve_alias(q)),
         _ => None,
@@ -210,6 +210,14 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         world_model_name,
         hide_tags,
         sz_xanims,
+        ads_view_kick_center_speed: s.f32_at(
+            p,
+            s.layout(sz::WEAPON_COMPLETE_ADS_VIEW_KICK_CENTER_SPEED_OFF, 180),
+        )?,
+        hip_view_kick_center_speed: s.f32_at(
+            p,
+            s.layout(sz::WEAPON_COMPLETE_HIP_VIEW_KICK_CENTER_SPEED_OFF, 184),
+        )?,
         ads_zoom_fov,
         ads_zoom_in_frac,
         ads_zoom_out_frac,

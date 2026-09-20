@@ -23,6 +23,7 @@ pub struct GfxMarkSubKey {
     pub packed: bool,
     pub entity: Option<u16>,
     pub smodel: Option<u16>,
+    pub glass: Option<u16>,
     pub primary_light: u8,
     pub probe: u8,
 }
@@ -31,6 +32,7 @@ impl GfxMarkSubKey {
     pub fn from_context(context: &[u8; 7]) -> Self {
         Self {
             packed: !matches!(context[0], 0 | 2),
+            glass: (context[0] == 4).then(|| u16::from_le_bytes([context[2], context[3]])),
             entity: (context[0] == 3).then(|| u16::from_le_bytes([context[2], context[3]])),
             smodel: (context[0] & 0xc0 == 0x40)
                 .then(|| u16::from_le_bytes([context[2], context[3]])),

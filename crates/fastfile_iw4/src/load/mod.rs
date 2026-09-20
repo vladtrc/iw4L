@@ -81,7 +81,9 @@ fn load_asset_body_observed(
                 | ComWorld
                 | FxWorld
                 | GameWorldMp
+                | GameWorldSp
                 | MapEnts
+                | AddonMapEnts
                 | GfxWorld
                 | ClipMapMp
                 | ClipMapSp
@@ -143,7 +145,9 @@ fn load_asset_body_observed(
         LightDef => world::load_light_def(s, links),
         GfxWorld => gfxworld::load_gfxworld(s, links),
         GameWorldMp => world::load_gameworld_mp(s),
+        GameWorldSp => world::load_gameworld_sp(s),
         MapEnts => world::load_mapents(s),
+        AddonMapEnts => world::load_addonmapents(s),
         ClipMapMp | ClipMapSp => clipmap::load_clipmap(s, links),
         ImpactFx => load_impact_fx(s, links),
         Weapon => weapon::load_weapon(s, links),

@@ -40,6 +40,7 @@ pub(crate) fn run_menu_shots(
     mut stack: ResMut<RetailMenuStack>,
     mut scratch: ResMut<ClassSetupScratch>,
     mut options: ResMut<OptionsState>,
+    catalog: Res<crate::ClassLoadoutCatalog>,
     mut menu_enabled: ResMut<MenuEnabled>,
     mut class_overlay: ResMut<ClassSelectOverlayOpen>,
     mut focus: ResMut<crate::nav::Focus>,
@@ -201,7 +202,7 @@ pub(crate) fn run_menu_shots(
         }
         22 => {
             scratch.editing = Some(ClassEditRow::Primary);
-            focus.widget = Some("class_setup/cat/sniper".into());
+            focus.widget = Some("class_setup/cat/iw4:sniper".into());
             machine.wait = MENU_SHOT_SETTLE;
             machine.step = 23;
         }
@@ -211,7 +212,10 @@ pub(crate) fn run_menu_shots(
             machine.capture_pending = true;
         }
         24 => {
-            scratch.picker_category = Some(assets::CacAuthoredCategory::Sniper);
+            scratch.picker_category = Some(crate::class_setup::ClassPickerFolder {
+                namespace: assets::AssetNamespace::Iw4,
+                category: Some(assets::CacAuthoredCategory::Sniper),
+            });
             focus.widget = Some("class_setup/pick/0".into());
             machine.wait = MENU_SHOT_SETTLE;
             machine.step = 25;
@@ -281,9 +285,61 @@ pub(crate) fn run_menu_shots(
             machine.capture_pending = true;
         }
         35 => {
+            open(&mut stack, "class_setup");
+            machine.wait = MENU_SHOT_SETTLE;
+            machine.step = 36;
+        }
+        36 => {
+            scratch.summary_active = true;
+            scratch.begin_edit(ClassEditRow::Lethal);
+            focus.widget = catalog
+                .categories_for(ClassEditRow::Lethal)
+                .first()
+                .map(|folder| format!("class_setup/cat/{}", folder.slug()));
+            machine.wait = MENU_SHOT_SETTLE;
+            machine.step = 37;
+        }
+        37 => {
+            capture_menu(&mut commands, dir, "18-cac-lethal-games");
+            machine.wait = MENU_SHOT_WRITE;
+            machine.capture_pending = true;
+        }
+        38 => {
+            if let Some(folder) = catalog
+                .categories_for(ClassEditRow::Lethal)
+                .into_iter()
+                .find(|folder| folder.namespace == assets::AssetNamespace::Iw5)
+            {
+                scratch.pick_category(&catalog, folder);
+            }
+            focus.widget = Some("class_setup/pick/0".into());
+            machine.wait = MENU_SHOT_SETTLE;
+            machine.step = 39;
+        }
+        39 => {
+            capture_menu(&mut commands, dir, "19-cac-lethal-iw5");
+            machine.wait = MENU_SHOT_WRITE;
+            machine.capture_pending = true;
+        }
+        40 => {
+            scratch.begin_edit(ClassEditRow::Primary);
+            scratch.picker_page = 1;
+            focus.widget = catalog
+                .categories_for(ClassEditRow::Primary)
+                .get(crate::class_setup::PICKER_PAGE_SIZE)
+                .map(|folder| format!("class_setup/cat/{}", folder.slug()));
+            machine.wait = MENU_SHOT_SETTLE;
+            machine.step = 41;
+        }
+        41 => {
+            capture_menu(&mut commands, dir, "20-cac-categories-page-2");
+            machine.wait = MENU_SHOT_WRITE;
+            machine.capture_pending = true;
+        }
+        42 => {
             diag::info!(Ui, "menu-shots: wrote pack under {}", dir.display());
             exit.write(AppExit::Success);
-            machine.step = 36;
+            machine.step = 43;
         }
         _ => {}
     }

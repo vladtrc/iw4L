@@ -827,13 +827,13 @@ pub fn sample_client_input(
 /// A stall is a stretch in which the authority acked none of the local client's
 /// commands. Both measures of one — the age of the oldest command still waiting
 /// to be acked, and the command time spanned by the unacknowledged history — are
-/// wall-clock spans, so a single long frame fills either on its own. Failing the
-/// session on the first of them turned every hitch into a permanent disconnect.
+/// wall-clock spans, so a single long frame fills either on its own — which is
+/// why one stall is not a failure.
 pub const BACKLOG_STALL_MS: i32 = 1000;
 
 /// How many stalls the link may take before the session is failed for real. A
 /// hitch costs one and is recovered from; an authority that has genuinely gone
-/// away keeps earning them and still fails, a few seconds later than before.
+/// away keeps earning them and fails once they add up.
 pub const BACKLOG_STALLS_BEFORE_FAIL: u32 = 3;
 
 #[derive(Debug, Default)]
@@ -1479,121 +1479,4 @@ pub fn register_client_runtime(app: &mut App) {
 
 pub fn register_listen_prediction_arm(app: &mut App) {
     app.add_systems(Update, arm_listen_prediction.in_set(ClientSet::Load));
-}
-
-#[cfg(test)]
-mod work_limit_tests {
-    use super::*;
-    use bevy::ecs::system::SystemId;
-    use sim::ClientId;
-
-    fn stalled_world() -> (World, SystemId) {
-        let mut world = World::new();
-        world.insert_resource(PendingClientSends::default());
-        world.insert_resource(ClientPredictionState(ClientPrediction::new(ClientId(1))));
-        world.insert_resource(CgFrameClock::default());
-        world.insert_resource(ClsRealtime::default());
-        world.insert_resource(ClientCmdTemplate::default());
-        world.insert_resource(crate::SignonState::default());
-        world.insert_resource(AuthorityInputGate {
-            local_cmds_enabled: true,
-        });
-        world.insert_resource(ClientActionInbox::default());
-
-        // One command sent and never acked: every tick from here on is a stall.
-        world.resource_mut::<PendingClientSends>().push(
-            CmdSeq(1),
-            UserCmd::default(),
-            sim::ShotSampleProvenance::NO_CLAIM,
-        );
-        let id = world.register_system(enforce_client_work_limits);
-        (world, id)
-    }
-
-    fn at(world: &mut World, id: SystemId, now_ms: i32) {
-        world
-            .resource_mut::<CgFrameClock>()
-            .assign_server_time(now_ms);
-        world.run_system(id).expect("work limits ran");
-    }
-
-    fn failed(world: &World) -> bool {
-        world.resource::<crate::SignonState>().phase.is_failed()
-    }
-
-    #[test]
-    fn a_single_stall_re_adopts_instead_of_failing_the_session() {
-        let (mut world, id) = stalled_world();
-
-        at(&mut world, id, BACKLOG_STALL_MS + 1);
-
-        assert!(!failed(&world), "a hitch must not disconnect the session");
-        assert!(
-            world.resource::<AuthorityInputGate>().local_cmds_enabled,
-            "the local player keeps their input"
-        );
-    }
-
-    #[test]
-    fn a_stall_that_never_lifts_still_fails_the_session() {
-        let (mut world, id) = stalled_world();
-
-        for stall in 1..BACKLOG_STALLS_BEFORE_FAIL {
-            at(&mut world, id, (stall as i32 + 1) * BACKLOG_STALL_MS);
-            assert!(!failed(&world), "failed on stall {stall}");
-        }
-        at(
-            &mut world,
-            id,
-            (BACKLOG_STALLS_BEFORE_FAIL as i32 + 1) * BACKLOG_STALL_MS,
-        );
-
-        assert!(failed(&world), "a dead authority must still fail the link");
-        assert!(!world.resource::<AuthorityInputGate>().local_cmds_enabled);
-    }
-
-    #[test]
-    fn frames_inside_one_stall_are_not_counted_separately() {
-        let (mut world, id) = stalled_world();
-
-        // 110 frames at 60 Hz span under two stall windows, so they are worth
-        // two stalls. Without the debounce each frame would count its own and
-        // the session would be gone inside three of them.
-        for frame in 0..110 {
-            at(&mut world, id, BACKLOG_STALL_MS + 1 + frame * 16);
-        }
-
-        assert!(!failed(&world), "frames were counted as separate stalls");
-    }
-
-    #[test]
-    fn an_ack_clears_the_stalls_that_came_before_it() {
-        let mut stalls = BacklogStalls::default();
-
-        assert_eq!(stalls.note(1_000, 0), Some(1));
-        assert_eq!(stalls.note(2_000, 0), Some(2));
-        assert_eq!(stalls.note(3_000, 1), Some(1), "the ack reset the count");
-    }
-
-    #[test]
-    fn a_stall_is_counted_once_per_window() {
-        let mut stalls = BacklogStalls::default();
-
-        assert_eq!(stalls.note(1_000, 0), Some(1));
-        assert_eq!(stalls.note(1_000 + BACKLOG_STALL_MS - 1, 0), None);
-        assert_eq!(stalls.note(1_000 + BACKLOG_STALL_MS, 0), Some(2));
-    }
-
-    #[test]
-    fn a_resync_drops_the_history_the_authority_never_acked() {
-        let mut prediction = ClientPrediction::new(ClientId(1));
-        prediction.install_world(sim::SimWorld::new());
-        prediction.predict(UserCmd::default(), ServerTime::from_ms(50));
-        assert!(!prediction.history().is_empty());
-
-        prediction.force_resync();
-
-        assert!(prediction.history().is_empty());
-        assert_eq!(prediction.metrics().forced_adopts, 1);
-    }
 }

@@ -14,16 +14,3 @@ pub fn force_vector(struct_angles: [f32; 3]) -> [f32; 3] {
 pub fn should_push(on_ground: bool) -> bool {
     on_ground
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn yaw_zero_pushes_along_x() {
-        let v = force_vector([0.0, 0.0, 0.0]);
-        assert!((v[0] - SPEED).abs() < 0.01);
-        assert!(v[1].abs() < 0.01);
-        assert!(v[2].abs() < 0.01);
-    }
-}

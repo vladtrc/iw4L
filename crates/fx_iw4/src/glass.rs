@@ -1,3 +1,5 @@
+use crate::glass_geo::{FX_GLASS_SHARD_VERT_MAX, FxGlassPieceGeo};
+
 pub const FX_GLASS_INIT_PIECE_STATE: usize = 0x34;
 
 pub const FX_GLASS_PIECE_PLACE: usize = 0x20;
@@ -119,6 +121,10 @@ pub fn fx_glass_place_origin(place: &[u8; FX_GLASS_PIECE_PLACE]) -> [f32; 3] {
         read_f32(place, FX_GLASS_INIT_ORIGIN + 4),
         read_f32(place, FX_GLASS_INIT_ORIGIN + 8),
     ]
+}
+
+pub fn fx_glass_place_radius(place: &[u8; FX_GLASS_PIECE_PLACE]) -> f32 {
+    read_f32(place, 0x1c)
 }
 
 pub fn fx_glass_state_geo_start(state: &[u8; FX_GLASS_PIECE_STATE]) -> u16 {
@@ -348,8 +354,13 @@ pub const FX_GLASS_VERT_SCALE: f32 = 0.03125;
 
 pub const FX_GLASS_SHATTERED_SCALE: f32 = 48.0;
 
-pub fn fx_glass_apply_shattered_uv(uv: [f32; 2], scale: f32) -> [f32; 2] {
-    [uv[0] * scale, uv[1] * scale]
+pub fn fx_glass_piece_tex_vecs(def: &[u8; FX_GLASS_DEF], flags: u16) -> [[f32; 2]; 2] {
+    if flags & crate::glass_shatter::FX_GLASS_STATE_FLAG_DAMAGED != 0 {
+        let scale = FX_GLASS_VERT_SCALE / FX_GLASS_SHATTERED_SCALE;
+        [[scale, 0.0], [0.0, scale]]
+    } else {
+        fx_glass_def_tex_vecs(def)
+    }
 }
 
 pub fn fx_unit_quat_to_axis(q: [f32; 4]) -> [[f32; 3]; 3] {
@@ -386,6 +397,57 @@ pub struct FxGlassIntactVert {
     pub uv: [f32; 2],
 }
 
+/// The parent-local to world transform a piece's packed vertices go through.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FxGlassVertXform {
+    pub origin: [f32; 3],
+    pub ax: [f32; 3],
+    pub ay: [f32; 3],
+    pub tex: [[f32; 2]; 2],
+    pub uv0: [f32; 2],
+}
+
+impl FxGlassVertXform {
+    pub fn new(
+        place: &[u8; FX_GLASS_PIECE_PLACE],
+        state: &[u8; FX_GLASS_PIECE_STATE],
+        def: &[u8; FX_GLASS_DEF],
+    ) -> Self {
+        let axis = fx_unit_quat_to_axis(fx_glass_place_quat(place));
+        Self {
+            origin: fx_glass_place_origin(place),
+            ax: [
+                axis[0][0] * FX_GLASS_VERT_SCALE,
+                axis[0][1] * FX_GLASS_VERT_SCALE,
+                axis[0][2] * FX_GLASS_VERT_SCALE,
+            ],
+            ay: [
+                axis[1][0] * FX_GLASS_VERT_SCALE,
+                axis[1][1] * FX_GLASS_VERT_SCALE,
+                axis[1][2] * FX_GLASS_VERT_SCALE,
+            ],
+            tex: fx_glass_piece_tex_vecs(def, fx_glass_state_flags(state)),
+            uv0: [read_f32(state, 0), read_f32(state, 4)],
+        }
+    }
+
+    pub fn apply(&self, packed: [i16; 2]) -> FxGlassIntactVert {
+        let x = f32::from(packed[0]);
+        let y = f32::from(packed[1]);
+        FxGlassIntactVert {
+            xyz: [
+                self.origin[0] + x * self.ax[0] + y * self.ay[0],
+                self.origin[1] + x * self.ax[1] + y * self.ay[1],
+                self.origin[2] + x * self.ax[2] + y * self.ay[2],
+            ],
+            uv: [
+                self.tex[0][0] * x + self.tex[0][1] * y + self.uv0[0],
+                self.tex[1][0] * x + self.tex[1][1] * y + self.uv0[1],
+            ],
+        }
+    }
+}
+
 pub fn fx_glass_intact_verts(
     place: &[u8; FX_GLASS_PIECE_PLACE],
     state: &[u8; FX_GLASS_PIECE_STATE],
@@ -400,57 +462,31 @@ pub fn fx_glass_intact_verts(
     let start = usize::from(fx_glass_state_geo_start(state));
     let end = start.checked_add(vert_n)?;
     let slice = geo.get(start..end)?;
-    let origin = fx_glass_place_origin(place);
-    let axis = fx_unit_quat_to_axis(fx_glass_place_quat(place));
-    let ax = [
-        axis[0][0] * FX_GLASS_VERT_SCALE,
-        axis[0][1] * FX_GLASS_VERT_SCALE,
-        axis[0][2] * FX_GLASS_VERT_SCALE,
-    ];
-    let ay = [
-        axis[1][0] * FX_GLASS_VERT_SCALE,
-        axis[1][1] * FX_GLASS_VERT_SCALE,
-        axis[1][2] * FX_GLASS_VERT_SCALE,
-    ];
-    let tex = fx_glass_def_tex_vecs(def);
-    let u0 = read_f32(state, 0);
-    let v0 = read_f32(state, 4);
+    let xform = FxGlassVertXform::new(place, state, def);
     for (dst, word) in out.iter_mut().zip(slice.iter()) {
-        let [ix, iy] = fx_glass_geo_vert(word);
-        let x = ix as f32;
-        let y = iy as f32;
-        dst.xyz = [
-            origin[0] + x * ax[0] + y * ay[0],
-            origin[1] + x * ax[1] + y * ay[1],
-            origin[2] + x * ax[2] + y * ay[2],
-        ];
-        dst.uv = [
-            tex[0][0] * x + tex[0][1] * y + u0,
-            tex[1][0] * x + tex[1][1] * y + v0,
-        ];
+        *dst = xform.apply(fx_glass_geo_vert(word));
     }
     Some(vert_n)
 }
 
-pub fn fx_glass_intact_fan_indices(vert_n: u8, out: &mut [u16]) -> Option<usize> {
-    let n = u16::from(vert_n);
-    if n < 3 {
+/// Transforms a decoded piece's border vertices, the outer contour followed by every
+/// hole contour, which is the index space its stored triangulation addresses.
+pub fn fx_glass_piece_verts(
+    place: &[u8; FX_GLASS_PIECE_PLACE],
+    state: &[u8; FX_GLASS_PIECE_STATE],
+    def: &[u8; FX_GLASS_DEF],
+    pgeo: &FxGlassPieceGeo,
+    out: &mut [FxGlassIntactVert],
+) -> Option<usize> {
+    let n = pgeo.border_vert_n;
+    if n < 3 || out.len() < n {
         return None;
     }
-    let want = usize::from(n.saturating_sub(2)) * 3;
-    if out.len() < want {
-        return None;
+    let xform = FxGlassVertXform::new(place, state, def);
+    for (dst, packed) in out.iter_mut().zip(pgeo.border_verts().iter()) {
+        *dst = xform.apply(*packed);
     }
-    let mut w = 0usize;
-    let mut i = 1u16;
-    while i + 1 < n {
-        out[w] = 0;
-        out[w + 1] = i;
-        out[w + 2] = i + 1;
-        w += 3;
-        i += 1;
-    }
-    Some(want)
+    Some(n)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -462,39 +498,51 @@ pub struct FxGlassSlabVert {
     pub binormal_sign: f32,
 }
 
-pub fn fx_glass_slab_counts(vert_n: usize, half_thickness: f32) -> (usize, usize) {
-    if vert_n < 3 {
+/// Vertex and index budget for one piece's slab.
+///
+/// A shard is concave and may enclose holes, so the faces come from the stored
+/// triangulation and the rim runs along every border contour, the outer one and each
+/// hole, rather than along a single convex ring.
+pub fn fx_glass_slab_counts(pgeo: &FxGlassPieceGeo, half_thickness: f32) -> (usize, usize) {
+    let n = pgeo.border_vert_n;
+    if n < 3 || pgeo.tri_n == 0 {
         return (0, 0);
     }
-    let front_tris = vert_n - 2;
-    let front_idx = front_tris * 3;
-    let back_idx = front_idx;
-    let rim = if half_thickness.abs() > 1e-4 {
-        vert_n * 6
-    } else {
-        0
-    };
-    let verts = if half_thickness.abs() > 1e-4 {
-        vert_n * 2 + vert_n * 4
-    } else {
-        vert_n * 2
-    };
-    (verts, front_idx + back_idx + rim)
+    let faces = pgeo.tri_n * 3 * 2;
+    let solid = half_thickness.abs() > 1e-4;
+    let rim_edges = if solid { n } else { 0 };
+    (n * 2 + rim_edges * 4, faces + rim_edges * 6)
+}
+
+/// Walks the border edges of a piece: the outer ring, then each hole's ring.
+fn fx_glass_border_edges(pgeo: &FxGlassPieceGeo, mut f: impl FnMut(usize, usize)) {
+    let n = pgeo.vert_n;
+    for i in 0..n {
+        f(i, (i + 1) % n);
+    }
+    for hole in pgeo.holes() {
+        let start = usize::from(hole.start);
+        let count = usize::from(hole.count);
+        for k in 0..count {
+            f(start + k, start + (k + 1) % count);
+        }
+    }
 }
 
 pub fn fx_glass_emit_slab(
     cpu: &[FxGlassIntactVert],
+    pgeo: &FxGlassPieceGeo,
     normal: [f32; 3],
     tangent: [f32; 3],
     half_thickness: f32,
     out_verts: &mut [FxGlassSlabVert],
     out_idx: &mut [u16],
 ) -> Option<(usize, usize)> {
-    let n = cpu.len();
-    if n < 3 {
+    let n = pgeo.border_vert_n;
+    if n < 3 || cpu.len() < n || pgeo.tri_n == 0 {
         return None;
     }
-    let (need_v, need_i) = fx_glass_slab_counts(n, half_thickness);
+    let (need_v, need_i) = fx_glass_slab_counts(pgeo, half_thickness);
     if out_verts.len() < need_v || out_idx.len() < need_i {
         return None;
     }
@@ -502,7 +550,7 @@ pub fn fx_glass_emit_slab(
     let back_n = [-normal[0], -normal[1], -normal[2]];
     let back_t = [-tangent[0], -tangent[1], -tangent[2]];
     let mut v = 0usize;
-    for src in cpu {
+    for src in &cpu[..n] {
         out_verts[v] = FxGlassSlabVert {
             xyz: [
                 src.xyz[0] + normal[0] * h,
@@ -517,7 +565,7 @@ pub fn fx_glass_emit_slab(
         v += 1;
     }
     let back_base = v as u16;
-    for src in cpu {
+    for src in &cpu[..n] {
         out_verts[v] = FxGlassSlabVert {
             xyz: [
                 src.xyz[0] - normal[0] * h,
@@ -532,26 +580,28 @@ pub fn fx_glass_emit_slab(
         v += 1;
     }
     let mut i = 0usize;
-    let mut k = 1u16;
-    while k + 1 < n as u16 {
-        out_idx[i] = 0;
-        out_idx[i + 1] = k;
-        out_idx[i + 2] = k + 1;
+    for tri in pgeo.triangles() {
+        out_idx[i] = u16::from(tri[0]);
+        out_idx[i + 1] = u16::from(tri[1]);
+        out_idx[i + 2] = u16::from(tri[2]);
         i += 3;
-        k += 1;
     }
-    k = 1u16;
-    while k + 1 < n as u16 {
-        out_idx[i] = back_base;
-        out_idx[i + 1] = back_base + k + 1;
-        out_idx[i + 2] = back_base + k;
+    for tri in pgeo.triangles() {
+        out_idx[i] = back_base + u16::from(tri[0]);
+        out_idx[i + 1] = back_base + u16::from(tri[2]);
+        out_idx[i + 2] = back_base + u16::from(tri[1]);
         i += 3;
-        k += 1;
     }
     if h.abs() > 1e-4 {
-        for e in 0..n {
-            let a = e;
-            let b = (e + 1) % n;
+        let mut edges = [(0usize, 0usize); FX_GLASS_SHARD_VERT_MAX];
+        let mut edge_n = 0usize;
+        fx_glass_border_edges(pgeo, |a, b| {
+            if edge_n < edges.len() {
+                edges[edge_n] = (a, b);
+                edge_n += 1;
+            }
+        });
+        for (a, b) in edges[..edge_n].iter().copied() {
             let ea = [
                 cpu[b].xyz[0] - cpu[a].xyz[0],
                 cpu[b].xyz[1] - cpu[a].xyz[1],
