@@ -341,6 +341,7 @@ impl Plugin for ConsolePlugin {
                             crate::debug_dof::route,
                             crate::debug_distortion::route,
                             crate::debug_glow::route,
+                            crate::debug_vision::route,
                         )
                             .chain(),
                         crate::debug_fog::route,
@@ -674,6 +675,7 @@ fn setup_console(
     crate::debug_view_proj::register_view_proj_commands(&mut registry);
     crate::debug_dof::register(&mut registry);
     crate::debug_glow::register(&mut registry);
+    crate::debug_vision::register(&mut registry);
     crate::debug_distortion::register(&mut registry);
     crate::debug_fog::register(&mut registry);
     crate::debug_smc::register_smc_enable_commands(&mut registry);

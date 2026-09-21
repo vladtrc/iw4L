@@ -69,7 +69,12 @@ pub fn lookup(id: &str, host: Host<'_>) -> Option<Screen> {
         "lobby_game_setup" => Some(lobby_game_setup(host.game_setup, host.browser_enabled)),
         "game_mode_select" => Some(game_mode_select(host.game_setup)),
         "game_map_select" => Some(game_map_select(host.maps, host.game_setup)),
-        "game_lobby" => Some(game_lobby(host.maps, host.game_setup, host.bridge)),
+        "game_lobby" => Some(game_lobby(
+            host.maps,
+            host.game_setup,
+            host.bridge,
+            host.settings,
+        )),
         "find_lobbies" => Some(find_lobbies(
             host.browser_enabled,
             host.browser,
@@ -201,6 +206,7 @@ pub fn game_lobby(
     maps: &[String],
     setup: Option<&GameSetupDraft>,
     bridge: Option<&net::MasterBridgeState>,
+    settings: Option<&frame::GameSettings>,
 ) -> Screen {
     let selected = match bridge {
         Some(net::MasterBridgeState::Hosting { map, .. })
@@ -214,12 +220,36 @@ pub fn game_lobby(
         GamePrivacy::Private => "PRIVATE LOBBY",
         GamePrivacy::Public => "PUBLIC LOBBY",
     };
-    let member_ids = match bridge {
-        Some(net::MasterBridgeState::Hosting { members, .. })
-        | Some(net::MasterBridgeState::Joined { members, .. }) => members.as_slice(),
-        _ => &[],
+    let local_name = settings.map_or("Player", |settings| settings.player_name.as_str());
+    let (players, max_players): (Vec<(&str, bool)>, u8) = match bridge {
+        Some(net::MasterBridgeState::Hosting {
+            identity,
+            members,
+            member_names,
+            max_players,
+            ..
+        })
+        | Some(net::MasterBridgeState::Joined {
+            identity,
+            members,
+            member_names,
+            max_players,
+            ..
+        }) => (
+            members
+                .iter()
+                .map(|member| {
+                    (
+                        member_names.get(member).map_or("Player", String::as_str),
+                        *member == identity.member_id,
+                    )
+                })
+                .collect(),
+            *max_players,
+        ),
+        _ => (vec![(local_name, true)], 18),
     };
-    let member_count = 1 + member_ids.len();
+    let member_count = players.len();
     let skip_votes = match bridge {
         Some(net::MasterBridgeState::Hosting { skip_votes, .. })
         | Some(net::MasterBridgeState::Joined { skip_votes, .. }) => *skip_votes,
@@ -240,82 +270,106 @@ pub fn game_lobby(
     widgets.extend([
         tinted_image(
             "game_lobby/left_fade",
-            -64.0,
+            -107.0,
             0.0,
             280.0,
             480.0,
             "gradient_fadein_fadebottom",
             [1.0, 1.0, 1.0, 0.1],
         ),
-        retail_title("game_lobby/title", 4.0, 18.0, 212.0, mode_label),
+        retail_title("game_lobby/title", -43.0, 32.0, 216.0, mode_label),
         label(
             "game_lobby/privacy",
-            4.0,
-            42.0,
-            212.0,
-            18.0,
-            0.24,
+            432.0,
+            36.0,
+            252.0,
+            22.0,
+            0.3,
             privacy_label,
         ),
     ]);
-    let mut host_row = tinted_image(
-        "game_lobby/host_row",
-        368.0,
-        28.0,
-        272.0,
-        20.0,
-        "playercard_short_bg",
-        [0.0, 0.0, 0.0, 0.5],
-    );
-    host_row.style.animation = WidgetAnimation::None;
-    widgets.push(host_row);
+    widgets.extend([
+        tinted_panel(
+            "game_lobby/menu_rule",
+            -43.0,
+            83.0,
+            216.0,
+            0.5,
+            [1.0, 1.0, 1.0, 0.45],
+        ),
+        right_label(
+            "game_lobby/context_help",
+            -43.0,
+            204.0,
+            216.0,
+            34.0,
+            0.22,
+            " ",
+        ),
+        tinted_panel(
+            "game_lobby/footer",
+            -107.0,
+            428.0,
+            854.0,
+            18.0,
+            [0.0, 0.0, 0.0, 0.3],
+        ),
+    ]);
     widgets.push(label(
-        "game_lobby/host",
-        376.0,
-        28.0,
-        252.0,
-        20.0,
-        0.3,
-        "HOST",
+        "game_lobby/footer_name",
+        -43.0,
+        428.0,
+        216.0,
+        18.0,
+        0.28,
+        local_name,
     ));
-    for (index, member) in member_ids.iter().enumerate() {
-        let id = member.to_string();
-        let y = 48.0 + index as f32 * 20.0;
-        widgets.push(tinted_image(
+    let row_step = (334.0 / member_count.max(1) as f32).min(20.0);
+    for (index, (name, local)) in players.iter().enumerate() {
+        let y = 66.0 + index as f32 * row_step;
+        let row = tinted_panel(
             &format!("game_lobby/member_row/{index}"),
-            368.0,
-            y,
-            272.0,
-            20.0,
-            "playercard_short_bg",
-            [0.0, 0.0, 0.0, 0.5],
-        ));
-        widgets.push(label(
-            &format!("game_lobby/member/{index}"),
-            376.0,
+            432.0,
             y,
             252.0,
-            20.0,
-            0.25,
-            &format!("MEMBER {}", &id[..8]),
-        ));
+            row_step - 2.0,
+            [0.0, 0.0, 0.0, 0.35],
+        );
+        widgets.push(row);
+        let mut player = label(
+            &format!("game_lobby/member/{index}"),
+            450.0,
+            y,
+            226.0,
+            row_step - 2.0,
+            0.34,
+            name,
+        );
+        player.style.font_enum = 3;
+        if *local {
+            player.style.fore_color = [1.0, 0.85, 0.35, 1.0];
+        }
+        widgets.push(player);
     }
-    widgets.push(right_label(
+    let mut count = right_label(
         "game_lobby/member_count",
-        368.0,
-        408.0,
-        264.0,
+        432.0,
+        406.0,
+        252.0,
         22.0,
-        0.34,
-        &format!("{member_count}/18 PLAYERS"),
-    ));
+        0.5,
+        &format!("{member_count}/{max_players} PLAYERS"),
+    );
+    count.style.font_enum = 9;
+    count.style.fore_color = [1.0, 1.0, 1.0, 0.35];
+    widgets.push(count);
     if let Some(map) = selected
         && is_host
     {
         widgets.push(retail_button(
             "game_lobby/start",
-            -64.0,
-            48.0,
+            -107.0,
+            86.0,
             "@MENU_START_GAME_CAPS",
             vec![
                 ScreenCmd::PlaySound("mouse_click".into()),
@@ -328,8 +382,8 @@ pub fn game_lobby(
     }
     widgets.push(retail_button(
         "game_lobby/classes",
-        -64.0,
-        if is_host { 68.0 } else { 48.0 },
+        -107.0,
+        if is_host { 106.0 } else { 86.0 },
         "@MENU_CREATE_A_CLASS_CAPS",
         vec![
             ScreenCmd::PlaySound("mouse_click".into()),
@@ -338,8 +392,8 @@ pub fn game_lobby(
     ));
     widgets.push(retail_button(
         "game_lobby/back",
-        -64.0,
-        420.0,
+        -107.0,
+        400.0,
         "BACK",
         vec![
             ScreenCmd::PlaySound("mouse_click".into()),
@@ -350,8 +404,8 @@ pub fn game_lobby(
     if is_host {
         widgets.push(retail_button(
             "game_lobby/game_setup",
-            -64.0,
-            88.0,
+            -107.0,
+            126.0,
             "@MENU_GAME_SETUP_CAPS",
             vec![
                 ScreenCmd::PlaySound("mouse_click".into()),
@@ -361,8 +415,8 @@ pub fn game_lobby(
     } else if privacy == GamePrivacy::Public {
         widgets.push(retail_button(
             "game_lobby/vote",
-            -64.0,
-            68.0,
+            -107.0,
+            106.0,
             "@MENU_VOTE_TO_SKIP_CAPS",
             vec![
                 ScreenCmd::PlaySound("mouse_click".into()),
@@ -371,26 +425,18 @@ pub fn game_lobby(
         ));
     }
     if privacy == GamePrivacy::Public {
-        let vote_status = if !member_ids.is_empty() && skip_votes as usize == member_ids.len() {
+        let vote_status = if member_count > 1 && skip_votes as usize == member_count - 1 {
             "VETO PASSED - HOST MUST CHANGE MAP".to_owned()
         } else {
             format!(
                 "VOTE TO SKIP: {skip_votes}/{} MEMBER VOTES",
-                member_ids.len()
+                member_count.saturating_sub(1)
             )
         };
-        widgets.push(tinted_panel(
-            "game_lobby/vote_strip",
-            0.0,
-            301.0,
-            216.0,
-            20.0,
-            [0.25, 0.0, 0.0, 0.5],
-        ));
         widgets.push(label(
             "game_lobby/vote_status",
-            0.0,
-            301.0,
+            -43.0,
+            372.0,
             216.0,
             20.0,
             0.24,
@@ -400,24 +446,24 @@ pub fn game_lobby(
     if let Some(map) = selected {
         widgets.push(image(
             "game_lobby/map_preview",
-            0.0,
-            281.0,
+            -43.0,
+            244.0,
             216.0,
             122.0,
             &game_preview_stem(map),
         ));
         widgets.push(tinted_panel(
             "game_lobby/map_strip",
-            0.0,
-            281.0,
+            -43.0,
+            244.0,
             216.0,
             20.0,
             [0.0, 0.0, 0.0, 0.5],
         ));
-        widgets.push(label(
+        widgets.push(right_label(
             "game_lobby/map",
-            0.0,
-            281.0,
+            -43.0,
+            244.0,
             216.0,
             20.0,
             0.34,
@@ -425,16 +471,16 @@ pub fn game_lobby(
         ));
         widgets.push(tinted_panel(
             "game_lobby/mode_strip",
-            0.0,
-            383.0,
+            -43.0,
+            346.0,
             216.0,
             20.0,
             [0.0, 0.0, 0.0, 0.5],
         ));
-        widgets.push(label(
+        widgets.push(right_label(
             "game_lobby/mode",
-            0.0,
-            383.0,
+            -43.0,
+            346.0,
             216.0,
             20.0,
             0.28,
@@ -443,8 +489,8 @@ pub fn game_lobby(
     } else {
         widgets.push(label(
             "game_lobby/no_map",
-            0.0,
-            281.0,
+            -43.0,
+            244.0,
             216.0,
             20.0,
             0.32,
@@ -454,9 +500,9 @@ pub fn game_lobby(
     if let Some(net::MasterBridgeState::Failed { error, .. }) = bridge {
         widgets.push(label(
             "game_lobby/error",
-            4.0,
-            218.0,
-            300.0,
+            432.0,
+            430.0,
+            252.0,
             44.0,
             0.24,
             &format!("LOBBY ERROR: {error}"),
@@ -469,13 +515,29 @@ pub fn game_lobby(
     {
         widgets.push(label(
             "game_lobby/connecting",
-            4.0,
-            218.0,
-            320.0,
+            432.0,
+            430.0,
+            252.0,
             22.0,
             0.26,
             "CONNECTING TO PUBLIC LOBBY...",
         ));
+    }
+    for widget in &mut widgets {
+        if widget.focusable {
+            widget.style.text_scale = 0.32;
+        }
+        if widget.id == "game_lobby/title" {
+            widget.style.text_scale = 0.35;
+        }
+        widget.help = match widget.id.as_str() {
+            "game_lobby/start" => Some("Start the match with these players.".into()),
+            "game_lobby/classes" => Some("Create your own custom classes.".into()),
+            "game_lobby/game_setup" => Some("Change the map and game mode.".into()),
+            "game_lobby/vote" => Some("Vote to skip the current map.".into()),
+            "game_lobby/back" => Some("Leave this lobby.".into()),
+            _ => None,
+        };
     }
     Screen {
         id: "game_lobby".into(),

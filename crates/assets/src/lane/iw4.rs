@@ -142,6 +142,8 @@ impl ZoneLane for Iw4Lane {
             .file_stem()
             .and_then(|stem| stem.to_str())
             .map(|stem| format!("vision/{}.vision", stem.to_ascii_lowercase()));
+        let mut film_visions = common_film_visions.clone();
+        film_visions.extend(sink.film_visions.clone());
         let film_result = match vision_name.as_ref() {
             Some(name) => match sink.film_visions.remove(name) {
                 Some(Ok(vision)) => Ok(Some((vision, "fastfile"))),
@@ -392,6 +394,7 @@ impl ZoneLane for Iw4Lane {
                     dyn_ents,
                     exp_fog,
                     film_vision,
+                    film_visions,
                     createart_name,
                     policy: WorldDrawPolicy::iw4(),
                     ..Default::default()
@@ -752,6 +755,7 @@ impl ZoneLane for Iw4Lane {
                         intermission_view,
                         exp_fog,
                         film_vision,
+                        film_visions,
                         createart_name,
                         min,
                         max,
@@ -792,6 +796,7 @@ impl ZoneLane for Iw4Lane {
                         dyn_ents,
                         exp_fog,
                         film_vision,
+                        film_visions,
                         createart_name,
                         policy: WorldDrawPolicy::iw4(),
                         ..Default::default()

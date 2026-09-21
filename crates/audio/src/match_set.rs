@@ -127,6 +127,15 @@ fn queue_match_clips(
             request_named(clips, &bank.0, ns, &emitter.soundalias, &mut required);
         }
     }
+    let mut destructible_loops: Vec<&str> = Vec::new();
+    for alias in gamemode_iw4::destructible_loop_sound_aliases() {
+        if destructible_loops.contains(&alias) {
+            continue;
+        }
+        destructible_loops.push(alias);
+        aliases += 1;
+        request_named(clips, &bank.0, namespace.namespace, alias, &mut required);
+    }
     for alias in RADIATION_DOOR_ALIASES {
         aliases += 1;
         request_named(clips, &bank.0, AssetNamespace::T5, alias, &mut required);

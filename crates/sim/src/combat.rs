@@ -1058,6 +1058,7 @@ pub(crate) fn phase_trace(
                             attacker_life: em.attacker_life,
                             target,
                             amount: scaled as u32,
+                            splash: false,
                             epoch,
                         };
                         let report = world

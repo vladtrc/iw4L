@@ -163,6 +163,7 @@ pub enum TessJob {
 
 #[derive(Resource, Default)]
 pub struct HudTessPass {
+    pub overhead_names: TessJob,
     pub compass: TessJob,
     pub scorebar: TessJob,
     pub splash: TessJob,

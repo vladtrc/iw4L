@@ -269,13 +269,13 @@ impl ToyDestructibleKind {
     }
 
     pub const fn destroyed_state(self) -> u8 {
-        self.definition().destroyed_state
+        self.definition().destroyed_state()
     }
 
     pub const fn initial_body(self) -> VehicleBodyState {
         VehicleBodyState {
             state_index: 0,
-            health: self.definition().health[0],
+            health: self.definition().initial_health(),
         }
     }
 
@@ -432,637 +432,1042 @@ pub const VEHICLE_POLICECAR: VehicleDestructibleDefinition = VehicleDestructible
     },
 };
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ToyDestructibleDefinition {
-    pub health: &'static [u32],
-    pub destroyed_state: u8,
+/// Splash bias explosive damage carries when a destructible declares no scaler
+/// of its own.
+pub const MP_EXPLOSIVE_DAMAGE_BIAS: f32 = 13.0;
 
-    pub health_drain: Option<(u32, f32, u32, &'static str)>,
-
-    pub cap_fx: Option<&'static str>,
-
-    pub leak_loop_fx: Option<&'static str>,
-    pub death_fx: &'static str,
-    pub death_fx_tag: Option<&'static str>,
-    pub death_sound: &'static str,
-    pub explode_force: (u32, u32),
-    pub explode_range_mp: u32,
-
-    pub explode_damage: (u32, u32),
-    pub explode_origin_offset_z: f32,
-    pub husk: &'static str,
+/// Which damage causes a stage reacts to. A rejected cause leaves the stage
+/// untouched: no health comes off and no action fires.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DamageCauseFilter {
+    Any,
+    Splash,
+    NotSplash,
 }
 
-pub const TOY_OXYGEN_HEALTH: &[u32] = &[150, 300];
-pub const TOY_OXYGEN_DESTROYED_STATE: u8 = 2;
+impl DamageCauseFilter {
+    pub const fn accepts(self, splash: bool) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Splash => splash,
+            Self::NotSplash => !splash,
+        }
+    }
+}
+
+/// A one-shot effect a stage plays as it is left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DestructibleFx {
+    pub tag: &'static str,
+    pub name: &'static str,
+    /// `false` fires the effect along [`VEHICLE_DEATH_FX_FORWARD`] from the tag
+    /// origin instead of along the tag's own axes.
+    pub use_tag_angles: bool,
+    pub cause: DamageCauseFilter,
+}
+
+impl DestructibleFx {
+    pub const fn on(tag: &'static str, name: &'static str) -> Self {
+        Self {
+            tag,
+            name,
+            use_tag_angles: true,
+            cause: DamageCauseFilter::Any,
+        }
+    }
+
+    pub const fn flat(mut self) -> Self {
+        self.use_tag_angles = false;
+        self
+    }
+
+    pub const fn splash(mut self) -> Self {
+        self.cause = DamageCauseFilter::Splash;
+        self
+    }
+
+    pub const fn not_splash(mut self) -> Self {
+        self.cause = DamageCauseFilter::NotSplash;
+        self
+    }
+}
+
+/// An effect a stage keeps replaying while the destructible sits past it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DestructibleLoopFx {
+    pub tag: &'static str,
+    pub name: &'static str,
+    pub interval_ms: u32,
+}
+
+impl DestructibleLoopFx {
+    pub const fn new(tag: &'static str, name: &'static str, interval_ms: u32) -> Self {
+        Self {
+            tag,
+            name,
+            interval_ms,
+        }
+    }
+}
+
+/// A part that leaves the body when the stage is left: cap, valve, drawer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DestructiblePartThrow {
+    pub tag: &'static str,
+    pub model: &'static str,
+    pub velocity: [i32; 3],
+}
+
+impl DestructiblePartThrow {
+    pub const fn new(tag: &'static str, model: &'static str, velocity: [i32; 3]) -> Self {
+        Self {
+            tag,
+            model,
+            velocity,
+        }
+    }
+}
+
+/// Health the stage bleeds on its own once it is left, until the destructible
+/// reaches its last stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DestructibleHealthDrain {
+    pub amount: u32,
+    pub interval_ms: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DestructibleExplode {
+    pub range_mp: u32,
+    pub damage: (u32, u32),
+    pub origin_offset_z: f32,
+}
+
+/// One rung of a destructible's staircase.
+///
+/// `model` and `health` describe the stage as it is *entered*; every action
+/// list describes what happens as it is *left*.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ToyStage {
+    /// `None` keeps whatever model the previous stages left standing.
+    pub model: Option<&'static str>,
+    pub health: u32,
+    pub cause: DamageCauseFilter,
+    pub fx: &'static [DestructibleFx],
+    pub sounds: &'static [&'static str],
+    pub loop_fx: &'static [DestructibleLoopFx],
+    pub loop_sounds: &'static [&'static str],
+    pub throws: &'static [DestructiblePartThrow],
+    pub health_drain: Option<DestructibleHealthDrain>,
+    pub explode: Option<DestructibleExplode>,
+}
+
+impl ToyStage {
+    pub const fn new(health: u32) -> Self {
+        Self {
+            model: None,
+            health,
+            cause: DamageCauseFilter::Any,
+            fx: &[],
+            sounds: &[],
+            loop_fx: &[],
+            loop_sounds: &[],
+            throws: &[],
+            health_drain: None,
+            explode: None,
+        }
+    }
+
+    pub const fn terminal(model: &'static str) -> Self {
+        Self::new(0).model(model)
+    }
+
+    pub const fn model(mut self, model: &'static str) -> Self {
+        self.model = Some(model);
+        self
+    }
+
+    pub const fn splash_only(mut self) -> Self {
+        self.cause = DamageCauseFilter::Splash;
+        self
+    }
+
+    pub const fn fx(mut self, fx: &'static [DestructibleFx]) -> Self {
+        self.fx = fx;
+        self
+    }
+
+    pub const fn sounds(mut self, sounds: &'static [&'static str]) -> Self {
+        self.sounds = sounds;
+        self
+    }
+
+    pub const fn loop_fx(mut self, loop_fx: &'static [DestructibleLoopFx]) -> Self {
+        self.loop_fx = loop_fx;
+        self
+    }
+
+    pub const fn loop_sounds(mut self, loop_sounds: &'static [&'static str]) -> Self {
+        self.loop_sounds = loop_sounds;
+        self
+    }
+
+    pub const fn throws(mut self, throws: &'static [DestructiblePartThrow]) -> Self {
+        self.throws = throws;
+        self
+    }
+
+    pub const fn drain(mut self, amount: u32, interval_ms: u32) -> Self {
+        self.health_drain = Some(DestructibleHealthDrain {
+            amount,
+            interval_ms,
+        });
+        self
+    }
+
+    pub const fn explode(
+        mut self,
+        range_mp: u32,
+        damage: (u32, u32),
+        origin_offset_z: f32,
+    ) -> Self {
+        self.explode = Some(DestructibleExplode {
+            range_mp,
+            damage,
+            origin_offset_z,
+        });
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ToyDestructibleDefinition {
+    /// Stage 0 is the standing prop; the last stage is the husk.
+    pub stages: &'static [ToyStage],
+    pub splash_scaler: Option<f32>,
+}
+
+impl ToyDestructibleDefinition {
+    pub const fn destroyed_state(&self) -> u8 {
+        (self.stages.len() - 1) as u8
+    }
+
+    pub const fn initial_health(&self) -> u32 {
+        self.stages[0].health
+    }
+
+    pub const fn splash_damage_scaler(&self) -> f32 {
+        match self.splash_scaler {
+            Some(scaler) => scaler,
+            None => MP_EXPLOSIVE_DAMAGE_BIAS,
+        }
+    }
+
+    pub fn stage(&self, state: u8) -> &'static ToyStage {
+        let last = self.stages.len() - 1;
+        &self.stages[(state as usize).min(last)]
+    }
+
+    /// Actions fire on the way out of a stage, so entering `state` runs the
+    /// list belonging to `state - 1`.
+    pub fn left_stage(&self, entered: u8) -> Option<&'static ToyStage> {
+        let index = (entered as usize).checked_sub(1)?;
+        self.stages.get(index)
+    }
+
+    /// The model the prop stands in at `state`: the newest one any stage up to
+    /// here declared.
+    pub fn stage_model(&self, state: u8) -> Option<&'static str> {
+        let last = (state as usize).min(self.stages.len() - 1);
+        self.stages[..=last]
+            .iter()
+            .rev()
+            .find_map(|stage| stage.model)
+    }
+
+    pub fn husk(&self) -> Option<&'static str> {
+        self.stage_model(self.destroyed_state())
+    }
+
+    pub fn stage_models(&self) -> impl Iterator<Item = &'static str> {
+        let stages = self.stages;
+        stages.iter().filter_map(|stage| stage.model)
+    }
+
+    /// Leaving a stage cuts every running loop effect when that stage anchors
+    /// an effect to a tag of its own -- looping or one-shot -- and otherwise
+    /// leaves them burning, past the last stage included. So the newest left
+    /// stage that anchors anything decides what is still playing: its own loop
+    /// effects, which is nothing at all for a stage that only fires a one-shot.
+    pub fn active_loop_fx(&self, state: u8) -> &'static [DestructibleLoopFx] {
+        let Some(newest) = (state as usize).checked_sub(1) else {
+            return &[];
+        };
+        let newest = newest.min(self.stages.len() - 1);
+        self.stages[..=newest]
+            .iter()
+            .rev()
+            .find(|stage| !stage.fx.is_empty() || !stage.loop_fx.is_empty())
+            .map(|stage| stage.loop_fx)
+            .unwrap_or(&[])
+    }
+
+    /// Loop sounds are cut at every transition and only the stage just left
+    /// speaks.
+    pub fn active_loop_sounds(&self, state: u8) -> &'static [&'static str] {
+        match self.left_stage(state) {
+            Some(stage) => stage.loop_sounds,
+            None => &[],
+        }
+    }
+
+    /// Tags whose parts have already been thrown off by `state`.
+    pub fn hidden_tags(&self, state: u8) -> impl Iterator<Item = &'static str> {
+        let thrown = &self.stages[..(state as usize).min(self.stages.len())];
+        thrown
+            .iter()
+            .flat_map(|stage| stage.throws.iter().map(|throw| throw.tag))
+    }
+}
+
+/// Every loop a destructible can speak, so a client prepares them with the
+/// rest of the match audio instead of at the first hiss.
+pub fn destructible_loop_sound_aliases() -> impl Iterator<Item = &'static str> {
+    TOY_DESTRUCTIBLE_KINDS
+        .iter()
+        .flat_map(|kind| kind.definition().stages.iter())
+        .flat_map(|stage| stage.loop_sounds.iter().copied())
+}
 
 pub const TOY_OXYGEN_TANK_01: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_OXYGEN_HEALTH,
-    destroyed_state: TOY_OXYGEN_DESTROYED_STATE,
-    health_drain: Some((12, 0.2, 64, "allies")),
-    cap_fx: Some("props/oxygen_tank01_cap"),
-    leak_loop_fx: Some("distortion/oxygen_tank_leak"),
-    death_fx: "explosions/oxygen_tank01_explosion",
-    death_fx_tag: Some("tag_fx"),
-    death_sound: "oxygen_tank_explode",
-    explode_force: (7_000, 8_000),
-    explode_range_mp: 256,
-    explode_damage: (16, 150),
-    explode_origin_offset_z: 32.0,
-    husk: "machinery_oxygen_tank01_des",
+    stages: &[
+        ToyStage::new(150)
+            .fx(&[DestructibleFx::on("tag_cap", "props/oxygen_tank01_cap")])
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_cap",
+                "distortion/oxygen_tank_leak",
+                400,
+            )])
+            .loop_sounds(&["oxygen_tank_leak_loop"])
+            .drain(12, 200),
+        ToyStage::new(300)
+            .model("machinery_oxygen_tank01_dam")
+            .fx(&[DestructibleFx::on("tag_fx", "explosions/oxygen_tank01_explosion").flat()])
+            .sounds(&["oxygen_tank_explode"])
+            .explode(256, (16, 150), 32.0),
+        ToyStage::terminal("machinery_oxygen_tank01_des"),
+    ],
+    splash_scaler: None,
 };
 
 pub const TOY_OXYGEN_TANK_02: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_OXYGEN_HEALTH,
-    destroyed_state: TOY_OXYGEN_DESTROYED_STATE,
-    health_drain: Some((12, 0.2, 64, "allies")),
-    cap_fx: Some("props/oxygen_tank02_cap"),
-    leak_loop_fx: Some("distortion/oxygen_tank_leak"),
-    death_fx: "explosions/oxygen_tank02_explosion",
-    death_fx_tag: Some("tag_fx"),
-    death_sound: "oxygen_tank_explode",
-    explode_force: (7_000, 8_000),
-    explode_range_mp: 256,
-    explode_damage: (16, 150),
-    explode_origin_offset_z: 32.0,
-    husk: "machinery_oxygen_tank02_des",
+    stages: &[
+        ToyStage::new(150)
+            .fx(&[DestructibleFx::on("tag_cap", "props/oxygen_tank02_cap")])
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_cap",
+                "distortion/oxygen_tank_leak",
+                400,
+            )])
+            .loop_sounds(&["oxygen_tank_leak_loop"])
+            .drain(12, 200),
+        ToyStage::new(300)
+            .model("machinery_oxygen_tank02_dam")
+            .fx(&[DestructibleFx::on("tag_fx", "explosions/oxygen_tank02_explosion").flat()])
+            .sounds(&["oxygen_tank_explode"])
+            .explode(256, (16, 150), 32.0),
+        ToyStage::terminal("machinery_oxygen_tank02_des"),
+    ],
+    splash_scaler: None,
 };
-
-pub const TOY_PROPANE_TANK02_HEALTH: &[u32] = &[50, 350, 350, 150, 150];
-pub const TOY_PROPANE_TANK02_DESTROYED_STATE: u8 = 5;
 
 pub const TOY_PROPANE_TANK02: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_PROPANE_TANK02_HEALTH,
-    destroyed_state: TOY_PROPANE_TANK02_DESTROYED_STATE,
-    health_drain: Some((12, 0.2, 300, "allies")),
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: "explosions/propane_large_exp",
-    death_fx_tag: Some("tag_fx"),
-    death_sound: "propanetank02_explode",
-    explode_force: (7_000, 8_000),
-    explode_range_mp: 600,
-    explode_damage: (32, 300),
-    explode_origin_offset_z: 80.0,
-    husk: "com_propane_tank02_DES",
+    stages: &[
+        ToyStage::new(50),
+        ToyStage::new(350)
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_cap",
+                "distortion/propane_cap_distortion",
+                100,
+            )])
+            .loop_sounds(&["propanetank02_gas_leak_loop"]),
+        ToyStage::new(350)
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_cap",
+                "fire/propane_capfire_leak",
+                100,
+            )])
+            .sounds(&["propanetank02_flareup_med"])
+            .loop_sounds(&["propanetank02_fire_med"])
+            .drain(12, 200),
+        ToyStage::new(150)
+            .fx(&[
+                DestructibleFx::on("tag_valve", "fire/propane_valvefire_flareup"),
+                DestructibleFx::on("tag_cap", "fire/propane_capfire_flareup"),
+            ])
+            .loop_fx(&[
+                DestructibleLoopFx::new("tag_cap", "fire/propane_capfire", 600),
+                DestructibleLoopFx::new("tag_valve", "fire/propane_valvefire", 100),
+            ])
+            .sounds(&["propanetank02_flareup2_med"])
+            .loop_sounds(&["propanetank02_fire_med"])
+            .throws(&[
+                DestructiblePartThrow::new("tag_cap", "com_propane_tank02_cap", [50, 0, 0]),
+                DestructiblePartThrow::new("tag_valve", "com_propane_tank02_valve", [50, 0, 0]),
+            ]),
+        ToyStage::new(150)
+            .fx(&[
+                DestructibleFx::on("tag_fx", "fire/propane_small_fire"),
+                DestructibleFx::on("tag_fx", "explosions/propane_large_exp_fireball"),
+                DestructibleFx::on("tag_fx", "explosions/propane_large_exp").flat(),
+            ])
+            .sounds(&["propanetank02_explode"])
+            .loop_sounds(&["propanetank02_fire_blown_med"])
+            .explode(600, (32, 300), 80.0),
+        ToyStage::terminal("com_propane_tank02_des"),
+    ],
+    splash_scaler: Some(5.0),
 };
-
-pub const TOY_PROPANE_TANK02_SMALL_HEALTH: &[u32] = &[50, 350, 350, 200, 200];
-pub const TOY_PROPANE_TANK02_SMALL_DESTROYED_STATE: u8 = 5;
 
 pub const TOY_PROPANE_TANK02_SMALL: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_PROPANE_TANK02_SMALL_HEALTH,
-    destroyed_state: TOY_PROPANE_TANK02_SMALL_DESTROYED_STATE,
-    health_drain: Some((12, 0.2, 210, "allies")),
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: "explosions/propane_large_exp",
-    death_fx_tag: Some("tag_fx"),
-    death_sound: "propanetank02_explode",
-    explode_force: (7_000, 8_000),
-    explode_range_mp: 400,
-    explode_damage: (32, 100),
-    explode_origin_offset_z: 80.0,
-    husk: "com_propane_tank02_small_DES",
+    stages: &[
+        ToyStage::new(50),
+        ToyStage::new(350)
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_cap",
+                "distortion/propane_cap_distortion",
+                100,
+            )])
+            .loop_sounds(&["propanetank02_gas_leak_loop"]),
+        ToyStage::new(350)
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_cap",
+                "fire/propane_capfire_leak",
+                100,
+            )])
+            .sounds(&["propanetank02_flareup_med"])
+            .loop_sounds(&["propanetank02_fire_med"])
+            .drain(12, 200),
+        ToyStage::new(200)
+            .fx(&[
+                DestructibleFx::on("tag_valve", "fire/propane_valvefire_flareup"),
+                DestructibleFx::on("tag_cap", "fire/propane_capfire_flareup"),
+            ])
+            .loop_fx(&[
+                DestructibleLoopFx::new("tag_cap", "fire/propane_capfire", 600),
+                DestructibleLoopFx::new("tag_valve", "fire/propane_valvefire", 100),
+            ])
+            .sounds(&["propanetank02_flareup_med"])
+            .loop_sounds(&["propanetank02_fire_med"])
+            .throws(&[
+                DestructiblePartThrow::new("tag_cap", "com_propane_tank02_small_cap", [50, 0, 0]),
+                DestructiblePartThrow::new(
+                    "tag_valve",
+                    "com_propane_tank02_small_valve",
+                    [50, 0, 0],
+                ),
+            ]),
+        ToyStage::new(200)
+            .fx(&[
+                DestructibleFx::on("tag_fx", "fire/propane_small_fire"),
+                DestructibleFx::on("tag_fx", "explosions/propane_large_exp").flat(),
+            ])
+            .sounds(&["propanetank02_explode"])
+            .explode(400, (32, 100), 80.0),
+        ToyStage::terminal("com_propane_tank02_small_des"),
+    ],
+    splash_scaler: Some(10.0),
 };
 
-pub const TOY_TV_HEALTH: &[u32] = &[1];
-pub const TOY_TV_DESTROYED_STATE: u8 = 1;
-pub const TOY_TV_DEATH_SOUND: &str = "tv_shot_burst";
-pub const TOY_TV_DEATH_FX_TAG: &str = "tag_fx";
-pub const TOY_TUBETV_DEATH_FX: &str = "explosions/tv_explosion";
-pub const TOY_FLATSCREEN_DEATH_FX: &str = "explosions/tv_flatscreen_explosion";
-pub const TOY_TUBETV_EXPLODE_RANGE_MP: u32 = 9;
-pub const TOY_FLATSCREEN_EXPLODE_RANGE_MP: u32 = 10;
-pub const TOY_TUBETV_EXPLODE_ORIGIN_OFFSET_Z: f32 = 12.0;
-pub const TOY_FLATSCREEN_EXPLODE_ORIGIN_OFFSET_Z: f32 = 15.0;
+pub const TOY_TUBETV_TV1: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(1)
+            .fx(&[DestructibleFx::on("tag_fx", "explosions/tv_explosion")])
+            .sounds(&["tv_shot_burst"])
+            .explode(9, (3, 3), 12.0),
+        ToyStage::terminal("com_tv1_d"),
+    ],
+    splash_scaler: Some(1.0),
+};
 
-const fn toy_tv(
-    husk: &'static str,
-    death_fx: &'static str,
-    explode_range_mp: u32,
-    explode_origin_offset_z: f32,
-) -> ToyDestructibleDefinition {
+pub const TOY_TUBETV_TV2: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(1)
+            .fx(&[DestructibleFx::on("tag_fx", "explosions/tv_explosion")])
+            .sounds(&["tv_shot_burst"])
+            .explode(9, (3, 3), 12.0),
+        ToyStage::terminal("com_tv2_d"),
+    ],
+    splash_scaler: Some(1.0),
+};
+
+pub const TOY_FLATSCREEN_01: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(1)
+            .fx(&[DestructibleFx::on(
+                "tag_fx",
+                "explosions/tv_flatscreen_explosion",
+            )])
+            .sounds(&["tv_shot_burst"])
+            .explode(10, (3, 3), 15.0),
+        ToyStage::terminal("ma_flatscreen_tv_broken_01"),
+    ],
+    splash_scaler: Some(1.0),
+};
+
+pub const TOY_FLATSCREEN_02: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(1)
+            .fx(&[DestructibleFx::on(
+                "tag_fx",
+                "explosions/tv_flatscreen_explosion",
+            )])
+            .sounds(&["tv_shot_burst"])
+            .explode(10, (3, 3), 15.0),
+        ToyStage::terminal("ma_flatscreen_tv_broken_02"),
+    ],
+    splash_scaler: Some(1.0),
+};
+
+pub const TOY_FLATSCREEN_WALLMOUNT_01: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(1)
+            .fx(&[DestructibleFx::on(
+                "tag_fx",
+                "explosions/tv_flatscreen_explosion",
+            )])
+            .sounds(&["tv_shot_burst"])
+            .explode(10, (3, 3), 15.0),
+        ToyStage::terminal("ma_flatscreen_tv_wallmount_broken_01"),
+    ],
+    splash_scaler: Some(1.0),
+};
+
+pub const TOY_FLATSCREEN_WALLMOUNT_02: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(1)
+            .fx(&[DestructibleFx::on(
+                "tag_fx",
+                "explosions/tv_flatscreen_explosion",
+            )])
+            .sounds(&["tv_shot_burst"])
+            .explode(10, (3, 3), 15.0),
+        ToyStage::terminal("ma_flatscreen_tv_wallmount_broken_02"),
+    ],
+    splash_scaler: Some(1.0),
+};
+
+pub const TOY_LIGHT_CEILING_FLUORESCENT: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(150)
+            .fx(&[
+                DestructibleFx::on("tag_fx", "misc/light_fluorescent_blowout_runner"),
+                DestructibleFx::on("tag_swing_fx", "misc/light_blowout_swinging_runner"),
+            ])
+            .sounds(&["fluorescent_light_fall", "fluorescent_light_bulb"])
+            .explode(64, (40, 80), 80.0),
+        ToyStage::terminal("me_lightfluohang_double_destroyed"),
+    ],
+    splash_scaler: Some(15.0),
+};
+
+pub const TOY_LIGHT_CEILING_FLUORESCENT_SINGLE: ToyDestructibleDefinition =
     ToyDestructibleDefinition {
-        health: TOY_TV_HEALTH,
-        destroyed_state: TOY_TV_DESTROYED_STATE,
-        health_drain: None,
-        cap_fx: None,
-        leak_loop_fx: None,
-        death_fx,
-        death_fx_tag: Some(TOY_TV_DEATH_FX_TAG),
-        death_sound: TOY_TV_DEATH_SOUND,
-        explode_force: (20, 2_000),
-        explode_range_mp,
-        explode_damage: (3, 3),
-        explode_origin_offset_z,
-        husk,
-    }
-}
+        stages: &[
+            ToyStage::new(150)
+                .fx(&[
+                    DestructibleFx::on("tag_fx", "misc/light_fluorescent_single_blowout_runner"),
+                    DestructibleFx::on("tag_swing_center_fx", "misc/light_blowout_swinging_runner"),
+                    DestructibleFx::on(
+                        "tag_swing_center_fx_far",
+                        "misc/light_blowout_swinging_runner",
+                    ),
+                ])
+                .sounds(&["fluorescent_light_fall", "fluorescent_light_bulb"])
+                .explode(64, (40, 80), 80.0),
+            ToyStage::terminal("me_lightfluohang_single_destroyed"),
+        ],
+        splash_scaler: Some(15.0),
+    };
 
-pub const TOY_TUBETV_TV1: ToyDestructibleDefinition = toy_tv(
-    "com_tv1_d",
-    TOY_TUBETV_DEATH_FX,
-    TOY_TUBETV_EXPLODE_RANGE_MP,
-    TOY_TUBETV_EXPLODE_ORIGIN_OFFSET_Z,
-);
-pub const TOY_TUBETV_TV2: ToyDestructibleDefinition = toy_tv(
-    "com_tv2_d",
-    TOY_TUBETV_DEATH_FX,
-    TOY_TUBETV_EXPLODE_RANGE_MP,
-    TOY_TUBETV_EXPLODE_ORIGIN_OFFSET_Z,
-);
-pub const TOY_FLATSCREEN_01: ToyDestructibleDefinition = toy_tv(
-    "ma_flatscreen_tv_broken_01",
-    TOY_FLATSCREEN_DEATH_FX,
-    TOY_FLATSCREEN_EXPLODE_RANGE_MP,
-    TOY_FLATSCREEN_EXPLODE_ORIGIN_OFFSET_Z,
-);
-pub const TOY_FLATSCREEN_02: ToyDestructibleDefinition = toy_tv(
-    "ma_flatscreen_tv_broken_02",
-    TOY_FLATSCREEN_DEATH_FX,
-    TOY_FLATSCREEN_EXPLODE_RANGE_MP,
-    TOY_FLATSCREEN_EXPLODE_ORIGIN_OFFSET_Z,
-);
-pub const TOY_FLATSCREEN_WALLMOUNT_01: ToyDestructibleDefinition = toy_tv(
-    "ma_flatscreen_tv_wallmount_broken_01",
-    TOY_FLATSCREEN_DEATH_FX,
-    TOY_FLATSCREEN_EXPLODE_RANGE_MP,
-    TOY_FLATSCREEN_EXPLODE_ORIGIN_OFFSET_Z,
-);
-pub const TOY_FLATSCREEN_WALLMOUNT_02: ToyDestructibleDefinition = toy_tv(
-    "ma_flatscreen_tv_wallmount_broken_02",
-    TOY_FLATSCREEN_DEATH_FX,
-    TOY_FLATSCREEN_EXPLODE_RANGE_MP,
-    TOY_FLATSCREEN_EXPLODE_ORIGIN_OFFSET_Z,
-);
+pub const TOY_ELECTRICBOX2: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(150)
+            .fx(&[DestructibleFx::on("tag_fx", "props/electricbox4_explode")])
+            .sounds(&["exp_fusebox_sparks"])
+            .explode(32, (32, 48), 0.0),
+        ToyStage::terminal("me_electricbox2_dest"),
+    ],
+    splash_scaler: Some(15.0),
+};
 
-pub const TOY_FLUORESCENT_HEALTH: &[u32] = &[150];
-pub const TOY_FLUORESCENT_DESTROYED_STATE: u8 = 1;
-pub const TOY_FLUORESCENT_DEATH_SOUND: &str = "fluorescent_light_bulb";
-pub const TOY_FLUORESCENT_DEATH_FX: &str = "misc/light_fluorescent_blowout_runner";
-pub const TOY_FLUORESCENT_SINGLE_DEATH_FX: &str = "misc/light_fluorescent_single_blowout_runner";
-pub const TOY_FLUORESCENT_EXPLODE_RANGE_MP: u32 = 64;
-pub const TOY_FLUORESCENT_EXPLODE_DAMAGE: (u32, u32) = (40, 80);
-
-const fn toy_fluorescent(husk: &'static str, death_fx: &'static str) -> ToyDestructibleDefinition {
-    ToyDestructibleDefinition {
-        health: TOY_FLUORESCENT_HEALTH,
-        destroyed_state: TOY_FLUORESCENT_DESTROYED_STATE,
-        health_drain: None,
-        cap_fx: None,
-        leak_loop_fx: None,
-        death_fx,
-        death_fx_tag: Some("tag_fx"),
-        death_sound: TOY_FLUORESCENT_DEATH_SOUND,
-        explode_force: (20, 2_000),
-        explode_range_mp: TOY_FLUORESCENT_EXPLODE_RANGE_MP,
-        explode_damage: TOY_FLUORESCENT_EXPLODE_DAMAGE,
-        explode_origin_offset_z: 0.0,
-        husk,
-    }
-}
-
-pub const TOY_LIGHT_CEILING_FLUORESCENT: ToyDestructibleDefinition = toy_fluorescent(
-    "me_lightfluohang_double_destroyed",
-    TOY_FLUORESCENT_DEATH_FX,
-);
-pub const TOY_LIGHT_CEILING_FLUORESCENT_SINGLE: ToyDestructibleDefinition = toy_fluorescent(
-    "me_lightfluohang_single_destroyed",
-    TOY_FLUORESCENT_SINGLE_DEATH_FX,
-);
-
-pub const TOY_ELECTRICBOX_HEALTH: &[u32] = &[150];
-pub const TOY_ELECTRICBOX_DESTROYED_STATE: u8 = 1;
-pub const TOY_ELECTRICBOX_DEATH_FX: &str = "props/electricbox4_explode";
-pub const TOY_ELECTRICBOX_DEATH_SOUND: &str = "exp_fusebox_sparks";
-pub const TOY_ELECTRICBOX_EXPLODE_RANGE_MP: u32 = 32;
-pub const TOY_ELECTRICBOX_EXPLODE_DAMAGE: (u32, u32) = (32, 48);
-
-const fn toy_electricbox(
-    husk: &'static str,
-    explode_force: (u32, u32),
-) -> ToyDestructibleDefinition {
-    ToyDestructibleDefinition {
-        health: TOY_ELECTRICBOX_HEALTH,
-        destroyed_state: TOY_ELECTRICBOX_DESTROYED_STATE,
-        health_drain: None,
-        cap_fx: None,
-        leak_loop_fx: None,
-        death_fx: TOY_ELECTRICBOX_DEATH_FX,
-        death_fx_tag: Some("tag_fx"),
-        death_sound: TOY_ELECTRICBOX_DEATH_SOUND,
-        explode_force,
-        explode_range_mp: TOY_ELECTRICBOX_EXPLODE_RANGE_MP,
-        explode_damage: TOY_ELECTRICBOX_EXPLODE_DAMAGE,
-        explode_origin_offset_z: 0.0,
-        husk,
-    }
-}
-
-pub const TOY_ELECTRICBOX2: ToyDestructibleDefinition =
-    toy_electricbox("me_electricbox2_dest", (1_000, 2_000));
-pub const TOY_ELECTRICBOX4: ToyDestructibleDefinition =
-    toy_electricbox("me_electricbox4_dest", (20, 2_000));
-
-pub const TOY_AIRCONDITIONER_HEALTH: &[u32] = &[300];
-pub const TOY_AIRCONDITIONER_DESTROYED_STATE: u8 = 1;
-pub const TOY_AIRCONDITIONER_DEATH_FX: &str = "explosions/airconditioner_ex_explode";
-pub const TOY_AIRCONDITIONER_DEATH_SOUND: &str = "airconditioner_burst";
+pub const TOY_ELECTRICBOX4: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(150)
+            .fx(&[DestructibleFx::on("tag_fx", "props/electricbox4_explode")])
+            .sounds(&["exp_fusebox_sparks"])
+            .explode(32, (32, 48), 0.0),
+        ToyStage::terminal("me_electricbox4_dest"),
+    ],
+    splash_scaler: Some(15.0),
+};
 
 pub const TOY_AIRCONDITIONER: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_AIRCONDITIONER_HEALTH,
-    destroyed_state: TOY_AIRCONDITIONER_DESTROYED_STATE,
-    health_drain: None,
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: TOY_AIRCONDITIONER_DEATH_FX,
-    death_fx_tag: Some("tag_fx"),
-    death_sound: TOY_AIRCONDITIONER_DEATH_SOUND,
-    explode_force: (1_000, 2_000),
-    explode_range_mp: 32,
-    explode_damage: (32, 48),
-    explode_origin_offset_z: 0.0,
-    husk: "com_ex_airconditioner_dam",
+    stages: &[
+        ToyStage::new(0).loop_sounds(&["airconditioner_running_loop"]),
+        ToyStage::new(300)
+            .model("com_ex_airconditioner")
+            .fx(&[DestructibleFx::on(
+                "tag_fx",
+                "explosions/airconditioner_ex_explode",
+            )])
+            .sounds(&["airconditioner_burst"])
+            .explode(32, (32, 48), 0.0),
+        ToyStage::terminal("com_ex_airconditioner_dam"),
+    ],
+    splash_scaler: None,
 };
-
-pub const TOY_WALL_FAN_HEALTH: &[u32] = &[150, 150];
-pub const TOY_WALL_FAN_DESTROYED_STATE: u8 = 2;
-pub const TOY_WALL_FAN_DEATH_FX: &str = "explosions/wallfan_explosion_des";
-pub const TOY_WALL_FAN_DEATH_SOUND: &str = "wall_fan_break";
 
 pub const TOY_WALL_FAN: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_WALL_FAN_HEALTH,
-    destroyed_state: TOY_WALL_FAN_DESTROYED_STATE,
-    health_drain: None,
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: TOY_WALL_FAN_DEATH_FX,
-    death_fx_tag: Some("tag_fx"),
-    death_sound: TOY_WALL_FAN_DEATH_SOUND,
-    explode_force: (0, 0),
-    explode_range_mp: 0,
-    explode_damage: (0, 0),
-    explode_origin_offset_z: 0.0,
-    husk: "cs_wallfan1_dmg",
+    stages: &[
+        ToyStage::new(0).loop_sounds(&["wall_fan_fanning"]),
+        ToyStage::new(150)
+            .model("cs_wallfan1")
+            .fx(&[DestructibleFx::on(
+                "tag_fx",
+                "explosions/wallfan_explosion_dmg",
+            )])
+            .sounds(&["wall_fan_sparks"]),
+        ToyStage::new(150)
+            .model("cs_wallfan1")
+            .fx(&[DestructibleFx::on(
+                "tag_fx",
+                "explosions/wallfan_explosion_des",
+            )])
+            .sounds(&["wall_fan_break"]),
+        ToyStage::terminal("cs_wallfan1_dmg"),
+    ],
+    splash_scaler: None,
 };
-
-pub const TOY_LOCKER_DOUBLE_HEALTH: &[u32] = &[150];
-pub const TOY_LOCKER_DOUBLE_DESTROYED_STATE: u8 = 1;
-pub const TOY_LOCKER_DOUBLE_DEATH_FX: &str = "props/locker_double_des_03_both";
-pub const TOY_LOCKER_DOUBLE_DEATH_SOUND: &str = "lockers_double";
 
 pub const TOY_LOCKER_DOUBLE: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_LOCKER_DOUBLE_HEALTH,
-    destroyed_state: TOY_LOCKER_DOUBLE_DESTROYED_STATE,
-    health_drain: None,
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: TOY_LOCKER_DOUBLE_DEATH_FX,
-    death_fx_tag: Some("tag_fx"),
-    death_sound: TOY_LOCKER_DOUBLE_DEATH_SOUND,
-    explode_force: (0, 0),
-    explode_range_mp: 0,
-    explode_damage: (0, 0),
-    explode_origin_offset_z: 0.0,
-    husk: "com_locker_double_destroyed",
+    stages: &[
+        ToyStage::new(150)
+            .fx(&[DestructibleFx::on(
+                "tag_fx",
+                "props/locker_double_des_03_both",
+            )])
+            .sounds(&["lockers_double"]),
+        ToyStage::terminal("com_locker_double_destroyed"),
+    ],
+    splash_scaler: None,
 };
-
-pub const TOY_FILECABINET_HEALTH: &[u32] = &[120];
-pub const TOY_FILECABINET_DESTROYED_STATE: u8 = 1;
-pub const TOY_FILECABINET_DEATH_FX: &str = "props/filecabinet_dam";
-pub const TOY_FILECABINET_DEATH_SOUND: &str = "exp_filecabinet";
 
 pub const TOY_FILECABINET: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_FILECABINET_HEALTH,
-    destroyed_state: TOY_FILECABINET_DESTROYED_STATE,
-    health_drain: None,
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: TOY_FILECABINET_DEATH_FX,
-    death_fx_tag: Some("tag_drawer_lower"),
-    death_sound: TOY_FILECABINET_DEATH_SOUND,
-    explode_force: (0, 0),
-    explode_range_mp: 0,
-    explode_damage: (0, 0),
-    explode_origin_offset_z: 0.0,
-    husk: "com_filecabinetblackclosed_dam",
+    stages: &[
+        ToyStage::new(120)
+            .fx(&[DestructibleFx::on("tag_drawer_lower", "props/filecabinet_dam").not_splash()])
+            .sounds(&["exp_filecabinet"]),
+        ToyStage::new(20)
+            .model("com_filecabinetblackclosed_dam")
+            .splash_only()
+            .fx(&[DestructibleFx::on("tag_drawer_upper", "props/filecabinet_des").splash()])
+            .sounds(&["exp_filecabinet"])
+            .throws(&[DestructiblePartThrow::new(
+                "tag_drawer_upper",
+                "com_filecabinetblackclosed_drawer",
+                [50, -10, 5],
+            )]),
+        ToyStage::terminal("com_filecabinetblackclosed_des"),
+    ],
+    splash_scaler: None,
 };
 
-pub const TOY_GAS_STATION_TRASH_BIN_01_HEALTH: &[u32] = &[120];
-pub const TOY_GAS_STATION_TRASH_BIN_01_DESTROYED_STATE: u8 = 1;
-pub const TOY_GAS_STATION_TRASH_BIN_01_DEATH_FX: &str = "props/garbage_spew";
-
 pub const TOY_GAS_STATION_TRASH_BIN_01: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_GAS_STATION_TRASH_BIN_01_HEALTH,
-    destroyed_state: TOY_GAS_STATION_TRASH_BIN_01_DESTROYED_STATE,
-    health_drain: None,
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: TOY_GAS_STATION_TRASH_BIN_01_DEATH_FX,
-    death_fx_tag: Some("tag_fx"),
-    death_sound: "",
-    explode_force: (600, 651),
-    explode_range_mp: 1,
-    explode_damage: (10, 20),
-    explode_origin_offset_z: 0.0,
-    husk: "usa_gas_station_trash_bin_01_base",
+    stages: &[
+        ToyStage::new(120)
+            .fx(&[
+                DestructibleFx::on("tag_fx", "props/garbage_spew_des").splash(),
+                DestructibleFx::on("tag_fx", "props/garbage_spew").not_splash(),
+            ])
+            .explode(1, (10, 20), 80.0),
+        ToyStage::terminal("usa_gas_station_trash_bin_01_base"),
+    ],
+    splash_scaler: None,
 };
 
 pub const TOY_GAS_STATION_TRASH_BIN_02: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_GAS_STATION_TRASH_BIN_01_HEALTH,
-    destroyed_state: TOY_GAS_STATION_TRASH_BIN_01_DESTROYED_STATE,
-    health_drain: None,
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: TOY_GAS_STATION_TRASH_BIN_01_DEATH_FX,
-    death_fx_tag: Some("tag_fx_high"),
-    death_sound: "",
-    explode_force: (600, 651),
-    explode_range_mp: 1,
-    explode_damage: (10, 20),
-    explode_origin_offset_z: 0.0,
-    husk: "usa_gas_station_trash_bin_02_base",
+    stages: &[
+        ToyStage::new(120)
+            .fx(&[
+                DestructibleFx::on("tag_fx_high", "props/garbage_spew_des").splash(),
+                DestructibleFx::on("tag_fx_high", "props/garbage_spew").not_splash(),
+            ])
+            .explode(1, (10, 20), 80.0),
+        ToyStage::terminal("usa_gas_station_trash_bin_02_base"),
+    ],
+    splash_scaler: None,
 };
-
-pub const TOY_CEILING_FAN_HEALTH: &[u32] = &[150];
-pub const TOY_CEILING_FAN_DESTROYED_STATE: u8 = 1;
-pub const TOY_CEILING_FAN_DEATH_FX: &str = "explosions/ceiling_fan_explosion";
-pub const TOY_CEILING_FAN_DEATH_SOUND: &str = "ceiling_fan_sparks";
 
 pub const TOY_CEILING_FAN: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_CEILING_FAN_HEALTH,
-    destroyed_state: TOY_CEILING_FAN_DESTROYED_STATE,
-    health_drain: None,
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: TOY_CEILING_FAN_DEATH_FX,
-    death_fx_tag: Some("tag_fx"),
-    death_sound: TOY_CEILING_FAN_DEATH_SOUND,
-    explode_force: (1_000, 2_000),
-    explode_range_mp: 32,
-    explode_damage: (5, 32),
-    explode_origin_offset_z: 0.0,
-    husk: "me_fanceil1_des",
+    stages: &[
+        ToyStage::new(0),
+        ToyStage::new(150)
+            .model("me_fanceil1")
+            .fx(&[DestructibleFx::on(
+                "tag_fx",
+                "explosions/ceiling_fan_explosion",
+            )])
+            .sounds(&["ceiling_fan_sparks"])
+            .explode(32, (5, 32), 0.0),
+        ToyStage::terminal("me_fanceil1_des"),
+    ],
+    splash_scaler: None,
 };
 
-pub const TOY_TRASHBIN_HEALTH: &[u32] = &[120];
-pub const TOY_TRASHBIN_DESTROYED_STATE: u8 = 1;
-pub const TOY_TRASHBIN_DEATH_FX: &str = "props/garbage_spew";
-pub const TOY_TRASHBIN_DEATH_SOUND: &str = "exp_trashcan_sweet";
-pub const TOY_TRASHBIN_EXPLODE_RANGE_MP: u32 = 1;
-pub const TOY_TRASHBIN_EXPLODE_DAMAGE: (u32, u32) = (10, 20);
+pub const TOY_TRASHBIN_01: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(120)
+            .fx(&[
+                DestructibleFx::on("tag_fx", "props/garbage_spew_des").splash(),
+                DestructibleFx::on("tag_fx", "props/garbage_spew").not_splash(),
+            ])
+            .sounds(&["exp_trashcan_sweet"])
+            .explode(1, (10, 20), 80.0),
+        ToyStage::terminal("com_trashbin01_dmg"),
+    ],
+    splash_scaler: None,
+};
 
-const fn toy_trashbin(husk: &'static str, explode_force: (u32, u32)) -> ToyDestructibleDefinition {
-    ToyDestructibleDefinition {
-        health: TOY_TRASHBIN_HEALTH,
-        destroyed_state: TOY_TRASHBIN_DESTROYED_STATE,
-        health_drain: None,
-        cap_fx: None,
-        leak_loop_fx: None,
-        death_fx: TOY_TRASHBIN_DEATH_FX,
-        death_fx_tag: Some("tag_fx"),
-        death_sound: TOY_TRASHBIN_DEATH_SOUND,
-        explode_force,
-        explode_range_mp: TOY_TRASHBIN_EXPLODE_RANGE_MP,
-        explode_damage: TOY_TRASHBIN_EXPLODE_DAMAGE,
-        explode_origin_offset_z: 0.0,
-        husk,
-    }
-}
-
-pub const TOY_TRASHBIN_01: ToyDestructibleDefinition =
-    toy_trashbin("com_trashbin01_dmg", (1_300, 1_351));
-pub const TOY_TRASHBIN_02: ToyDestructibleDefinition =
-    toy_trashbin("com_trashbin02_dmg", (600, 800));
-
-pub const TOY_TRANSFORMER_SMALL01_HEALTH: &[u32] = &[75, 75, 150, 250, 400];
-pub const TOY_TRANSFORMER_SMALL01_DESTROYED_STATE: u8 = 5;
-pub const TOY_TRANSFORMER_SMALL01_DEATH_FX: &str = "explosions/transformer_explosion";
-pub const TOY_TRANSFORMER_SMALL01_DEATH_SOUND: &str = "transformer01_explode";
+pub const TOY_TRASHBIN_02: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(120)
+            .fx(&[
+                DestructibleFx::on("tag_fx", "props/garbage_spew_des").splash(),
+                DestructibleFx::on("tag_fx", "props/garbage_spew").not_splash(),
+            ])
+            .sounds(&["exp_trashcan_sweet"])
+            .explode(1, (10, 20), 80.0),
+        ToyStage::terminal("com_trashbin02_dmg"),
+    ],
+    splash_scaler: None,
+};
 
 pub const TOY_TRANSFORMER_SMALL01: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_TRANSFORMER_SMALL01_HEALTH,
-    destroyed_state: TOY_TRANSFORMER_SMALL01_DESTROYED_STATE,
-    health_drain: Some((24, 0.2, 150, "allies")),
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: TOY_TRANSFORMER_SMALL01_DEATH_FX,
-    death_fx_tag: Some("tag_fx"),
-    death_sound: TOY_TRANSFORMER_SMALL01_DEATH_SOUND,
-    explode_force: (7_000, 8_000),
-    explode_range_mp: 256,
-    explode_damage: (16, 100),
-    explode_origin_offset_z: 0.0,
-    husk: "utility_transformer_small01_dest",
+    stages: &[
+        ToyStage::new(75).loop_fx(&[DestructibleLoopFx::new(
+            "tag_fx",
+            "smoke/car_damage_whitesmoke",
+            400,
+        )]),
+        ToyStage::new(75).loop_fx(&[DestructibleLoopFx::new(
+            "tag_fx",
+            "smoke/car_damage_blacksmoke",
+            400,
+        )]),
+        ToyStage::new(150)
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_fx",
+                "explosions/transformer_spark_runner",
+                500,
+            )])
+            .loop_sounds(&["transformer_spark_loop"])
+            .drain(24, 200),
+        ToyStage::new(250)
+            .loop_fx(&[
+                DestructibleLoopFx::new("tag_fx", "explosions/transformer_spark_runner", 500),
+                DestructibleLoopFx::new("tag_fx", "fire/transformer_small_blacksmoke_fire", 400),
+            ])
+            .sounds(&["transformer01_flareup_med"])
+            .loop_sounds(&["transformer_spark_loop"])
+            .drain(24, 200),
+        ToyStage::new(400)
+            .fx(&[
+                DestructibleFx::on("tag_fx", "explosions/transformer_explosion").flat(),
+                DestructibleFx::on("tag_fx", "fire/firelp_small_pm"),
+            ])
+            .sounds(&["transformer01_explode"])
+            .explode(256, (16, 100), 0.0),
+        ToyStage::terminal("utility_transformer_small01_dest"),
+    ],
+    splash_scaler: Some(15.0),
 };
 
 pub const TOY_TRANSFORMER_RATNEST01: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_TRANSFORMER_SMALL01_HEALTH,
-    destroyed_state: TOY_TRANSFORMER_SMALL01_DESTROYED_STATE,
-    health_drain: Some((24, 0.2, 150, "allies")),
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: TOY_TRANSFORMER_SMALL01_DEATH_FX,
-    death_fx_tag: Some("tag_fx"),
-    death_sound: TOY_TRANSFORMER_SMALL01_DEATH_SOUND,
-    explode_force: (7_000, 8_000),
-    explode_range_mp: 256,
-    explode_damage: (16, 100),
-    explode_origin_offset_z: 0.0,
-    husk: "utility_transformer_ratnest01_dest",
+    stages: &[
+        ToyStage::new(75).loop_fx(&[DestructibleLoopFx::new(
+            "tag_fx",
+            "smoke/car_damage_whitesmoke",
+            400,
+        )]),
+        ToyStage::new(75).loop_fx(&[DestructibleLoopFx::new(
+            "tag_fx",
+            "smoke/car_damage_blacksmoke",
+            400,
+        )]),
+        ToyStage::new(150)
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_sparks",
+                "explosions/transformer_spark_runner",
+                500,
+            )])
+            .loop_sounds(&["transformer_spark_loop"])
+            .drain(24, 200),
+        ToyStage::new(250)
+            .loop_fx(&[
+                DestructibleLoopFx::new("tag_sparks", "explosions/transformer_spark_runner", 500),
+                DestructibleLoopFx::new("tag_fx", "fire/transformer_blacksmoke_fire", 400),
+            ])
+            .sounds(&["transformer01_flareup_med"])
+            .loop_sounds(&["transformer_spark_loop"])
+            .drain(24, 200),
+        ToyStage::new(400)
+            .fx(&[
+                DestructibleFx::on("tag_fx", "explosions/transformer_explosion").flat(),
+                DestructibleFx::on("tag_fx", "fire/firelp_small_pm"),
+            ])
+            .sounds(&["transformer01_explode"])
+            .explode(256, (16, 100), 0.0),
+        ToyStage::terminal("utility_transformer_ratnest01_dest"),
+    ],
+    splash_scaler: Some(15.0),
 };
-
-pub const TOY_WATER_COLLECTOR_HEALTH: &[u32] = &[220];
-pub const TOY_WATER_COLLECTOR_DESTROYED_STATE: u8 = 1;
-pub const TOY_WATER_COLLECTOR_DEATH_FX: &str = "explosions/water_collector_explosion";
-pub const TOY_WATER_COLLECTOR_DEATH_SOUND: &str = "water_collector_splash";
-pub const TOY_WATER_COLLECTOR_EXPLODE_ORIGIN_OFFSET_Z: f32 = 32.0;
 
 pub const TOY_WATER_COLLECTOR: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_WATER_COLLECTOR_HEALTH,
-    destroyed_state: TOY_WATER_COLLECTOR_DESTROYED_STATE,
-    health_drain: None,
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: TOY_WATER_COLLECTOR_DEATH_FX,
-    death_fx_tag: Some("tag_fx"),
-    death_sound: TOY_WATER_COLLECTOR_DEATH_SOUND,
-    explode_force: (500, 800),
-    explode_range_mp: 32,
-    explode_damage: (1, 10),
-    explode_origin_offset_z: TOY_WATER_COLLECTOR_EXPLODE_ORIGIN_OFFSET_Z,
-    husk: "utility_water_collector_base_dest",
+    stages: &[
+        ToyStage::new(220)
+            .fx(&[DestructibleFx::on(
+                "tag_fx",
+                "explosions/water_collector_explosion",
+            )])
+            .sounds(&["water_collector_splash"])
+            .explode(32, (1, 10), 32.0),
+        ToyStage::terminal("utility_water_collector_base_dest"),
+    ],
+    splash_scaler: None,
 };
 
-pub const TOY_NEWSPAPER_STAND_HEALTH: &[u32] = &[120];
-pub const TOY_NEWSPAPER_STAND_DESTROYED_STATE: u8 = 1;
-pub const TOY_NEWSPAPER_STAND_RED_DEATH_FX: &str = "props/news_stand_paper_spill";
-pub const TOY_NEWSPAPER_STAND_BLUE_DEATH_FX: &str = "props/news_stand_paper_spill_shatter";
-pub const TOY_NEWSPAPER_STAND_DEATH_SOUND: &str = "exp_newspaper_box";
-pub const TOY_NEWSPAPER_STAND_EXPLODE_RANGE_MP: u32 = 64;
-pub const TOY_NEWSPAPER_STAND_EXPLODE_DAMAGE: (u32, u32) = (0, 0);
+pub const TOY_NEWSPAPER_STAND_RED: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(120)
+            .fx(&[DestructibleFx::on("tag_door", "props/news_stand_paper_spill").not_splash()])
+            .sounds(&["exp_newspaper_box"])
+            .explode(64, (0, 0), 80.0),
+        ToyStage::new(20)
+            .model("com_newspaperbox_red_dam")
+            .splash_only()
+            .fx(&[DestructibleFx::on("tag_fx", "props/news_stand_explosion").splash()]),
+        ToyStage::terminal("com_newspaperbox_red_des"),
+    ],
+    splash_scaler: None,
+};
 
-const fn toy_newspaper_stand(
-    husk: &'static str,
-    death_fx: &'static str,
-    explode_force: (u32, u32),
-) -> ToyDestructibleDefinition {
-    ToyDestructibleDefinition {
-        health: TOY_NEWSPAPER_STAND_HEALTH,
-        destroyed_state: TOY_NEWSPAPER_STAND_DESTROYED_STATE,
-        health_drain: None,
-        cap_fx: None,
-        leak_loop_fx: None,
-        death_fx,
-        death_fx_tag: Some("tag_door"),
-        death_sound: TOY_NEWSPAPER_STAND_DEATH_SOUND,
-        explode_force,
-        explode_range_mp: TOY_NEWSPAPER_STAND_EXPLODE_RANGE_MP,
-        explode_damage: TOY_NEWSPAPER_STAND_EXPLODE_DAMAGE,
-        explode_origin_offset_z: 0.0,
-        husk,
-    }
-}
+pub const TOY_NEWSPAPER_STAND_BLUE: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(120)
+            .fx(&[
+                DestructibleFx::on("tag_door", "props/news_stand_paper_spill_shatter").not_splash(),
+            ])
+            .sounds(&["exp_newspaper_box"])
+            .explode(64, (0, 0), 80.0),
+        ToyStage::new(20)
+            .model("com_newspaperbox_blue_dam")
+            .splash_only()
+            .fx(&[DestructibleFx::on("tag_fx", "props/news_stand_explosion").splash()]),
+        ToyStage::terminal("com_newspaperbox_blue_des"),
+    ],
+    splash_scaler: None,
+};
 
-pub const TOY_NEWSPAPER_STAND_RED: ToyDestructibleDefinition = toy_newspaper_stand(
-    "com_newspaperbox_red_dam",
-    TOY_NEWSPAPER_STAND_RED_DEATH_FX,
-    (2_500, 2_501),
-);
-pub const TOY_NEWSPAPER_STAND_BLUE: ToyDestructibleDefinition = toy_newspaper_stand(
-    "com_newspaperbox_blue_dam",
-    TOY_NEWSPAPER_STAND_BLUE_DEATH_FX,
-    (800, 2_001),
-);
+pub const TOY_CHICKEN_BLACK_WHITE: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(0).loop_sounds(&["animal_chicken_idle_loop"]),
+        ToyStage::new(25)
+            .model("chicken_black_white")
+            .fx(&[DestructibleFx::on(
+                "tag_origin",
+                "props/chicken_exp_black_white",
+            )])
+            .sounds(&["animal_chicken_death"]),
+        ToyStage::terminal("chicken_black_white"),
+    ],
+    splash_scaler: None,
+};
 
-pub const TOY_CHICKEN_HEALTH: &[u32] = &[25];
-pub const TOY_CHICKEN_DESTROYED_STATE: u8 = 1;
-pub const TOY_CHICKEN_BLACK_WHITE_DEATH_FX: &str = "props/chicken_exp_black_white";
-pub const TOY_CHICKEN_WHITE_DEATH_FX: &str = "props/chicken_exp_white";
-pub const TOY_CHICKEN_DEATH_SOUND: &str = "animal_chicken_death";
-
-const fn toy_chicken(husk: &'static str, death_fx: &'static str) -> ToyDestructibleDefinition {
-    ToyDestructibleDefinition {
-        health: TOY_CHICKEN_HEALTH,
-        destroyed_state: TOY_CHICKEN_DESTROYED_STATE,
-        health_drain: None,
-        cap_fx: None,
-        leak_loop_fx: None,
-        death_fx,
-        death_fx_tag: Some("tag_origin"),
-        death_sound: TOY_CHICKEN_DEATH_SOUND,
-        explode_force: (0, 0),
-        explode_range_mp: 0,
-        explode_damage: (0, 0),
-        explode_origin_offset_z: 0.0,
-        husk,
-    }
-}
-
-pub const TOY_CHICKEN_BLACK_WHITE: ToyDestructibleDefinition =
-    toy_chicken("chicken_black_white", TOY_CHICKEN_BLACK_WHITE_DEATH_FX);
-pub const TOY_CHICKEN_WHITE: ToyDestructibleDefinition =
-    toy_chicken("chicken_white", TOY_CHICKEN_WHITE_DEATH_FX);
-
-pub const TOY_FIREHYDRANT_HEALTH: &[u32] = &[250, 500, 800];
-pub const TOY_FIREHYDRANT_DESTROYED_STATE: u8 = 3;
-pub const TOY_FIREHYDRANT_DEATH_FX: &str = "props/firehydrant_exp";
-pub const TOY_FIREHYDRANT_DEATH_SOUND: &str = "firehydrant_burst";
-pub const TOY_FIREHYDRANT_LEAK_LOOP_FX: &str = "props/firehydrant_leak";
+pub const TOY_CHICKEN_WHITE: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(0).loop_sounds(&["animal_chicken_idle_loop"]),
+        ToyStage::new(25)
+            .model("chicken_white")
+            .fx(&[DestructibleFx::on("tag_origin", "props/chicken_exp_white")])
+            .sounds(&["animal_chicken_death"]),
+        ToyStage::terminal("chicken_white"),
+    ],
+    splash_scaler: None,
+};
 
 pub const TOY_FIREHYDRANT: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_FIREHYDRANT_HEALTH,
-    destroyed_state: TOY_FIREHYDRANT_DESTROYED_STATE,
-    health_drain: Some((12, 0.2, 0, "")),
-    cap_fx: None,
-    leak_loop_fx: Some(TOY_FIREHYDRANT_LEAK_LOOP_FX),
-    death_fx: TOY_FIREHYDRANT_DEATH_FX,
-    death_fx_tag: Some("tag_fx"),
-    death_sound: TOY_FIREHYDRANT_DEATH_SOUND,
-    explode_force: (17_000, 18_000),
-    explode_range_mp: 96,
-    explode_damage: (32, 48),
-    explode_origin_offset_z: 0.0,
-    husk: "com_firehydrant_dest",
+    stages: &[
+        ToyStage::new(250),
+        ToyStage::new(500)
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_cap",
+                "props/firehydrant_leak",
+                100,
+            )])
+            .loop_sounds(&["firehydrant_spray_loop"])
+            .drain(12, 200),
+        ToyStage::new(800)
+            .fx(&[
+                DestructibleFx::on("tag_fx", "props/firehydrant_exp").flat(),
+                DestructibleFx::on("tag_fx", "props/firehydrant_spray_10sec").flat(),
+            ])
+            .sounds(&["firehydrant_burst"])
+            .explode(96, (32, 48), 80.0),
+        ToyStage::terminal("com_firehydrant_dest"),
+    ],
+    splash_scaler: Some(11.0),
 };
-
-pub const TOY_COPIER_HEALTH: &[u32] = &[250, 250, 500, 800];
-pub const TOY_COPIER_DESTROYED_STATE: u8 = 4;
-pub const TOY_COPIER_DEATH_FX: &str = "props/photocopier_exp";
-pub const TOY_COPIER_DEATH_SOUND: &str = "copier_exp";
 
 pub const TOY_COPIER: ToyDestructibleDefinition = ToyDestructibleDefinition {
-    health: TOY_COPIER_HEALTH,
-    destroyed_state: TOY_COPIER_DESTROYED_STATE,
-    health_drain: Some((12, 0.2, 0, "")),
-    cap_fx: None,
-    leak_loop_fx: None,
-    death_fx: TOY_COPIER_DEATH_FX,
-    death_fx_tag: Some("tag_fx"),
-    death_sound: TOY_COPIER_DEATH_SOUND,
-    explode_force: (7_000, 8_000),
-    explode_range_mp: 96,
-    explode_damage: (32, 48),
-    explode_origin_offset_z: 0.0,
-    husk: "prop_photocopier_destroyed",
+    stages: &[
+        ToyStage::new(250).loop_fx(&[DestructibleLoopFx::new(
+            "tag_left_feeder",
+            "smoke/car_damage_whitesmoke",
+            400,
+        )]),
+        ToyStage::new(250).loop_fx(&[DestructibleLoopFx::new(
+            "tag_left_feeder",
+            "smoke/car_damage_blacksmoke",
+            400,
+        )]),
+        ToyStage::new(500)
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_fx",
+                "props/photocopier_sparks",
+                3_000,
+            )])
+            .loop_sounds(&["copier_spark_loop"])
+            .drain(12, 200),
+        ToyStage::new(800)
+            .fx(&[
+                DestructibleFx::on("tag_fx", "props/photocopier_exp").flat(),
+                DestructibleFx::on("tag_fx", "props/photocopier_fire"),
+            ])
+            .sounds(&["copier_exp"])
+            .loop_sounds(&["copier_fire_loop"])
+            .explode(96, (32, 48), 80.0),
+        ToyStage::terminal("prop_photocopier_destroyed"),
+    ],
+    splash_scaler: Some(15.0),
 };
 
-pub const TOY_GENERATOR_HEALTH: &[u32] = &[75, 75, 250, 400];
-pub const TOY_GENERATOR_ON_HEALTH: &[u32] = &[150, 75, 250, 400];
-pub const TOY_GENERATOR_DESTROYED_STATE: u8 = 4;
-pub const TOY_GENERATOR_DEATH_FX: &str = "explosions/generator_explosion";
-pub const TOY_GENERATOR_DEATH_SOUND: &str = "generator01_explode";
+pub const TOY_GENERATOR: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(75).loop_fx(&[DestructibleLoopFx::new(
+            "tag_fx2",
+            "smoke/generator_damage_whitesmoke",
+            400,
+        )]),
+        ToyStage::new(75).loop_fx(&[DestructibleLoopFx::new(
+            "tag_fx2",
+            "smoke/generator_damage_blacksmoke",
+            400,
+        )]),
+        ToyStage::new(250)
+            .loop_fx(&[
+                DestructibleLoopFx::new("tag_fx2", "smoke/generator_damage_blacksmoke", 400),
+                DestructibleLoopFx::new("tag_fx4", "explosions/generator_spark_runner", 900),
+                DestructibleLoopFx::new("tag_fx3", "explosions/generator_spark_runner", 612),
+            ])
+            .loop_sounds(&["generator_spark_loop"])
+            .drain(24, 200),
+        ToyStage::new(400)
+            .fx(&[
+                DestructibleFx::on("tag_fx", "explosions/generator_explosion").flat(),
+                DestructibleFx::on("tag_fx", "fire/generator_des_fire"),
+            ])
+            .sounds(&["generator01_explode"])
+            .explode(128, (16, 50), 0.0),
+        ToyStage::terminal("machinery_generator_des"),
+    ],
+    splash_scaler: Some(15.0),
+};
 
-const fn toy_generator(health: &'static [u32]) -> ToyDestructibleDefinition {
-    ToyDestructibleDefinition {
-        health,
-        destroyed_state: TOY_GENERATOR_DESTROYED_STATE,
-        health_drain: Some((24, 0.2, 64, "allies")),
-        cap_fx: None,
-        leak_loop_fx: None,
-        death_fx: TOY_GENERATOR_DEATH_FX,
-        death_fx_tag: Some("tag_fx"),
-        death_sound: TOY_GENERATOR_DEATH_SOUND,
-        explode_force: (7_000, 8_000),
-        explode_range_mp: 128,
-        explode_damage: (16, 50),
-        explode_origin_offset_z: 0.0,
-        husk: "machinery_generator_des",
-    }
-}
+pub const TOY_GENERATOR_ON: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(0)
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_fx2",
+                "smoke/generator_exhaust",
+                400,
+            )])
+            .loop_sounds(&["generator_running"]),
+        ToyStage::new(150)
+            .model("machinery_generator")
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_fx2",
+                "smoke/generator_damage_whitesmoke",
+                400,
+            )])
+            .loop_sounds(&["generator_running"]),
+        ToyStage::new(75)
+            .loop_fx(&[DestructibleLoopFx::new(
+                "tag_fx2",
+                "smoke/generator_damage_blacksmoke",
+                400,
+            )])
+            .loop_sounds(&["generator_damage_loop"]),
+        ToyStage::new(250)
+            .loop_fx(&[
+                DestructibleLoopFx::new("tag_fx2", "smoke/generator_damage_blacksmoke", 400),
+                DestructibleLoopFx::new("tag_fx4", "explosions/generator_spark_runner", 900),
+                DestructibleLoopFx::new("tag_fx3", "explosions/generator_spark_runner", 612),
+            ])
+            .loop_sounds(&["generator_spark_loop", "generator_damage_loop"])
+            .drain(24, 200),
+        ToyStage::new(400)
+            .fx(&[
+                DestructibleFx::on("tag_fx", "explosions/generator_explosion").flat(),
+                DestructibleFx::on("tag_fx", "fire/generator_des_fire"),
+            ])
+            .sounds(&["generator01_explode"])
+            .explode(128, (16, 50), 0.0),
+        ToyStage::terminal("machinery_generator_des"),
+    ],
+    splash_scaler: Some(15.0),
+};
 
-pub const TOY_GENERATOR: ToyDestructibleDefinition = toy_generator(TOY_GENERATOR_HEALTH);
-pub const TOY_GENERATOR_ON: ToyDestructibleDefinition = toy_generator(TOY_GENERATOR_ON_HEALTH);
+pub const TOY_DT_MIRROR_LARGE: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(150)
+            .fx(&[DestructibleFx::on("tag_fx", "props/mirror_shatter_large")])
+            .sounds(&["mirror_shatter"]),
+        ToyStage::new(150)
+            .model("dt_mirror_large_dam")
+            .fx(&[DestructibleFx::on(
+                "tag_fx",
+                "props/mirror_dt_panel_large_broken",
+            )])
+            .explode(32, (32, 48), 0.0),
+        ToyStage::terminal("dt_mirror_large_des"),
+    ],
+    splash_scaler: Some(5.0),
+};
 
-pub const TOY_DT_MIRROR_HEALTH: &[u32] = &[150, 150];
-pub const TOY_DT_MIRROR_DESTROYED_STATE: u8 = 2;
-pub const TOY_DT_MIRROR_LARGE_DEATH_FX: &str = "props/mirror_dt_panel_large_broken";
-pub const TOY_DT_MIRROR_DEATH_FX: &str = "props/mirror_dt_panel_broken";
-pub const TOY_DT_MIRROR_DEATH_SOUND: &str = "mirror_shatter";
-
-const fn toy_dt_mirror(husk: &'static str, death_fx: &'static str) -> ToyDestructibleDefinition {
-    ToyDestructibleDefinition {
-        health: TOY_DT_MIRROR_HEALTH,
-        destroyed_state: TOY_DT_MIRROR_DESTROYED_STATE,
-        health_drain: None,
-        cap_fx: None,
-        leak_loop_fx: None,
-        death_fx,
-        death_fx_tag: Some("tag_fx"),
-        death_sound: TOY_DT_MIRROR_DEATH_SOUND,
-        explode_force: (1_000, 2_000),
-        explode_range_mp: 32,
-        explode_damage: (32, 48),
-        explode_origin_offset_z: 0.0,
-        husk,
-    }
-}
-
-pub const TOY_DT_MIRROR_LARGE: ToyDestructibleDefinition =
-    toy_dt_mirror("dt_mirror_large_des", TOY_DT_MIRROR_LARGE_DEATH_FX);
-pub const TOY_DT_MIRROR: ToyDestructibleDefinition =
-    toy_dt_mirror("dt_mirror_des", TOY_DT_MIRROR_DEATH_FX);
+pub const TOY_DT_MIRROR: ToyDestructibleDefinition = ToyDestructibleDefinition {
+    stages: &[
+        ToyStage::new(150)
+            .fx(&[DestructibleFx::on("tag_fx", "props/mirror_shatter")])
+            .sounds(&["mirror_shatter"]),
+        ToyStage::new(150)
+            .model("dt_mirror_dam")
+            .fx(&[DestructibleFx::on("tag_fx", "props/mirror_dt_panel_broken")])
+            .explode(32, (32, 48), 0.0),
+        ToyStage::terminal("dt_mirror_des"),
+    ],
+    splash_scaler: Some(5.0),
+};
 
 pub fn destructible_destroyed_state(kind: &str) -> Option<u8> {
     VehicleDestructibleKind::from_mapents(kind)
@@ -1134,16 +1539,38 @@ pub fn apply_vehicle_player_bullet(
     apply_destructible_part_player_bullet(&def.health, destroyed_state, state, damage)
 }
 
-pub fn apply_toy_player_bullet(
+/// Walks a toy down its staircase: each stage that runs out of health hands
+/// the leftover damage to the next one. A stage that rejects the damage cause
+/// keeps everything, so the prop stalls where the script says it should.
+pub fn apply_toy_damage(
     def: &ToyDestructibleDefinition,
-    state: VehicleBodyState,
-    damage: u32,
+    mut state: VehicleBodyState,
+    mut damage: u32,
+    splash: bool,
 ) -> VehicleBodyState {
-    apply_destructible_part_player_bullet(def.health, def.destroyed_state, state, damage)
-}
+    let destroyed_state = def.destroyed_state();
+    if damage == 0 || state.state_index >= destroyed_state {
+        return state;
+    }
 
-pub fn toy_healthdrain_arms(previous: u8, next: u8, destroyed_state: u8) -> bool {
-    previous == 0 && next > 0 && next < destroyed_state
+    loop {
+        if !def.stage(state.state_index).cause.accepts(splash) {
+            return state;
+        }
+        if damage < state.health {
+            state.health -= damage;
+            return state;
+        }
+        damage -= state.health;
+        state.state_index += 1;
+        if state.state_index >= destroyed_state {
+            return VehicleBodyState {
+                state_index: destroyed_state,
+                health: 0,
+            };
+        }
+        state.health = def.stage(state.state_index).health;
+    }
 }
 
 pub fn vehicle_healthdrain_arms(previous: u8, next: u8, destroyed_state: u8) -> bool {

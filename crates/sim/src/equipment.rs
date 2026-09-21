@@ -838,6 +838,7 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
                                 attacker_life: projectile.owner_life,
                                 target,
                                 amount: facts.impact_damage.max(0) as u32,
+                                splash: false,
                                 epoch,
                             });
                         }

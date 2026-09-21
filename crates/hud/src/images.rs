@@ -264,6 +264,9 @@ impl HudImages {
     }
 
     fn decode_iwd_rgba(&self, ns: AssetNamespace, name: &str) -> CachedRgba {
+        if cache_key(name) == "white" {
+            return Some((1, 1, vec![255; 4]));
+        }
         let main = self.trees.main_for(ns)?;
         match assets::decode_ui_image_from_main(main, name) {
             Ok(image) => image,

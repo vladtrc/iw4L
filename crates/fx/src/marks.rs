@@ -1,14 +1,16 @@
 use marks_iw4::{
-    FX_MARK_HANDLE_NONE, FX_MARKS_INIT_ALLOCED_COUNT, FX_MARKS_LIMIT, FX_POINT_GROUP_CHAIN_NONE,
-    FX_POINT_GROUP_LIMIT, FX_POINT_GROUP_NEXT_NONE, FX_TRI_GROUP_CHAIN_NONE, FX_TRI_GROUP_LIMIT,
-    FX_TRI_GROUP_NEXT_NONE, FxAllocMarkRequest, FxMarkConstructed, FxMarkStagingPoint,
-    FxMarkStagingTri, FxPointGroup, FxTriGroup, GFX_MARK_MESH_VERTEX_STRIDE, GfxMarkMeshBudget,
-    fx_alloc_and_construct_mark, fx_copy_mark_points, fx_copy_mark_tris,
-    fx_generate_mark_verts_begin, fx_impact_mark_models_generate, fx_impact_mark_outer_gate,
-    fx_init_mark_next_handle, fx_init_point_next_slot, fx_init_tri_next_slot,
-    fx_mark_context_is_world_list, fx_mark_contexts_equal, fx_mark_point_groups_for_count,
-    fx_mark_tri_groups_for_staging, fx_pack_mark_world_vertex, r_add_mark_mesh_draw_surf,
+    FX_MARK_HANDLE_NONE, FX_MARKS_ACTIVE_LIMIT, FX_MARKS_INIT_ALLOCED_COUNT, FX_MARKS_LIMIT,
+    FX_POINT_GROUP_CHAIN_NONE, FX_POINT_GROUP_LIMIT, FX_POINT_GROUP_NEXT_NONE,
+    FX_TRI_GROUP_CHAIN_NONE, FX_TRI_GROUP_LIMIT, FX_TRI_GROUP_NEXT_NONE, FxAllocMarkRequest,
+    FxMarkConstructed, FxMarkStagingPoint, FxMarkStagingTri, FxPointGroup, FxTriGroup,
+    GFX_MARK_MESH_VERTEX_STRIDE, GfxMarkMeshBudget, fx_alloc_and_construct_mark,
+    fx_copy_mark_points, fx_copy_mark_tris, fx_generate_mark_verts_begin,
+    fx_impact_mark_models_generate, fx_impact_mark_outer_gate, fx_init_mark_next_handle,
+    fx_init_point_next_slot, fx_init_tri_next_slot, fx_mark_context_is_world_list,
+    fx_mark_contexts_equal, fx_mark_point_groups_for_count, fx_mark_tri_groups_for_staging,
+    fx_pack_mark_world_vertex, r_add_mark_mesh_draw_surf,
 };
+use std::collections::VecDeque;
 
 #[derive(Clone, Debug)]
 pub struct FxMarksSystemHost {
@@ -19,6 +21,7 @@ pub struct FxMarksSystemHost {
 
     alloced: u32,
     constructed: Vec<Option<FxMarkConstructed>>,
+    allocation_order: VecDeque<u16>,
 
     material_names: Vec<Option<String>>,
     tri_first: u32,
@@ -135,11 +138,12 @@ impl FxMarksSystemHost {
             live: 0,
             alloced: FX_MARKS_INIT_ALLOCED_COUNT,
             constructed: vec![None; n],
+            allocation_order: VecDeque::new(),
             material_names: vec![None; n],
-            tri_first: 0,
+            tri_first: 1,
             tri_next,
             tri_groups: vec![FxTriGroup::ZERO; FX_TRI_GROUP_LIMIT as usize],
-            point_first: 0,
+            point_first: 1,
             point_next,
             point_groups: vec![FxPointGroup::ZERO; FX_POINT_GROUP_LIMIT as usize],
             no_marks: false,
@@ -180,13 +184,24 @@ impl FxMarksSystemHost {
         {
             return None;
         }
-        if self.first_free == FX_MARK_HANDLE_NONE {
-            return None;
-        }
         let tris = &staging_tris[..req.tri_count as usize];
         let points = &staging_points[..req.point_count as usize];
-        let tri_head = self.pop_tri_chain(fx_mark_tri_groups_for_staging(tris))?;
-        let point_head = self.pop_point_chain(fx_mark_point_groups_for_count(req.point_count))?;
+        let needed_tris = fx_mark_tri_groups_for_staging(tris);
+        let needed_points = fx_mark_point_groups_for_count(req.point_count);
+        if needed_tris == 0 || needed_points == 0 {
+            return None;
+        }
+        // The pool is fixed: make room by recycling the oldest mark.
+        while self.live >= FX_MARKS_ACTIVE_LIMIT
+            || self.first_free == FX_MARK_HANDLE_NONE
+            || self.free_tri_groups() < needed_tris
+            || self.free_point_groups() < needed_points
+        {
+            let oldest = self.allocation_order.pop_front()?;
+            self.release_mark(oldest);
+        }
+        let tri_head = self.pop_tri_chain(needed_tris)?;
+        let point_head = self.pop_point_chain(needed_points)?;
         let copied_tri = fx_copy_mark_tris(&mut self.tri_groups, tri_head, tris);
         let copied_point = fx_copy_mark_points(&mut self.point_groups, point_head, points);
         if copied_tri != req.tri_count || copied_point != req.point_count {
@@ -196,6 +211,7 @@ impl FxMarksSystemHost {
         let handle = self.first_free;
         self.first_free = self.next[handle as usize];
         self.constructed[handle as usize] = Some(mark);
+        self.allocation_order.push_back(handle);
         self.live = self.live.saturating_add(1);
         self.alloced = self.alloced.saturating_add(1);
         Some(handle)
@@ -288,18 +304,44 @@ impl FxMarksSystemHost {
             if mark.context as u8 != 4 || (mark.context >> 16) as u16 != piece {
                 continue;
             }
-            self.recycle_tri_chain(mark.tris);
-            self.recycle_point_chain(mark.points);
-            self.constructed[slot] = None;
-            if let Some(name) = self.material_names.get_mut(slot) {
-                *name = None;
-            }
-            self.next[slot] = self.first_free;
-            self.first_free = slot as u16;
-            self.live = self.live.saturating_sub(1);
+            self.release_mark(slot as u16);
+            self.allocation_order
+                .retain(|&handle| handle != slot as u16);
             hidden = hidden.saturating_add(1);
         }
         hidden
+    }
+
+    fn release_mark(&mut self, handle: u16) {
+        let Some(mark) = self.constructed[handle as usize].take() else {
+            return;
+        };
+        self.recycle_tri_chain(mark.tris);
+        self.recycle_point_chain(mark.points);
+        self.material_names[handle as usize] = None;
+        self.next[handle as usize] = self.first_free;
+        self.first_free = handle;
+        self.live -= 1;
+    }
+
+    fn free_tri_groups(&self) -> u32 {
+        let mut count = 0;
+        let mut slot = self.tri_first;
+        while slot != FX_TRI_GROUP_NEXT_NONE {
+            count += 1;
+            slot = self.tri_next[slot as usize];
+        }
+        count
+    }
+
+    fn free_point_groups(&self) -> u32 {
+        let mut count = 0;
+        let mut slot = self.point_first;
+        while slot != FX_POINT_GROUP_NEXT_NONE {
+            count += 1;
+            slot = self.point_next[slot as usize];
+        }
+        count
     }
 
     fn recycle_tri_chain(&mut self, mut head: u16) {

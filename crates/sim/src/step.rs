@@ -157,7 +157,7 @@ fn phase_destructible_death_presentation(world: &mut FrameWorld, msec: i32) {
         world.world_objects_mut().set_death_anim_time(id, time);
     }
     apply_explodable_barrel_death_presentation(world);
-    apply_toy_death_presentation(world);
+    apply_toy_stage_presentation(world);
     apply_flammable_crate_death_presentation(world);
     apply_destructable_death_presentation(world);
 }
@@ -184,48 +184,50 @@ pub fn apply_explodable_barrel_death_presentation(world: &mut SimState) {
                 continue;
             }
             capabilities.linked_brushes.clear();
-            if let Some(dobj) = capabilities.dobj.as_mut()
-                && dobj.current_model != crate::EXPLODABLE_BARREL_HUSK
-            {
-                let cap = dobj.husk_capability.clone();
-                dobj.set_model(crate::EXPLODABLE_BARREL_HUSK.to_owned(), cap);
-                dobj.semantic_state = xmodel_runtime::DObjSemanticState::bind_pose(
-                    crate::EXPLODABLE_BARREL_HUSK.to_owned(),
-                    dobj.model_revision,
-                    dobj.pose_revision,
-                );
-                dobj.pose_request = xmodel_runtime::DObjPoseRequest::bind_pose();
+            if let Some(dobj) = capabilities.dobj.as_mut() {
+                dobj.set_stage_model(crate::EXPLODABLE_BARREL_HUSK);
             }
         }
     }
 }
 
-pub fn apply_toy_death_presentation(world: &mut SimState) {
-    let deaths: Vec<(crate::ScriptModelId, &'static str)> = world
+pub fn apply_toy_stage_presentation(world: &mut SimState) {
+    for id in world.world_objects_mut().take_toy_part_launches() {
+        world
+            .script_gaps_mut()
+            .raise(gamemode_iw4::ScriptGapCause::DestructiblePartLaunch {
+                source_ordinal: id.to_wire(),
+            });
+    }
+    let stages: Vec<(
+        crate::ScriptModelId,
+        Option<&'static str>,
+        Vec<&'static str>,
+    )> = world
         .world_objects()
         .toy_bodies()
         .iter()
-        .filter(|(_, kind, body)| body.state_index >= kind.destroyed_state())
-        .map(|(id, kind, _)| (*id, kind.definition().husk))
+        .map(|(id, kind, body)| {
+            let def = kind.definition();
+            (
+                *id,
+                def.stage_model(body.state_index),
+                def.hidden_tags(body.state_index).collect(),
+            )
+        })
         .collect();
-    for (id, husk) in deaths {
+    for (id, model, hidden) in stages {
         for capabilities in world.entity_collision_capabilities_mut() {
             if capabilities.owner.script_model() != Some(id) {
                 continue;
             }
-            if let Some(dobj) = capabilities.dobj.as_mut()
-                && dobj.current_model != husk
-            {
-                dobj.play_anim = None;
-                let cap = dobj.husk_capability.clone();
-                dobj.set_model(husk.to_owned(), cap);
-                dobj.semantic_state = xmodel_runtime::DObjSemanticState::bind_pose(
-                    husk.to_owned(),
-                    dobj.model_revision,
-                    dobj.pose_revision,
-                );
-                dobj.pose_request = xmodel_runtime::DObjPoseRequest::bind_pose();
+            let Some(dobj) = capabilities.dobj.as_mut() else {
+                continue;
+            };
+            if let Some(model) = model {
+                dobj.set_stage_model(model);
             }
+            dobj.hide_tags(&hidden);
         }
     }
 }
@@ -251,17 +253,8 @@ pub fn apply_flammable_crate_death_presentation(world: &mut SimState) {
                 continue;
             }
             capabilities.linked_brushes.clear();
-            if let Some(dobj) = capabilities.dobj.as_mut()
-                && dobj.current_model != gamemode_iw4::FLAMMABLE_CRATE_HUSK
-            {
-                let cap = dobj.husk_capability.clone();
-                dobj.set_model(gamemode_iw4::FLAMMABLE_CRATE_HUSK.to_owned(), cap);
-                dobj.semantic_state = xmodel_runtime::DObjSemanticState::bind_pose(
-                    gamemode_iw4::FLAMMABLE_CRATE_HUSK.to_owned(),
-                    dobj.model_revision,
-                    dobj.pose_revision,
-                );
-                dobj.pose_request = xmodel_runtime::DObjPoseRequest::bind_pose();
+            if let Some(dobj) = capabilities.dobj.as_mut() {
+                dobj.set_stage_model(gamemode_iw4::FLAMMABLE_CRATE_HUSK);
             }
         }
     }
@@ -322,11 +315,11 @@ fn phase_animated_map_models(world: &mut FrameWorld, tick: Tick, msec: i32) {
 
 fn emit_vehicle_fx_events(world: &mut FrameWorld, tick: Tick) {
     let (death_fx, death_sounds) = world.world_objects_mut().take_new_death_fx_pulses();
-    let burn_start = world.world_objects_mut().take_new_burn_fx_pulses();
+    let (stage_fx, stage_sounds) = world.world_objects_mut().take_new_stage_pulses();
     let loop_fx = world
         .world_objects_mut()
         .tick_vehicle_loopfx(crate::MATCH_TICK_MS);
-    for pulse in death_sounds {
+    for pulse in death_sounds.into_iter().chain(stage_sounds) {
         let origin = pulse_world_origin(world, pulse.owner, pulse.tag, pulse.origin);
         let event_parm = i32::from(world.sound_alias_index(pulse.alias));
         world.push_entity_event(
@@ -342,7 +335,7 @@ fn emit_vehicle_fx_events(world: &mut FrameWorld, tick: Tick) {
             },
         );
     }
-    for pulse in death_fx.into_iter().chain(loop_fx).chain(burn_start) {
+    for pulse in death_fx.into_iter().chain(loop_fx).chain(stage_fx) {
         let (origin, direction) = pulse_world_pose(world, &pulse);
         let event_parm = i32::from(world.effect_name_index(pulse.def_name));
         world.push_entity_event(
@@ -361,6 +354,23 @@ fn emit_vehicle_fx_events(world: &mut FrameWorld, tick: Tick) {
     }
 }
 
+/// Publishes the loops the destructibles are speaking, aliases interned into
+/// the configstring the client resolves them through.
+fn publish_destructible_loop_sounds(world: &mut FrameWorld) {
+    let speaking = world.world_objects().speaking_loop_sounds();
+    let rows = speaking
+        .into_iter()
+        .map(
+            |(owner, alias, origin)| crate::world_objects::DestructibleLoopSound {
+                owner,
+                alias_index: world.sound_alias_index(alias),
+                origin,
+            },
+        )
+        .collect();
+    world.world_objects_mut().set_destructible_loop_sounds(rows);
+}
+
 fn pulse_world_pose(
     world: &FrameWorld,
     pulse: &crate::world_objects::VehicleFxPulse,
@@ -368,9 +378,14 @@ fn pulse_world_pose(
     let Some(tag) = pulse.tag else {
         return (pulse.origin, gamemode_iw4::VEHICLE_DEATH_FX_FORWARD);
     };
-    script_model_dobj(world, pulse.owner)
+    let pose = script_model_dobj(world, pulse.owner)
         .and_then(|dobj| dobj.tag_world_pose(tag))
-        .unwrap_or((pulse.origin, gamemode_iw4::VEHICLE_DEATH_FX_FORWARD))
+        .unwrap_or((pulse.origin, gamemode_iw4::VEHICLE_DEATH_FX_FORWARD));
+    if pulse.use_tag_angles {
+        pose
+    } else {
+        (pose.0, gamemode_iw4::VEHICLE_DEATH_FX_FORWARD)
+    }
 }
 
 fn pulse_world_origin(
@@ -833,8 +848,13 @@ fn run_entity_types_system(ecs: &mut World) {
             phase_health_regen(&mut world, tick);
             phase_finalstand_timer(&mut world, tick);
             emit_vehicle_fx_events(&mut world, tick);
+            publish_destructible_loop_sounds(&mut world);
             phase_destructible_death_presentation(&mut world, msec);
             phase_animated_map_models(&mut world, tick, msec);
+        } else {
+            // A client presents the stages it adopted; the effects that go
+            // with them arrive as entity events from the host.
+            phase_destructible_death_presentation(&mut world, msec);
         }
     } else {
         crate::entity_run::phase_walk_entity_thinks(&mut world);

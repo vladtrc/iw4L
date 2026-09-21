@@ -9,6 +9,7 @@ mod debug_fog;
 mod debug_fx;
 mod debug_fx_marks;
 mod debug_glow;
+mod debug_vision;
 mod debug_lod;
 mod debug_move;
 mod debug_script_mover;

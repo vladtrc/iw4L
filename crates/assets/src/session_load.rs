@@ -204,6 +204,8 @@ pub struct PreparedWorld {
     pub exp_fog: Option<crate::ExpFog>,
 
     pub film_vision: Option<crate::FilmVision>,
+    pub film_visions:
+        std::collections::BTreeMap<String, Result<crate::FilmVision, crate::FilmVisionParseError>>,
 
     pub createart_name: Option<String>,
     pub min: [f32; 3],

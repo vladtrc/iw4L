@@ -5,12 +5,13 @@ use playerstate_iw4::AnimPair;
 use sim::{
     AreaEntityLinkSnapshot, AreaEntityWorldSnapshot, AreaSectorSnapshot, ClassId,
     ClassRejectReason, ClientAction, ClientId, ClientLifecycle, ClientSnapshotMeta, DamageSource,
-    DroppedItemAmmo, EntityEventPayload, EntityEventRecord, EntityKernelOccupiedSnapshot,
-    EntityKernelSlotSnapshot, EntityKernelSnapshot, EntityRef, EntityRelations, EntityRunKind,
-    EventAudience, EventRecord, EventSequence, GiveRejectReason, GlassCause, GlassPieceSnapshot,
-    GlassPieceState, GlassShatterSeed, ItemPickupRecord, LifeSequence, LoadoutSpec, MatchEndReason,
-    MatchPhase, PelletFxRecord, PlayerCorpsePool, PlayerCorpseSlot, RngDebugMeta, ScriptModelId,
-    SimEvent, SnapshotMeta, Tick, WorldObjectSnapshot,
+    DestructibleLoopSound, DroppedItemAmmo, EntityEventPayload, EntityEventRecord,
+    EntityKernelOccupiedSnapshot, EntityKernelSlotSnapshot, EntityKernelSnapshot, EntityRef,
+    EntityRelations, EntityRunKind, EventAudience, EventRecord, EventSequence, GiveRejectReason,
+    GlassCause, GlassPieceSnapshot, GlassPieceState, GlassShatterSeed, ItemPickupRecord,
+    LifeSequence, LoadoutSpec, MatchEndReason, MatchPhase, PelletFxRecord, PlayerCorpsePool,
+    PlayerCorpseSlot, RngDebugMeta, ScriptModelId, SimEvent, SnapshotMeta, Tick,
+    WorldObjectSnapshot,
 };
 
 use crate::transport::wire::{WireError, WireReader, WireWriter};
@@ -48,7 +49,9 @@ impl WorldObjectSyncEncoder {
             self.force_full = false;
         } else {
             let (destructibles, glass) = world_object_delta(&self.baseline, &current);
-            if destructibles.is_empty() && glass.is_empty() {
+            let loops_spoke =
+                self.baseline.destructible_loop_sounds != current.destructible_loop_sounds;
+            if destructibles.is_empty() && glass.is_empty() && !loops_spoke {
                 out.put_u8(0);
                 self.baseline.as_of_ms = current.as_of_ms;
                 self.baseline.map_round_epoch = current.map_round_epoch;
@@ -186,6 +189,7 @@ fn encode_world_object_full(out: &mut WireWriter, snap: &WorldObjectSnapshot) {
         out.put_u32(*id);
         encode_glass_piece_snapshot(out, *row);
     }
+    encode_destructible_loop_sounds(out, &snap.destructible_loop_sounds);
 }
 
 fn encode_world_object_delta(
@@ -216,6 +220,42 @@ fn encode_world_object_delta(
     for id in &glass.removed {
         out.put_u32(*id);
     }
+    encode_destructible_loop_sounds(out, &current.destructible_loop_sounds);
+}
+
+/// The loops are a handful of rows that only move when a stage does, so they
+/// ride whole rather than as a delta of their own.
+fn encode_destructible_loop_sounds(out: &mut WireWriter, rows: &[DestructibleLoopSound]) {
+    debug_assert!(rows.len() <= u16::MAX as usize);
+    out.put_u16(rows.len() as u16);
+    for row in rows {
+        out.put_u32(row.owner.to_wire());
+        out.put_u8(row.alias_index);
+        for v in row.origin {
+            out.put_f32(v);
+        }
+    }
+}
+
+fn decode_destructible_loop_sounds(
+    input: &mut WireReader<'_>,
+) -> Result<Vec<DestructibleLoopSound>, WireError> {
+    let count = input.get_u16()? as usize;
+    let mut rows = Vec::with_capacity(count.min(256));
+    for _ in 0..count {
+        let owner = ScriptModelId::from_wire(input.get_u32()?);
+        let alias_index = input.get_u8()?;
+        let mut origin = [0.0; 3];
+        for v in &mut origin {
+            *v = input.get_f32()?;
+        }
+        rows.push(DestructibleLoopSound {
+            owner,
+            alias_index,
+            origin,
+        });
+    }
+    Ok(rows)
 }
 
 fn apply_pair_delta<K: Copy + Ord, V: Copy>(table: &mut Vec<(K, V)>, delta: &PairDelta<K, V>) {
@@ -266,8 +306,10 @@ fn decode_world_object_sync(
             for _ in 0..glass_removed {
                 glass.removed.push(input.get_u32()?);
             }
+            let destructible_loop_sounds = decode_destructible_loop_sounds(input)?;
             apply_pair_delta(&mut state.destructible_stages, &destructibles);
             apply_pair_delta(&mut state.glass_pieces, &glass);
+            state.destructible_loop_sounds = destructible_loop_sounds;
         }
         2 => {
             let destructible_count = input.get_u16()? as usize;
@@ -281,12 +323,14 @@ fn decode_world_object_sync(
             for _ in 0..glass_count {
                 glass_pieces.push((input.get_u32()?, decode_glass_piece_snapshot(input)?));
             }
+            let destructible_loop_sounds = decode_destructible_loop_sounds(input)?;
             *state = WorldObjectSnapshot {
                 as_of_ms: state.as_of_ms,
                 map_round_epoch: state.map_round_epoch,
                 fracture_profile_version: state.fracture_profile_version,
                 destructible_stages,
                 glass_pieces,
+                destructible_loop_sounds,
             };
         }
         _ => return Err(WireError::Malformed("unknown world object sync tag")),
@@ -556,6 +600,13 @@ pub fn encode_snapshot_meta_sections(
     let mut mark = out.len();
     out.put_u8(phase_tag(meta.phase));
     out.put_u32(meta.match_elapsed_ms);
+    let (prematch_tag, elapsed_ms) = match meta.prematch {
+        gamemode_iw4::PrematchStep::Waiting { elapsed_ms } => (0, elapsed_ms),
+        gamemode_iw4::PrematchStep::Starting { elapsed_ms } => (1, elapsed_ms),
+        gamemode_iw4::PrematchStep::Done => (2, 0),
+    };
+    out.put_u8(prematch_tag);
+    out.put_u32(elapsed_ms);
     out.put_i32(meta.score_limit);
     out.put_u32(meta.time_limit_ms);
     out.put_u8(meta.kind.wire_tag());
@@ -631,6 +682,14 @@ pub fn decode_snapshot_meta(
 ) -> Result<(SnapshotMeta, Vec<u8>), WireError> {
     let phase = phase_from_tag(input.get_u8()?)?;
     let match_elapsed_ms = input.get_u32()?;
+    let prematch_tag = input.get_u8()?;
+    let elapsed_ms = input.get_u32()?;
+    let prematch = match prematch_tag {
+        0 => gamemode_iw4::PrematchStep::Waiting { elapsed_ms },
+        1 => gamemode_iw4::PrematchStep::Starting { elapsed_ms },
+        2 => gamemode_iw4::PrematchStep::Done,
+        _ => return Err(WireError::Malformed("unknown prematch tag")),
+    };
     let score_limit = input.get_i32()?;
     let time_limit_ms = input.get_u32()?;
     let kind = gamemode_iw4::GameModeKind::from_wire_tag(input.get_u8()?)
@@ -678,6 +737,7 @@ pub fn decode_snapshot_meta(
         SnapshotMeta {
             phase,
             match_elapsed_ms,
+            prematch,
             score_limit,
             time_limit_ms,
             kind,

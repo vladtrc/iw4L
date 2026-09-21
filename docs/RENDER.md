@@ -48,3 +48,6 @@ maps change, and `PublishedRenderFrame` every frame. `d3d9_decl` / `d3d9_sm3` /
 crossing is the adapter inside `render`, while `session` stands the match up and
 `assets` owns the bytes. No live `r_*` dvars: env vars (`IW4L_SINGLE_CELL`,
 `IW4L_SUN_SHADOW_*`, …) and Perfetto (`IW4L_PERF=1`, [`PERF.md`](PERF.md)).
+
+Film vision presets come out of the map and common fastfiles; `visionSetNaked` and
+`visionReset` on the console drive `FilmVisionView` between them over a transition.

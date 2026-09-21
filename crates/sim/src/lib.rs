@@ -140,7 +140,7 @@ pub use spawn::{
 };
 pub use step::{
     apply_destructable_death_presentation, apply_explodable_barrel_death_presentation,
-    apply_toy_death_presentation, phase_materialize_entity_dobjs,
+    apply_toy_stage_presentation, phase_materialize_entity_dobjs,
 };
 pub use use_object::{
     DomFlagInstallError, MapUseBindError, UseCancelReason, UseHoldSession, UseObject,
@@ -159,7 +159,7 @@ pub use world::{
 };
 pub use world_objects::{
     DestructableDown, DestructableInstall, DestructibleApplyReport, DestructibleDamageIntent,
-    DestructibleExplodeEvent, DestructibleStateIndex, FlammableCrateInstall,
+    DestructibleExplodeEvent, DestructibleLoopSound, DestructibleStateIndex, FlammableCrateInstall,
     GLASS_BLAST_DAMAGE_SCALE, GLASS_BLAST_RADIUS_CAP, GLASS_DAMAGE_TO_DESTROY,
     GLASS_DAMAGE_TO_WEAKEN, GLASS_FRACTURE_PROFILE_VERSION, GLASS_MELEE_DAMAGE,
     GLASS_PROJECTILE_PANE_HOPS, GlassBreakRecord, GlassCause, GlassPaneBasis, GlassPieceId,

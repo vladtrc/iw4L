@@ -530,16 +530,15 @@ pub(crate) fn paint_focus_help(
     widgets: Query<(&Focusable, &WidgetHelp)>,
     mut labels: Query<&mut Text, With<FocusHelpText>>,
 ) {
-    if !focus.is_changed() {
-        return;
-    }
     let value = focus
         .widget
         .as_deref()
         .and_then(|id| widgets.iter().find(|(widget, _)| widget.id == id))
         .map_or("", |(_, help)| help.0.as_str());
     for mut text in &mut labels {
-        *text = Text::new(value);
+        if text.0 != value {
+            *text = Text::new(value);
+        }
     }
 }
 

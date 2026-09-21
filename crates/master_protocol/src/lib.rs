@@ -2,8 +2,8 @@
 
 use core::{fmt, str::FromStr};
 
-pub const PROTOCOL_VERSION: u16 = 8;
-pub const ALPN: &[u8] = b"iw4l-master/8";
+pub const PROTOCOL_VERSION: u16 = 9;
+pub const ALPN: &[u8] = b"iw4l-master/9";
 pub const MAX_CONTROL_BYTES: usize = 16 * 1024;
 pub const MAX_OPAQUE_PAYLOAD: usize = 1100;
 
@@ -19,6 +19,7 @@ pub const MAX_ADVERT_NAME_BYTES: usize = 48;
 pub const MAX_MAP_BYTES: usize = 64;
 pub const MAX_MODE_BYTES: usize = 24;
 pub const MAX_BUILD_BYTES: usize = 64;
+pub const MAX_PLAYER_NAME_BYTES: usize = 64;
 pub const MAX_LIST_ADVERTS: usize = 128;
 
 pub const SESSION_IDLE: core::time::Duration = core::time::Duration::from_secs(8);
@@ -287,6 +288,7 @@ pub struct ControlHello {
     pub game_protocol: u32,
     pub role: EndpointRole,
     pub build: String,
+    pub player_name: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,6 +327,7 @@ pub struct RoomView {
     pub name: String,
     pub host: MemberId,
     pub members: Vec<MemberId>,
+    pub member_names: std::collections::HashMap<MemberId, String>,
     pub map: String,
     pub mode: String,
     pub joinable: bool,
@@ -733,6 +736,7 @@ pub fn encode_control_frame(frame: &ControlFrame) -> Result<Vec<u8>, ProtocolErr
             out.u32(hello.game_protocol);
             out.u8(hello.role.wire());
             out.string(&hello.build, MAX_BUILD_BYTES)?;
+            out.string(&hello.player_name, MAX_PLAYER_NAME_BYTES)?;
             (KIND_HELLO, 0, out.0)
         }
         ControlFrame::Request(request) => (
@@ -773,6 +777,7 @@ pub fn decode_control_frame(bytes: &[u8]) -> Result<ControlFrame, ProtocolError>
                 game_protocol: body.u32()?,
                 role: EndpointRole::from_wire(body.u8()?)?,
                 build: body.string(MAX_BUILD_BYTES)?,
+                player_name: body.string(MAX_PLAYER_NAME_BYTES)?,
             };
             body.finish()?;
             ControlFrame::Hello(hello)
@@ -1128,6 +1133,12 @@ fn encode_room_view(view: &RoomView) -> Result<Vec<u8>, ProtocolError> {
     out.u8(view.members.len() as u8);
     for member in &view.members {
         out.bytes(&member.0);
+        out.string(
+            view.member_names
+                .get(member)
+                .map_or("Player", String::as_str),
+            MAX_PLAYER_NAME_BYTES,
+        )?;
     }
     Ok(out.0)
 }
@@ -1149,14 +1160,18 @@ fn decode_room_view(body: &mut Reader<'_>) -> Result<RoomView, ProtocolError> {
         return Err(ProtocolError::LengthExceeded(count));
     }
     let mut members = Vec::with_capacity(count);
+    let mut member_names = std::collections::HashMap::new();
     for _ in 0..count {
-        members.push(MemberId(body.array()?));
+        let member = MemberId(body.array()?);
+        members.push(member);
+        member_names.insert(member, body.string(MAX_PLAYER_NAME_BYTES)?);
     }
     Ok(RoomView {
         room_id,
         name,
         host,
         members,
+        member_names,
         map,
         mode,
         joinable,

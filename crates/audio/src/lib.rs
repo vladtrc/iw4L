@@ -45,5 +45,6 @@ pub use start::{
 };
 pub use voice::VoiceOccupancy;
 
+mod destructible_loops;
 mod map_doors;
 mod match_set;

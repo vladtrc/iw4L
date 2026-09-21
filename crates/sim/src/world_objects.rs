@@ -5,10 +5,10 @@ use entity_iw4::{
 };
 use gamemode_iw4::{
     VEHICLE_HEALTHDRAIN_AMOUNT, VEHICLE_HEALTHDRAIN_INTERVAL_MS, VEHICLE_LOOPFX_INTERVAL_MS,
-    VehicleBodyState, apply_destructible_part_player_bullet, apply_toy_player_bullet,
+    VehicleBodyState, apply_destructible_part_player_bullet, apply_toy_damage,
     apply_vehicle_player_bullet, g_radius_damage_amount, radius_damage_distance_to_aabb,
-    toy_healthdrain_arms, vehicle_active_loop_fx, vehicle_death_fx_if_destroyed,
-    vehicle_death_presentation_if_destroyed, vehicle_healthdrain_arms,
+    vehicle_active_loop_fx, vehicle_death_fx_if_destroyed, vehicle_death_presentation_if_destroyed,
+    vehicle_healthdrain_arms,
 };
 
 pub use gamemode_iw4::{ToyDestructibleKind, VehicleDestructibleKind};
@@ -91,13 +91,26 @@ impl DestructibleStateIndex {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorldObjectSnapshot {
     pub as_of_ms: i32,
     pub map_round_epoch: u32,
     pub fracture_profile_version: u32,
     pub destructible_stages: Vec<(ScriptModelId, u8)>,
     pub glass_pieces: Vec<(GlassPieceId, GlassPieceSnapshot)>,
+
+    /// The loops a destructible keeps speaking while it sits in its stage --
+    /// leaking gas, burning -- each one an alias the client resolves out of
+    /// the sound alias configstring.
+    pub destructible_loop_sounds: Vec<DestructibleLoopSound>,
+}
+
+/// One looping alias a destructible is speaking, placed in the world.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DestructibleLoopSound {
+    pub owner: ScriptModelId,
+    pub alias_index: u8,
+    pub origin: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +121,10 @@ pub struct DestructibleDamageIntent {
     pub attacker_life: LifeSequence,
     pub target: ScriptModelId,
     pub amount: u32,
+
+    /// `true` for radius damage, which is what the GSC damage filters and the
+    /// per-type splash scaler key off.
+    pub splash: bool,
 
     pub epoch: EntityCollisionEpoch,
 }
@@ -139,9 +156,19 @@ pub struct VehicleDumpRow {
     pub death_anim_time: Option<f32>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DrainFamily {
+    Vehicle,
+    Barrel,
+    Toy,
+    Crate,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct VehicleHealthDrain {
     wait_ms: u32,
+    amount: u32,
+    interval_ms: u32,
     attacker: ClientId,
     attacker_life: LifeSequence,
     source: DamageSource,
@@ -153,6 +180,10 @@ pub struct VehicleFxPulse {
     pub origin: [f32; 3],
     pub def_name: &'static str,
     pub tag: Option<&'static str>,
+
+    /// `false` plays the effect at the tag with a fixed world forward instead
+    /// of the tag's own orientation.
+    pub use_tag_angles: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -169,10 +200,28 @@ pub struct DestructibleApplyReport {
     pub explodes: Vec<DestructibleExplodeEvent>,
 }
 
-enum VehicleApply {
-    Unchanged,
-    Changed,
-    Exploded(DestructibleExplodeEvent),
+/// What one damage application did to one destructible. `None` from an
+/// `apply_*_amount` means the target is not of that family, or nothing moved.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct DestructibleApply {
+    changed: bool,
+    explodes: Vec<DestructibleExplodeEvent>,
+}
+
+impl DestructibleApply {
+    fn changed() -> Self {
+        Self {
+            changed: true,
+            explodes: Vec::new(),
+        }
+    }
+
+    fn exploded(explode: DestructibleExplodeEvent) -> Self {
+        Self {
+            changed: true,
+            explodes: vec![explode],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -183,7 +232,7 @@ pub struct WorldObjectState {
     vehicle_origins: Vec<(ScriptModelId, [f32; 3])>,
     vehicle_drains: Vec<(ScriptModelId, VehicleHealthDrain)>,
 
-    vehicle_loopfx: Vec<(ScriptModelId, u32)>,
+    vehicle_loopfx: Vec<(ScriptModelId, &'static str, u32)>,
 
     vehicle_death_fx_emitted: Vec<ScriptModelId>,
     death_anim_times: Vec<(ScriptModelId, f32)>,
@@ -191,7 +240,10 @@ pub struct WorldObjectState {
     toy_bodies: Vec<(ScriptModelId, ToyDestructibleKind, VehicleBodyState)>,
     toy_origins: Vec<(ScriptModelId, [f32; 3])>,
     toy_drains: Vec<(ScriptModelId, VehicleHealthDrain)>,
-    toy_cap_start: Vec<VehicleFxPulse>,
+    toy_fx_pulses: Vec<VehicleFxPulse>,
+    toy_sound_pulses: Vec<VehicleSoundPulse>,
+    toy_part_launches: Vec<ScriptModelId>,
+    destructible_loop_sounds: Vec<DestructibleLoopSound>,
 
     barrel_bodies: Vec<(ScriptModelId, VehicleBodyState)>,
     barrel_origins: Vec<(ScriptModelId, [f32; 3])>,
@@ -258,7 +310,10 @@ impl WorldObjectState {
         self.toy_bodies.clear();
         self.toy_origins.clear();
         self.toy_drains.clear();
-        self.toy_cap_start.clear();
+        self.toy_fx_pulses.clear();
+        self.toy_sound_pulses.clear();
+        self.toy_part_launches.clear();
+        self.destructible_loop_sounds.clear();
         for (id, kind, origin) in toys {
             self.register_toy_at(id, kind, Some(origin));
         }
@@ -549,6 +604,7 @@ impl WorldObjectState {
                     attacker_life: explode.attacker_life,
                     target: target.id,
                     amount: amount as u32,
+                    splash: true,
                     epoch: EntityCollisionEpoch::CurrentTick,
                 });
             }
@@ -585,110 +641,146 @@ impl WorldObjectState {
             if intent.amount == 0 {
                 continue;
             }
-            match self.apply_vehicle_amount(
+            let mut applied = self.apply_vehicle_amount(
                 intent.target,
                 intent.amount,
                 intent.attacker,
                 intent.attacker_life,
                 intent.source,
-            ) {
-                VehicleApply::Unchanged => match self.apply_toy_amount(
+            );
+            if applied.is_none() {
+                applied = self.apply_toy_amount(
                     intent.target,
                     intent.amount,
                     intent.attacker,
                     intent.attacker_life,
                     intent.source,
-                ) {
-                    VehicleApply::Unchanged => match self.apply_barrel_amount(
-                        intent.target,
-                        intent.amount,
-                        intent.attacker,
-                        intent.attacker_life,
-                        intent.source,
-                    ) {
-                        VehicleApply::Unchanged => match self.apply_crate_amount(
-                            intent.target,
-                            intent.amount,
-                            intent.attacker,
-                            intent.attacker_life,
-                            intent.source,
-                        ) {
-                            VehicleApply::Unchanged => {
-                                match self.apply_destructable_amount(intent.target, intent.amount) {
-                                    VehicleApply::Unchanged => {}
-                                    VehicleApply::Changed => changed += 1,
-                                    VehicleApply::Exploded(explode) => {
-                                        changed += 1;
-                                        explodes.push(explode);
-                                    }
-                                }
-                            }
-                            VehicleApply::Changed => changed += 1,
-                            VehicleApply::Exploded(explode) => {
-                                changed += 1;
-                                explodes.push(explode);
-                            }
-                        },
-                        VehicleApply::Changed => changed += 1,
-                        VehicleApply::Exploded(explode) => {
-                            changed += 1;
-                            explodes.push(explode);
-                        }
-                    },
-                    VehicleApply::Changed => changed += 1,
-                    VehicleApply::Exploded(explode) => {
-                        changed += 1;
-                        explodes.push(explode);
-                    }
-                },
-                VehicleApply::Changed => changed += 1,
-                VehicleApply::Exploded(explode) => {
-                    changed += 1;
-                    explodes.push(explode);
-                }
+                    intent.splash,
+                );
             }
+            if applied.is_none() {
+                applied = self.apply_barrel_amount(
+                    intent.target,
+                    intent.amount,
+                    intent.attacker,
+                    intent.attacker_life,
+                    intent.source,
+                );
+            }
+            if applied.is_none() {
+                applied = self.apply_crate_amount(
+                    intent.target,
+                    intent.amount,
+                    intent.attacker,
+                    intent.attacker_life,
+                    intent.source,
+                );
+            }
+            if applied.is_none() {
+                applied = self.apply_destructable_amount(intent.target, intent.amount);
+            }
+            let Some(apply) = applied else {
+                continue;
+            };
+            if apply.changed {
+                changed += 1;
+            }
+            explodes.extend(apply.explodes);
         }
         DestructibleApplyReport { changed, explodes }
     }
 
     pub fn tick_vehicle_healthdrain(&mut self, dt_ms: u32) -> DestructibleApplyReport {
-        let ids: Vec<ScriptModelId> = self.vehicle_drains.iter().map(|(id, _)| *id).collect();
+        self.tick_drains(DrainFamily::Vehicle, dt_ms)
+    }
+
+    pub fn tick_explodable_barrel_burn(&mut self, dt_ms: u32) -> DestructibleApplyReport {
+        self.tick_drains(DrainFamily::Barrel, dt_ms)
+    }
+
+    pub fn tick_toy_healthdrain(&mut self, dt_ms: u32) -> DestructibleApplyReport {
+        self.tick_drains(DrainFamily::Toy, dt_ms)
+    }
+
+    pub fn tick_flammable_crate_burn(&mut self, dt_ms: u32) -> DestructibleApplyReport {
+        self.tick_drains(DrainFamily::Crate, dt_ms)
+    }
+
+    fn drain_table(
+        &mut self,
+        family: DrainFamily,
+    ) -> &mut Vec<(ScriptModelId, VehicleHealthDrain)> {
+        match family {
+            DrainFamily::Vehicle => &mut self.vehicle_drains,
+            DrainFamily::Barrel => &mut self.barrel_drains,
+            DrainFamily::Toy => &mut self.toy_drains,
+            DrainFamily::Crate => &mut self.crate_drains,
+        }
+    }
+
+    /// Every armed drain of one family: the drain carries its own amount and
+    /// interval, so one loop serves all of them.
+    fn tick_drains(&mut self, family: DrainFamily, dt_ms: u32) -> DestructibleApplyReport {
+        let ids: Vec<ScriptModelId> = self.drain_table(family).iter().map(|(id, _)| *id).collect();
         let mut changed = 0;
         let mut explodes = Vec::new();
         for id in ids {
-            let Some(index) = self
-                .vehicle_drains
-                .iter()
-                .position(|(drain_id, _)| *drain_id == id)
-            else {
+            let table = self.drain_table(family);
+            let Some(index) = table.iter().position(|(drain_id, _)| *drain_id == id) else {
                 continue;
             };
-            self.vehicle_drains[index].1.wait_ms =
-                self.vehicle_drains[index].1.wait_ms.saturating_add(dt_ms);
-            while self.vehicle_drains[index].1.wait_ms >= VEHICLE_HEALTHDRAIN_INTERVAL_MS {
-                self.vehicle_drains[index].1.wait_ms -= VEHICLE_HEALTHDRAIN_INTERVAL_MS;
-                let drain = self.vehicle_drains[index].1;
-                match self.apply_vehicle_amount(
-                    id,
-                    VEHICLE_HEALTHDRAIN_AMOUNT,
-                    drain.attacker,
-                    drain.attacker_life,
-                    drain.source,
-                ) {
-                    VehicleApply::Unchanged => {}
-                    VehicleApply::Changed => changed += 1,
-                    VehicleApply::Exploded(explode) => {
-                        changed += 1;
-                        explodes.push(explode);
-                        break;
-                    }
+            table[index].1.wait_ms = table[index].1.wait_ms.saturating_add(dt_ms);
+            loop {
+                let table = self.drain_table(family);
+                let Some(index) = table.iter().position(|(drain_id, _)| *drain_id == id) else {
+                    break;
+                };
+                let drain = table[index].1;
+                if drain.interval_ms == 0 || drain.wait_ms < drain.interval_ms {
+                    break;
                 }
-                if self
-                    .vehicle_drains
-                    .iter()
-                    .position(|(drain_id, _)| *drain_id == id)
-                    .is_none()
-                {
+                table[index].1.wait_ms -= drain.interval_ms;
+                let applied = match family {
+                    DrainFamily::Vehicle => self.apply_vehicle_amount(
+                        id,
+                        drain.amount,
+                        drain.attacker,
+                        drain.attacker_life,
+                        drain.source,
+                    ),
+                    DrainFamily::Barrel => self.apply_barrel_amount(
+                        id,
+                        drain.amount,
+                        drain.attacker,
+                        drain.attacker_life,
+                        drain.source,
+                    ),
+                    // A health drain is never splash damage.
+                    DrainFamily::Toy => self.apply_toy_amount(
+                        id,
+                        drain.amount,
+                        drain.attacker,
+                        drain.attacker_life,
+                        drain.source,
+                        false,
+                    ),
+                    DrainFamily::Crate => self.apply_crate_amount(
+                        id,
+                        drain.amount,
+                        drain.attacker,
+                        drain.attacker_life,
+                        drain.source,
+                    ),
+                };
+                let Some(apply) = applied else {
+                    continue;
+                };
+                if apply.changed {
+                    changed += 1;
+                }
+                let exploded = !apply.explodes.is_empty();
+                explodes.extend(apply.explodes);
+                if exploded {
                     break;
                 }
             }
@@ -741,17 +833,6 @@ impl WorldObjectState {
                     None,
                 ))
             }))
-            .chain(self.toy_bodies.iter().filter_map(|(id, kind, body)| {
-                if body.state_index < kind.destroyed_state() {
-                    return None;
-                }
-                if self.vehicle_death_fx_emitted.iter().any(|have| have == id) {
-                    return None;
-                }
-                let origin = lookup_origin(&self.toy_origins, *id)?;
-                let def = kind.definition();
-                Some((*id, def.death_fx, def.death_sound, origin, def.death_fx_tag))
-            }))
             .collect();
         for (id, def_name, alias, origin, tag) in pending {
             self.vehicle_death_fx_emitted.push(id);
@@ -760,6 +841,7 @@ impl WorldObjectState {
                 origin,
                 def_name,
                 tag,
+                use_tag_angles: true,
             });
             if !alias.is_empty() {
                 sounds.push(VehicleSoundPulse {
@@ -773,127 +855,55 @@ impl WorldObjectState {
         (fx, sounds)
     }
 
-    pub fn take_new_burn_fx_pulses(&mut self) -> Vec<VehicleFxPulse> {
-        let mut pulses = std::mem::take(&mut self.barrel_burn_start);
-        pulses.append(&mut self.toy_cap_start);
-        pulses
+    /// Effects and sounds queued by state changes: the barrel burn start and
+    /// every destructible action state a toy has left this tick.
+    pub fn take_new_stage_pulses(&mut self) -> (Vec<VehicleFxPulse>, Vec<VehicleSoundPulse>) {
+        let mut fx = std::mem::take(&mut self.barrel_burn_start);
+        fx.append(&mut self.toy_fx_pulses);
+        (fx, std::mem::take(&mut self.toy_sound_pulses))
     }
 
-    pub fn tick_explodable_barrel_burn(&mut self, dt_ms: u32) -> DestructibleApplyReport {
-        let ids: Vec<ScriptModelId> = self.barrel_drains.iter().map(|(id, _)| *id).collect();
-        let mut changed = 0;
-        let mut explodes = Vec::new();
-        for id in ids {
-            let Some(index) = self
-                .barrel_drains
-                .iter()
-                .position(|(drain_id, _)| *drain_id == id)
-            else {
-                continue;
-            };
-            self.barrel_drains[index].1.wait_ms =
-                self.barrel_drains[index].1.wait_ms.saturating_add(dt_ms);
-            while self.barrel_drains[index].1.wait_ms
-                >= crate::barrel_policy::EXPLODABLE_BARREL_BURN_DRAIN_INTERVAL_MS
-            {
-                self.barrel_drains[index].1.wait_ms -=
-                    crate::barrel_policy::EXPLODABLE_BARREL_BURN_DRAIN_INTERVAL_MS;
-                let drain = self.barrel_drains[index].1;
-                match self.apply_barrel_amount(
-                    id,
-                    crate::barrel_policy::EXPLODABLE_BARREL_BURN_DRAIN,
-                    drain.attacker,
-                    drain.attacker_life,
-                    drain.source,
-                ) {
-                    VehicleApply::Unchanged => {}
-                    VehicleApply::Changed => changed += 1,
-                    VehicleApply::Exploded(explode) => {
-                        changed += 1;
-                        explodes.push(explode);
-                        break;
-                    }
-                }
-                if self
-                    .barrel_drains
-                    .iter()
-                    .position(|(drain_id, _)| *drain_id == id)
-                    .is_none()
-                {
-                    break;
-                }
-            }
-        }
-        DestructibleApplyReport { changed, explodes }
+    pub fn take_toy_part_launches(&mut self) -> Vec<ScriptModelId> {
+        core::mem::take(&mut self.toy_part_launches)
     }
 
-    pub fn tick_toy_healthdrain(&mut self, dt_ms: u32) -> DestructibleApplyReport {
-        let ids: Vec<ScriptModelId> = self.toy_drains.iter().map(|(id, _)| *id).collect();
-        let mut changed = 0;
-        let mut explodes = Vec::new();
-        for id in ids {
-            let Some(index) = self
-                .toy_drains
-                .iter()
-                .position(|(drain_id, _)| *drain_id == id)
-            else {
-                continue;
-            };
-            let Some((_, kind, _)) = self.toy_bodies.iter().find(|(have, _, _)| *have == id) else {
-                remove_drain(&mut self.toy_drains, id);
-                continue;
-            };
-            let Some((amount, wait_s, _, _)) = kind.definition().health_drain else {
-                remove_drain(&mut self.toy_drains, id);
-                continue;
-            };
-            let interval_ms = (wait_s * 1000.0) as u32;
-            if interval_ms == 0 {
-                remove_drain(&mut self.toy_drains, id);
-                continue;
-            }
-            self.toy_drains[index].1.wait_ms =
-                self.toy_drains[index].1.wait_ms.saturating_add(dt_ms);
-            while self.toy_drains[index].1.wait_ms >= interval_ms {
-                self.toy_drains[index].1.wait_ms -= interval_ms;
-                let drain = self.toy_drains[index].1;
-                match self.apply_toy_amount(
-                    id,
-                    amount,
-                    drain.attacker,
-                    drain.attacker_life,
-                    drain.source,
-                ) {
-                    VehicleApply::Unchanged => {}
-                    VehicleApply::Changed => changed += 1,
-                    VehicleApply::Exploded(explode) => {
-                        changed += 1;
-                        explodes.push(explode);
-                        break;
-                    }
-                }
-                if self
-                    .toy_drains
+    /// Every loop a destructible is speaking right now, by alias, for the step
+    /// to intern and publish.
+    pub fn speaking_loop_sounds(&self) -> Vec<(ScriptModelId, &'static str, [f32; 3])> {
+        self.toy_bodies
+            .iter()
+            .flat_map(|(id, kind, body)| {
+                let origin = lookup_origin(&self.toy_origins, *id);
+                kind.definition()
+                    .active_loop_sounds(body.state_index)
                     .iter()
-                    .position(|(drain_id, _)| *drain_id == id)
-                    .is_none()
-                {
-                    break;
-                }
-            }
-        }
-        DestructibleApplyReport { changed, explodes }
+                    .filter_map(move |alias| Some((*id, *alias, origin?)))
+            })
+            .collect()
+    }
+
+    pub fn set_destructible_loop_sounds(&mut self, rows: Vec<DestructibleLoopSound>) {
+        self.destructible_loop_sounds = rows;
     }
 
     pub fn tick_vehicle_loopfx(&mut self, dt_ms: u32) -> Vec<VehicleFxPulse> {
-        let desired: Vec<(ScriptModelId, &'static str, [f32; 3], u32)> = self
+        let desired: Vec<(VehicleFxPulse, u32)> = self
             .vehicle_bodies
             .iter()
             .filter_map(|(id, kind, body)| {
                 let def = kind.definition();
                 let fx = vehicle_active_loop_fx(def, body.state_index, kind.destroyed_state())?;
                 let origin = lookup_origin(&self.vehicle_origins, *id)?;
-                Some((*id, fx, origin, VEHICLE_LOOPFX_INTERVAL_MS))
+                Some((
+                    VehicleFxPulse {
+                        owner: *id,
+                        origin,
+                        def_name: fx,
+                        tag: None,
+                        use_tag_angles: true,
+                    },
+                    VEHICLE_LOOPFX_INTERVAL_MS,
+                ))
             })
             .chain(self.barrel_bodies.iter().filter_map(|(id, body)| {
                 if body.state_index >= crate::barrel_policy::EXPLODABLE_BARREL_DESTROYED_STATE {
@@ -904,35 +914,55 @@ impl WorldObjectState {
                 }
                 let origin = lookup_origin(&self.barrel_origins, *id)?;
                 Some((
-                    *id,
-                    crate::barrel_policy::EXPLODABLE_BARREL_BURN_LOOP_FX,
-                    origin,
+                    VehicleFxPulse {
+                        owner: *id,
+                        origin,
+                        def_name: crate::barrel_policy::EXPLODABLE_BARREL_BURN_LOOP_FX,
+                        tag: None,
+                        use_tag_angles: true,
+                    },
                     crate::barrel_policy::EXPLODABLE_BARREL_BURN_LOOP_INTERVAL_MS,
                 ))
             }))
-            .chain(self.toy_bodies.iter().filter_map(|(id, kind, body)| {
-                if body.state_index >= kind.destroyed_state() {
-                    return None;
-                }
-                if !self.toy_drains.iter().any(|(have, _)| have == id) {
-                    return None;
-                }
-                let def = kind.definition();
-                let fx = def.leak_loop_fx?;
-                let origin = lookup_origin(&self.toy_origins, *id)?;
-                Some((*id, fx, origin, VEHICLE_LOOPFX_INTERVAL_MS))
+            .chain(self.toy_bodies.iter().flat_map(|(id, kind, body)| {
+                let origin = lookup_origin(&self.toy_origins, *id);
+                kind.definition()
+                    .active_loop_fx(body.state_index)
+                    .iter()
+                    .filter_map(move |fx| {
+                        Some((
+                            VehicleFxPulse {
+                                owner: *id,
+                                origin: origin?,
+                                def_name: fx.name,
+                                tag: Some(fx.tag),
+                                use_tag_angles: true,
+                            },
+                            fx.interval_ms,
+                        ))
+                    })
             }))
             .collect();
-        self.vehicle_loopfx
-            .retain(|(id, _)| desired.iter().any(|(want, _, _, _)| want == id));
-        for (id, _, _, _) in &desired {
-            if !self.vehicle_loopfx.iter().any(|(have, _)| have == id) {
-                self.vehicle_loopfx.push((*id, 0));
+        self.vehicle_loopfx.retain(|(id, name, _)| {
+            desired
+                .iter()
+                .any(|(pulse, _)| pulse.owner == *id && pulse.def_name == *name)
+        });
+        for (pulse, _) in &desired {
+            if !self
+                .vehicle_loopfx
+                .iter()
+                .any(|(id, name, _)| *id == pulse.owner && *name == pulse.def_name)
+            {
+                self.vehicle_loopfx.push((pulse.owner, pulse.def_name, 0));
             }
         }
         let mut pulses = Vec::new();
-        for (id, fx, origin, interval) in desired {
-            let Some((_, wait)) = self.vehicle_loopfx.iter_mut().find(|(have, _)| *have == id)
+        for (pulse, interval) in desired {
+            let Some((_, _, wait)) = self
+                .vehicle_loopfx
+                .iter_mut()
+                .find(|(id, name, _)| *id == pulse.owner && *name == pulse.def_name)
             else {
                 continue;
             };
@@ -940,13 +970,8 @@ impl WorldObjectState {
                 *wait -= dt_ms;
                 continue;
             }
-            pulses.push(VehicleFxPulse {
-                owner: id,
-                origin,
-                def_name: fx,
-                tag: None,
-            });
             *wait = interval;
+            pulses.push(pulse);
         }
         pulses
     }
@@ -974,13 +999,13 @@ impl WorldObjectState {
         attacker: ClientId,
         attacker_life: LifeSequence,
         source: DamageSource,
-    ) -> VehicleApply {
+    ) -> Option<DestructibleApply> {
         let Some(index) = self
             .vehicle_bodies
             .iter()
             .position(|(id, _, _)| *id == target)
         else {
-            return VehicleApply::Unchanged;
+            return None;
         };
         let kind = self.vehicle_bodies[index].1;
         let def = kind.definition();
@@ -989,7 +1014,7 @@ impl WorldObjectState {
         let was_destroyed = body.state_index >= destroyed;
         let next = apply_vehicle_player_bullet(def, destroyed, body, amount);
         if next == body {
-            return VehicleApply::Unchanged;
+            return None;
         }
         self.vehicle_bodies[index].2 = next;
         self.set_destructible_state(target, DestructibleStateIndex::new(next.state_index));
@@ -999,6 +1024,8 @@ impl WorldObjectState {
                     target,
                     VehicleHealthDrain {
                         wait_ms: 0,
+                        amount: VEHICLE_HEALTHDRAIN_AMOUNT,
+                        interval_ms: VEHICLE_HEALTHDRAIN_INTERVAL_MS,
                         attacker,
                         attacker_life,
                         source,
@@ -1014,7 +1041,7 @@ impl WorldObjectState {
             && next.state_index >= destroyed
             && let Some(origin) = lookup_origin(&self.vehicle_origins, target)
         {
-            return VehicleApply::Exploded(DestructibleExplodeEvent {
+            return Some(DestructibleApply::exploded(DestructibleExplodeEvent {
                 owner: target,
                 origin,
                 attacker,
@@ -1022,9 +1049,9 @@ impl WorldObjectState {
                 source: DamageSource::Radius(target),
                 explode_range_mp: def.explode_range_mp,
                 explode_damage: def.explode_damage,
-            });
+            }));
         }
-        VehicleApply::Changed
+        Some(DestructibleApply::changed())
     }
 
     fn apply_toy_amount(
@@ -1034,67 +1061,95 @@ impl WorldObjectState {
         attacker: ClientId,
         attacker_life: LifeSequence,
         source: DamageSource,
-    ) -> VehicleApply {
-        let Some(index) = self.toy_bodies.iter().position(|(id, _, _)| *id == target) else {
-            return VehicleApply::Unchanged;
-        };
+        splash: bool,
+    ) -> Option<DestructibleApply> {
+        let index = self
+            .toy_bodies
+            .iter()
+            .position(|(id, _, _)| *id == target)?;
         let kind = self.toy_bodies[index].1;
         let def = kind.definition();
-        let destroyed = kind.destroyed_state();
+        let destroyed = def.destroyed_state();
         let body = self.toy_bodies[index].2;
-        let was_destroyed = body.state_index >= destroyed;
-        let next = apply_toy_player_bullet(def, body, amount);
+        let amount = if splash {
+            (amount as f32 * def.splash_damage_scaler()) as u32
+        } else {
+            amount
+        };
+        let next = apply_toy_damage(def, body, amount, splash);
         if next == body {
-            return VehicleApply::Unchanged;
+            return None;
         }
         self.toy_bodies[index].2 = next;
         self.set_destructible_state(target, DestructibleStateIndex::new(next.state_index));
+        let origin = lookup_origin(&self.toy_origins, target)?;
 
-        if toy_healthdrain_arms(body.state_index, next.state_index, destroyed)
-            && def.health_drain.is_some()
-            && def.leak_loop_fx.is_some()
-            && !self.toy_drains.iter().any(|(id, _)| *id == target)
-        {
-            self.toy_drains.push((
-                target,
-                VehicleHealthDrain {
-                    wait_ms: 0,
-                    attacker,
-                    attacker_life,
-                    source,
-                },
-            ));
-            self.toy_drains.sort_by_key(|(id, _)| *id);
-            if let (Some(origin), Some(cap_fx)) =
-                (lookup_origin(&self.toy_origins, target), def.cap_fx)
-            {
-                self.toy_cap_start.push(VehicleFxPulse {
+        let mut explodes = Vec::new();
+        for entered in (body.state_index + 1)..=next.state_index {
+            // The action list belongs to the state being left, not the one entered.
+            let Some(left) = def.left_stage(entered) else {
+                continue;
+            };
+            for fx in left.fx {
+                if !fx.cause.accepts(splash) {
+                    continue;
+                }
+                self.toy_fx_pulses.push(VehicleFxPulse {
                     owner: target,
                     origin,
-                    def_name: cap_fx,
+                    def_name: fx.name,
+                    tag: Some(fx.tag),
+                    use_tag_angles: fx.use_tag_angles,
+                });
+            }
+            for alias in left.sounds {
+                self.toy_sound_pulses.push(VehicleSoundPulse {
+                    owner: target,
+                    origin,
+                    alias,
                     tag: None,
+                });
+            }
+            if !left.throws.is_empty() {
+                self.toy_part_launches.push(target);
+            }
+            if let Some(drain) = left.health_drain {
+                // Only a state that declares a drain restarts one; a state
+                // that declares none leaves a running drain alone.
+                upsert_value(
+                    &mut self.toy_drains,
+                    target,
+                    VehicleHealthDrain {
+                        wait_ms: 0,
+                        amount: drain.amount,
+                        interval_ms: drain.interval_ms,
+                        attacker,
+                        attacker_life,
+                        source,
+                    },
+                );
+            }
+            if let Some(explode) = left.explode {
+                let mut at = origin;
+                at[2] += explode.origin_offset_z;
+                explodes.push(DestructibleExplodeEvent {
+                    owner: target,
+                    origin: at,
+                    attacker,
+                    attacker_life,
+                    source: DamageSource::Radius(target),
+                    explode_range_mp: explode.range_mp,
+                    explode_damage: explode.damage,
                 });
             }
         }
         if next.state_index >= destroyed {
             remove_drain(&mut self.toy_drains, target);
         }
-        if !was_destroyed
-            && next.state_index >= destroyed
-            && let Some(mut origin) = lookup_origin(&self.toy_origins, target)
-        {
-            origin[2] += def.explode_origin_offset_z;
-            return VehicleApply::Exploded(DestructibleExplodeEvent {
-                owner: target,
-                origin,
-                attacker,
-                attacker_life,
-                source: DamageSource::Radius(target),
-                explode_range_mp: def.explode_range_mp,
-                explode_damage: def.explode_damage,
-            });
-        }
-        VehicleApply::Changed
+        Some(DestructibleApply {
+            changed: true,
+            explodes,
+        })
     }
 
     fn apply_barrel_amount(
@@ -1104,9 +1159,9 @@ impl WorldObjectState {
         attacker: ClientId,
         attacker_life: LifeSequence,
         source: DamageSource,
-    ) -> VehicleApply {
+    ) -> Option<DestructibleApply> {
         let Some(index) = self.barrel_bodies.iter().position(|(id, _)| *id == target) else {
-            return VehicleApply::Unchanged;
+            return None;
         };
         let destroyed = crate::barrel_policy::EXPLODABLE_BARREL_DESTROYED_STATE;
         let body = self.barrel_bodies[index].1;
@@ -1118,7 +1173,7 @@ impl WorldObjectState {
             amount,
         );
         if next == body {
-            return VehicleApply::Unchanged;
+            return None;
         }
         self.barrel_bodies[index].1 = next;
         self.set_destructible_state(target, DestructibleStateIndex::new(next.state_index));
@@ -1129,6 +1184,8 @@ impl WorldObjectState {
                 target,
                 VehicleHealthDrain {
                     wait_ms: 0,
+                    amount: crate::barrel_policy::EXPLODABLE_BARREL_BURN_DRAIN,
+                    interval_ms: crate::barrel_policy::EXPLODABLE_BARREL_BURN_DRAIN_INTERVAL_MS,
                     attacker,
                     attacker_life,
                     source,
@@ -1141,6 +1198,7 @@ impl WorldObjectState {
                     origin,
                     def_name: crate::barrel_policy::EXPLODABLE_BARREL_BURN_START_FX,
                     tag: None,
+                    use_tag_angles: true,
                 });
             }
         }
@@ -1149,7 +1207,7 @@ impl WorldObjectState {
                 self.pending_barrel_downs.push(target);
             }
             if let Some(origin) = lookup_origin(&self.barrel_origins, target) {
-                return VehicleApply::Exploded(DestructibleExplodeEvent {
+                return Some(DestructibleApply::exploded(DestructibleExplodeEvent {
                     owner: target,
                     origin,
                     attacker,
@@ -1157,10 +1215,10 @@ impl WorldObjectState {
                     source: DamageSource::Radius(target),
                     explode_range_mp: crate::barrel_policy::EXPLODABLE_BARREL_EXPLODE_RANGE,
                     explode_damage: crate::barrel_policy::EXPLODABLE_BARREL_EXPLODE_DAMAGE,
-                });
+                }));
             }
         }
-        VehicleApply::Changed
+        Some(DestructibleApply::changed())
     }
 
     fn apply_crate_amount(
@@ -1170,22 +1228,22 @@ impl WorldObjectState {
         attacker: ClientId,
         attacker_life: LifeSequence,
         source: DamageSource,
-    ) -> VehicleApply {
+    ) -> Option<DestructibleApply> {
         let Some(index) = self.crate_bodies.iter().position(|(id, _)| *id == target) else {
-            return VehicleApply::Unchanged;
+            return None;
         };
         if self.crate_bodies[index].1.destroyed {
-            return VehicleApply::Unchanged;
+            return None;
         }
         let attacker_is_player = !matches!(source, DamageSource::Radius(_));
         if !gamemode_iw4::flammable_crate_damage_applies(false, attacker_is_player) {
-            return VehicleApply::Unchanged;
+            return None;
         }
         let amount = i32::try_from(amount).unwrap_or(i32::MAX);
         let next =
             gamemode_iw4::flammable_crate_health_after(self.crate_bodies[index].1.health, amount);
         if next == self.crate_bodies[index].1.health {
-            return VehicleApply::Unchanged;
+            return None;
         }
         self.crate_bodies[index].1.health = next;
         if gamemode_iw4::flammable_crate_should_ignite(next)
@@ -1197,6 +1255,8 @@ impl WorldObjectState {
                 target,
                 VehicleHealthDrain {
                     wait_ms: 0,
+                    amount: u32::try_from(gamemode_iw4::FLAMMABLE_CRATE_BURN_DRAIN).unwrap_or(0),
+                    interval_ms: gamemode_iw4::FLAMMABLE_CRATE_BURN_DRAIN_INTERVAL_MS,
                     attacker,
                     attacker_life,
                     source,
@@ -1205,7 +1265,7 @@ impl WorldObjectState {
             self.crate_drains.sort_by_key(|(id, _)| *id);
         }
         if !gamemode_iw4::flammable_crate_should_explode(next) {
-            return VehicleApply::Changed;
+            return Some(DestructibleApply::changed());
         }
         self.crate_bodies[index].1.destroyed = true;
         self.crate_bodies[index].1.burning = false;
@@ -1215,11 +1275,11 @@ impl WorldObjectState {
             self.pending_crate_downs.push(target);
         }
         let Some(origin) = lookup_origin(&self.crate_origins, target) else {
-            return VehicleApply::Changed;
+            return Some(DestructibleApply::changed());
         };
         let mut explode_at = origin;
         explode_at[2] += gamemode_iw4::FLAMMABLE_CRATE_EXPLODE_ORIGIN_Z;
-        VehicleApply::Exploded(DestructibleExplodeEvent {
+        Some(DestructibleApply::exploded(DestructibleExplodeEvent {
             owner: target,
             origin: explode_at,
             attacker,
@@ -1227,7 +1287,7 @@ impl WorldObjectState {
             source: DamageSource::Radius(target),
             explode_range_mp: gamemode_iw4::FLAMMABLE_CRATE_EXPLODE_RANGE,
             explode_damage: gamemode_iw4::FLAMMABLE_CRATE_EXPLODE_DAMAGE,
-        })
+        }))
     }
 
     pub fn take_flammable_crate_downs(&mut self) -> Vec<ScriptModelId> {
@@ -1256,74 +1316,30 @@ impl WorldObjectState {
             .is_some_and(|(_, body)| body.burning)
     }
 
-    pub fn tick_flammable_crate_burn(&mut self, dt_ms: u32) -> DestructibleApplyReport {
-        let ids: Vec<ScriptModelId> = self.crate_drains.iter().map(|(id, _)| *id).collect();
-        let mut changed = 0;
-        let mut explodes = Vec::new();
-        for id in ids {
-            let Some(index) = self
-                .crate_drains
-                .iter()
-                .position(|(drain_id, _)| *drain_id == id)
-            else {
-                continue;
-            };
-            self.crate_drains[index].1.wait_ms =
-                self.crate_drains[index].1.wait_ms.saturating_add(dt_ms);
-            while self.crate_drains[index].1.wait_ms
-                >= gamemode_iw4::FLAMMABLE_CRATE_BURN_DRAIN_INTERVAL_MS
-            {
-                self.crate_drains[index].1.wait_ms -=
-                    gamemode_iw4::FLAMMABLE_CRATE_BURN_DRAIN_INTERVAL_MS;
-                let drain = self.crate_drains[index].1;
-                match self.apply_crate_amount(
-                    id,
-                    u32::try_from(gamemode_iw4::FLAMMABLE_CRATE_BURN_DRAIN).unwrap_or(0),
-                    drain.attacker,
-                    drain.attacker_life,
-                    drain.source,
-                ) {
-                    VehicleApply::Unchanged => {}
-                    VehicleApply::Changed => changed += 1,
-                    VehicleApply::Exploded(explode) => {
-                        changed += 1;
-                        explodes.push(explode);
-                        break;
-                    }
-                }
-                if self
-                    .crate_drains
-                    .iter()
-                    .position(|(drain_id, _)| *drain_id == id)
-                    .is_none()
-                {
-                    break;
-                }
-            }
-        }
-        DestructibleApplyReport { changed, explodes }
-    }
-
-    fn apply_destructable_amount(&mut self, target: ScriptModelId, amount: u32) -> VehicleApply {
+    fn apply_destructable_amount(
+        &mut self,
+        target: ScriptModelId,
+        amount: u32,
+    ) -> Option<DestructibleApply> {
         let Some(index) = self
             .destructable_bodies
             .iter()
             .position(|(id, _)| *id == target)
         else {
-            return VehicleApply::Unchanged;
+            return None;
         };
         if self.destructable_bodies[index].1.destroyed {
-            return VehicleApply::Unchanged;
+            return None;
         }
         let amount = i32::try_from(amount).unwrap_or(i32::MAX);
         let threshold = self.destructable_bodies[index].1.threshold;
         if !gamemode_iw4::damage_applies(amount, threshold) {
-            return VehicleApply::Unchanged;
+            return None;
         }
         let next_dmg = self.destructable_bodies[index].1.dmg.saturating_add(amount);
         self.destructable_bodies[index].1.dmg = next_dmg;
         if !gamemode_iw4::should_destruct(next_dmg, self.destructable_bodies[index].1.accumulate) {
-            return VehicleApply::Changed;
+            return Some(DestructibleApply::changed());
         }
         self.destructable_bodies[index].1.destroyed = true;
         self.set_destructible_state(target, DestructibleStateIndex::new(1));
@@ -1342,7 +1358,7 @@ impl WorldObjectState {
                 play_fx,
             });
         }
-        VehicleApply::Changed
+        Some(DestructibleApply::changed())
     }
 
     pub fn glass_piece_state(&self, id: GlassPieceId) -> GlassPieceState {
@@ -1670,13 +1686,31 @@ impl WorldObjectState {
             fracture_profile_version: GLASS_FRACTURE_PROFILE_VERSION,
             destructible_stages,
             glass_pieces,
+            destructible_loop_sounds: self.destructible_loop_sounds.clone(),
         }
     }
 
     pub fn adopt_snapshot(&mut self, snap: &WorldObjectSnapshot) {
         self.map_round_epoch = snap.map_round_epoch;
+        self.destructible_loop_sounds = snap.destructible_loop_sounds.clone();
         self.destructible_stages = snap.destructible_stages.clone();
         sort_pairs(&mut self.destructible_stages);
+
+        // Presentation reads the per-family bodies, so a client that only
+        // receives stages has to see them there too.
+        for (id, _, body) in &mut self.vehicle_bodies {
+            body.state_index = lookup_value(&self.destructible_stages, *id).unwrap_or(0);
+        }
+        for (id, kind, body) in &mut self.toy_bodies {
+            let state = lookup_value(&self.destructible_stages, *id).unwrap_or(0);
+            *body = VehicleBodyState {
+                state_index: state,
+                health: kind.definition().stage(state).health,
+            };
+        }
+        for (id, body) in &mut self.barrel_bodies {
+            body.state_index = lookup_value(&self.destructible_stages, *id).unwrap_or(0);
+        }
 
         self.glass_pieces.clear();
         self.glass_native.clear();

@@ -230,6 +230,10 @@ pub struct WorldScene {
     pub exp_fog: Option<assets::ExpFog>,
 
     pub film_vision: Option<assets::FilmVision>,
+    pub film_visions: std::collections::BTreeMap<
+        String,
+        Result<assets::FilmVision, assets::FilmVisionParseError>,
+    >,
 
     pub createart_name: Option<String>,
 
@@ -710,6 +714,7 @@ impl WorldScene {
             retained_lightmap_uvs: Vec::new(),
             exp_fog: None,
             film_vision: None,
+            film_visions: Default::default(),
             createart_name: None,
             dir_primary_light: None,
             t5_sun_parse_exposure: None,
@@ -796,6 +801,7 @@ impl WorldScene {
             retained_lightmap_uvs: Vec::new(),
             exp_fog: None,
             film_vision: None,
+            film_visions: Default::default(),
             createart_name: None,
             dir_primary_light: None,
             t5_sun_parse_exposure: None,
@@ -1524,6 +1530,7 @@ pub fn world_scene_from_draw(
     scene.sky_model = sky_model;
     scene.exp_fog = world.exp_fog;
     scene.film_vision = world.film_vision;
+    scene.film_visions = world.film_visions;
     scene.createart_name = world.createart_name;
     scene.dir_primary_light = dir_primary_light;
     scene.t5_sun_parse_exposure = draw.t5_sun_parse_exposure;

@@ -75,6 +75,7 @@ struct ClientTarget {
 }
 
 struct Peer {
+    player_name: String,
     connection: quinn::Connection,
     control_tx: tokio::sync::mpsc::Sender<ControlFrame>,
 }
@@ -103,12 +104,14 @@ impl ServiceState {
     fn attach_peer(
         &mut self,
         connection_id: u64,
+        player_name: String,
         connection: quinn::Connection,
         control_tx: tokio::sync::mpsc::Sender<ControlFrame>,
     ) {
         self.peers.insert(
             connection_id,
             Peer {
+                player_name,
                 connection,
                 control_tx,
             },
@@ -176,6 +179,7 @@ impl ServiceState {
         };
         room.connection_of.remove(&member_id);
         room.view.members.retain(|id| *id != member_id);
+        room.view.member_names.remove(&member_id);
         room.view.revision = room.view.revision.wrapping_add(1).max(1);
         self.generation = self.generation.wrapping_add(1);
         self.publish_view(room_id)
@@ -563,10 +567,12 @@ async fn run_connection(
         hello.build
     );
     let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<ControlFrame>(CONTROL_CAP);
-    state
-        .lock()
-        .await
-        .attach_peer(connection_id, connection.clone(), control_tx);
+    state.lock().await.attach_peer(
+        connection_id,
+        normalize_player_name(&hello.player_name),
+        connection.clone(),
+        control_tx,
+    );
     let mut children = tokio::task::JoinSet::new();
     children.spawn(async move {
         let result = async {
@@ -835,6 +841,7 @@ fn create_room(
         name,
         host: member_id,
         members: vec![member_id],
+        member_names: [(member_id, state.peers[&connection_id].player_name.clone())].into(),
         map,
         mode,
         joinable: true,
@@ -914,6 +921,9 @@ fn join_room(
     room.member_of.insert(connection_id, member_id);
     room.connection_of.insert(member_id, connection_id);
     room.view.members.push(member_id);
+    room.view
+        .member_names
+        .insert(member_id, state.peers[&connection_id].player_name.clone());
     room.view.revision = room.view.revision.wrapping_add(1).max(1);
     state.membership.insert(connection_id, room_id);
     state.generation = state.generation.wrapping_add(1);
@@ -1316,6 +1326,7 @@ async fn rpc(
             game_protocol: 0,
             role,
             build: "iw4l-master".into(),
+            player_name: String::new(),
         }),
     )
     .await?;
@@ -1381,4 +1392,18 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     let mut reader = BufReader::new(File::open(path)?);
     rustls_pemfile::private_key(&mut reader)?
         .ok_or_else(|| format!("{} contains no private key", path.display()).into())
+}
+
+fn normalize_player_name(name: &str) -> String {
+    let name: String = name
+        .trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(16)
+        .collect();
+    if name.is_empty() {
+        "Player".into()
+    } else {
+        name
+    }
 }

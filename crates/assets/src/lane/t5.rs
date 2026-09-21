@@ -543,6 +543,7 @@ impl ZoneLane for T5Lane {
                         intermission_view,
                         exp_fog,
                         film_vision: None,
+                        film_visions: Default::default(),
                         createart_name,
                         min,
                         max,

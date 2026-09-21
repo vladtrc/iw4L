@@ -522,9 +522,12 @@ pub enum MasterBridgeState {
     },
     Hosting {
         identity: SessionIdentity,
+        name: String,
         map: String,
         mode: String,
         members: Vec<MemberId>,
+        member_names: std::collections::HashMap<MemberId, String>,
+        max_players: u8,
         skip_votes: u8,
         in_match: bool,
     },
@@ -533,9 +536,12 @@ pub enum MasterBridgeState {
     },
     Joined {
         identity: SessionIdentity,
+        name: String,
         map: String,
         mode: String,
         members: Vec<MemberId>,
+        member_names: std::collections::HashMap<MemberId, String>,
+        max_players: u8,
         skip_votes: u8,
         in_match: bool,
     },
@@ -740,6 +746,7 @@ impl MasterMatchStart {
 }
 
 pub fn arm_master_bridge(
+    settings: Res<frame::GameSettings>,
     intent: Res<MasterLaunchIntent>,
     role: Res<crate::RuntimeRole>,
     authority: Option<Res<AuthorityWorld>>,
@@ -796,7 +803,7 @@ pub fn arm_master_bridge(
             if *role != crate::RuntimeRole::Listen || udp_hub.is_some() {
                 return;
             }
-            let relay = spawn_host(config.clone());
+            let relay = spawn_host(config.clone(), settings.player_name.clone());
             diag::info!(
                 Net,
                 "master public lobby arming for {}",
@@ -808,7 +815,7 @@ pub fn arm_master_bridge(
             if *role != crate::RuntimeRole::Client || udp_link.is_some() {
                 return;
             }
-            let relay = spawn_join(config.clone());
+            let relay = spawn_join(config.clone(), settings.player_name.clone());
             diag::info!(
                 Net,
                 "master joining lobby advert {} through {} ({}/{})",
@@ -1013,6 +1020,7 @@ fn browser_worker(
                         game_protocol: crate::PROTOCOL_VERSION,
                         role: EndpointRole::Cli,
                         build: endpoint_build(),
+                        player_name: String::new(),
                     }),
                 )
                 .await?;
@@ -1105,6 +1113,7 @@ fn browser_worker(
 }
 
 struct WorkerCtx {
+    player_name: String,
     state: Arc<Mutex<MasterBridgeState>>,
     commands: Arc<Mutex<Vec<MasterBridgeCommand>>>,
     installed_load: Arc<Mutex<Option<frame::LocalLoadKey>>>,
@@ -1119,12 +1128,12 @@ struct WorkerCtx {
 static BRIDGE_INCARNATION: AtomicU64 = AtomicU64::new(1);
 static ATTEMPT_ID: AtomicU64 = AtomicU64::new(1);
 
-fn spawn_host(config: HostConfig) -> MasterBridge {
-    spawn_worker("host", SessionKind::Host(config))
+fn spawn_host(config: HostConfig, player_name: String) -> MasterBridge {
+    spawn_worker("host", SessionKind::Host(config), player_name)
 }
 
-fn spawn_join(config: JoinConfig) -> MasterBridge {
-    spawn_worker("join", SessionKind::Join(config))
+fn spawn_join(config: JoinConfig, player_name: String) -> MasterBridge {
+    spawn_worker("join", SessionKind::Join(config), player_name)
 }
 
 enum SessionKind {
@@ -1132,7 +1141,7 @@ enum SessionKind {
     Join(JoinConfig),
 }
 
-fn spawn_worker(role: &'static str, kind: SessionKind) -> MasterBridge {
+fn spawn_worker(role: &'static str, kind: SessionKind, player_name: String) -> MasterBridge {
     let attempt_id = ATTEMPT_ID.fetch_add(1, Ordering::Relaxed);
     let mut identity = SessionIdentity::unassigned(attempt_id);
     if let SessionKind::Join(config) = &kind {
@@ -1147,6 +1156,7 @@ fn spawn_worker(role: &'static str, kind: SessionKind) -> MasterBridge {
     let facts = Arc::new(Mutex::new(Vec::new()));
     let incarnation = BRIDGE_INCARNATION.fetch_add(1, Ordering::Relaxed);
     let ctx = WorkerCtx {
+        player_name,
         state: Arc::clone(&state),
         commands: Arc::clone(&commands),
         installed_load: Arc::clone(&installed_load),
@@ -1513,6 +1523,7 @@ async fn session_main(
     ctx: WorkerCtx,
 ) -> std::result::Result<(), TransportFault> {
     let WorkerCtx {
+        player_name,
         state,
         commands,
         installed_load,
@@ -1564,6 +1575,7 @@ async fn session_main(
             game_protocol: crate::PROTOCOL_VERSION,
             role: hello_role,
             build: endpoint_build(),
+            player_name,
         }),
     )
     .await
@@ -1963,9 +1975,12 @@ fn publish_room_view(
     if is_host {
         *current = MasterBridgeState::Hosting {
             identity,
+            name: view.name.clone(),
             map: view.map.clone(),
             mode: view.mode.clone(),
             members: view.members.clone(),
+            member_names: view.member_names.clone(),
+            max_players: view.max_players,
             skip_votes,
             in_match,
         };
@@ -1974,9 +1989,12 @@ fn publish_room_view(
     if view.contains(local_member) {
         *current = MasterBridgeState::Joined {
             identity,
+            name: view.name.clone(),
             map: view.map.clone(),
             mode: view.mode.clone(),
             members: view.members.clone(),
+            member_names: view.member_names.clone(),
+            max_players: view.max_players,
             skip_votes,
             in_match,
         };

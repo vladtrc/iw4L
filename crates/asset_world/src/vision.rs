@@ -152,16 +152,20 @@ pub fn parse_film_vision_rawfile(
         }
         _ => (false, 0.0, 0.0, 0.0, 0.0),
     };
+    let desaturation = desaturation.ok_or_else(|| missing("r_filmDesaturation"))?;
+    let light_tint = light_tint.ok_or_else(|| missing("r_filmLightTint"))?;
+    let dark_tint = dark_tint.ok_or_else(|| missing("r_filmDarkTint"))?;
     Ok(Some(FilmVision {
         enable: enable.ok_or_else(|| missing("r_filmEnable"))?,
         contrast: contrast.ok_or_else(|| missing("r_filmContrast"))?,
         brightness: brightness.ok_or_else(|| missing("r_filmBrightness"))?,
-        desaturation: desaturation.ok_or_else(|| missing("r_filmDesaturation"))?,
-        desaturation_dark: desaturation_dark.ok_or_else(|| missing("r_filmDesaturationDark"))?,
+        desaturation,
+        desaturation_dark: desaturation_dark.unwrap_or(desaturation),
         invert: invert.ok_or_else(|| missing("r_filmInvert"))?,
-        light_tint: light_tint.ok_or_else(|| missing("r_filmLightTint"))?,
-        medium_tint: medium_tint.ok_or_else(|| missing("r_filmMediumTint"))?,
-        dark_tint: dark_tint.ok_or_else(|| missing("r_filmDarkTint"))?,
+        light_tint,
+        medium_tint: medium_tint
+            .unwrap_or_else(|| std::array::from_fn(|i| (light_tint[i] + dark_tint[i]) * 0.5)),
+        dark_tint,
         glow_enable: glow.0,
         glow_radius: glow.1,
         glow_bloom_cutoff: glow.2,

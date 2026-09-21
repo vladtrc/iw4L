@@ -10,7 +10,8 @@ use hud_iw4::{
     RADARJAM_DIST_MAX, RADARJAM_DIST_MIN, cg_compass_fade_alpha, cg_compass_friendly_size,
     cg_compass_player_size, cg_compass_sound_ping_fade, cg_compass_up_yaw_vector,
     cg_radar_jam_intensity, cg_radar_jam_nearest_distance, cg_world_pos_to_compass_partial,
-    compass_map_bounds_from_minimap_corners, compass_partial_map_uv, radar_contact_trail_visible,
+    compass_clamp_offset, compass_map_bounds_from_minimap_corners, compass_partial_map_uv,
+    radar_contact_trail_visible,
 };
 use net::{CgFrameClock, LocalPresentClient, PresentedSnapshot, WeaponFirePingBus};
 use sim::ClientId;
@@ -34,6 +35,7 @@ pub(crate) struct CompassRaster;
 #[derive(Resource, Default)]
 pub(crate) struct CompassPingLatch {
     actors: HashMap<u32, PingActor>,
+    last_time: Option<i32>,
 }
 
 struct PingActor {
@@ -185,8 +187,24 @@ pub(crate) fn update_compass(
         )
     };
     let map_item = items.map.1;
+    let local_team = presented
+        .snapshot()
+        .and_then(|s| s.meta.for_client(local.0))
+        .map_or(3, |m| m.client_state_team);
     let mut live: Vec<([f32; 2], f32)> = Vec::new();
-    for actor in latch.actors.values() {
+    for (&id, actor) in &latch.actors {
+        let Some(meta) = presented
+            .snapshot()
+            .and_then(|s| s.meta.for_client(ClientId(id)))
+        else {
+            continue;
+        };
+        if local_team == 3
+            || meta.client_state_team == 3
+            || same_team(local_team, meta.client_state_team)
+        {
+            continue;
+        }
         let Some(alpha) = cg_compass_sound_ping_fade(
             cg_clock.time(),
             actor.begin_fade_ms,
@@ -255,11 +273,10 @@ pub(crate) fn update_compass(
                 size,
                 drawable.max_range,
             );
-            let x = map_item.rect.x
-                + map_item.rect.w * COMPASS_SIZE_DEFAULT * 0.5
-                + offset[0].clamp(-size * 0.5 + 6.0, size * 0.5 - 6.0);
-            let y =
-                map_item.rect.y + size * 0.5 + offset[1].clamp(-size * 0.5 + 6.0, size * 0.5 - 6.0);
+            let width = map_item.rect.w * COMPASS_SIZE_DEFAULT;
+            let offset = compass_clamp_offset(offset, [width, size]);
+            let x = map_item.rect.x + width * 0.5 + offset[0];
+            let y = map_item.rect.y + size * 0.5 + offset[1];
             let r = surface.apply_rect(
                 x - 8.0,
                 y - 8.0,
@@ -294,7 +311,38 @@ pub(crate) fn update_compass(
         fonts.insert(crate::font_overlay::HUD_SMALL_FONT.to_owned(), font);
         gaps.clear(HudGap::CompassObjectives);
     }
-    let (quads, _) = crate::draw2d::tessellate_fonts(&list, &fonts);
+    let (mut quads, _) = crate::draw2d::tessellate_fonts(&list, &fonts);
+    if let Some(snapshot) = presented.snapshot() {
+        for (id, _) in &snapshot.players {
+            if *id == local.0 {
+                continue;
+            }
+            let Some(meta) = snapshot.meta.for_client(*id) else {
+                continue;
+            };
+            if !same_team(local_team, meta.client_state_team) {
+                continue;
+            }
+            let Some(other) = presented.alive_player(*id) else {
+                continue;
+            };
+            let offset = cg_world_pos_to_compass_partial(
+                north,
+                player_xy,
+                [other.origin[0], other.origin[1]],
+                map_item.rect.h * COMPASS_SIZE_DEFAULT,
+                drawable.max_range,
+            );
+            quads.push(friendly_quad(
+                &surface,
+                map_item,
+                offset,
+                [ping_w, ping_h],
+                ps.viewangles[1] - other.viewangles[1],
+                jam_fade,
+            ));
+        }
+    }
     if quads.is_empty() {
         hide(&mut pass);
         return;
@@ -329,22 +377,6 @@ fn build_compass_list(
         index: map_index,
     };
     let mut cmds = Vec::new();
-    cmds.push(Draw2dCmd {
-        material_namespace: map_namespace,
-        x: applied.x,
-        y: applied.y,
-        w: applied.w,
-        h: applied.h,
-        s0: 0.0,
-        t0: 0.0,
-        s1: 1.0,
-        t1: 1.0,
-        color: map_item.fore_color,
-        material: String::new(),
-        op: Draw2dOp::ClipRect,
-        provenance: provenance_map.clone(),
-        layer: 1,
-    });
     cmds.push(Draw2dCmd {
         material_namespace: map_namespace,
         x: applied.x,
@@ -407,6 +439,7 @@ fn build_compass_list(
         None => Draw2dProvenance::OwnerDraw(OWNER_DRAW_ENEMIES),
     };
     for &(offset, alpha) in pings {
+        let offset = compass_clamp_offset(offset, [vw, vh]);
         let cx = map_item.rect.x + vw * 0.5 + offset[0];
         let cy = map_item.rect.y + vh * 0.5 + offset[1];
         let pr = surface.apply_rect(
@@ -437,6 +470,53 @@ fn build_compass_list(
     Draw2dList { cmds }
 }
 
+fn same_team(local: i32, other: i32) -> bool {
+    matches!(local, 1 | 2) && local == other
+}
+
+fn friendly_quad(
+    surface: &crate::surface::Hud2dSurface,
+    map: &MenuItem,
+    offset: [f32; 2],
+    size: [f32; 2],
+    yaw: f32,
+    alpha: f32,
+) -> crate::draw2d::Draw2dQuad {
+    let map_size = [
+        map.rect.w * COMPASS_SIZE_DEFAULT,
+        map.rect.h * COMPASS_SIZE_DEFAULT,
+    ];
+    let offset = compass_clamp_offset(offset, map_size);
+    let center = [
+        map.rect.x + map_size[0] * 0.5 + offset[0],
+        map.rect.y + map_size[1] * 0.5 + offset[1],
+    ];
+    let (sin, cos) = yaw.to_radians().sin_cos();
+    let xy = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]].map(|p| {
+        let x = p[0] * size[0];
+        let y = p[1] * size[1];
+        let r = surface.apply_rect(
+            center[0] + x * cos - y * sin,
+            center[1] + x * sin + y * cos,
+            0.0,
+            0.0,
+            map.rect.horz_align as i32,
+            map.rect.vert_align as i32,
+        );
+        [r.x, r.y]
+    });
+    crate::draw2d::Draw2dQuad {
+        xy,
+        st: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        color: [1.0, 1.0, 1.0, alpha],
+        material: "compassping_friendly_mp".to_owned(),
+        material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+        provenance: Draw2dProvenance::OwnerDraw(158),
+        layer: 1,
+        clip: None,
+    }
+}
+
 fn scale_icon_alpha(mut rgba: [f32; 4], scale: f32) -> [f32; 4] {
     rgba[3] *= scale;
     rgba
@@ -449,6 +529,18 @@ fn take_fire_pings(
     cg_time_ms: i32,
     latch: &mut CompassPingLatch,
 ) -> i32 {
+    if latch.last_time.is_some_and(|last| cg_time_ms < last) || presented.snapshot().is_none() {
+        latch.actors.clear();
+    }
+    latch.last_time = Some(cg_time_ms);
+    latch.actors.retain(|_, actor| {
+        cg_compass_sound_ping_fade(
+            cg_time_ms,
+            actor.begin_fade_ms,
+            hud_iw4::COMPASS_SOUND_PING_FADE_TIME_DEFAULT,
+        )
+        .is_some()
+    });
     let n = bus.pings.len() as i32;
     for ping in bus.pings.drain(..) {
         if ping.number == local.0 as i32 {

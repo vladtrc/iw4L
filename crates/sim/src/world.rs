@@ -2894,6 +2894,7 @@ impl SimState {
                 objectives: self.objectives.clone(),
                 phase: self.phase,
                 match_elapsed_ms: self.match_elapsed_ms,
+                prematch: self.prematch,
                 score_limit: self.bootstrap.score_limit,
                 time_limit_ms: self.bootstrap.time_limit_ms,
                 kind: self.bootstrap.kind,
@@ -3107,6 +3108,7 @@ impl SimState {
 
         self.phase = snapshot.meta.phase;
         self.match_elapsed_ms = snapshot.meta.match_elapsed_ms;
+        self.prematch = snapshot.meta.prematch;
         self.running = true;
         self.spawn_rng.restore_draws(snapshot.meta.rng.spawn_draws);
         self.combat_rng

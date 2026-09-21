@@ -387,6 +387,8 @@ fn bump_shell_revision(
     mut revision: ResMut<ShellRevision>,
     mut last_window: Local<Option<Option<(u32, u32, u32)>>>,
     mut last_stack: Local<Vec<String>>,
+    mut last_bridge: Local<Option<net::MasterBridgeState>>,
+    mut last_browser: Local<Option<net::MasterBrowserSnapshot>>,
 ) {
     let window_key = window_layout_key(&windows);
     let window_changed = last_window.as_ref() != Some(&window_key);
@@ -395,18 +397,16 @@ fn bump_shell_revision(
     if stack_changed {
         last_stack.clone_from(&stack.names);
     }
-    let external_changed = extras
-        .browser
-        .as_ref()
-        .is_some_and(|value| value.is_changed())
+    let bridge = extras.master_bridge.as_ref().map(|value| value.state());
+    let browser = extras.browser.as_ref().map(|value| value.snapshot());
+    let external_changed = *last_bridge != bridge
+        || *last_browser != browser
         || extras
             .master_intent
             .as_ref()
-            .is_some_and(|value| value.is_changed())
-        || extras
-            .master_bridge
-            .as_ref()
             .is_some_and(|value| value.is_changed());
+    *last_bridge = bridge;
+    *last_browser = browser;
     if extras.class_phase.is_changed()
         || extras.class_status.is_changed()
         || extras.class_store.is_changed()

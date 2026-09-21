@@ -15,6 +15,7 @@ impl ledger::Gap for ScriptGapKey {
         Self(GapId::FlammableCrateFx),
         Self(GapId::FlammableCratePhysics),
         Self(GapId::ExplodableBarrelPhysics),
+        Self(GapId::DestructiblePartLaunch),
         Self(GapId::RadiationDoorKillEdge),
         Self(GapId::RadiationSwitchExploder),
         Self(GapId::RadiationDiggerFx),

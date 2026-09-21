@@ -184,6 +184,7 @@ fn overlay_archived_world(live: &Snapshot, archived: &Snapshot, viewer: ClientId
     out.tick = live.tick;
     out.meta.phase = live.meta.phase;
     out.meta.match_elapsed_ms = live.meta.match_elapsed_ms;
+    out.meta.prematch = live.meta.prematch;
     out.meta.score_limit = live.meta.score_limit;
     out.meta.time_limit_ms = live.meta.time_limit_ms;
     out.meta.kind = live.meta.kind;

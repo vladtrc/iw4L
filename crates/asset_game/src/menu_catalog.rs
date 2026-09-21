@@ -607,8 +607,33 @@ impl MenuSink {
         }
 
         materials.extend(
-            ["progress_bar_bg", "progress_bar_fill", "hud_suitcase_bomb"].map(str::to_owned),
+            [
+                "progress_bar_bg",
+                "progress_bar_fill",
+                "hud_suitcase_bomb",
+                "compassping_friendly_mp",
+                "compassping_enemyfiring",
+            ]
+            .map(str::to_owned),
         );
+        // Rank tables and their materials can arrive in separate UI zones.
+        materials.extend(
+            self.material_ts2d
+                .keys()
+                .filter(|name| name.starts_with("rank_"))
+                .cloned(),
+        );
+        if let Some(table) = self.catalog.string_table("mp/rankIconTable.csv") {
+            for row in 0..table.rows {
+                // Column zero identifies the rank; the rest are prestige variants.
+                for col in 1..table.columns {
+                    let material = table.cell(row as i32, col as i32);
+                    if !material.is_empty() {
+                        materials.push(material.to_owned());
+                    }
+                }
+            }
+        }
         materials.sort_unstable();
         materials.dedup();
         for material in materials {

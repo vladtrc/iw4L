@@ -2,6 +2,10 @@ pub const FX_MARK_STRIDE: usize = 0x40;
 
 pub const FX_MARKS_LIMIT: u32 = 512;
 
+/// How many marks may be alive at once. The pool holds `FX_MARKS_LIMIT`
+/// slots; this is the smaller budget the oldest mark is recycled against.
+pub const FX_MARKS_ACTIVE_LIMIT: u32 = 256;
+
 pub const FX_TRI_GROUP_STRIDE: usize = 0x18;
 
 pub const FX_TRI_GROUP_LIMIT: u32 = 2048;

@@ -234,6 +234,18 @@ pub fn cg_world_pos_to_compass_partial(
     ]
 }
 
+/// Intersect the center-to-contact ray with the map rectangle.
+#[must_use]
+pub fn compass_clamp_offset(offset: [f32; 2], size: [f32; 2]) -> [f32; 2] {
+    let mut scale = 1.0_f32;
+    for axis in 0..2 {
+        if offset[axis].abs() > size[axis] * 0.5 {
+            scale = scale.min(size[axis].max(0.0) * 0.5 / offset[axis].abs());
+        }
+    }
+    [offset[0] * scale, offset[1] * scale]
+}
+
 #[must_use]
 pub fn cg_compass_sound_ping_fade(
     cg_time_ms: i32,

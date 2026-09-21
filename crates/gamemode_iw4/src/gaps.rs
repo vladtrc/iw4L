@@ -10,6 +10,7 @@ pub enum ScriptGap {
     FlammableCrateFx,
     FlammableCratePhysics,
     ExplodableBarrelPhysics,
+    DestructiblePartLaunch,
     RadiationDoorKillEdge,
     RadiationSwitchExploder,
     RadiationDiggerFx,
@@ -26,6 +27,7 @@ impl ScriptGap {
         Self::FlammableCrateFx,
         Self::FlammableCratePhysics,
         Self::ExplodableBarrelPhysics,
+        Self::DestructiblePartLaunch,
         Self::RadiationDoorKillEdge,
         Self::RadiationSwitchExploder,
         Self::RadiationDiggerFx,
@@ -42,6 +44,7 @@ impl ScriptGap {
             Self::FlammableCrateFx => "gsc.mp._interactive_objects.flammable_crate_explode",
             Self::FlammableCratePhysics => "gsc.mp._interactive_objects.flammable_crate_explode",
             Self::ExplodableBarrelPhysics => "gsc.mp._explosive_barrels.explodable_barrel_explode",
+            Self::DestructiblePartLaunch => "gsc.common_scripts._destructible.physics_launch",
             Self::RadiationDoorKillEdge => "gsc.mp.mp_radiation.kill_edge_players_func",
             Self::RadiationSwitchExploder => "gsc.mp.mp_radiation.turnSwitchPanelGreen",
             Self::RadiationDiggerFx => "gsc.mp.mp_radiation.digger_dig_think",
@@ -72,6 +75,7 @@ pub enum ScriptGapCause {
     FlammableCrateFx { source_ordinal: u32 },
     FlammableCratePhysics { source_ordinal: u32 },
     ExplodableBarrelPhysics { source_ordinal: u32 },
+    DestructiblePartLaunch { source_ordinal: u32 },
     RadiationDoorKillEdge,
     RadiationSwitchExploder,
     RadiationDiggerFx,
@@ -89,6 +93,7 @@ impl ScriptGapCause {
             Self::FlammableCrateFx { .. } => ScriptGap::FlammableCrateFx,
             Self::FlammableCratePhysics { .. } => ScriptGap::FlammableCratePhysics,
             Self::ExplodableBarrelPhysics { .. } => ScriptGap::ExplodableBarrelPhysics,
+            Self::DestructiblePartLaunch { .. } => ScriptGap::DestructiblePartLaunch,
             Self::RadiationDoorKillEdge => ScriptGap::RadiationDoorKillEdge,
             Self::RadiationSwitchExploder => ScriptGap::RadiationSwitchExploder,
             Self::RadiationDiggerFx => ScriptGap::RadiationDiggerFx,
@@ -121,6 +126,10 @@ impl fmt::Display for ScriptGapCause {
             Self::ExplodableBarrelPhysics { source_ordinal } => write!(
                 f,
                 "explodable barrel {source_ordinal} physicsexplosionsphere, earthquake, piece2 husk, and tipped pose are not wired"
+            ),
+            Self::DestructiblePartLaunch { source_ordinal } => write!(
+                f,
+                "destructible {source_ordinal} launched a part; the part hides but no physics model is spawned"
             ),
             Self::RadiationDoorKillEdge => {
                 f.write_str("radiation doors closing: kill_edge_players_func DoDamage is not wired")

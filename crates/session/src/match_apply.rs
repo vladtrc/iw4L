@@ -1367,37 +1367,24 @@ fn log_destructible_death_assets(death: &PreparedDestructibleDeath) {
 }
 
 fn log_destructible_fx_assets(fx: &PreparedFxCatalog) {
-    const DEFS: &[&str] = &[
+    const VEHICLE_DEFS: &[&str] = &[
         "smoke/car_damage_blacksmoke_fire",
         "explosions/small_vehicle_explosion",
         "explosions/vehicle_explosion_medium",
         sim::EXPLODABLE_BARREL_DEATH_FX,
         sim::EXPLODABLE_BARREL_BURN_START_FX,
         sim::EXPLODABLE_BARREL_BURN_LOOP_FX,
-        gamemode_iw4::TOY_TUBETV_DEATH_FX,
-        gamemode_iw4::TOY_FLATSCREEN_DEATH_FX,
-        gamemode_iw4::TOY_FLUORESCENT_DEATH_FX,
-        gamemode_iw4::TOY_FLUORESCENT_SINGLE_DEATH_FX,
-        gamemode_iw4::TOY_ELECTRICBOX_DEATH_FX,
-        gamemode_iw4::TOY_AIRCONDITIONER_DEATH_FX,
-        gamemode_iw4::TOY_WALL_FAN_DEATH_FX,
-        gamemode_iw4::TOY_CEILING_FAN_DEATH_FX,
-        gamemode_iw4::TOY_LOCKER_DOUBLE_DEATH_FX,
-        gamemode_iw4::TOY_FILECABINET_DEATH_FX,
-        gamemode_iw4::TOY_GAS_STATION_TRASH_BIN_01_DEATH_FX,
-        gamemode_iw4::TOY_TRANSFORMER_SMALL01_DEATH_FX,
-        gamemode_iw4::TOY_WATER_COLLECTOR_DEATH_FX,
-        gamemode_iw4::TOY_NEWSPAPER_STAND_RED_DEATH_FX,
-        gamemode_iw4::TOY_NEWSPAPER_STAND_BLUE_DEATH_FX,
-        gamemode_iw4::TOY_CHICKEN_BLACK_WHITE_DEATH_FX,
-        gamemode_iw4::TOY_CHICKEN_WHITE_DEATH_FX,
-        gamemode_iw4::TOY_FIREHYDRANT_DEATH_FX,
-        gamemode_iw4::TOY_COPIER_DEATH_FX,
-        gamemode_iw4::TOY_GENERATOR_DEATH_FX,
-        gamemode_iw4::TOY_DT_MIRROR_LARGE_DEATH_FX,
-        gamemode_iw4::TOY_DT_MIRROR_DEATH_FX,
     ];
-    for name in DEFS {
+    let mut names: Vec<&str> = VEHICLE_DEFS.to_vec();
+    for kind in gamemode_iw4::TOY_DESTRUCTIBLE_KINDS {
+        for stage in kind.definition().stages {
+            names.extend(stage.fx.iter().map(|fx| fx.name));
+            names.extend(stage.loop_fx.iter().map(|fx| fx.name));
+        }
+    }
+    names.sort_unstable();
+    names.dedup();
+    for name in names {
         let status = if fx.0.resolve_def(name).is_some() {
             "captured"
         } else if fx.0.get(name).is_some() {
@@ -1464,20 +1451,23 @@ fn apply_toy_spawn_models(world: &mut assets::PreparedWorld) {
     }
 }
 
-fn attach_husk_capability(
+fn attach_swap_capabilities<'a>(
     dobj: &mut sim::AuthorityDObjState,
     world: &assets::PreparedWorld,
-    name: &str,
+    names: impl IntoIterator<Item = &'a str>,
 ) {
-    let key = assets::MapXModelAssetKey(name.to_owned());
-    dobj.husk_capability = match world.map_xmodel_scene_assets.get(&key) {
-        Some(
-            assets::MapXModelSceneAsset::Iw4(model)
-            | assets::MapXModelSceneAsset::Iw5(model)
-            | assets::MapXModelSceneAsset::T5(model),
-        ) => model.retained_capability().map(std::sync::Arc::new),
-        Some(assets::MapXModelSceneAsset::Unavailable { .. }) | None => None,
-    };
+    for name in names {
+        let key = assets::MapXModelAssetKey(name.to_owned());
+        let capability = match world.map_xmodel_scene_assets.get(&key) {
+            Some(
+                assets::MapXModelSceneAsset::Iw4(model)
+                | assets::MapXModelSceneAsset::Iw5(model)
+                | assets::MapXModelSceneAsset::T5(model),
+            ) => model.retained_capability().map(std::sync::Arc::new),
+            Some(assets::MapXModelSceneAsset::Unavailable { .. }) | None => None,
+        };
+        dobj.swap_capabilities.push((name.to_owned(), capability));
+    }
 }
 
 fn authority_entity_model_install(world: &assets::PreparedWorld) -> AuthorityEntityModelInstall {
@@ -1567,25 +1557,25 @@ fn authority_entity_model_install(world: &assets::PreparedWorld) -> AuthorityEnt
             if let Some(kind) =
                 sim::VehicleDestructibleKind::from_mapents(&instance.metadata.destructible_type)
             {
-                attach_husk_capability(&mut dobj, world, kind.definition().death.husk);
+                attach_swap_capabilities(&mut dobj, world, [kind.definition().death.husk]);
             } else if let Some(kind) =
                 sim::ToyDestructibleKind::from_mapents(&instance.metadata.destructible_type)
             {
-                attach_husk_capability(&mut dobj, world, kind.definition().husk);
+                attach_swap_capabilities(&mut dobj, world, kind.definition().stage_models());
             } else if assets::exploding_prop_machine(
                 &instance.metadata.targetname,
                 &instance.metadata.script_noteworthy,
                 &instance.metadata.destructible_type,
             ) == Some("explodable_barrel")
             {
-                attach_husk_capability(&mut dobj, world, sim::EXPLODABLE_BARREL_HUSK);
+                attach_swap_capabilities(&mut dobj, world, [sim::EXPLODABLE_BARREL_HUSK]);
             } else if assets::exploding_prop_machine(
                 &instance.metadata.targetname,
                 &instance.metadata.script_noteworthy,
                 &instance.metadata.destructible_type,
             ) == Some("flammable_crate")
             {
-                attach_husk_capability(&mut dobj, world, gamemode_iw4::FLAMMABLE_CRATE_HUSK);
+                attach_swap_capabilities(&mut dobj, world, [gamemode_iw4::FLAMMABLE_CRATE_HUSK]);
             }
 
             if let Some(definition) = &instance.metadata.t5_destructible {

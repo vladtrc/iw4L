@@ -74,10 +74,11 @@ pub use mesh::{
     r_reserve_mark_mesh_verts,
 };
 pub use pool::{
-    FX_MARK_ENT_LIMIT, FX_MARK_HANDLE_NONE, FX_MARK_STRIDE, FX_MARKS_CLIENT_STRIDE, FX_MARKS_LIMIT,
-    FX_POINT_GROUP_LIMIT, FX_POINT_GROUP_NEXT_NONE, FX_POINT_GROUP_STRIDE, FX_TRI_GROUP_LIMIT,
-    FX_TRI_GROUP_NEXT_NONE, FX_TRI_GROUP_STRIDE, fx_init_mark_next_handle, fx_init_point_next_slot,
-    fx_init_tri_next_slot, fx_mark_handle_for_slot, fx_mark_handle_from_byte_offset,
+    FX_MARK_ENT_LIMIT, FX_MARK_HANDLE_NONE, FX_MARK_STRIDE, FX_MARKS_ACTIVE_LIMIT,
+    FX_MARKS_CLIENT_STRIDE, FX_MARKS_LIMIT, FX_POINT_GROUP_LIMIT, FX_POINT_GROUP_NEXT_NONE,
+    FX_POINT_GROUP_STRIDE, FX_TRI_GROUP_LIMIT, FX_TRI_GROUP_NEXT_NONE, FX_TRI_GROUP_STRIDE,
+    fx_init_mark_next_handle, fx_init_point_next_slot, fx_init_tri_next_slot,
+    fx_mark_handle_for_slot, fx_mark_handle_from_byte_offset,
 };
 pub use xsurface::{
     XSurfaceCollisionLeaf, XSurfaceCollisionNode, XSurfaceCollisionTree, XSurfaceVisitError,

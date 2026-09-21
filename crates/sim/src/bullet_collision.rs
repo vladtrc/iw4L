@@ -187,7 +187,12 @@ pub struct AuthorityDObjState {
 
     pub(crate) t5_destructible: Option<crate::t5_destructible::State>,
     pub(crate) pickup_glass: Option<[gamemode_iw4::VehicleBodyState; 6]>,
-    pub husk_capability: Option<std::sync::Arc<xmodel_runtime::RetainedModelCapability>>,
+    /// Capabilities for the models this script model can swap to: husks and
+    /// the intermediate stages of a destructible.
+    pub swap_capabilities: Vec<(
+        String,
+        Option<std::sync::Arc<xmodel_runtime::RetainedModelCapability>>,
+    )>,
 }
 
 fn iw_angles_to_mat4(origin: glam::Vec3, angles: [f32; 3]) -> glam::Mat4 {
@@ -323,8 +328,64 @@ impl AuthorityDObjState {
             apos: None,
             pickup_glass: None,
             t5_destructible: None,
-            husk_capability: None,
+            swap_capabilities: Vec::new(),
         }
+    }
+
+    pub fn swap_capability(
+        &self,
+        model: &str,
+    ) -> Option<std::sync::Arc<xmodel_runtime::RetainedModelCapability>> {
+        self.swap_capabilities
+            .iter()
+            .find(|(name, _)| name == model)
+            .and_then(|(_, capability)| capability.clone())
+    }
+
+    /// Put the model a destructible state asks for on this dobj.
+    pub fn set_stage_model(&mut self, model: &str) {
+        if self.current_model == model {
+            return;
+        }
+        self.play_anim = None;
+        let capability = self.swap_capability(model);
+        self.set_model(model.to_owned(), capability);
+        self.semantic_state = xmodel_runtime::DObjSemanticState::bind_pose(
+            model.to_owned(),
+            self.model_revision,
+            self.pose_revision,
+        );
+        self.pose_request = xmodel_runtime::DObjPoseRequest::bind_pose();
+    }
+
+    /// Hide the parts a destructible has launched. Parts never come back
+    /// inside a round, so this only ever adds bits.
+    pub fn hide_tags(&mut self, tags: &[&str]) {
+        let Some(capability) = &self.capability else {
+            return;
+        };
+        let mut words = *self.semantic_state.hide_part_bits.words();
+        for tag in tags {
+            let Some(bone) = capability
+                .pose
+                .bone_names
+                .iter()
+                .position(|name| name == *tag)
+            else {
+                continue;
+            };
+            words[bone / 32] |= 0x8000_0000 >> (bone % 32);
+        }
+        let hide = xmodel_runtime::HidePartBits::from_words(words);
+        if hide == self.semantic_state.hide_part_bits {
+            return;
+        }
+        self.semantic_state.hide_part_bits = hide;
+        self.pose_request.hide_part_bits = hide;
+        self.pose_revision = self.pose_revision.wrapping_add(1);
+        self.semantic_state.pose_revision = self.pose_revision;
+        self.current_collision = None;
+        self.materialized_pose_revision = None;
     }
 
     pub fn set_model(
@@ -346,7 +407,7 @@ impl AuthorityDObjState {
     pub fn begin_destructible_death(&mut self, husk: &str, clip: &str) {
         self.play_anim = None;
         self.pickup_glass = None;
-        self.set_model(husk.to_owned(), self.husk_capability.clone());
+        self.set_model(husk.to_owned(), self.swap_capability(husk));
         self.pose_revision = self.pose_revision.wrapping_add(1);
         self.semantic_state = xmodel_runtime::DObjSemanticState::one_leaf(
             husk.to_owned(),

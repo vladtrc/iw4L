@@ -380,6 +380,7 @@ pub struct SnapshotMeta {
     pub phase: MatchPhase,
 
     pub match_elapsed_ms: u32,
+    pub prematch: gamemode_iw4::PrematchStep,
 
     pub score_limit: i32,
 

@@ -10,6 +10,7 @@ pub struct FilmVisionView {
     result: hud_iw4::VisionSetVars,
     lerp: hud_iw4::VisionSetLerpData,
     last_map: Option<assets::FilmVision>,
+    override_vision: Option<assets::FilmVision>,
 }
 
 impl Default for FilmVisionView {
@@ -21,7 +22,47 @@ impl Default for FilmVisionView {
             result: hud_iw4::VisionSetVars::default(),
             lerp: hud_iw4::VisionSetLerpData::default(),
             last_map: None,
+            override_vision: None,
         }
+    }
+}
+
+impl FilmVisionView {
+    /// Select a preset, or restore the map with None. Call only for a ready view.
+    pub fn select(
+        &mut self,
+        map: Option<assets::FilmVision>,
+        preset: Option<assets::FilmVision>,
+        now_ms: i32,
+        duration_ms: i32,
+        allowed: bool,
+        script_forced: bool,
+    ) {
+        if self.last_map.is_none() {
+            self.result = pack_film_vision(map.unwrap_or_default());
+            self.lerp.style = hud_iw4::VISION_SET_LERP_HOLD;
+        }
+        let (current, _) = hud_iw4::cg_vision_sets_update(
+            now_ms,
+            self.from,
+            self.to,
+            self.lerp,
+            self.result,
+            allowed,
+            script_forced,
+        );
+        let target = preset.or(map).unwrap_or_default();
+        (self.from, self.to, self.lerp) = hud_iw4::cg_vision_set_start(
+            now_ms,
+            duration_ms,
+            hud_iw4::VISION_SET_LERP_TO_SMOOTH,
+            self.lerp.style,
+            current,
+            pack_film_vision(target),
+        );
+        self.result = if duration_ms <= 0 { self.to } else { current };
+        self.last_map = Some(target);
+        self.override_vision = preset;
     }
 }
 
@@ -158,7 +199,42 @@ pub fn presented_film_vision_with_lerp(
     presented_film_vision_with_glow_tweaks(true, Some(mixed), use_tweaks, tweaks)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IntroStage {
+    Waiting,
+    Starting,
+    Returning,
+    Playing,
+}
+
+fn intro_stage(phase: sim::MatchPhase, prematch: gamemode_iw4::PrematchStep) -> (IntroStage, i32) {
+    if phase != sim::MatchPhase::Warmup {
+        return (IntroStage::Playing, 0);
+    }
+    match prematch {
+        gamemode_iw4::PrematchStep::Starting { elapsed_ms } => {
+            let return_at = gamemode_iw4::MATCH_START_MS.saturating_sub(2000)
+                + gamemode_iw4::MATCH_START_PULSE_IN_MS as u32;
+            if elapsed_ms >= return_at {
+                (
+                    IntroStage::Returning,
+                    elapsed_ms.saturating_sub(return_at) as i32,
+                )
+            } else {
+                (IntroStage::Starting, 0)
+            }
+        }
+        _ => (IntroStage::Waiting, 0),
+    }
+}
+
+#[derive(Resource, Default)]
+struct MatchIntroVision {
+    stage: Option<IntroStage>,
+}
+
 pub fn register(app: &mut App) {
+    app.init_resource::<MatchIntroVision>();
     app.init_resource::<FilmVisionView>().add_systems(
         Update,
         update_film_vision_view
@@ -173,10 +249,78 @@ fn update_film_vision_view(
     glow: Res<GlowDvars>,
     clock: Res<net::CgFrameClock>,
     mut film: ResMut<FilmVisionView>,
+    presented: Res<net::PresentedSnapshot>,
+    mut intro: ResMut<MatchIntroVision>,
 ) {
+    if !view.ready {
+        intro.stage = None;
+    } else {
+        let (stage, age_ms) = presented
+            .snapshot()
+            .map_or((IntroStage::Waiting, 0), |snapshot| {
+                intro_stage(snapshot.meta.phase, snapshot.meta.prematch)
+            });
+        if intro.stage != Some(stage) {
+            match stage {
+                IntroStage::Waiting | IntroStage::Starting => {
+                    match scene.film_visions.get("vision/mpintro.vision") {
+                        Some(Ok(preset)) => film.select(
+                            scene.film_vision,
+                            Some(*preset),
+                            clock.time(),
+                            0,
+                            glow.allowed,
+                            glow.allowed_script_forced,
+                        ),
+                        Some(Err(error)) => diag::warn!(World, "match intro vision: {error:?}"),
+                        None => {}
+                    }
+                }
+                IntroStage::Returning => {
+                    if intro.stage.is_none()
+                        && let Some(Ok(preset)) = scene.film_visions.get("vision/mpintro.vision")
+                    {
+                        film.select(
+                            scene.film_vision,
+                            Some(*preset),
+                            clock.time() - age_ms,
+                            0,
+                            glow.allowed,
+                            glow.allowed_script_forced,
+                        );
+                    }
+                    film.select(
+                        scene.film_vision,
+                        None,
+                        clock.time() - age_ms,
+                        3000,
+                        glow.allowed,
+                        glow.allowed_script_forced,
+                    );
+                }
+                IntroStage::Playing if intro.stage.is_some() => {
+                    let duration = if intro.stage == Some(IntroStage::Returning) {
+                        3000
+                    } else {
+                        0
+                    };
+                    film.select(
+                        scene.film_vision,
+                        None,
+                        clock.time(),
+                        duration,
+                        glow.allowed,
+                        glow.allowed_script_forced,
+                    );
+                }
+                IntroStage::Playing => {}
+            }
+            intro.stage = Some(stage);
+        }
+    }
     let mixed = presented_film_vision_with_lerp(
         view.ready,
-        scene.film_vision,
+        film.override_vision.or(scene.film_vision),
         clock.time(),
         0,
         &mut film,

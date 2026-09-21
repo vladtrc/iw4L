@@ -1,43 +1,48 @@
 use std::collections::HashMap;
 
-use assets::{MenuCatalog, PreparedLocalizedStrings, SessionTeamIcons, TeamIcons};
+use assets::{FontDef, MenuCatalog, PreparedLocalizedStrings, SessionTeamIcons, TeamIcons};
 use bevy::prelude::*;
 use entity_iw4::client_state_name;
 use frame::LaunchIdentity;
 use gamemode_iw4::{ParsedScores, Score};
 use hud_iw4::{
-    ALIGN_VIEWABLE, ExprHost, Operand, match_time_remaining_ms, r_normalized_text_scale,
-    scorebar_gametype_loc_key,
+    ALIGN_CENTER, match_time_remaining_ms, r_normalized_text_scale, scorebar_gametype_loc_key,
 };
-use net::{ClientActionInput, LocalPresentClient, PresentedSnapshot};
-use sim::{ClientSnapshotMeta, Snapshot};
+use net::{
+    CgScores, ClientActionInput, LocalPresentClient, MasterBridge, MasterBridgeState,
+    PresentedSnapshot,
+};
+use sim::{ClientLifecycle, MatchPhase, Snapshot};
 
-use crate::chrome::{ChromeAssets, execute_chrome_menu};
+use crate::chrome::ui_text_width;
 use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance, tessellate_fonts};
 use crate::font_overlay::HUD_SMALL_FONT;
 use crate::gpu_list::{HudTessPass, TessJob};
-use crate::images::HudImages;
-use crate::scorebar::{hud_team_icons, sys_milliseconds};
+use crate::images::{HUD_CHROME_NAMESPACE, HudImages};
+use crate::overhead_names::rank_presentation;
+use crate::scorebar::hud_team_icons;
+use crate::surface::Hud2dSurface;
 
-const TEAM_SPECTATOR: i32 = 3;
-
+const LIST_X: f32 = 70.0;
 const LIST_WIDTH: f32 = 500.0;
-
-const ITEM_HEIGHT: f32 = 18.0;
-
-const TEXT_SCALE: f32 = 0.35;
-
-const NAME_FRAC: f32 = 0.35;
-
-const NUM_FRAC: f32 = 0.1;
-
-const ICON_SKIP_FRAC: f32 = 0.15;
+const WHITE: [f32; 4] = [1.0; 4];
+const MINE: [f32; 4] = [1.0, 0.8, 0.4, 1.0];
+const COLUMNS: [(f32, f32, &str); 5] = [
+    (248.0, 49.0, "CGAME_SB_SCORE"),
+    (297.0, 44.0, "CGAME_SB_KILLS"),
+    (341.0, 48.0, "CGAME_SB_ASSISTS"),
+    (389.0, 47.0, "CGAME_SB_DEATHS"),
+    (436.0, 40.0, "CGAME_SB_PING"),
+];
 
 #[derive(Clone, Debug)]
 struct ScoreboardRow {
     score: Score,
     name: String,
+    prestige: i32,
+    dead: bool,
 }
+
 #[derive(Component)]
 pub(crate) struct ScoreboardRaster;
 
@@ -45,232 +50,214 @@ pub(crate) fn spawn_scoreboard(root: &mut ChildSpawnerCommands) {
     crate::font_overlay::spawn_overlay(root, ScoreboardRaster);
 }
 
-fn hide(pass: &mut HudTessPass) {
-    pass.scoreboard = TessJob::Hide;
-}
-
-struct ScoreboardExprHost {
-    ms: i32,
-    player_score: i32,
-    time_left: i32,
-    score_limit: i32,
-    icons: TeamIcons,
-    kind: gamemode_iw4::GameModeKind,
-    client_state_team: i32,
-    team_scores: [i32; 3],
-}
-
-impl ExprHost for ScoreboardExprHost {
-    fn milliseconds(&self) -> i32 {
-        self.ms
-    }
-    fn static_dvar_int(&self, index: i32) -> Result<i32, hud_iw4::ExprError> {
-        match index {
-            16 => Ok(self.score_limit),
-
-            22 => Ok(0),
-            17 | 18 | 19 | 21 | 26 | 37 | 38 => Ok(0),
-            _ => Err(hud_iw4::ExprError::Host("static dvar")),
-        }
-    }
-    fn static_dvar_string(&self, index: i32) -> Result<String, hud_iw4::ExprError> {
-        match index {
-            6 => self
-                .icons
-                .allies
-                .clone()
-                .ok_or(hud_iw4::ExprError::Host("g_TeamIcon_Allies")),
-            7 => self
-                .icons
-                .axis
-                .clone()
-                .ok_or(hud_iw4::ExprError::Host("g_TeamIcon_Axis")),
-            _ => Err(hud_iw4::ExprError::Host("static dvar string")),
-        }
-    }
-    fn team_field(&self, field: &str) -> Result<Operand, hud_iw4::ExprError> {
-        if field.eq_ignore_ascii_case("name") {
-            Ok(Operand::Str(
-                entity_iw4::cg_get_team_name(self.client_state_team).to_owned(),
-            ))
-        } else if field.eq_ignore_ascii_case("score") {
-            Ok(Operand::Int(
-                self.team_scores
-                    .get(self.client_state_team as usize)
-                    .copied()
-                    .unwrap_or(0),
-            ))
-        } else {
-            Err(hud_iw4::ExprError::Host("team field"))
-        }
-    }
-    fn player_field(&self, field: &str) -> Result<Operand, hud_iw4::ExprError> {
-        if field.eq_ignore_ascii_case("score") {
-            Ok(Operand::Int(self.player_score))
-        } else {
-            Err(hud_iw4::ExprError::Host("player field"))
-        }
-    }
-    fn other_team_field(&self, field: &str) -> Result<Operand, hud_iw4::ExprError> {
-        if field.eq_ignore_ascii_case("score") {
-            Ok(Operand::Int(
-                self.team_scores[if self.client_state_team == 1 { 2 } else { 1 }],
-            ))
-        } else {
-            Err(hud_iw4::ExprError::Host("other team field"))
-        }
-    }
-    fn local_var_string(&self, _name: &str) -> Result<Operand, hud_iw4::ExprError> {
-        Ok(Operand::Str(String::new()))
-    }
-    fn time_left(&self) -> Result<i32, hud_iw4::ExprError> {
-        Ok(self.time_left)
-    }
-    fn score_at_rank(&self, _rank: i32) -> Result<i32, hud_iw4::ExprError> {
-        Ok(self.player_score)
-    }
-    fn gametype_name(&self) -> Result<Operand, hud_iw4::ExprError> {
-        match scorebar_gametype_loc_key(self.kind.token()) {
-            Some(key) => Ok(Operand::Str(key.to_owned())),
-            None => Err(hud_iw4::ExprError::Host("gametype loc")),
-        }
-    }
-    fn dvar_int(&self, name: &str) -> Result<i32, hud_iw4::ExprError> {
-        if name.eq_ignore_ascii_case("splitscreen") || name.eq_ignore_ascii_case("ui_bomb_timer") {
-            Ok(0)
-        } else if name.eq_ignore_ascii_case("ui_scorelimit") {
-            Ok(self.score_limit)
-        } else {
-            Err(hud_iw4::ExprError::Host("dvarint"))
-        }
-    }
-}
-
-fn client_score_is_better(a: &Score, b: &Score) -> bool {
-    if a.team != b.team && (a.team == TEAM_SPECTATOR || b.team == TEAM_SPECTATOR) {
-        return false;
-    }
-    if a.score > b.score {
-        return true;
-    }
-    if a.score >= b.score {
-        return a.deaths < b.deaths;
-    }
-    false
-}
-
-fn sort_scores(rows: &mut [ScoreboardRow]) {
-    for i in 1..rows.len() {
-        let mut j = i;
-        while j > 0 && client_score_is_better(&rows[j].score, &rows[j - 1].score) {
-            rows.swap(j, j - 1);
-            j -= 1;
-        }
-    }
-}
-
-fn name_for(meta: &ClientSnapshotMeta) -> String {
-    match client_state_name(&meta.name) {
-        Some(n) => n.to_owned(),
-        None => String::new(),
-    }
-}
-
 fn rows_from_parsed(snap: &Snapshot, parsed: &ParsedScores) -> Vec<ScoreboardRow> {
     let mut rows = Vec::with_capacity(parsed.num);
-    for i in 0..parsed.num {
-        let score = parsed.scores[i];
-        let name = match snap
+    for entry in parsed.scores.iter().take(parsed.num) {
+        let Some((_, meta)) = snap
             .meta
             .clients
             .iter()
-            .find(|(id, _)| id.0 as i32 == score.client)
-        {
-            Some((_, meta)) => name_for(meta),
-            None => String::new(),
+            .find(|(id, _)| id.0 as i32 == entry.client)
+        else {
+            continue;
         };
-        rows.push(ScoreboardRow { score, name });
+        let mut score = *entry;
+        score.score = meta.score;
+        score.kills = meta.kills;
+        score.deaths = meta.deaths;
+        score.team = meta.client_state_team;
+        score.rank = meta.rank;
+        rows.push(ScoreboardRow {
+            score,
+            name: client_state_name(&meta.name).unwrap_or_default().to_owned(),
+            prestige: meta.prestige,
+            dead: matches!(
+                meta.lifecycle,
+                ClientLifecycle::Dead | ClientLifecycle::RespawnPending
+            ),
+        });
     }
-    sort_scores(&mut rows);
+    rows.sort_by(|a, b| {
+        b.score
+            .score
+            .cmp(&a.score.score)
+            .then(a.score.deaths.cmp(&b.score.deaths))
+    });
     rows
 }
 
-fn loc_text(strings: Option<&PreparedLocalizedStrings>, key: &str) -> Option<String> {
-    strings.and_then(|s| s.0.text(key)).map(str::to_owned)
+fn localized(strings: Option<&PreparedLocalizedStrings>, key: &str) -> String {
+    let key = key.trim_start_matches('@');
+    strings
+        .and_then(|s| s.0.text(key))
+        .unwrap_or(key)
+        .to_owned()
 }
 
-fn text_cmd(
-    x: f32,
-    y: f32,
-    cmd_w: f32,
-    cmd_h: f32,
-    material: String,
-    text: String,
-    color: [f32; 4],
-) -> Draw2dCmd {
-    Draw2dCmd {
-        material_namespace: crate::images::HUD_CHROME_NAMESPACE,
-        x: (x + 0.5).floor(),
-        y: (y + 0.5).floor(),
-        w: cmd_w,
-        h: cmd_h,
-        s0: 0.0,
-        t0: 0.0,
-        s1: 1.0,
-        t1: 1.0,
-        color,
-        material,
-        op: Draw2dOp::TextRun {
-            font: HUD_SMALL_FONT.to_owned(),
-            scale: cmd_w,
-            text,
-            loc_key: String::new(),
+struct BoardDraw<'a> {
+    surface: &'a Hud2dSurface,
+    font: &'a FontDef,
+    cmds: Vec<Draw2dCmd>,
+}
 
-            style: crate::draw2d::TEXT_STYLE_UNREAD,
-            fx: None,
-        },
-        provenance: Draw2dProvenance::CgDraw {
-            site: "client_score",
-        },
-        layer: 2,
+impl BoardDraw<'_> {
+    fn picture(&mut self, x: f32, y: f32, w: f32, h: f32, material: &str, color: [f32; 4]) {
+        let r = self
+            .surface
+            .apply_rect(x - 320.0, y - 240.0, w, h, ALIGN_CENTER, ALIGN_CENTER);
+        self.cmds.push(Draw2dCmd {
+            x: r.x,
+            y: r.y,
+            w: r.w,
+            h: r.h,
+            s0: 0.0,
+            t0: 0.0,
+            s1: 1.0,
+            t1: 1.0,
+            color,
+            material: material.to_owned(),
+            material_namespace: HUD_CHROME_NAMESPACE,
+            op: Draw2dOp::StretchPic,
+            provenance: Draw2dProvenance::CgDraw { site: "scoreboard" },
+            layer: 1,
+        });
+    }
+
+    fn text(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        scale: f32,
+        centered: bool,
+        text: &str,
+        color: [f32; 4],
+    ) {
+        let scale = if centered {
+            scale * (width / ui_text_width(self.font, text, scale).max(1.0)).min(1.0)
+        } else {
+            scale
+        };
+        // Keep color escapes intact while fitting names into their column.
+        let mut text = text.to_owned();
+        while !text.is_empty() && ui_text_width(self.font, &text, scale) > width {
+            text.pop();
+        }
+        if text.ends_with('^') {
+            text.pop();
+        }
+        if text.is_empty() {
+            return;
+        }
+        let x = if centered {
+            x + (width - ui_text_width(self.font, &text, scale)) * 0.5
+        } else {
+            x
+        };
+        let nscale = r_normalized_text_scale(self.font.pixel_height, scale);
+        let r = self.surface.apply_rect(
+            x - 320.0,
+            y - 240.0,
+            nscale,
+            nscale,
+            ALIGN_CENTER,
+            ALIGN_CENTER,
+        );
+        self.cmds.push(Draw2dCmd {
+            x: r.x.round(),
+            y: r.y.round(),
+            w: r.w,
+            h: r.h,
+            s0: 0.0,
+            t0: 0.0,
+            s1: 1.0,
+            t1: 1.0,
+            color,
+            material: assets::AssetRef::bare_name(&self.font.material).to_owned(),
+            material_namespace: HUD_CHROME_NAMESPACE,
+            op: Draw2dOp::TextRun {
+                font: HUD_SMALL_FONT.to_owned(),
+                scale: r.w,
+                text,
+                loc_key: String::new(),
+                style: 3,
+                fx: None,
+            },
+            provenance: Draw2dProvenance::CgDraw { site: "scoreboard" },
+            layer: 2,
+        });
+    }
+
+    fn ping(&mut self, x: f32, y: f32, h: f32, ping: i32) {
+        if ping < 0 {
+            return;
+        }
+        let bars = (4 - ping / 100).clamp(1, 4);
+        let low = [0.0, 0.75, 0.0, 1.0];
+        let med = [0.8, 0.8, 0.0, 1.0];
+        let high = [0.8, 0.0, 0.0, 1.0];
+        let (a, b, t) = if bars < 2 {
+            (high, med, bars as f32 / 2.0)
+        } else {
+            (med, low, (bars - 2) as f32 / 2.0)
+        };
+        let color = std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t);
+        self.picture(x, y, 20.0, h, "white", [0.25, 0.25, 0.25, 0.5]);
+        for i in 1..=bars {
+            let bh = h * 0.7 * i as f32 / 4.0;
+            self.picture(
+                x + 2.0 + (i - 1) as f32 * 4.0,
+                y + h - bh,
+                3.0,
+                bh,
+                "white",
+                color,
+            );
+        }
     }
 }
 
-fn push_cell(
-    cmds: &mut Vec<Draw2dCmd>,
-    surface: &crate::surface::Hud2dSurface,
-    x_virtual: f32,
-    y_virtual: f32,
-    nscale: f32,
-    material: &str,
-    text: &str,
-    color: [f32; 4],
-) {
-    if text.is_empty() {
-        return;
+fn team_presentation(
+    catalog: &MenuCatalog,
+    icons: &TeamIcons,
+    team: i32,
+    strings: Option<&PreparedLocalizedStrings>,
+) -> (String, Option<String>, [f32; 4]) {
+    let icon = match team {
+        1 => icons.axis.clone(),
+        2 => icons.allies.clone(),
+        _ => None,
+    };
+    if let Some(table) = catalog.string_table(gamemode_iw4::FACTION_TABLE)
+        && let Some(icon) = icon.as_deref()
+        && let Some(row) = (0..table.rows as i32).find(|&r| table.cell(r, 5) == icon)
+    {
+        let mut color = [0.25, 0.25, 0.25, 0.5];
+        for (i, component) in color.iter_mut().take(3).enumerate() {
+            *component = table.cell(row, 14 + i as i32).parse().unwrap_or(0.25);
+        }
+        return (
+            localized(strings, table.cell(row, 2)),
+            Some(icon.to_owned()),
+            color,
+        );
     }
-    let applied = surface.apply_rect(
-        x_virtual,
-        y_virtual,
-        nscale,
-        nscale,
-        ALIGN_VIEWABLE,
-        ALIGN_VIEWABLE,
-    );
-    cmds.push(text_cmd(
-        applied.x,
-        applied.y,
-        applied.w,
-        applied.h,
-        material.to_owned(),
-        text.to_owned(),
-        color,
-    ));
+    let (key, color) = match team {
+        0 => ("CGAME_FFA", [0.76, 0.78, 0.10, 0.5]),
+        1 => ("MPUI_AXIS", [0.25, 0.25, 0.25, 0.5]),
+        2 => ("MPUI_ALLIES", [0.25, 0.25, 0.25, 0.5]),
+        _ => ("CGAME_SPECTATORS", [0.25, 0.25, 0.25, 0.5]),
+    };
+    (localized(strings, key), icon, color)
+}
+
+pub(crate) fn displayed(down: bool, phase: MatchPhase) -> bool {
+    down || matches!(phase, MatchPhase::Intermission | MatchPhase::PostGame)
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_scoreboard(
-    surface: Res<crate::surface::Hud2dSurface>,
+    surface: Res<Hud2dSurface>,
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
     actions: Option<Res<ClientActionInput>>,
@@ -278,183 +265,229 @@ pub(crate) fn update_scoreboard(
     strings: Option<Res<PreparedLocalizedStrings>>,
     identity: Option<Res<LaunchIdentity>>,
     session_icons: Option<Res<SessionTeamIcons>>,
+    scores: Option<Res<CgScores>>,
+    bridge: Option<Res<MasterBridge>>,
     mut hud_images: ResMut<HudImages>,
     mut images: ResMut<Assets<Image>>,
     mut pass: ResMut<HudTessPass>,
-    mut exprs: ResMut<crate::expr_cache::MenuExprCache>,
 ) {
-    let down = actions.as_ref().is_some_and(|a| a.client.kb.scores.active);
-    if !down {
-        hide(&mut pass);
-        return;
-    }
+    pass.scoreboard = TessJob::Hide;
     let Some(snap) = presented.snapshot() else {
-        hide(&mut pass);
         return;
     };
-    let parsed = net::parse_scoreboard_cmd(&net::format_scoreboard_from_snapshot(snap));
-    let rows = rows_from_parsed(snap, &parsed);
+    let down = actions.as_ref().is_some_and(|a| a.client.kb.scores.active);
+    if !displayed(down, snap.meta.phase) || !surface.is_ready() {
+        return;
+    }
+    let Some(catalog) = catalog.as_deref() else {
+        return;
+    };
+    let Some(font) = catalog.font(HUD_SMALL_FONT) else {
+        return;
+    };
+    let fallback = net::parse_scoreboard_cmd(&net::format_scoreboard_from_snapshot(snap));
+    let parsed = scores
+        .as_ref()
+        .filter(|s| s.cmd.is_some())
+        .map_or(&fallback, |s| &s.parsed);
+    let rows = rows_from_parsed(snap, parsed);
     if rows.is_empty() {
-        hide(&mut pass);
         return;
     }
-
-    if !surface.is_ready() {
-        hide(&mut pass);
-        return;
-    }
-    let font = catalog.as_ref().and_then(|c| c.font(HUD_SMALL_FONT));
-    let Some(def) = font else {
-        hide(&mut pass);
-        return;
-    };
-    let nscale = r_normalized_text_scale(def.pixel_height, TEXT_SCALE);
-    let material = assets::AssetRef::bare_name(&def.material).to_owned();
-    let _ = hud_images.get(crate::images::HUD_CHROME_NAMESPACE, &material, &mut images);
-    let mut fonts = HashMap::new();
-    fonts.insert(HUD_SMALL_FONT.to_owned(), def);
-
     let loc = strings.as_deref();
-    let mut cmds = Vec::new();
-    let list_x = (640.0 - LIST_WIDTH) * 0.5;
-    let header_y = 64.0;
-    let name_x = list_x + LIST_WIDTH * ICON_SKIP_FRAC;
-    let score_x = name_x + LIST_WIDTH * NAME_FRAC + LIST_WIDTH * 0.05;
-    let kills_x = score_x + LIST_WIDTH * NUM_FRAC;
-    let deaths_x = kills_x + LIST_WIDTH * NUM_FRAC * 2.0;
-    let ping_x = deaths_x + LIST_WIDTH * NUM_FRAC;
+    let icons = hud_team_icons(Some(catalog), identity.as_deref(), session_icons.as_deref());
+    let local_team = snap
+        .meta
+        .for_client(local.0)
+        .map_or(0, |m| m.client_state_team);
+    let order = if local_team == 2 {
+        [2, 1, 0, 3]
+    } else {
+        [1, 2, 0, 3]
+    };
+    let teams: Vec<_> = order
+        .into_iter()
+        .filter(|team| rows.iter().any(|r| r.score.team == *team))
+        .collect();
+    // Fit the entire roster, including team banners, above the server footer.
+    let available = 350.0 - teams.len() as f32 * 34.0;
+    let row_step = (available / rows.len() as f32).min(20.0);
+    let row_h = row_step - 2.0;
+    let scale = 0.35 * (row_h / 18.0).min(1.0);
+    let mut draw = BoardDraw {
+        surface: &surface,
+        font,
+        cmds: Vec::new(),
+    };
 
-    let header = [1.0, 1.0, 1.0, 1.0];
-
-    let mine = [1.0, 0.8, 0.4, 1.0];
-    if let Some(text) = loc_text(loc, "CGAME_SB_SCORE") {
-        push_cell(
-            &mut cmds, &surface, score_x, header_y, nscale, &material, &text, header,
-        );
-    }
-    if let Some(text) = loc_text(loc, "CGAME_SB_KILLS") {
-        push_cell(
-            &mut cmds, &surface, kills_x, header_y, nscale, &material, &text, header,
-        );
-    }
-    if let Some(text) = loc_text(loc, "CGAME_SB_DEATHS") {
-        push_cell(
-            &mut cmds, &surface, deaths_x, header_y, nscale, &material, &text, header,
-        );
-    }
-    if let Some(text) = loc_text(loc, "CGAME_SB_PING") {
-        push_cell(
-            &mut cmds, &surface, ping_x, header_y, nscale, &material, &text, header,
-        );
-    }
-
-    for (i, row) in rows.iter().enumerate() {
-        let y = header_y + ITEM_HEIGHT + ITEM_HEIGHT * (i as f32);
-        let color = if row.score.client == local.0.0 as i32 {
-            mine
-        } else {
-            header
-        };
-        push_cell(
-            &mut cmds, &surface, name_x, y, nscale, &material, &row.name, color,
-        );
-        if row.score.team != TEAM_SPECTATOR {
-            push_cell(
-                &mut cmds,
-                &surface,
-                score_x,
-                y,
-                nscale,
-                &material,
-                &format!("{}", row.score.score),
-                color,
-            );
-            push_cell(
-                &mut cmds,
-                &surface,
-                kills_x,
-                y,
-                nscale,
-                &material,
-                &format!("{}", row.score.kills),
-                color,
-            );
-            push_cell(
-                &mut cmds,
-                &surface,
-                deaths_x,
-                y,
-                nscale,
-                &material,
-                &format!("{}", row.score.deaths),
-                color,
-            );
-        }
-        push_cell(
-            &mut cmds, &surface, ping_x, y, nscale, &material, "—", color,
-        );
-    }
-
-    let mut chrome_cmds = Vec::new();
-    if let Some(menu) = catalog.as_ref().and_then(|c| c.get("scoreboard"))
-        && let Some(local_meta) = snap.meta.for_client(local.0)
-    {
-        let remaining_ms =
-            match_time_remaining_ms(snap.meta.time_limit_ms, snap.meta.match_elapsed_ms);
-        let remaining_s = remaining_ms.max(0) / 1000;
-        let player_score = local_meta.score;
-        let host = ScoreboardExprHost {
-            ms: sys_milliseconds() as i32,
-            player_score,
-            time_left: remaining_s,
-            score_limit: snap.meta.score_limit,
-            icons: hud_team_icons(
-                catalog.as_deref(),
-                identity.as_deref(),
-                session_icons.as_deref(),
-            ),
-            kind: snap.meta.kind,
-            client_state_team: local_meta.client_state_team,
-            team_scores: snap.meta.objectives.scores,
-        };
-        let frame = execute_chrome_menu(
-            menu,
-            &host,
-            &surface,
-            ChromeAssets {
-                catalog: catalog.as_deref(),
-                localize: strings.as_ref().map(|s| &s.0),
-            },
-            &mut exprs,
-        );
-        for cmd in &frame.list.cmds {
-            let _ = hud_images.get(
-                crate::images::HUD_CHROME_NAMESPACE,
-                &cmd.material,
-                &mut images,
-            );
-        }
-        if let Some(cat) = catalog.as_deref() {
-            for cmd in &frame.list.cmds {
-                let Draw2dOp::TextRun { font, .. } = &cmd.op else {
-                    continue;
-                };
-                if fonts.contains_key(font) {
-                    continue;
-                }
-                if let Some(def) = cat.font(font) {
-                    fonts.insert(font.clone(), def);
-                }
+    draw.picture(0.0, 24.0, 640.0, 25.0, "white", [0.1, 0.1, 0.1, 0.35]);
+    if snap.meta.kind.is_team() {
+        for (team, x) in [(2, 32.0), (1, 127.0)] {
+            let (_, icon, _) = team_presentation(catalog, &icons, team, loc);
+            if let Some(icon) = icon {
+                draw.picture(x, 20.0, 30.0, 30.0, &icon, WHITE);
             }
+            draw.text(
+                x + 32.0,
+                41.0,
+                60.0,
+                0.35,
+                false,
+                &snap.meta.objectives.scores[team as usize].to_string(),
+                WHITE,
+            );
         }
-        chrome_cmds = frame.list.cmds;
     }
-    chrome_cmds.extend(cmds);
-    let list = Draw2dList { cmds: chrome_cmds };
+    let key = scorebar_gametype_loc_key(snap.meta.kind.token()).unwrap_or("MPUI_DD");
+    let title = localized(loc, key);
+    draw.text(226.0, 41.0, 295.0, 0.35, true, &title, WHITE);
+    if snap.meta.score_limit > 0 {
+        let score = if snap.meta.kind.is_team() {
+            snap.meta
+                .objectives
+                .scores
+                .get(local_team as usize)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            snap.meta.for_client(local.0).map_or(0, |m| m.score)
+        };
+        draw.text(
+            226.0,
+            58.0,
+            295.0,
+            0.28,
+            true,
+            &format!("{score} / {}", snap.meta.score_limit),
+            WHITE,
+        );
+    }
+    let remaining_ms = if snap.meta.kind == gamemode_iw4::GameModeKind::Demolition {
+        snap.meta.objectives.round_remaining_ms as i32
+    } else {
+        match_time_remaining_ms(snap.meta.time_limit_ms, snap.meta.match_elapsed_ms)
+    };
+    let remaining = remaining_ms.max(0) / 1000;
+    draw.text(
+        558.0,
+        41.0,
+        60.0,
+        0.35,
+        true,
+        &format!("{}:{:02}", remaining / 60, remaining % 60),
+        WHITE,
+    );
+
+    for (x, w, key) in COLUMNS {
+        draw.text(
+            LIST_X + x,
+            77.0,
+            w,
+            scale,
+            true,
+            &localized(loc, key),
+            WHITE,
+        );
+    }
+    let mut y = 82.0;
+    for team in teams {
+        let (name, icon, back) = team_presentation(catalog, &icons, team, loc);
+        let count = rows.iter().filter(|r| r.score.team == team).count();
+        if let Some(icon) = icon {
+            draw.picture(LIST_X, y, 28.0, 28.0, &icon, WHITE);
+        }
+        draw.text(
+            LIST_X + 34.0,
+            y + 24.0,
+            260.0,
+            0.35,
+            false,
+            &format!("{name}  ( {count} )"),
+            WHITE,
+        );
+        y += 30.0;
+        for row in rows.iter().filter(|r| r.score.team == team) {
+            let color = if row.score.client == local.0.0 as i32 {
+                MINE
+            } else {
+                WHITE
+            };
+            draw.picture(LIST_X, y, LIST_WIDTH - 24.0, row_h, "white", back);
+            if let Some((icon, level)) = rank_presentation(catalog, row.score.rank, row.prestige) {
+                draw.picture(LIST_X, y, row_h, row_h, icon, WHITE);
+                draw.text(
+                    LIST_X + row_h + 1.0,
+                    y + row_h * 0.8,
+                    22.0,
+                    scale * 0.25 / 0.35,
+                    false,
+                    level,
+                    WHITE,
+                );
+            }
+            draw.text(
+                LIST_X + 44.0,
+                y + row_h * 0.8,
+                182.0,
+                scale,
+                false,
+                &row.name,
+                color,
+            );
+            if row.dead {
+                draw.picture(LIST_X + 228.0, y, row_h, row_h, "hud_status_dead", WHITE);
+            }
+            let values = [
+                row.score.score,
+                row.score.kills,
+                row.score.assists,
+                row.score.deaths,
+                row.score.ping,
+            ];
+            for ((x, w, _), value) in COLUMNS.into_iter().zip(values) {
+                if team == 3 && x < 436.0 {
+                    continue;
+                }
+                let value = if x == 436.0 && value < 0 {
+                    String::new()
+                } else {
+                    value.to_string()
+                };
+                draw.text(LIST_X + x, y + row_h * 0.8, w, scale, true, &value, color);
+            }
+            draw.ping(LIST_X + 480.0, y, row_h, row.score.ping);
+            y += row_step;
+        }
+        y += 4.0;
+    }
+    let server = bridge
+        .as_ref()
+        .and_then(|b| match b.state() {
+            MasterBridgeState::Hosting { name, .. } | MasterBridgeState::Joined { name, .. } => {
+                Some(name)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| "IW4L".to_owned());
+    draw.text(LIST_X, 455.0, 365.0, 0.3, false, &server, WHITE);
+    if let Some(identity) = identity.as_ref() {
+        draw.text(
+            LIST_X + 370.0,
+            455.0,
+            130.0,
+            0.3,
+            false,
+            &identity.zone,
+            WHITE,
+        );
+    }
+    for cmd in &draw.cmds {
+        let _ = hud_images.get(HUD_CHROME_NAMESPACE, &cmd.material, &mut images);
+    }
+    let list = Draw2dList { cmds: draw.cmds };
+    let fonts = HashMap::from([(HUD_SMALL_FONT.to_owned(), font)]);
     let (quads, _) = tessellate_fonts(&list, &fonts);
-    if quads.is_empty() {
-        hide(&mut pass);
-        return;
+    if !quads.is_empty() {
+        pass.scoreboard = TessJob::Quads(quads);
     }
-    pass.scoreboard = TessJob::Quads(quads);
 }

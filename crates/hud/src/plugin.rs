@@ -136,6 +136,7 @@ impl Plugin for HudPlugin {
                 (
                     begin_hud_tess_frame,
                     flush_flash_tess,
+                    flush_overhead_names_tess,
                     flush_hud_tess,
                     flush_scoreboard_tess,
                     flush_killcam_skip_tess,
@@ -282,6 +283,7 @@ fn ensure_hud_root(mut commands: Commands, existing: Query<Entity, With<HudRoot>
             Visibility::Hidden,
         ))
         .with_children(|root| {
+            crate::font_overlay::spawn_overlay(root, crate::overhead_names::OverheadNamesRaster);
             spawn_reticle(root);
             spawn_iris(root);
             spawn_hitmarker(root);
@@ -304,6 +306,7 @@ fn sync_hud_visibility(
     screen: Res<AppScreen>,
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
+    actions: Option<Res<net::ClientActionInput>>,
     view: Option<Res<ViewSubject>>,
     ui_draw: Option<Res<UiDraw>>,
     input: Option<Res<frame::HudInputView>>,
@@ -314,12 +317,13 @@ fn sync_hud_visibility(
         .snapshot()
         .and_then(|s| s.meta.for_client(local.0))
         .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive);
-    let objective_outcome = presented
+    let scores_down = actions.as_ref().is_some_and(|a| a.client.kb.scores.active);
+    let scoreboard = presented
         .snapshot()
-        .is_some_and(|s| s.meta.kind.is_team() && s.meta.phase == sim::MatchPhase::Intermission);
+        .is_some_and(|s| crate::scoreboard::displayed(scores_down, s.meta.phase));
     let in_killcam = view.as_deref().is_some_and(|v| v.in_killcam());
     let ui_on = ui_draw.is_some_and(|d| d.0);
-    let show = hud_root_should_show(*screen, alive || objective_outcome, in_killcam, ui_on)
+    let show = hud_root_should_show(*screen, alive || scoreboard, in_killcam, ui_on)
         && !input.is_some_and(|input| input.menu_open);
     visible.0 = Some(i32::from(show));
     for mut vis in &mut roots {
@@ -715,6 +719,36 @@ fn flush_use_hint_tess(
         return;
     }
     let job = std::mem::take(&mut pass.use_hint);
+    if let Ok((_, mut host, mut latch)) = hint.single_mut() {
+        gpu_list::apply_tess_job(
+            job,
+            &mut host,
+            &mut latch,
+            &mut hud_images,
+            &mut images,
+            &mut frame,
+            surface.width(),
+            surface.height(),
+        );
+    }
+}
+
+pub(crate) fn flush_overhead_names_tess(
+    surface: Res<crate::surface::Hud2dSurface>,
+    mut pass: ResMut<HudTessPass>,
+    mut hud_images: ResMut<HudImages>,
+    mut images: ResMut<Assets<Image>>,
+    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
+    mut hint: Query<
+        (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
+        With<crate::overhead_names::OverheadNamesRaster>,
+    >,
+) {
+    let _body = gpu_list::TessBody::open();
+    if !surface.is_ready() {
+        return;
+    }
+    let job = std::mem::take(&mut pass.overhead_names);
     if let Ok((_, mut host, mut latch)) = hint.single_mut() {
         gpu_list::apply_tess_job(
             job,
