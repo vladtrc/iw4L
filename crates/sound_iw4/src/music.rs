@@ -203,6 +203,30 @@ pub fn play_spawn_music<const N: usize>(client: ClientId, team: Team, out: &mut 
     });
 }
 
+/// Team-based game end: `victory_<winner>` to the winning team, `defeat_<other>`
+/// to the losing team, `nuke_music` to everyone when the winner is undefined.
+/// Each line reaches one team, so spectators hear nothing unless it was a draw.
+pub fn play_team_game_win<const N: usize>(
+    winner: Option<Team>,
+    fleet: &Fleet,
+    out: &mut Log<Output, N>,
+) {
+    for player in fleet.players {
+        let alias = match (winner, player.pers_team.and_then(PersTeam::playing)) {
+            (Some(winner), Some(team)) if team == winner => team_music("victory_", team),
+            (Some(winner), Some(team)) if team == winner.other() => team_music("defeat_", team),
+            (Some(_), _) => continue,
+            (None, _) => {
+                recipes::music_alias("nuke_music").expect("game[music][nuke_music] is in the table")
+            }
+        };
+        out.push(Output::PlayLocalSound {
+            client: player.client,
+            alias,
+        });
+    }
+}
+
 pub fn play_ffa_game_win<const N: usize>(
     winner: Option<ClientId>,
     fleet: &Fleet,

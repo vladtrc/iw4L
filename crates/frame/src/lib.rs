@@ -15,9 +15,9 @@ pub use schedule::{
 };
 pub use script_entity_notify::{AbortKillcam, BeginKillcam, KillcamEnded, SpawnedPlayer};
 pub use script_notify::{
-    ExitLevelCalled, GameEnded, GameWin, GlassDestroyed, MatchEndingReason, MatchEndingSoon,
-    MatchEndingVerySoon, PrematchDone, SpawnedPlayerNotify, SpawningIntermission,
-    register_script_notify,
+    ExitLevelCalled, GameEnded, GameWin, GameWinner, GlassDestroyed, MatchEndingReason,
+    MatchEndingSoon, MatchEndingVerySoon, PrematchDone, RoundSwitch as RoundSwitchNotify,
+    RoundSwitchKind, RoundWin, SpawnedPlayerNotify, SpawningIntermission, register_script_notify,
 };
 pub use session::{
     AdmissionKey, AppScreen, BotNavigationReady, CacWeaponOffer, ClassSelectHandoff, HasWorld,

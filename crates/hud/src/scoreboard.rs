@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use assets::{FontDef, MenuCatalog, PreparedLocalizedStrings, SessionTeamIcons, TeamIcons};
+use assets::{
+    FontDef, MapTeamSettings, MenuCatalog, PreparedLocalizedStrings, SessionTeamSettings,
+};
 use bevy::prelude::*;
 use entity_iw4::client_state_name;
 use frame::LaunchIdentity;
@@ -20,7 +22,6 @@ use crate::font_overlay::HUD_SMALL_FONT;
 use crate::gpu_list::{HudTessPass, TessJob};
 use crate::images::{HUD_CHROME_NAMESPACE, HudImages};
 use crate::overhead_names::rank_presentation;
-use crate::scorebar::hud_team_icons;
 use crate::surface::Hud2dSurface;
 
 const LIST_X: f32 = 70.0;
@@ -218,27 +219,34 @@ impl BoardDraw<'_> {
 }
 
 fn team_presentation(
-    catalog: &MenuCatalog,
-    icons: &TeamIcons,
+    icons: &MapTeamSettings,
     team: i32,
     strings: Option<&PreparedLocalizedStrings>,
-) -> (String, Option<String>, [f32; 4]) {
+) -> (String, Option<assets::AssetKey>, [f32; 4]) {
     let icon = match team {
         1 => icons.axis.clone(),
         2 => icons.allies.clone(),
         _ => None,
     };
-    if let Some(table) = catalog.string_table(gamemode_iw4::FACTION_TABLE)
-        && let Some(icon) = icon.as_deref()
-        && let Some(row) = (0..table.rows as i32).find(|&r| table.cell(r, 5) == icon)
-    {
-        let mut color = [0.25, 0.25, 0.25, 0.5];
-        for (i, component) in color.iter_mut().take(3).enumerate() {
-            *component = table.cell(row, 14 + i as i32).parse().unwrap_or(0.25);
-        }
+    let name = match team {
+        1 => icons.axis_name.as_ref(),
+        2 => icons.allies_name.as_ref(),
+        _ => None,
+    };
+    let color = match team {
+        1 => icons.axis_color,
+        2 => icons.allies_color,
+        _ => None,
+    }
+    .map(|rgb| [rgb[0], rgb[1], rgb[2], 0.5])
+    .unwrap_or([0.25, 0.25, 0.25, 0.5]);
+    if let Some(name) = name {
         return (
-            localized(strings, table.cell(row, 2)),
-            Some(icon.to_owned()),
+            strings
+                .and_then(|s| s.0.text_asset(name))
+                .unwrap_or(&name.name)
+                .to_owned(),
+            icon,
             color,
         );
     }
@@ -264,7 +272,7 @@ pub(crate) fn update_scoreboard(
     catalog: Option<Res<MenuCatalog>>,
     strings: Option<Res<PreparedLocalizedStrings>>,
     identity: Option<Res<LaunchIdentity>>,
-    session_icons: Option<Res<SessionTeamIcons>>,
+    session_icons: Option<Res<SessionTeamSettings>>,
     scores: Option<Res<CgScores>>,
     bridge: Option<Res<MasterBridge>>,
     mut hud_images: ResMut<HudImages>,
@@ -295,7 +303,10 @@ pub(crate) fn update_scoreboard(
         return;
     }
     let loc = strings.as_deref();
-    let icons = hud_team_icons(Some(catalog), identity.as_deref(), session_icons.as_deref());
+    let Some(teams) = session_icons.as_deref() else {
+        return;
+    };
+    let icons = &teams.0;
     let local_team = snap
         .meta
         .for_client(local.0)
@@ -323,9 +334,10 @@ pub(crate) fn update_scoreboard(
     draw.picture(0.0, 24.0, 640.0, 25.0, "white", [0.1, 0.1, 0.1, 0.35]);
     if snap.meta.kind.is_team() {
         for (team, x) in [(2, 32.0), (1, 127.0)] {
-            let (_, icon, _) = team_presentation(catalog, &icons, team, loc);
+            let (_, icon, _) = team_presentation(icons, team, loc);
             if let Some(icon) = icon {
-                draw.picture(x, 20.0, 30.0, 30.0, &icon, WHITE);
+                draw.picture(x, 20.0, 30.0, 30.0, &icon.name, WHITE);
+                draw.cmds.last_mut().unwrap().material_namespace = icon.namespace;
             }
             draw.text(
                 x + 32.0,
@@ -391,10 +403,11 @@ pub(crate) fn update_scoreboard(
     }
     let mut y = 82.0;
     for team in teams {
-        let (name, icon, back) = team_presentation(catalog, &icons, team, loc);
+        let (name, icon, back) = team_presentation(icons, team, loc);
         let count = rows.iter().filter(|r| r.score.team == team).count();
         if let Some(icon) = icon {
-            draw.picture(LIST_X, y, 28.0, 28.0, &icon, WHITE);
+            draw.picture(LIST_X, y, 28.0, 28.0, &icon.name, WHITE);
+            draw.cmds.last_mut().unwrap().material_namespace = icon.namespace;
         }
         draw.text(
             LIST_X + 34.0,
@@ -482,7 +495,7 @@ pub(crate) fn update_scoreboard(
         );
     }
     for cmd in &draw.cmds {
-        let _ = hud_images.get(HUD_CHROME_NAMESPACE, &cmd.material, &mut images);
+        let _ = hud_images.get(cmd.material_namespace, &cmd.material, &mut images);
     }
     let list = Draw2dList { cmds: draw.cmds };
     let fonts = HashMap::from([(HUD_SMALL_FONT.to_owned(), font)]);

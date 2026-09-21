@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
-use assets::{MenuCatalog, MenuDef, PreparedLocalizedStrings, SessionTeamIcons, TeamIcons};
+use assets::{
+    MapTeamSettings, MenuCatalog, MenuDef, PreparedLocalizedStrings, SessionTeamSettings,
+};
 use bevy::prelude::*;
 use bevy::ui::{Display, FocusPolicy};
-use frame::LaunchIdentity;
 use hud_iw4::{
     ExprHost, Operand, ScorebarStatus, match_time_remaining_ms, scorebar_gametype_loc_key,
 };
@@ -58,7 +59,7 @@ struct ScorebarExprHost<'a> {
     team_scores: [i32; 3],
     ffa_team: Option<u8>,
     menu: &'a MenuDef,
-    icons: TeamIcons,
+    icons: &'a MapTeamSettings,
     local_vars: &'a UiLocalVars,
 }
 
@@ -68,32 +69,6 @@ fn ffa_ui_team(ffa_team: Option<u8>) -> &'static str {
     } else {
         "marines"
     }
-}
-
-pub(crate) fn hud_team_icons(
-    catalog: Option<&MenuCatalog>,
-    identity: Option<&LaunchIdentity>,
-    session: Option<&SessionTeamIcons>,
-) -> TeamIcons {
-    if let Some(session) = session {
-        if session.0.allies.is_some() || session.0.axis.is_some() {
-            return session.0.clone();
-        }
-    }
-    let Some(catalog) = catalog else {
-        return TeamIcons::default();
-    };
-    let Some(identity) = identity.filter(|i| !i.zone.is_empty()) else {
-        return TeamIcons::default();
-    };
-    let Some(table) = catalog.string_table(gamemode_iw4::FACTION_TABLE) else {
-        return TeamIcons::default();
-    };
-    let arena = catalog
-        .rawfile_text("mp/basemaps.arena")
-        .map(str::to_owned)
-        .or_else(|| assets::read_basemaps_arena(&identity.games_root));
-    assets::team_icons_for_zone(table, arena.as_deref(), &identity.zone)
 }
 
 impl ExprHost for ScorebarExprHost<'_> {
@@ -190,12 +165,14 @@ impl ExprHost for ScorebarExprHost<'_> {
         if name.eq_ignore_ascii_case("g_TeamIcon_Allies") {
             self.icons
                 .allies
-                .clone()
+                .as_ref()
+                .map(assets::AssetKey::display)
                 .ok_or(hud_iw4::ExprError::Host("g_TeamIcon_Allies"))
         } else if name.eq_ignore_ascii_case("g_TeamIcon_Axis") {
             self.icons
                 .axis
-                .clone()
+                .as_ref()
+                .map(assets::AssetKey::display)
                 .ok_or(hud_iw4::ExprError::Host("g_TeamIcon_Axis"))
         } else if name.eq_ignore_ascii_case("ui_danger_team") {
             Ok(String::new())
@@ -307,8 +284,7 @@ pub(crate) fn update_scorebar(
     local: Res<LocalPresentClient>,
     catalog: Option<Res<MenuCatalog>>,
     strings: Option<Res<PreparedLocalizedStrings>>,
-    identity: Option<Res<LaunchIdentity>>,
-    session_icons: Option<Res<SessionTeamIcons>>,
+    session_icons: Option<Res<SessionTeamSettings>>,
     local_vars: Res<UiLocalVars>,
     mut hud_images: ResMut<HudImages>,
     mut images: ResMut<Assets<Image>>,
@@ -365,6 +341,10 @@ pub(crate) fn update_scorebar(
         hide(&mut pass);
         return;
     };
+    let Some(teams) = session_icons.as_deref() else {
+        hide(&mut pass);
+        return;
+    };
     let host = ScorebarExprHost {
         ms: sys_ms as i32,
         player_score: local_meta.score,
@@ -381,11 +361,7 @@ pub(crate) fn update_scorebar(
         team_scores: snap.meta.objectives.scores,
         ffa_team: local_meta.ffa_team,
         menu,
-        icons: hud_team_icons(
-            catalog.as_deref(),
-            identity.as_deref(),
-            session_icons.as_deref(),
-        ),
+        icons: &teams.0,
         local_vars: &local_vars,
     };
 
@@ -403,7 +379,7 @@ pub(crate) fn update_scorebar(
     }
 
     let ChromeFrame {
-        list,
+        mut list,
         coverage: _,
         vis_errors: _,
     } = execute_chrome_menu(
@@ -417,12 +393,28 @@ pub(crate) fn update_scorebar(
         &mut exprs,
     );
     let mut fonts: HashMap<String, &assets::FontDef> = HashMap::new();
-    for cmd in &list.cmds {
-        let _ = hud_images.get(
-            crate::images::HUD_CHROME_NAMESPACE,
-            &cmd.material,
-            &mut images,
-        );
+    for cmd in &mut list.cmds {
+        if let Ok(mut key) = assets::AssetKey::parse(&cmd.material) {
+            // IW4 scorebar expressions append `_fade` to faction icons. T5
+            // supplies the base emblem only; translate that authored IW4 variant
+            // to the selected T5 team's exact material, without probing sources.
+            if key.namespace == assets::AssetNamespace::T5 {
+                for icon in [teams.0.allies.as_ref(), teams.0.axis.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    if key.namespace == icon.namespace
+                        && key.name.strip_suffix("_fade") == Some(icon.name.as_str())
+                    {
+                        key = icon.clone();
+                        break;
+                    }
+                }
+            }
+            cmd.material_namespace = key.namespace;
+            cmd.material = key.name;
+        }
+        let _ = hud_images.get(cmd.material_namespace, &cmd.material, &mut images);
     }
     if let Some(cat) = catalog.as_deref() {
         for cmd in &list.cmds {

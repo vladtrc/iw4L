@@ -4,9 +4,15 @@ use bevy::prelude::*;
 use bevy::tasks::{Task, futures_lite::future};
 use frame::{ClientSet, LaunchIdentity, MapLoadApproved, MapLoadFailed};
 
-use crate::loading_screen::LoadingScreen;
+use crate::map_load_process::MapLoadProcess;
 use crate::progress::LoadProgress;
 use crate::session_load::{MatchLoadOutcome, PreparedMatch, load_prepared_match};
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MapLoadApproval;
+
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MatchLoadDispatch;
 
 #[derive(Resource, Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MatchLoadBusy(pub bool);
@@ -50,7 +56,6 @@ pub struct PreparedMatchReady {
 fn start_match_load(
     mut commands: Commands,
     request: Option<Res<MatchLoadRequest>>,
-    mut loading: Option<ResMut<LoadingScreen>>,
     busy: Option<Res<MatchLoadTask>>,
     abort: Option<Res<MatchLoadAbort>>,
     mut inflight: ResMut<MatchLoadBusy>,
@@ -84,12 +89,17 @@ fn start_match_load(
     let zone = request.zone.clone();
     let zone_accepted = zone.clone();
     let cancel_handle = progress.clone();
-    let kickoff = loading
-        .as_deref_mut()
-        .and_then(|screen| screen.take_kickoff());
+    // The process outlives the overlay and every task this spawns: it is what
+    // the table reads, what admission finishes, and what the bench still has
+    // once the screen is gone.
+    commands.insert_resource(MapLoadProcess::new(
+        request_id,
+        load_key,
+        zone.clone(),
+        cancel_handle.clone(),
+    ));
 
     let task = crate::session_load::load_pool().spawn(async move {
-        drop(kickoff);
         match load_prepared_match(zone_ff, common_mp, progress).await {
             MatchLoadOutcome::Ready(prepared) => Some(PreparedMatchReady {
                 request_id,
@@ -119,7 +129,6 @@ fn approve_map_load(
     mut approved: MessageReader<MapLoadApproved>,
     mut failed: MessageWriter<MapLoadFailed>,
     identity: Res<LaunchIdentity>,
-    loading: Option<Res<LoadingScreen>>,
     abort: Option<Res<MatchLoadAbort>>,
 ) {
     for request in approved.read() {
@@ -160,10 +169,9 @@ fn approve_map_load(
             });
             continue;
         }
-        let progress = loading
-            .as_ref()
-            .map(|screen| screen.progress.clone())
-            .unwrap_or_default();
+        // Its own state, never the live map's: tasks from the request before
+        // this one still hold handles, and they must not land in these rows.
+        let progress = LoadProgress::new(request.request_id);
         commands.insert_resource(MatchLoadRequest {
             request_id: request.request_id,
             load_key: request.load_key,
@@ -243,10 +251,14 @@ pub fn register_match_load_systems(app: &mut App) {
     app.init_resource::<MatchLoadBusy>().add_systems(
         Update,
         (
-            approve_map_load,
-            start_match_load.after(approve_map_load),
-            poll_match_load.after(start_match_load),
-            expire_match_load_abort.after(poll_match_load),
+            approve_map_load.in_set(MapLoadApproval),
+            (
+                start_match_load,
+                poll_match_load.after(start_match_load),
+                expire_match_load_abort.after(poll_match_load),
+            )
+                .in_set(MatchLoadDispatch)
+                .after(MapLoadApproval),
         )
             .after(frame::SessionSwapApplied)
             .in_set(ClientSet::Load),

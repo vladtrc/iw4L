@@ -331,14 +331,28 @@ fn runtime_array(
     Ok(())
 }
 
-fn load_map_triggers(s: &mut ZoneStream<'_>, triggers: Ptr) -> Result<()> {
+fn load_map_triggers(
+    s: &mut ZoneStream<'_>,
+    triggers: Ptr,
+) -> Result<crate::zone::MapEntsGeometry> {
     let model_count = s.i32_at(triggers, 0)?.max(0) as usize;
     let hull_count = s.i32_at(triggers, s.layout(8, 16))?.max(0) as usize;
     let slab_count = s.i32_at(triggers, s.layout(16, 32))?.max(0) as usize;
-    s.plain_array(triggers, s.layout(4, 8), 4, sz::TRIGGER_MODEL, model_count)?;
-    s.plain_array(triggers, s.layout(12, 24), 4, sz::TRIGGER_HULL, hull_count)?;
-    s.plain_array(triggers, s.layout(20, 40), 4, sz::TRIGGER_SLAB, slab_count)?;
-    Ok(())
+    let trigger_models =
+        s.plain_array(triggers, s.layout(4, 8), 4, sz::TRIGGER_MODEL, model_count)?;
+    let trigger_hulls =
+        s.plain_array(triggers, s.layout(12, 24), 4, sz::TRIGGER_HULL, hull_count)?;
+    let trigger_slabs =
+        s.plain_array(triggers, s.layout(20, 40), 4, sz::TRIGGER_SLAB, slab_count)?;
+    Ok(crate::zone::MapEntsGeometry {
+        trigger_models,
+        trigger_model_count: model_count,
+        trigger_hulls,
+        trigger_hull_count: hull_count,
+        trigger_slabs,
+        trigger_slab_count: slab_count,
+        ..Default::default()
+    })
 }
 
 pub(super) fn load_mapents(s: &mut ZoneStream<'_>) -> Result<()> {
@@ -349,12 +363,12 @@ pub(super) fn load_mapents(s: &mut ZoneStream<'_>) -> Result<()> {
     s.push(XFILE_BLOCK_VIRTUAL)?;
     follow_name(s, p, 0)?;
     let entity_string = s.plain_array(p, s.layout(4, 8), 1, 1, entity_chars)?;
+    let triggers = load_map_triggers(s, p.at(s.layout(0xc, 24)))?;
     s.record_map_ents(crate::zone::MapEntsGeometry {
         entity_string,
         entity_chars,
+        ..triggers
     });
-
-    load_map_triggers(s, p.at(s.layout(0xc, 24)))?;
     load_client_triggers(s, p.at(s.layout(0x24, 72)))?;
 
     s.pop()

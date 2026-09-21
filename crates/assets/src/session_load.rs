@@ -14,7 +14,7 @@ use crate::{
     load_localize_catalog_in_lane,
     material_images::ImageDemandPlan,
     open_zone, open_zone_shared, peek_zone_version,
-    progress::LoadProgress,
+    progress::{LoadProgress, StageHandle, StageId},
 };
 use asset_transport::load_jobs::{self, JobKind};
 
@@ -251,9 +251,8 @@ pub struct PreparedMatch {
     pub xmodel_walk: crate::PreparedXModelWalkCensus,
 }
 
-/// What a match walk produced. A canceled walk has no prepared match at all —
-/// it is not an empty one, and nothing downstream has to tell the two apart by
-/// looking at how little arrived.
+/// What a match walk produced. A canceled walk has no prepared match at all,
+/// which is not the same as an empty one.
 pub enum MatchLoadOutcome {
     Ready(PreparedMatch),
     Canceled,
@@ -276,12 +275,19 @@ pub async fn load_prepared_match(
         let zone_ff = zone_ff.clone();
         let progress = progress.clone();
         pool.spawn(async move {
-            let path = zone_ff.map_err(|error| format!("zone not found: {error}"))?;
-            let stage = progress.stage("opening zone archive");
+            let path = match zone_ff {
+                Ok(path) => path,
+                Err(error) => {
+                    progress.record_skipped_scoped(StageId::MapAssets, "open");
+                    return Err(format!("zone not found: {error}"));
+                }
+            };
+            let stage = progress.begin_scoped(StageId::MapAssets, "open", None);
             progress.begin_zone_open();
-            let image = open_zone_shared(&path).map_err(|error| format!("open zone: {error}"))?;
+            let opened = open_zone_shared(&path);
+            finish_zone_open(stage, &opened);
+            let image = opened.map_err(|error| format!("open zone: {error}"))?;
             progress.record_zone_image_bytes(image.bytes.len());
-            drop(stage);
             Ok::<_, String>((path, image))
         })
     };
@@ -337,10 +343,13 @@ pub async fn load_prepared_match(
         let common_mp = common_mp.clone();
         let progress = progress.clone();
         pool.spawn(async move {
-            let path = common_mp.ok()?;
-            let stage = progress.stage("opening common_mp archive");
+            let Some(path) = common_mp.ok() else {
+                progress.record_skipped_scoped(StageId::CommonAssets, "common_mp");
+                return None;
+            };
+            let stage = progress.begin_scoped(StageId::CommonAssets, "common_mp", None);
             let opened = open_zone_shared(&path);
-            drop(stage);
+            finish_zone_open(stage, &opened);
             Some((path, opened))
         })
     };
@@ -359,11 +368,13 @@ pub async fn load_prepared_match(
             let mut report = Vec::new();
             let strings = match &zone_ff {
                 Ok(path) => {
-                    let stage = progress.stage("walking language zones");
+                    let stage = progress.begin(StageId::Localization, None);
                     let catalog = load_localized_strings_beside(path, &mut report, &stage);
+                    stage.done();
                     catalog
                 }
                 Err(_) => {
+                    progress.record_skipped(StageId::Localization);
                     report.push("localize: no zone path — every on-screen string is a gap".into());
                     LocalizeCatalog::default()
                 }
@@ -398,6 +409,7 @@ pub async fn load_prepared_match(
         t5_xanims,
         t5_fx,
         t5_projectiles,
+        t5_teamsets,
         t5_images,
         t5_report,
     ) = t5_weapon_walk.await;
@@ -440,7 +452,7 @@ pub async fn load_prepared_match(
     let mut common_tracers = crate::TracerCatalog::default();
     let mut xmodel_walk = crate::PreparedXModelWalkCensus::default();
     let mut s1_common_bytes = 0;
-    let mut teamset_icons = std::collections::HashMap::new();
+    let mut teamsets = t5_teamsets;
     let mut common_film_visions = std::collections::BTreeMap::new();
     let mut common_images = None;
 
@@ -470,13 +482,9 @@ pub async fn load_prepared_match(
         Some((path, Ok(image))) => {
             let mut census =
                 lane(image.game).load_common_mp(&path, &image, &progress, true, material_seed);
-            // The runtime common_mp walk is synchronous here, so its plan is
-            // handed over the instant the walk puts it down rather than at the
-            // bottom of the function.
-            // Held, not enqueued: every one of this plan's disputed claims
-            // was answered by a donor, and the donors have not finished. It
-            // decodes once the merged catalog can say which of its claims are
-            // still its own.
+            // Held, not enqueued: every one of this plan's disputed claims was
+            // answered by a donor, and the donors have not finished. It decodes
+            // once the merged catalog can say which claims are still its own.
             common_images = hold_image_plan(
                 "common_mp FPV",
                 census.pending_images.take(),
@@ -491,7 +499,7 @@ pub async fn load_prepared_match(
             common_tracers = census.tracers;
             xmodel_walk = census.xmodel_walk;
             s1_common_bytes = census.s1_common_bytes;
-            teamset_icons = census.teamset_icons;
+            teamsets.extend(census.teamsets);
             common_film_visions = census.film_visions;
             (
                 census.weapons,
@@ -673,17 +681,27 @@ pub async fn load_prepared_match(
         .absorb_captured(common_scene_models);
     report.append(&mut common_report);
 
-    if facts.team_icons.allies.is_none() && facts.team_icons.axis.is_none() {
+    if facts.team_settings.allies.is_none() && facts.team_settings.axis.is_none() {
         if let Some(name) = facts.t5_teamset.as_ref() {
-            if let Some(icons) = teamset_icons.get(name) {
-                facts.team_icons = icons.clone();
+            if let Some(icons) = teamsets.get(name) {
+                facts.team_settings = icons.clone();
             }
         }
     }
+    if facts.t5_teamset.is_some() {
+        facts.script_sound.attackers = facts
+            .script_sound
+            .attackers
+            .or_else(|| facts.team_settings.attackers.clone());
+        facts.script_sound.defenders = facts
+            .script_sound
+            .defenders
+            .or_else(|| facts.team_settings.defenders.clone());
+    }
     match (
         facts.t5_teamset.as_deref(),
-        facts.team_icons.allies.as_deref(),
-        facts.team_icons.axis.as_deref(),
+        facts.team_settings.allies.as_ref(),
+        facts.team_settings.axis.as_ref(),
     ) {
         (Some(ts), Some(a), Some(x)) => {
             report.push(format!("team icons: teamset={ts} allies={a} axis={x}"));
@@ -695,6 +713,14 @@ pub async fn load_prepared_match(
         }
         _ => {}
     }
+
+    report.push(format!(
+        "map teams: allies={:?} axis={:?} attackers={:?} defenders={:?}",
+        facts.team_settings.allies_name,
+        facts.team_settings.axis_name,
+        facts.script_sound.attackers,
+        facts.script_sound.defenders,
+    ));
 
     report.push(format!(
         "s1 pool walked: common={s1_common_bytes} map={s1_map_bytes} total={} rss={}",
@@ -868,8 +894,10 @@ pub async fn load_prepared_match(
     }
 
     if let Ok(path) = &zone_ff {
-        let stage = progress.stage("decoding merged material images");
-        match crate::decode_material_color_maps(path, &mut global, &stage, load_pool()) {
+        let stage = progress.begin_scoped(StageId::Images, "merged", None);
+        let decoded = crate::decode_material_color_maps(path, &mut global, &stage, load_pool());
+        stage.finish_from(&decoded);
+        match decoded {
             Ok(stats) => report.push(format!(
                 "merged material images: {}/{} decoded, {} missing, {} unsupported",
                 stats.decoded, stats.requested, stats.missing, stats.unsupported
@@ -941,14 +969,16 @@ pub async fn load_prepared_match(
             let want: std::collections::BTreeSet<usize> =
                 requested.iter().map(|(index, _)| *index).collect();
             let want = want.len();
-            let stage = progress.stage("decoding light attenuation images");
-            match crate::decode_catalog_images_from_iwd(
+            let stage = progress.begin_scoped(StageId::Images, "attenuation", None);
+            let decoded = crate::decode_catalog_images_from_iwd(
                 path,
                 &mut global,
                 requested,
                 &stage,
                 load_pool(),
-            ) {
+            );
+            stage.finish_from(&decoded);
+            match decoded {
                 Ok(n) => report.push(format!(
                     "IWD light attenuation: decoded {n} of {want} GfxLightDef images (Image_LoadFromIwi; empty payload is not a host ramp)"
                 )),
@@ -965,14 +995,16 @@ pub async fn load_prepared_match(
         ));
     }
     if let Ok(path) = &zone_ff {
-        let stage = progress.stage("decoding tracer beam images");
-        match crate::material_images::decode_color_or_2d_for_names(
+        let stage = progress.begin_scoped(StageId::Images, "tracers", None);
+        let decoded = crate::material_images::decode_color_or_2d_for_names(
             path,
             &mut global,
             common_tracers.named_materials(),
             &stage,
             load_pool(),
-        ) {
+        );
+        stage.finish_from(&decoded);
+        match decoded {
             Ok(n) => report.push(format!(
                 "tracer beam images after absorb: {n} TS_COLOR_MAP/TS_2D decoded"
             )),
@@ -1158,14 +1190,16 @@ pub async fn load_prepared_match(
             .collect();
         if !missing.is_empty() {
             if let Ok(path) = &zone_ff {
-                let stage = progress.stage("decoding fx elem 2d images");
-                match crate::material_images::decode_color_or_2d_for_names(
+                let stage = progress.begin_scoped(StageId::Images, "fx_elem", None);
+                let decoded = crate::material_images::decode_color_or_2d_for_names(
                     path,
                     &mut global,
                     missing.iter(),
                     &stage,
                     load_pool(),
-                ) {
+                );
+                stage.finish_from(&decoded);
+                match decoded {
                     Ok(n) => report.push(format!(
                         "fx elem 2d images after absorb: {n} TS_COLOR_MAP/TS_2D decoded"
                     )),
@@ -1481,9 +1515,9 @@ fn walk_material_file(
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_else(|| "zone".into());
-    let stage = progress.stage(format!("opening {zone_name} archive"));
+    let stage = progress.begin_scoped(StageId::CommonAssets, zone_name.clone(), None);
     let opened = open_zone_shared(path);
-    drop(stage);
+    finish_zone_open(stage, &opened);
     match opened {
         Ok(image) => {
             let pop = lane(image.game).load_material_population(path, &image, progress, seed);
@@ -1697,9 +1731,9 @@ fn capture_common_zone(
         report.push(format!("{report_label}: canceled before the walk started"));
         return None;
     }
-    let stage = progress.stage(stage_label);
+    let stage = progress.begin_scoped(StageId::CommonAssets, stage_label, None);
     let opened = open_zone_shared(donor);
-    drop(stage);
+    finish_zone_open(stage, &opened);
     match opened {
         Ok(image) => Some(lane(image.game).load_common_mp(
             donor,
@@ -1734,10 +1768,8 @@ async fn apply_image_batch(
     let first_gap = batch.stats.first_gap.clone();
     let census = batch.apply(global);
     job.bytes(None, Some(census.final_cpu_bytes))
-        // What the plan prepared and what it served out of another plan's
-        // work, kept apart: only the first is work this plan did. What
-        // survived is `retained + discarded`, a check on the pair and never
-        // its definition.
+        // What the plan prepared and what it served out of another plan's work,
+        // kept apart: only the first is work this plan did.
         .prepared(census.newly_prepared_bytes, census.reused_bytes)
         .merged(
             census.final_cpu_bytes,
@@ -1766,10 +1798,8 @@ async fn apply_image_batch(
     if let Some(line) = census.discard_line() {
         report.push(format!("{label} image discard: {line}"));
     }
-    // Who answered for the claims this plan prepared and the merge threw
-    // away. A count by reason says how much was wasted; this says by
-    // whom, which is what decides whether the claim could have been
-    // resolved before it was prepared.
+    // Who answered for the claims this plan prepared and the merge threw away,
+    // which is what says whether a claim could have been resolved earlier.
     if !census.disputed_winners.is_empty() {
         report.push(format!(
             "{label} image dispute: {}",
@@ -1795,9 +1825,7 @@ async fn apply_image_batch(
 }
 
 /// An image plan already on the pool, and the job row that records when it got
-/// there. The producer owns both from the moment its plan is ready: the walk
-/// that discovers the demand hands it over itself rather than carrying it back
-/// to a consumer that is busy elsewhere.
+/// there. The walk that discovers the demand hands both over itself.
 struct PendingImages {
     job: load_jobs::Job,
     task: bevy::tasks::Task<(&'static str, crate::material_images::DecodedImageBatch)>,
@@ -1811,15 +1839,12 @@ impl PendingImages {
     }
 }
 
-/// A plan whose walk has finished, holding the job row that records when it
-/// did.
+/// A plan whose walk has finished, holding the job row that records when it did.
 ///
 /// `job` is opened by the producer when it starts looking, so the row carries
-/// the whole story: discovered → ready → enqueued → started → finished →
-/// joined. The gap this exists to expose is `ready → enqueued`; a timer that
-/// starts when a worker picks the job up cannot see it at all — and a plan
-/// that waits for the catalog before it decodes spends that whole wait here,
-/// in the open, rather than inside a decode timer.
+/// discovered → ready → enqueued → started → finished → joined. A plan waiting
+/// for the catalog spends that wait in `ready → enqueued`, not in a decode
+/// timer.
 struct HeldImagePlan {
     label: &'static str,
     plan: ImageDemandPlan,
@@ -1857,12 +1882,12 @@ impl HeldImagePlan {
         let progress = progress.clone();
         let task = load_pool().spawn(async move {
             job.started();
-            let stage = progress.stage(format!("decoding {label} material images"));
+            let stage = progress.begin_scoped(StageId::Images, label, None);
             // The plan splits itself across this same pool. The worker this
             // task is on joins that scope rather than blocking on it, so a
             // plan does not cost a load worker to supervise it.
             let batch = plan.run(&stage, job, load_pool());
-            drop(stage);
+            stage.done();
             job.finished();
             (label, batch)
         });
@@ -2100,9 +2125,9 @@ fn t5_weapon_common_prep(runtime_common: Option<&Path>, progress: &LoadProgress)
     }
     let (leftover_startup, leftover_startup_report) = leftover_walk_t5_startup_materials(progress);
     report.extend(leftover_startup_report);
-    let stage = progress.stage("walking T5 common_mp as weapon catalog");
+    let stage = progress.begin_scoped(StageId::CommonAssets, "t5_weapons", None);
     let opened = open_zone_shared(&donor.path).map_err(|error| error.to_string());
-    drop(stage);
+    stage.finish_from(&opened);
     T5CommonPrep::Ready {
         donor: donor.path,
         opened,
@@ -2124,6 +2149,7 @@ fn walk_t5_weapon_common(
     XAnimBuild,
     FxCatalog,
     crate::ProjectileMeshBuild,
+    std::collections::HashMap<String, crate::MapTeamSettings>,
     Option<PendingImages>,
     Vec<String>,
 ) {
@@ -2136,6 +2162,7 @@ fn walk_t5_weapon_common(
             XAnimBuild::default(),
             FxCatalog::default(),
             crate::ProjectileMeshBuild::default(),
+            Default::default(),
             None,
             report,
         )
@@ -2188,6 +2215,7 @@ fn walk_t5_weapon_common(
         census.xanims,
         census.fx,
         census.projectile_meshes,
+        census.teamsets,
         pending_images,
         report,
     )
@@ -2214,11 +2242,14 @@ async fn walk_startup_material_zones(
                     None => find_zone_for_tree(&map_path, zone),
                 };
                 found.and_then(|found| {
-                    let stage = progress.stage(format!("opening {zone} archive"));
+                    let stage = progress.begin_scoped(StageId::CommonAssets, zone, None);
                     let image = open_zone_shared(&found.path)
                         .map(|image| (found.path, image))
                         .map_err(|error| error.to_string());
-                    drop(stage);
+                    if let Ok((_, image)) = &image {
+                        stage.set_bytes(image.bytes.len() as u64);
+                    }
+                    stage.finish_from(&image);
                     image
                 })
             })
@@ -2270,7 +2301,7 @@ async fn walk_startup_material_zones(
 fn load_localized_strings_beside(
     zone_ff: &std::path::Path,
     report: &mut Vec<String>,
-    stage: &crate::progress::LoadStage,
+    stage: &crate::progress::StageHandle,
 ) -> LocalizeCatalog {
     let mut catalog = LocalizeCatalog::default();
     let root = match games_root_from_env() {
@@ -2289,7 +2320,7 @@ fn load_localized_strings_beside(
         (
             crate::AssetNamespace::T5,
             fastfile_t5::ZONE_VERSION_PC,
-            &["en_code_post_gfx_mp", "en_common_mp", "en_ui_mp"],
+            &["code_post_gfx_mp", "common_mp", "ui_mp"],
         ),
         (
             crate::AssetNamespace::Iw5,
@@ -2297,39 +2328,81 @@ fn load_localized_strings_beside(
             MP_LOCALIZED_ZONES,
         ),
     ];
-    stage.total(lanes.iter().map(|(_, _, names)| names.len() as u64).sum());
+    let runtime_language = find_runtime_common_mp(&root, zone_ff)
+        .ok()
+        .and_then(|zone| zone.path.parent()?.file_name()?.to_str().map(str::to_owned));
+    let mut plan = Vec::new();
     for (namespace, version, names) in lanes {
-        for name in names {
-            stage.advance(1);
-
-            let found = if namespace == crate::AssetNamespace::Iw4 {
-                find_runtime_zone(&root, zone_ff, name)
-            } else {
-                find_zone_file_version(&root, name, version)
-            };
-            let Ok(found) = found else {
-                continue;
-            };
-            match load_localize_catalog_in_lane(&found.path) {
-                Ok(part) if part.is_empty() => {}
-                Ok(part) => {
-                    report.push(format!(
-                        "localize: {} {name} {} strings",
-                        namespace.as_str(),
-                        part.len()
-                    ));
-                    catalog.absorb(part);
+        let found: Vec<_> = if namespace == crate::AssetNamespace::T5 {
+            match find_zone_file_version(&root, "common_mp", version).and_then(|zone| {
+                asset_transport::discover::find_t5_localized_zones(
+                    &zone.path,
+                    runtime_language.as_deref(),
+                )
+            }) {
+                Ok(zones) => zones,
+                Err(error) => {
+                    report.push(format!("localize gap: {error}"));
+                    Vec::new()
                 }
-                Err(error) => report.push(format!(
-                    "localize gap: {} {name} failed: {error}",
-                    namespace.as_str()
-                )),
             }
+        } else {
+            names
+                .iter()
+                .filter_map(|name| {
+                    if namespace == crate::AssetNamespace::Iw4 {
+                        find_runtime_zone(&root, zone_ff, name)
+                    } else {
+                        find_zone_file_version(&root, name, version)
+                    }
+                    .ok()
+                })
+                .collect()
+        };
+        plan.extend(found.into_iter().map(|found| (namespace, found)));
+    }
+    // The plan only closes once every lane has been searched: a zone that is
+    // not there is not part of the volume, and counting it would report work
+    // nobody is going to do.
+    stage.set_total(plan.len() as u64);
+    for (namespace, found) in plan {
+        let name = &found.zone_name;
+        match load_localize_catalog_in_lane(&found.path) {
+            Ok(part) if part.is_empty() => {}
+            Ok(part) => {
+                report.push(format!(
+                    "localize: {} {name} {} strings",
+                    namespace.as_str(),
+                    part.len()
+                ));
+                catalog.absorb_in_namespace(namespace, part);
+            }
+            Err(error) => report.push(format!(
+                "localize gap: {} {name} failed: {error}",
+                namespace.as_str()
+            )),
         }
+        // A zone that failed to open is still a unit this pass has handled.
+        stage.advance(1);
     }
     report.push(format!(
         "localize: {} strings for on-screen text",
         catalog.len()
     ));
     catalog
+}
+
+/// Close a zone-open stage with the weight of what it read.
+///
+/// A zone open has no units to count — it is one read — but it does have a
+/// size, and that size is what the rest of the load is built out of. Recording
+/// it here means every opener says it the same way.
+fn finish_zone_open<E>(
+    stage: StageHandle,
+    opened: &Result<std::sync::Arc<asset_transport::zone::ZoneImage>, E>,
+) {
+    if let Ok(image) = opened {
+        stage.set_bytes(image.bytes.len() as u64);
+    }
+    stage.finish_from(opened);
 }

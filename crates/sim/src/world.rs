@@ -415,6 +415,12 @@ pub struct SimState {
 
     pending_game_win: Option<Option<ClientId>>,
 
+    pending_team_game_win: Option<Option<gamemode_iw4::Team>>,
+
+    pending_round_win: Option<Option<gamemode_iw4::Team>>,
+
+    pending_round_switch: Option<bool>,
+
     game_win_winner: Option<ClientId>,
 
     placement_cointoss_unwired: u32,
@@ -573,6 +579,9 @@ impl Default for SimState {
             max_alive_seen: 0,
             pending_prematch_done: false,
             pending_game_win: None,
+            pending_team_game_win: None,
+            pending_round_win: None,
+            pending_round_switch: None,
             game_win_winner: None,
             placement_cointoss_unwired: 0,
             pending_spawn_music: Vec::new(),
@@ -769,6 +778,19 @@ impl SimState {
         self.pending_game_win.take()
     }
 
+    pub fn take_team_game_win(&mut self) -> Option<Option<gamemode_iw4::Team>> {
+        self.pending_team_game_win.take()
+    }
+
+    pub fn take_round_win(&mut self) -> Option<Option<gamemode_iw4::Team>> {
+        self.pending_round_win.take()
+    }
+
+    /// `Some(true)` is halftime; `Some(false)` is a side switch.
+    pub fn take_round_switch(&mut self) -> Option<bool> {
+        self.pending_round_switch.take()
+    }
+
     pub fn max_alive_seen(&self) -> u32 {
         self.max_alive_seen
     }
@@ -808,6 +830,20 @@ impl SimState {
     pub(crate) fn set_pending_game_win(&mut self, winner: Option<ClientId>) {
         self.pending_game_win = Some(winner);
         self.game_win_winner = winner;
+    }
+
+    pub(crate) fn set_pending_team_game_win(&mut self, winner: Option<gamemode_iw4::Team>) {
+        self.pending_team_game_win = Some(winner);
+    }
+
+    /// A round win is notified only when this was not the last round; the
+    /// game-ending round reaches the dialog as a game win.
+    pub(crate) fn set_pending_round_switch(&mut self, halftime: bool) {
+        self.pending_round_switch = Some(halftime);
+    }
+
+    pub(crate) fn set_pending_round_win(&mut self, winner: Option<gamemode_iw4::Team>) {
+        self.pending_round_win = Some(winner);
     }
 
     pub fn game_win_winner(&self) -> Option<ClientId> {
@@ -1056,6 +1092,10 @@ impl SimState {
 
     pub(crate) fn bootstrap_ref(&self) -> &MatchBootstrap {
         &self.bootstrap
+    }
+
+    pub fn game_mode_kind(&self) -> gamemode_iw4::GameModeKind {
+        self.bootstrap.kind
     }
 
     pub fn authored_spawn_origins(&self) -> Vec<[f32; 3]> {

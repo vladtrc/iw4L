@@ -5,7 +5,7 @@ use super::{
     ZoneLane, ZoneWalkSink,
 };
 use crate::lane_capability::{LaneStatus, PreparedCapability};
-use crate::progress::LoadProgress;
+use crate::progress::{LoadProgress, StageId};
 use crate::session_load::{PreparedWorld, WorldDrawPolicy};
 use crate::{
     BodyMeshBuild, Iw5ZoneMemory, MASK_PLAYER_SOLID, OwnedLightGrid, XAnimBuild, ZoneGame,
@@ -42,21 +42,26 @@ impl Iw5Lane {
         ),
     ];
 
-    fn stamp_map_tree_team_icons(path: &Path, loaded: &mut LoadedWorld) {
-        if loaded.facts.team_icons.allies.is_some() || loaded.facts.team_icons.axis.is_some() {
+    fn stamp_map_tree_team_settings(path: &Path, loaded: &mut LoadedWorld) {
+        if loaded.facts.team_settings.allies.is_some() || loaded.facts.team_settings.axis.is_some()
+        {
             return;
         }
         match crate::find_zone_for_tree(path, "code_post_gfx_mp") {
             Ok(found) => {
-                let (arena, table) = crate::load_iw5_team_icon_sources(&found.path);
+                let (arena, table) = crate::load_iw5_team_sources(&found.path);
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 if let Some(table) = table.as_ref() {
-                    loaded.facts.team_icons =
-                        crate::team_icons_for_zone(table, arena.as_deref(), stem);
+                    loaded.facts.team_settings = crate::team_settings_for_zone(
+                        table,
+                        crate::AssetNamespace::Iw5,
+                        arena.as_deref(),
+                        stem,
+                    );
                 }
                 match (
-                    loaded.facts.team_icons.allies.as_deref(),
-                    loaded.facts.team_icons.axis.as_deref(),
+                    loaded.facts.team_settings.allies.as_ref(),
+                    loaded.facts.team_settings.axis.as_ref(),
                 ) {
                     (Some(a), Some(x)) => loaded.report.push(format!(
                         "team icons: iw5 arena allies={a} axis={x} zone={stem}"
@@ -73,7 +78,7 @@ impl Iw5Lane {
     }
 
     fn finish_loaded(path: &Path, mut loaded: LoadedWorld) -> LoadedWorld {
-        Self::stamp_map_tree_team_icons(path, &mut loaded);
+        Self::stamp_map_tree_team_settings(path, &mut loaded);
         loaded
     }
 }
@@ -100,10 +105,14 @@ impl ZoneLane for Iw5Lane {
         >,
     ) -> LoadedWorld {
         let mut report = vec![format!("game: IW5 ({})", path.display())];
-        let stage = progress.stage("reading IW5 zone header");
+        let stage = progress.begin_scoped(StageId::MapAssets, "header", None);
         let header = match image.iw5_header() {
-            Ok(h) => h,
+            Ok(h) => {
+                stage.done();
+                h
+            }
             Err(e) => {
+                stage.fail();
                 return Self::finish_loaded(
                     path,
                     LoadedWorld::with_gap(
@@ -116,8 +125,7 @@ impl ZoneLane for Iw5Lane {
             }
         };
 
-        drop(stage);
-        let stage = progress.stage("preparing IW5 zone memory");
+        let stage = progress.begin_scoped(StageId::MapAssets, "memory", None);
         report.push(crate::zone::xfile_arena_row(
             "zone arenas map",
             &header.block_size,
@@ -126,8 +134,12 @@ impl ZoneLane for Iw5Lane {
         ));
         let mut memory = Iw5ZoneMemory::for_header(&header);
         let mut stream = match memory.stream(&image.bytes) {
-            Ok(s) => s,
+            Ok(s) => {
+                stage.done();
+                s
+            }
             Err(e) => {
+                stage.fail();
                 return Self::finish_loaded(
                     path,
                     LoadedWorld::with_gap(
@@ -140,21 +152,23 @@ impl ZoneLane for Iw5Lane {
             }
         };
 
-        drop(stage);
-        let stage = progress.stage("walking IW5 map assets");
+        let stage = progress.begin_scoped(StageId::MapAssets, "walk", None);
         let mut sink = ZoneWalkSink::default();
         let seeded_techsets = material_seed.technique_set_facts().to_vec();
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(crate::AssetNamespace::Iw5);
-        match fastfile_iw5::load_zone(&mut stream, &mut sink) {
+        let walked = fastfile_iw5::load_zone(&mut stream, &mut sink);
+        match &walked {
             Ok(_) => report.push(format!("zone walk: complete, {} assets", sink.walked)),
             Err(e) => report.push(format!(
                 "zone walk: stopped after {} assets — {e}",
                 sink.walked
             )),
         }
+        stage.set_completed(sink.walked as u64);
         let exp_fog = sink.exp_fog.take();
+        let script_sound = std::mem::take(&mut sink.script_sound).finish();
         let createart_name = sink.createart_name.take();
         report.push(match &exp_fog {
             Some(fog) => format!(
@@ -198,6 +212,8 @@ impl ZoneLane for Iw5Lane {
          unrouted={}",
             materials.unrouted_material_count()
         ));
+        stage.finish_from(&walked);
+        let clip_stage = progress.begin_scoped(StageId::MapAssets, "collision", None);
         let map_xmodels = std::mem::take(&mut sink.map_xmodels);
         let bodies = std::mem::take(&mut sink.bodies);
         let fpv_meshes = std::mem::take(&mut sink.fpv_meshes);
@@ -249,9 +265,10 @@ impl ZoneLane for Iw5Lane {
             None
         };
 
-        drop(stage);
-        let _stage = progress.stage("building IW5 world geometry");
+        clip_stage.done();
+        let stage = progress.begin_scoped(StageId::MapAssets, "geometry", None);
         let Some(geometry) = stream.gfx_world() else {
+            stage.fail();
             report.push("no GfxWorld retained — nothing to draw".into());
             report.push("bodies: empty (no GfxWorld; XModel bone capture not reached)".into());
             let dm_spawns = dm_spawn_points_iw5(&stream);
@@ -298,7 +315,9 @@ impl ZoneLane for Iw5Lane {
             report.push("com_world: not retained".into());
         }
 
-        match build_iw5_world_draw(&stream, geometry, materials) {
+        let world_draw = build_iw5_world_draw(&stream, geometry, materials);
+        stage.finish_from(&world_draw);
+        match world_draw {
             Ok((draw, map_materials)) => {
                 let map_models = super::build_iw5_static_model_draw(&stream, geometry, map_xmodels);
                 if let Some(error) = map_models.static_error.as_ref() {
@@ -584,6 +603,7 @@ impl ZoneLane for Iw5Lane {
                         fpv_meshes,
                         xanims: map_xanims,
                         facts: crate::MapFacts {
+                            script_sound: script_sound.clone(),
                             minimap_corners,
                             north_yaw,
                             compass,
@@ -716,7 +736,7 @@ impl ZoneLane for Iw5Lane {
 
         let mut pending_images = None;
         if decode_color_maps {
-            let stage = progress.stage("planning IW5 common_mp material images");
+            let stage = progress.begin_scoped(StageId::Images, "common_mp", None);
             let (inline, plan) = crate::material_images::plan_material_color_maps(
                 path,
                 &mut materials,
@@ -730,6 +750,10 @@ impl ZoneLane for Iw5Lane {
                 inline.missing,
                 inline.unsupported
             ));
+            // The plan itself is decoded later, under its own stage. This one
+            // planned and decoded the in-zone bodies, and it finished; letting
+            // the handle drop would record it as interrupted.
+            stage.done();
             pending_images = Some(plan);
         }
         CommonCensus {

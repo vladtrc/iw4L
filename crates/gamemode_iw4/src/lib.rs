@@ -179,7 +179,7 @@ pub use give_flag_capture_xp::{
 };
 pub use globallogic::{
     END_GAME_ON_TIME_LIMIT, HALFTIME_TYPE, OBJECTIVE_BASED, POST_ROUND_TIME_MS, TEAM_BASED_DEFAULT,
-    ranked_match,
+    ranked_match, round_switch_is_halftime,
 };
 pub use health_regen::{
     BREATHING_BETTER_ALIAS, BREATHING_HURT_ALIAS, BREATHING_HURT_HEALTH_FRAC,

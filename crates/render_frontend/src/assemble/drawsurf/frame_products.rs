@@ -1155,60 +1155,7 @@ pub(crate) fn bake_sun_shadow_casters(
         let (smodel_near, smodel_far) = sun_smodel_vis.split_at_mut(1);
         let (msb_near, msb_far) = sun_frustum_draw_msb.split_at_mut(1);
 
-        let [draw0, draw1] = ComputeTaskPool::get()
-            .scope(|scope| {
-                scope.spawn(async {
-                    crate::prepare::scene::cull::add_world_surfaces_frustum_only(
-                        dpvs,
-                        planes0.as_slice(),
-                        cell_vis,
-                        cell_vis_all,
-                        &mut surf_near[0],
-                        &mut smodel_near[0],
-                        &mut msb_near[0],
-                    )
-                });
-                scope.spawn(async {
-                    crate::prepare::scene::cull::add_world_surfaces_frustum_only(
-                        dpvs,
-                        planes1.as_slice(),
-                        cell_vis,
-                        cell_vis_all,
-                        &mut surf_far[0],
-                        &mut smodel_far[0],
-                        &mut msb_far[0],
-                    )
-                });
-            })
-            .try_into()
-            .expect("two sun vis partitions");
-        *sun_draw_cell_n = draw0.1.max(draw1.1);
         let lod_origin_eye = camera_view.map(|view| view.inverse().transform_point3(Vec3::ZERO));
-        if let Some(view) = camera_view {
-            let lod_origin = view.inverse().transform_point3(Vec3::ZERO).to_array();
-            let insts = smodel_plan.shadow_draw_insts.as_slice();
-            let scale_last = lod_ramp.scale_last;
-            let (vis_near, vis_far) = sun_smodel_vis.split_at_mut(1);
-
-            ComputeTaskPool::get().scope(|scope| {
-                scope.spawn(async {
-                    dpvs_iw4::cull_smodel_sun_shadow_vis(
-                        &mut vis_near[0],
-                        insts,
-                        lod_origin,
-                        scale_last,
-                    );
-                });
-                scope.spawn(async {
-                    dpvs_iw4::cull_smodel_sun_shadow_vis(
-                        &mut vis_far[0],
-                        insts,
-                        lod_origin,
-                        scale_last,
-                    );
-                });
-            });
-        }
         let gen_changed = casters.generation_id != inputs.catalog_generation;
         let buckets = super::retained_list::SmodelBucketBakeSrc {
             pretess_enable: pretess.enabled,
@@ -1222,43 +1169,68 @@ pub(crate) fn bake_sun_shadow_casters(
         let catalog = &generation.catalog;
         let ramp = lod_ramp.args();
 
-        let [mut near, mut far] = ComputeTaskPool::get()
+        // Each partition owns its visibility -> LOD -> bake chain. Only the
+        // final merge needs both results; intermediate joins serialize the chains.
+        let [(mut near, draw0), (mut far, draw1)] = ComputeTaskPool::get()
             .scope(|scope| {
-                scope.spawn(async {
-                    super::retained_list::bake_sun_shadow_caster_plan(
-                        cull,
-                        &smodel_plan.shadow_draw_insts,
-                        world_plan,
-                        smodel_plan,
-                        catalog,
-                        Some(&sun_surface_vis[0]),
-                        Some(&sun_smodel_vis[0]),
-                        lod_origin_eye,
-                        ramp,
-                        buckets,
+                for (planes, surface_vis, smodel_vis, frustum_msb, bsp_ids, smodel_ids) in [
+                    (
+                        planes0.as_slice(),
+                        &mut surf_near[0],
+                        &mut smodel_near[0],
+                        &mut msb_near[0],
                         &mut bsp_ids,
                         &mut smodel_ids,
-                    )
-                });
-                scope.spawn(async {
-                    super::retained_list::bake_sun_shadow_caster_plan(
-                        cull,
-                        &smodel_plan.shadow_draw_insts,
-                        world_plan,
-                        smodel_plan,
-                        catalog,
-                        Some(&sun_surface_vis[1]),
-                        Some(&sun_smodel_vis[1]),
-                        lod_origin_eye,
-                        ramp,
-                        buckets,
+                    ),
+                    (
+                        planes1.as_slice(),
+                        &mut surf_far[0],
+                        &mut smodel_far[0],
+                        &mut msb_far[0],
                         &mut bsp_ids_far,
                         &mut smodel_ids_far,
-                    )
-                });
+                    ),
+                ] {
+                    scope.spawn(async move {
+                        let (_, draw_cells) =
+                            crate::prepare::scene::cull::add_world_surfaces_frustum_only(
+                                dpvs,
+                                planes,
+                                cell_vis,
+                                cell_vis_all,
+                                surface_vis,
+                                smodel_vis,
+                                frustum_msb,
+                            );
+                        if let Some(eye) = lod_origin_eye {
+                            dpvs_iw4::cull_smodel_sun_shadow_vis(
+                                smodel_vis,
+                                &smodel_plan.shadow_draw_insts,
+                                eye.to_array(),
+                                ramp.scale_last,
+                            );
+                        }
+                        let plan = super::retained_list::bake_sun_shadow_caster_plan(
+                            cull,
+                            &smodel_plan.shadow_draw_insts,
+                            world_plan,
+                            smodel_plan,
+                            catalog,
+                            Some(surface_vis),
+                            Some(smodel_vis),
+                            lod_origin_eye,
+                            ramp,
+                            buckets,
+                            bsp_ids,
+                            smodel_ids,
+                        );
+                        (plan, draw_cells)
+                    });
+                }
             })
             .try_into()
-            .expect("two sun bake partitions");
+            .expect("two sun partitions");
+        *sun_draw_cell_n = draw0.max(draw1);
         let (mut ordered0, ordered1) = super::retained_list::merge_sun_shadow_caster_partitions(
             &mut near,
             &mut far,

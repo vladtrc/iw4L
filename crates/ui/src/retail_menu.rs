@@ -47,7 +47,7 @@ pub(crate) struct RetailPaintCtx<'w> {
     compass: Option<Res<'w, assets::SessionCompass>>,
     presented: Option<Res<'w, net::PresentedSnapshot>>,
     local: Option<Res<'w, net::LocalPresentClient>>,
-    team_icons: Option<Res<'w, assets::SessionTeamIcons>>,
+    team_settings: Option<Res<'w, assets::SessionTeamSettings>>,
     class_store: Res<'w, crate::SessionClassStore>,
     class_phase: Res<'w, crate::ClassSelectPhase>,
     class_status: Res<'w, crate::ClassSelectStatus>,
@@ -105,20 +105,7 @@ pub(crate) fn spawn_retail_shell(
                 identity.zone.trim_start_matches("mp_").to_uppercase()
             );
             match_info.map = loc.text(&key).unwrap_or(&identity.zone).to_owned();
-            let icons = paint
-                .team_icons
-                .as_deref()
-                .map(|icons| icons.0.clone())
-                .filter(|icons| icons.axis.is_some() || icons.allies.is_some())
-                .or_else(|| {
-                    catalog.string_table("mp/factionTable.csv").map(|table| {
-                        assets::team_icons_for_zone(
-                            table,
-                            catalog.rawfile_text("mp/basemaps.arena"),
-                            &identity.zone,
-                        )
-                    })
-                });
+            let icons = paint.team_settings.as_deref().map(|icons| icons.0.clone());
             if let (Some(icons), Some(snapshot), Some(local)) = (
                 icons,
                 paint.presented.as_deref().and_then(|p| p.snapshot()),

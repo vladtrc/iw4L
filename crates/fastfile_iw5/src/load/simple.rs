@@ -70,7 +70,7 @@ pub(super) fn load_script_file(
     let buf_ptr = always_array(s, p.at(s.layout(16, 24)), 1, compressed_len)?;
     s.pop()?;
     s.push(XFILE_BLOCK_SCRIPT)?;
-    always_array(s, p.at(s.layout(20, 32)), 1, bytecode_len)?;
+    let code_ptr = always_array(s, p.at(s.layout(20, 32)), 1, bytecode_len)?;
     s.pop()?;
     if let Some(px) = buf_ptr {
         if compressed_len > 0 {
@@ -78,6 +78,9 @@ pub(super) fn load_script_file(
             let name = linked_name(s, p);
             if !name.is_empty() {
                 links.capture_raw_file(name, raw, true)?;
+                if let Some(code) = code_ptr {
+                    links.capture_script_file(name, raw, s.slice_at(code, 0, bytecode_len)?)?;
+                }
             }
         }
     }

@@ -3084,7 +3084,7 @@ pub struct InGameMenuInfo {
     pub mode: String,
     pub description: Option<String>,
     pub map: String,
-    pub icon: Option<String>,
+    pub icon: Option<assets::AssetKey>,
     pub compass: Option<String>,
 }
 
@@ -3144,7 +3144,7 @@ pub fn ingame_options(info: Option<&InGameMenuInfo>) -> Screen {
                 94.0,
                 128.0,
                 128.0,
-                icon,
+                &icon.display(),
                 [1.0, 1.0, 1.0, 0.3],
             ));
         }

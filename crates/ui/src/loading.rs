@@ -5,7 +5,9 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, futures_lite::future};
 
 use crate::{GameUiFont, UiLayer, UiLayerVisibility, game_text_font};
 
-pub use assets::{LoadLaneView, LoadProgress, LoadingPreviewSource, LoadingScreen};
+pub use assets::{LoadProgress, LoadingPreviewSource, LoadingScreen};
+
+use crate::load_table::{LoadRow, activity_line, format_elapsed, project, total_elapsed};
 
 #[derive(Component)]
 pub(crate) struct LoadingRoot;
@@ -70,10 +72,10 @@ pub(crate) struct LoadingActivity;
 pub(crate) struct LoadingStatusRow;
 
 #[derive(Component)]
-pub(crate) struct LoadingStatusLane(u64);
+pub(crate) struct LoadingStatusCaption;
 
 #[derive(Component)]
-pub(crate) struct LoadingStatusCaption;
+pub(crate) struct LoadingStatusCount;
 
 #[derive(Component)]
 pub(crate) struct LoadingStatusTime;
@@ -101,10 +103,23 @@ const LETTER_FONT_PX: f32 = 56.0;
 const LETTER_FONT_MIN: f32 = 28.0;
 const MODE_FONT_PX: f32 = 22.0;
 const STATUS_FONT_PX: f32 = 14.0;
-const STATUS_TIME_COL_PX: f32 = 64.0;
+/// The two number columns reserve the same width in every row, so a number
+/// growing a digit — or a size crossing from MB to GB — moves nothing.
+const STATUS_VALUE_COL_PX: f32 = 104.0;
+const STATUS_TIME_COL_PX: f32 = 76.0;
+/// Every row is the same height, whether it says anything or not.
+const STATUS_ROW_PX: f32 = 20.0;
+/// At most two stages are shown running. A load opens more than that at once,
+/// and a block that grew and shrank would move every row under it.
+const STATUS_ACTIVE_ROWS: usize = 2;
+/// The table is redrawn about ten times a second; the letters keep their own
+/// per-frame animation.
+const STATUS_TABLE_PERIOD: Duration = Duration::from_millis(100);
+/// Every stage the load can show fits, so the box never has to grow.
+const STATUS_TABLE_VH: f32 = 44.0;
 const LOADING_CLEAR: Color = Color::srgb(0.08, 0.09, 0.12);
 const STATUS_RUNNING: Color = Color::srgb(1.0, 0.72, 0.28);
-const STATUS_DONE: Color = Color::srgb(0.62, 0.92, 0.68);
+const STATUS_TOTAL: Color = Color::srgb(0.92, 0.93, 0.95);
 
 fn loading_text_shadow() -> TextShadow {
     TextShadow {
@@ -226,11 +241,15 @@ pub(crate) fn spawn_loading_screen(
                         loading_text_shadow(),
                     ));
                 });
+                // Pinned by its top: the box has a height of its own and fills
+                // from the first line down, so a stage opening lands under the
+                // rows instead of shoving them up the screen.
                 row.spawn(Node {
                     width: Val::Percent(48.0),
+                    height: Val::Vh(STATUS_TABLE_VH),
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Stretch,
-                    justify_content: JustifyContent::FlexEnd,
+                    justify_content: JustifyContent::FlexStart,
                     row_gap: Val::Px(2.0),
                     ..default()
                 })
@@ -291,15 +310,21 @@ fn begin_loading_preview_decode(
     };
 
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        let stage = progress.stage("decoding loadscreen image");
+        let stage = progress.begin(assets::StageId::Preview, None);
         let decoded = match assets::decode_map_preview(&zone_ff, &map_name) {
             Ok(decoded) => decoded,
             Err(error) => {
                 diag::warn!(Ui, "loading: preview index: {error}");
-                None
+                stage.fail();
+                return None;
             }
         };
-        drop(stage);
+        // A zone with no loadscreen is not a failure — the branch simply had
+        // nothing to decode.
+        match decoded.is_some() {
+            true => stage.done(),
+            false => stage.skip(),
+        }
         decoded
     });
     commands.insert_resource(LoadingPreviewTask { identity, task });
@@ -364,22 +389,14 @@ pub(crate) fn update_loading_screen(
     time: Res<Time>,
     font: Option<Res<GameUiFont>>,
     mut screen: Option<ResMut<LoadingScreen>>,
-    mut letters: Query<(&LoadingLetter, &mut TextColor), Without<LoadingStatusCaption>>,
-    list: Query<(Entity, Option<&Children>), (With<LoadingStatusList>, Without<LoadingStatusRow>)>,
-    rows: Query<
-        (Entity, &LoadingStatusLane, &Children),
-        (With<LoadingStatusRow>, Without<LoadingStatusList>),
-    >,
-    mut texts: ParamSet<(
-        Query<&mut Text, (With<LoadingStatusCaption>, Without<LoadingActivity>)>,
-        Query<&mut Text, (With<LoadingStatusTime>, Without<LoadingActivity>)>,
-    )>,
-    mut status_color: Query<
-        &mut TextColor,
-        (
-            Without<LoadingLetter>,
-            Or<(With<LoadingStatusCaption>, With<LoadingStatusTime>)>,
-        ),
+    load: Option<Res<assets::MapLoadProcess>>,
+    mut next_table: Local<Option<std::time::Instant>>,
+    mut shown: Local<StatusTable>,
+    mut letters: Query<(&LoadingLetter, &mut TextColor), Without<LoadingStatusCell>>,
+    list: Query<(Entity, Option<&Children>), With<LoadingStatusList>>,
+    mut cells: Query<
+        (&LoadingStatusCell, &mut Text, &mut TextColor),
+        (Without<LoadingLetter>, Without<LoadingActivity>),
     >,
     roots: Query<Entity, Or<(With<LoadingRoot>, With<LoadingCamera>)>>,
     mut activity: Query<
@@ -387,8 +404,7 @@ pub(crate) fn update_loading_screen(
         (
             With<LoadingActivity>,
             Without<LoadingLetter>,
-            Without<LoadingStatusCaption>,
-            Without<LoadingStatusTime>,
+            Without<LoadingStatusCell>,
         ),
     >,
 ) {
@@ -413,144 +429,326 @@ pub(crate) fn update_loading_screen(
             inactive
         };
     }
-    let lanes = screen.progress.snapshot_lanes();
-    let active = lanes.iter().filter(|lane| lane.in_progress()).count();
-    for (mut text, mut color) in &mut activity {
-        if let Some(reason) = screen.failure() {
-            *text = Text::new(format!("Map load failed\n{reason}"));
-            color.0 = Color::srgb(1.0, 0.35, 0.25);
-        } else {
-            *text = Text::new(format!("Loading · {active} active stages"));
-            color.0 = STATUS_RUNNING;
-        }
-    }
-    if let (Ok((list_entity, children)), Some(font)) = (list.single(), font.as_ref()) {
-        let child_ids: Vec<Entity> = children.map(|c| c.iter().collect()).unwrap_or_default();
-        let mut ordered = Vec::with_capacity(lanes.len());
-        for lane in &lanes {
-            if let Some(row) = child_ids.iter().copied().find(|&entity| {
-                rows.get(entity)
-                    .map(|(_, id, _)| id.0 == lane.id)
-                    .unwrap_or(false)
-            }) {
-                paint_status_row(&rows, &mut texts, &mut status_color, row, lane);
-                ordered.push(row);
-            } else {
-                ordered.push(spawn_status_row(&mut commands, &font.0, lane));
-            }
-        }
-        if child_ids != ordered {
-            commands.entity(list_entity).replace_children(&ordered);
-        }
-        for entity in child_ids {
-            if !ordered.contains(&entity) {
-                commands.entity(entity).try_despawn();
-            }
-        }
-    }
 
     if screen.is_complete() {
         dismiss_loading_overlay(&mut commands, roots.iter(), std::iter::empty(), true);
         diag::info!(Ui, "loading: screen dismissed");
+        return;
     }
-}
 
-fn paint_status_row(
-    rows: &Query<
-        (Entity, &LoadingStatusLane, &Children),
-        (With<LoadingStatusRow>, Without<LoadingStatusList>),
-    >,
-    texts: &mut ParamSet<(
-        Query<&mut Text, (With<LoadingStatusCaption>, Without<LoadingActivity>)>,
-        Query<&mut Text, (With<LoadingStatusTime>, Without<LoadingActivity>)>,
-    )>,
-    status_color: &mut Query<
-        &mut TextColor,
-        (
-            Without<LoadingLetter>,
-            Or<(With<LoadingStatusCaption>, With<LoadingStatusTime>)>,
-        ),
-    >,
-    row: Entity,
-    lane: &LoadLaneView,
-) {
-    let color = if lane.in_progress() {
-        STATUS_RUNNING
-    } else {
-        STATUS_DONE
-    };
-    let Ok((_, _, kids)) = rows.get(row) else {
+    let now = std::time::Instant::now();
+    if next_table.is_some_and(|due| now < due) {
+        return;
+    }
+    *next_table = Some(now + STATUS_TABLE_PERIOD);
+
+    // The process is the load; the screen is one way of watching it. When both
+    // are here the process wins, because it is the one a new request replaces.
+    let progress = load
+        .as_deref()
+        .map(|process| &process.progress)
+        .unwrap_or(&screen.progress);
+    let snapshot = progress.snapshot();
+    let table = project(&snapshot);
+
+    for (mut text, mut color) in &mut activity {
+        let (line, paint) = match screen.failure() {
+            Some(reason) => (
+                format!("Map load failed\n{reason}"),
+                Color::srgb(1.0, 0.35, 0.25),
+            ),
+            None => (activity_line(&snapshot), STATUS_RUNNING),
+        };
+        set_text(&mut text, &line);
+        color.0 = paint;
+    }
+
+    let (Ok((list_entity, children)), Some(font)) = (list.single(), font.as_ref()) else {
         return;
     };
-    let kids: Vec<Entity> = kids.iter().collect();
-    if let Some(&cap) = kids.first() {
-        if let Ok(mut text) = texts.p0().get_mut(cap) {
-            *text = Text::new(lane.caption());
+    let mut relayout = false;
+    if children.is_none_or(|children| children.is_empty())
+        || shown.request != Some(snapshot.request_id)
+    {
+        for entity in shown.drain() {
+            commands.entity(entity).try_despawn();
         }
-        if let Ok(mut paint) = status_color.get_mut(cap) {
-            paint.0 = color;
+        shown.request = Some(snapshot.request_id);
+        shown.head = Some(spawn_head_row(&mut commands, &font.0));
+        relayout = true;
+    }
+
+    for (stage, _) in &mut shown.active {
+        if stage.is_some_and(|id| !table.running.iter().any(|row| row.id == id)) {
+            *stage = None;
         }
     }
-    if let Some(&tm) = kids.get(1) {
-        if let Ok(mut text) = texts.p1().get_mut(tm) {
-            *text = Text::new(lane.elapsed_ms_label().unwrap_or_default());
+    for row in &table.running {
+        if shown.active.iter().any(|(stage, _)| *stage == Some(row.id)) {
+            continue;
         }
-        if let Ok(mut paint) = status_color.get_mut(tm) {
-            paint.0 = color;
+        // A stage whose group finished and then opened another scope goes on
+        // being watched where it already is, never drawn twice.
+        if shown.ended.iter().any(|(id, _)| *id == row.id) {
+            continue;
         }
+        if let Some((stage, _)) = shown.active.iter_mut().find(|(stage, _)| stage.is_none()) {
+            *stage = Some(row.id);
+        } else if shown.active.len() < STATUS_ACTIVE_ROWS {
+            let line = StatusLine::Active(shown.active.len());
+            let entity = spawn_stage_row(&mut commands, &font.0, line, row);
+            shown.active.push((Some(row.id), entity));
+            relayout = true;
+        }
+    }
+    for row in &table.ended {
+        if shown.ended.iter().any(|(id, _)| *id == row.id) {
+            continue;
+        }
+        let entity = spawn_stage_row(&mut commands, &font.0, StatusLine::Ended(row.id), row);
+        shown.ended.push((row.id, entity));
+        relayout = true;
+    }
+    if relayout && let Some(head) = shown.head {
+        let mut children = Vec::with_capacity(1 + shown.active.len() + shown.ended.len());
+        children.push(head);
+        children.extend(shown.active.iter().map(|(_, entity)| *entity));
+        children.extend(shown.ended.iter().map(|(_, entity)| *entity));
+        commands.entity(list_entity).replace_children(&children);
+    }
+
+    // Stages overlap, so this is shorter than their column added up.
+    let elapsed = format_elapsed(total_elapsed(&snapshot));
+
+    for (cell, mut text, mut color) in &mut cells {
+        let row = match cell.line {
+            StatusLine::Head => {
+                set_text(
+                    &mut text,
+                    match cell.column {
+                        StatusColumn::Name => "Progress",
+                        StatusColumn::Value => "",
+                        StatusColumn::Time => &elapsed,
+                    },
+                );
+                continue;
+            }
+            StatusLine::Active(slot) => shown
+                .active
+                .get(slot)
+                .and_then(|(stage, _)| *stage)
+                .and_then(|id| table.running.iter().find(|row| row.id == id)),
+            StatusLine::Ended(id) => table
+                .ended
+                .iter()
+                .chain(table.running.iter())
+                .find(|row| row.id == id),
+        };
+        let Some(row) = row else {
+            set_text(&mut text, "");
+            continue;
+        };
+        set_text(
+            &mut text,
+            match cell.column {
+                StatusColumn::Name => &row.name,
+                StatusColumn::Value => &row.value,
+                StatusColumn::Time => &row.time,
+            },
+        );
+        color.0 = row.state.color();
     }
 }
 
-fn spawn_status_row(commands: &mut Commands, font: &Handle<Font>, lane: &LoadLaneView) -> Entity {
-    let color = if lane.in_progress() {
-        STATUS_RUNNING
-    } else {
-        STATUS_DONE
-    };
-    let time = lane.elapsed_ms_label().unwrap_or_default();
-    let row = commands
+/// Rewriting a `Text` that already says this would re-lay out the row.
+fn set_text(text: &mut Text, value: &str) {
+    if text.0 != value {
+        text.0.clear();
+        text.0.push_str(value);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatusColumn {
+    Name,
+    Value,
+    Time,
+}
+
+/// What the list holds right now: its first line, the fixed set of active
+/// slots, and every stage that has finished, in the order they finished.
+///
+/// Both blocks only grow. An active slot outlives the stage in it — it is a
+/// place on the screen, not a stage — and a finished row, once drawn, is never
+/// moved or respawned.
+#[derive(Default)]
+pub(crate) struct StatusTable {
+    /// A second request is a different load and gets a table of its own.
+    request: Option<u64>,
+    head: Option<Entity>,
+    active: Vec<(Option<assets::StageId>, Entity)>,
+    ended: Vec<(assets::StageId, Entity)>,
+}
+
+impl StatusTable {
+    fn drain(&mut self) -> Vec<Entity> {
+        self.head
+            .take()
+            .into_iter()
+            .chain(self.active.drain(..).map(|(_, entity)| entity))
+            .chain(self.ended.drain(..).map(|(_, entity)| entity))
+            .collect()
+    }
+}
+
+/// Which line a cell belongs to. An active slot is addressed by its place in
+/// the block, because the stage standing in it changes; a finished row is
+/// addressed by its stage, because it never moves again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatusLine {
+    Head,
+    Active(usize),
+    Ended(assets::StageId),
+}
+
+#[derive(Component)]
+pub(crate) struct LoadingStatusCell {
+    line: StatusLine,
+    column: StatusColumn,
+}
+
+/// The one line that is there from the first frame to the last, which is what
+/// lets the rows under it be appended to.
+fn spawn_head_row(commands: &mut Commands, font: &Handle<Font>) -> Entity {
+    let entity = commands
         .spawn((
             LoadingStatusRow,
-            LoadingStatusLane(lane.id),
             Node {
-                width: Val::Percent(100.0),
-                flex_direction: FlexDirection::Row,
-                justify_content: JustifyContent::SpaceBetween,
-                align_items: AlignItems::Baseline,
-                column_gap: Val::Px(12.0),
-                ..default()
+                margin: UiRect::bottom(Val::Px(4.0)),
+                ..status_row_node()
             },
         ))
         .id();
-    commands.entity(row).with_children(|row| {
-        row.spawn((
-            LoadingStatusCaption,
-            Text::new(lane.caption()),
+    commands.entity(entity).with_children(|parent| {
+        parent.spawn((
+            LoadingStatusCell {
+                line: StatusLine::Head,
+                column: StatusColumn::Name,
+            },
+            Text::new("Progress"),
             game_text_font(font, STATUS_FONT_PX),
-            TextColor(color),
-            TextLayout::justify(Justify::Left),
+            TextColor(STATUS_TOTAL),
+            status_text_layout(Justify::Left),
             loading_text_shadow(),
             Node {
+                flex_grow: 1.0,
                 flex_shrink: 1.0,
                 ..default()
             },
         ));
-        row.spawn((
-            LoadingStatusTime,
-            Text::new(time),
+        for (column, width) in [
+            (StatusColumn::Value, STATUS_VALUE_COL_PX),
+            (StatusColumn::Time, STATUS_TIME_COL_PX),
+        ] {
+            parent.spawn((
+                LoadingStatusCell {
+                    line: StatusLine::Head,
+                    column,
+                },
+                Text::new(""),
+                game_text_font(font, STATUS_FONT_PX),
+                TextColor(STATUS_TOTAL),
+                status_text_layout(Justify::Right),
+                loading_text_shadow(),
+                status_cell_node(width),
+            ));
+        }
+    });
+    entity
+}
+
+fn status_row_node() -> Node {
+    Node {
+        width: Val::Percent(100.0),
+        height: Val::Px(STATUS_ROW_PX),
+        flex_direction: FlexDirection::Row,
+        justify_content: JustifyContent::SpaceBetween,
+        align_items: AlignItems::Center,
+        column_gap: Val::Px(12.0),
+        ..default()
+    }
+}
+
+fn spawn_stage_row(
+    commands: &mut Commands,
+    font: &Handle<Font>,
+    line: StatusLine,
+    row: &LoadRow,
+) -> Entity {
+    let color = row.state.color();
+    let entity = commands.spawn((LoadingStatusRow, status_row_node())).id();
+    commands.entity(entity).with_children(|parent| {
+        parent.spawn((
+            LoadingStatusCaption,
+            LoadingStatusCell {
+                line,
+                column: StatusColumn::Name,
+            },
+            Text::new(row.name.clone()),
             game_text_font(font, STATUS_FONT_PX),
             TextColor(color),
-            TextLayout::justify(Justify::Right),
+            status_text_layout(Justify::Left),
             loading_text_shadow(),
             Node {
-                min_width: Val::Px(STATUS_TIME_COL_PX),
-                flex_shrink: 0.0,
-                align_items: AlignItems::FlexEnd,
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
                 ..default()
             },
         ));
+        parent.spawn((
+            LoadingStatusCount,
+            LoadingStatusCell {
+                line,
+                column: StatusColumn::Value,
+            },
+            Text::new(row.value.clone()),
+            game_text_font(font, STATUS_FONT_PX),
+            TextColor(color),
+            status_text_layout(Justify::Right),
+            loading_text_shadow(),
+            status_cell_node(STATUS_VALUE_COL_PX),
+        ));
+        parent.spawn((
+            LoadingStatusTime,
+            LoadingStatusCell {
+                line,
+                column: StatusColumn::Time,
+            },
+            Text::new(row.time.clone()),
+            game_text_font(font, STATUS_FONT_PX),
+            TextColor(color),
+            status_text_layout(Justify::Right),
+            loading_text_shadow(),
+            status_cell_node(STATUS_TIME_COL_PX),
+        ));
     });
-    row
+    entity
+}
+
+/// A wrapped cell is a taller box in a row of fixed height, and a taller box
+/// centres its first line higher than its neighbours'.
+fn status_text_layout(justify: Justify) -> TextLayout {
+    TextLayout::new(justify, bevy::text::LineBreak::NoWrap)
+}
+
+fn status_cell_node(width: f32) -> Node {
+    Node {
+        width: Val::Px(width),
+        min_width: Val::Px(width),
+        flex_shrink: 0.0,
+        justify_content: JustifyContent::FlexEnd,
+        ..default()
+    }
 }
 
 fn ping_pong(step: usize, count: usize) -> usize {

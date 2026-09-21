@@ -1019,6 +1019,10 @@ pub fn build_fx_verts(
     let catalog_index_n = Cell::new(0u32);
     let catalog_name_n = Cell::new(0u32);
     let vis_blocker_adds = RefCell::new(Vec::new());
+    // Most adjacent particles use the same definition/material. Share their
+    // diagnostic names instead of allocating two strings per generated sprite.
+    // The cache lives only as long as this generation call.
+    let mut sprite_names: Option<(Arc<str>, Arc<str>)> = None;
     let mut on_elem = |ctx: FxDrawElemContext<'_>| -> Option<FxSpriteInstance> {
         let Some(effect) = catalog_lookup_draw(
             catalog,
@@ -1038,7 +1042,6 @@ pub fn build_fx_verts(
             gaps.no_material_visual = gaps.no_material_visual.saturating_add(1);
             return None;
         };
-        let material_name = material_name.to_owned();
         let rand_size = fx_random_table_f32(ctx.elem_random_seed, FX_RAND_CH_SIZE0);
         let rand_color = fx_random_table_f32(ctx.elem_random_seed, FX_RAND_CH_COLOR);
         let Some(size0) = fx_evaluate_size0(
@@ -1152,15 +1155,21 @@ pub fn build_fx_verts(
             elem.view.fade_in_range,
             elem.view.fade_out_range,
         ));
+        if !sprite_names.as_ref().is_some_and(|(def, material)| {
+            def.as_ref() == ctx.def_name && material.as_ref() == material_name
+        }) {
+            sprite_names = Some((Arc::from(ctx.def_name), Arc::from(material_name)));
+        }
+        let (def_name, material_name) = sprite_names.as_ref().unwrap();
         Some(FxSpriteInstance {
             origin: ctx.origin,
             size0,
             size1,
             color_rgba: color,
             elem_type: ctx.elem_type,
-            def_name: ctx.def_name.to_owned(),
+            def_name: Arc::clone(def_name),
             def_index: ctx.def_index,
-            material_name,
+            material_name: Arc::clone(material_name),
             material_index: Some(material_index),
             axis,
             rotation_rad,

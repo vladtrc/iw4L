@@ -6108,6 +6108,7 @@ dependencies = [
  "diag",
  "frame",
  "net",
+ "session",
  "sim",
 ]
 

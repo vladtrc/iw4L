@@ -1,4 +1,4 @@
-use playerstate_iw4::{PlayerState, UserCmd};
+use playerstate_iw4::{ENTITYNUM_NONE, PM_TYPE_NORMAL_LINKED, PlayerState, UserCmd};
 
 use crate::{
     AdsFracContext, AdsIntentContext, AirMoveContext, CheckLadderContext, CollisionBackend,
@@ -114,6 +114,17 @@ pub fn pm_move<C: CollisionBackend, L: MantleXAnimLength, R: MantleRootDelta>(
     bounds.maxs[2] = pm_sync_stance_tail(ps);
 
     pm_update_ads_frac(ps, pml.msec, context.ads_frac);
+
+    if ps.pm_type == PM_TYPE_NORMAL_LINKED {
+        // The trigger link owns the origin: no walk, no air move, no jump, and
+        // velocity zeroed every pmove. Viewangles and stance stay live above,
+        // and the weapon ticks separately.
+        ps.pm_flags &= !PMF_LADDER;
+        ps.ground_entity_num = ENTITYNUM_NONE;
+        ps.velocity = [0.0; 3];
+        pm_drop_timers(ps, &pml);
+        return PmoveResult { pml, bounds };
+    }
 
     complete_ground_trace(ps, &mut pml, bounds, collision);
 

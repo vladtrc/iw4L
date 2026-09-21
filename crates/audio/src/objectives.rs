@@ -70,9 +70,15 @@ impl ObjectiveAudio {
                 if flag.capturing == Team::Free || flag.capturing != before.capturing {
                     self.notified.remove(&flag.id);
                 }
+
+                if flag.capturing != Team::Free
+                    && before.capturing == Team::Free
+                    && flag.owner == Team::Free
+                {
+                    self.status(now, flag.capturing, SECURING[index], false);
+                }
                 if flag.progress > 0.05
                     && flag.progress != before.progress
-                    && !flag.contested
                     && self.notified.insert(flag.id)
                 {
                     self.status(now, flag.capturing, SECURING[index], false);

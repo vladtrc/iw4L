@@ -107,6 +107,11 @@ pub trait AssetLinkSink {
 
     fn remember_xmodel_name(&mut self, _slot: Ptr, _insert_slot: Option<Ptr>, _name: Ptr) {}
 
+    fn capture_script_file(&mut self, name: &str, stack: &[u8], bytecode: &[u8]) -> Result<()> {
+        let _ = (name, stack, bytecode);
+        Ok(())
+    }
+
     fn capture_raw_file(&mut self, name: &str, data: &[u8], zlib_compressed: bool) -> Result<()> {
         let _ = (name, data, zlib_compressed);
         Ok(())

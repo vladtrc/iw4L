@@ -533,6 +533,7 @@ fn drop_without_bank<'a>(aliases: impl Iterator<Item = &'a str>, decisions: &mut
             variant: None,
             outcome: StartOutcome::Failed(StartFailure::BankMissing),
             secondary: None,
+            detail: None,
         });
     }
 }
@@ -672,6 +673,7 @@ fn drain_pending_oneshots(
                 variant: Some(entry.variant),
                 outcome: StartOutcome::Failed(StartFailure::Expired),
                 secondary: None,
+                detail: None,
             });
             continue;
         }
@@ -684,6 +686,7 @@ fn drain_pending_oneshots(
                     variant: Some(entry.variant),
                     outcome: StartOutcome::Failed(StartFailure::DecodeFailed),
                     secondary: None,
+                    detail: None,
                 });
             }
             Some(Ok(pcm)) => {
@@ -728,6 +731,7 @@ fn drain_pending_oneshots(
                     variant: started.variant,
                     outcome: started.outcome,
                     secondary: started.secondary,
+                    detail: started.detail,
                 });
             }
         }
@@ -788,6 +792,7 @@ pub(crate) fn play_alias_oneshot(
         variant: started.variant,
         outcome: started.outcome,
         secondary: started.secondary,
+        detail: started.detail,
     });
     outcome
 }
@@ -796,6 +801,7 @@ struct OneshotStart {
     outcome: StartOutcome,
     variant: Option<usize>,
     secondary: Option<(String, StartOutcome)>,
+    detail: Option<String>,
 }
 
 impl OneshotStart {
@@ -804,6 +810,7 @@ impl OneshotStart {
             outcome: StartOutcome::Failed(failure),
             variant: None,
             secondary: None,
+            detail: None,
         }
     }
 
@@ -811,6 +818,10 @@ impl OneshotStart {
         self.variant = Some(variant);
         self
     }
+}
+
+fn falloff_detail(dist: f32, dist_min: f32, dist_max: f32, atten: f32) -> String {
+    format!("dist={dist:.0} dist_min={dist_min:.0} dist_max={dist_max:.0} atten={atten:.3}")
 }
 
 fn prepare_voice(
@@ -952,6 +963,7 @@ fn play_alias_oneshot_at(
                 outcome: StartOutcome::Pending,
                 variant: Some(variant_index),
                 secondary: None,
+                detail: None,
             };
         }
         ClipTake::Failed(failure) => {
@@ -1070,8 +1082,17 @@ fn submit_prepared_oneshot(
     let sound = bank.sound_in(namespace, alias);
     let row = sound.and_then(|s| s.aliases.get(variant_index));
     let channel = sound.and_then(|s| s.ent_channel(variant_index));
+    let mut world_detail: Option<String> = None;
+    // Whether a sound is positional is the ent channel's call, not the caller's:
+    // `channels.def` marks channels like `auto2d`, `music` and `announcer` as 2D,
+    // and those play unpanned and unattenuated even when handed an entity to
+    // play on. `ui_mp_suitcasebomb_timer` rides `auto2d`, which is why the
+    // planted bomb ticks across the whole map.
+    let positional = channel
+        .and_then(|ch| bank.ent_channel(ch))
+        .is_none_or(|info| info.is_3d);
 
-    match origin_inches {
+    match origin_inches.filter(|_| positional) {
         Some(pos) => {
             let Some((ear, right)) = listener else {
                 diag::warn!(
@@ -1110,6 +1131,7 @@ fn submit_prepared_oneshot(
                     outcome: StartOutcome::Suppressed(SuppressReason::Inaudible),
                     variant: Some(variant_index),
                     secondary: None,
+                    detail: Some(falloff_detail(dist, row.dist_min, row.dist_max, atten)),
                 };
             }
             if let Err(reason) = prepare_voice(commands, occupancy, bank, channel, snd_ent) {
@@ -1117,8 +1139,10 @@ fn submit_prepared_oneshot(
                     outcome: StartOutcome::Suppressed(reason),
                     variant: Some(variant_index),
                     secondary: None,
+                    detail: Some(falloff_detail(dist, row.dist_min, row.dist_max, atten)),
                 };
             }
+            world_detail = Some(falloff_detail(dist, row.dist_min, row.dist_max, atten));
             pick.last_variant
                 .insert((namespace, alias.to_owned()), variant_index);
             let _ = shared.dry_handle(pcm_assets, clip, pcm.clone());
@@ -1162,6 +1186,7 @@ fn submit_prepared_oneshot(
                     outcome: StartOutcome::Suppressed(reason),
                     variant: Some(variant_index),
                     secondary: None,
+                    detail: None,
                 };
             }
             pick.last_variant
@@ -1213,6 +1238,7 @@ fn submit_prepared_oneshot(
         outcome: StartOutcome::Submitted,
         variant: Some(variant_index),
         secondary,
+        detail: world_detail,
     }
 }
 

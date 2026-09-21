@@ -4,7 +4,6 @@ use std::sync::Mutex;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 
-use assets::LoadingScreen;
 use audio::AudioReady;
 
 use crate::adapters::anim::dyn_ent::DynEntCellBits;
@@ -172,7 +171,7 @@ impl WorldSpawnJob {
 
 pub(crate) fn spawn_world(
     mut commands: Commands,
-    mut loading: Option<ResMut<LoadingScreen>>,
+    load: Option<Res<assets::MapLoadProcess>>,
     mut scene: ResMut<WorldScene>,
     mut images: ResMut<Assets<Image>>,
     shaders: Res<Assets<bevy::shader::Shader>>,
@@ -186,11 +185,19 @@ pub(crate) fn spawn_world(
     present_ack: Res<WorldPresentAck>,
     audio_ready: Option<Res<AudioReady>>,
 ) {
+    // Pacing belongs to the load that is still running, not to the screen that
+    // happens to be drawing it: a run without an overlay must spawn the world
+    // the same way this one does.
+    let progress = load
+        .as_deref()
+        .filter(|process| !process.is_complete())
+        .map(|process| process.progress.clone());
+    let paced = progress.is_some();
     if job.phase == WorldSpawnPhase::Gpu {
-        let Some(_loading) = loading.as_deref_mut() else {
+        if !paced {
             finish_world_spawn(&mut scene, &mut job, &mut commands);
             return;
-        };
+        }
         let gap_ms = job.slice_gap_ms(std::time::Instant::now());
         let spawn = job.spawn;
         let gpu_ready = gpu.as_deref();
@@ -213,12 +220,7 @@ pub(crate) fn spawn_world(
         return;
     }
     if scene.spawned {
-        record_first_world_frame(
-            loading.as_deref_mut(),
-            &job,
-            &present_ack,
-            report.as_deref(),
-        );
+        record_first_world_frame(progress.as_ref(), &job, &present_ack, report.as_deref());
         return;
     }
     if scene.batches.is_empty() {
@@ -227,7 +229,7 @@ pub(crate) fn spawn_world(
                 .iter()
                 .any(|line| line.contains("no GfxWorld reached"))
         });
-        if loading.is_some() && job.phase != WorldSpawnPhase::Done && gfx_miss {
+        if paced && job.phase != WorldSpawnPhase::Done && gfx_miss {
             diag::warn!(
                 World,
                 "world spawn: empty batches — spawn_world returns without Camera3d (no GfxWorld or world_draw produced none)"
@@ -240,7 +242,6 @@ pub(crate) fn spawn_world(
         return;
     }
 
-    let paced = loading.is_some();
     if paced && job.phase == WorldSpawnPhase::Unarmed {
         job.phase = WorldSpawnPhase::Yield;
         diag::info!(
@@ -266,8 +267,7 @@ pub(crate) fn spawn_world(
     }
 
     if job.phase == WorldSpawnPhase::Programs && !job.compile.armed {
-        job.images
-            .arm(&mut scene, loading.as_ref().map(|l| &l.progress));
+        job.images.arm(&mut scene, progress.as_ref());
     }
     let images_finished = if job.images.unfinished() {
         let max_this_frame = if paced {
@@ -293,9 +293,6 @@ pub(crate) fn spawn_world(
             job.images.largest_step_ns as f64 / 1.0e6,
             job.images.largest_step_bytes,
         );
-        if finished {
-            let _ = job.images.take_stage();
-        }
         finished
     } else {
         true
@@ -303,10 +300,8 @@ pub(crate) fn spawn_world(
 
     if job.phase == WorldSpawnPhase::Programs {
         if !job.compile.armed {
-            job.compile.arm(
-                &scene.runtime_material_catalog,
-                loading.as_ref().map(|screen| &screen.progress),
-            );
+            job.compile
+                .arm(&scene.runtime_material_catalog, progress.as_ref());
             job.admit = crate::assemble::drawsurf::MaterialProgramAdmit::default();
         }
         let compile_finished = job.compile.until(&scene.runtime_material_catalog, deadline);
@@ -326,7 +321,15 @@ pub(crate) fn spawn_world(
         if !compile_finished {
             return;
         }
-        let _ = job.compile.take_stage();
+        // Both halves publish themselves as they end; anything still open at
+        // the phase boundary ends here rather than being dropped unsaid.
+        let (compiled, merged) = job.compile.take_stages();
+        if let Some(stage) = compiled {
+            stage.done();
+        }
+        if let Some(stage) = merged {
+            stage.done();
+        }
         job.phase = WorldSpawnPhase::Admit;
         if deadline.is_some_and(|end| std::time::Instant::now() >= end) {
             return;
@@ -336,10 +339,7 @@ pub(crate) fn spawn_world(
     if job.phase == WorldSpawnPhase::Admit {
         let job = &mut *job;
         if !job.admit.armed() {
-            job.admit.arm(
-                &mut job.compile,
-                loading.as_ref().map(|screen| &screen.progress),
-            );
+            job.admit.arm(&mut job.compile, progress.as_ref());
             scene.exact_world_refuse = top_census_cause(&job.compile.world_causes);
             scene.exact_world_cause2 = ranked_census_cause(&job.compile.world_causes, 1);
             scene.exact_packed_refuse = top_census_cause(&job.compile.packed_causes);
@@ -629,7 +629,9 @@ pub(crate) fn spawn_world(
             );
         }
         commands.insert_resource(crate::assemble::drawsurf::DrawMethodDfog(false));
-        let _ = job.admit.take_stage();
+        if let Some(stage) = job.admit.take_stage() {
+            stage.done();
+        }
         job.phase = WorldSpawnPhase::Images;
         job.last_work_ms = frame_started.elapsed().as_secs_f32() * 1000.0;
         diag::info!(
@@ -683,7 +685,7 @@ pub(crate) fn spawn_world(
 
 pub(crate) fn spawn_world_finish(
     mut commands: Commands,
-    loading: Option<ResMut<LoadingScreen>>,
+    load: Option<Res<assets::MapLoadProcess>>,
     mut scene: ResMut<WorldScene>,
     mut images: ResMut<Assets<Image>>,
     mut job: ResMut<WorldSpawnJob>,
@@ -692,7 +694,11 @@ pub(crate) fn spawn_world_finish(
     if job.phase != WorldSpawnPhase::WorldTess {
         return;
     }
-    let paced = loading.is_some();
+    let progress = load
+        .as_deref()
+        .filter(|process| !process.is_complete())
+        .map(|process| process.progress.clone());
+    let paced = progress.is_some();
     let frame_started = std::time::Instant::now();
     super::world_occupancy::place(
         &mut commands,
@@ -706,7 +712,7 @@ pub(crate) fn spawn_world_finish(
     job.last_work_ms = frame_started.elapsed().as_secs_f32() * 1000.0;
     if paced {
         job.phase = WorldSpawnPhase::Gpu;
-        job.gpu_wait.arm(loading.as_deref());
+        job.gpu_wait.arm(progress.as_ref());
         diag::info!(
             World,
             "world spawn: Camera3d up; overlay holds for GPU images/pipelines (R_EndRegistration/RB_TouchAllImages) last_slice={:.1}ms images={}/{}",
@@ -727,37 +733,33 @@ pub(crate) fn spawn_world_finish(
 }
 
 fn record_first_world_frame(
-    loading: Option<&mut LoadingScreen>,
+    progress: Option<&assets::LoadProgress>,
     job: &WorldSpawnJob,
     present_ack: &WorldPresentAck,
     report: Option<&LaunchReport>,
 ) {
-    let Some(loading) = loading else {
+    let Some(progress) = progress else {
         return;
     };
     let Some(presented_at) = present_ack.presented_at(job.spawn) else {
         return;
     };
-    if !loading.progress.record_first_frame(presented_at) {
+    if !progress.record_first_frame(presented_at) {
         return;
     }
     let zone = report
         .map(|report| report.zone.as_str())
         .unwrap_or("<unknown>");
-    let image = loading
-        .progress
+    let image = progress
         .zone_image_bytes()
         .map_or_else(|| "NULL".to_owned(), |bytes| bytes.to_string());
-    let first_frame = loading
-        .progress
+    let first_frame = progress
         .first_frame_ms()
         .map_or_else(|| "NULL".to_owned(), |ms| format!("{ms:.1}"));
-    let rss_peak = loading
-        .progress
+    let rss_peak = progress
         .load_rss_peak_bytes()
         .map_or_else(|| "NULL".to_owned(), |bytes| bytes.to_string());
-    let rss_at_open = loading
-        .progress
+    let rss_at_open = progress
         .rss_at_open_bytes()
         .map_or_else(|| "NULL".to_owned(), |bytes| bytes.to_string());
     diag::info!(

@@ -106,9 +106,9 @@ pub struct FxSpriteInstance {
     pub size1: f32,
     pub color_rgba: [u8; 4],
     pub elem_type: u8,
-    pub def_name: String,
+    pub def_name: std::sync::Arc<str>,
     pub def_index: u8,
-    pub material_name: String,
+    pub material_name: std::sync::Arc<str>,
 
     pub material_index: Option<usize>,
 

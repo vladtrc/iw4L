@@ -3,6 +3,7 @@ pub mod dobj_pose;
 pub mod fpv;
 pub mod fpv_host;
 pub mod fpv_pose;
+pub mod fpv_rig;
 pub mod pose_types;
 pub mod remote_body;
 pub mod scene_submission;

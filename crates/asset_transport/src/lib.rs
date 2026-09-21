@@ -23,7 +23,8 @@ pub use iwd::{
 pub use load_jobs::{CacheResult, Job, JobKind};
 pub use namespace_trees::{NamespaceSoundIwd, NamespaceTree, NamespaceTrees};
 pub use progress::{
-    LoadLaneTiming, LoadLaneView, LoadOverflow, LoadProgress, LoadStage, peak_resident_bytes,
+    LoadLaneTiming, LoadProgress, LoadSnapshot, StageEnd, StageHandle, StageId, StageKey,
+    StageOutcome, StageScope, StageSnapshot, WorkCount, peak_resident_bytes,
     process_resident_bytes,
 };
 pub use zone::{

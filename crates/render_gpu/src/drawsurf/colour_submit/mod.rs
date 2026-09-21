@@ -6141,7 +6141,11 @@ fn coalesce_gpu_dirty(ranges: &mut Vec<(usize, usize)>) {
     let mut merged = 0;
     for i in 1..ranges.len() {
         let (start, end) = ranges[i];
-        if start <= ranges[merged].1 {
+        // Queue writes allocate staging storage and record a copy per range.
+        // Refill small clean gaps from the authoritative backing as well, trading
+        // at most 16 KiB per eliminated write for fewer staging allocations.
+        const MAX_UPLOAD_GAP: usize = 16 * 1024;
+        if start.saturating_sub(ranges[merged].1) <= MAX_UPLOAD_GAP {
             ranges[merged].1 = ranges[merged].1.max(end);
         } else {
             merged += 1;
@@ -6497,6 +6501,38 @@ fn upload_constant_arena(
     result
 }
 
+/// What `upload_packed_arena` has to move this frame. A changed logical
+/// length is not a relocated layout: growth inside the same allocation keeps
+/// its prefix and uploads only the tail, while a recreated buffer or an
+/// explicit owner/generation/reservation reset restores every byte. Pure over
+/// lengths so the decision is checkable without a device.
+#[derive(Debug, PartialEq, Eq)]
+enum ArenaUploadPlan {
+    /// Same length, no dirty ranges: nothing to write.
+    Idle,
+    /// The GPU buffer or the layout moved: restore every byte.
+    Full,
+    /// Same allocation, same layout: write dirty ranges, plus the grown tail
+    /// if the logical length moved.
+    Ranges,
+}
+
+fn plan_arena_upload(
+    old_len: usize,
+    total_len: usize,
+    resize: bool,
+    full_upload: bool,
+    dirty_empty: bool,
+) -> ArenaUploadPlan {
+    if resize || full_upload {
+        return ArenaUploadPlan::Full;
+    }
+    if total_len == 0 || (old_len == total_len && dirty_empty) {
+        return ArenaUploadPlan::Idle;
+    }
+    ArenaUploadPlan::Ranges
+}
+
 fn upload_packed_arena<'a>(
     identity: &[u8],
     placed: &[u8],
@@ -6528,18 +6564,58 @@ fn upload_packed_arena<'a>(
         }));
         arena.bind_group = None;
         arena.uploaded.clear();
+        perf::Counter::CounterArenaReallocN.emit(1.0);
     }
 
-    let layout_changed = resize || full_upload || arena.uploaded.len() != total_len;
-    if total_len > 0 && (layout_changed || !dirty.is_empty()) {
-        if layout_changed {
-            refill_arena_uploaded(&mut arena.uploaded, identity, placed, reserved);
-            write_buffer_padded(
-                queue,
-                arena.buffer.as_ref().expect("constant arena exists"),
-                &arena.uploaded,
-            );
-        } else {
+    // Taken where the upload is chosen, before any branch below: sizes the pack
+    // selected against what the queue was handed.
+    let old_len = arena.uploaded.len();
+    let plan = plan_arena_upload(old_len, total_len, resize, full_upload, dirty.is_empty());
+    perf::Counter::CounterArenaUsedBytes.emit(total_len as f64);
+    perf::Counter::CounterArenaCapacityBytes.emit(arena.capacity as f64);
+    let logical_dirty_bytes: usize = dirty
+        .iter()
+        .copied()
+        .map(|range| {
+            let (start, end) = gpu_dirty_range(range, reserved);
+            end.saturating_sub(start)
+        })
+        .sum();
+    perf::Counter::CounterArenaDirtyBytes.emit(logical_dirty_bytes as f64);
+    let mut uploaded_bytes: usize = 0;
+    let mut upload_calls: u32 = 0;
+
+    match plan {
+        ArenaUploadPlan::Idle => {}
+        ArenaUploadPlan::Full => {
+            if total_len > 0 {
+                refill_arena_uploaded(&mut arena.uploaded, identity, placed, reserved);
+                write_buffer_padded(
+                    queue,
+                    arena.buffer.as_ref().expect("constant arena exists"),
+                    &arena.uploaded,
+                );
+                uploaded_bytes = arena.uploaded.len();
+                upload_calls = 1;
+                if resize {
+                    perf::Counter::CounterArenaFullResize.emit(1.0);
+                } else {
+                    perf::Counter::CounterArenaFullFlag.emit(1.0);
+                }
+            }
+        }
+        ArenaUploadPlan::Ranges => {
+            // Same allocation, same layout: the old prefix is still where it
+            // was, so only the backing length moves. Growth extends it and the
+            // new tail joins the upload ranges below even with an empty dirty
+            // list; shrinkage truncates it, and the dropped tail is dead bytes
+            // no draw addresses.
+            let grew = total_len > old_len;
+            if grew {
+                arena.uploaded.resize(total_len, 0);
+            } else {
+                arena.uploaded.truncate(total_len);
+            }
             let mut gpu_ranges = std::mem::take(&mut arena.dirty_scratch);
             gpu_ranges.clear();
             gpu_ranges.extend(
@@ -6548,6 +6624,9 @@ fn upload_packed_arena<'a>(
                     .copied()
                     .map(|range| gpu_dirty_range(range, reserved)),
             );
+            if grew {
+                gpu_ranges.push((old_len, total_len));
+            }
             coalesce_gpu_dirty(&mut gpu_ranges);
             for &(start, end) in gpu_ranges.iter() {
                 let Some((start, end)) = aligned_backing_span(start, end, arena.uploaded.len())
@@ -6555,6 +6634,8 @@ fn upload_packed_arena<'a>(
                     continue;
                 };
                 refill_uploaded_span(&mut arena.uploaded, identity, placed, reserved, start, end);
+                upload_calls = upload_calls.saturating_add(1);
+                uploaded_bytes = uploaded_bytes.saturating_add(end.saturating_sub(start));
                 write_buffer_range(
                     queue,
                     arena.buffer.as_ref().expect("constant arena exists"),
@@ -6566,6 +6647,8 @@ fn upload_packed_arena<'a>(
             arena.dirty_scratch = gpu_ranges;
         }
     }
+    perf::Counter::CounterArenaUploadedBytes.emit(uploaded_bytes as f64);
+    perf::Counter::CounterArenaUploadCalls.emit(f64::from(upload_calls));
     if arena.bind_group.is_none() {
         let mut layout_source: Option<BindGroupLayoutDescriptor> = None;
         for draw in draws {

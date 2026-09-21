@@ -258,11 +258,7 @@ fn stages(lanes: &[LoadLaneTiming], out: &mut Vec<String>) {
     );
     for (index, lane) in ordered.iter().take(TOP_STAGES) {
         table.row([
-            format!(
-                "{}{}",
-                lane.label,
-                if lane.running { " (running)" } else { "" }
-            ),
+            format!("{}{}", lane.label, lane.outcome_suffix()),
             secs(lane.at),
             secs(lane.elapsed),
             secs(sole_open[*index]),

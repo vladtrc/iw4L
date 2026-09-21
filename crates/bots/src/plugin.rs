@@ -27,7 +27,7 @@ const METER_PERIOD_TICKS: u32 = 200;
 #[derive(Resource, Default)]
 struct BotNav {
     graph: NavGraph,
-    pending: Option<(u64, Task<NavGraph>)>,
+    pending: Option<(u64, Task<NavGraph>, Option<assets::StageHandle>)>,
 }
 
 /// Where the shared quota went and whether pending work actually advanced.
@@ -462,7 +462,7 @@ fn prepare_navigation(
     role: Res<RuntimeRole>,
     mut nav: ResMut<BotNav>,
     mut ready: ResMut<BotNavigationReady>,
-    loading: Option<Res<assets::LoadingScreen>>,
+    load: Option<Res<assets::MapLoadProcess>>,
 ) {
     if !matches!(*role, RuntimeRole::Listen | RuntimeRole::Dedicated) {
         ready.0 = true;
@@ -474,39 +474,48 @@ fn prepare_navigation(
     let Some(world) = world else {
         return;
     };
-    ready.0 = refresh_nav(&world.0, &mut nav, loading.as_deref());
+    ready.0 = refresh_nav(&world.0, &mut nav, load.as_deref());
 }
 
-fn refresh_nav(
-    world: &SimWorld,
-    nav: &mut BotNav,
-    loading: Option<&assets::LoadingScreen>,
-) -> bool {
+fn refresh_nav(world: &SimWorld, nav: &mut BotNav, load: Option<&assets::MapLoadProcess>) -> bool {
     let digest = world.content_digest();
     if nav.graph.digest == digest && nav.graph.schema == NAV_SCHEMA && nav.graph.hull == NAV_HULL {
         return true;
     }
-    if let Some((pending_digest, task)) = nav.pending.as_mut()
+    if let Some((pending_digest, task, stage)) = nav.pending.as_mut()
         && *pending_digest == digest
     {
         if let Some(graph) = future::block_on(future::poll_once(task)) {
             nav.graph = graph;
+            // The bake is only navigation once this graph is the one the bots
+            // will read, which is here and not on the worker.
+            if let Some(stage) = stage.take() {
+                // What the walk actually produced: the links bots route over.
+                // Nodes alone say how finely the grid was sampled; edges say
+                // how much of the map turned out to be connected.
+                let edges: usize = nav.graph.adj.iter().map(Vec::len).sum();
+                stage.set_completed(edges as u64);
+                stage.done();
+            }
             nav.pending = None;
             return true;
         }
         return false;
     }
-    let stage = loading.map(|loading| loading.progress.stage("preparing bot navigation"));
+    // A bake is one indivisible walk of the grid, so nothing counts up while it
+    // runs; the edge count is written once, when the graph it produced is the
+    // one the bots read.
+    let stage = load.map(|load| load.progress.begin(assets::StageId::Navigation, None));
     let mut snapshot = world.clone();
     let generation = nav.graph.generation.wrapping_add(1);
     nav.pending = Some((
         digest,
         assets::load_pool().spawn(async move {
-            let _stage = stage;
             let mut graph = navigation_for(&mut snapshot, digest);
             graph.generation = generation;
             graph
         }),
+        stage,
     ));
     false
 }

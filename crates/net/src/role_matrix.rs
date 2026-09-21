@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use frame::{
     GameEnded, GameWin, GlassDestroyed, MatchEndingSoon, MatchEndingVerySoon, MatchTornDown,
-    PrematchDone, SpawnedPlayerNotify,
+    PrematchDone, RoundSwitchNotify, RoundWin, SpawnedPlayerNotify,
 };
 
 use crate::plugin::NetPlugin;
@@ -77,6 +77,8 @@ fn probe_app() -> App {
     app.add_message::<GameEnded>();
     app.add_message::<PrematchDone>();
     app.add_message::<GameWin>();
+    app.add_message::<RoundWin>();
+    app.add_message::<RoundSwitchNotify>();
     app.add_message::<SpawnedPlayerNotify>();
     app.add_message::<GlassDestroyed>();
     app

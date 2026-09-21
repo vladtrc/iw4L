@@ -51,20 +51,16 @@ fn compile_one_job(catalog: &RuntimeMaterialCatalog, job: CompileJob) -> PassOut
 
 /// Compile every job, in chunks, on the load pool.
 ///
-/// The load pool's workers set their affinity to the process CPUs when they
-/// spawn, and they already exist. A thread spawned here would inherit the
-/// coordinator's affinity instead — on the paced path below that is an
-/// `AsyncComputeTaskPool` worker, confined to that pool's share of the CPUs.
+/// The pool's workers already exist and hold the process affinity; a thread
+/// spawned here would inherit the coordinator's narrower one instead.
 ///
 /// The results keep the order of `jobs` whatever order the chunks finish in:
-/// `TaskPool::scope` returns one `Vec` per task in the order the tasks were
-/// spawned, and every task here is spawned directly from this closure.
+/// `TaskPool::scope` returns one `Vec` per task in spawn order, and every task
+/// here is spawned directly from this closure.
 ///
-/// The cooperative policy is explicit and off: the calling thread waits for
-/// the chunks instead of ticking the pool's queue. It is the narrow-affinity
-/// thread in the paced case, and in the synchronous one it is the main thread
-/// in the middle of world spawn — neither is somewhere unrelated load work
-/// should be pulled onto.
+/// The cooperative policy is explicit and off: the calling thread waits for the
+/// chunks instead of ticking the pool's queue, so no unrelated load work is
+/// pulled onto the narrow-affinity thread or onto the main thread mid-spawn.
 fn compile_jobs_parallel(
     catalog: Arc<RuntimeMaterialCatalog>,
     jobs: Vec<CompileJob>,
@@ -212,7 +208,13 @@ pub struct MaterialProgramCompile {
     task: Option<Task<Vec<PassOutcome>>>,
     progress: Option<Arc<AtomicU32>>,
     started: Option<std::time::Instant>,
-    stage: Option<assets::LoadStage>,
+    load: Option<assets::LoadProgress>,
+    /// What the pool workers have computed. It ends when the last job is
+    /// computed, which is not when the result is published.
+    compile_stage: Option<assets::StageHandle>,
+    /// What the main thread has absorbed out of those outcomes. Until a slice
+    /// takes an outcome, nothing has been published from it.
+    merge_stage: Option<assets::StageHandle>,
     done: u32,
     total: u32,
     catalog: Option<Arc<RuntimeMaterialCatalog>>,
@@ -253,8 +255,10 @@ impl MaterialProgramCompile {
         self.total
     }
 
-    pub fn take_stage(&mut self) -> Option<assets::LoadStage> {
-        self.stage.take()
+    /// Hand both stages back, so the caller ends them where the work is really
+    /// over instead of leaving them to a drop.
+    pub fn take_stages(&mut self) -> (Option<assets::StageHandle>, Option<assets::StageHandle>) {
+        (self.compile_stage.take(), self.merge_stage.take())
     }
 
     pub(crate) fn take_ports(&mut self) -> Vec<RuntimeProgramPort> {
@@ -317,6 +321,11 @@ impl MaterialProgramCompile {
                     self.pending.len(),
                     slice_started.elapsed().as_secs_f32() * 1000.0
                 );
+                // One publish per main-thread slice, at the boundary the
+                // budget already draws.
+                if let Some(stage) = &self.merge_stage {
+                    stage.set_completed(self.absorb_at as u64);
+                }
                 return false;
             }
             let end = (self.absorb_at + CHUNK).min(self.pending.len());
@@ -333,29 +342,44 @@ impl MaterialProgramCompile {
             self.ports.len(),
             slice_started.elapsed().as_secs_f32() * 1000.0
         );
+        let merged = self.pending.len() as u64;
         self.pending.clear();
         self.absorb_at = 0;
         self.done = self.total;
-        if let Some(stage) = &self.stage {
-            stage.set_done(u64::from(self.done));
+        if let Some(stage) = self.merge_stage.take() {
+            stage.set_completed(merged);
+            stage.done();
         }
         self.progress = None;
         self.task = None;
         true
     }
 
-    fn absorb_outcomes(&mut self, outcomes: Vec<PassOutcome>) {
+    /// Compiled outcomes arrive as one block; publishing them is its own pass
+    /// over that block, with its own count.
+    fn take_outcomes(&mut self, outcomes: Vec<PassOutcome>) {
+        self.finish_compile();
+        if let Some(load) = &self.load {
+            self.merge_stage =
+                Some(load.begin(assets::StageId::ProgramMerge, Some(outcomes.len() as u64)));
+        }
         self.pending = outcomes;
         self.absorb_at = 0;
-        let _ = self.absorb_pending(None);
+    }
+
+    fn finish_compile(&mut self) {
+        if let Some(stage) = self.compile_stage.take() {
+            stage.set_completed(u64::from(self.total));
+            stage.done();
+        }
     }
 
     fn sync_progress(&mut self) {
         if let Some(progress) = &self.progress {
             self.done = progress.load(Ordering::Relaxed);
         }
-        if let Some(stage) = &self.stage {
-            stage.set_done(u64::from(self.done));
+        if let Some(stage) = &self.compile_stage {
+            stage.set_completed(u64::from(self.done));
         }
     }
 
@@ -375,6 +399,10 @@ impl MaterialProgramCompile {
             let jobs = std::mem::take(&mut self.jobs);
             if jobs.is_empty() {
                 self.done = self.total;
+                self.finish_compile();
+                if let Some(load) = &self.load {
+                    load.record_skipped(assets::StageId::ProgramMerge);
+                }
                 return true;
             }
             let catalog = Arc::clone(self.catalog.as_ref().unwrap_or(catalog));
@@ -399,7 +427,8 @@ impl MaterialProgramCompile {
                     .started
                     .map(|t| t.elapsed().as_secs_f32() * 1000.0)
                     .unwrap_or(0.0);
-                self.absorb_outcomes(outcomes);
+                self.take_outcomes(outcomes);
+                let _ = self.absorb_pending(None);
                 diag::info!(
                     World,
                     "world spawn compile pool: finished jobs={} ports={} {:.1}ms",
@@ -424,8 +453,7 @@ impl MaterialProgramCompile {
             .started
             .map(|t| t.elapsed().as_secs_f32() * 1000.0)
             .unwrap_or(0.0);
-        self.pending = outcomes;
-        self.absorb_at = 0;
+        self.take_outcomes(outcomes);
         self.task = None;
         let absorbed = self.absorb_pending(deadline);
         if absorbed {
@@ -448,11 +476,15 @@ impl MaterialProgramCompile {
         self.jobs.clear();
         self.catalog = Some(Arc::clone(catalog));
         log_catalog_generation(catalog);
+        if let Some(stage) = self.merge_stage.take() {
+            stage.cancel();
+        }
+        if let Some(stage) = self.compile_stage.take() {
+            stage.cancel();
+        }
+        self.load = progress.cloned();
         if let Some(progress) = progress {
-            self.stage = Some(progress.stage(format!(
-                "compiling programs ({} workers)",
-                assets::load_workers()
-            )));
+            self.compile_stage = Some(progress.begin(assets::StageId::Programs, None));
         }
         let mut techs = Vec::new();
         techs.extend(lighting_iw4::LIT_TECH_NO_SHADOW_DIR_SLOTS);
@@ -558,8 +590,8 @@ impl MaterialProgramCompile {
         self.refused_packed = 0;
         self.refused_pos_tex = 0;
         self.refused_postfx = 0;
-        if let Some(stage) = &self.stage {
-            stage.total(u64::from(self.total));
+        if let Some(stage) = &self.compile_stage {
+            stage.set_total(u64::from(self.total));
         }
         diag::info!(
             World,

@@ -17,11 +17,10 @@ use crate::anim::fpv::{
     local_shot_identity,
 };
 use crate::anim::fpv_host::{FpvGenerateArgs, FpvPoseKind, FpvPoseRefuse, generate_fpv_pose};
-use crate::anim::fpv_pose::{PosedModelSurface, pose_eye};
+use crate::anim::fpv_rig::PreparedFpvRig;
 use crate::anim::scene_submission::{AnimDObjSceneSubmission, AnimSceneSubmit};
 use crate::anim::viewmodel_controller::ViewmodelController;
 use crate::gaps::{RenderGap, RenderGapCause, RenderPresentationGaps};
-use crate::model_vertex_diag::{ModelVertexColorMode, apply_model_vertex_color_diag};
 use crate::occupancy::remote_body::RemotePlayer;
 use crate::occupancy::third_person::presented_is_third_person;
 use crate::occupancy::view_kick::{
@@ -54,6 +53,11 @@ use weapon_iw4::{
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FpvPlacementSet;
 
+/// The first-person vertices for this frame are written. The merge downstream
+/// orders itself after this set.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FpvGeometrySet;
+
 #[derive(Component)]
 pub struct FpvViewmodel;
 
@@ -71,6 +75,9 @@ pub struct SessionViewmodel(pub Option<SessionFpvMeshesHandles>);
 pub struct SessionFpvMeshesHandles {
     pub weapon_id: u32,
     pub fpv: EquippedFpv,
+    /// The rig this composition is drawn with. It outlives the frame; a pose
+    /// that still answers its key does not rebuild it.
+    pub(crate) rig: Option<PreparedFpvRig>,
     pub(crate) materials: Vec<render_scene::SmodelPassMaterial>,
     pub(crate) material_by_authored: HashMap<usize, u32>,
 }
@@ -216,14 +223,6 @@ pub fn spawn_pending_fpv(
     mut cursor: ResMut<FpvPresentCursor>,
     mut fpv_plan: ResMut<crate::FpvDrawPlan>,
     cameras: Query<Entity, With<FlyCamera>>,
-    mut lenses: Query<
-        &mut Transform,
-        (
-            With<FpvLens>,
-            Without<RemotePlayer>,
-            Without<WorldScriptModelInstance>,
-        ),
-    >,
     existing_fpv: Query<Entity, With<FpvPlacementRoot>>,
     mut status: ResMut<FpvStatusGap>,
     gaps: Res<RenderPresentationGaps>,
@@ -266,10 +265,6 @@ pub fn spawn_pending_fpv(
         status.0 = Some(FpvState::Blocked(RenderGapCause::FpvCatalogMissing));
         return;
     };
-    let hide_tags: Vec<String> = weapons
-        .as_ref()
-        .map(|reg| assets::effective_hide_tags(&reg.0, request.weapon_id))
-        .unwrap_or_default();
     let scope_name = weapons
         .as_ref()
         .and_then(|reg| reg.0.scope_viewmodel_of(request.weapon_id));
@@ -302,31 +297,6 @@ pub fn spawn_pending_fpv(
         weapon_hand_owned.as_deref(),
         idle_ns,
     );
-    let Some(posed) = pose_eye(
-        &fpv_cat.0,
-        idle_ns,
-        &request.gun_xmodel,
-        &hands,
-        idle_clip.as_deref(),
-        0.0,
-        &hide_tags,
-        scope_name,
-        rocket_name,
-    ) else {
-        diag::info!(
-            Fpv,
-            "fpv: cannot eye-pose `{}` (need viewhands+gun skels with tag_view)",
-            request.gun_xmodel
-        );
-        let cause = RenderGapCause::FpvEyePoseFailed {
-            gun_xmodel: request.gun_xmodel.clone(),
-        };
-        gaps.raise(cause.clone());
-        status.0 = Some(FpvState::Blocked(cause));
-        return;
-    };
-    let (hands_surfaces, gun_surfaces, stats, lens) =
-        (posed.hands, posed.gun, posed.stats, posed.lens);
     let Ok(host) = cameras.single() else {
         diag::info!(
             Fpv,
@@ -372,31 +342,35 @@ pub fn spawn_pending_fpv(
     let rocket_entry = rocket_name.and_then(|name| fpv_cat.0.get(idle_ns, name));
     let mut plan_mat_hints: Vec<String> = Vec::new();
 
-    let mut pack_surfaces = |surfaces: Vec<PosedModelSurface>| -> Vec<crate::FpvPlanSurface> {
-        use crate::anim::fpv_pose::FpvSurfOwner;
-        let mut out = Vec::new();
-        let color_mode = ModelVertexColorMode::from_env();
-        for surface in surfaces {
-            let hidden = surface.mesh.indices().is_none_or(|ix| ix.len() == 0);
-            let (label, entry) = match surface.owner {
-                FpvSurfOwner::Hands => ("fpv hands", hands_entry),
-                FpvSurfOwner::Gun => ("fpv gun", gun_entry),
-                FpvSurfOwner::Scope => ("fpv gun", scope_entry),
-                FpvSurfOwner::Rocket => ("fpv gun", rocket_entry),
-            };
+    // Which materials this composition needs, walked off the models rather than
+    // off a pose: the rig the first frame prepares needs this table to decide
+    // the layout.
+    let mut admit_model = |label: &str, entry: Option<&assets::FpvMeshEntry>| {
+        let Some(entry) = entry else {
+            return;
+        };
+        for surface_index in entry.skel.surfaces_for_lod(0) {
             let edge = entry
-                .and_then(|e| e.material_edges.get(surface.surface_index).copied())
+                .material_edges
+                .get(surface_index)
+                .copied()
                 .unwrap_or(AssetEdge::Absent);
-            let present_name = entry.and_then(|e| e.material_present_name(surface.surface_index));
-            let leftover_hint = entry.and_then(|e| {
-                e.material_names
-                    .get(surface.surface_index)
-                    .and_then(|n| n.as_deref())
-            });
-            let Some(mat) = fpv_pass_material(
+            let present_name = entry.material_present_name(surface_index);
+            let leftover_hint = entry
+                .material_names
+                .get(surface_index)
+                .and_then(|name| name.as_deref());
+            let authored = entry
+                .skel
+                .surface_materials
+                .get(surface_index)
+                .copied()
+                .flatten()
+                .map(|index| index.get());
+            let admitted = fpv_pass_material(
                 &tess.catalog,
                 tess.material_images.as_ref(),
-                surface.material,
+                authored,
                 edge,
                 present_name,
                 leftover_hint,
@@ -405,48 +379,27 @@ pub fn spawn_pending_fpv(
                 &mut materials,
                 lighting,
                 label,
-                surface.surface_index,
+                surface_index,
                 &mut ordinal_admitted,
                 &mut ordinal_refused,
                 &mut gun_skip,
-            ) else {
-                continue;
-            };
-            if let Some(hint) = leftover_hint.or(present_name) {
-                if plan_mat_hints.len() < 12 && !plan_mat_hints.iter().any(|seen| seen == hint) {
-                    plan_mat_hints.push(hint.to_owned());
-                }
-            }
-            if hidden {
+            );
+            if admitted.is_none() {
                 continue;
             }
-            let mut mesh = surface.mesh;
-            apply_model_vertex_color_diag(&mut mesh, color_mode, surface.surface_index);
-            out.push(crate::FpvPlanSurface {
-                mesh,
-                authored: surface.material,
-                material: mat,
-                packed_vertices: surface.packed_vertices,
-                is_scope: surface.owner == FpvSurfOwner::Scope,
-                is_lens: leftover_hint.is_some_and(leftover_scope_surf_is_lens),
-            });
+            if let Some(hint) = leftover_hint.or(present_name)
+                && plan_mat_hints.len() < 12
+                && !plan_mat_hints.iter().any(|seen| seen == hint)
+            {
+                plan_mat_hints.push(hint.to_owned());
+            }
         }
-        out
     };
-
-    let hands_n = hands_surfaces.len();
-    let posed_gun_n = gun_surfaces.len();
-    let hands_packed = pack_surfaces(hands_surfaces);
-    let gun_packed = pack_surfaces(gun_surfaces);
-    drop(pack_surfaces);
-    let hands_plan_n = hands_packed.len();
-    let gun_plan_n = gun_packed.len();
-    let mut all_packed = hands_packed;
-    all_packed.extend(gun_packed);
-
-    for mut lens_tf in &mut lenses {
-        *lens_tf = Transform::from_matrix(lens);
-    }
+    admit_model("fpv hands", hands_entry);
+    admit_model("fpv gun", gun_entry);
+    admit_model("fpv gun", scope_entry);
+    admit_model("fpv gun", rocket_entry);
+    drop(admit_model);
 
     commands.entity(host).with_children(|parent| {
         parent.spawn((
@@ -457,32 +410,15 @@ pub fn spawn_pending_fpv(
         ));
     });
 
-    crate::rebuild_fpv_draw_plan(&mut fpv_plan, &all_packed, 0, false);
-    fpv_plan.hands_plan_n = Some(hands_plan_n as u32);
-    fpv_plan.gun_plan_n = Some(gun_plan_n as u32);
+    // The plan belongs to the rig, and the rig is prepared by the first pose
+    // this composition takes. Until then the plan has nothing to publish.
+    crate::clear_fpv_draw_plan(&mut fpv_plan, 0);
     fpv_plan.gun_colormap_skip_n = Some(gun_skip.colormap_n);
     fpv_plan.gun_ordinal_skip_n = Some(gun_skip.ordinal_n);
     fpv_plan.gun_colormap_skip_names =
         (!gun_skip.colormap_names.is_empty()).then(|| gun_skip.colormap_names.join(","));
     fpv_plan.plan_mat_hints = (!plan_mat_hints.is_empty()).then(|| plan_mat_hints.join(","));
-    fpv_plan.plan_skip_n = Some(
-        (hands_n
-            .saturating_add(posed_gun_n)
-            .saturating_sub(all_packed.len())) as u32,
-    );
-    match &fpv_plan.packed_vertices {
-        assets::RetailPackedVertexPayload::Iw4(vertices) => diag::info!(
-            Fpv,
-            "fpv: packed admission model=`{}` verts={}",
-            request.gun_xmodel,
-            vertices.len()
-        ),
-        assets::RetailPackedVertexPayload::Unavailable { source_layout } => diag::info!(
-            Fpv,
-            "fpv: packed unavailable model=`{}` layout={source_layout}",
-            request.gun_xmodel
-        ),
-    }
+
     let (controller, left) = match (weapons.as_ref(), xanims.as_ref()) {
         (Some(reg), Some(cat)) => {
             let ns = reg
@@ -575,17 +511,16 @@ pub fn spawn_pending_fpv(
     session_vm.0 = Some(SessionFpvMeshesHandles {
         weapon_id: request.weapon_id,
         fpv: EquippedFpv::new(request.gun_xmodel.clone(), idle_ns, hands, controller, left),
+        rig: None,
         materials,
         material_by_authored,
     });
 
-    let pose_kind = if stats.idle_sampled {
+    let idle_kind = if idle_from_table {
         let name = idle_name.as_deref().unwrap_or("?");
-        format!("idle sample `{name}` (szXAnims[IDLE])")
-    } else if idle_from_table {
-        "bind-pose (szXAnims[IDLE] present; DObj pose failed)".into()
+        format!("idle `{name}` (szXAnims[IDLE])")
     } else {
-        "bind-pose (no szXAnims[IDLE] — guess forbidden)".into()
+        "no szXAnims[IDLE] — guess forbidden".to_owned()
     };
     let refused_names = if ordinal_refused.is_empty() {
         "none".to_owned()
@@ -602,27 +537,27 @@ pub fn spawn_pending_fpv(
         "fpv: ordinal admission admitted={ordinal_admitted} refused={} names=[{refused_names}] (whole model incl. hideTags-hidden surfaces; global catalog, clone-index unused)",
         ordinal_refused.len(),
     );
+    let vert_census = |entry: Option<&assets::FpvMeshEntry>| match entry {
+        Some(entry) => format!("{}/{}", entry.skel.rigid_verts, entry.skel.blend_verts),
+        None => "-".to_owned(),
+    };
     diag::info!(
         Fpv,
-        "fpv: eye-posed `{}` ({}; {}; hands surfaces={} rigid/blend={}/{} gun surfaces={} rigid/blend={}/{}; retained path, no Mesh3d)",
+        "fpv: equipped `{}` ({}; {}; hands rigid/blend={} gun rigid/blend={}; rig prepared on the first pose)",
         request.gun_xmodel,
         if request.from_gun_xmodel {
             "gunXModel[0]"
         } else {
             "idle→gun candidate (Diagnostic)"
         },
-        pose_kind,
-        hands_n,
-        stats.hands_rigid,
-        stats.hands_blend,
-        posed_gun_n,
-        stats.gun_rigid,
-        stats.gun_blend,
+        idle_kind,
+        vert_census(hands_entry),
+        vert_census(gun_entry),
     );
 
     gaps.clear(RenderGap::FpvViewmodel);
     status.0 = Some(FpvState::Drawn {
-        idle_sampled: stats.idle_sampled,
+        idle_sampled: idle_from_table,
     });
 }
 
@@ -1100,11 +1035,21 @@ pub fn tick_fpv_viewmodel(
         None
     };
     let weapon_id = session.weapon_id;
-    let kind = generate_fpv_pose(FpvGenerateArgs {
+    let SessionFpvMeshesHandles {
+        fpv: equipped,
+        rig,
+        materials,
+        material_by_authored,
+        ..
+    } = session;
+    let mut kind = generate_fpv_pose(FpvGenerateArgs {
         dt,
-        equipped: &mut session.fpv,
+        equipped,
+        rig,
         cursor: &mut cursor.0,
         catalog: &fpv.0,
+        materials,
+        material_by_authored,
         hide_tags: &hide_tags,
         scope_name,
         rocket_name,
@@ -1113,21 +1058,24 @@ pub fn tick_fpv_viewmodel(
         dual,
         dual_offset,
     });
-    if let FpvPoseKind::Posed(frame) = &kind {
+    if let FpvPoseKind::Posed(frame) = &mut kind {
         if weapon_id != 0 && !frame.notetracks.is_empty() {
             pending_notes.weapon = weapon_id;
             pending_notes.names.clone_from(&frame.notetracks);
         }
-        for (hand, bolt) in frame.bolts.iter().enumerate() {
-            if let Some(bolt) = bolt.clone() {
-                bolts.set_pose(hand, bolt);
+        // Nothing downstream of the bones waits for a vertex.
+        for (hand, pose) in frame.poses.iter_mut().enumerate() {
+            if let Some(pose) = pose.as_mut() {
+                bolts.set_pose(hand, core::mem::take(&mut pose.bolt));
             }
         }
     }
     product.kind = kind;
 }
 
-fn commit_fpv_draw_plan(
+/// Write this frame's vertices into the buffer the rig published, and nothing
+/// else: indices, surface ranges, materials and draws belong to the composition.
+fn skin_fpv_geometry(
     product: Res<FpvPoseProduct>,
     session_vm: Option<Res<SessionViewmodel>>,
     fpv_meshes: Option<Res<PreparedFpvMeshes>>,
@@ -1144,70 +1092,34 @@ fn commit_fpv_draw_plan(
     >,
 ) {
     fpv_plan.drawgun = product.drawgun;
+    let handle = fpv_plan.lighting_handle;
     match &product.kind {
-        FpvPoseKind::Hide => {
-            let handle = fpv_plan.lighting_handle;
-            crate::rebuild_fpv_draw_plan(&mut fpv_plan, &[], handle, false);
-        }
+        FpvPoseKind::Hide => crate::clear_fpv_draw_plan(&mut fpv_plan, handle),
         FpvPoseKind::Refuse(refuse) => {
             let cause = refuse_gap_cause(refuse.clone());
-            let handle = fpv_plan.lighting_handle;
-            crate::rebuild_fpv_draw_plan(&mut fpv_plan, &[], handle, false);
+            crate::clear_fpv_draw_plan(&mut fpv_plan, handle);
             gaps.raise(cause.clone());
             status.0 = Some(FpvState::Blocked(cause));
         }
         FpvPoseKind::Posed(frame) => {
-            let Some(session) = session_vm.as_ref().and_then(|s| s.0.as_ref()) else {
-                let handle = fpv_plan.lighting_handle;
-                crate::rebuild_fpv_draw_plan(&mut fpv_plan, &[], handle, false);
+            let rig = session_vm
+                .as_ref()
+                .and_then(|session| session.0.as_ref())
+                .and_then(|session| session.rig.as_ref());
+            let (Some(rig), Some(catalog)) = (rig, fpv_meshes.as_ref()) else {
+                crate::clear_fpv_draw_plan(&mut fpv_plan, handle);
                 return;
             };
-            let scope_entry = frame.scope_xmodel.as_deref().and_then(|n| {
-                fpv_meshes
-                    .as_ref()
-                    .and_then(|cat| cat.0.get(session.fpv.namespace, n))
-            });
-            let color_mode = ModelVertexColorMode::from_env();
-            let posed_n = frame.hands.len().saturating_add(frame.gun.len());
-            let mut packed: Vec<crate::FpvPlanSurface> = Vec::new();
-            for surface in frame.hands.iter().chain(frame.gun.iter()) {
-                if surface.mesh.indices().is_none_or(|ix| ix.len() == 0) {
-                    continue;
-                }
-                let Some(ai) = surface.material else {
-                    continue;
-                };
-                let Some(&mat_idx) = session.material_by_authored.get(&ai) else {
-                    continue;
-                };
-                let Some(mat) = session.materials.get(mat_idx as usize).cloned() else {
-                    continue;
-                };
-                let leftover_name = match surface.owner {
-                    crate::anim::fpv_pose::FpvSurfOwner::Scope => scope_entry.and_then(|e| {
-                        e.material_names
-                            .get(surface.surface_index)
-                            .and_then(|n| n.as_deref())
-                    }),
-                    _ => None,
-                };
-                let is_lens = leftover_name.is_some_and(leftover_scope_surf_is_lens);
-                let mut mesh = surface.mesh.clone();
-                apply_model_vertex_color_diag(&mut mesh, color_mode, surface.surface_index);
-                packed.push(crate::FpvPlanSurface {
-                    mesh,
-                    authored: surface.material,
-                    material: mat,
-                    packed_vertices: surface.packed_vertices.clone(),
-                    is_scope: surface.owner == crate::anim::fpv_pose::FpvSurfOwner::Scope,
-                    is_lens,
-                });
+            if fpv_plan.rig_generation != rig.generation() {
+                crate::install_prepared_fpv_plan(&mut fpv_plan, &rig.geometry, handle);
+                fpv_plan.rig_generation = rig.generation();
             }
-            let handle = fpv_plan.lighting_handle;
-            let visible = !packed.is_empty();
-            let admitted_n = packed.len();
-            crate::rebuild_fpv_draw_plan(&mut fpv_plan, &packed, handle, visible);
-            fpv_plan.plan_skip_n = Some(posed_n.saturating_sub(admitted_n) as u32);
+            if let Some(rows) = fpv_plan.packed_rows_mut() {
+                rig.skin_into(&catalog.0, &frame.poses, rows);
+            }
+            fpv_plan.revisions.bump_vertices();
+            fpv_plan.geometry_ok = !fpv_plan.draws().is_empty();
+            fpv_plan.settle_visible();
             gaps.clear(RenderGap::FpvViewmodel);
             status.0 = Some(FpvState::Drawn {
                 idle_sampled: frame.idle_sampled,
@@ -1219,16 +1131,22 @@ fn commit_fpv_draw_plan(
     }
 }
 
+/// Where the viewmodel sits this frame. It reads the placement the camera and
+/// the root carry and nothing the rig produced, so it does not wait behind the
+/// geometry.
 pub fn stamp_fpv_placement_matrix(
     mut fpv_plan: ResMut<crate::FpvDrawPlan>,
     cameras: Query<&Transform, (With<FlyCamera>, Without<FpvPlacementRoot>)>,
     roots: Query<&Transform, With<FpvPlacementRoot>>,
 ) {
     let (Ok(cam), Ok(local)) = (cameras.single(), roots.single()) else {
-        fpv_plan.visible = false;
+        fpv_plan.placement_ok = false;
+        fpv_plan.settle_visible();
         return;
     };
     fpv_plan.world_from_local = cam.to_matrix() * local.to_matrix();
+    fpv_plan.placement_ok = true;
+    fpv_plan.settle_visible();
 }
 
 pub fn publish_fpv_dobj_pose(
@@ -1489,10 +1407,6 @@ pub fn apply_fpv_placement(
     *transform = placed;
 }
 
-fn leftover_scope_surf_is_lens(name: &str) -> bool {
-    name.contains("lens")
-}
-
 fn fpv_spawn_queued(pending: Res<PendingFpvSpawn>) -> bool {
     pending.0.is_some()
 }
@@ -1544,14 +1458,16 @@ pub fn register_fpv_present_systems(app: &mut App) {
                     .after(sync_camera_from_presented),
                 flush_fpv_spawn.after(spawn_pending_fpv),
                 tick_fpv_viewmodel.after(flush_fpv_spawn),
-                commit_fpv_draw_plan.after(tick_fpv_viewmodel),
+                skin_fpv_geometry
+                    .after(tick_fpv_viewmodel)
+                    .in_set(FpvGeometrySet),
                 publish_fpv_notetracks.after(tick_fpv_viewmodel),
                 apply_fpv_placement
                     .after(tick_fpv_viewmodel)
                     .before(WorkerCmdSet::CellSceneEnt),
+                // Neither placement nor bone publication reads a vertex.
                 stamp_fpv_placement_matrix
                     .after(apply_fpv_placement)
-                    .after(commit_fpv_draw_plan)
                     .in_set(FpvPlacementSet),
                 publish_fpv_dobj_pose
                     .after(stamp_fpv_placement_matrix)

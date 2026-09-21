@@ -36,7 +36,7 @@ pub struct MapFacts {
 
     pub script_sound: crate::MapScriptSoundFacts,
 
-    pub team_icons: crate::TeamIcons,
+    pub team_settings: crate::MapTeamSettings,
 
     pub t5_teamset: Option<String>,
 }

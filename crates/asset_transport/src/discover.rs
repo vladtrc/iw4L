@@ -627,3 +627,58 @@ pub fn ensure_artifacts_dir() -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     Ok(dir.to_path_buf())
 }
+
+/// T5 language archives carry a language prefix rather than `localized_`.
+pub fn find_t5_localized_zones(
+    anchor: &Path,
+    language: Option<&str>,
+) -> Result<Vec<ZoneFile>, String> {
+    let root = game_root_for_zone(anchor)?.join("zone");
+    let mut choices: Vec<_> = files_under(vec![root])
+        .filter_map(Result::ok)
+        .filter(|path| {
+            path.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|name| name.ends_with("_code_post_gfx_mp.ff"))
+                && zone_game_for_path(path) == Some(crate::ZoneGame::T5)
+        })
+        .collect();
+    choices.sort();
+    let preferred = choices.iter().position(|path| {
+        path.parent()
+            .and_then(Path::file_name)
+            .and_then(|s| s.to_str())
+            .zip(language)
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+    });
+    let chosen = match preferred {
+        Some(index) => &choices[index],
+        None if choices.len() == 1 => &choices[0],
+        _ => {
+            return Err(format!(
+                "T5 language archive selection is ambiguous or missing: {} candidates",
+                choices.len()
+            ));
+        }
+    };
+    let name = chosen
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or("T5 language archive name")?;
+    let prefix = name
+        .strip_suffix("code_post_gfx_mp.ff")
+        .ok_or("T5 language prefix")?;
+    let dir = chosen.parent().ok_or("T5 language directory")?;
+    Ok(["code_post_gfx_mp", "common_mp", "ui_mp"]
+        .into_iter()
+        .filter_map(|stem| {
+            let zone_name = format!("{prefix}{stem}");
+            let path = dir.join(format!("{zone_name}.ff"));
+            path.is_file().then_some(ZoneFile {
+                path,
+                zone_name,
+                alias_note: None,
+            })
+        })
+        .collect())
+}

@@ -12,14 +12,14 @@ fn is_cac_table(name: &str) -> bool {
 use crate::{
     BodyMeshBuild, FpvMeshBuild, FxCatalog, ImpactFxCatalog, MaterialCatalog, ModelKind,
     PreparedXModelWalkCensus, SoldierKit, WeaponCatalog, WorldWeaponBuild, XAnimBuild, ZoneOwner,
-    build_xmodel_mesh, model_kind, progress::LoadStage, soldier_kits,
+    build_xmodel_mesh, model_kind, progress::StageHandle, soldier_kits,
 };
 
 #[derive(Default)]
 pub(crate) struct ZoneWalkSink {
     pub walked: usize,
 
-    pub stage: Option<LoadStage>,
+    pub stage: Option<StageHandle>,
     pub models: ModelCensus,
     pub materials: MaterialCatalog,
     pub fx: FxCatalog,
@@ -68,7 +68,7 @@ pub(crate) struct CommonWalkSink {
     script_strings: ScriptStrings,
     pub walked: usize,
 
-    pub stage: Option<LoadStage>,
+    pub stage: Option<StageHandle>,
     pub models: ModelCensus,
     pub materials: MaterialCatalog,
     pub weapons: WeaponCatalog,
@@ -96,7 +96,7 @@ pub(crate) struct CommonWalkSink {
     pub pen_table: Option<weapon_iw4::PenetrationDepthTable>,
     pub lochit_table: Option<[f32; weapon_iw4::HITLOC_COUNT]>,
 
-    pub teamset_icons: HashMap<String, crate::TeamIcons>,
+    pub teamsets: HashMap<String, crate::MapTeamSettings>,
 
     pub stats_tables: BTreeMap<String, crate::CapturedStringTable>,
 
@@ -104,7 +104,7 @@ pub(crate) struct CommonWalkSink {
 }
 
 impl ZoneWalkSink {
-    pub(crate) fn with_stage(stage: LoadStage) -> Self {
+    pub(crate) fn with_stage(stage: StageHandle) -> Self {
         Self {
             stage: Some(stage),
             ..Default::default()
@@ -119,7 +119,7 @@ impl ZoneWalkSink {
     fn asset_walked(&mut self) {
         self.walked += 1;
         if let Some(stage) = self.stage.as_ref() {
-            stage.set_done(self.walked as u64);
+            stage.set_completed(self.walked as u64);
         }
     }
 
@@ -141,7 +141,7 @@ impl ZoneWalkSink {
 }
 
 impl CommonWalkSink {
-    pub(crate) fn with_stage(stage: LoadStage) -> Self {
+    pub(crate) fn with_stage(stage: StageHandle) -> Self {
         Self {
             stage: Some(stage),
             ..Default::default()
@@ -156,7 +156,7 @@ impl CommonWalkSink {
     fn asset_walked(&mut self) {
         self.walked += 1;
         if let Some(stage) = self.stage.as_ref() {
-            stage.set_done(self.walked as u64);
+            stage.set_completed(self.walked as u64);
         }
     }
 
@@ -264,6 +264,16 @@ impl fastfile_iw5::AssetLinkSink for ZoneWalkSink {
             );
             self.xmodel_coll.alias_iw5(slot, target);
         }
+        Ok(())
+    }
+
+    fn capture_script_file(
+        &mut self,
+        name: &str,
+        stack: &[u8],
+        bytecode: &[u8],
+    ) -> fastfile_iw5::Result<()> {
+        self.script_sound.capture_iw5(name, stack, bytecode);
         Ok(())
     }
 
@@ -576,9 +586,9 @@ impl fastfile_t5::AssetLinkSink for CommonWalkSink {
         zlib_compressed: bool,
     ) -> fastfile_t5::Result<()> {
         if let Some((key, icons)) =
-            crate::t5_icons_from_teamset_rawfile(name, data, zlib_compressed)
+            crate::t5_settings_from_teamset_rawfile(name, data, zlib_compressed)
         {
-            self.teamset_icons.insert(key, icons);
+            self.teamsets.insert(key, icons);
         }
         Ok(())
     }
@@ -739,6 +749,9 @@ impl fastfile_t5::AssetLinkSink for ZoneWalkSink {
         zlib_compressed: bool,
     ) -> fastfile_t5::Result<()> {
         self.compass.capture(name, data, zlib_compressed);
+        if let Some(text) = asset_world::decode_rawfile_text(data, zlib_compressed) {
+            self.script_sound.capture(name, text.as_bytes(), false);
+        }
         if crate::is_createart_source(name) {
             self.createart_name = Some(name.to_owned());
         }
@@ -814,7 +827,7 @@ impl AssetSink for ZoneWalkSink {
 
     fn begin_assets(&mut self, count: usize) {
         if let Some(stage) = self.stage.as_ref() {
-            stage.total(count as u64);
+            stage.set_total(count as u64);
         }
     }
 
@@ -1004,7 +1017,7 @@ impl AssetLinkSink for ZoneWalkSink {
 impl AssetSink for CommonWalkSink {
     fn begin_assets(&mut self, count: usize) {
         if let Some(stage) = self.stage.as_ref() {
-            stage.total(count as u64);
+            stage.set_total(count as u64);
         }
     }
 
@@ -1244,12 +1257,12 @@ impl AssetLinkSink for CommonWalkSink {
 #[derive(Default)]
 pub(crate) struct MaterialPopulationSink {
     pub walked: usize,
-    pub stage: Option<LoadStage>,
+    pub stage: Option<StageHandle>,
     pub materials: MaterialCatalog,
 }
 
 impl MaterialPopulationSink {
-    pub(crate) fn with_stage(stage: LoadStage) -> Self {
+    pub(crate) fn with_stage(stage: StageHandle) -> Self {
         Self {
             stage: Some(stage),
             ..Default::default()
@@ -1264,7 +1277,7 @@ impl MaterialPopulationSink {
     fn asset_walked(&mut self) {
         self.walked += 1;
         if let Some(stage) = self.stage.as_ref() {
-            stage.set_done(self.walked as u64);
+            stage.set_completed(self.walked as u64);
         }
     }
 
@@ -1280,7 +1293,7 @@ impl MaterialPopulationSink {
 impl AssetSink for MaterialPopulationSink {
     fn begin_assets(&mut self, count: usize) {
         if let Some(stage) = self.stage.as_ref() {
-            stage.total(count as u64);
+            stage.set_total(count as u64);
         }
     }
 

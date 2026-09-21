@@ -28,14 +28,18 @@ pub(crate) fn prepare(
         };
         if !matches!(
             world.map_xmodel_scene_assets.get_name(model),
-            Some(assets::MapXModelSceneAsset::Iw4(_))
+            Some(
+                assets::MapXModelSceneAsset::Iw4(_)
+                    | assets::MapXModelSceneAsset::Iw5(_)
+                    | assets::MapXModelSceneAsset::T5(_)
+            )
         ) {
             return Err(format!("objective model {model} not captured"));
         }
         if kind == GameModeKind::Demolition {
             if trigger.angles != [0.0; 3] || trigger.hulls.as_ref().is_none_or(Vec::is_empty) {
                 return Err(format!(
-                    "DD {} requires unrotated authored IW4 trigger hulls",
+                    "DD {} requires unrotated authored trigger hulls",
                     trigger.script_label
                 ));
             }
@@ -180,7 +184,7 @@ pub(crate) fn install(
                     .collect()
             } else {
                 return Err(format!(
-                    "DD site {} missing authored IW4 trigger hulls ({})",
+                    "DD site {} missing authored trigger hulls ({})",
                     trigger.script_label, trigger.model
                 ));
             };

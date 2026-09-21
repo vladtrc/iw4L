@@ -115,7 +115,7 @@ pub struct CommonCensus {
     /// themselves do not outlive it.
     pub s1_common_bytes: usize,
 
-    pub teamset_icons: std::collections::HashMap<String, crate::TeamIcons>,
+    pub teamsets: std::collections::HashMap<String, crate::MapTeamSettings>,
     pub film_visions:
         std::collections::BTreeMap<String, Result<crate::FilmVision, crate::FilmVisionParseError>>,
 

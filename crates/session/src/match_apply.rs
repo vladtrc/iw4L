@@ -287,11 +287,12 @@ pub struct PreparedMatchSource<'w, 's> {
     bridge: Option<Res<'w, net::MasterBridge>>,
     intent: Option<Res<'w, net::MasterLaunchIntent>>,
     loading: Option<ResMut<'w, LoadingScreen>>,
+    load: Option<Res<'w, assets::MapLoadProcess>>,
     abort: Option<Res<'w, MatchLoadAbort>>,
     host_classes: Option<Res<'w, HostClassLoadouts>>,
     catalog: Option<Res<'w, assets::MenuCatalog>>,
     identity: Option<Res<'w, LaunchIdentity>>,
-    install_stage: Local<'s, Option<assets::LoadStage>>,
+    install_stage: Local<'s, Option<assets::StageHandle>>,
 }
 
 #[derive(SystemParam)]
@@ -340,6 +341,7 @@ pub fn apply_prepared_match(
         bridge,
         intent,
         mut loading,
+        load,
         abort,
         host_classes,
         catalog,
@@ -373,7 +375,9 @@ pub fn apply_prepared_match(
             ready.load_key,
             ready.zone
         );
-        let _ = install_stage.take();
+        if let Some(stage) = install_stage.take() {
+            stage.cancel();
+        }
         commands.remove_resource::<PreparedMatchReady>();
         return;
     }
@@ -384,7 +388,9 @@ pub fn apply_prepared_match(
     if abort.is_some_and(|abort| abort.0 == ready.request_id) {
         let dropped = ready.request_id;
         let zone = ready.zone.clone();
-        let _ = install_stage.take();
+        if let Some(stage) = install_stage.take() {
+            stage.cancel();
+        }
         commands.remove_resource::<PreparedMatchReady>();
         commands.remove_resource::<MatchLoadAbort>();
         diag::info!(
@@ -393,9 +399,16 @@ pub fn apply_prepared_match(
         );
         return;
     }
-    if loading.is_some() && install_stage.is_none() {
-        if let Some(loading) = loading.as_deref_mut() {
-            *install_stage = Some(loading.progress.stage("installing match"));
+    // The stage opens a frame before the work so the row is already up when
+    // the main thread stops answering — the yield is the point, not an
+    // accident of where the handle was created.
+    let live_load = load
+        .as_deref()
+        .filter(|process| !process.is_complete())
+        .map(|process| &process.progress);
+    if live_load.is_some() && install_stage.is_none() {
+        if let Some(progress) = live_load {
+            *install_stage = Some(progress.begin(assets::StageId::Install, None));
         }
         diag::info!(
             World,
@@ -403,7 +416,7 @@ pub fn apply_prepared_match(
         );
         return;
     }
-    let _install_stage = install_stage.take();
+    let install_stage = install_stage.take();
     let install_started = std::time::Instant::now();
     let request_id = ready.request_id;
     let load_key = ready.load_key;
@@ -430,6 +443,9 @@ pub fn apply_prepared_match(
                 probe.world_report = world_report;
             }
             *has_world = HasWorld(false);
+            if let Some(stage) = install_stage {
+                stage.fail();
+            }
             if let Some(loading) = loading.as_deref_mut() {
                 loading.fail(refusal.error.clone());
             }
@@ -497,7 +513,10 @@ pub fn apply_prepared_match(
             &mut install,
             assets::SessionMapScriptSound(facts.script_sound),
         );
-        stage_resource(&mut install, assets::SessionTeamIcons(facts.team_icons));
+        stage_resource(
+            &mut install,
+            assets::SessionTeamSettings(facts.team_settings),
+        );
         stage_resource(&mut install, assets::PreparedLocalizedStrings(strings));
         stage_resource(&mut install, fx_catalog);
         stage_resource(&mut install, type10);
@@ -845,8 +864,14 @@ pub fn apply_prepared_match(
                     install.apply(world);
                 }
             });
+            if let Some(stage) = install_stage {
+                stage.done();
+            }
         }
         Err(refusal) => {
+            if let Some(stage) = install_stage {
+                stage.fail();
+            }
             if let Some(loading) = loading.as_deref_mut() {
                 loading.fail(refusal.error.clone());
             }
@@ -944,7 +969,22 @@ fn preflight_match_install(
     let death = PreparedDestructibleDeath(std::mem::take(&mut prepared.destructible_death));
     log_destructible_death_assets(&death);
     let player_anim_sources = prepared.player_anim_sources;
-    let prepared_map = prepared.prepared_map;
+    let mut prepared_map = prepared.prepared_map;
+    if prepared_map.namespace == Some(assets::AssetNamespace::Iw4)
+        && let Some(catalog) = catalog
+        && let Some(table) = catalog.string_table(gamemode_iw4::FACTION_TABLE)
+    {
+        let arena = catalog
+            .rawfile_text("mp/basemaps.arena")
+            .map(str::to_owned)
+            .or_else(|| identity.and_then(|id| assets::read_basemaps_arena(&id.games_root)));
+        prepared_map.facts.team_settings = assets::team_settings_for_zone(
+            table,
+            assets::AssetNamespace::Iw4,
+            arena.as_deref(),
+            zone,
+        );
+    }
     let strings = std::mem::take(&mut prepared.strings);
     let kind = match match_kind(mode_selection) {
         Ok(kind) => kind,
@@ -977,7 +1017,11 @@ fn preflight_match_install(
             for model in &flags {
                 if !matches!(
                     prepared.world.map_xmodel_scene_assets.get_name(model),
-                    Some(assets::MapXModelSceneAsset::Iw4(_))
+                    Some(
+                        assets::MapXModelSceneAsset::Iw4(_)
+                            | assets::MapXModelSceneAsset::Iw5(_)
+                            | assets::MapXModelSceneAsset::T5(_)
+                    )
                 ) {
                     return Err(format!("DOM flag model unavailable: {model}"));
                 }

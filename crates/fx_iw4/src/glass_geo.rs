@@ -359,9 +359,6 @@ pub fn fx_glass_point_in_contour(verts: &[[i16; 2]], p: [f32; 2]) -> bool {
 }
 
 /// Containment for a whole piece: inside the outer contour and outside every hole.
-///
-/// This replaces the convex test repeated hits used, which accepted points in the
-/// notches of a concave shard and in the middle of a hole.
 /// Pulls an impact point onto the piece.
 ///
 /// A point already inside the outer contour and outside every hole is left alone;

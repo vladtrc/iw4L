@@ -11,6 +11,7 @@ bevy.workspace = true
 assets.workspace = true
 frame.workspace = true
 net = { path = "../net" }
+session.workspace = true
 sim.workspace = true
 
 [lints]

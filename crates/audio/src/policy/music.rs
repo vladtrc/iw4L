@@ -2,17 +2,19 @@ use std::collections::HashSet;
 
 use bevy::prelude::*;
 use frame::{
-    AuthoritySet, GameEnded, GameWin, GlassDestroyed, MatchEndingReason as BusReason,
-    MatchEndingSoon, MatchEndingVerySoon, PrematchDone, SpawnedPlayerNotify,
+    AuthoritySet, GameEnded, GameWin, GameWinner, GlassDestroyed, MatchEndingReason as BusReason,
+    MatchEndingSoon, MatchEndingVerySoon, PrematchDone, RoundSwitchKind, RoundSwitchNotify,
+    RoundWin, SpawnedPlayerNotify,
 };
 use killcam_iw4::log::Log;
 use killcam_iw4::task::Millis;
 use net::{AuthorityWorld, authority_should_tick};
 use sound_iw4::{
-    Alias, ClientId, Fleet, INIT, Level, MatchEndingReason as SoundReason, MusicController,
-    MusicStep, Notify, Output, PersTeam, Player, PlayerDialog, Recipe, SuspenseMusic, SuspenseStep,
-    Team, TeamScores, VOICE_INFIX, Winner, advance_all, group, leader_dialog_on_one,
-    leader_dialog_on_one_grouped, play_ffa_game_win, play_spawn_music, suspense_len,
+    Alias, Broadcast, ClientId, Fleet, INIT, Level, MatchEndingReason as SoundReason,
+    MusicController, MusicStep, Notify, Output, PersTeam, Player, PlayerDialog, Recipe,
+    RoundSwitch, SuspenseMusic, SuspenseStep, Team, TeamScores, VOICE_INFIX, Winner, advance_all,
+    group, leader_dialog, leader_dialog_on_one, leader_dialog_on_one_grouped, play_ffa_game_win,
+    play_spawn_music, play_team_game_win, suspense_len,
 };
 
 #[derive(Resource)]
@@ -37,6 +39,18 @@ pub struct ScriptMusicHost {
 
     prematch_done_flag: bool,
 
+    spawned_once: HashSet<ClientId>,
+
+    /// Only the first side switch of a match is ever spoken.
+    round_switch_done: bool,
+
+    /// The winner line is spoken a share of the round or post-match delay after
+    /// the win, so it outlives the notify frame and only ever fires once.
+    pending_round_dialog: Option<(Millis, Winner)>,
+    round_dialog_done: bool,
+    pending_game_dialog: Option<(Millis, Winner)>,
+    game_dialog_done: bool,
+
     pub unhandled_glass_destroyed: u32,
 }
 
@@ -59,6 +73,12 @@ impl Default for ScriptMusicHost {
             prefixes_bound: false,
             bound_zone: None,
             prematch_done_flag: false,
+            spawned_once: HashSet::new(),
+            round_switch_done: false,
+            pending_round_dialog: None,
+            round_dialog_done: false,
+            pending_game_dialog: None,
+            game_dialog_done: false,
             unhandled_glass_destroyed: 0,
         }
     }
@@ -143,15 +163,32 @@ fn apply_arena_charsets(
     }
 }
 
-fn ffa_level<'a>(losing: &'a [ClientId], highest: Option<ClientId>) -> Level<'a> {
+fn match_level<'a>(
+    world: &sim::SimWorld,
+    losing: &'a [ClientId],
+    highest: Option<ClientId>,
+) -> Level<'a> {
+    let kind = world.game_mode_kind();
+    let (roundlimit, rounds_played) = match kind {
+        gamemode_iw4::GameModeKind::Demolition => (
+            gamemode_iw4::dd::ROUND_LIMIT as i32,
+            world.objectives.round.saturating_sub(1) as i32,
+        ),
+        gamemode_iw4::GameModeKind::Domination => (gamemode_iw4::dom::ROUND_LIMIT, 0),
+        _ => (gamemode_iw4::ffa::ROUND_LIMIT, 0),
+    };
+    let scores = world.team_scores();
     Level {
         splitscreen: false,
-        team_based: false,
+        team_based: kind.is_team(),
 
         hardcore_mode: false,
-        roundlimit: gamemode_iw4::ffa::ROUND_LIMIT,
-        rounds_played: 0,
-        team_scores: TeamScores::default(),
+        roundlimit,
+        rounds_played,
+        team_scores: TeamScores {
+            allies: scores.allies,
+            axis: scores.axis,
+        },
         highest_scoring_player: highest,
         losing_players: losing,
     }
@@ -163,6 +200,8 @@ fn drain_level_notifies_to_music(
     mut ended: MessageReader<GameEnded>,
     mut prematch: MessageReader<PrematchDone>,
     mut game_win: MessageReader<GameWin>,
+    mut round_win: MessageReader<RoundWin>,
+    mut round_switch: MessageReader<RoundSwitchNotify>,
     mut spawned: MessageReader<SpawnedPlayerNotify>,
     mut glass_destroyed: MessageReader<GlassDestroyed>,
     mut host: ResMut<ScriptMusicHost>,
@@ -177,6 +216,12 @@ fn drain_level_notifies_to_music(
         host.controller = MusicController::new();
         host.suspense = None;
         host.prematch_done_flag = false;
+        host.spawned_once.clear();
+        host.round_switch_done = false;
+        host.pending_round_dialog = None;
+        host.round_dialog_done = false;
+        host.pending_game_dialog = None;
+        host.game_dialog_done = false;
         host.rng_seeded = false;
     }
     sync_roster_from_world(&mut host, &authority);
@@ -188,11 +233,13 @@ fn drain_level_notifies_to_music(
     let ended_n = ended.read().count();
     let prematch_n = prematch.read().count();
     let win_msgs: Vec<GameWin> = game_win.read().copied().collect();
+    let round_msgs: Vec<RoundWin> = round_win.read().copied().collect();
+    let switch_msgs: Vec<RoundSwitchNotify> = round_switch.read().copied().collect();
     let spawned_msgs: Vec<SpawnedPlayerNotify> = spawned.read().copied().collect();
     let _ = glass_destroyed.read().count();
     let highest = host.players.first().map(|p| p.client);
     let losing = host.losing.clone();
-    let level = ffa_level(&losing, highest);
+    let level = match_level(&authority.0, &losing, highest);
     let mut out: Log<Output, 32> = Log::new();
 
     let gametype_line = if !authority.0.objectives.bombs.is_empty() {
@@ -211,6 +258,12 @@ fn drain_level_notifies_to_music(
         suspense,
         rng_state,
         prematch_done_flag,
+        spawned_once,
+        round_switch_done,
+        pending_round_dialog,
+        round_dialog_done,
+        pending_game_dialog,
+        game_dialog_done,
         ..
     } = &mut *host;
     {
@@ -227,7 +280,14 @@ fn drain_level_notifies_to_music(
         for _ in 0..prematch_n {
             *prematch_done_flag = true;
             controller.on_notify(now, Notify::PrematchDone, &level, &mut fleet, &mut out);
-            fire_intro_for_fleet(now, &level, &mut fleet, &authority.0.objectives, &mut out);
+            fire_intro_for_fleet(
+                now,
+                &level,
+                &mut fleet,
+                spawned_once,
+                &authority.0.objectives,
+                &mut out,
+            );
         }
         for msg in spawned_msgs {
             let Some(player) = fleet
@@ -238,6 +298,9 @@ fn drain_level_notifies_to_music(
             else {
                 continue;
             };
+            if spawned_once.contains(&player.client) {
+                continue;
+            }
             let team = match player.pers_team {
                 Some(PersTeam::Allies) => Team::Allies,
                 Some(PersTeam::Axis) => Team::Axis,
@@ -246,6 +309,7 @@ fn drain_level_notifies_to_music(
                     continue;
                 }
             };
+            spawned_once.insert(player.client);
             play_spawn_music(player.client, team, &mut out);
             leader_dialog_on_one(
                 now,
@@ -267,20 +331,90 @@ fn drain_level_notifies_to_music(
             }
         }
         for msg in win_msgs {
-            let winner = msg
-                .winner
-                .and_then(|id| u8::try_from(id).ok().map(ClientId));
+            let winner = bus_winner(msg.winner);
+            controller.on_notify(now, Notify::GameWin(winner), &level, &mut fleet, &mut out);
+
+            match winner {
+                Winner::Team(team) => play_team_game_win(Some(team), &fleet, &mut out),
+                Winner::Player(client) => play_ffa_game_win(Some(client), &fleet, &mut out),
+
+                Winner::Undefined if level.team_based => {
+                    play_team_game_win(None, &fleet, &mut out);
+                }
+                Winner::Undefined => play_ffa_game_win(None, &fleet, &mut out),
+            }
+
+            if !*game_dialog_done {
+                *game_dialog_done = true;
+                *pending_game_dialog = Some((now + killcam_iw4::POST_ROUND_TIME_MS / 2, winner));
+            }
+        }
+        for msg in switch_msgs {
+            let switch = match msg.kind {
+                RoundSwitchKind::Halftime => RoundSwitch::Halftime,
+                RoundSwitchKind::Overtime => RoundSwitch::Overtime,
+                RoundSwitchKind::Other => RoundSwitch::Other,
+            };
             controller.on_notify(
                 now,
-                Notify::GameWin(match winner {
-                    Some(c) => Winner::Player(c),
-                    None => Winner::Undefined,
-                }),
+                Notify::RoundSwitch(switch),
                 &level,
                 &mut fleet,
                 &mut out,
             );
-            play_ffa_game_win(winner, &fleet, &mut out);
+            if *round_switch_done {
+                continue;
+            }
+            *round_switch_done = true;
+            let clients: Vec<ClientId> = fleet.players.iter().map(|p| p.client).collect();
+            for client in clients {
+                leader_dialog_on_one(
+                    now,
+                    &level,
+                    &mut fleet,
+                    client,
+                    switch.dialog_key(),
+                    &mut out,
+                );
+            }
+        }
+        for msg in round_msgs {
+            let winner = bus_winner(msg.winner);
+            controller.on_notify(now, Notify::RoundWin(winner), &level, &mut fleet, &mut out);
+            if !*round_dialog_done {
+                *round_dialog_done = true;
+                *pending_round_dialog = Some((now + killcam_iw4::ROUND_END_DELAY_MS / 4, winner));
+            }
+        }
+        if let Some((at, winner)) = *pending_round_dialog {
+            if now >= at {
+                *pending_round_dialog = None;
+                winner_dialog(
+                    now,
+                    &level,
+                    &mut fleet,
+                    winner,
+                    "round_success",
+                    "round_failure",
+                    None,
+                    &mut out,
+                );
+            }
+        }
+        if let Some((at, winner)) = *pending_game_dialog {
+            if now >= at {
+                *pending_game_dialog = None;
+                winner_dialog(
+                    now,
+                    &level,
+                    &mut fleet,
+                    winner,
+                    "mission_success",
+                    "mission_failure",
+                    Some("mission_draw"),
+                    &mut out,
+                );
+            }
         }
         for msg in soon_msgs {
             let reason = match msg.reason {
@@ -373,14 +507,65 @@ fn drain_level_notifies_to_music(
     flush_outputs(&out, &mut pending_svc, allies.as_deref(), axis.as_deref());
 }
 
+fn bus_winner(winner: GameWinner) -> Winner {
+    match winner {
+        GameWinner::Allies => Winner::Team(Team::Allies),
+        GameWinner::Axis => Winner::Team(Team::Axis),
+        GameWinner::Player(id) => match u8::try_from(id).ok().map(ClientId) {
+            Some(client) => Winner::Player(client),
+            None => Winner::Undefined,
+        },
+        GameWinner::Undefined => Winner::Undefined,
+    }
+}
+
+/// The winning team hears `success`, the other hears `failure`, and a player
+/// winner says nothing at all. Only the game dialog has a draw line.
+#[allow(clippy::too_many_arguments)]
+fn winner_dialog<const N: usize>(
+    now: Millis,
+    level: &Level,
+    fleet: &mut Fleet<'_>,
+    winner: Winner,
+    success: &'static str,
+    failure: &'static str,
+    draw: Option<&'static str>,
+    out: &mut Log<Output, N>,
+) {
+    match winner {
+        Winner::Team(team) => {
+            leader_dialog(now, level, fleet, Broadcast::to_team(success, team), out);
+            leader_dialog(
+                now,
+                level,
+                fleet,
+                Broadcast::to_team(failure, team.other()),
+                out,
+            );
+        }
+        Winner::Player(_) => {}
+        Winner::Undefined => {
+            if let Some(draw) = draw {
+                leader_dialog(now, level, fleet, Broadcast::everyone(draw), out);
+            }
+        }
+    }
+}
+
 fn fire_intro_for_fleet<const N: usize>(
     now: Millis,
     level: &Level,
     fleet: &mut Fleet<'_>,
+    spawned_once: &HashSet<ClientId>,
     objectives: &sim::ObjectiveMatch,
     out: &mut Log<Output, N>,
 ) {
-    let clients: Vec<ClientId> = fleet.players.iter().map(|p| p.client).collect();
+    let clients: Vec<ClientId> = fleet
+        .players
+        .iter()
+        .map(|p| p.client)
+        .filter(|c| spawned_once.contains(c))
+        .collect();
     for client in clients {
         fire_intro_on_one(now, level, fleet, client, objectives, out);
     }
@@ -500,6 +685,8 @@ fn sync_roster_from_world(host: &mut ScriptMusicHost, authority: &AuthorityWorld
         }
     }
 
+    host.spawned_once
+        .retain(|c| players.iter().any(|p| p.client == *c));
     let winner = players.first().map(|p| p.client);
     host.losing = players
         .iter()

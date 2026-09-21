@@ -41,6 +41,7 @@ impl Plugin for RenderAssemblePlugin {
             Update,
             crate::assemble::drawsurf::rebuild_xmodel_draw_lane
                 .after(crate::adapters::anim::fpv_present::FpvPlacementSet)
+                .after(crate::adapters::anim::fpv_present::FpvGeometrySet)
                 .after(frame::WorkerCmdSet::AddSceneEnt)
                 .after(crate::assemble::drawsurf::tess::xmodel::apply_resolved_fx_model_lighting)
                 .after(crate::adapters::anim::script_model::ScriptModelDrawSet)

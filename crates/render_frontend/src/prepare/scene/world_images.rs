@@ -192,7 +192,7 @@ pub struct WorldImageUpload {
     lightmaps: Vec<Option<super::world::WorldLightmap>>,
     lightmap_handles: Vec<Option<RuntimeLightmapHandles>>,
     lightmap_at: usize,
-    upload_stage: Option<assets::LoadStage>,
+    upload_stage: Option<assets::StageHandle>,
     reachable_exact: HashSet<u32>,
 }
 
@@ -227,7 +227,7 @@ impl WorldImageUpload {
         &self.lightmap_handles
     }
 
-    pub fn take_stage(&mut self) -> Option<assets::LoadStage> {
+    pub fn take_stage(&mut self) -> Option<assets::StageHandle> {
         self.upload_stage.take()
     }
 
@@ -322,10 +322,14 @@ impl WorldImageUpload {
         self.exact_at = 0;
         self.probe_at = 0;
         self.lightmap_at = 0;
+        // A rearm after a load that never got here leaves the old handle
+        // behind; it was interrupted, not finished.
+        if let Some(stage) = self.upload_stage.take() {
+            stage.cancel();
+        }
         if let Some(progress) = progress {
-            let stage = progress.stage("uploading world images");
-            stage.total(u64::from(self.total));
-            self.upload_stage = Some(stage);
+            self.upload_stage =
+                Some(progress.begin(assets::StageId::WorldImages, Some(u64::from(self.total))));
         }
     }
 
@@ -470,13 +474,20 @@ impl WorldImageUpload {
             stepped = true;
             self.sync_stage();
         }
-        self.upload_stage = None;
+        // Every slot has been handed over: this is the boundary the owner
+        // meant, not merely `done == total`.
+        if let Some(stage) = self.upload_stage.take() {
+            stage.set_completed(u64::from(self.done));
+            stage.set_bytes(self.handed_bytes);
+            stage.done();
+        }
         true
     }
 
     fn sync_stage(&self) {
         if let Some(stage) = &self.upload_stage {
-            stage.set_done(u64::from(self.done));
+            stage.set_completed(u64::from(self.done));
+            stage.set_bytes(self.handed_bytes);
         }
     }
 }

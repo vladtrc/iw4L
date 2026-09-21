@@ -271,6 +271,7 @@ fn kind_tag(kind: AssetKind) -> u8 {
         AssetKind::XModel => 3,
         AssetKind::Anim => 4,
         AssetKind::Material => 5,
+        AssetKind::Localize => 6,
     }
 }
 

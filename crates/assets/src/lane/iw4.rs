@@ -12,7 +12,7 @@ use crate::{
     dm_spawn_points, intermission_view,
     lane_capability::{LaneStatus, PreparedCapability},
     map_ents_entity_string, minimap_corners,
-    progress::LoadProgress,
+    progress::{LoadProgress, StageId},
     session_load::{PreparedWorld, WorldDrawPolicy},
     worldspawn_north_yaw,
 };
@@ -68,10 +68,14 @@ impl ZoneLane for Iw4Lane {
         >,
     ) -> LoadedWorld {
         let mut report = Vec::new();
-        let stage = progress.stage("reading zone header");
+        let stage = progress.begin_scoped(StageId::MapAssets, "header", None);
         let header = match image.header() {
-            Ok(h) => h,
+            Ok(h) => {
+                stage.done();
+                h
+            }
             Err(e) => {
+                stage.fail();
                 return LoadedWorld::with_gap(
                     WorldDrawPolicy::iw4(),
                     PreparedCapability::PreparedWorld,
@@ -81,8 +85,7 @@ impl ZoneLane for Iw4Lane {
             }
         };
 
-        drop(stage);
-        let stage = progress.stage("preparing zone memory");
+        let stage = progress.begin_scoped(StageId::MapAssets, "memory", None);
         report.push(crate::zone::xfile_arena_row(
             "zone arenas map",
             &header.block_size,
@@ -91,8 +94,12 @@ impl ZoneLane for Iw4Lane {
         ));
         let mut memory = ZoneMemory::for_header(&header);
         let mut stream = match memory.stream(&image.bytes) {
-            Ok(s) => s,
+            Ok(s) => {
+                stage.done();
+                s
+            }
             Err(e) => {
+                stage.fail();
                 return LoadedWorld::with_gap(
                     WorldDrawPolicy::iw4(),
                     PreparedCapability::PreparedWorld,
@@ -102,14 +109,15 @@ impl ZoneLane for Iw4Lane {
             }
         };
 
-        drop(stage);
-        let mut sink = ZoneWalkSink::with_stage(progress.stage("walking map assets"));
+        let mut sink =
+            ZoneWalkSink::with_stage(progress.begin_scoped(StageId::MapAssets, "walk", None));
         let seeded_techsets = material_seed.technique_set_facts().to_vec();
         sink.seed_materials(material_seed);
         sink.map_xmodels.shared_surfaces = shared_surfaces;
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(crate::AssetNamespace::Iw4);
-        match load_zone(&mut stream, &mut sink) {
+        let walked = load_zone(&mut stream, &mut sink);
+        match &walked {
             Ok(_) => report.push(format!("zone walk: complete, {} assets", sink.walked)),
             Err(e) => report.push(format!(
                 "zone walk: stopped after {} assets — {e}",
@@ -121,7 +129,9 @@ impl ZoneLane for Iw4Lane {
             stream.unsettled_offsets()
         ));
         report.extend(sink.models.report("map"));
-        drop(sink.stage.take());
+        if let Some(stage) = sink.stage.take() {
+            stage.finish_from(&walked);
+        }
         let light_def_table = sink.light_def_table;
         let light_def_bodies = sink.light_def_bodies;
         let mut materials = std::mem::take(&mut sink.materials);
@@ -249,8 +259,8 @@ impl ZoneLane for Iw4Lane {
             .map(str::to_owned)
             .collect();
         let leftover = std::mem::take(&mut sink.fx_glass_def_materials);
-        let image_stage = progress.stage("decoding material images");
-        let clip_stage = progress.stage("building collision map");
+        let image_stage = progress.begin_scoped(StageId::Images, "map", None);
+        let clip_stage = progress.begin_scoped(StageId::MapAssets, "collision", None);
         let mut clip = None;
         let mut clip_report = Vec::new();
         let mut fx_glass = None;
@@ -336,7 +346,7 @@ impl ZoneLane for Iw4Lane {
                 ),
                 None => crate::DynEntCatalog::default(),
             };
-            drop(clip_stage);
+            clip_stage.done();
         });
         report.extend(image_report.into_iter().flatten());
         report.extend(clip_report);
@@ -372,8 +382,9 @@ impl ZoneLane for Iw4Lane {
                 gfx.dyn_model_count, gfx.dyn_brush_count
             ));
         }
-        let stage = progress.stage("building world geometry");
+        let stage = progress.begin_scoped(StageId::MapAssets, "geometry", None);
         let Some(geometry) = stream.gfx_world() else {
+            stage.fail();
             report.push("no GfxWorld reached — nothing to draw".into());
             push_mapents_key_census(&mut report, &stream);
             let dm_spawns = dm_spawn_points(&stream);
@@ -424,10 +435,10 @@ impl ZoneLane for Iw4Lane {
             "GfxLightDef map zone: table={light_def_table} bodies={light_def_bodies} recorded={}",
             stream.light_defs().len()
         ));
-        drop(stage);
-        let stage = progress.stage("building static models");
+        stage.finish_from(&world_draw);
         match world_draw {
             Ok((draw, map_materials)) => {
+                let stage = progress.begin_scoped(StageId::MapAssets, "models", None);
                 let map_models = super::build_static_model_draw(&stream, geometry, map_xmodels);
                 {
                     let n = draw.primary_lights.len();
@@ -495,8 +506,8 @@ impl ZoneLane for Iw4Lane {
                     ..
                 } = map_models;
 
-                drop(stage);
-                let stage = progress.stage("sampling static model lighting");
+                stage.done();
+                let stage = progress.begin_scoped(StageId::MapAssets, "lighting", None);
                 let smodel_lighting_samples = {
                     use crate::model_lighting::{
                         OwnedLightGrid, build_smodel_lighting_samples_with_sight,
@@ -573,8 +584,8 @@ impl ZoneLane for Iw4Lane {
                     }
                 };
                 let (smodel_lighting_samples, light_grid) = smodel_lighting_samples;
-                drop(stage);
-                let _stage = progress.stage("finishing world handoff");
+                stage.done();
+                let handoff = progress.begin_scoped(StageId::MapAssets, "handoff", None);
                 let intermission_view = intermission_view(&stream);
                 let minimap_corners = minimap_corners(&stream);
                 let north_yaw = worldspawn_north_yaw(&stream);
@@ -732,6 +743,7 @@ impl ZoneLane for Iw4Lane {
                 let min = draw.stats.min;
                 let max = draw.stats.max;
                 let world_bounds = draw.stats.bounds;
+                handoff.done();
                 LoadedWorld {
                     materials: map_materials,
                     world: PreparedWorld {
@@ -860,12 +872,18 @@ impl ZoneLane for Iw4Lane {
             fastfile_iw4::XFILE_BLOCK_TEMP,
             fastfile_iw4::XFILE_BLOCK_VIRTUAL,
         )];
-        let mut sink = CommonWalkSink::with_stage(progress.stage(format!("walking {zone_name}")));
+        let mut sink = CommonWalkSink::with_stage(progress.begin_scoped(
+            StageId::CommonAssets,
+            zone_name.clone(),
+            None,
+        ));
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::intern(&zone_name));
         sink.set_capture_ns(crate::AssetNamespace::Iw4);
         let walk = load_zone(&mut stream, &mut sink);
-        drop(sink.stage.take());
+        if let Some(stage) = sink.stage.take() {
+            stage.finish_from(&walk);
+        }
         let mut report = sink.models.report("common_mp");
         report.splice(0..0, report_arenas.drain(..));
         if let Err(error) = walk {
@@ -1074,7 +1092,7 @@ impl ZoneLane for Iw4Lane {
         if decode_color_maps {
             let mut material_population = sink.materials;
 
-            let stage = progress.stage("planning common_mp material images");
+            let stage = progress.begin_scoped(StageId::Images, "common_mp", None);
             let (inline, mut plan) = crate::material_images::plan_material_color_maps(
                 path,
                 &mut material_population,
@@ -1114,7 +1132,11 @@ impl ZoneLane for Iw4Lane {
             report.push(format!(
                 "common_mp fx elem 2d images: {fx_inline} in-zone TS_COLOR_MAP/TS_2D decoded, rest claimed"
             ));
-            drop(stage);
+            // The planning phase is over and it succeeded: what is left of the
+            // plan is decoded later, under its own stage. Dropping the handle
+            // here would be recorded as an interrupted stage, which is what a
+            // load that was cut short looks like.
+            stage.done();
             let pending_images = Some(plan);
             {
                 let unique: std::collections::BTreeSet<String> =
@@ -1192,7 +1214,7 @@ impl ZoneLane for Iw4Lane {
                 lochit_table: sink.lochit_table,
                 xmodel_walk: sink.models.walk_census(),
                 s1_common_bytes,
-                teamset_icons: std::collections::HashMap::new(),
+                teamsets: std::collections::HashMap::new(),
                 film_visions: sink.film_visions,
             }
         } else {
@@ -1227,7 +1249,7 @@ impl ZoneLane for Iw4Lane {
                 lochit_table: sink.lochit_table,
                 xmodel_walk: sink.models.walk_census(),
                 s1_common_bytes,
-                teamset_icons: std::collections::HashMap::new(),
+                teamsets: std::collections::HashMap::new(),
                 film_visions: sink.film_visions,
             }
         }
@@ -1265,13 +1287,18 @@ impl ZoneLane for Iw4Lane {
                 };
             }
         };
-        let mut sink =
-            MaterialPopulationSink::with_stage(progress.stage(format!("walking {zone_name}")));
+        let mut sink = MaterialPopulationSink::with_stage(progress.begin_scoped(
+            StageId::CommonAssets,
+            zone_name.clone(),
+            None,
+        ));
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::intern(&zone_name));
         sink.set_capture_ns(crate::AssetNamespace::Iw4);
         let walk = load_zone(&mut stream, &mut sink);
-        drop(sink.stage.take());
+        if let Some(stage) = sink.stage.take() {
+            stage.finish_from(&walk);
+        }
         let mut report = Vec::new();
         if let Err(error) = walk {
             report.push(format!(
@@ -1305,7 +1332,7 @@ fn push_mapents_key_census(report: &mut Vec<String>, stream: &fastfile_iw4::Zone
 fn decode_map_material_images(
     path: &Path,
     catalog: &mut crate::MaterialCatalog,
-    stage: crate::progress::LoadStage,
+    stage: crate::progress::StageHandle,
     fx_name_hints: Vec<String>,
     glass_names: Vec<String>,
 ) -> Vec<String> {
@@ -1349,6 +1376,6 @@ fn decode_map_material_images(
     report.push(
         "image memory map fx color maps: n=0 bytes=0 (Bound into catalog; no clone sidecar)".into(),
     );
-    drop(stage);
+    stage.done();
     report
 }

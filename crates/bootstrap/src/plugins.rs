@@ -29,6 +29,10 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
         RuntimeRole::Client => NetPlugin::client(),
         RuntimeRole::Replay => NetPlugin::replay(),
     };
+    if crate::bench::enabled() {
+        // Unfocused benchmarks must not inherit the window runner's 60 Hz sleep.
+        app.insert_resource(bevy::winit::WinitSettings::continuous());
+    }
     app.add_plugins(AssetPlugin)
         .add_plugins(UiPlugin)
         .add_plugins(ConsolePlugin)
@@ -43,7 +47,29 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
         schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
     });
 
+    app.edit_schedule(First, |schedule| {
+        schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+    });
+    app.edit_schedule(PreUpdate, |schedule| {
+        schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+    });
+    app.edit_schedule(PostUpdate, |schedule| {
+        schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+    });
+    app.edit_schedule(Last, |schedule| {
+        schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+    });
+
     if let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) {
+        render_app.edit_schedule(bevy::render::renderer::RenderGraph, |schedule| {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
+        render_app.edit_schedule(bevy::core_pipeline::Core3d, |schedule| {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
+        render_app.edit_schedule(bevy::core_pipeline::Core2d, |schedule| {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
         render_app.edit_schedule(bevy::render::Render, |schedule| {
             schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
         });

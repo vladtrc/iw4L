@@ -712,7 +712,7 @@ fn commit_fx_transaction(
                 if cursor.draw_miss_material == n {
                     let name = sprites
                         .first()
-                        .map(|s| s.material_name.as_str())
+                        .map(|s| s.material_name.as_ref())
                         .unwrap_or("?");
                     diag::warn!(
                         World,
@@ -1292,7 +1292,7 @@ fn log_fx_near_camera(
                 format!(
                     "#{mat} `{}` n={} near={nearest:.0} amax={amax}",
                     list.first()
-                        .map(|s| s.material_name.as_str())
+                        .map(|s| s.material_name.as_ref())
                         .unwrap_or("?"),
                     list.len()
                 ),
@@ -1502,7 +1502,7 @@ fn impact_present_census(host: &FxSystemHost, sprites: &[FxSpriteInstance]) -> I
         decal_dist,
         far_origin: farthest.map(|s| s.origin),
         far_flags: farthest.map(|s| s.flags),
-        far_def: farthest.map(|s| s.def_name.clone()),
+        far_def: farthest.map(|s| s.def_name.to_string()),
         vel_local_n: impacts
             .iter()
             .filter(|s| (s.flags & FX_ELEM_VEL_LOCAL) != 0)

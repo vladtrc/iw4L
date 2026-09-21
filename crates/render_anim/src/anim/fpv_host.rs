@@ -1,11 +1,14 @@
+use std::collections::HashMap;
+
 use bevy::math::{Mat4, Vec3};
 use bevy::prelude::*;
-use bevy::render::mesh::Mesh;
+use render_scene::SmodelPassMaterial;
 
 use crate::anim::fpv::{
     EquippedFpv, FpvAuthoritySample, FpvPresentState, tick_equipped_fpv_with_predicted_fire,
 };
-use crate::anim::fpv_pose::{FpvBoltFrame, PosedClip, PosedModelSurface, pose_eye_blended};
+use crate::anim::fpv_pose::{FpvBoltFrame, PosedClip};
+use crate::anim::fpv_rig::{FpvHandPose, FpvRigInputs, FpvRigKey, PreparedFpvRig};
 use assets::FpvMeshCatalog;
 
 #[derive(Resource, Default)]
@@ -76,14 +79,14 @@ impl Default for FpvPoseKind {
     }
 }
 
+/// What one frame asked of the rig: bones per hand, and the lens the right hand
+/// carries. No geometry — the surfaces this rig draws were settled when it was
+/// prepared, and the vertices are written straight into the published plan.
 pub struct FpvPosedFrame {
-    pub hands: Vec<PosedModelSurface>,
-    pub gun: Vec<PosedModelSurface>,
+    pub poses: [Option<FpvHandPose>; 2],
     pub lens: Mat4,
-    pub bolts: [Option<FpvBoltFrame>; 2],
     pub idle_sampled: bool,
     pub notetracks: Vec<String>,
-    pub scope_xmodel: Option<String>,
 }
 
 #[derive(Resource, Default)]
@@ -95,8 +98,11 @@ pub struct FpvPoseProduct {
 pub struct FpvGenerateArgs<'a> {
     pub dt: f32,
     pub equipped: &'a mut EquippedFpv,
+    pub rig: &'a mut Option<PreparedFpvRig>,
     pub cursor: &'a mut FpvPresentState,
     pub catalog: &'a FpvMeshCatalog,
+    pub materials: &'a [SmodelPassMaterial],
+    pub material_by_authored: &'a HashMap<usize, u32>,
     pub hide_tags: &'a [String],
     pub scope_name: Option<&'a str>,
     pub rocket_name: Option<&'a str>,
@@ -110,8 +116,11 @@ pub fn generate_fpv_pose(args: FpvGenerateArgs<'_>) -> FpvPoseKind {
     let FpvGenerateArgs {
         dt,
         equipped,
+        rig,
         cursor,
         catalog,
+        materials,
+        material_by_authored,
         hide_tags,
         scope_name,
         rocket_name,
@@ -122,106 +131,122 @@ pub fn generate_fpv_pose(args: FpvGenerateArgs<'_>) -> FpvPoseKind {
     } = args;
     let (_pose, notifies) =
         tick_equipped_fpv_with_predicted_fire(equipped, cursor, sample, predicted_fire, dt);
-    let anims: Vec<PosedClip<'_>> = equipped
+
+    let right: Vec<PosedClip<'_>> = equipped
         .controller
         .active_anims()
         .map(|a| PosedClip {
+            node: a.node,
             clip: a.clip,
             time: a.time,
             weight: a.weight,
         })
         .collect();
-    if anims.is_empty() {
+    if right.is_empty() {
         return FpvPoseKind::Refuse(FpvPoseRefuse::NoActiveClips);
     }
-    let Some(posed) = pose_eye_blended(
-        catalog,
-        equipped.namespace,
-        &equipped.gun_xmodel,
-        &equipped.hands,
-        &anims,
-        hide_tags,
-        scope_name,
-        rocket_name,
-    ) else {
+    let left: Vec<PosedClip<'_>> = match (dual, equipped.left.as_ref()) {
+        (true, Some(left)) => left
+            .active_anims()
+            .map(|a| PosedClip {
+                node: a.node,
+                clip: a.clip,
+                time: a.time,
+                weight: a.weight,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let dual_drawn = !left.is_empty();
+
+    let composed = rig.as_ref().is_some_and(|rig| {
+        rig.matches(
+            equipped.namespace,
+            &equipped.gun_xmodel,
+            &equipped.hands,
+            scope_name,
+            rocket_name,
+            hide_tags,
+            dual_drawn,
+        )
+    });
+    if !composed {
+        let key = FpvRigKey {
+            namespace: equipped.namespace,
+            gun: equipped.gun_xmodel.clone(),
+            hands: equipped.hands.clone(),
+            scope: scope_name.map(str::to_owned),
+            rocket: rocket_name.map(str::to_owned),
+            hide_tags: hide_tags.to_vec(),
+            dual: dual_drawn,
+        };
+        match PreparedFpvRig::build(
+            key,
+            FpvRigInputs {
+                catalog,
+                materials,
+                material_by_authored,
+            },
+        ) {
+            Ok(prepared) => {
+                diag::info!(
+                    Fpv,
+                    "fpv: prepared rig `{}` — {} draws, {} vertices, {} surfaces skipped{}",
+                    equipped.gun_xmodel,
+                    prepared.geometry.plan_draw_n,
+                    prepared.geometry.dest_n,
+                    prepared.geometry.plan_skip_n,
+                    if dual_drawn { ", dual" } else { "" }
+                );
+                *rig = Some(prepared);
+            }
+            Err(error) => {
+                diag::info!(
+                    Fpv,
+                    "fpv: cannot prepare `{}` — {error}",
+                    equipped.gun_xmodel
+                );
+                *rig = None;
+                return FpvPoseKind::Refuse(FpvPoseRefuse::EyePoseFailed {
+                    gun_xmodel: equipped.gun_xmodel.clone(),
+                });
+            }
+        }
+    }
+    let Some(prepared) = rig.as_mut() else {
         return FpvPoseKind::Refuse(FpvPoseRefuse::EyePoseFailed {
             gun_xmodel: equipped.gun_xmodel.clone(),
         });
     };
-    drop(anims);
-    let (mut hands, mut gun, stats, lens) = (posed.hands, posed.gun, posed.stats, posed.lens);
-    let mut bolts = [Some(posed.bolt), None];
-    if dual {
-        if let Some(left) = equipped.left.as_ref() {
-            let left_anims: Vec<PosedClip<'_>> = left
-                .active_anims()
-                .map(|a| PosedClip {
-                    clip: a.clip,
-                    time: a.time,
-                    weight: a.weight,
-                })
-                .collect();
-            if !left_anims.is_empty() {
-                if let Some(left_posed) = pose_eye_blended(
-                    catalog,
-                    equipped.namespace,
-                    &equipped.gun_xmodel,
-                    &equipped.hands,
-                    &left_anims,
-                    hide_tags,
-                    None,
-                    None,
-                ) {
-                    let (mut lh, mut lg, mut left_bolt) =
-                        (left_posed.hands, left_posed.gun, left_posed.bolt);
-                    if let Some(offset) = dual_offset.filter(|o| *o != 0.0) {
-                        translate_posed_surfaces(&mut lh, Vec3::new(offset, 0.0, 0.0));
-                        translate_posed_surfaces(&mut lg, Vec3::new(offset, 0.0, 0.0));
-                        let shift = Mat4::from_translation(Vec3::new(offset, 0.0, 0.0));
-                        for bone in &mut left_bolt.bones {
-                            *bone = shift * *bone;
-                        }
-                    }
-                    bolts[1] = Some(left_bolt);
-                    hands.extend(lh);
-                    gun.extend(lg);
-                }
-            }
-        }
-    }
-    FpvPoseKind::Posed(FpvPosedFrame {
-        hands,
-        gun,
-        lens,
-        bolts,
-        idle_sampled: stats.idle_sampled,
-        notetracks: notifies,
-        scope_xmodel: scope_name.map(str::to_owned),
-    })
-}
 
-pub fn translate_posed_surfaces(surfaces: &mut [PosedModelSurface], delta: Vec3) {
-    if delta == Vec3::ZERO {
-        return;
-    }
-    for surface in surfaces {
-        if let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(pos)) =
-            surface.mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
-        {
-            for p in pos.iter_mut() {
-                p[0] += delta.x;
-                p[1] += delta.y;
-                p[2] += delta.z;
-            }
-        }
-        for row in &mut surface.packed_vertices {
-            let mut xyz = [0.0f32; 3];
-            xyz[0] = f32::from_le_bytes([row[0], row[1], row[2], row[3]]) + delta.x;
-            xyz[1] = f32::from_le_bytes([row[4], row[5], row[6], row[7]]) + delta.y;
-            xyz[2] = f32::from_le_bytes([row[8], row[9], row[10], row[11]]) + delta.z;
-            row[0..4].copy_from_slice(&xyz[0].to_le_bytes());
-            row[4..8].copy_from_slice(&xyz[1].to_le_bytes());
-            row[8..12].copy_from_slice(&xyz[2].to_le_bytes());
-        }
-    }
+    let Some(right_pose) = prepared.pose_hand(0, &right, Vec3::ZERO) else {
+        return FpvPoseKind::Refuse(FpvPoseRefuse::EyePoseFailed {
+            gun_xmodel: equipped.gun_xmodel.clone(),
+        });
+    };
+    let lens = right_pose.lens;
+    let left_pose = if dual_drawn {
+        let offset = dual_offset
+            .filter(|offset| *offset != 0.0)
+            .map(|offset| Vec3::new(offset, 0.0, 0.0))
+            .unwrap_or(Vec3::ZERO);
+        // The rig laid out a left hand, so a left hand that cannot be posed is
+        // a plan with a hole in it. Refusing the frame is the honest answer.
+        let Some(pose) = prepared.pose_hand(1, &left, offset) else {
+            return FpvPoseKind::Refuse(FpvPoseRefuse::EyePoseFailed {
+                gun_xmodel: equipped.gun_xmodel.clone(),
+            });
+        };
+        Some(pose)
+    } else {
+        None
+    };
+
+    let poses = [Some(right_pose), left_pose];
+    FpvPoseKind::Posed(FpvPosedFrame {
+        poses,
+        lens,
+        idle_sampled: true,
+        notetracks: notifies,
+    })
 }

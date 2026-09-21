@@ -13,46 +13,87 @@ pub struct ArenaCharsets {
     pub axischar: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct TeamIcons {
-    pub allies: Option<String>,
-    pub axis: Option<String>,
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MapTeamSettings {
+    pub allies_color: Option<[f32; 3]>,
+    pub axis_color: Option<[f32; 3]>,
+    pub allies_name: Option<asset_core::AssetKey>,
+    pub axis_name: Option<asset_core::AssetKey>,
+    pub attackers: Option<String>,
+    pub defenders: Option<String>,
+    pub allies: Option<asset_core::AssetKey>,
+    pub axis: Option<asset_core::AssetKey>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Resource)]
-pub struct SessionTeamIcons(pub TeamIcons);
+#[derive(Clone, Debug, Default, PartialEq, Resource)]
+pub struct SessionTeamSettings(pub MapTeamSettings);
 
-fn table_icon(table: &CapturedStringTable, charset: Option<&str>) -> Option<String> {
+fn table_icon(
+    table: &CapturedStringTable,
+    namespace: asset_core::AssetNamespace,
+    charset: Option<&str>,
+) -> Option<asset_core::AssetKey> {
     let charset = charset.filter(|s| !s.is_empty())?;
     let cell = table.lookup_col(charset, FACTION_ICON_COL);
-    (!cell.is_empty()).then(|| cell.to_owned())
+    asset_core::AssetKey::new(namespace, asset_core::AssetKind::Material, cell).ok()
 }
 
 #[must_use]
-pub fn team_icons(
+pub fn team_settings(
     table: &CapturedStringTable,
+    namespace: asset_core::AssetNamespace,
     allieschar: Option<&str>,
     axischar: Option<&str>,
-) -> TeamIcons {
-    TeamIcons {
-        allies: table_icon(table, allieschar),
-        axis: table_icon(table, axischar),
+) -> MapTeamSettings {
+    let color = |charset: &str| {
+        let rgb = [14, 15, 16].map(|column| table.lookup_col(charset, column).parse::<f32>().ok());
+        let rgb = [rgb[0]?, rgb[1]?, rgb[2]?];
+        rgb.iter().all(|v| v.is_finite()).then_some(rgb)
+    };
+    MapTeamSettings {
+        allies_color: allieschar.and_then(color),
+        axis_color: axischar.and_then(color),
+        allies: table_icon(table, namespace, allieschar),
+        axis: table_icon(table, namespace, axischar),
+        allies_name: allieschar.and_then(|name| {
+            asset_core::AssetKey::new(
+                namespace,
+                asset_core::AssetKind::Localize,
+                table.lookup_col(name, 2),
+            )
+            .ok()
+        }),
+        axis_name: axischar.and_then(|name| {
+            asset_core::AssetKey::new(
+                namespace,
+                asset_core::AssetKind::Localize,
+                table.lookup_col(name, 2),
+            )
+            .ok()
+        }),
+        ..Default::default()
     }
 }
 
 #[must_use]
-pub fn team_icons_for_zone(
+pub fn team_settings_for_zone(
     table: &CapturedStringTable,
+    namespace: asset_core::AssetNamespace,
     arena_text: Option<&str>,
     zone: &str,
-) -> TeamIcons {
+) -> MapTeamSettings {
     if zone.is_empty() {
-        return TeamIcons::default();
+        return MapTeamSettings::default();
     }
     let Some(row) = arena_text.and_then(|text| arena_charsets(text, zone)) else {
-        return TeamIcons::default();
+        return MapTeamSettings::default();
     };
-    team_icons(table, row.allieschar.as_deref(), row.axischar.as_deref())
+    team_settings(
+        table,
+        namespace,
+        row.allieschar.as_deref(),
+        row.axischar.as_deref(),
+    )
 }
 
 fn is_basemaps_arena_name(name: &str) -> bool {
@@ -68,9 +109,7 @@ fn is_faction_table_name(name: &str) -> bool {
         .eq_ignore_ascii_case("mp/factiontable.csv")
 }
 
-pub fn load_iw5_team_icon_sources(
-    zone_path: &Path,
-) -> (Option<String>, Option<CapturedStringTable>) {
+pub fn load_iw5_team_sources(zone_path: &Path) -> (Option<String>, Option<CapturedStringTable>) {
     let Ok(image) = crate::open_zone(zone_path) else {
         return (None, None);
     };
@@ -271,12 +310,84 @@ pub fn t5_teamset_from_map_gsc(script: &str) -> Option<&str> {
     None
 }
 
+fn script_dvar_string<'a>(script: &'a str, key: &str) -> Option<&'a str> {
+    for line in script.lines() {
+        let line = line.trim();
+        let Some((function, args)) = line.split_once('(') else {
+            continue;
+        };
+        if !function.trim().eq_ignore_ascii_case("setdvar") {
+            continue;
+        }
+        let mut quotes = args.split('"');
+        let (Some(before), Some(name), Some(between), Some(value)) =
+            (quotes.next(), quotes.next(), quotes.next(), quotes.next())
+        else {
+            continue;
+        };
+        if !before.trim().is_empty() || !name.eq_ignore_ascii_case(key) {
+            continue;
+        }
+        if !matches!(between.trim(), "," | ",&" | ", &") {
+            continue;
+        }
+        return Some(value);
+    }
+    None
+}
+
 #[must_use]
-pub fn t5_icons_from_teamset_gsc(script: &str) -> TeamIcons {
-    TeamIcons {
-        allies: crate::game_nested_string_assignment(script, &["icons", "allies"])
-            .map(str::to_owned),
-        axis: crate::game_nested_string_assignment(script, &["icons", "axis"]).map(str::to_owned),
+pub fn t5_settings_from_teamset_gsc(script: &str) -> MapTeamSettings {
+    let color = |key| {
+        let mut values = script_dvar_string(script, key)?
+            .split_whitespace()
+            .map(str::parse::<f32>);
+        let rgb = [
+            values.next()?.ok()?,
+            values.next()?.ok()?,
+            values.next()?.ok()?,
+        ];
+        (values.next().is_none() && rgb.iter().all(|v| v.is_finite())).then_some(rgb)
+    };
+    MapTeamSettings {
+        allies_color: color("g_TeamColor_Allies"),
+        axis_color: color("g_TeamColor_Axis"),
+        allies_name: script_dvar_string(script, "g_TeamName_Allies").and_then(|name| {
+            asset_core::AssetKey::new(
+                asset_core::AssetNamespace::T5,
+                asset_core::AssetKind::Localize,
+                name,
+            )
+            .ok()
+        }),
+        axis_name: script_dvar_string(script, "g_TeamName_Axis").and_then(|name| {
+            asset_core::AssetKey::new(
+                asset_core::AssetNamespace::T5,
+                asset_core::AssetKind::Localize,
+                name,
+            )
+            .ok()
+        }),
+        attackers: asset_audio::game_string_assignment(script, "attackers").map(str::to_owned),
+        defenders: asset_audio::game_string_assignment(script, "defenders").map(str::to_owned),
+        allies: crate::game_nested_string_assignment(script, &["icons", "allies"]).and_then(
+            |name| {
+                asset_core::AssetKey::new(
+                    asset_core::AssetNamespace::T5,
+                    asset_core::AssetKind::Material,
+                    name,
+                )
+                .ok()
+            },
+        ),
+        axis: crate::game_nested_string_assignment(script, &["icons", "axis"]).and_then(|name| {
+            asset_core::AssetKey::new(
+                asset_core::AssetNamespace::T5,
+                asset_core::AssetKind::Material,
+                name,
+            )
+            .ok()
+        }),
     }
 }
 
@@ -290,14 +401,14 @@ pub fn t5_teamset_from_rawfile(name: &str, data: &[u8], zlib_compressed: bool) -
 }
 
 #[must_use]
-pub fn t5_icons_from_teamset_rawfile(
+pub fn t5_settings_from_teamset_rawfile(
     name: &str,
     data: &[u8],
     zlib_compressed: bool,
-) -> Option<(String, TeamIcons)> {
+) -> Option<(String, MapTeamSettings)> {
     let key = t5_teamset_key_from_rawfile(name)?.to_owned();
     let text = crate::decode_rawfile_text(data, zlib_compressed)?;
-    let icons = t5_icons_from_teamset_gsc(&text);
+    let icons = t5_settings_from_teamset_gsc(&text);
     (icons.allies.is_some() || icons.axis.is_some()).then_some((key, icons))
 }
 

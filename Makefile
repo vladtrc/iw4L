@@ -64,12 +64,12 @@ PROFILE_BIN = $(ROOT)/target/$(if $(filter dev,$(PROFILE)),debug,$(PROFILE))/iw4
 # is torn hold (HasWorld=0 and scene.spawned=0), not `wait 2s`. Occupancy
 # claims are Perfetto events (`cargo xtask live swap`), not dump MAX(sequence).
 LIFECYCLE_SWAP_CMDS ?= wait world; wait 2s; disconnect; wait torn; wait 1s; map mp_rust; wait world; wait ambient; quit
-# LIFECYCLE-REPLACE. map over map, no disconnect. burn-unit-tests PLAN named this.
+# LIFECYCLE-REPLACE. map over map, no disconnect.
 # `wait world` after rust is scene.spawned; `wait ambient` is MapAmbientBooted.
 LIFECYCLE_REPLACE_CMDS ?= wait world; wait 2s; map mp_rust; wait world; wait ambient; quit
-# Match → demo (console `demo`, retail CL_PlayDemo_f). Records a few ticks first.
+# Match → demo (console `demo`). Records a few ticks first.
 LIFECYCLE_PLAY_IN_CMDS ?= wait world; spawn assault; wait 2s; record swap_in; wait 2s; stoprecord; demo swap_in; wait 20s; quit
-# Demo → disconnect → main menu (CL_DemoCompleted / CL_Disconnect).
+# Demo → disconnect → main menu.
 # Theater occupancy is `theater` events; idle after torn is `cgame_hold`.
 LIFECYCLE_DEMO_OUT_CMDS ?= wait world; spawn assault; record swap_out; wait 2s; stoprecord; demo swap_out; wait 8s; disconnect; wait torn; wait 8s; quit
 # Demo → map (theater replaced by a live match).

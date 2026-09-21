@@ -48,6 +48,7 @@ pub fn update_admission(
 pub fn drive_class_select_screen(
     mut screen: ResMut<AppScreen>,
     mut loading: Option<ResMut<LoadingScreen>>,
+    mut load: Option<ResMut<assets::MapLoadProcess>>,
     signon: Res<SignonState>,
     has_world: Option<Res<HasWorld>>,
 ) {
@@ -61,13 +62,26 @@ pub fn drive_class_select_screen(
                 loading.fail(reason.to_string());
             }
         }
+        if let Some(load) = load.as_deref_mut() {
+            load.fail();
+        }
         if matches!(*screen, AppScreen::ClassSelect | AppScreen::InGame) {
             *screen = AppScreen::MainMenu;
         }
         return;
     }
     if !admitted || !world_installed {
+        // Local preparation can be finished long before the session says this
+        // client may continue. That wait is the load's own row, so the table
+        // can say what is holding it rather than showing everything green.
+        if world_installed && let Some(load) = load.as_deref_mut() {
+            load.await_admission();
+        }
         return;
+    }
+    // The load ends here, with or without a screen over it.
+    if let Some(load) = load.as_deref_mut() {
+        load.finish();
     }
     // The overlay comes down on its own terms, the class-select hop on the
     // screen's. A replay is already `InGame` by the time this runs — the first

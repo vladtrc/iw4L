@@ -100,41 +100,17 @@ fn insert_loading_chrome(
 pub(crate) fn begin_map_from_menu(
     mut commands: Commands,
     mut pending: ResMut<PendingMenuMap>,
-    mut menu_enabled: ResMut<MenuEnabled>,
-    mut app_screen: ResMut<AppScreen>,
-    mut identity: ResMut<LaunchIdentity>,
+    mut swap: ResMut<session::SessionSwapRequest>,
     game_setup: Res<crate::menu::GameSetupDraft>,
-    mut class_overlay: ResMut<ClassSelectOverlayOpen>,
-    mut window: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
 ) {
     let Some(requested) = pending.0.take() else {
         return;
     };
-    let games = assets::GamesRoot(identity.games_root.clone());
-    let (zone, zone_ff, common_mp, zone_alias, loading_title) = resolve_zone(&games, &requested);
-    let probe = launch_report(zone.clone(), common_mp.clone(), zone_ff.clone(), zone_alias);
-    let progress = LoadProgress::default();
-
-    identity.zone = zone.clone();
-    if let Ok(mut window) = window.single_mut() {
-        window.title = format!("iw4l — {zone}");
-    }
-
-    menu_enabled.0 = false;
-    class_overlay.0 = false;
-    *app_screen = AppScreen::Loading;
-    commands.insert_resource(probe);
     commands.insert_resource(game_setup.selected_mode);
-    commands.insert_resource(MatchLoadRequest {
-        request_id: 0,
-        load_key: frame::LocalLoadKey::from_request(0, frame::MatchKey::NONE, 0),
-        zone: zone.clone(),
-        zone_ff: zone_ff.clone(),
-        common_mp,
-        progress: progress.clone(),
-    });
-    insert_loading_chrome(&mut commands, progress, loading_title, &zone, zone_ff, 0);
-    diag::info!(Ui, "menu: loading {zone}");
+    match swap.request_zone(requested.clone()) {
+        Ok(id) => diag::info!(Ui, "menu: loading {requested} (swap #{id})"),
+        Err(error) => diag::warn!(Ui, "menu: load `{requested}` refused — {error}"),
+    }
 }
 
 pub(crate) fn begin_load_from_session(
@@ -228,25 +204,21 @@ pub(crate) fn restore_menu_on_disconnect(
 }
 
 pub(crate) fn register_menu_load_systems(app: &mut App) {
-    app.add_systems(
-        Update,
-        begin_map_from_menu
-            .run_if(resource_exists::<LaunchIdentity>)
-            .in_set(ClientSet::Ui),
-    )
-    .add_systems(
-        Update,
-        crate::retail_menu::sync_frontend_music
-            .after(begin_map_from_menu)
-            .in_set(ClientSet::Ui),
-    )
-    .add_systems(
-        Update,
-        (
-            begin_load_from_session,
-            restore_menu_on_disconnect.after(begin_load_from_session),
+    app.add_systems(Update, begin_map_from_menu.in_set(ClientSet::Ui))
+        .add_systems(
+            Update,
+            crate::retail_menu::sync_frontend_music
+                .after(begin_map_from_menu)
+                .in_set(ClientSet::Ui),
         )
-            .after(frame::SessionSwapApplied)
-            .in_set(ClientSet::Load),
-    );
+        .add_systems(
+            Update,
+            (
+                begin_load_from_session,
+                restore_menu_on_disconnect.after(begin_load_from_session),
+            )
+                .after(assets::MapLoadApproval)
+                .before(assets::MatchLoadDispatch)
+                .in_set(ClientSet::Load),
+        );
 }

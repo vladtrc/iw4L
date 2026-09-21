@@ -1,7 +1,24 @@
 use crate::frame::FrameWorld;
 use crate::{ClientId, ClientLifecycle, MatchPhase, Tick};
 use gamemode_iw4::{GameModeKind, Team, UseHoldLoopInput, UseHoldLoopState, UseHoldLoopTick, dd};
-use playerstate_iw4::buttons;
+use playerstate_iw4::{PM_TYPE_NORMAL_LINKED, buttons};
+
+/// Round-based gametypes run the clock too; the remaining time is the current
+/// round's, not the match's.
+fn evaluate_round_clock(world: &mut FrameWorld, tick: Tick, remaining_ms: u32) {
+    let Some(emit) = gamemode_iw4::match_clock::clock_tick(gamemode_iw4::ClockTick {
+        time_remaining_ms: remaining_ms as i32,
+        time_limit_minutes: dd::TIME_LIMIT_MS as f32 / 60_000.0,
+        half_time: false,
+        timer_stopped: false,
+    }) else {
+        return;
+    };
+    if emit.countdown_tick {
+        crate::score::push_countdown_tick_event(world, tick);
+    }
+    world.set_pending_match_clock(Some(emit));
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ObjectiveView {
@@ -77,23 +94,22 @@ impl Default for ObjectiveMatch {
 impl ObjectiveMatch {
     pub(crate) fn constrain_cmds(&self, cmds: &mut [(ClientId, playerstate_iw4::UserCmd)]) {
         for (id, cmd) in cmds {
-            let requested = self
-                .bombs
-                .iter()
-                .find(|b| b.user == Some(*id))
-                .map(|b| self.use_weapons[usize::from(b.planted_at_ms.is_some())])
-                .or_else(|| {
-                    self.restoring
-                        .iter()
-                        .find(|(c, _, _)| c == id)
-                        .map(|(_, w, _)| *w)
-                });
-            if let Some(weapon) = requested {
+            // Active use (plant/defuse): the player is linked to the site, so
+            // translation is dropped while viewangles, stance and the melee or
+            // grenade cancels keep flowing.
+            if let Some(site) = self.bombs.iter().find(|b| b.user == Some(*id)) {
+                let weapon = self.use_weapons[usize::from(site.planted_at_ms.is_some())];
                 cmd.weapon = weapon as u16;
                 cmd.weapon_mapped = weapon as u16;
                 cmd.forwardmove = 0;
                 cmd.rightmove = 0;
-                cmd.buttons &= buttons::USE | buttons::MELEE_CHARGE;
+                continue;
+            }
+            // The briefcase is taken back after the unlink, and the freed player
+            // keeps full movement: steer the weapon switch, never the movement.
+            if let Some((_, weapon, _)) = self.restoring.iter().find(|(c, _, _)| c == id) {
+                cmd.weapon = *weapon as u16;
+                cmd.weapon_mapped = *weapon as u16;
             }
         }
     }
@@ -194,6 +210,24 @@ fn use_weapon_ammo(world: &mut FrameWorld, id: ClientId, weapon: u32, count: i32
     }
 }
 
+/// The user is linked to the trigger on the USE press and unlinked in the frame
+/// the hold completes or is released. The briefcase take-back afterwards runs on
+/// a freed player, so `restoring` must never re-freeze movement.
+fn link_user(world: &mut FrameWorld, id: ClientId) {
+    if let Some(p) = world.player_mut(id).filter(|p| p.pm_type == 0) {
+        p.pm_type = PM_TYPE_NORMAL_LINKED;
+    }
+}
+
+fn unlink_user(world: &mut FrameWorld, id: ClientId) {
+    if let Some(p) = world
+        .player_mut(id)
+        .filter(|p| p.pm_type == PM_TYPE_NORMAL_LINKED)
+    {
+        p.pm_type = 0;
+    }
+}
+
 fn sound(world: &mut FrameWorld, tick: Tick, origin: [f32; 3], name: &str) {
     let index = world.sound_alias_index(name);
     world.push_entity_event(
@@ -247,6 +281,9 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
             state.restoring.clear();
             let defenders = state.defenders();
             for site in &mut state.bombs {
+                if let Some(id) = site.user.take() {
+                    unlink_user(world, id);
+                }
                 site.planted_at_ms = None;
                 site.planter = None;
                 site.destroyed = false;
@@ -289,6 +326,9 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
         {
             if let (Some(id), Some(restore)) = (site.user, site.return_weapon.take()) {
                 state.restoring.push((id, restore, state.use_weapons[1]));
+            }
+            if let Some(id) = site.user.take() {
+                unlink_user(world, id);
             }
             site.planted_at_ms = None;
             site.destroyed = true;
@@ -380,6 +420,9 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
                     .restoring
                     .push((id, restore, state.use_weapons[usize::from(planted)]));
             }
+            if let Some(id) = site.user.take() {
+                unlink_user(world, id);
+            }
             site.user = None;
             site.hold = UseHoldLoopState::begin();
         }
@@ -407,6 +450,7 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
             }
         }
         if let Some(id) = site.user {
+            link_user(world, id);
             busy.push(id);
             let input = UseHoldLoopInput {
                 alive: true,
@@ -430,6 +474,7 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
                             state.use_weapons[usize::from(planted)],
                         ));
                     }
+                    unlink_user(world, id);
                     site.user = None;
                     site.hold = UseHoldLoopState::begin();
                 }
@@ -472,6 +517,7 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
                             state.use_weapons[usize::from(planted)],
                         ));
                     }
+                    unlink_user(world, id);
                     site.user = None;
                     site.hold = UseHoldLoopState::begin();
                 }
@@ -486,9 +532,11 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
         };
     }
     if !paused {
-        state.round_remaining_ms = state
-            .round_remaining_ms
-            .saturating_sub(crate::MATCH_TICK_MS);
+        let before = state.round_remaining_ms;
+        state.round_remaining_ms = before.saturating_sub(crate::MATCH_TICK_MS);
+        if before / 1000 != state.round_remaining_ms / 1000 {
+            evaluate_round_clock(world, tick, state.round_remaining_ms);
+        }
     }
     let winner = if !state.bombs.is_empty() && state.bombs.iter().all(|s| s.destroyed) {
         Some(state.attackers)
@@ -501,13 +549,21 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
     };
     if let Some(winner) = winner {
         for site in &mut state.bombs {
-            if let (Some(id), Some(restore)) = (site.user.take(), site.return_weapon.take()) {
-                state.restoring.push((
-                    id,
-                    restore,
-                    state.use_weapons[usize::from(site.planted_at_ms.is_some())],
-                ));
+            let user = site.user.take();
+            let restore = site.return_weapon.take();
+            if let Some(id) = user {
+                unlink_user(world, id);
+                if let Some(restore) = restore {
+                    state.restoring.push((
+                        id,
+                        restore,
+                        state.use_weapons[usize::from(site.planted_at_ms.is_some())],
+                    ));
+                }
+            } else if let Some(restore) = restore {
+                site.return_weapon = Some(restore);
             }
+            site.user = None;
             site.view.users.clear();
             site.view.progress = 0.0;
             site.view.capturing = Team::Free;
@@ -518,7 +574,21 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
             state.scores[winner as usize] >= dd::WIN_LIMIT as i32 || state.round >= dd::ROUND_LIMIT;
         state.round_end_at_ms = Some(now.saturating_add(dd::ROUND_END_MS + dd::SWITCH_SIDES_MS));
         world.set_phase(MatchPhase::Intermission);
-        if state.match_over {
+        if !state.match_over {
+            world.set_pending_round_win(Some(winner));
+            world.set_pending_round_switch(gamemode_iw4::round_switch_is_halftime(
+                state.round,
+                dd::ROUND_LIMIT,
+                dd::WIN_LIMIT,
+            ));
+        } else {
+            let allies = state.scores[Team::Allies as usize];
+            let axis = state.scores[Team::Axis as usize];
+            world.set_pending_team_game_win(match allies.cmp(&axis) {
+                core::cmp::Ordering::Greater => Some(Team::Allies),
+                core::cmp::Ordering::Less => Some(Team::Axis),
+                core::cmp::Ordering::Equal => None,
+            });
             world.push_event(
                 tick,
                 crate::EventAudience::All,

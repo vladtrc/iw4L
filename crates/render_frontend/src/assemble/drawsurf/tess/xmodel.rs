@@ -9,19 +9,18 @@ use super::smodel::{RetailPackedVertexRefusal, SmodelPassMaterial, SmodelVertex}
 
 pub use render_anim::{
     BODY_PACKED_UNAVAILABLE, DynEntAssetDraw, DynEntDrawPlan, DynEntOwnerDraw,
-    FPV_PACKED_EMPTY_PLAN, FPV_PACKED_UNAVAILABLE, FpvDrawPlan, FpvPlanSurface, FpvSurfaceDraw,
-    ItemAssetDraw, ItemDrawPlan, ItemOwnerDraw, MissileDrawPlan, MissileOwnerDraw,
-    RemoteBodyDrawPlan, RemoteBodySurfaceDraw, ScriptModelAssetDraw, ScriptModelDrawPlan,
-    ScriptModelOwnerDraw, XMODEL_OBJECT_ID_BODY_BASE, XMODEL_OBJECT_ID_DYNENT_BASE,
-    XMODEL_OBJECT_ID_ITEM_BASE, XMODEL_OBJECT_ID_MISSILE_BASE,
+    FPV_PACKED_EMPTY_PLAN, FPV_PACKED_UNAVAILABLE, FpvDrawPlan, FpvSurfaceDraw, ItemAssetDraw,
+    ItemDrawPlan, ItemOwnerDraw, MissileDrawPlan, MissileOwnerDraw, RemoteBodyDrawPlan,
+    RemoteBodySurfaceDraw, ScriptModelAssetDraw, ScriptModelDrawPlan, ScriptModelOwnerDraw,
+    XMODEL_OBJECT_ID_BODY_BASE, XMODEL_OBJECT_ID_DYNENT_BASE, XMODEL_OBJECT_ID_ITEM_BASE,
+    XMODEL_OBJECT_ID_MISSILE_BASE,
 };
 pub use render_anim::{
     BodyPackedSession, append_dynent_asset, append_dynent_surfaces, append_item_surfaces,
     append_missile_surfaces, append_remote_body_cpu_blob, append_script_model_asset,
     authored_lit_xmodel_pass_material, body_lit_pass_material, bound_lit_xmodel_pass_material,
     finish_remote_body_draw_plan, install_body_packed_session, overwrite_script_model_asset,
-    push_remote_body_cpu_draw, rebuild_fpv_draw_plan, retain_script_model_assets,
-    take_body_packed_session,
+    push_remote_body_cpu_draw, retain_script_model_assets, take_body_packed_session,
 };
 pub use render_fx::append_fx_model_asset;
 
@@ -526,7 +525,7 @@ pub fn merge_xmodel_draw_plan(
             merged,
             &mut packed,
             &mut packed_ok,
-            fpv.vertices().len(),
+            fpv.decoded_n(),
             fpv.indices(),
             fpv.surface_ranges(),
             fpv.materials(),
@@ -747,7 +746,7 @@ fn concat_packed_owners<'a>(
             admit: ADMIT_FPV,
             rev_i: 0,
             payload: fpv.packed_vertices(),
-            decoded_n: fpv.vertices().len(),
+            decoded_n: fpv.decoded_n(),
         },
         ConcatPackedOwner {
             admit: ADMIT_SCRIPT,

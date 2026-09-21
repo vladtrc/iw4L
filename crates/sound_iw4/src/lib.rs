@@ -21,7 +21,9 @@ pub use dialog::{
     leader_dialog_on_players,
 };
 pub use level::{Fleet, Level, Player, TeamScores, is_excluded, play_sound_on_players};
-pub use music::{MusicController, MusicStep, play_ffa_game_win, play_spawn_music};
+pub use music::{
+    MusicController, MusicStep, play_ffa_game_win, play_spawn_music, play_team_game_win,
+};
 pub use notify::{MatchEndingReason, Notify, NotifyKind, RoundSwitch, Winner};
 pub use output::{
     Alias, ClientId, ClientMask, Origin, Output, PersTeam, Team, VOICE_INFIX,

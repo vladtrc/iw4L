@@ -3,7 +3,6 @@ pub mod draw;
 mod draw_build;
 pub mod gaps;
 pub mod lighting;
-pub mod model_vertex_diag;
 pub mod occupancy;
 mod plugin;
 
@@ -26,7 +25,7 @@ pub use lighting::{
     script_model_lighting_box_half, viewmodel_lighting_origin,
 };
 pub use occupancy::{
-    CgGunOffset, DynEntCellBits, DynEntPhysClip, DynEntPhysWorld, FpvPlacementRoot,
+    CgGunOffset, DynEntCellBits, DynEntPhysClip, DynEntPhysWorld, FpvGeometrySet, FpvPlacementRoot,
     FpvPlacementSet, LocalSpawnArmed, PendingViewHurt, RemoteFxBolts, RemotePlayer, RenderFocus,
     ScriptModelDrawSet, ScriptModelSkinSet, SessionViewmodel, occupy_fpv_scene, spawn_pending_fpv,
     stamp_fpv_placement_matrix, sync_camera_from_presented, tick_fpv_viewmodel,

@@ -5,7 +5,7 @@ use super::{
     ZoneLane, ZoneWalkSink,
 };
 use crate::lane_capability::{LaneStatus, PreparedCapability};
-use crate::progress::LoadProgress;
+use crate::progress::{LoadProgress, StageId};
 use crate::session_load::{PreparedWorld, WorldDrawPolicy};
 use crate::{
     MASK_PLAYER_SOLID, T5ZoneMemory, ZoneGame, ZoneImage, build_t5_clip_collision,
@@ -64,10 +64,14 @@ impl ZoneLane for T5Lane {
         >,
     ) -> LoadedWorld {
         let mut report = vec![format!("game: T5 ({})", path.display())];
-        let stage = progress.stage("reading T5 zone header");
+        let stage = progress.begin_scoped(StageId::MapAssets, "header", None);
         let header = match image.t5_header() {
-            Ok(h) => h,
+            Ok(h) => {
+                stage.done();
+                h
+            }
             Err(e) => {
+                stage.fail();
                 return LoadedWorld::with_gap(
                     WorldDrawPolicy::t5(),
                     PreparedCapability::PreparedWorld,
@@ -77,8 +81,7 @@ impl ZoneLane for T5Lane {
             }
         };
 
-        drop(stage);
-        let stage = progress.stage("preparing T5 zone memory");
+        let stage = progress.begin_scoped(StageId::MapAssets, "memory", None);
         report.push(crate::zone::xfile_arena_row(
             "zone arenas map",
             &header.block_size,
@@ -87,8 +90,12 @@ impl ZoneLane for T5Lane {
         ));
         let mut memory = T5ZoneMemory::for_header(&header);
         let mut stream = match memory.stream(&image.bytes) {
-            Ok(s) => s,
+            Ok(s) => {
+                stage.done();
+                s
+            }
             Err(e) => {
+                stage.fail();
                 return LoadedWorld::with_gap(
                     WorldDrawPolicy::t5(),
                     PreparedCapability::PreparedWorld,
@@ -98,20 +105,21 @@ impl ZoneLane for T5Lane {
             }
         };
 
-        drop(stage);
-        let stage = progress.stage("walking T5 map assets");
+        let stage = progress.begin_scoped(StageId::MapAssets, "walk", None);
         let mut sink = ZoneWalkSink::default();
         let seeded_techsets = material_seed.technique_set_facts().to_vec();
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(crate::AssetNamespace::T5);
-        match fastfile_t5::load_zone(&mut stream, &mut sink) {
+        let walked = fastfile_t5::load_zone(&mut stream, &mut sink);
+        match &walked {
             Ok(_) => report.push(format!("zone walk: complete, {} assets", sink.walked)),
             Err(e) => report.push(format!(
                 "zone walk: stopped after {} assets — {e}",
                 sink.walked
             )),
         }
+        stage.set_completed(sink.walked as u64);
         report.push(format!(
             "pointer drift: {} unsettled offsets",
             stream.unsettled_offsets()
@@ -177,6 +185,7 @@ impl ZoneLane for T5Lane {
         let exp_fog = sink.exp_fog;
         let createart_name = sink.createart_name.clone();
         let t5_teamset = sink.t5_teamset.clone();
+        let script_sound = std::mem::take(&mut sink.script_sound).finish();
         match (&createart_name, exp_fog) {
             (Some(name), Some(fog)) => report.push(format!(
                 "t5 createart: {name} fog=ready start={:.1} half={:.1}",
@@ -195,8 +204,8 @@ impl ZoneLane for T5Lane {
             }
         });
 
-        drop(stage);
-        let stage = progress.stage("decoding T5 material images");
+        stage.finish_from(&walked);
+        let stage = progress.begin_scoped(StageId::Images, "map", None);
         let compass = std::mem::take(&mut sink.compass).resolve(&sink.materials);
         report.push(format!("compass: {:?}", compass));
         let mut materials = std::mem::take(&mut sink.materials);
@@ -236,9 +245,10 @@ impl ZoneLane for T5Lane {
             materials.capture_gaps
         ));
 
-        drop(stage);
-        let _stage = progress.stage("building T5 world geometry");
+        stage.done();
+        let stage = progress.begin_scoped(StageId::MapAssets, "geometry", None);
         let Some(geometry) = stream.gfx_world() else {
+            stage.fail();
             report.push("no GfxWorld retained — nothing to draw".into());
             let dm_spawns = dm_spawn_points_t5(&stream);
             let mut loaded = LoadedWorld {
@@ -254,6 +264,7 @@ impl ZoneLane for T5Lane {
                 fpv_meshes,
                 facts: crate::MapFacts {
                     t5_teamset: t5_teamset.clone(),
+                    script_sound: script_sound.clone(),
                     ..Default::default()
                 },
                 report,
@@ -276,7 +287,9 @@ impl ZoneLane for T5Lane {
             geometry.smodel_count
         ));
 
-        match build_t5_world_draw(&stream, geometry, materials) {
+        let world_draw = build_t5_world_draw(&stream, geometry, materials);
+        stage.finish_from(&world_draw);
+        match world_draw {
             Ok((mut draw, map_materials)) => {
                 let mut map_xmodels = map_xmodels;
                 if let Some(name) = geometry.sky_box_model.and_then(|p| stream.cstr(p).ok()) {
@@ -286,7 +299,14 @@ impl ZoneLane for T5Lane {
                         draw.sky_model.is_some()
                     ));
                 }
-                let map_models = super::build_t5_static_model_draw(&stream, geometry, map_xmodels);
+                let mut map_models =
+                    super::build_t5_static_model_draw(&stream, geometry, map_xmodels);
+                if let Some(clip) = &clip {
+                    asset_world::capture_brush_trigger_hulls(
+                        &mut map_models.map_use_triggers,
+                        clip,
+                    );
+                }
                 if let Some(error) = map_models.static_error.as_ref() {
                     report.push(format!("static models: {error}"));
                 }
@@ -560,6 +580,7 @@ impl ZoneLane for T5Lane {
                         north_yaw,
                         compass,
                         t5_teamset: t5_teamset.clone(),
+                        script_sound: script_sound.clone(),
                         ..Default::default()
                     },
                     report,
@@ -582,6 +603,7 @@ impl ZoneLane for T5Lane {
                     fpv_meshes,
                     facts: crate::MapFacts {
                         t5_teamset: t5_teamset.clone(),
+                        script_sound: script_sound.clone(),
                         ..Default::default()
                     },
                     report,
@@ -699,7 +721,7 @@ impl ZoneLane for T5Lane {
 
         let mut pending_images = None;
         if decode_color_maps {
-            let stage = progress.stage("planning T5 common_mp material images");
+            let stage = progress.begin_scoped(StageId::Images, "common_mp", None);
             let (inline, plan) = crate::material_images::plan_material_color_maps(
                 path,
                 &mut materials,
@@ -713,11 +735,15 @@ impl ZoneLane for T5Lane {
                 inline.missing,
                 inline.unsupported
             ));
+            // The plan itself is decoded later, under its own stage. This one
+            // planned and decoded the in-zone bodies, and it finished; letting
+            // the handle drop would record it as interrupted.
+            stage.done();
             pending_images = Some(plan);
         }
         report.push(format!(
             "common_mp T5 teamset scripts: {} (_teamset_*.gsc icons)",
-            sink.teamset_icons.len()
+            sink.teamsets.len()
         ));
         CommonCensus {
             pending_images,
@@ -732,7 +758,7 @@ impl ZoneLane for T5Lane {
             impact_fx: sink.impact_fx.take_table(),
             fx_models: sink.fx_models,
             report,
-            teamset_icons: sink.teamset_icons,
+            teamsets: sink.teamsets,
             film_visions: std::collections::BTreeMap::new(),
             ..Default::default()
         }

@@ -513,6 +513,27 @@ enum PostFxSubmitRefusal {
     SamplerMismatch,
     MissingSamplerRegister(u16),
 }
+
+/// The refusal as a number for the counter: the `Debug` string exists only in
+/// the change-only warn below, never per frame. Numbers are stable — a report
+/// compares them across runs, so a new variant goes at the end.
+fn refusal_discriminant(cause: &PostFxSubmitRefusal) -> u8 {
+    match cause {
+        PostFxSubmitRefusal::TargetFormat(_) => 0,
+        PostFxSubmitRefusal::PartialViewport { .. } => 1,
+        PostFxSubmitRefusal::FloatZNotResolvedForFrame => 2,
+        PostFxSubmitRefusal::PipelinePending => 3,
+        PostFxSubmitRefusal::DofPlan(_) => 4,
+        PostFxSubmitRefusal::FilmSource(_) => 5,
+        PostFxSubmitRefusal::Execute { .. } => 6,
+        PostFxSubmitRefusal::PassCount => 7,
+        PostFxSubmitRefusal::PortMismatch => 8,
+        PostFxSubmitRefusal::Constants { .. } => 9,
+        PostFxSubmitRefusal::MissingCodeImage(_) => 10,
+        PostFxSubmitRefusal::SamplerMismatch => 11,
+        PostFxSubmitRefusal::MissingSamplerRegister(_) => 12,
+    }
+}
 #[derive(Default)]
 struct PostFxTextureCache {
     owner: Option<(MaterialGenerationId, UVec2)>,
@@ -643,16 +664,24 @@ fn draw_postfx(
         }
         Ok(uploads)
     };
+    let planned = gpu.steps.len();
+    perf::Counter::CounterPostFxPlannedSteps.emit(planned as f64);
     let uploads = match prepare() {
         Ok(uploads) => uploads,
         Err(cause) => {
+            perf::Counter::CounterPostFxRefusal.emit(f64::from(refusal_discriminant(&cause)));
             if refusal.as_ref() != Some(&cause) {
-                diag::warn!(World, "post-fx submit: RED cause={cause:?}");
+                diag::warn!(
+                    World,
+                    "post-fx submit: RED frame={} planned={planned} cause={cause:?}",
+                    products.0.frame_id,
+                );
                 *refusal = Some(cause);
             }
             return;
         }
     };
+    perf::Counter::CounterPostFxExecutedSteps.emit(uploads.len() as f64);
 
     let owner = (gpu.prepared[0].film.generation, targets.size);
     if texture_cache.owner != Some(owner) {

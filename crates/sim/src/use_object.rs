@@ -1165,6 +1165,7 @@ fn phase_update_dom_scores(world: &mut FrameWorld) {
             continue;
         };
         let total = world.grant_dom_objective_point(team, now);
+        crate::score::evaluate_team_score_limit_soon(world, total);
         world.push_use_event(UseObjectEvent::DomTeamScore {
             team: match team {
                 gamemode_iw4::ScoringTeam::Axis => Team::Axis as u8,

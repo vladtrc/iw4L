@@ -329,7 +329,15 @@ pub fn map_use_triggers_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Vec<MapUseTrigg
     let Some(text) = entity_string_iw5(s) else {
         return Vec::new();
     };
-    parse_map_use_triggers(text)
+    let mut triggers = parse_map_use_triggers(text);
+    if let Some(geo) = s.map_ents() {
+        for trigger in &mut triggers {
+            if let Some(index) = trigger.model.strip_prefix('?').and_then(|v| v.parse().ok()) {
+                trigger.hulls = capture_iw5_trigger_hulls(s, geo, index);
+            }
+        }
+    }
+    triggers
 }
 
 fn has_ascii_prefix(value: &str, prefix: &str) -> bool {
@@ -425,7 +433,18 @@ pub fn dm_spawn_points_t5(s: &fastfile_t5::ZoneStream<'_>) -> Vec<SpawnPoint> {
     let Some(text) = entity_string_t5(s) else {
         return Vec::new();
     };
-    parse_spawn_points(text, MP_SPAWN_CLASSNAMES)
+    let names: Vec<_> = MP_SPAWN_CLASSNAMES
+        .iter()
+        .map(|name| name.replace("mp_dd_", "mp_dem_"))
+        .collect();
+    let names: Vec<_> = names.iter().map(String::as_str).collect();
+    let mut spawns = parse_spawn_points(text, &names);
+    for spawn in &mut spawns {
+        if let Some(suffix) = spawn.classname.strip_prefix("mp_dem_") {
+            spawn.classname = format!("mp_dd_{suffix}");
+        }
+    }
+    spawns
 }
 
 pub fn script_model_placements_t5(s: &fastfile_t5::ZoneStream<'_>) -> Vec<ScriptModelPlacement> {
@@ -958,6 +977,9 @@ fn numbered_pair(line: &str) -> Option<(EntityKey, &str)> {
         IW5_KEY_GAMEOBJECT => EntityKey::Gameobject,
         IW5_KEY_DESTRUCTIBLE_TYPE => EntityKey::DestructibleType,
         IW5_KEY_LT_ORIGIN => EntityKey::LtOrigin,
+        "11996" => EntityKey::ScriptLabel,
+        "2009" => EntityKey::ScriptExploder,
+        "7864" => EntityKey::ScriptPrefabExploder,
         named => named_key(named),
     };
     let mut quotes = rest.match_indices('"').map(|(index, _)| index);
@@ -1043,4 +1065,92 @@ fn capture_trigger_hulls(
         out.push(MapTriggerHull { mid, half, slabs });
     }
     Some(out)
+}
+
+fn capture_iw5_trigger_hulls(
+    s: &fastfile_iw5::ZoneStream<'_>,
+    g: fastfile_iw5::MapEntsGeometry,
+    index: usize,
+) -> Option<Vec<MapTriggerHull>> {
+    if index >= g.trigger_model_count {
+        return None;
+    }
+    let model = g.trigger_models?.at(index * 8);
+    let count = usize::from(s.u16_at(model, 4).ok()?);
+    let first = usize::from(s.u16_at(model, 6).ok()?);
+    if first.checked_add(count)? > g.trigger_hull_count || count == 0 {
+        return None;
+    }
+    let mut out = Vec::new();
+    for n in first..first + count {
+        let hull = g.trigger_hulls?.at(n * 32);
+        let mid = [
+            s.f32_at(hull, 0).ok()?,
+            s.f32_at(hull, 4).ok()?,
+            s.f32_at(hull, 8).ok()?,
+        ];
+        let half = [
+            s.f32_at(hull, 12).ok()?,
+            s.f32_at(hull, 16).ok()?,
+            s.f32_at(hull, 20).ok()?,
+        ];
+        let count = usize::from(s.u16_at(hull, 28).ok()?);
+        let first = usize::from(s.u16_at(hull, 30).ok()?);
+        if first.checked_add(count)? > g.trigger_slab_count {
+            return None;
+        }
+        let mut slabs = Vec::new();
+        for i in first..first + count {
+            let slab = g.trigger_slabs?.at(i * 20);
+            slabs.push((
+                [
+                    s.f32_at(slab, 0).ok()?,
+                    s.f32_at(slab, 4).ok()?,
+                    s.f32_at(slab, 8).ok()?,
+                ],
+                s.f32_at(slab, 12).ok()?,
+                s.f32_at(slab, 16).ok()?,
+            ));
+        }
+        out.push(MapTriggerHull { mid, half, slabs });
+    }
+    Some(out)
+}
+
+pub fn capture_brush_trigger_hulls(triggers: &mut [MapUseTrigger], clip: &crate::ClipCollision) {
+    for trigger in triggers {
+        trigger.hulls = (|| {
+            let index: usize = trigger.model.strip_prefix('*')?.parse().ok()?;
+            let model = clip.cmodels.get(index)?;
+            let first = model.first_brush as usize;
+            let ids = clip
+                .leafbrushes
+                .get(first..first.checked_add(model.num_brushes as usize)?)?;
+            ids.iter()
+                .map(|&id| {
+                    let brush = clip.brushes.get(id as usize)?;
+                    let planes = &brush.planes;
+                    if planes.len() < 6 {
+                        return None;
+                    }
+                    let mins: [f32; 3] = std::array::from_fn(|i| -planes[i * 2 + 1][3]);
+                    let maxs: [f32; 3] = std::array::from_fn(|i| planes[i * 2][3]);
+                    let mid = std::array::from_fn(|i| (mins[i] + maxs[i]) * 0.5);
+                    let half = std::array::from_fn(|i| (maxs[i] - mins[i]) * 0.5);
+                    let slabs = planes[6..]
+                        .iter()
+                        .map(|p| {
+                            let dir = [p[0], p[1], p[2]];
+                            // The opposite slab face is outside the brush's axial bounds.
+                            let lower = (0..3)
+                                .map(|i| dir[i] * if dir[i] >= 0.0 { mins[i] } else { maxs[i] })
+                                .sum::<f32>();
+                            (dir, (lower + p[3]) * 0.5, (p[3] - lower) * 0.5)
+                        })
+                        .collect();
+                    Some(MapTriggerHull { mid, half, slabs })
+                })
+                .collect()
+        })();
+    }
 }

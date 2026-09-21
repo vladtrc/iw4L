@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use assets::{
-    AssetNamespace, LoadingScreen, MatchType10SoundHints, PreparedWeapons, PreparedXAnims,
+    AssetNamespace, MapLoadProcess, MatchType10SoundHints, PreparedWeapons, PreparedXAnims,
     SoundCatalog, WeaponRegistry,
 };
 use bevy::prelude::*;
@@ -18,12 +18,29 @@ pub struct AudioReady(pub bool);
 
 const MATCH_HUD_PULSE: &[&str] = &["ui_pulse_text_type", "ui_pulse_text_delete"];
 
+const MATCH_CLOCK: &[&str] = &[gamemode_iw4::match_clock::COUNTDOWN_TICK_ALIAS];
+
 #[derive(Resource, Default)]
 struct MatchClipPrep {
     submitted: bool,
     required: HashSet<ClipKey>,
+    /// Clips this match still had to convert when the set was queued — not the
+    /// alias count, and not the whole cache.
     total: usize,
-    stage: Option<assets::LoadStage>,
+    stage: Option<assets::StageHandle>,
+    /// Resident sample bytes this process had already produced when the set
+    /// was queued. The decoders count for the life of the process, so what
+    /// this match cost is the distance from here.
+    sample_bytes_at_queue: u64,
+}
+
+/// Resident `f32` samples every decoder has produced so far.
+fn prepared_sample_bytes() -> u64 {
+    crate::clip_prep_cost()
+        .paths
+        .iter()
+        .map(|(_, cost)| cost.sample_bytes)
+        .sum()
 }
 
 pub(crate) fn register(app: &mut App) {
@@ -49,6 +66,9 @@ fn reset_match_audio_on_torn_down(
         return;
     }
     *ready = AudioReady(false);
+    if let Some(stage) = prep.stage.take() {
+        stage.cancel();
+    }
     *prep = MatchClipPrep::default();
 }
 
@@ -64,7 +84,7 @@ fn queue_match_clips(
     catalog: Option<Res<assets::MenuCatalog>>,
     script_sound: Option<Res<assets::SessionMapScriptSound>>,
     namespace: Option<Res<SoundBankNamespace>>,
-    loading: Option<Res<LoadingScreen>>,
+    loading: Option<Res<MapLoadProcess>>,
     mut prep: ResMut<MatchClipPrep>,
     mut ready: ResMut<AudioReady>,
 ) {
@@ -79,6 +99,9 @@ fn queue_match_clips(
     }
     let Some(clips) = clips.as_mut() else {
         ready.0 = true;
+        if let Some(loading) = loading.as_ref() {
+            loading.progress.record_skipped(assets::StageId::Audio);
+        }
         diag::info!(
             Audio,
             "audio: AudioReady skipped — sound bank did not install"
@@ -164,7 +187,11 @@ fn queue_match_clips(
         aliases += 1;
         request_named(clips, &bank.0, namespace.namespace, alias, &mut required);
     }
-    for alias in MATCH_HUD_PULSE.iter().chain(crate::objectives::EFFECTS) {
+    for alias in MATCH_HUD_PULSE
+        .iter()
+        .chain(MATCH_CLOCK)
+        .chain(crate::objectives::EFFECTS)
+    {
         aliases += 1;
         request_named(clips, &bank.0, AssetNamespace::Iw4, alias, &mut required);
     }
@@ -176,9 +203,12 @@ fn queue_match_clips(
     prep.required = required;
     prep.submitted = true;
     if let Some(loading) = loading {
-        let stage = loading.progress.stage("preparing match audio");
-        stage.total(prep.total as u64);
-        prep.stage = Some(stage);
+        prep.sample_bytes_at_queue = prepared_sample_bytes();
+        prep.stage = Some(
+            loading
+                .progress
+                .begin(assets::StageId::Audio, Some(prep.total as u64)),
+        );
     }
     diag::info!(
         Audio,
@@ -206,8 +236,10 @@ fn poll_match_audio_ready(
     };
     prep.required.retain(|key| clips.ready(key).is_none());
     let done = prep.total.saturating_sub(prep.required.len());
+    let decoded = prepared_sample_bytes().saturating_sub(prep.sample_bytes_at_queue);
     if let Some(stage) = prep.stage.as_ref() {
-        stage.set_done(done as u64);
+        stage.set_completed(done as u64);
+        stage.set_bytes(decoded);
     }
     if prep.required.is_empty() {
         mark_ready(&mut ready, &mut prep, Some(&mut **clips));
@@ -215,7 +247,11 @@ fn poll_match_audio_ready(
 }
 
 fn mark_ready(ready: &mut AudioReady, prep: &mut MatchClipPrep, clips: Option<&mut ClipStore>) {
-    let _ = prep.stage.take();
+    if let Some(stage) = prep.stage.take() {
+        stage.set_completed(prep.total as u64);
+        stage.set_bytes(prepared_sample_bytes().saturating_sub(prep.sample_bytes_at_queue));
+        stage.done();
+    }
     if !ready.0 {
         ready.0 = true;
         diag::info!(Audio, "audio: AudioReady ({} clips prepared)", prep.total);

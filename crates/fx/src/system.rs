@@ -222,6 +222,8 @@ pub struct FxSystemHost {
     effects: Vec<FxEffectSlot>,
 
     pub(crate) elems: Vec<FxElemSlot>,
+    pub(crate) sort_distances: Vec<(u32, f32)>,
+    pub(crate) sort_epoch: u32,
 
     pub(crate) elem_first_free: Option<usize>,
 
@@ -502,6 +504,8 @@ impl FxSystemHost {
                 .map(|_| FxEffectSlot::default())
                 .collect(),
             elems,
+            sort_distances: vec![(0, 0.0); FX_ELEM_POOL_CAPACITY as usize],
+            sort_epoch: 0,
             elem_first_free: Some(0),
             elem_live_count: 0,
             elem_alloc_failures: 0,

@@ -43,7 +43,7 @@ pub struct MaterialProgramAdmit {
     exact_shaders: Vec<Handle<Shader>>,
     pending: std::collections::HashMap<AssetId<Shader>, PendingShader>,
     requests: Vec<AssetId<Shader>>,
-    stage: Option<assets::LoadStage>,
+    stage: Option<assets::StageHandle>,
 }
 
 impl MaterialProgramAdmit {
@@ -66,7 +66,7 @@ impl MaterialProgramAdmit {
         )
     }
 
-    pub fn take_stage(&mut self) -> Option<assets::LoadStage> {
+    pub fn take_stage(&mut self) -> Option<assets::StageHandle> {
         self.stage.take()
     }
 
@@ -91,8 +91,13 @@ impl MaterialProgramAdmit {
         compile: &mut MaterialProgramCompile,
         progress: Option<&assets::LoadProgress>,
     ) {
+        // Admission is its own operation: what the compiler produced is one
+        // thing, what this generation accepts into the registry is another.
+        if let Some(stage) = self.stage.take() {
+            stage.cancel();
+        }
         if let Some(progress) = progress {
-            self.stage = Some(progress.stage("admitting world shaders"));
+            self.stage = Some(progress.begin(assets::StageId::Shaders, None));
         }
         let ports = compile.take_ports();
         let world_port_count = ports
@@ -156,7 +161,7 @@ impl MaterialProgramAdmit {
         self.exact_shaders.clear();
         self.armed = true;
         if let Some(stage) = &self.stage {
-            stage.total(self.registry.ports().len() as u64);
+            stage.set_total(self.registry.ports().len() as u64);
         }
     }
 
@@ -179,7 +184,7 @@ impl MaterialProgramAdmit {
             self.exact_shaders.push(handle.clone());
         }
         if let Some(stage) = &self.stage {
-            stage.set_done(self.exact_shaders.len() as u64);
+            stage.set_completed(self.exact_shaders.len() as u64);
         }
         diag::info!(
             World,

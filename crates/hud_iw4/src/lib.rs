@@ -63,8 +63,8 @@ pub use compass::{
     RADARJAM_DIST_MIN, RADARJAM_DIST_NONE, REQUIRED_MAP_ASPECT_RATIO_DEFAULT,
     cg_compass_fade_alpha, cg_compass_friendly_size, cg_compass_player_size,
     cg_compass_sound_ping_fade, cg_compass_up_yaw_vector, cg_radar_jam_intensity,
-    cg_radar_jam_nearest_distance, cg_world_pos_to_compass_partial,
-    compass_clamp_offset, compass_map_bounds_from_corners, compass_map_bounds_from_minimap_corners,
+    cg_radar_jam_nearest_distance, cg_world_pos_to_compass_partial, compass_clamp_offset,
+    compass_map_bounds_from_corners, compass_map_bounds_from_minimap_corners,
     compass_partial_map_uv, radar_contact_trail_visible, setup_mini_map_frame,
 };
 pub use crosshair::{

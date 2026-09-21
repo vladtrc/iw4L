@@ -196,7 +196,7 @@ fn evaluate_time_limit_clock(world: &mut FrameWorld, tick: Tick) {
     world.set_pending_match_clock(Some(emit));
 }
 
-fn push_countdown_tick_event(world: &mut FrameWorld, tick: Tick) {
+pub(crate) fn push_countdown_tick_event(world: &mut FrameWorld, tick: Tick) {
     let event_parm = i32::from(world.sound_alias_index(match_clock::COUNTDOWN_TICK_ALIAS));
     world.push_entity_event(
         tick,
@@ -209,6 +209,21 @@ fn push_countdown_tick_event(world: &mut FrameWorld, tick: Tick) {
             ..Default::default()
         },
     );
+}
+
+/// Runs on every team score change outside overtime.
+pub(crate) fn evaluate_team_score_limit_soon(world: &mut FrameWorld, score: i32) {
+    world.set_pending_score_limit_soon(None);
+    let boot = world.bootstrap_ref();
+    let notify = gamemode_iw4::sound_emit::check_team_score_limit_soon(ScoreLimitSoonInput {
+        score_limit: boot.score_limit,
+        objective_based: gamemode_iw4::OBJECTIVE_BASED,
+        score_limit_override: false,
+        team_based: true,
+        time_passed_ms: world.match_elapsed_ms() as i32,
+        score,
+    });
+    world.set_pending_score_limit_soon(notify);
 }
 
 fn evaluate_player_score_limit_soon(world: &mut FrameWorld, score: i32) {
@@ -267,6 +282,8 @@ pub(crate) fn apply_match_end(world: &mut FrameWorld, tick: Tick) {
         } else {
             None
         };
+        let winner = world.objectives.winner;
+        world.set_pending_team_game_win(winner);
     }
     world.push_event(tick, EventAudience::All, SimEvent::MatchEnded { reason });
     diag::info!(

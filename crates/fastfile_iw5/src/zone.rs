@@ -717,6 +717,12 @@ pub struct ClipMapGeometry {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MapEntsGeometry {
+    pub trigger_models: Option<Ptr>,
+    pub trigger_model_count: usize,
+    pub trigger_hulls: Option<Ptr>,
+    pub trigger_hull_count: usize,
+    pub trigger_slabs: Option<Ptr>,
+    pub trigger_slab_count: usize,
     pub entity_string: Option<Ptr>,
     pub entity_chars: usize,
 }

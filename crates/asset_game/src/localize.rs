@@ -9,11 +9,34 @@ use crate::{ZoneGame, ZoneMemory, open_zone};
 #[derive(Clone, Debug, Default, Resource)]
 pub struct LocalizeCatalog {
     entries: HashMap<String, String>,
+    by_namespace: HashMap<(asset_core::AssetNamespace, String), String>,
 }
 
 impl LocalizeCatalog {
     pub fn text(&self, key: &str) -> Option<&str> {
         self.entries.get(&key.to_uppercase()).map(String::as_str)
+    }
+
+    pub fn text_asset(&self, key: &asset_core::AssetKey) -> Option<&str> {
+        if key.kind != asset_core::AssetKind::Localize {
+            return None;
+        }
+        self.by_namespace
+            .get(&(key.namespace, key.name.to_uppercase()))
+            .map(String::as_str)
+    }
+
+    pub fn absorb_in_namespace(
+        &mut self,
+        namespace: asset_core::AssetNamespace,
+        other: LocalizeCatalog,
+    ) {
+        for (name, text) in &other.entries {
+            self.by_namespace
+                .entry((namespace, name.clone()))
+                .or_insert_with(|| text.clone());
+        }
+        self.absorb(other);
     }
 
     pub fn len(&self) -> usize {
@@ -29,6 +52,7 @@ impl LocalizeCatalog {
     }
 
     pub fn absorb(&mut self, other: LocalizeCatalog) {
+        self.by_namespace.extend(other.by_namespace);
         for (k, v) in other.entries {
             self.entries.entry(k).or_insert(v);
         }
@@ -222,7 +246,10 @@ impl LocalizeCatalog {
             at = text_end;
             entries.insert(key, text);
         }
-        (at == blob.len() && entries.len() == count).then_some(Self { entries })
+        (at == blob.len() && entries.len() == count).then_some(Self {
+            entries,
+            ..Default::default()
+        })
     }
 }
 

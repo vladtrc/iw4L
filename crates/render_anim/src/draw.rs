@@ -224,7 +224,8 @@ impl DynEntDrawPlan {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct FpvDrawPlan {
-    pub(crate) vertices: Vec<SmodelVertex>,
+    /// How many vertices the packed rows below carry.
+    pub(crate) decoded_n: usize,
     pub(crate) indices: Vec<u32>,
     pub(crate) surface_ranges: Vec<(u32, u32)>,
     pub(crate) materials: Vec<SmodelPassMaterial>,
@@ -265,6 +266,18 @@ pub struct FpvDrawPlan {
     pub generation: u64,
     pub revisions: SourceRevisions,
 
+    /// Whether this frame's placement matrix is real. Placement and geometry
+    /// are published by two independent systems, each stating its own half for
+    /// `settle_visible` to read.
+    pub placement_ok: bool,
+
+    /// Whether the rig skinned rows into this plan this frame.
+    pub geometry_ok: bool,
+
+    /// Which prepared rig the rows below came from. The rig publishes them
+    /// once; a frame that still answers this generation publishes vertices.
+    pub rig_generation: u64,
+
     pub(crate) packed_vertices: assets::RetailPackedVertexPayload,
 }
 
@@ -273,17 +286,26 @@ impl FpvDrawPlan {
     pub fn admits_colour(&self) -> bool {
         self.visible && self.lighting_handle != 0 && self.drawgun != Some(0)
     }
-}
 
-pub struct FpvPlanSurface {
-    pub mesh: Mesh,
-    pub authored: Option<usize>,
-    pub material: SmodelPassMaterial,
-    pub packed_vertices: Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
+    pub fn decoded_n(&self) -> usize {
+        self.decoded_n
+    }
 
-    pub is_scope: bool,
+    /// The rows this frame skinned into. `None` once the plan has nothing
+    /// packed to write — an empty plan, or a composition whose models never
+    /// carried retail packed vertices.
+    pub fn packed_rows_mut(&mut self) -> Option<&mut [[u8; asset_iw4::size::GFX_PACKED_VERTEX]]> {
+        match &mut self.packed_vertices {
+            assets::RetailPackedVertexPayload::Iw4(rows) => Some(rows.as_mut_slice()),
+            assets::RetailPackedVertexPayload::Unavailable { .. } => None,
+        }
+    }
 
-    pub is_lens: bool,
+    /// Both halves have to hold: a plan with rows nobody can place is no more
+    /// drawable than a placement with nothing to draw.
+    pub fn settle_visible(&mut self) {
+        self.visible = self.geometry_ok && self.placement_ok && self.drawgun != Some(0);
+    }
 }
 
 pub fn topology_fingerprint(indices: &[u32], ranges: &[(u32, u32)], decoded_n: usize) -> u64 {
@@ -381,7 +403,7 @@ fn apply_fpv_plan(
             plan.reflection_probe_index = reflection_probe_index;
 
             if !plan.draws.is_empty() {
-                plan.visible = plan.drawgun != Some(0);
+                plan.settle_visible();
             }
         }
         Some(ResolvedModelLighting::Failed) | None => hide(plan),
@@ -402,9 +424,8 @@ fn apply_fpv_plan(
 }
 
 /// The rows a producer rebuilds every frame, handed to the plan that publishes
-/// them. The plan answers whether anything moved, and that answer is the only
-/// thing downstream is entitled to ask — no consumer re-hashes the rows to find
-/// out for itself.
+/// them. The plan answers whether anything moved; no consumer re-hashes the
+/// rows to find out for itself.
 macro_rules! publish_frame_rows {
     ($plan:ty, $draw:ty, $owner:ty) => {
         impl $plan {
@@ -433,10 +454,8 @@ macro_rules! publish_frame_rows {
     };
 }
 
-/// Read-only views of what a producer published. The rows themselves are the
-/// producer's: a consumer that could still write them would be finishing work
-/// the producer had already called done, and the revision it publishes would
-/// stop being the whole truth about them.
+/// Read-only views of what a producer published: a consumer that could write
+/// the rows would make the published revision less than the whole truth.
 macro_rules! published_rows {
     ($plan:ty, $draw:ty) => {
         impl $plan {
@@ -472,7 +491,28 @@ published_rows!(ScriptModelDrawPlan, XModelSurfaceDraw);
 published_rows!(MissileDrawPlan, XModelSurfaceDraw);
 published_rows!(ItemDrawPlan, XModelSurfaceDraw);
 published_rows!(DynEntDrawPlan, XModelSurfaceDraw);
-published_rows!(FpvDrawPlan, FpvSurfaceDraw);
+
+impl FpvDrawPlan {
+    pub fn draws(&self) -> &[FpvSurfaceDraw] {
+        &self.draws
+    }
+
+    pub fn materials(&self) -> &[SmodelPassMaterial] {
+        &self.materials
+    }
+
+    pub fn indices(&self) -> &[u32] {
+        &self.indices
+    }
+
+    pub fn surface_ranges(&self) -> &[(u32, u32)] {
+        &self.surface_ranges
+    }
+
+    pub fn packed_vertices(&self) -> &assets::RetailPackedVertexPayload {
+        &self.packed_vertices
+    }
+}
 
 impl RemoteBodyDrawPlan {
     pub fn decoded_n(&self) -> usize {
@@ -495,8 +535,7 @@ impl MissileDrawPlan {
     /// Takes the rebuild and reports what moved. Vertex bytes are not compared:
     /// these models are posed by `world_from_local`, so a different mesh always
     /// shows up in the index layout, the surface ranges, the materials or the
-    /// owner list, and walking the byte buffer every frame would cost more than
-    /// the consumer-side hash this replaces.
+    /// owner list.
     pub fn publish_rebuild(
         &mut self,
         staged: &mut Self,

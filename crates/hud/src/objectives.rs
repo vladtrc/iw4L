@@ -142,10 +142,9 @@ pub(crate) fn draw(
             let active = if mode == GameModeKind::Domination {
                 !friendly && view.capturing == team
             } else {
-                state
-                    .bombs
-                    .iter()
-                    .any(|b| b.view.id == view.id && b.user == Some(local))
+                state.bombs.iter().any(|b| {
+                    b.view.id == view.id && b.user == Some(local) && b.hold.use_rate != 0.0
+                })
             };
             if active {
                 let hint = if mode == GameModeKind::Domination {

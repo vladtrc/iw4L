@@ -7,6 +7,7 @@ mod equip_txn;
 mod gap_hud;
 mod launch_report;
 mod layers;
+mod load_table;
 mod loading;
 mod menu;
 mod menu_import;
@@ -46,7 +47,7 @@ pub use launch_report::publish_gap_hud;
 pub use layers::{
     ApplyUiLayers, GameUiFont, UiDraw, UiLayer, UiLayerVisibility, UiLayers, game_text_font,
 };
-pub use loading::{LoadLaneView, LoadProgress, LoadingPreviewSource, LoadingScreen};
+pub use loading::{LoadProgress, LoadingPreviewSource, LoadingScreen};
 pub use menu::{
     GameLobbyRole, GamePrivacy, GameSetupDraft, MenuBackground, MenuEnabled, MenuMapList,
     PendingMenuBgPixels, PendingMenuMap,

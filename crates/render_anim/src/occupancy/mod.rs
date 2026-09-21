@@ -13,8 +13,8 @@ pub mod view_kick;
 pub use dyn_ent::DynEntCellBits;
 pub use dyn_ent_phys::{DynEntPhysClip, DynEntPhysWorld};
 pub use fpv_present::{
-    FpvPlacementRoot, FpvPlacementSet, LocalSpawnArmed, SessionViewmodel, occupy_fpv_scene,
-    spawn_pending_fpv, stamp_fpv_placement_matrix, tick_fpv_viewmodel,
+    FpvGeometrySet, FpvPlacementRoot, FpvPlacementSet, LocalSpawnArmed, SessionViewmodel,
+    occupy_fpv_scene, spawn_pending_fpv, stamp_fpv_placement_matrix, tick_fpv_viewmodel,
 };
 pub use remote_body::{RemoteFxBolts, RemotePlayer};
 pub use script_model::{RenderFocus, ScriptModelDrawSet, ScriptModelSkinSet};

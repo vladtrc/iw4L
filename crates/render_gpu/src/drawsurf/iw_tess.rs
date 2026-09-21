@@ -287,6 +287,29 @@ fn extract_iw_tess(mut extracted: ResMut<ExtractedIwTess>, frame: Extract<Res<Hu
     };
 }
 
+// Batches append to the same backing until rollover. Stage that contiguous
+// range once, before its buffer is retired or the frame starts drawing it.
+fn extend_tess_upload(dirty: &mut Option<core::ops::Range<usize>>, start: usize, len: usize) {
+    match dirty {
+        Some(range) => {
+            range.start = range.start.min(start);
+            range.end = range.end.max(start + len);
+        }
+        None => *dirty = Some(start..start + len),
+    }
+}
+
+fn flush_tess_upload(
+    queue: &RenderQueue,
+    buffer: &Buffer,
+    backing: &[u8],
+    dirty: &mut Option<core::ops::Range<usize>>,
+) {
+    if let Some(range) = dirty.take() {
+        queue.write_buffer(buffer, range.start as u64, &backing[range]);
+    }
+}
+
 fn prepare_iw_tess(
     extracted: Res<ExtractedIwTess>,
     mut meta: ResMut<IwTessMeta>,
@@ -302,6 +325,8 @@ fn prepare_iw_tess(
     if !extracted.0.visible {
         return;
     }
+    let mut vb_dirty = None;
+    let mut ib_dirty = None;
     for (batch_i, batch) in extracted.0.batches.iter().enumerate() {
         if batch.index_count == 0 || batch.vertex_count == 0 {
             continue;
@@ -329,6 +354,7 @@ fn prepare_iw_tess(
             .vertex_count
             .saturating_mul(super::backend::GFX_TESS_VERTEX_STRIDE);
         if meta.cpu_vb.capacity < meta.cpu_vb.used_bytes.saturating_add(need_vb) && meta.vb_wrote {
+            flush_tess_upload(&queue, &meta.vb, &meta.cpu_vb_bytes, &mut vb_dirty);
             let next = create_tess_vb(&device);
             let old = core::mem::replace(&mut meta.vb, next);
             meta.retired_vb.push(old);
@@ -350,10 +376,10 @@ fn prepare_iw_tess(
             continue;
         }
         let vb_gpu = meta.vb.clone();
-        queue.write_buffer(
-            &vb_gpu,
-            u64::from(tess_draw.vertex.lock_byte_offset),
-            packed,
+        extend_tess_upload(
+            &mut vb_dirty,
+            tess_draw.vertex.lock_byte_offset as usize,
+            packed.len(),
         );
         meta.vb_wrote = true;
         let tri_count = batch.index_count / 3;
@@ -364,6 +390,12 @@ fn prepare_iw_tess(
             > meta.cpu_ib.capacity
             && meta.ib_wrote
         {
+            flush_tess_upload(
+                &queue,
+                &meta.ib,
+                bytemuck::cast_slice(&meta.cpu_ib_indices),
+                &mut ib_dirty,
+            );
             let next = create_tess_ib(&device);
             let old = core::mem::replace(&mut meta.ib, next);
             meta.retired_ib.push(old);
@@ -381,10 +413,10 @@ fn prepare_iw_tess(
         let Some(ib_bytes) = meta.cpu_ib_indices.get(ib_start..ib_end) else {
             continue;
         };
-        queue.write_buffer(
-            &ib_gpu,
-            u64::from(index_append.lock_byte_offset),
-            bytemuck::cast_slice(ib_bytes),
+        extend_tess_upload(
+            &mut ib_dirty,
+            index_append.lock_byte_offset as usize,
+            core::mem::size_of_val(ib_bytes),
         );
         meta.ib_wrote = true;
         let stream = gfx_tess_stream0(meta.vb_token, tess_draw.vertex);
@@ -397,6 +429,14 @@ fn prepare_iw_tess(
             batch_i,
         });
     }
+
+    flush_tess_upload(&queue, &meta.vb, &meta.cpu_vb_bytes, &mut vb_dirty);
+    flush_tess_upload(
+        &queue,
+        &meta.ib,
+        bytemuck::cast_slice(&meta.cpu_ib_indices),
+        &mut ib_dirty,
+    );
 
     let Some(projection) =
         r_cmd_buf_set_2d_projection(extracted.0.surface_w as i32, extracted.0.surface_h as i32)

@@ -1,9 +1,8 @@
 //! Section three: the counters.
 //!
-//! `Counter::emit` writes a Perfetto counter track, and the bench report is a
-//! different tool over the same run, so the recorder keeps every render-stage
-//! timing, every GPU pass and every draw census as well. This is where they are
-//! read back, without anyone opening the `.pftrace`.
+//! `Counter::emit` writes a Perfetto counter track, and the recorder keeps the
+//! same render-stage timings, GPU passes and draw censuses. This is where they
+//! are read back, without anyone opening the `.pftrace`.
 //!
 //! Three rules the tables here exist to keep:
 //!
@@ -11,21 +10,23 @@
 //!   could not time and a pass that cost nothing are not the same fact;
 //! * a sample is not a frame. `submit_prepare` fires once per submit and
 //!   `fx_update` twice per frame, so `avg` is the cost of one *call* and
-//!   `per frame` is the cost of the calls one frame made. The two columns are
-//!   printed side by side because comparing the wrong one to a frame budget is
-//!   the easiest mistake this report can invite;
+//!   `per frame` is the cost of the calls one frame made. Both columns are
+//!   printed, because only the second answers a frame budget;
 //! * GPU passes are not added up. They overlap on the device and the driver
 //!   resolves them some frames after the CPU work that queued them, so the
-//!   measured `gpu_frame` interval is printed as its own row rather than as a
-//!   total of the rows above it.
+//!   `gpu_frame` span sum is printed as its own row rather than as a total of
+//!   the rows above it — and rather than as a measured interval, which it is
+//!   not: no outer GPU frame interval exists on this path.
 
 use perf::{Counter, CounterStats, Origin, Phase, SpanStats, Unit};
 
 use crate::bench::table::{Align, Table};
 
-/// CPU stage timings, in the order the work happens rather than by size: a
-/// reader is looking for where a stage grew, and the sequence is the context.
-const CPU_MS: [Counter; 7] = [
+/// CPU stage timings, in the order the work happens rather than by size.
+/// `prepare_views` is last because it is a render-world set interval around
+/// bevy's own `PrepareViews` systems, not one step of the submit sequence, and
+/// it holds whatever else the executor ran inside that set.
+const CPU_MS: [Counter; 8] = [
     Counter::RenderSubmitPrepareMs,
     Counter::RenderSubmitGatherMs,
     Counter::RenderSubmitArenaMs,
@@ -33,10 +34,11 @@ const CPU_MS: [Counter; 7] = [
     Counter::RenderSubmitSunMs,
     Counter::RenderGraphRenderMs,
     Counter::RenderGraphPresentMs,
+    Counter::RenderPrepareViewsMs,
 ];
 
-/// GPU pass timings. `gpu_frame` is last and is the measured interval, not the
-/// sum of the passes before it.
+/// GPU pass timings. `gpu_frame` is last and is the span sum, not the sum of
+/// the passes before it and not a measured device interval.
 const GPU_MS: [Counter; 6] = [
     Counter::RenderGpuColourMs,
     Counter::RenderGpuSunMs,
@@ -47,9 +49,7 @@ const GPU_MS: [Counter; 6] = [
 ];
 
 /// Inside `Present` and `Ui`, whose span self-time is most of what the frame
-/// report cannot name. Two phases in one table because they are adjacent and a
-/// reader chasing the frame reads them together; the `present_`/`ui_` prefix
-/// says which is which.
+/// report cannot name. The `present_`/`ui_` prefix says which phase a row is.
 const PHASE_MS: [Counter; 5] = [
     Counter::PresentPublishMs,
     Counter::HudTessBodyMs,
@@ -72,8 +72,14 @@ const SCHEDULE_MS: [Counter; 3] = [
 ];
 
 /// Per-frame work: what the CPU asked the GPU to do, and what it allocated
-/// doing it.
-const WORK: [Counter; 14] = [
+/// doing it. The `arena_*` rows are the constant-arena upload census taken
+/// where the upload is chosen: `used`/`capacity` are the staging sizes,
+/// `dirty` what the pack marked, `uploaded` what the queue was handed, and
+/// `full_resize`/`full_flag` why a full upload happened — a grown logical
+/// length alone uploads only its tail and appears in none of the full rows.
+/// The `postfx_*` rows are the submit decision: the refusal discriminant and
+/// the planned/executed step counts, with no strings per frame.
+const WORK: [Counter; 25] = [
     Counter::HudTessJobs,
     Counter::RenderGraphSubmitPendingN,
     Counter::CounterOverlayConstWrites,
@@ -88,6 +94,17 @@ const WORK: [Counter; 14] = [
     Counter::CounterCmdState,
     Counter::CounterFxElemLive,
     Counter::CounterProcessAllocations,
+    Counter::CounterArenaUsedBytes,
+    Counter::CounterArenaCapacityBytes,
+    Counter::CounterArenaDirtyBytes,
+    Counter::CounterArenaUploadedBytes,
+    Counter::CounterArenaUploadCalls,
+    Counter::CounterArenaFullResize,
+    Counter::CounterArenaFullFlag,
+    Counter::CounterArenaReallocN,
+    Counter::CounterPostFxRefusal,
+    Counter::CounterPostFxPlannedSteps,
+    Counter::CounterPostFxExecutedSteps,
 ];
 
 pub(crate) fn render(wall: &SpanStats, out: &mut Vec<String>) {
@@ -139,7 +156,7 @@ pub(crate) fn render(wall: &SpanStats, out: &mut Vec<String>) {
 
     out.push(String::new());
     out.push(
-        "  GPU passes (ms) — measured on the device, resolved some frames after the CPU work that queued them. They overlap, so they are not summed; `gpu_frame` is the measured interval."
+        "  GPU passes (ms) — measured on the device, resolved some frames after the CPU work that queued them. They overlap, so they are not summed; `gpu_frame` is the span sum over the newest delivered batch, not a measured device interval."
             .to_owned(),
     );
     ms_table(&stats, &GPU_MS, wall, frames, Share::Wall, out);
@@ -166,19 +183,13 @@ pub(crate) fn render(wall: &SpanStats, out: &mut Vec<String>) {
 /// How old the state on the surface was, in its own table because every column
 /// the other tables carry would be a lie here.
 ///
-/// `presented_state_age` is when the work happened, not how long anything
-/// took, so it has no `per frame` and no `%frame`: an age divided by a frame
-/// is not a share of one, and among the render stages it reads as one — which
-/// is the input-to-photon reading the frame section forbids.
-/// `presented_frames_behind` is the same quantity counted in frames, so it
-/// belongs beside it rather than in the work table, where its `total` would be
-/// a sum of the number one.
+/// `presented_state_age` is when the work happened, not how long anything took,
+/// so it has no `per frame` and no `%frame`: an age divided by a frame is not a
+/// share of one. `presented_frames_behind` is the same quantity counted in
+/// frames and belongs beside it.
 ///
-/// Silent when the counter never fired at all, which is a run that presented
-/// nothing rather than a run that presented in line with the main world: a
-/// serialised run still has an age here, it just answers zero frames behind.
-/// A MISS row would read as a measurement that came back empty rather than as
-/// a question the run never asked.
+/// Silent when the counter never fired, which is a run that presented nothing:
+/// a serialised run still has an age here and answers zero frames behind.
 fn age_table(stats: &[CounterStats], frames: u64, out: &mut Vec<String>) {
     let Some(age) = find(stats, Counter::RenderPresentedStateAgeMs) else {
         return;
@@ -227,9 +238,7 @@ fn age_table(stats: &[CounterStats], frames: u64, out: &mut Vec<String>) {
 }
 
 /// Which HUD slice was the largest, not only how large. An index is not a
-/// duration and has no business in a millisecond table, so it gets a sentence:
-/// the reader who has just seen a HUD stage take a third of the frame should
-/// not then have to bisect the chain to find out which one.
+/// duration and has no business in a millisecond table, so it gets a sentence.
 fn hud_stage(stats: &[CounterStats], out: &mut Vec<String>) {
     out.push(
         "    These are wall intervals between two systems, not the cost of either. Whatever the executor ran in the gap is in them; compare them against `hud_tess_body` above rather than adding the two, and do not subtract either from a span."
@@ -248,9 +257,7 @@ fn hud_stage(stats: &[CounterStats], out: &mut Vec<String>) {
 }
 
 /// Counters that took a sample and are in none of the three tables above. The
-/// tables are a curated set — the frame's cost and the frame's work — while
-/// `summary.json` carries every counter the recorder held. Naming the rest is
-/// what stops the report reading as the whole list when it is a selection.
+/// tables are a selection; naming the rest is what says so.
 fn untabled(stats: &[CounterStats], out: &mut Vec<String>) {
     let tabled: Vec<Counter> = CPU_MS
         .into_iter()
@@ -283,8 +290,7 @@ fn untabled(stats: &[CounterStats], out: &mut Vec<String>) {
 /// What the last column of a millisecond table divides by, and what it is
 /// therefore allowed to be called. A CPU stage is part of the frame it was
 /// measured in; a GPU pass is device time against the same wall clock and is
-/// not a share of any one frame, so it gets its own name rather than borrowing
-/// one that would read as a frame budget.
+/// not a share of any one frame, so it gets its own name.
 #[derive(Clone, Copy)]
 enum Share {
     Frame,
@@ -420,8 +426,7 @@ fn rejected(stats: &[CounterStats], out: &mut Vec<String>) {
 
 /// Counters this build declares that took no sample in either phase. Printing
 /// the names is the difference between "this workload never did that" and
-/// "nothing emits this any more", which the reader can tell apart and the
-/// report cannot.
+/// "nothing emits this any more".
 fn never_sampled(out: &mut Vec<String>) {
     let silent = perf::stats::counters_never_sampled();
     if silent.is_empty() {

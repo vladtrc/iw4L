@@ -5,7 +5,7 @@ use dpvs_iw4::{
     pack_particle_cloud_draw_surf, pack_xmodel_rigid_skinned_draw_surf,
     with_reflection_probe_index,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -2542,8 +2542,6 @@ pub struct SunShadowCasterPlan {
 
     pub cutout_custom0: u32,
 
-    pub cutout_plus23_names: Option<String>,
-
     pub bsp_ids: Vec<u16>,
     pub smodel_ids: Vec<u16>,
     pub bsp_ids_far: Vec<u16>,
@@ -2643,7 +2641,6 @@ fn emit_world_sun_shadow_surf(
     world_plan: &super::WorldDrawGpuPlan,
     catalog: &super::RuntimeMaterialCatalog,
     plan: &mut SunShadowCasterPlan,
-    cutout_names: &mut BTreeMap<String, u32>,
     world_from_local: Mat4,
 ) {
     plan.world_eligible = plan.world_eligible.saturating_add(1);
@@ -2658,9 +2655,6 @@ fn emit_world_sun_shadow_surf(
         .unwrap_or(false);
     if cutout {
         plan.cutout_plus23 = plan.cutout_plus23.saturating_add(1);
-        if let Some(material) = material {
-            *cutout_names.entry(material.name.clone()).or_default() += 1;
-        }
     }
     let empty_ib = world_plan
         .surface_ranges()
@@ -2746,7 +2740,6 @@ fn emit_world_sun_shadow_from_vis(
     world_plan: &super::WorldDrawGpuPlan,
     catalog: &super::RuntimeMaterialCatalog,
     plan: &mut SunShadowCasterPlan,
-    cutout_names: &mut BTreeMap<String, u32>,
     bsp_ids: &mut Vec<u16>,
 ) {
     let n = cull.surface_materials.len();
@@ -2771,7 +2764,6 @@ fn emit_world_sun_shadow_from_vis(
                 world_plan,
                 catalog,
                 plan,
-                cutout_names,
                 Mat4::IDENTITY,
             );
         }
@@ -2784,15 +2776,7 @@ fn emit_world_sun_shadow_from_vis(
             if !cull.capture.casters.get(surf) {
                 continue;
             }
-            emit_world_sun_shadow_surf(
-                surf,
-                cull,
-                world_plan,
-                catalog,
-                plan,
-                cutout_names,
-                Mat4::IDENTITY,
-            );
+            emit_world_sun_shadow_surf(surf, cull, world_plan, catalog, plan, Mat4::IDENTITY);
         }
     }
     for (surf, pose) in extra_bmodel_surfs_with_pose(
@@ -2803,7 +2787,7 @@ fn emit_world_sun_shadow_from_vis(
         if vis.get(surf).copied().unwrap_or(0) == 0 {
             continue;
         }
-        emit_world_sun_shadow_surf(surf, cull, world_plan, catalog, plan, cutout_names, pose);
+        emit_world_sun_shadow_surf(surf, cull, world_plan, catalog, plan, pose);
     }
 }
 
@@ -2952,50 +2936,24 @@ pub fn bake_sun_shadow_caster_plan(
     let mut destinations = Vec::new();
     let mut destination_sources = Vec::new();
     let mut custom_skip = HashSet::new();
-    let mut cutout_names = BTreeMap::<String, u32>::new();
     if let Some(vis) = world_vis {
-        emit_world_sun_shadow_from_vis(
-            vis,
-            cull,
-            world_plan,
-            catalog,
-            &mut plan,
-            &mut cutout_names,
-            bsp_ids,
-        );
+        emit_world_sun_shadow_from_vis(vis, cull, world_plan, catalog, &mut plan, bsp_ids);
     } else {
         let n = cull.capture.casters.len().max(cull.surface_materials.len());
         for surf in 0..n {
             if !cull.capture.casters.get(surf) {
                 continue;
             }
-            emit_world_sun_shadow_surf(
-                surf,
-                cull,
-                world_plan,
-                catalog,
-                &mut plan,
-                &mut cutout_names,
-                Mat4::IDENTITY,
-            );
+            emit_world_sun_shadow_surf(surf, cull, world_plan, catalog, &mut plan, Mat4::IDENTITY);
         }
         for (surf, pose) in extra_bmodel_surfs_with_pose(
             &cull.brush_models,
             &cull.capture.casters,
             &cull.bmodel_world_from_local,
         ) {
-            emit_world_sun_shadow_surf(
-                surf,
-                cull,
-                world_plan,
-                catalog,
-                &mut plan,
-                &mut cutout_names,
-                pose,
-            );
+            emit_world_sun_shadow_surf(surf, cull, world_plan, catalog, &mut plan, pose);
         }
     }
-    plan.cutout_plus23_names = rank_cutout_names(cutout_names);
     if let Some(vis) = smodel_vis {
         let cap = vis.len().min(smodel_draw_insts.len());
         if smodel_ids.len() < cap {
@@ -3269,20 +3227,4 @@ fn collect_xmodel_sun_shadow_casters(
         });
     }
     items
-}
-fn rank_cutout_names(map: BTreeMap<String, u32>) -> Option<String> {
-    let mut ranked: Vec<_> = map.into_iter().collect();
-    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    if ranked.is_empty() {
-        None
-    } else {
-        Some(
-            ranked
-                .iter()
-                .take(6)
-                .map(|(name, n)| format!("{name}:{n}"))
-                .collect::<Vec<_>>()
-                .join(","),
-        )
-    }
 }

@@ -474,9 +474,15 @@ pub(crate) fn build_t5_static_model_draw(
             }),
         ),
     };
-    let scripts = script_model_placements_t5(stream);
-    let brushes = script_brush_model_placements_t5(stream);
-    let use_triggers = map_use_triggers_t5(stream);
+    let mut scripts = script_model_placements_t5(stream);
+    let mut brushes = script_brush_model_placements_t5(stream);
+    let mut use_triggers = map_use_triggers_t5(stream);
+    normalize_bomb_sites(
+        &mut scripts,
+        &mut brushes,
+        &mut use_triggers,
+        "bombzone_dem",
+    );
     let descriptors = flag_descriptors_t5(stream);
     let structs = map_script_structs_t5(stream);
     link_model_placements(
@@ -506,9 +512,10 @@ pub(crate) fn build_iw5_static_model_draw(
             }),
         ),
     };
-    let scripts = script_model_placements_iw5(stream);
-    let brushes = script_brush_model_placements_iw5(stream);
-    let use_triggers = map_use_triggers_iw5(stream);
+    let mut scripts = script_model_placements_iw5(stream);
+    let mut brushes = script_brush_model_placements_iw5(stream);
+    let mut use_triggers = map_use_triggers_iw5(stream);
+    normalize_bomb_sites(&mut scripts, &mut brushes, &mut use_triggers, "dd_bombzone");
     let descriptors = flag_descriptors_iw5(stream);
     let structs = map_script_structs_iw5(stream);
     link_model_placements(
@@ -522,6 +529,52 @@ pub(crate) fn build_iw5_static_model_draw(
         catalog,
         geometry.smodel_count,
     )
+}
+
+fn normalize_bomb_sites(
+    scripts: &mut [crate::ScriptModelPlacement],
+    brushes: &mut [crate::ScriptBrushModelPlacement],
+    triggers: &mut [crate::MapUseTrigger],
+    demolition_tag: &str,
+) {
+    let normalize = |value: &mut String| {
+        *value = value
+            .split_ascii_whitespace()
+            .map(|token| {
+                if token == demolition_tag {
+                    "bombzone"
+                } else if token == "bombzone" {
+                    "sd_bombzone"
+                } else {
+                    token
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+    };
+    for script in scripts {
+        normalize(&mut script.gameobject);
+    }
+    for brush in brushes {
+        normalize(&mut brush.gameobject);
+    }
+    for trigger in triggers {
+        normalize(&mut trigger.gameobject);
+        if trigger.targetname == demolition_tag {
+            trigger.targetname = if trigger
+                .script_label
+                .trim_start_matches('_')
+                .eq_ignore_ascii_case("c")
+            {
+                "dd_overtime_bombzone"
+            } else {
+                "bombzone"
+            }
+            .to_owned();
+        } else if trigger.targetname == "bombzone" {
+            trigger.targetname = "sd_bombzone".to_owned();
+        }
+    }
 }
 
 pub(crate) fn link_model_placements(

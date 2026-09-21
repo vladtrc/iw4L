@@ -100,6 +100,8 @@ pub struct StartDecision {
     pub variant: Option<usize>,
     pub outcome: StartOutcome,
     pub secondary: Option<(String, StartOutcome)>,
+
+    pub detail: Option<String>,
 }
 
 impl StartDecision {
@@ -116,6 +118,10 @@ impl StartDecision {
         );
         if let Some((sec, outcome)) = &self.secondary {
             line.push_str(&format!(" secondary=`{sec}` result={outcome}"));
+        }
+        if let Some(detail) = &self.detail {
+            line.push(' ');
+            line.push_str(detail);
         }
         line
     }

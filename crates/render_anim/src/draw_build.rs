@@ -7,9 +7,9 @@ use render_scene::{SmodelPassMaterial, WorldModelLightingAtlas};
 use crate::anim::fpv_pose::PosedModelSurface;
 use crate::draw::{
     BODY_PACKED_UNAVAILABLE, DynEntAssetDraw, DynEntDrawPlan, FPV_PACKED_EMPTY_PLAN,
-    FPV_PACKED_UNAVAILABLE, FpvDrawPlan, FpvPlanSurface, FpvSurfaceDraw, ItemDrawPlan,
-    MissileDrawPlan, RemoteBodyDrawPlan, RemoteBodySurfaceDraw, ScriptModelAssetDraw,
-    ScriptModelDrawPlan, stamp_plan_geometry, topology_fingerprint,
+    FPV_PACKED_UNAVAILABLE, FpvDrawPlan, ItemDrawPlan, MissileDrawPlan, RemoteBodyDrawPlan,
+    RemoteBodySurfaceDraw, ScriptModelAssetDraw, ScriptModelDrawPlan, stamp_plan_geometry,
+    topology_fingerprint,
 };
 
 pub const XMODEL_PACKED_UNAVAILABLE: &str =
@@ -726,86 +726,80 @@ fn append_mesh(
     Some((index_start, count as u32))
 }
 
-pub fn rebuild_fpv_draw_plan(
+/// Publish the rows a prepared rig settled: its indices, its surface ranges,
+/// its materials and its draws, plus a packed vertex buffer sized to the layout
+/// it laid out. This runs when the composition changes. A pose writes into the
+/// buffer below and touches nothing else here.
+pub fn install_prepared_fpv_plan(
     plan: &mut FpvDrawPlan,
-    surfaces: &[FpvPlanSurface],
+    geometry: &crate::anim::fpv_rig::PreparedFpvGeometry,
     lighting_handle: u32,
-    visible: bool,
 ) {
-    plan.vertices.clear();
+    plan.indices.clear();
+    plan.indices.extend_from_slice(&geometry.indices);
+    plan.surface_ranges.clear();
+    plan.surface_ranges
+        .extend_from_slice(&geometry.surface_ranges);
+    plan.materials.clear();
+    plan.materials.extend_from_slice(&geometry.materials);
+    plan.draws.clear();
+    plan.draws.extend_from_slice(&geometry.draws);
+    plan.decoded_n = geometry.dest_n;
+    plan.lighting_handle = lighting_handle;
+    plan.geometry_ok = false;
+    plan.packed_vertices = install_retained_packed(
+        geometry.packed_ok,
+        vec![[0u8; asset_iw4::size::GFX_PACKED_VERTEX]; geometry.dest_n],
+        geometry.dest_n,
+        FPV_PACKED_EMPTY_PLAN,
+        FPV_PACKED_UNAVAILABLE,
+    );
+    plan.hands_plan_n = Some(geometry.hands_plan_n);
+    plan.gun_plan_n = Some(geometry.gun_plan_n);
+    plan.scope_plan_n = Some(geometry.scope_plan_n);
+    plan.scope_house_plan_n = Some(geometry.scope_house_plan_n);
+    plan.scope_lens_plan_n = Some(geometry.scope_lens_plan_n);
+    plan.plan_draw_n = Some(geometry.plan_draw_n);
+    plan.plan_skip_n = Some(geometry.plan_skip_n);
+    plan.revisions.bump_vertices();
+    let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.decoded_n);
+    let revision = plan.revision;
+    plan.revision = stamp_plan_geometry(&mut plan.revisions, revision, topology);
+}
+
+/// Nothing to draw. A plan that was already empty publishes no new revision:
+/// a hidden viewmodel is not a reason for the merge downstream to re-copy a
+/// vertex bank every frame.
+pub fn clear_fpv_draw_plan(plan: &mut FpvDrawPlan, lighting_handle: u32) {
+    let was_empty = plan.draws.is_empty() && plan.decoded_n == 0;
+    plan.lighting_handle = lighting_handle;
+    plan.geometry_ok = false;
+    plan.settle_visible();
+    // The rows are gone, so the rig that published them has to publish them
+    // again before this plan draws anything: a viewmodel hidden without a
+    // respawn behind it comes back to the same composition, not to an empty
+    // plan.
+    plan.rig_generation = 0;
+    if was_empty {
+        return;
+    }
     plan.indices.clear();
     plan.surface_ranges.clear();
     plan.materials.clear();
     plan.draws.clear();
-    plan.lighting_handle = lighting_handle;
-
-    plan.visible = visible && plan.drawgun != Some(0);
-    if surfaces.is_empty() {
-        plan.hands_plan_n = None;
-        plan.gun_plan_n = None;
-        plan.scope_plan_n = Some(0);
-        plan.scope_house_plan_n = Some(0);
-        plan.scope_lens_plan_n = Some(0);
-        plan.plan_draw_n = Some(0);
-    }
-    let mut packed = Vec::new();
-    let mut packed_ok = true;
-    let mut mat_key: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
-    for surface in surfaces {
-        let decoded_before = plan.vertices.len();
-        let Some((start, count)) =
-            append_mesh(&surface.mesh, &mut plan.vertices, &mut plan.indices)
-        else {
-            continue;
-        };
-        let decoded_count = plan.vertices.len() - decoded_before;
-        if packed_ok {
-            if surface.packed_vertices.len() == decoded_count {
-                packed.extend_from_slice(&surface.packed_vertices);
-            } else {
-                packed_ok = false;
-                packed.clear();
-            }
-        }
-        let range_idx = plan.surface_ranges.len() as u32;
-        plan.surface_ranges.push((start, count));
-        let mat_idx = if let Some(ai) = surface.authored {
-            *mat_key.entry(ai).or_insert_with(|| {
-                let idx = plan.materials.len() as u32;
-                plan.materials.push(surface.material.clone());
-                idx
-            })
-        } else {
-            let idx = plan.materials.len() as u32;
-            plan.materials.push(surface.material.clone());
-            idx
-        };
-        debug_assert_eq!(
-            plan.materials
-                .get(mat_idx as usize)
-                .map(|m| m.model_lighting_required),
-            Some(true)
-        );
-        plan.draws.push(FpvSurfaceDraw {
-            surface: range_idx,
-            material: mat_idx,
-            is_scope: surface.is_scope && !surface.is_lens,
-        });
-    }
-    plan.packed_vertices = install_retained_packed(
-        packed_ok,
-        packed,
-        plan.vertices.len(),
-        FPV_PACKED_EMPTY_PLAN,
-        FPV_PACKED_UNAVAILABLE,
-    );
-    plan.scope_plan_n = Some(surfaces.iter().filter(|s| s.is_scope).count() as u32);
-    plan.scope_house_plan_n =
-        Some(surfaces.iter().filter(|s| s.is_scope && !s.is_lens).count() as u32);
-    plan.scope_lens_plan_n = Some(surfaces.iter().filter(|s| s.is_lens).count() as u32);
-    plan.plan_draw_n = Some(plan.draws.len() as u32);
+    plan.decoded_n = 0;
+    plan.packed_vertices = assets::RetailPackedVertexPayload::Unavailable {
+        source_layout: FPV_PACKED_EMPTY_PLAN,
+    };
+    plan.hands_plan_n = None;
+    plan.gun_plan_n = None;
+    plan.scope_plan_n = Some(0);
+    plan.scope_house_plan_n = Some(0);
+    plan.scope_lens_plan_n = Some(0);
+    plan.plan_draw_n = Some(0);
+    plan.plan_skip_n = Some(0);
     plan.revisions.bump_vertices();
-    let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.vertices.len());
-    let rev = plan.revision;
-    plan.revision = stamp_plan_geometry(&mut plan.revisions, rev, topology);
+    let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, 0);
+    let revision = plan.revision;
+    plan.revision = stamp_plan_geometry(&mut plan.revisions, revision, topology);
 }

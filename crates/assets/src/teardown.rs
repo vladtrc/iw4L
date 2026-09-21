@@ -6,7 +6,7 @@ use crate::{
     PreparedBodies, PreparedBodyClips, PreparedDestructibleDeath, PreparedFpvMeshes,
     PreparedLocalizedStrings, PreparedProjectileMeshes, PreparedWeapons, PreparedWorldWeapons,
     PreparedXAnims, PreparedXModelWalkCensus, SessionCompass, SessionMapScriptSound,
-    SessionTeamIcons,
+    SessionTeamSettings,
 };
 
 pub(crate) fn drop_match_catalogs_on_teardown(
@@ -27,7 +27,7 @@ pub(crate) fn drop_match_catalogs_on_teardown(
     commands.remove_resource::<PlayerAnimSources>();
     commands.remove_resource::<SessionCompass>();
     commands.remove_resource::<SessionMapScriptSound>();
-    commands.remove_resource::<SessionTeamIcons>();
+    commands.remove_resource::<SessionTeamSettings>();
     commands.remove_resource::<PreparedLocalizedStrings>();
     commands.remove_resource::<PreparedDestructibleDeath>();
     commands.remove_resource::<PreparedBodyClips>();

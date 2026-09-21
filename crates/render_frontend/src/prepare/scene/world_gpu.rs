@@ -17,21 +17,34 @@ pub(crate) fn overlay_is_quiet(ready: bool, quiet: u32) -> bool {
 pub struct WorldGpuWait {
     started: Option<std::time::Instant>,
     quiet: u32,
-    stage: Option<assets::LoadStage>,
-    images_stage: Option<assets::LoadStage>,
-    pipelines_stage: Option<assets::LoadStage>,
+    stage: Option<assets::StageHandle>,
+    images_stage: Option<assets::StageHandle>,
+    pipelines_stage: Option<assets::StageHandle>,
 }
 
 impl WorldGpuWait {
-    pub fn arm(&mut self, loading: Option<&assets::LoadingScreen>) {
+    pub fn arm(&mut self, progress: Option<&assets::LoadProgress>) {
         self.started = Some(std::time::Instant::now());
         self.quiet = 0;
-        if let Some(progress) = loading.map(|screen| &screen.progress) {
-            self.images_stage = Some(progress.stage("preparing GPU textures"));
-            self.pipelines_stage = Some(progress.stage("compiling render pipelines"));
-            let stage = progress.stage("waiting for complete render frames");
-            stage.total(u64::from(GPU_QUIET_FRAMES));
-            self.stage = Some(stage);
+        // A wait that never reached its gate before the world changed under it
+        // was interrupted; it did not quietly succeed.
+        for stage in [
+            self.images_stage.take(),
+            self.pipelines_stage.take(),
+            self.stage.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            stage.cancel();
+        }
+        if let Some(progress) = progress {
+            self.images_stage = Some(progress.begin(assets::StageId::GpuTextures, None));
+            self.pipelines_stage = Some(progress.begin(assets::StageId::Pipelines, None));
+            self.stage = Some(progress.begin(
+                assets::StageId::RenderFrames,
+                Some(u64::from(GPU_QUIET_FRAMES)),
+            ));
         }
     }
 
@@ -229,19 +242,26 @@ pub(crate) fn poll(
     gap_ms: f32,
 ) -> bool {
     if let Some(gpu) = gpu {
+        // Residency and warmth are gauges: what is on the GPU right now. They
+        // may fall between frames, and it is the existing gate — `gpu.images`,
+        // `gpu.pipelines` — that says the wait is over, never count equality.
         if let Some(stage) = &wait.images_stage {
-            stage.total(u64::from(gpu.image_need_n));
-            stage.set_done(u64::from(gpu.image_ready_n));
+            stage.set_total(u64::from(gpu.image_need_n));
+            stage.set_completed(u64::from(gpu.image_ready_n));
         }
-        if gpu.images {
-            wait.images_stage = None;
+        if gpu.images
+            && let Some(stage) = wait.images_stage.take()
+        {
+            stage.done();
         }
         if let Some(stage) = &wait.pipelines_stage {
-            stage.total(u64::from(gpu.warmup.total));
-            stage.set_done(u64::from(gpu.warmup.ready));
+            stage.set_total(u64::from(gpu.warmup.total));
+            stage.set_completed(u64::from(gpu.warmup.ready));
         }
-        if gpu.pipelines {
-            wait.pipelines_stage = None;
+        if gpu.pipelines
+            && let Some(stage) = wait.pipelines_stage.take()
+        {
+            stage.done();
         }
     }
     let ready = gpu.is_some_and(|gpu| gpu.live_for(spawn));
@@ -251,7 +271,7 @@ pub(crate) fn poll(
         wait.quiet = 0;
     }
     if let Some(stage) = &wait.stage {
-        stage.set_done(u64::from(wait.quiet.min(GPU_QUIET_FRAMES)));
+        stage.set_completed(u64::from(wait.quiet.min(GPU_QUIET_FRAMES)));
     }
     diag::info!(
         World,
@@ -271,9 +291,15 @@ pub(crate) fn poll(
     if !overlay_is_quiet(ready, wait.quiet) {
         return false;
     }
-    wait.stage = None;
-    wait.images_stage = None;
-    wait.pipelines_stage = None;
+    if let Some(stage) = wait.stage.take() {
+        stage.done();
+    }
+    if let Some(stage) = wait.images_stage.take() {
+        stage.done();
+    }
+    if let Some(stage) = wait.pipelines_stage.take() {
+        stage.done();
+    }
     true
 }
 

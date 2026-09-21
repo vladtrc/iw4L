@@ -1062,7 +1062,11 @@ struct GraphDiagSample {
     cpu_top: Option<String>,
 }
 
-fn sample_graph_from_store(store: &DiagnosticsStore) -> GraphDiagSample {
+/// The newest delivered GPU batch summed, with the batch's own delivery
+/// marker: the latest measurement timestamp in that batch. It marks a
+/// delivery, not a source frame — equal durations are never compared, and a
+/// span with no measurement in the batch stays missing rather than reused.
+fn sample_graph_from_store(store: &DiagnosticsStore) -> (GraphDiagSample, Option<Instant>) {
     let mut gpu_sum = 0.0f64;
     let mut gpu_any = false;
     let mut gpu_opaque = store
@@ -1132,15 +1136,18 @@ fn sample_graph_from_store(store: &DiagnosticsStore) -> GraphDiagSample {
         }
     }
 
-    GraphDiagSample {
-        gpu_frame: gpu_any.then_some(gpu_sum as f32),
-        gpu_opaque,
-        gpu_iw4,
-        cpu_graph: cpu_any.then_some(cpu_sum as f32),
-        cpu_opaque,
-        cpu_present: present_any.then_some(cpu_present as f32),
-        cpu_top: top_name,
-    }
+    (
+        GraphDiagSample {
+            gpu_frame: gpu_any.then_some(gpu_sum as f32),
+            gpu_opaque,
+            gpu_iw4,
+            cpu_graph: cpu_any.then_some(cpu_sum as f32),
+            cpu_opaque,
+            cpu_present: present_any.then_some(cpu_present as f32),
+            cpu_top: top_name,
+        },
+        newest_gpu_time,
+    )
 }
 
 pub fn sample_render_frame_diag(
@@ -1150,6 +1157,7 @@ pub fn sample_render_frame_diag(
     meshes: Res<Assets<Mesh>>,
     visible_meshes: Query<(&Mesh3d, &ViewVisibility)>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut last_gpu_batch: Local<Option<Instant>>,
 ) {
     if let Ok(mut guard) = slot.0.lock() {
         // The published sample is read every main frame; its counters belong
@@ -1208,6 +1216,11 @@ pub fn sample_render_frame_diag(
                         perf::Counter::RenderPresentedStateAgeMs,
                         sample.presented_state_age_ms,
                     ),
+                    // The `PrepareViews` set as it ran: a set interval, not a
+                    // body. Whatever the executor scheduled inside the set is
+                    // in it, so it is not addable to anything and not
+                    // exclusive CPU work.
+                    (perf::Counter::RenderPrepareViewsMs, sample.prepare_views_ms),
                 ] {
                     if let Some(value) = value {
                         counter.emit_at(f64::from(value), sample.origin_frame);
@@ -1382,19 +1395,28 @@ pub fn sample_render_frame_diag(
     }
 
     if let Some(store) = store.as_ref() {
-        let sample = sample_graph_from_store(store);
-        if let Some(ms) = sample.gpu_frame {
-            perf::Counter::RenderGpuFrameMs.emit(f64::from(ms));
-        }
-        for (counter, value) in [
-            (perf::Counter::RenderGpuColourMs, sample.gpu_iw4.colour),
-            (perf::Counter::RenderGpuSunMs, sample.gpu_iw4.sun),
-            (perf::Counter::RenderGpuSpotMs, sample.gpu_iw4.spot),
-            (perf::Counter::RenderGpuFloatzMs, sample.gpu_iw4.floatz),
-            (perf::Counter::RenderGpuPostfxMs, sample.gpu_iw4.postfx),
-        ] {
-            if let Some(ms) = value {
-                counter.emit(f64::from(ms));
+        let (sample, batch) = sample_graph_from_store(store);
+        // The store holds the newest delivered batch, not this frame's work,
+        // so without a delivery marker the same batch would publish again on
+        // every main frame until the device resolves another. The batch
+        // timestamp is the marker: a delivery identity, not a source-frame
+        // id. Missing spans stay missing — they emit nothing either way.
+        let fresh_batch = batch != *last_gpu_batch;
+        if fresh_batch {
+            *last_gpu_batch = batch;
+            if let Some(ms) = sample.gpu_frame {
+                perf::Counter::RenderGpuFrameMs.emit(f64::from(ms));
+            }
+            for (counter, value) in [
+                (perf::Counter::RenderGpuColourMs, sample.gpu_iw4.colour),
+                (perf::Counter::RenderGpuSunMs, sample.gpu_iw4.sun),
+                (perf::Counter::RenderGpuSpotMs, sample.gpu_iw4.spot),
+                (perf::Counter::RenderGpuFloatzMs, sample.gpu_iw4.floatz),
+                (perf::Counter::RenderGpuPostfxMs, sample.gpu_iw4.postfx),
+            ] {
+                if let Some(ms) = value {
+                    counter.emit(f64::from(ms));
+                }
             }
         }
         diag.gpu_opaque_ms = sample.gpu_opaque;

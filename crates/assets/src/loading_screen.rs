@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use bevy::prelude::Resource;
 
-use crate::progress::{LoadProgress, LoadStage};
+use crate::progress::LoadProgress;
 
 #[derive(Resource)]
 pub struct LoadingScreen {
@@ -20,8 +20,6 @@ pub struct LoadingScreen {
 
     pub(crate) since_complete: Duration,
     pub(crate) preview_ready: bool,
-
-    kickoff: Option<LoadStage>,
 }
 
 impl LoadingScreen {
@@ -30,7 +28,6 @@ impl LoadingScreen {
         title: impl Into<String>,
         mode_label: impl Into<String>,
     ) -> Self {
-        let kickoff = progress.stage("starting map load");
         Self {
             progress,
             title: title.into(),
@@ -42,12 +39,7 @@ impl LoadingScreen {
             complete_at: None,
             since_complete: Duration::ZERO,
             preview_ready: false,
-            kickoff: Some(kickoff),
         }
-    }
-
-    pub(crate) fn take_kickoff(&mut self) -> Option<LoadStage> {
-        self.kickoff.take()
     }
 
     pub fn title(&self) -> &str {
@@ -58,26 +50,14 @@ impl LoadingScreen {
         &self.mode_label
     }
 
+    /// The overlay's own bookkeeping only. What the load does when it
+    /// completes belongs to [`crate::MapLoadProcess`], which is still there
+    /// when no overlay is.
     pub fn finish(&mut self) {
         if !self.complete && self.failure.is_none() {
             self.complete = true;
             self.complete_at = Some(Instant::now());
             self.since_complete = Duration::ZERO;
-            let installed_ms = self.spawned_at.elapsed().as_secs_f32() * 1000.0;
-
-            let trim_ms = diag::release_freed_heap().as_secs_f32() * 1000.0;
-            let with_trim_ms = self.spawned_at.elapsed().as_secs_f32() * 1000.0;
-            let rss = crate::process_resident_bytes()
-                .map(|bytes| format!(" rss_mib={}", bytes >> 20))
-                .unwrap_or_default();
-            let heap = diag::process_live_heap_bytes()
-                .map(|bytes| format!(" heap_mib={}", bytes >> 20))
-                .unwrap_or_default();
-            diag::info!(
-                World,
-                "load complete: {installed_ms:.0}ms overlay-to-world-installed (+trim {with_trim_ms:.0}ms) for `{}`{rss}{heap} trim={trim_ms:.1}ms",
-                self.title
-            );
         }
     }
 
@@ -85,7 +65,6 @@ impl LoadingScreen {
         self.failure = Some(reason.into());
         self.complete = false;
         self.complete_at = None;
-        self.kickoff.take();
     }
 
     pub fn failure(&self) -> Option<&str> {

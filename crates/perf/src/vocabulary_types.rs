@@ -122,6 +122,34 @@ pub enum Counter {
     WorldPretessSkip,
 
     SmodelIbSkip,
+
+    /// Bevy `PrepareViews` set as a wall interval: the render systems between
+    /// `Specialize` and `Queue` ran inside it, and so did whatever else the
+    /// executor scheduled there. A body only in the sense the HUD bodies are —
+    /// read it against the schedule gaps, never as exclusive CPU work.
+    RenderPrepareViewsMs,
+
+    /// Constant-arena upload census, taken where the upload is chosen and
+    /// performed. Byte counts are CPU-side staging sizes; the driver copies
+    /// them to the device after the call returns.
+    CounterArenaUsedBytes,
+    CounterArenaCapacityBytes,
+    CounterArenaDirtyBytes,
+    CounterArenaUploadedBytes,
+    CounterArenaUploadCalls,
+    /// Full uploads grouped by reason: the GPU buffer was recreated, or an
+    /// explicit owner/generation/reservation reset required it. A changed
+    /// logical length alone is not a reason — the tail uploads on its own.
+    CounterArenaFullResize,
+    CounterArenaFullFlag,
+    CounterArenaReallocN,
+
+    /// Postfx submit decision: the refusal discriminant (no strings per
+    /// frame), and the planned/executed step counts with the frame identity
+    /// held at the decision point.
+    CounterPostFxRefusal,
+    CounterPostFxPlannedSteps,
+    CounterPostFxExecutedSteps,
 }
 
 impl Span {
@@ -242,7 +270,7 @@ pub enum Unit {
 }
 
 impl Counter {
-    pub const COUNT: usize = Self::SmodelIbSkip as usize + 1;
+    pub const COUNT: usize = Self::CounterPostFxExecutedSteps as usize + 1;
 
     /// Every counter, in declaration order. The recorder indexes its arrays by
     /// `counter as usize`, so this and the enum must not drift.
@@ -295,6 +323,18 @@ impl Counter {
         Self::FxLayoutOverlay,
         Self::WorldPretessSkip,
         Self::SmodelIbSkip,
+        Self::RenderPrepareViewsMs,
+        Self::CounterArenaUsedBytes,
+        Self::CounterArenaCapacityBytes,
+        Self::CounterArenaDirtyBytes,
+        Self::CounterArenaUploadedBytes,
+        Self::CounterArenaUploadCalls,
+        Self::CounterArenaFullResize,
+        Self::CounterArenaFullFlag,
+        Self::CounterArenaReallocN,
+        Self::CounterPostFxRefusal,
+        Self::CounterPostFxPlannedSteps,
+        Self::CounterPostFxExecutedSteps,
     ];
 
     /// The name the counter carries in a trace and in the bench report.
@@ -348,6 +388,18 @@ impl Counter {
             Self::FxLayoutOverlay => "fx_layout_overlay",
             Self::WorldPretessSkip => "world_pretess_skip",
             Self::SmodelIbSkip => "smodel_ib_skip",
+            Self::RenderPrepareViewsMs => "prepare_views",
+            Self::CounterArenaUsedBytes => "arena_used_bytes",
+            Self::CounterArenaCapacityBytes => "arena_capacity_bytes",
+            Self::CounterArenaDirtyBytes => "arena_dirty_bytes",
+            Self::CounterArenaUploadedBytes => "arena_uploaded_bytes",
+            Self::CounterArenaUploadCalls => "arena_upload_calls",
+            Self::CounterArenaFullResize => "arena_full_resize",
+            Self::CounterArenaFullFlag => "arena_full_flag",
+            Self::CounterArenaReallocN => "arena_realloc",
+            Self::CounterPostFxRefusal => "postfx_refusal",
+            Self::CounterPostFxPlannedSteps => "postfx_planned_steps",
+            Self::CounterPostFxExecutedSteps => "postfx_executed_steps",
         }
     }
 
@@ -376,7 +428,8 @@ impl Counter {
             | Self::RenderGpuSpotMs
             | Self::RenderGpuFloatzMs
             | Self::RenderGpuPostfxMs
-            | Self::RenderGpuFrameMs => Unit::Milliseconds,
+            | Self::RenderGpuFrameMs
+            | Self::RenderPrepareViewsMs => Unit::Milliseconds,
             _ => Unit::Count,
         }
     }

@@ -2,7 +2,8 @@
 
 `IW4L_BENCH=1` turns on an in-process recorder. At exit it prints three
 independent reports to `iw4l-artifacts/bench/<stamp>.txt`. None needs a trace
-file; any can be MISS while the others stand.
+file; any can be MISS while the others stand. Benchmarks keep running when
+unfocused; the window runner does not impose its background 60 Hz sleep.
 
 ```bash
 make bench demo0011              # play a demo   (a goal is always a demo name)

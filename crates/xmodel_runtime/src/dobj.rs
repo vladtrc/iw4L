@@ -264,17 +264,15 @@ impl DObj {
         }
 
         let mut duplicates = Vec::new();
-        for dest in 0..bones.len() {
-            if bones[dest].name.is_empty() {
+        let mut first_by_name = std::collections::HashMap::<&str, usize>::new();
+        for (dest, bone) in bones.iter().enumerate() {
+            if bone.name.is_empty() {
                 continue;
             }
-            if let Some(source) = bones[..dest]
-                .iter()
-                .position(|b| b.name == bones[dest].name && b.model != bones[dest].model)
-            {
-                if bones[dest].parent == Some(source) {
-                    continue;
-                }
+            let source = *first_by_name.entry(&bone.name).or_insert(dest);
+            // Models are appended in contiguous blocks. The first occurrence
+            // is therefore also the first occurrence in any earlier model.
+            if bones[source].model != bone.model && bone.parent != Some(source) {
                 duplicates.push((dest, source));
             }
         }
@@ -303,7 +301,14 @@ impl DObj {
     }
 
     pub fn tracks_for(&self, clip: &AnimClip) -> Vec<Option<usize>> {
-        clip.tracks.iter().map(|t| self.find(&t.name)).collect()
+        let mut first_by_name = std::collections::HashMap::with_capacity(self.bones.len());
+        for (index, bone) in self.bones.iter().enumerate() {
+            first_by_name.entry(bone.name.as_str()).or_insert(index);
+        }
+        clip.tracks
+            .iter()
+            .map(|track| first_by_name.get(track.name.as_str()).copied())
+            .collect()
     }
 
     pub fn calc_anim(&self, anims: &[AnimInstance<'_>], requested: &PartBits) -> Vec<Local> {

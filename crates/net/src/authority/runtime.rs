@@ -14,9 +14,10 @@ use crate::schedule::{AuthoritySet, ClientSet};
 use crate::transport::archive::FrameArchive;
 use crate::transport::loopback_live::ListenLoopback;
 use frame::{
-    AbortKillcam, BeginKillcam, ExitLevelCalled, GameEnded, GameWin, GlassDestroyed, KillcamEnded,
-    MatchEndingReason, MatchEndingSoon, MatchEndingVerySoon, MatchTornDown, PrematchDone,
-    SpawnedPlayer, SpawnedPlayerNotify, SpawningIntermission, register_script_notify,
+    AbortKillcam, BeginKillcam, ExitLevelCalled, GameEnded, GameWin, GameWinner, GlassDestroyed,
+    KillcamEnded, MatchEndingReason, MatchEndingSoon, MatchEndingVerySoon, MatchTornDown,
+    PrematchDone, RoundSwitchKind, RoundSwitchNotify, RoundWin, SpawnedPlayer, SpawnedPlayerNotify,
+    SpawningIntermission, register_script_notify,
 };
 use gamemode_iw4::end_game::EndGameTailOutput;
 use gamemode_iw4::sound_emit::{MatchEndingReason as GscEndingReason, MatchSoundEmit};
@@ -1330,8 +1331,18 @@ pub struct ScriptNotifyEmitStats {
     pub game_ended: u32,
     pub prematch_done: u32,
     pub game_win: u32,
+    pub round_win: u32,
+    pub round_switch: u32,
     pub spawn_music: u32,
     pub glass_destroyed: u32,
+}
+
+fn team_winner(winner: Option<gamemode_iw4::Team>) -> GameWinner {
+    match winner {
+        Some(gamemode_iw4::Team::Allies) => GameWinner::Allies,
+        Some(gamemode_iw4::Team::Axis) => GameWinner::Axis,
+        Some(gamemode_iw4::Team::Free) | None => GameWinner::Undefined,
+    }
 }
 
 pub fn authority_bookkeeping(
@@ -1343,6 +1354,8 @@ pub fn authority_bookkeeping(
     mut ended: MessageWriter<GameEnded>,
     mut prematch: MessageWriter<PrematchDone>,
     mut game_win: MessageWriter<GameWin>,
+    mut round_win: MessageWriter<RoundWin>,
+    mut round_switch: MessageWriter<RoundSwitchNotify>,
     mut spawned_music: MessageWriter<SpawnedPlayerNotify>,
     mut glass_destroyed: MessageWriter<GlassDestroyed>,
     mut stats: ResMut<ScriptNotifyEmitStats>,
@@ -1369,7 +1382,32 @@ pub fn authority_bookkeeping(
     }
     if let Some(winner) = world.0.take_game_win() {
         game_win.write(GameWin {
-            winner: winner.map(|id| id.0),
+            winner: match winner {
+                Some(id) => GameWinner::Player(id.0),
+                None => GameWinner::Undefined,
+            },
+        });
+        stats.game_win = stats.game_win.saturating_add(1);
+    }
+    if let Some(winner) = world.0.take_round_win() {
+        round_win.write(RoundWin {
+            winner: team_winner(winner),
+        });
+        stats.round_win = stats.round_win.saturating_add(1);
+    }
+    if let Some(halftime) = world.0.take_round_switch() {
+        round_switch.write(RoundSwitchNotify {
+            kind: if halftime {
+                RoundSwitchKind::Halftime
+            } else {
+                RoundSwitchKind::Other
+            },
+        });
+        stats.round_switch = stats.round_switch.saturating_add(1);
+    }
+    if let Some(winner) = world.0.take_team_game_win() {
+        game_win.write(GameWin {
+            winner: team_winner(winner),
         });
         stats.game_win = stats.game_win.saturating_add(1);
     }

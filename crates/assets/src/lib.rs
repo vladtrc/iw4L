@@ -111,6 +111,7 @@ pub mod progress {
 mod projectile_mesh_catalog {
     pub use asset_model::*;
 }
+mod map_load_process;
 pub mod session_load;
 mod soldiers {
     pub use asset_model::*;
@@ -179,10 +180,10 @@ pub use animtree::{
     PLAYERANIM_SCRIPT_PATH, PLAYERANIM_TYPES_PATH, PlayerAnimLeafBinds, PlayerAnimSources,
 };
 pub use arena::{
-    ArenaCharsets, FACTION_ICON_COL, SessionTeamIcons, TeamIcons, arena_charsets,
-    load_iw5_team_icon_sources, parse_arena, read_basemaps_arena, read_iwd_named,
-    t5_icons_from_teamset_gsc, t5_icons_from_teamset_rawfile, t5_teamset_from_map_gsc,
-    t5_teamset_from_rawfile, t5_teamset_key_from_rawfile, team_icons, team_icons_for_zone,
+    ArenaCharsets, FACTION_ICON_COL, MapTeamSettings, SessionTeamSettings, arena_charsets,
+    load_iw5_team_sources, parse_arena, read_basemaps_arena, read_iwd_named,
+    t5_settings_from_teamset_gsc, t5_settings_from_teamset_rawfile, t5_teamset_from_map_gsc,
+    t5_teamset_from_rawfile, t5_teamset_key_from_rawfile, team_settings, team_settings_for_zone,
 };
 pub use artifact_cache::{cache_flight, cache_get, cache_put, fnv1a64, fnv1a64_more};
 pub use asset_core::{
@@ -316,7 +317,8 @@ pub use map_script_sound::{
     game_nested_string_assignment, game_string_assignment,
 };
 pub use match_load::{
-    MatchLoadAbort, MatchLoadAccepted, MatchLoadBusy, MatchLoadRequest, PreparedMatchReady,
+    MapLoadApproval, MatchLoadAbort, MatchLoadAccepted, MatchLoadBusy, MatchLoadDispatch,
+    MatchLoadRequest, PreparedMatchReady,
 };
 pub use material_catalog::{
     AssetPointerIdentity, AssetRefDumpCensus, AuthoredImage, AuthoredMaterial, AuthoredShader,
@@ -389,6 +391,7 @@ pub use playeranim_parse::{
 };
 pub use plugin::AssetPlugin;
 
+pub use map_load_process::MapLoadProcess;
 pub use prepared::{
     MapFacts, MatchMaterials, MatchType10SoundHints, PreparedBodies, PreparedBodyClips,
     PreparedDestructibleDeath, PreparedFpvMeshes, PreparedGaps, PreparedLocalizedStrings,
@@ -396,7 +399,8 @@ pub use prepared::{
     PreparedXModelWalkCensus, SessionCompass,
 };
 pub use progress::{
-    LoadLaneTiming, LoadLaneView, LoadOverflow, LoadProgress, LoadStage, peak_resident_bytes,
+    LoadLaneTiming, LoadProgress, LoadSnapshot, StageEnd, StageHandle, StageId, StageKey,
+    StageOutcome, StageScope, StageSnapshot, WorkCount, peak_resident_bytes,
     process_resident_bytes,
 };
 pub use projectile_mesh_catalog::{

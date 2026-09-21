@@ -17,7 +17,7 @@ use bevy::render::render_resource::{
 use bevy::tasks::TaskPool;
 
 use crate::material_catalog::TS_2D;
-use crate::progress::LoadStage;
+use crate::progress::StageHandle;
 use crate::{
     AuthoredImage, ImageVariantId, MaterialDefinitions, TS_COLOR_MAP, TS_FUNCTION, TS_NORMAL_MAP,
     TS_WATER_MAP,
@@ -288,7 +288,7 @@ fn texture_semantic_decodes_as_normal(semantic: u8) -> Option<bool> {
 pub fn decode_material_color_maps(
     zone_ff: &Path,
     catalog: &mut MaterialDefinitions,
-    stage: &LoadStage,
+    stage: &StageHandle,
     pool: &TaskPool,
 ) -> Result<MaterialImageStats, String> {
     let main = game_main_for_zone(zone_ff)?;
@@ -300,7 +300,7 @@ pub fn decode_material_color_maps(
 
     let work = requested_color_map_slots(catalog);
     stats.requested = work.len();
-    stage.total(work.len() as u64);
+    stage.set_total(work.len() as u64);
 
     let images = &catalog.images;
     let decoded = decode_requests_in_parallel(images, index.as_ref(), &work, stage, pool);
@@ -384,7 +384,7 @@ pub fn decode_color_or_2d_for_names(
     zone_ff: &Path,
     catalog: &mut MaterialDefinitions,
     names: impl IntoIterator<Item = impl AsRef<str>>,
-    stage: &LoadStage,
+    stage: &StageHandle,
     pool: &TaskPool,
 ) -> Result<usize, String> {
     let work = requested_named_2d_slots(catalog, names);
@@ -393,7 +393,7 @@ pub fn decode_color_or_2d_for_names(
     }
     let main = game_main_for_zone(zone_ff)?;
     let index = IwdIndex::open(&main)?;
-    stage.total(work.len() as u64);
+    stage.set_total(work.len() as u64);
     let images = &catalog.images;
     let decoded = decode_requests_in_parallel(images, index.as_ref(), &work, stage, pool);
     let mut n = 0usize;
@@ -471,7 +471,7 @@ pub fn decode_catalog_images_from_iwd(
     zone_ff: &Path,
     catalog: &mut MaterialDefinitions,
     images: impl IntoIterator<Item = (usize, u8)>,
-    stage: &LoadStage,
+    stage: &StageHandle,
     pool: &TaskPool,
 ) -> Result<usize, String> {
     let mut seen = std::collections::BTreeSet::new();
@@ -494,7 +494,7 @@ pub fn decode_catalog_images_from_iwd(
     }
     let main = game_main_for_zone(zone_ff)?;
     let index = IwdIndex::open(&main)?;
-    stage.total(work.len() as u64);
+    stage.set_total(work.len() as u64);
     let catalog_images = &catalog.images;
     let decoded = decode_requests_in_parallel(catalog_images, index.as_ref(), &work, stage, pool);
     let mut n = 0usize;
@@ -802,7 +802,7 @@ fn decode_requests_in_parallel(
     images: &[AuthoredImage],
     index: &IwdIndex,
     work: &[ImageRequest],
-    stage: &LoadStage,
+    stage: &StageHandle,
     pool: &TaskPool,
 ) -> Vec<ImageOutcome> {
     if work.is_empty() {
@@ -821,7 +821,19 @@ fn decode_requests_in_parallel(
                         });
                         continue;
                     }
-                    out.push(decode_one_request(images, index, image_index, request));
+                    let outcome = decode_one_request(images, index, image_index, request);
+                    // What this decode actually produced. Texels that came out
+                    // of another asker's decode are that asker's weight, and
+                    // counting them here would bill one buffer twice.
+                    if let ImageOutcome::Decoded {
+                        payload,
+                        shared: false,
+                        ..
+                    } = &outcome
+                    {
+                        stage.add_bytes(payload.bytes());
+                    }
+                    out.push(outcome);
                     stage.advance(1);
                 }
                 out
@@ -1215,6 +1227,19 @@ pub fn decode_ui_image(
     games_root: &Path,
     image_name: &str,
 ) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
+    if image_name.contains(':') {
+        let key = asset_core::AssetKey::parse(image_name).map_err(|e| e.to_string())?;
+        if key.kind != asset_core::AssetKind::Material {
+            return Err("UI image key must name a material".into());
+        }
+        let trees = asset_transport::NamespaceTrees::discover(&asset_transport::GamesRoot(
+            games_root.to_owned(),
+        ));
+        let Some(main) = trees.main_for(key.namespace) else {
+            return Ok(None);
+        };
+        return decode_ui_image_from_main(main, &key.name);
+    }
     let name = crate::AssetRef::bare_name(image_name);
     for main in ui_decode_mains(games_root) {
         match decode_ui_image_from_main(&main, name)? {
@@ -2428,7 +2453,7 @@ impl ImageDemandPlan {
     /// decode timer measures decoding and the wait before it is its own column.
     pub fn run(
         self,
-        stage: &LoadStage,
+        stage: &StageHandle,
         job: asset_transport::Job,
         pool: &TaskPool,
     ) -> DecodedImageBatch {
@@ -2471,7 +2496,7 @@ impl ImageDemandPlan {
             requested: work.len(),
             ..Default::default()
         };
-        stage.total(work.len() as u64);
+        stage.set_total(work.len() as u64);
         let outcomes =
             decode_requests_in_parallel(&self.demands, index.as_ref(), &work, stage, pool);
         let mut decoded = Vec::with_capacity(outcomes.len());
@@ -2767,7 +2792,7 @@ fn discard_reason(catalog: &MaterialDefinitions, name: &str) -> &'static str {
 pub fn plan_material_color_maps(
     zone_ff: &Path,
     catalog: &mut MaterialDefinitions,
-    stage: &LoadStage,
+    stage: &StageHandle,
     pool: &TaskPool,
 ) -> (MaterialImageStats, ImageDemandPlan) {
     let mut plan = ImageDemandPlan::new(zone_ff);
@@ -2804,7 +2829,7 @@ pub fn plan_color_or_2d_for_names(
     plan: &mut ImageDemandPlan,
     catalog: &mut MaterialDefinitions,
     names: impl IntoIterator<Item = impl AsRef<str>>,
-    stage: &LoadStage,
+    stage: &StageHandle,
     pool: &TaskPool,
 ) -> usize {
     let requested = requested_named_2d_slots(catalog, names);
@@ -2815,7 +2840,7 @@ pub fn plan_color_or_2d_for_names(
 fn decode_inline(
     catalog: &mut MaterialDefinitions,
     work: &[ImageRequest],
-    stage: &LoadStage,
+    stage: &StageHandle,
     pool: &TaskPool,
 ) -> MaterialImageStats {
     let mut stats = MaterialImageStats {

@@ -34,14 +34,6 @@ pub struct PosedSmodelSurface {
     pub packed_vertices: Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
 }
 
-pub(crate) fn skin_model(
-    skel: &FpvSkel,
-    bone_to_local: impl Fn(usize) -> Mat4,
-    hide_tags: &[String],
-) -> Option<Vec<PosedModelSurface>> {
-    skin_model_filtered(skel, bone_to_local, hide_tags, |_| true, |_| false, 0)
-}
-
 pub fn skin_model_filtered(
     skel: &FpvSkel,
     bone_to_local: impl Fn(usize) -> Mat4,
@@ -355,12 +347,6 @@ pub(crate) fn meshes_from_blended(
         });
     }
     Some(out)
-}
-
-pub(crate) fn mark_fpv_owner(surfaces: &mut [PosedModelSurface], owner: FpvSurfOwner) {
-    for surface in surfaces {
-        surface.owner = owner;
-    }
 }
 
 #[derive(Clone, Debug)]

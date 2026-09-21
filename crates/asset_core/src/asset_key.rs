@@ -42,6 +42,7 @@ pub enum AssetKind {
     XModel,
     Anim,
     Material,
+    Localize,
 }
 
 impl AssetKind {
@@ -52,6 +53,7 @@ impl AssetKind {
             Self::XModel => "xmodel",
             Self::Anim => "anim",
             Self::Material => "material",
+            Self::Localize => "localize",
         }
     }
 
@@ -62,6 +64,7 @@ impl AssetKind {
             "xmodel" => Some(Self::XModel),
             "anim" => Some(Self::Anim),
             "material" => Some(Self::Material),
+            "localize" => Some(Self::Localize),
             _ => None,
         }
     }
