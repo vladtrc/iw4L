@@ -5,6 +5,7 @@ pub mod fpv_host;
 pub mod fpv_pose;
 pub mod fpv_prepared;
 pub mod fpv_rig;
+pub mod model_materials;
 pub mod pose_types;
 pub mod remote_body;
 pub mod scene_submission;

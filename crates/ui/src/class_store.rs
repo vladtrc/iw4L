@@ -80,3 +80,154 @@ pub(crate) fn sync_host_class_loadouts(
     store.commit_slots(&scratch);
     host.slots = scratch.slots.iter().map(HostClassSlot::from).collect();
 }
+
+const CLASS_FILE_HEADER: &str = "iw4l-classes 1";
+
+/// Custom classes survive a restart: they are read once when the artifacts
+/// folder is known and written whenever an edit lands in the store.
+#[derive(Resource, Default)]
+pub(crate) struct ClassStoreFile {
+    path: Option<std::path::PathBuf>,
+    loaded: bool,
+    written: Option<Vec<ClassSlotState>>,
+}
+
+fn clean_field(value: &str) -> String {
+    value.replace(['\t', '\n', '\r'], " ")
+}
+
+fn encode_slots(slots: &[ClassSlotState]) -> String {
+    let mut out = String::from(CLASS_FILE_HEADER);
+    out.push('\n');
+    for slot in slots {
+        let attachments = |list: &[String]| {
+            list.iter()
+                .map(|value| clean_field(value).replace(',', " "))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let fields = [
+            clean_field(&slot.name),
+            clean_field(&slot.primary),
+            attachments(&slot.primary_attachments),
+            clean_field(&slot.secondary),
+            attachments(&slot.secondary_attachments),
+            clean_field(&slot.lethal),
+            clean_field(&slot.tactical),
+            clean_field(&slot.perk1),
+            clean_field(&slot.perk2),
+            clean_field(&slot.perk3),
+            clean_field(&slot.deathstreak),
+        ];
+        out.push_str(&fields.join("\t"));
+        out.push('\n');
+    }
+    out
+}
+
+fn decode_slots(text: &str) -> Option<Vec<ClassSlotState>> {
+    let mut lines = text.lines();
+    if lines.next()? != CLASS_FILE_HEADER {
+        return None;
+    }
+    let attachments = |field: &str| -> Vec<String> {
+        field
+            .split(',')
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    let mut slots = Vec::new();
+    for line in lines.filter(|line| !line.is_empty()) {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let [
+            name,
+            primary,
+            primary_attachments,
+            secondary,
+            secondary_attachments,
+            lethal,
+            tactical,
+            perk1,
+            perk2,
+            perk3,
+            deathstreak,
+        ] = fields.as_slice()
+        else {
+            return None;
+        };
+        slots.push(ClassSlotState {
+            name: (*name).to_owned(),
+            primary: (*primary).to_owned(),
+            primary_attachments: attachments(*primary_attachments),
+            secondary: (*secondary).to_owned(),
+            secondary_attachments: attachments(*secondary_attachments),
+            lethal: (*lethal).to_owned(),
+            tactical: (*tactical).to_owned(),
+            perk1: (*perk1).to_owned(),
+            perk2: (*perk2).to_owned(),
+            perk3: (*perk3).to_owned(),
+            deathstreak: (*deathstreak).to_owned(),
+            lock_reason: None,
+        });
+    }
+    (!slots.is_empty()).then_some(slots)
+}
+
+/// Read the saved classes into the editing scratch once; the store and the
+/// host loadouts follow it through `sync_host_class_loadouts`.
+pub(crate) fn load_class_store(
+    identity: Option<Res<frame::LaunchIdentity>>,
+    mut file: ResMut<ClassStoreFile>,
+    mut scratch: ResMut<ClassSetupScratch>,
+) {
+    if file.loaded {
+        return;
+    }
+    let Some(identity) = identity else {
+        return;
+    };
+    if identity.artifacts.as_os_str().is_empty() {
+        return;
+    }
+    let path = identity.artifacts.join("profile").join("classes.txt");
+    file.loaded = true;
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match decode_slots(&text) {
+            Some(slots) => {
+                diag::info!(Ui, "classes: {} read from {}", slots.len(), path.display());
+                file.written = Some(slots.clone());
+                scratch.slots = slots;
+                scratch.reset_navigation();
+            }
+            None => diag::warn!(
+                Ui,
+                "classes: {} is not a class file this build reads; presets kept",
+                path.display()
+            ),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => diag::warn!(Ui, "classes: cannot read {}: {error}", path.display()),
+    }
+    file.path = Some(path);
+}
+
+pub(crate) fn save_class_store(store: Res<SessionClassStore>, mut file: ResMut<ClassStoreFile>) {
+    if !file.loaded || file.written.as_deref() == Some(store.slots.as_slice()) {
+        return;
+    }
+    let Some(path) = file.path.clone() else {
+        return;
+    };
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&path, encode_slots(&store.slots)));
+    match written {
+        Ok(()) => file.written = Some(store.slots.clone()),
+        Err(error) => {
+            diag::warn!(Ui, "classes: cannot write {}: {error}", path.display());
+            file.written = Some(store.slots.clone());
+        }
+    }
+}

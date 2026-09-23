@@ -93,6 +93,7 @@ impl Plugin for RenderPreparePlugin {
                     spawn_world,
                     spawn_world_finish.after(spawn_world),
                     render_anim::prepare_fpv_compositions.after(spawn_world_finish),
+                    render_anim::prepare_model_materials.after(spawn_world_finish),
                     crate::assemble::drawsurf::tess::glass::apply_cg_glass_tess
                         .after(spawn_world)
                         .after(WorkerCmdSet::FxNonDependent),

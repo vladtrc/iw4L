@@ -157,7 +157,6 @@ pub fn generate_fpv_pose(args: FpvGenerateArgs<'_>) -> FpvPoseKind {
     };
     let dual_drawn = !left.is_empty();
 
-    // The rig was laid out before Ready; this frame only chooses it.
     let Some(prepared) = rigs.pick(rocket, dual_drawn) else {
         *active = None;
         return FpvPoseKind::Refuse(FpvPoseRefuse::EyePoseFailed {

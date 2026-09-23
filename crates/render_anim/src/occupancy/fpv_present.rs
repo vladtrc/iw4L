@@ -70,8 +70,6 @@ pub use crate::anim::fpv_host::{
 #[derive(Resource, Default)]
 pub struct SessionViewmodel(pub Option<SessionFpvMeshesHandles>);
 
-/// The weapon the local player holds, as a prepared view plus the animation
-/// state only this equip owns.
 pub struct SessionFpvMeshesHandles {
     pub weapon_id: u32,
     pub catalog_id: u64,
@@ -212,7 +210,6 @@ pub fn spawn_pending_fpv(
         .table()
         .filter(|table| same_material_catalog(table.material_catalog(), Some(&*tess)))
     else {
-        // The table for this material generation is still being prepared.
         pending.0 = Some(request);
         return;
     };
@@ -275,7 +272,6 @@ pub fn spawn_pending_fpv(
         ));
     });
 
-    // The plan belongs to the rig the first pose picks.
     crate::clear_fpv_draw_plan(&mut fpv_plan, 0);
     let census = &view.census;
     fpv_plan.gun_colormap_skip_n = Some(census.gun_colormap_skip_n);
@@ -1074,6 +1070,7 @@ pub fn register_fpv_present_systems(app: &mut App) {
     app.init_resource::<LocalSpawnArmed>()
         .init_resource::<SessionViewmodel>()
         .init_resource::<PreparedFpv>()
+        .init_resource::<crate::anim::model_materials::PreparedModelMaterials>()
         .init_resource::<SessionViewKick>()
         .init_resource::<CgGunOffset>()
         .init_resource::<CgViewweaponAim>()

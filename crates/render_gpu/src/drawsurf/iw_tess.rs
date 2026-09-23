@@ -454,32 +454,11 @@ fn draw_iw_tess(
     let scene_size = target.main_texture().size();
     if extracted.0.saved_screen_sequence != saved.sequence {
         saved.sequence = extracted.0.saved_screen_sequence;
-        let reusable = saved
+        if let Some(copy) = saved
             .copy
             .as_ref()
-            .is_some_and(|copy| copy.format == format && copy.size == scene_size);
-        if !reusable {
-            let texture = device.create_texture(&TextureDescriptor {
-                label: Some("iw_tess_saved_screen"),
-                size: scene_size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format,
-                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&TextureViewDescriptor::default());
-            let sampler = device.create_sampler(&SamplerDescriptor::default());
-            saved.copy = Some(SavedScreenCopy {
-                texture,
-                view,
-                sampler,
-                format,
-                size: scene_size,
-            });
-        }
-        if let Some(copy) = saved.copy.as_ref() {
+            .filter(|copy| copy.format == format && copy.size == scene_size)
+        {
             context.command_encoder().copy_texture_to_texture(
                 target.main_texture().as_image_copy(),
                 copy.texture.as_image_copy(),
@@ -654,6 +633,59 @@ impl HudBloodGpu {
     }
 }
 
+/// The saved-screen texture and the pipeline that draws it exist before the
+/// first flash: both are made while the view exists, and the pipeline is queued
+/// under the loading screen's wait for queued pipelines.
+fn prepare_saved_screen(
+    views: Query<&ViewTarget, With<Camera3d>>,
+    device: Res<RenderDevice>,
+    cache: Res<PipelineCache>,
+    pipeline: Res<IwTessPipeline>,
+    mut specialized: ResMut<SpecializedRenderPipelines<IwTessPipeline>>,
+    mut saved: ResMut<SavedScreenGpu>,
+) {
+    let Some(target) = views.iter().next() else {
+        return;
+    };
+    let format = target.main_texture_format();
+    let size = target.main_texture().size();
+    specialized.specialize(
+        &cache,
+        &pipeline,
+        IwTessPipelineKey {
+            target: format,
+            samples: 1,
+            state_bits: None,
+        },
+    );
+    if saved
+        .copy
+        .as_ref()
+        .is_some_and(|copy| copy.format == format && copy.size == size)
+    {
+        return;
+    }
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("iw_tess_saved_screen"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&SamplerDescriptor::default());
+    saved.copy = Some(SavedScreenCopy {
+        texture,
+        view,
+        sampler,
+        format,
+        size,
+    });
+}
+
 fn prepare_hud_blood(
     postfx: Res<super::postfx::ExtractedPostFx>,
     extracted: Res<ExtractedIwTess>,
@@ -724,6 +756,7 @@ pub(super) fn register(app: &mut App) {
             (
                 prepare_iw_tess.in_set(RenderSystems::PrepareResources),
                 prepare_hud_blood.in_set(RenderSystems::PrepareResources),
+                prepare_saved_screen.in_set(RenderSystems::PrepareResources),
             ),
         )
         .add_systems(

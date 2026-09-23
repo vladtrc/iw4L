@@ -48,6 +48,7 @@ gap, not "ordinary blending".
   The FPV consumer reads `PreparedFpv` only, never the weapon registry: views,
   rigs and material bindings are built before Ready; an equip picks one, and a
   mandatory material that failed is a refusal naming model, surface and
-  material.
+  material. Remote kits (`PreparedRemoteKits`: models, hide bits, shared DObj)
+  and dropped items are composed at install, not on first sight.
 
 To watch it live: `IW4L_PERF=1` / [`PERF.md`](PERF.md).

@@ -74,12 +74,11 @@ struct ScriptModelPoseLocals<'w, 's> {
 struct ScriptModelTessLocals<'w, 's> {
     last_material_generation: Local<'s, Option<render_material::MaterialGenerationId>>,
     last_unbound_materials: Local<'s, usize>,
-    material_cache: Local<'s, HashMap<assets::MaterialIndex, SmodelPassMaterial>>,
+    model_materials: Res<'w, crate::anim::model_materials::PreparedModelMaterials>,
     live_plan: Local<'s, Vec<usize>>,
     product_to_plan: Local<'s, Vec<usize>>,
     keep: Local<'s, Vec<bool>>,
     remap: Local<'s, Vec<Option<usize>>>,
-    _marker: std::marker::PhantomData<&'w ()>,
 }
 
 struct ScriptOwnerRow {
@@ -732,12 +731,11 @@ fn commit_script_model_draw_plan(
     let ScriptModelTessLocals {
         mut last_material_generation,
         mut last_unbound_materials,
-        mut material_cache,
+        model_materials,
         mut live_plan,
         mut product_to_plan,
         mut keep,
         mut remap,
-        _marker: _,
     } = locals;
     if product.producer_unavailable {
         plan.publish_no_rows();
@@ -764,7 +762,6 @@ fn commit_script_model_draw_plan(
         plan.revision = revision;
         plan.generation = generation;
         plan.revisions = revisions;
-        material_cache.clear();
         *last_material_generation = Some(material_generation);
     }
     draws.clear();
@@ -783,45 +780,9 @@ fn commit_script_model_draw_plan(
                 .iter()
                 .zip(posed.authored.iter().copied())
                 .map(|(_surface, authored)| {
-                    let authored = authored?;
-                    if let Some(material) = material_cache.get(&authored) {
-                        return Some(material.clone());
-                    }
-                    let world_material = tess.catalog.derived(authored)?;
-                    let ordinal = tess
-                        .catalog
-                        .sorted_materials
-                        .ordinal_for_asset_id(authored.order())?;
-                    let maps = render_scene::runtime_maps(
-                        Some(authored),
-                        &tess.catalog,
-                        tess.material_images.as_ref(),
-                    );
-                    let inv_h =
-                        lighting_iw4::model_lighting_inv_image_height(atlas.dims.image_height)?;
-                    let scale = lighting_iw4::model_lighting_lookup_scale(inv_h);
-                    let material = SmodelPassMaterial {
-                        model_lighting_required: true,
-                        color: maps.color,
-                        specular: maps.specular,
-                        probe: None,
-                        atlas: Some(atlas.image.clone()),
-                        alpha_mode: maps.alpha_mode,
-                        draw_mode: maps.draw_mode,
-                        cull_mode: maps.cull_mode,
-                        env_map_parms: maps.env_map_parms,
-                        lighting_lookup_scale: [scale.u, scale.v, scale.w, scale.q],
-                        atlas_lookup: [
-                            lighting_iw4::MODEL_LIGHTING_INV_ATLAS_WIDTH as f32,
-                            inv_h,
-                            lighting_iw4::MODEL_LIGHTING_VOLUME_W,
-                            0.0,
-                        ],
-                        sort_key: world_material.sort_key,
-                        material_sorted_index: Some(ordinal.get()),
-                    };
-                    material_cache.insert(authored, material.clone());
-                    Some(material)
+                    model_materials
+                        .authored(&tess.catalog, authored?)
+                        .cloned()
                 })
                 .collect::<Vec<_>>();
             append_or_overwrite_script_model(

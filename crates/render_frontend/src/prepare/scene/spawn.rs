@@ -182,8 +182,12 @@ pub(crate) fn spawn_world(
     fx_catalog: Option<Res<PreparedFxCatalog>>,
     report: Option<Res<LaunchReport>>,
     present_ack: Res<WorldPresentAck>,
-    fpv: Res<render_anim::PreparedFpv>,
+    prepared: (
+        Res<render_anim::PreparedFpv>,
+        Res<render_anim::PreparedModelMaterials>,
+    ),
 ) {
+    let (fpv, model_materials) = prepared;
     // Pacing belongs to the load that is still running, not to the screen that
     // happens to be drawing it: a run without an overlay must spawn the world
     // the same way this one does.
@@ -204,11 +208,12 @@ pub(crate) fn spawn_world(
         // First-person compositions are part of Ready: equipping must find
         // them prepared, so the overlay holds until the table binds to this
         // material generation.
-        let fpv_done = fpv.settled_for(&tess.catalog);
+        let fpv_done =
+            fpv.settled_for(&tess.catalog) && model_materials.settled_for(&tess.catalog);
         if gpu_done && !fpv_done {
             diag::info!(
                 World,
-                "world spawn: GPU ready; overlay holds for first-person preparation"
+                "world spawn: GPU ready; overlay holds for model and first-person preparation"
             );
         }
         if gpu_done && fpv_done {

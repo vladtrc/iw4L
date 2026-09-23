@@ -25,12 +25,10 @@ use assets::{AnimInstance, FpvAssembly, FpvClipTracks, FpvMeshCatalog, FpvPartRo
 /// composition that draws the model.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FpvSurfaceVerdict {
-    /// Drawn with this row of the admission table.
     Admitted(u32),
     /// Nothing the first-person pass can draw: no material, or a technique
     /// that samples no colour map. Skipped without failing the weapon.
     Inapplicable(&'static str),
-    /// A material the model needs and the session could not provide.
     Refused {
         material: String,
         cause: &'static str,
@@ -70,8 +68,6 @@ impl FpvMaterialAdmission {
     }
 }
 
-/// One drawn surface of a prepared model: its run inside the model's own
-/// index list and the admitted material it draws with.
 #[derive(Clone, Copy, Debug)]
 struct PreparedFpvSurface {
     index_start: u32,
@@ -224,14 +220,12 @@ impl PreparedFpvModel {
     }
 }
 
-/// One model inside the combined skeleton of a composition.
 struct ComposedPart {
     model: Arc<PreparedFpvModel>,
     owner: FpvSurfOwner,
     bone_base: usize,
 }
 
-/// A first-person assembly with every part bound to its prepared model.
 pub struct PreparedFpvComposition {
     assembly: Arc<FpvAssembly>,
     parts: Vec<ComposedPart>,

@@ -19,6 +19,7 @@ pub fn reset_anim_for_match(
     mut pending: ResMut<PendingFpvSpawn>,
     mut viewmodel: ResMut<SessionViewmodel>,
     mut prepared_fpv: ResMut<PreparedFpv>,
+    mut model_materials: ResMut<crate::anim::model_materials::PreparedModelMaterials>,
     mut settled: ResMut<FpvHeldSettled>,
     mut held_life: ResMut<FpvHeldLife>,
     mut scene_skels: ResMut<AnimDObjSceneSkels>,
@@ -35,6 +36,7 @@ pub fn reset_anim_for_match(
     pending.0 = None;
     *viewmodel = SessionViewmodel::default();
     prepared_fpv.clear();
+    model_materials.clear();
     settled.0 = None;
     held_life.0 = None;
     *scene_skels = AnimDObjSceneSkels::default();

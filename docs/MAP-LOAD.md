@@ -46,7 +46,10 @@ the grid again; a match teardown drops the in-memory copy, not the file.
 screen also holds for GPU images, every queued pipeline (the HUD blood film is
 queued as soon as its material exists) and the `first_person` stage: every
 weapon's first-person materials admitted and compositions laid out
-(`render_anim::PreparedFpv`). `load ledger:` in the log is one line per load of
+(`render_anim::PreparedFpv`), and every body, world-weapon, map-model and
+projectile material plus the single-model DObjs (`PreparedModelMaterials`).
+Remote kits and dropped-item compositions are built at install.
+`load ledger:` in the log is one line per load of
 what was handed over or compiled new against what an earlier load left behind.
 
 ## Cache, and poking it: `iw4l-artifacts/cache/<kind>/<prefix>/<key>`

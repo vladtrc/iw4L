@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 
 use bevy::prelude::*;
 use dpvs_iw4::{
@@ -480,6 +479,7 @@ fn pose_dyn_ents(
     instances: Query<(Entity, &WorldDynEntInstance, &Transform, &Visibility)>,
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<FpvLens>>,
     lod_skinned: Res<render_scene::LodRampSkinnedDvar>,
+    prepared: Res<crate::anim::model_materials::PreparedModelMaterials>,
     mut product: ResMut<DynEntPoseProduct>,
 ) {
     product.owners.clear();
@@ -526,10 +526,7 @@ fn pose_dyn_ents(
         {
             index
         } else {
-            let Some(pose) = skel.pose.as_ref() else {
-                continue;
-            };
-            let Some(dobj) = assets::DObj::build(&[(pose, None)]).ok() else {
+            let Some(dobj) = prepared.scene_dobj(&inst.current_model.0) else {
                 continue;
             };
             let dobj_state =
@@ -540,7 +537,7 @@ fn pose_dyn_ents(
             let Some((surfaces, authored)) = pose_script_dobj_with_materials(
                 Some(catalog),
                 &[skel],
-                &dobj,
+                dobj,
                 &request,
                 Some(DObjLodView {
                     origin: inst.lighting_origin,
@@ -581,6 +578,7 @@ fn append_dynent_draws(
     mut plan: ResMut<DynEntDrawPlan>,
     mut lighting_requests: ResMut<ModelLightingRequests>,
     product: Res<DynEntPoseProduct>,
+    model_materials: Res<crate::anim::model_materials::PreparedModelMaterials>,
     mut last_material_generation: Local<Option<render_material::MaterialGenerationId>>,
     mut draws: Local<Vec<XModelSurfaceDraw>>,
     mut owners: Local<Vec<DynEntOwnerDraw>>,
@@ -593,8 +591,8 @@ fn append_dynent_draws(
     let catalog_changed = catalog.as_ref().is_some_and(|c| c.is_changed());
     let atlas_changed = atlas.as_ref().is_some_and(|a| a.is_changed());
     let tess_changed = tess.as_ref().is_some_and(|h| h.is_changed());
-    let atlas = atlas_ref.expect("checked");
     let tess = tess.as_deref().expect("checked");
+    let tess_catalog = std::sync::Arc::clone(&tess.catalog);
     let material_generation = tess.catalog.generation_id;
     let catalog_reset = catalog_changed
         || atlas_changed
@@ -610,7 +608,6 @@ fn append_dynent_draws(
     draws.clear();
     owners.clear();
 
-    let mut material_cache: HashMap<assets::MaterialIndex, SmodelPassMaterial> = HashMap::new();
     let mut drawn = 0u16;
     let mut packed_assets: Vec<Option<Vec<(u32, u32)>>> = vec![None; product.assets.len()];
 
@@ -626,45 +623,9 @@ fn append_dynent_draws(
                 .iter()
                 .zip(posed.authored.iter().copied())
                 .map(|(_surface, authored)| {
-                    let authored = authored?;
-                    if let Some(material) = material_cache.get(&authored) {
-                        return Some(material.clone());
-                    }
-                    let world_material = tess.catalog.derived(authored)?;
-                    let ordinal = tess
-                        .catalog
-                        .sorted_materials
-                        .ordinal_for_asset_id(authored.order())?;
-                    let maps = render_scene::runtime_maps(
-                        Some(authored),
-                        &tess.catalog,
-                        tess.material_images.as_ref(),
-                    );
-                    let inv_h =
-                        lighting_iw4::model_lighting_inv_image_height(atlas.dims.image_height)?;
-                    let scale = lighting_iw4::model_lighting_lookup_scale(inv_h);
-                    let material = SmodelPassMaterial {
-                        model_lighting_required: true,
-                        color: maps.color,
-                        specular: maps.specular,
-                        probe: None,
-                        atlas: Some(atlas.image.clone()),
-                        alpha_mode: maps.alpha_mode,
-                        draw_mode: maps.draw_mode,
-                        cull_mode: maps.cull_mode,
-                        env_map_parms: maps.env_map_parms,
-                        lighting_lookup_scale: [scale.u, scale.v, scale.w, scale.q],
-                        atlas_lookup: [
-                            lighting_iw4::MODEL_LIGHTING_INV_ATLAS_WIDTH as f32,
-                            inv_h,
-                            lighting_iw4::MODEL_LIGHTING_VOLUME_W,
-                            0.0,
-                        ],
-                        sort_key: world_material.sort_key,
-                        material_sorted_index: Some(ordinal.get()),
-                    };
-                    material_cache.insert(authored, material.clone());
-                    Some(material)
+                    model_materials
+                        .authored(&tess_catalog, authored?)
+                        .cloned()
                 })
                 .collect();
             if materials.iter().all(Option::is_none) {

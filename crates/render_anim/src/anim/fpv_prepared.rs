@@ -25,13 +25,10 @@ use crate::anim::fpv_rig::{
 };
 use crate::gaps::RenderGapCause;
 
-/// Work done per frame while the loading screen is up.
 const PREPARE_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
 
 const NO_COLOUR_MAP: &str = "technique samples no colour map";
 
-/// The rigs one weapon can be drawn with: bare or carrying its rocket, one
-/// hand or two.
 #[derive(Default)]
 pub struct FpvRigSet {
     bare: [Option<Arc<PreparedFpvRig>>; 2],
@@ -52,7 +49,6 @@ impl FpvRigSet {
     }
 }
 
-/// Surfaces of the gun a composition leaves out, for the plan's diagnostics.
 #[derive(Clone, Debug, Default)]
 pub struct FpvViewCensus {
     pub gun_colormap_skip_n: u32,
@@ -60,7 +56,6 @@ pub struct FpvViewCensus {
     pub mat_hints: Vec<String>,
 }
 
-/// One weapon on one kit side, ready to be equipped.
 pub struct FpvWeaponView {
     pub weapon_id: u32,
     pub gun_name: String,
@@ -84,7 +79,6 @@ pub enum FpvWeaponSlot {
 
 static ABSENT_SLOT: FpvWeaponSlot = FpvWeaponSlot::Absent;
 
-/// What preparing one table built, for the load ledger.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FpvPreparationCensus {
     pub models: usize,
@@ -131,7 +125,6 @@ impl FpvWeaponTable {
         self.hud_iris.get(weapon as usize).copied().unwrap_or(false)
     }
 
-    /// The linked first-person gun model, whatever the kit side.
     pub fn gun_index(&self, weapon: u32) -> Option<FpvMeshIndex> {
         self.guns.get(weapon as usize).copied().flatten()
     }
@@ -199,8 +192,6 @@ struct FpvPreparationJob {
     refused: Vec<String>,
 }
 
-/// The first-person table of the installed match, or the job still building
-/// it.
 #[derive(Resource, Default)]
 pub struct PreparedFpv {
     job: Option<FpvPreparationJob>,
@@ -239,7 +230,6 @@ fn composition_key(composition: &Arc<PreparedFpvComposition>) -> usize {
     Arc::as_ptr(composition) as usize
 }
 
-/// What the session admits for one surface of one first-person model.
 #[allow(clippy::too_many_arguments)]
 fn admit_surface(
     global: &RuntimeMaterialCatalog,
@@ -446,7 +436,6 @@ impl FpvPreparationJob {
         }
     }
 
-    /// Run until the budget is spent or the table is complete.
     fn advance(
         &mut self,
         deadline: std::time::Instant,

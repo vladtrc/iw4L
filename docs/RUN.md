@@ -56,3 +56,5 @@ received plus its own presented state; `demo LATEST` plays it back.
   magazine will not reload itself (`press +attack` ×N, then `press +reload`);
 * `look` without `LookState` only writes `ps.viewangles` — no aiming;
 * `give` takes a namespace: `give t5:weapon/psg1_acog`, `give iw5:weapon/msr`.
+* custom classes live in `iw4l-artifacts/profile/classes.txt` (one tab-separated
+  row per class); delete it to get the presets back.

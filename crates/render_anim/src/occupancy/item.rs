@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use bevy::prelude::*;
 
 use crate::anim::scene_submission::{AnimDObjSceneSkels, AnimDObjSceneSubmission, AnimSceneSubmit};
@@ -7,7 +5,7 @@ use crate::anim::xmodel_pose::PosedModelSurface;
 use crate::occupancy::script_model::pose_script_dobj_with_materials;
 use crate::{
     ItemAssetDraw, ItemDrawPlan, ItemOwnerDraw, XMODEL_OBJECT_ID_ITEM_BASE, append_item_surfaces,
-    body_lit_pass_material, dobj_lighting_box_half, stamp_plan_geometry, topology_fingerprint,
+    dobj_lighting_box_half, stamp_plan_geometry, topology_fingerprint,
 };
 use anim_iw4::DOBJ_RADIUS_PARENT_ROOT;
 use entity_iw4::{ET_ITEM, Trajectory, bg_evaluate_trajectory};
@@ -19,6 +17,101 @@ use render_scene::{
 
 pub const ITEM_LIGHTING_Z_OFS: f32 = 4.0;
 
+/// A dropped weapon's models as one DObj: the world model and its attachment
+/// models on their tags, composed once per weapon when the match installs.
+struct ItemComposition {
+    name: String,
+    model: assets::WorldWeaponIndex,
+    attachments: Vec<assets::WorldWeaponIndex>,
+    key: String,
+    dobj: assets::DObj,
+}
+
+#[derive(Resource, Default)]
+struct PreparedItemCompositions {
+    owner: Option<(usize, u64)>,
+    by_weapon: std::collections::HashMap<u32, std::sync::Arc<ItemComposition>>,
+}
+
+impl PreparedItemCompositions {
+    fn owned_by(
+        &self,
+        weapons: &assets::PreparedWeapons,
+        world: &assets::PreparedWorldWeapons,
+    ) -> bool {
+        self.owner == Some((std::sync::Arc::as_ptr(&weapons.0) as usize, world.0.identity()))
+    }
+}
+
+fn compose_item(
+    registry: &assets::WeaponRegistry,
+    catalog: &assets::WorldWeaponCatalog,
+    weapon: u32,
+) -> Option<ItemComposition> {
+    let entry = registry.world_model_entry(weapon, catalog)?;
+    let model_index = registry.world_model_edge_of(weapon)?.bound_index()?;
+    let pose = entry.skel.pose.as_ref()?;
+    let attachments = crate::anim::remote_body::world_attachments(registry, catalog, weapon);
+    let mut key = entry.skel.name.clone();
+    let mut dobj_models = vec![(pose, None)];
+    let mut attachment_models = Vec::with_capacity(attachments.len());
+    for attachment in &attachments {
+        let Some(pose) = attachment.entry.skel.pose.as_ref() else {
+            continue;
+        };
+        key.push('+');
+        key.push_str(&attachment.entry.skel.name);
+        attachment_models.push(attachment.index);
+        dobj_models.push((
+            pose,
+            Some(assets::Attach {
+                parent_model: 0,
+                tag: attachment.tag.to_owned(),
+            }),
+        ));
+    }
+    let dobj = assets::DObj::build(&dobj_models).ok()?;
+    Some(ItemComposition {
+        name: entry.skel.name.clone(),
+        model: assets::WorldWeaponIndex::from_order(model_index),
+        attachments: attachment_models,
+        key,
+        dobj,
+    })
+}
+
+fn prepare_item_compositions(
+    weapons: Option<Res<assets::PreparedWeapons>>,
+    world_weapons: Option<Res<assets::PreparedWorldWeapons>>,
+    mut prepared: ResMut<PreparedItemCompositions>,
+) {
+    let (Some(weapons), Some(world)) = (weapons, world_weapons) else {
+        return;
+    };
+    if prepared.owned_by(&weapons, &world) {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let mut by_weapon = std::collections::HashMap::new();
+    if !world.0.is_empty() {
+        for weapon in 1..=weapons.0.len() as u32 {
+            if let Some(composition) = compose_item(&weapons.0, &world.0, weapon) {
+                by_weapon.insert(weapon, std::sync::Arc::new(composition));
+            }
+        }
+    }
+    diag::info!(
+        World,
+        "dropped items: {} weapon compositions prepared in {:.1}ms",
+        by_weapon.len(),
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    *prepared = PreparedItemCompositions {
+        owner: Some((std::sync::Arc::as_ptr(&weapons.0) as usize, world.0.identity())),
+        by_weapon,
+    };
+}
+
 #[derive(Resource, Default)]
 struct ItemOccupancy {
     rows: Vec<OccupiedItem>,
@@ -29,10 +122,7 @@ struct OccupiedItem {
     entnum: i32,
     origin: [f32; 3],
     angles: [f32; 3],
-    name: String,
-    model: assets::WorldWeaponIndex,
-    attachments: Vec<(assets::WorldWeaponIndex, String)>,
-    key: String,
+    composition: std::sync::Arc<ItemComposition>,
     lighting_origin: [f32; 3],
 }
 
@@ -77,6 +167,8 @@ fn item_scene_slot(scene: &render_scene::GfxScene, entnum: u32) -> ItemSceneSlot
 pub fn register_item_systems(app: &mut App) {
     app.init_resource::<ItemDrawPlan>()
         .init_resource::<ItemOccupancy>()
+        .init_resource::<PreparedItemCompositions>()
+        .add_systems(Update, prepare_item_compositions.in_set(net::ClientSet::Load))
         .init_resource::<ItemPoseProduct>()
         .add_systems(
             Update,
@@ -147,6 +239,7 @@ fn occupy_item_scene_ents(
     local_client: Option<Res<net::LocalPresentClient>>,
     weapons: Option<Res<assets::PreparedWeapons>>,
     world_weapons: Option<Res<assets::PreparedWorldWeapons>>,
+    compositions: Res<PreparedItemCompositions>,
     mut occupancy: ResMut<ItemOccupancy>,
     mut scene_skels: ResMut<AnimDObjSceneSkels>,
     mut scene_submissions: MessageWriter<AnimDObjSceneSubmission>,
@@ -165,7 +258,13 @@ fn occupy_item_scene_ents(
         .filter(|clock| clock.started())
         .map(|clock| clock.time())
         .unwrap_or_else(|| sim::level_time_ms(snapshot.tick));
-    let weapons_reg = weapons.as_ref().map(|w| &w.0).filter(|reg| !reg.is_empty());
+    let live = match (weapons.as_deref(), world_weapons.as_deref()) {
+        (Some(weapons), Some(world)) => compositions.owned_by(weapons, world),
+        _ => false,
+    };
+    if !live {
+        return;
+    }
     let catalog = world_weapons
         .as_ref()
         .map(|prepared| &prepared.0)
@@ -190,34 +289,20 @@ fn occupy_item_scene_ents(
         if hide_scavenger && item_is_scavenger(snapshot, es.number) {
             continue;
         }
-        let Some(entry) = weapons_reg.and_then(|reg| reg.world_model_entry(weapon, catalog)) else {
+        let Some(composition) = compositions.by_weapon.get(&weapon) else {
             continue;
         };
-        let Some(model_index) = weapons_reg
-            .and_then(|reg| reg.world_model_edge_of(weapon))
-            .and_then(|edge| edge.bound_index())
-        else {
+        let Some(entry) = catalog.get_at(composition.model.order()) else {
             continue;
         };
-        let name = entry.skel.name.as_str();
-        let Some(_pose) = entry.skel.pose.as_ref() else {
-            continue;
-        };
-        let attachments = weapons_reg
-            .map(|reg| crate::anim::remote_body::world_attachments(reg, catalog, weapon))
-            .unwrap_or_default();
-        let mut key = name.to_owned();
-        for attachment in &attachments {
-            key.push('+');
-            key.push_str(&attachment.entry.skel.name);
-        }
-        let mut models = vec![scene_skels.model(name, &entry.skel, 0)];
-        models.extend(attachments.iter().map(|attachment| {
-            scene_skels.model(
-                attachment.entry.skel.name.as_str(),
-                &attachment.entry.skel,
+        let mut models = vec![scene_skels.shared(&composition.name, &entry.skel, 0)];
+        models.extend(composition.attachments.iter().filter_map(|index| {
+            let attachment = catalog.get_at(index.order())?;
+            Some(scene_skels.shared(
+                attachment.skel.name.as_str(),
+                &attachment.skel,
                 0,
-            )
+            ))
         }));
         let origin = evaluate_origin(es, at_time);
         let lighting_origin = item_lighting_origin(origin);
@@ -248,13 +333,7 @@ fn occupy_item_scene_ents(
             entnum: es.number,
             origin,
             angles,
-            name: name.to_owned(),
-            model: assets::WorldWeaponIndex::from_order(model_index),
-            attachments: attachments
-                .iter()
-                .map(|attachment| (attachment.index, attachment.tag.to_owned()))
-                .collect(),
-            key,
+            composition: std::sync::Arc::clone(composition),
             lighting_origin,
         });
     }
@@ -287,69 +366,58 @@ fn pose_items(
         if slot.hidden {
             continue;
         }
-        let asset_index =
-            if let Some(index) = product.assets.iter().position(|asset| asset.key == row.key) {
-                index
-            } else {
-                let Some(entry) = catalog.get_at(row.model.order()) else {
-                    continue;
+        let composition = &row.composition;
+        let asset_index = if let Some(index) = product
+            .assets
+            .iter()
+            .position(|asset| asset.key == composition.key)
+        {
+            index
+        } else {
+            let mut skels = Vec::with_capacity(1 + composition.attachments.len());
+            let mut model_indices = Vec::with_capacity(1 + composition.attachments.len());
+            for index in std::iter::once(&composition.model).chain(&composition.attachments) {
+                let Some(entry) = catalog.get_at(index.order()) else {
+                    break;
                 };
-                let Some(pose) = entry.skel.pose.as_ref() else {
-                    continue;
-                };
-                let mut skels = vec![&*entry.skel];
-                let mut model_indices = vec![row.model];
-                let mut dobj_models = vec![(pose, None)];
-                for (model, tag) in &row.attachments {
-                    let Some(attachment) = catalog.get_at(model.order()) else {
-                        continue;
-                    };
-                    let Some(pose) = attachment.skel.pose.as_ref() else {
-                        continue;
-                    };
-                    skels.push(&*attachment.skel);
-                    model_indices.push(*model);
-                    dobj_models.push((
-                        pose,
-                        Some(assets::Attach {
-                            parent_model: 0,
-                            tag: tag.clone(),
-                        }),
-                    ));
-                }
-                let Some(dobj) = assets::DObj::build(&dobj_models).ok() else {
-                    continue;
-                };
-                let dobj_state = assets::dobj::DObjSemanticState::bind_pose(row.name.clone(), 1, 1);
-                let Ok(request) = dobj_state.resolve_request(|_| None) else {
-                    continue;
-                };
-                let Some((surfaces, _)) = pose_script_dobj_with_materials(
-                    None,
-                    &skels,
-                    &dobj,
-                    &request,
-                    None,
-                    slot.skin_entries,
-                ) else {
-                    continue;
-                };
-                let index = product.assets.len();
-                product.assets.push(ItemPosedAsset {
-                    key: row.key.clone(),
-                    models: model_indices,
-                    surfaces,
-                });
-                index
+                skels.push(&*entry.skel);
+                model_indices.push(*index);
+            }
+            if skels.len() != 1 + composition.attachments.len() {
+                continue;
+            }
+            let dobj = &composition.dobj;
+            let dobj_state =
+                assets::dobj::DObjSemanticState::bind_pose(composition.name.clone(), 1, 1);
+            let Ok(request) = dobj_state.resolve_request(|_| None) else {
+                continue;
             };
+            let Some((surfaces, _)) = pose_script_dobj_with_materials(
+                None,
+                &skels,
+                dobj,
+                &request,
+                None,
+                slot.skin_entries,
+            ) else {
+                continue;
+            };
+            let index = product.assets.len();
+            product.assets.push(ItemPosedAsset {
+                key: composition.key.clone(),
+                models: model_indices,
+                surfaces,
+            });
+            index
+        };
         product.owners.push(ItemPosedOwner {
             asset_index,
             index: row.index,
             entnum,
             origin: row.origin,
             angles: row.angles,
-            name: row.name.clone(),
-            model: row.model,
+            name: composition.name.clone(),
+            model: composition.model,
             lighting_origin: row.lighting_origin,
         });
     }
@@ -364,8 +432,8 @@ fn append_item_draws(
     facts: Res<WorldPresentFacts>,
     mut plan: ResMut<ItemDrawPlan>,
     mut lighting_requests: ResMut<ModelLightingRequests>,
+    model_materials: Res<crate::anim::model_materials::PreparedModelMaterials>,
     mut last_material_generation: Local<Option<render_material::MaterialGenerationId>>,
-    mut material_cache: Local<HashMap<String, SmodelPassMaterial>>,
     mut draws: Local<Vec<XModelSurfaceDraw>>,
     mut owners: Local<Vec<ItemOwnerDraw>>,
 ) {
@@ -382,7 +450,6 @@ fn append_item_draws(
         plan.revision = revision;
         plan.generation = generation;
         plan.publish_no_rows();
-        material_cache.clear();
         *last_material_generation = None;
         return;
     }
@@ -391,7 +458,7 @@ fn append_item_draws(
         .is_some_and(|value| value.is_changed());
     let atlas_changed = atlas.as_ref().is_some_and(|value| value.is_changed());
     let tess_changed = tess.as_ref().is_some_and(|value| value.is_changed());
-    let (Some(catalog), Some(atlas), Some(tess)) = (catalog, atlas_ref, tess.as_deref()) else {
+    let (Some(catalog), Some(_), Some(tess)) = (catalog, atlas_ref, tess.as_deref()) else {
         unreachable!("required item draw resources checked above");
     };
     let material_generation = tess.catalog.generation_id;
@@ -406,7 +473,6 @@ fn append_item_draws(
         plan.revision = revision;
         plan.generation = generation;
         plan.revisions.bump_admission();
-        material_cache.clear();
         *last_material_generation = Some(material_generation);
     }
     for row in &product.owners {
@@ -425,12 +491,9 @@ fn append_item_draws(
                     let entry =
                         catalog.get_at(posed.models.get(usize::from(surface.model))?.order())?;
                     let present_name = entry.material_present_name(surface.surface_index)?;
-                    if let Some(material) = material_cache.get(present_name) {
-                        return Some(material.clone());
-                    }
-                    let material = body_lit_pass_material(atlas, &tess.catalog, present_name)?;
-                    material_cache.insert(present_name.to_owned(), material.clone());
-                    Some(material)
+                    model_materials
+                        .material(&tess.catalog, present_name)
+                        .cloned()
                 })
                 .collect();
             if materials.iter().all(Option::is_none) {

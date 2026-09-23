@@ -5,7 +5,10 @@ use frame::ClientSet;
 
 use crate::GameUiFont;
 use crate::class_setup::{ClassLoadoutCatalog, ClassSetupScratch};
-use crate::class_store::{SessionClassStore, sync_host_class_loadouts};
+use crate::class_store::{
+    ClassStoreFile, SessionClassStore, load_class_store, save_class_store,
+    sync_host_class_loadouts,
+};
 use crate::nav::{
     ActivatePulse, Focus, Hover, MenuShellCmd, PointerActivation, drive_control_axes,
     paint_focus_help, paint_selection_bars, play_focus_sound, sync_hover_and_nav,
@@ -102,6 +105,7 @@ impl Plugin for MenuPlugin {
             .init_resource::<BindingView>()
             .init_resource::<ShellRevision>()
             .init_resource::<SessionClassStore>()
+            .init_resource::<ClassStoreFile>()
             .init_resource::<frame::HostClassLoadouts>()
             .init_resource::<MenuCatalog>()
             .init_resource::<LocalizeCatalog>()
@@ -151,7 +155,9 @@ impl Plugin for MenuPlugin {
                         crate::options::apply_option_intents,
                         crate::class_setup::apply_cac_intents,
                         crate::options::apply_window_settings,
+                        load_class_store,
                         sync_host_class_loadouts,
+                        save_class_store,
                     )
                         .chain(),
                 )

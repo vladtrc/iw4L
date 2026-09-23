@@ -18,6 +18,7 @@ pub use anim::fpv_prepared::{
     FpvPreparationCensus, FpvRigSet, FpvWeaponSlot, FpvWeaponTable, FpvWeaponView, PreparedFpv,
     prepare_fpv_compositions,
 };
+pub use anim::model_materials::{PreparedModelMaterials, prepare_model_materials};
 pub use anim::viewmodel_controller::{
     AdvanceResult, EventResult, ViewmodelController, ViewmodelEvent, WeaponState,
 };

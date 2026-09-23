@@ -369,7 +369,6 @@ impl NotetrackSoundTable {
         }
     }
 
-    /// Say once per weapon and notetrack what could not play.
     fn report_once(&mut self, weapon: u32, note: &str, message: impl FnOnce() -> String) {
         if self.reported.insert((weapon, note.to_owned())) {
             diag::warn!(Audio, "{}", message());
