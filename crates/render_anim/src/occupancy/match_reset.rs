@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use frame::{MatchInstalled, MatchTornDown, SessionSwapApplied};
 use net::ClientSet;
 
+use crate::anim::fpv_prepared::PreparedFpv;
 use crate::anim::scene_submission::AnimDObjSceneSkels;
 use crate::occupancy::dyn_ent::{DynEntPhysClip, DynEntPhysWorld};
 use crate::occupancy::fpv_present::{
@@ -17,6 +18,7 @@ pub fn reset_anim_for_match(
     mut cursor: ResMut<FpvPresentCursor>,
     mut pending: ResMut<PendingFpvSpawn>,
     mut viewmodel: ResMut<SessionViewmodel>,
+    mut prepared_fpv: ResMut<PreparedFpv>,
     mut settled: ResMut<FpvHeldSettled>,
     mut held_life: ResMut<FpvHeldLife>,
     mut scene_skels: ResMut<AnimDObjSceneSkels>,
@@ -32,6 +34,7 @@ pub fn reset_anim_for_match(
     cursor.0.clear();
     pending.0 = None;
     *viewmodel = SessionViewmodel::default();
+    prepared_fpv.clear();
     settled.0 = None;
     held_life.0 = None;
     *scene_skels = AnimDObjSceneSkels::default();

@@ -45,6 +45,8 @@ pub enum StageId {
     Pipelines,
     /// Consecutive frames drawn with nothing left compiling.
     RenderFrames,
+    /// Admitting first-person materials and laying out every composition.
+    FirstPerson,
     /// Converting the clips this match's aliases resolve to.
     Audio,
     /// Baking the bot navigation graph.
@@ -54,7 +56,7 @@ pub enum StageId {
 }
 
 impl StageId {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::MapAssets,
         Self::CommonAssets,
         Self::Localization,
@@ -68,6 +70,7 @@ impl StageId {
         Self::GpuTextures,
         Self::Pipelines,
         Self::RenderFrames,
+        Self::FirstPerson,
         Self::Audio,
         Self::Navigation,
         Self::Admission,
@@ -88,6 +91,7 @@ impl StageId {
             Self::GpuTextures => "gpu_textures",
             Self::Pipelines => "pipelines",
             Self::RenderFrames => "render_frames",
+            Self::FirstPerson => "first_person",
             Self::Audio => "audio",
             Self::Navigation => "navigation",
             Self::Admission => "admission",

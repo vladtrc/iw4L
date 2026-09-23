@@ -610,8 +610,14 @@ fn commit_fx_transaction(
         &mut env.staged_models,
     );
     model_plan.publish_rebuild(&mut env.staged_models);
+    let split = fx_light_split();
+    let (spot_lights, omni_lights) = if split.draws_light_elems() {
+        (out.spot_lights.as_slice(), out.omni_lights.as_slice())
+    } else {
+        (&[][..], &[][..])
+    };
     let spot_cone = lighting_iw4::SpotLightConeDvars::register_defaults();
-    for light in &out.spot_lights {
+    for light in spot_lights {
         match lighting_iw4::r_add_omni_light_to_scene_allows(
             world_present,
             light.radius,
@@ -630,7 +636,7 @@ fn commit_fx_transaction(
             Err(_) => {}
         }
     }
-    for light in &out.omni_lights {
+    for light in omni_lights {
         match lighting_iw4::r_add_omni_light_to_scene_allows(
             world_present,
             light.radius,
@@ -648,7 +654,12 @@ fn commit_fx_transaction(
         }
     }
     let eye = cam_tf.translation.to_array();
-    for light in &post_lights {
+    let post_lights = if split.draws_sprites() {
+        post_lights.as_slice()
+    } else {
+        &[]
+    };
+    for light in post_lights {
         let Some(tess) = fx_iw4::fx_post_light_generate_verts(light, eye) else {
             env.post_lights.skipped_short = env.post_lights.skipped_short.saturating_add(1);
             continue;
@@ -681,8 +692,13 @@ fn commit_fx_transaction(
     }
 
     let mut batches: HashMap<usize, Vec<&FxSpriteInstance>> = HashMap::new();
-    let sprites_total = out.sprites.len();
-    for sprite in &out.sprites {
+    let sprites = if split.draws_sprites() {
+        out.sprites.as_slice()
+    } else {
+        &[]
+    };
+    let sprites_total = sprites.len();
+    for sprite in sprites {
         let Some(asset_id) = sprite.material_index else {
             cursor.draw_miss_material = cursor.draw_miss_material.saturating_add(1);
             plan.miss_material = plan.miss_material.saturating_add(1);
@@ -2815,4 +2831,34 @@ fn cg_melee_blood(
         fx_world.view().as_ref().map(|s| s as &dyn FxScene),
     );
     cursor.impact_played = cursor.impact_played.saturating_add(played);
+}
+
+/// Which half of an effect reaches the frame, for telling a light element's
+/// contribution to lit geometry apart from the bloom of the sprite drawn with
+/// it. `IW4L_FX_LIGHT_SPLIT=lights` keeps only light elements;
+/// `IW4L_FX_LIGHT_SPLIT=sprites` keeps only sprites and glows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FxLightSplit {
+    Both,
+    LightsOnly,
+    SpritesOnly,
+}
+
+impl FxLightSplit {
+    fn draws_light_elems(self) -> bool {
+        self != Self::SpritesOnly
+    }
+
+    fn draws_sprites(self) -> bool {
+        self != Self::LightsOnly
+    }
+}
+
+fn fx_light_split() -> FxLightSplit {
+    static SPLIT: std::sync::OnceLock<FxLightSplit> = std::sync::OnceLock::new();
+    *SPLIT.get_or_init(|| match std::env::var("IW4L_FX_LIGHT_SPLIT").as_deref() {
+        Ok("lights") => FxLightSplit::LightsOnly,
+        Ok("sprites") => FxLightSplit::SpritesOnly,
+        _ => FxLightSplit::Both,
+    })
 }

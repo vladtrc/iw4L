@@ -1,12 +1,12 @@
-use assets::{PreparedFpvMeshes, PreparedWeapons};
 use bevy::prelude::*;
 use frame::{LaunchReport, LifeEnded, LifeFrontPublished, LifeStarted};
 use net::{ClientSet, LocalPresentClient, PresentedSnapshot};
 
+use crate::anim::fpv_prepared::PreparedFpv;
 use crate::gaps::{RenderGap, RenderGapCause, RenderPresentationGaps};
 use crate::occupancy::fpv_present::{
     FpvHeldLife, FpvHeldSettled, FpvPlacementRoot, FpvState, FpvStatusGap, PendingFpvSpawn,
-    PendingFpvSpawnRequest, SessionViewmodel, resolve_fpv_gun,
+    PendingFpvSpawnRequest, SessionViewmodel,
 };
 use weapon_iw4::bg_get_viewmodel_weapon_index;
 
@@ -14,8 +14,7 @@ pub fn sync_fpv_to_held_weapon(
     mut commands: Commands,
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
-    weapons: Option<Res<PreparedWeapons>>,
-    fpv_meshes: Option<Res<PreparedFpvMeshes>>,
+    prepared: Res<PreparedFpv>,
     mut pending_fpv: ResMut<PendingFpvSpawn>,
     mut session_vm: ResMut<SessionViewmodel>,
     mut settled: ResMut<FpvHeldSettled>,
@@ -150,37 +149,37 @@ pub fn sync_fpv_to_held_weapon(
         return;
     }
 
-    let state = match (
-        weapons.as_ref().map(|r| &r.0),
-        fpv_meshes.as_ref().map(|r| &r.0),
-    ) {
-        (Some(reg), Some(fpv)) => match resolve_fpv_gun(reg, fpv, held) {
-            Some(gun_index) => {
-                for entity in &existing_fpv {
-                    commands.entity(entity).try_despawn();
-                }
-                session_vm.0 = None;
-                pending_fpv.0 = Some(PendingFpvSpawnRequest {
-                    gun_index,
-                    catalog_id: fpv.identity(),
-                    weapon_id: held,
-                });
-                settled.0 = None;
-                FpvState::Queued
+    // Until the session's first-person table exists there is nothing to
+    // equip; the held weapon is looked at again next frame.
+    let Some(table) = prepared.table() else {
+        let waiting = FpvState::Blocked(RenderGapCause::FpvCatalogMissing);
+        if status.0.as_ref() != Some(&waiting) {
+            status.0 = Some(waiting);
+        }
+        return;
+    };
+    let state = match table.gun_index(held) {
+        Some(gun_index) => {
+            for entity in &existing_fpv {
+                commands.entity(entity).try_despawn();
             }
-            None => {
-                for entity in &existing_fpv {
-                    commands.entity(entity).try_despawn();
-                }
-                session_vm.0 = None;
-                pending_fpv.0 = None;
-                settled.0 = Some(held);
-                FpvState::Blocked(RenderGapCause::FpvGunXModelUnresolved { weapon_id: held })
+            session_vm.0 = None;
+            pending_fpv.0 = Some(PendingFpvSpawnRequest {
+                gun_index,
+                catalog_id: table.catalog_id(),
+                weapon_id: held,
+            });
+            settled.0 = None;
+            FpvState::Queued
+        }
+        None => {
+            for entity in &existing_fpv {
+                commands.entity(entity).try_despawn();
             }
-        },
-        _ => {
+            session_vm.0 = None;
+            pending_fpv.0 = None;
             settled.0 = Some(held);
-            FpvState::Blocked(RenderGapCause::FpvCatalogMissing)
+            FpvState::Blocked(RenderGapCause::FpvGunXModelUnresolved { weapon_id: held })
         }
     };
 

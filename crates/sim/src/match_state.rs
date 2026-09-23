@@ -541,9 +541,34 @@ pub struct HealthRegenCensus {
     pub named_sound: Option<&'static str>,
 }
 
+/// What the authority did with one client's movement commands. `path_units`
+/// sums the distance of every applied move, so a circle or a wall slide still
+/// counts where net displacement would not.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct InputReceipt {
+    pub applied_cmds: u32,
+    pub moving_cmds: u32,
+    pub path_units: f32,
+}
+
+impl InputReceipt {
+    pub(crate) fn record(&mut self, moving: bool, from: [f32; 3], to: [f32; 3]) {
+        self.applied_cmds = self.applied_cmds.wrapping_add(1);
+        if moving {
+            self.moving_cmds = self.moving_cmds.wrapping_add(1);
+        }
+        let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+        let step = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if step.is_finite() {
+            self.path_units += step;
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClientMatchState {
     pub lifecycle: ClientLifecycle,
+    pub input_receipt: InputReceipt,
     pub loadout: Option<LoadoutSpec>,
     pub life_sequence: LifeSequence,
 

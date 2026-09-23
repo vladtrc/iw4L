@@ -557,18 +557,94 @@ pub fn kit_dobj_radius(radii: impl IntoIterator<Item = f32>) -> Option<f32> {
         .fold(None::<f32>, |acc, r| Some(acc.map_or(r, |a| a.max(r))))
 }
 
+/// Part bits a remote kit hides, per kit side and held weapon, resolved once
+/// per installed body, weapon and world-weapon catalog instead of per player
+/// per frame.
+#[derive(bevy::prelude::Resource, Default)]
+pub struct PreparedRemoteKitHides {
+    owner: Option<(
+        std::sync::Arc<assets::BodyMeshCatalog>,
+        std::sync::Arc<assets::WeaponRegistry>,
+        u64,
+    )>,
+    hides: std::collections::HashMap<(bool, u32), [u32; 6]>,
+}
+
+impl PreparedRemoteKitHides {
+    pub fn owned_by(
+        &self,
+        bodies: &assets::PreparedBodies,
+        weapons: &assets::PreparedWeapons,
+        world_weapons: &assets::PreparedWorldWeapons,
+    ) -> bool {
+        self.owner.as_ref().is_some_and(|(b, w, catalog)| {
+            std::sync::Arc::ptr_eq(b, &bodies.0)
+                && std::sync::Arc::ptr_eq(w, &weapons.0)
+                && *catalog == world_weapons.0.identity()
+        })
+    }
+
+    pub fn get(&self, axis: bool, weapon: u32) -> Option<[u32; 6]> {
+        self.hides.get(&(axis, weapon)).copied()
+    }
+
+    pub fn prepare(
+        bodies: &assets::PreparedBodies,
+        weapons: &assets::PreparedWeapons,
+        world_weapons: &assets::PreparedWorldWeapons,
+    ) -> Self {
+        let mut hides = std::collections::HashMap::new();
+        for axis in [false, true] {
+            for weapon in 0..=weapons.0.len() as u32 {
+                let Some((models, _)) = occupy_remote_kit_dobj(
+                    bodies,
+                    Some(weapons),
+                    Some(world_weapons),
+                    axis,
+                    weapon,
+                    true,
+                ) else {
+                    continue;
+                };
+                hides.insert((axis, weapon), kit_hide_part_bits(&models));
+            }
+        }
+        Self {
+            owner: Some((
+                std::sync::Arc::clone(&bodies.0),
+                std::sync::Arc::clone(&weapons.0),
+                world_weapons.0.identity(),
+            )),
+            hides,
+        }
+    }
+}
+
+pub fn kit_hide_part_bits(models: &[KitModel<'_>]) -> [u32; 6] {
+    let mut bits = [0u32; 6];
+    let mut base = 0usize;
+    for model in models {
+        render_scene::hide_part_bits_from_tags(&mut bits, model.skel, base, &model.hide_tags);
+        base += model.skel.bones.len();
+    }
+    bits
+}
+
 pub struct KitModel<'a> {
     pub name: &'a str,
     pub skel: &'a assets::ModelSkel,
     pub hide_tags: Vec<String>,
 }
 
+/// The models of one remote kit. `with_hide_tags` resolves the gun's hide tags,
+/// which only preparing the kit's hide bits needs.
 pub fn occupy_remote_kit_dobj<'a>(
     bodies: &'a assets::PreparedBodies,
     weapons: Option<&'a assets::PreparedWeapons>,
     world_weapons: Option<&'a assets::PreparedWorldWeapons>,
     axis: bool,
     weapon: u32,
+    with_hide_tags: bool,
 ) -> Option<(Vec<KitModel<'a>>, Option<f32>)> {
     let kits = bodies.0.kits();
     let kit = kits.kit(axis)?;
@@ -607,8 +683,9 @@ pub fn occupy_remote_kit_dobj<'a>(
                         name: entry.skel.name.as_str(),
                         skel: &entry.skel,
                         hide_tags: weapons
+                            .filter(|_| with_hide_tags)
                             .map(|registry| assets::effective_hide_tags(&registry.0, weapon))
-                            .unwrap_or_default(),
+                            .unwrap_or_else(Vec::new),
                     });
                     for attachment in world_attachments(&registry.0, &catalog.0, weapon) {
                         skels.push(KitModel {

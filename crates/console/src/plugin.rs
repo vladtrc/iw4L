@@ -2167,8 +2167,12 @@ fn mark_match_facts(
         out.push_str(&format!(" local={life}"));
         if let Some(meta) = meta {
             out.push_str(&format!(
-                " local_life={} local_deaths={}",
-                meta.life_sequence.0, meta.deaths
+                " local_life={} local_deaths={} local_cmds={} local_moving_cmds={} local_path={:.1}",
+                meta.life_sequence.0,
+                meta.deaths,
+                meta.input_receipt.applied_cmds,
+                meta.input_receipt.moving_cmds,
+                meta.input_receipt.path_units
             ));
         }
         if let Some(ps) = presented.and_then(|p| p.alive_player(local.0)) {

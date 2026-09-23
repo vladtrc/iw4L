@@ -2,6 +2,7 @@ use crate::anim::remote_body::{
     AdvancedRemoteTree, CpuBodyGeom, CpuSurfMeta, PendingGunSkin, RemoteBodySkinnedItem,
     RemoteBodySkinnedQueue, RemoteBodyTrees, RemoteModelLods, RemoteSkinModels,
     RemoteSkinPoseHashes, SkinAfterPose, WorldGunGap, advance_remote_tree, bind_remote_skin_models,
+    PreparedRemoteKitHides,
     clone_corpse_tree_from_victim, commit_assembled_body, dobj_radii, ensure_remote_dobj,
     hash_skin_matrices, occupy_lod_byte, occupy_remote_kit_dobj, packed_anim, pose_remote_dobj,
     push_cached_surfaces, remote_player_controller, select_remote_lods, select_remote_models,
@@ -71,6 +72,8 @@ pub fn register_remote_body_systems(app: &mut App) {
         .init_resource::<RemoteSkinPoseHashes>()
         .init_resource::<RemoteBodySkinnedQueue>()
         .init_resource::<RemoteBodyLightingBinds>()
+        .init_resource::<PreparedRemoteKitHides>()
+        .add_systems(Update, prepare_remote_kit_hides.in_set(ClientSet::Load))
         .init_resource::<crate::anim::dobj_pose::HostDObjPoseFrame>()
         .init_resource::<crate::anim::dobj_pose::PosedPlayerFrame>()
         .add_systems(
@@ -131,6 +134,30 @@ pub fn register_remote_body_systems(app: &mut App) {
         );
 }
 
+/// Resolve every kit's hide bits when the match's bodies, weapons or world
+/// weapons are installed — before anyone is drawn holding one.
+fn prepare_remote_kit_hides(
+    bodies: Option<Res<PreparedBodies>>,
+    weapons: Option<Res<PreparedWeapons>>,
+    world_weapons: Option<Res<PreparedWorldWeapons>>,
+    mut hides: ResMut<PreparedRemoteKitHides>,
+) {
+    let (Some(bodies), Some(weapons), Some(world)) = (bodies, weapons, world_weapons) else {
+        return;
+    };
+    if hides.owned_by(&bodies, &weapons, &world) {
+        return;
+    }
+    let started = std::time::Instant::now();
+    *hides = PreparedRemoteKitHides::prepare(&bodies, &weapons, &world);
+    diag::info!(
+        World,
+        "remote kits: hide bits prepared for {} weapons in {:.1}ms",
+        weapons.0.len(),
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
 fn finish_body_draw_plan(mut plan: ResMut<RemoteBodyDrawPlan>) {
     finish_remote_body_draw_plan(&mut plan);
 }
@@ -148,6 +175,7 @@ fn occupy_remote_scene_ents(
     bodies: Option<Res<PreparedBodies>>,
     weapons: Option<Res<PreparedWeapons>>,
     world_weapons: Option<Res<PreparedWorldWeapons>>,
+    kit_hides: Res<PreparedRemoteKitHides>,
     remotes: Query<
         (&CEntity, &CEntityRuntime, &Transform),
         (
@@ -159,6 +187,10 @@ fn occupy_remote_scene_ents(
 ) {
     let Some(bodies) = bodies.as_deref() else {
         return;
+    };
+    let hides_live = match (weapons.as_deref(), world_weapons.as_deref()) {
+        (Some(weapons), Some(world)) => kit_hides.owned_by(bodies, weapons, world),
+        _ => false,
     };
     let kits = bodies.0.kits();
     if kits.allies.is_none() && kits.axis.is_none() {
@@ -195,14 +227,21 @@ fn occupy_remote_scene_ents(
         let ffa_team = meta.and_then(|m| m.ffa_team);
         let client_state_team = meta.map(|m| m.client_state_team).unwrap_or(0);
         let axis = assets::kit_assignment_is_axis(client_state_team, ffa_team);
+        let held = remote_pose_sample(runtime).weapon;
         let Some((kit_models, radius)) = occupy_remote_kit_dobj(
             bodies,
             weapons.as_deref(),
             world_weapons.as_deref(),
             axis,
-            remote_pose_sample(runtime).weapon,
+            held,
+            false,
         ) else {
             continue;
+        };
+        let hide_part_bits = if hides_live {
+            kit_hides.get(axis, held).unwrap_or([0; 6])
+        } else {
+            [0; 6]
         };
         let origin = transform.translation.to_array();
         let quat = [
@@ -218,19 +257,10 @@ fn occupy_remote_scene_ents(
             .iter()
             .map(|model| occupy_lod_byte(skel_camera_lod(model.skel, origin, eye, ramp)))
             .collect();
-        let mut hide_part_bits = [0u32; 6];
-        let mut base = 0usize;
         let models: Vec<_> = kit_models
             .iter()
             .enumerate()
             .map(|(i, model)| {
-                render_scene::hide_part_bits_from_tags(
-                    &mut hide_part_bits,
-                    model.skel,
-                    base,
-                    &model.hide_tags,
-                );
-                base += model.skel.bones.len();
                 scene_skels.model(
                     model.name,
                     model.skel,

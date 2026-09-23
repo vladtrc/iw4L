@@ -117,7 +117,7 @@ pub use match_state::{
     CLASS_CATALOG_STEADY_AIM, CLASS_CATALOG_STOPPING_POWER, ClassDef, ClassRejectReason,
     ClientLifecycle, ClientSnapshotMeta, ConfigurationChangeRejectReason, DroppedItemAmmo,
     EntityEventPayload, EntityEventRecord, EventAudience, EventRecord, GiveRejectReason,
-    HealthRegenCensus, ItemPickupRecord, KillcamHud, LoadoutSpec, MatchEndReason, PelletFxRecord,
+    HealthRegenCensus, InputReceipt, ItemPickupRecord, KillcamHud, LoadoutSpec, MatchEndReason, PelletFxRecord,
     RngDebugMeta, SIM_EVENT_ROSTER, SimEvent, SimEventRow, SnapshotMeta,
     UNRELIABLE_SIM_EVENT_COUNT, class_catalog_has, class_catalog_radar_jam_e_flags,
     perk_bits_from_class_catalog, sim_event_is_reliable,

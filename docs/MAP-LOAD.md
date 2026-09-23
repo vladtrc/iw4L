@@ -42,6 +42,13 @@ The walk graph is cached (`nav`), keyed by the content digest with the bake's
 schema and hull, so the second start of a map reads it back instead of walking
 the grid again; a match teardown drops the in-memory copy, not the file.
 
+`MatchLoadOutcome::Ready` is the CPU package, not render-ready. The loading
+screen also holds for GPU images, every queued pipeline (the HUD blood film is
+queued as soon as its material exists) and the `first_person` stage: every
+weapon's first-person materials admitted and compositions laid out
+(`render_anim::PreparedFpv`). `load ledger:` in the log is one line per load of
+what was handed over or compiled new against what an earlier load left behind.
+
 ## Cache, and poking it: `iw4l-artifacts/cache/<kind>/<prefix>/<key>`
 
 Content-addressed leaf in `asset_transport::artifact_cache` (`cache_get` /

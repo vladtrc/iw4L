@@ -660,6 +660,7 @@ fn run_players_system(ecs: &mut World) {
                 crate::damage::shellshock_dump_affects_movement(ps.shellshock_index),
             );
             let mut cmd = *cmd;
+            let commanded_move = cmd.forwardmove != 0 || cmd.rightmove != 0;
             let linked_brushes: Vec<LinkedBrushCollisionBrush> = world
                 .entity_collision_capabilities()
                 .iter()
@@ -681,7 +682,7 @@ fn run_players_system(ecs: &mut World) {
             let script = world.player_anim_script();
             let mantle = world.mantle_xanims();
             let applied_mt = Cell::new(None);
-            let (walking, linked_bounds, anim_movetype, view_w, primary) = {
+            let (walking, linked_bounds, anim_movetype, view_w, primary, moved_from, moved_to) = {
                 let ps = world
                     .player_mut(*id)
                     .expect("Alive client has a player row");
@@ -689,6 +690,7 @@ fn run_players_system(ecs: &mut World) {
                 if ps.shellshock_time.wrapping_add(ps.shellshock_duration) < level_time {
                     ps.pm_flags &= !playerstate_iw4::pm_flags::SHELLSHOCKED;
                 }
+                let moved_from = ps.origin;
                 let result = pm_move(
                     ps,
                     &mut cmd,
@@ -705,14 +707,21 @@ fn run_players_system(ecs: &mut World) {
                     pml.almost_ground_plane != 0,
                 );
                 let (view_w, primary) = crate::pmove_anim_weapon_ids(ps);
+                let moved_to = ps.origin;
                 (
                     pml.walking as i32,
                     result.bounds,
                     anim_movetype,
                     view_w,
                     primary,
+                    moved_from,
+                    moved_to,
                 )
             };
+            world
+                .client_meta_mut(*id)
+                .input_receipt
+                .record(commanded_move, moved_from, moved_to);
             if let Some(movetype) = anim_movetype {
                 let view_facts = world.combat_facts_for(view_w);
                 let primary_facts = world.combat_facts_for(primary);

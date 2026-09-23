@@ -32,6 +32,10 @@ pub enum HudTessTechnique {
     Modulate,
 
     SplatterAlt,
+
+    /// Samples the scene the renderer saved when the current flash began. The
+    /// batch image is a stand-in; the renderer binds its saved copy instead.
+    SavedScreen,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +62,11 @@ pub struct HudTessGpuFrame {
     pub surface_w: f32,
     pub surface_h: f32,
     pub visible: bool,
+
+    /// Bumped on the frame a flash begins: the renderer copies that frame's
+    /// scene before any HUD draws over it, and `SavedScreen` batches sample it
+    /// until the next bump.
+    pub saved_screen_sequence: u64,
 }
 
 impl HudTessGpuFrame {
@@ -458,6 +467,14 @@ pub(crate) fn pack_splatter_alt(
         first_vertex: 0,
         vertex_count: 4,
     });
+    packed
+}
+
+pub(crate) fn pack_saved_screen(quad: &Draw2dQuad, stand_in: Handle<Image>) -> PackedList {
+    let mut packed = pack_modulate(quad, stand_in);
+    for batch in &mut packed.batches {
+        batch.technique = HudTessTechnique::SavedScreen;
+    }
     packed
 }
 

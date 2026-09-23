@@ -735,8 +735,7 @@ pub fn install_prepared_fpv_plan(
     geometry: &crate::anim::fpv_rig::PreparedFpvGeometry,
     lighting_handle: u32,
 ) {
-    plan.indices.clear();
-    plan.indices.extend_from_slice(&geometry.indices);
+    geometry.write_indices(&mut plan.indices);
     plan.surface_ranges.clear();
     plan.surface_ranges
         .extend_from_slice(&geometry.surface_ranges);

@@ -158,6 +158,7 @@ impl Plugin for PlayerSoundPlugin {
             .add_message::<Footstep>()
             .add_message::<WeaponSound>()
             .add_message::<ViewmodelNotetracks>()
+            .init_resource::<crate::entity_events::NotetrackSoundTable>()
             .add_message::<LandSound>()
             .add_systems(
                 Update,
@@ -199,6 +200,8 @@ impl Plugin for PlayerSoundPlugin {
                         .after(crate::ambient::stop_map_ambient_on_match_end),
                     crate::ambient::install_sound_bank
                         .after(crate::ambient::start_sound_bank_compose),
+                    crate::entity_events::bind_notetrack_sounds
+                        .after(crate::ambient::install_sound_bank),
                     crate::ambient::stop_map_ambient_on_match_end.after(SessionSwapApplied),
                     reset_clip_prep_on_match_torn_down,
                 )

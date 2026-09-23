@@ -14,6 +14,10 @@ pub use anim::fpv_host::{
     FpvPoseRefuse, FpvPosedFrame, FpvPresentCursor, PendingFpvNotetracks, PendingFpvSpawn,
     PendingFpvSpawnRequest, generate_fpv_pose,
 };
+pub use anim::fpv_prepared::{
+    FpvPreparationCensus, FpvRigSet, FpvWeaponSlot, FpvWeaponTable, FpvWeaponView, PreparedFpv,
+    prepare_fpv_compositions,
+};
 pub use anim::viewmodel_controller::{
     AdvanceResult, EventResult, ViewmodelController, ViewmodelEvent, WeaponState,
 };

@@ -6210,6 +6210,17 @@ impl WeaponRegistry {
             .get(&note.to_ascii_lowercase())
     }
 
+    pub fn notetrack_actions_of(
+        &self,
+        index: u32,
+    ) -> impl Iterator<Item = (&str, &LinkedNotetrackAction)> {
+        self.rows
+            .get(index as usize)
+            .into_iter()
+            .flat_map(|row| row.notetrack_actions.iter())
+            .map(|(note, action)| (note.as_str(), action))
+    }
+
     pub fn notetrack_sound_aliases_of(&self, index: u32) -> impl Iterator<Item = &str> {
         self.rows
             .get(index as usize)
