@@ -83,6 +83,7 @@ struct PlayerCardExprHost<'a> {
     menu: Option<&'a assets::MenuDef>,
     ms: i32,
     in_killcam: bool,
+    game_ended: bool,
     own_team: i32,
     local_vars: &'a UiLocalVars,
     cache: &'a PlayerCardCache,
@@ -149,7 +150,10 @@ impl ExprHost for PlayerCardExprHost<'_> {
         if name.eq_ignore_ascii_case("hiDef") {
             return Ok(1);
         }
-        if ["ui_hide_playercards", "splitscreen", "scr_gameended"]
+        if name.eq_ignore_ascii_case("scr_gameended") {
+            return Ok(i32::from(self.game_ended));
+        }
+        if ["ui_hide_playercards", "splitscreen"]
             .iter()
             .any(|dvar| name.eq_ignore_ascii_case(dvar))
         {
@@ -453,6 +457,12 @@ pub(crate) fn update_playercard(
         menu: None,
         ms: now_ms,
         in_killcam: view.as_deref().is_some_and(|v| v.in_killcam()),
+        game_ended: presented.snapshot().is_some_and(|s| {
+            matches!(
+                s.meta.phase,
+                sim::MatchPhase::Intermission | sim::MatchPhase::PostGame
+            )
+        }),
         own_team,
         local_vars: &local_vars,
         cache: &cache,

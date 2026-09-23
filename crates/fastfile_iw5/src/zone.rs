@@ -330,11 +330,16 @@ pub struct AttachmentGeometry {
     pub overlay_height: f32,
     pub overlay_reticle: i32,
     pub thermal: bool,
+    pub facts: crate::attachment::AttachmentFacts,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WeaponGeometry {
     pub name: Option<Ptr>,
+
+    pub kill_icon_slot: Option<Ptr>,
+
+    pub kill_icon: Option<Ptr>,
 
     pub display_name: Option<Ptr>,
 
@@ -389,6 +394,7 @@ pub struct WeaponGeometry {
     pub ads_overlay_width: f32,
     pub ads_overlay_height: f32,
     pub overlay_reticle: i32,
+    pub overlay_interface: i32,
 
     pub attachments: [Option<Ptr>; crate::size::WEAPON_ATTACHMENT_SLOT_COUNT],
 

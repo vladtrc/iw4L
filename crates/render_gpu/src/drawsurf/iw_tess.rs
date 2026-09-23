@@ -103,7 +103,6 @@ struct ExtractedIwTess(ExtractedTessFrame);
 struct IwTessPipeline {
     shader: Handle<Shader>,
     modulate_layout: BindGroupLayoutDescriptor,
-    splatter_layout: BindGroupLayoutDescriptor,
     params: Buffer,
 }
 
@@ -111,7 +110,6 @@ struct IwTessPipeline {
 struct IwTessPipelineKey {
     target: TextureFormat,
     samples: u32,
-    technique: HudTessTechnique,
     state_bits: Option<[u32; 2]>,
 }
 
@@ -119,41 +117,22 @@ impl SpecializedRenderPipeline for IwTessPipeline {
     type Key = IwTessPipelineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
-        let (layout, blend, entry, label, defs) = match key.technique {
-            HudTessTechnique::Modulate => (
-                self.modulate_layout.clone(),
-                BlendComponent {
-                    src_factor: BlendFactor::SrcAlpha,
-                    dst_factor: BlendFactor::OneMinusSrcAlpha,
-                    operation: BlendOperation::Add,
-                },
-                "fs_tess",
-                "iw_tess_stretchpic",
-                Vec::new(),
-            ),
-            HudTessTechnique::SplatterAlt => (
-                self.splatter_layout.clone(),
-                BlendComponent {
-                    src_factor: BlendFactor::One,
-                    dst_factor: BlendFactor::OneMinusSrcAlpha,
-                    operation: BlendOperation::Add,
-                },
-                "fs_splatter",
-                "iw_tess_splatter_alt",
-                vec!["IW_TESS_SPLATTER".into()],
-            ),
+        let blend = BlendComponent {
+            src_factor: BlendFactor::SrcAlpha,
+            dst_factor: BlendFactor::OneMinusSrcAlpha,
+            operation: BlendOperation::Add,
         };
         let state = key.state_bits.map(|bits| {
             crate::GfxPassState::from_state_bits(bits[0], bits[1])
                 .apply_change_state_0_host(AlphaMode::Blend, false)
         });
         RenderPipelineDescriptor {
-            label: Some(label.into()),
-            layout: vec![layout],
+            label: Some("iw_tess_stretchpic".into()),
+            layout: vec![self.modulate_layout.clone()],
             immediate_size: 0,
             vertex: VertexState {
                 shader: self.shader.clone(),
-                shader_defs: defs.clone(),
+                shader_defs: Vec::new(),
                 entry_point: Some("vs_tess".into()),
                 buffers: vec![VertexBufferLayout {
                     array_stride: 32,
@@ -179,8 +158,8 @@ impl SpecializedRenderPipeline for IwTessPipeline {
             },
             fragment: Some(FragmentState {
                 shader: self.shader.clone(),
-                shader_defs: defs,
-                entry_point: Some(entry.into()),
+                shader_defs: Vec::new(),
+                entry_point: Some("fs_tess".into()),
                 targets: vec![Some(ColorTargetState {
                     format: key.target,
                     blend: match state {
@@ -228,19 +207,6 @@ fn init_pipeline(
                 ShaderStages::VERTEX_FRAGMENT,
                 (
                     uniform_buffer_sized(false, NonZeroU64::new(PARAMS_SIZE)),
-                    texture_2d(TextureSampleType::Float { filterable: true }),
-                    sampler(SamplerBindingType::Filtering),
-                ),
-            ),
-        ),
-        splatter_layout: BindGroupLayoutDescriptor::new(
-            "iw_tess_splatter_layout",
-            &BindGroupLayoutEntries::sequential(
-                ShaderStages::VERTEX_FRAGMENT,
-                (
-                    uniform_buffer_sized(false, NonZeroU64::new(PARAMS_SIZE)),
-                    texture_2d(TextureSampleType::Float { filterable: true }),
-                    sampler(SamplerBindingType::Filtering),
                     texture_2d(TextureSampleType::Float { filterable: true }),
                     sampler(SamplerBindingType::Filtering),
                 ),
@@ -456,6 +422,11 @@ fn draw_iw_tess(
     cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
     images: Res<RenderAssets<GpuImage>>,
+    postfx: Res<super::postfx::ExtractedPostFx>,
+    queue: Res<RenderQueue>,
+    mut texture_table: ResMut<super::texture_table::ExactTextureTable>,
+    mut blood_port: Local<Option<super::hud_blood::BloodPortGpu>>,
+    mut blood_refusal: Local<Option<super::hud_blood::BloodGpuRefusal>>,
     mut context: RenderContext,
     stages: Option<Res<SharedRenderStagesSlot>>,
 ) {
@@ -475,6 +446,36 @@ fn draw_iw_tess(
 
     let samples = 1;
     let format = target.main_texture_format();
+    let has_blood = meta.draws.iter().any(|geom| {
+        extracted
+            .0
+            .batches
+            .get(geom.batch_i)
+            .is_some_and(|batch| batch.technique == HudTessTechnique::SplatterAlt)
+    });
+    let blood_ready = has_blood
+        && match prepare_blood(
+            &mut blood_port,
+            postfx.blood.as_ref(),
+            format,
+            &device,
+            &cache,
+            &queue,
+            extracted.0.surface_w,
+            extracted.0.surface_h,
+        ) {
+            Ok(ready) => {
+                *blood_refusal = None;
+                ready
+            }
+            Err(cause) => {
+                if blood_refusal.as_ref() != Some(&cause) {
+                    diag::warn!(World, "hud blood port: RED cause={cause:?}");
+                    *blood_refusal = Some(cause);
+                }
+                false
+            }
+        };
     let mut prepared = Vec::with_capacity(meta.draws.len());
     for geom in &meta.draws {
         let Some(batch) = extracted.0.batches.get(geom.batch_i) else {
@@ -483,23 +484,19 @@ fn draw_iw_tess(
         let Some(gpu_image) = images.get(&batch.image) else {
             continue;
         };
-        let id = specialized.specialize(
-            &cache,
-            &pipeline,
-            IwTessPipelineKey {
-                target: format,
-                samples,
-                technique: batch.technique,
-                state_bits: batch.state_bits,
-            },
-        );
-        if cache.get_render_pipeline(id).is_none() {
-            continue;
-        }
-        let bind = match batch.technique {
+        let (id, bind, textures) = match batch.technique {
             HudTessTechnique::Modulate => {
+                let id = specialized.specialize(
+                    &cache,
+                    &pipeline,
+                    IwTessPipelineKey {
+                        target: format,
+                        samples,
+                        state_bits: batch.state_bits,
+                    },
+                );
                 let layout = cache.get_bind_group_layout(&pipeline.modulate_layout);
-                device.create_bind_group(
+                let bind = device.create_bind_group(
                     "iw_tess_modulate",
                     &layout,
                     &BindGroupEntries::sequential((
@@ -507,30 +504,25 @@ fn draw_iw_tess(
                         &gpu_image.texture_view,
                         &gpu_image.sampler,
                     )),
-                )
+                );
+                (id, bind, None)
             }
             HudTessTechnique::SplatterAlt => {
-                let Some(mask_handle) = batch.mask.as_ref() else {
+                let Some(gpu_mask) = batch.mask.as_ref().and_then(|mask| images.get(mask)) else {
                     continue;
                 };
-                let Some(gpu_mask) = images.get(mask_handle) else {
+                let Some(port) = blood_port.as_mut().filter(|_| blood_ready) else {
                     continue;
                 };
-                let layout = cache.get_bind_group_layout(&pipeline.splatter_layout);
-                device.create_bind_group(
-                    "iw_tess_splatter",
-                    &layout,
-                    &BindGroupEntries::sequential((
-                        pipeline.params.as_entire_buffer_binding(),
-                        &gpu_image.texture_view,
-                        &gpu_image.sampler,
-                        &gpu_mask.texture_view,
-                        &gpu_mask.sampler,
-                    )),
-                )
+                let textures =
+                    port.textures(&mut texture_table, &device, &cache, gpu_image, gpu_mask);
+                (port.pipeline, port.constants.clone(), Some(textures))
             }
         };
-        prepared.push((id, bind, geom));
+        if cache.get_render_pipeline(id).is_none() {
+            continue;
+        }
+        prepared.push((id, bind, textures, geom));
     }
     if prepared.is_empty() {
         if let Some(slot) = stages.as_ref()
@@ -554,12 +546,15 @@ fn draw_iw_tess(
     let mut streams = GfxCmdBufStreams::default();
     let mut bind_n = 0u32;
     let mut skip_n = 0u32;
-    for (id, bind, geom) in &prepared {
+    for (id, bind, textures, geom) in &prepared {
         let Some(gpu_pipeline) = cache.get_render_pipeline(*id) else {
             continue;
         };
         pass.set_render_pipeline(gpu_pipeline);
         pass.set_bind_group(0, bind, &[]);
+        if let Some(textures) = textures {
+            pass.set_bind_group(1, textures, &[]);
+        }
         let action = r_set_stream_source(
             &mut streams,
             geom.stream.buffer,
@@ -584,6 +579,33 @@ fn draw_iw_tess(
         guard.tess_stream_bind_n = Some(bind_n);
         guard.tess_stream_skip_n = Some(skip_n);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_blood(
+    port: &mut Option<super::hud_blood::BloodPortGpu>,
+    blood: Option<&super::postfx::ExtractedBlood>,
+    format: TextureFormat,
+    device: &RenderDevice,
+    cache: &PipelineCache,
+    queue: &RenderQueue,
+    surface_w: f32,
+    surface_h: f32,
+) -> Result<bool, super::hud_blood::BloodGpuRefusal> {
+    let Some(blood) = blood else {
+        *port = None;
+        return Ok(false);
+    };
+    if port.as_ref().is_none_or(|port| !port.matches(blood, format)) {
+        *port = None;
+        *port = Some(super::hud_blood::BloodPortGpu::create(
+            blood, format, device, cache,
+        )?);
+    }
+    port.as_ref()
+        .expect("built above")
+        .upload(queue, surface_w, surface_h)?;
+    Ok(true)
 }
 
 pub(super) fn register(app: &mut App) {

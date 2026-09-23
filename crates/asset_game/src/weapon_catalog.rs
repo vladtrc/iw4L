@@ -117,6 +117,8 @@ pub struct WeaponBodyFacts {
 
     pub overlay_reticle: i32,
 
+    pub overlay_interface: i32,
+
     pub ads_overlay_width: f32,
 
     pub ads_overlay_height: f32,
@@ -446,7 +448,7 @@ pub struct CatalogWeapon {
     pub scope_rows: [Iw5ScopeRow; 6],
 
     pub iw5_attachment_slots: [Option<String>; fastfile_iw5::size::WEAPON_ATTACHMENT_SLOT_COUNT],
-    pub iw5_reload_overrides: Vec<Iw5ReloadOverride>,
+    pub iw5_reload_overrides: Vec<fastfile_iw5::ReloadOverride>,
     pub iw5_anim_overrides: Vec<LeftoverAnimOverride>,
     pub iw5_fx_overrides: Vec<Iw5FxOverride>,
     pub iw5_notetrack_overrides: Vec<Iw5NotetrackOverride>,
@@ -530,151 +532,24 @@ pub struct Iw5ScopeRow {
     pub ads_zoom_fov: f32,
     pub ads_zoom_in_frac: f32,
     pub ads_zoom_out_frac: f32,
-    pub sight: Option<Iw5AttachmentSight>,
-    pub ammo_general: Option<Iw5AttachmentAmmoGeneral>,
-    pub reload: Option<Iw5AttachmentReload>,
-    pub add_ons: Option<Iw5AttachmentAddOns>,
-    pub general: Option<Iw5AttachmentGeneral>,
-    pub aim_assist: Option<Iw5AttachmentAimAssist>,
-    pub ammunition: Option<Iw5AttachmentAmmunition>,
-    pub damage: Option<Iw5AttachmentDamage>,
+    pub sight: Option<fastfile_iw5::AttachmentSight>,
+    pub ammo_general: Option<fastfile_iw5::AttachmentAmmoGeneral>,
+    pub reload: Option<fastfile_iw5::AttachmentReload>,
+    pub add_ons: Option<fastfile_iw5::AttachmentAddOns>,
+    pub general: Option<fastfile_iw5::AttachmentGeneral>,
+    pub aim_assist: Option<fastfile_iw5::AttachmentAimAssist>,
+    pub ammunition: Option<fastfile_iw5::AttachmentAmmunition>,
+    pub damage: Option<fastfile_iw5::AttachmentDamage>,
     pub location_damage: Option<[f32; 19]>,
-    pub idle_settings: Option<Iw5AttachmentIdleSettings>,
-    pub ads_settings: Option<Iw5AttachmentAdsSettings>,
-    pub ads_settings_main: Option<Iw5AttachmentAdsSettings>,
-    pub hip_spread: Option<Iw5AttachmentHipSpread>,
-    pub gun_kick: Option<Iw5AttachmentGunKick>,
+    pub idle_settings: Option<fastfile_iw5::AttachmentIdleSettings>,
+    pub ads_settings: Option<fastfile_iw5::AttachmentAdsSettings>,
+    pub ads_settings_main: Option<fastfile_iw5::AttachmentAdsSettings>,
+    pub hip_spread: Option<fastfile_iw5::AttachmentHipSpread>,
+    pub gun_kick: Option<fastfile_iw5::AttachmentGunKick>,
     pub view_kick: Option<[f32; 10]>,
-    pub scales: Iw5AttachmentScales,
+    pub scales: fastfile_iw5::AttachmentScales,
     pub hide_iron_sights: bool,
     pub share_ammo_with_alt: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Iw5AttachmentSight {
-    pub aim_down_sight: bool,
-    pub ads_fire: bool,
-    pub rechamber_while_ads: bool,
-    pub no_ads_when_mag_empty: bool,
-    pub can_hold_breath: bool,
-    pub can_variable_zoom: bool,
-    pub hide_rail: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Iw5AttachmentAmmoGeneral {
-    pub penetrate_type: i32,
-    pub penetrate_multiplier: f32,
-    pub impact_type: i32,
-    pub fire_type: i32,
-    pub rifle_bullet: bool,
-    pub armor_piercing: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Iw5AttachmentReload {
-    pub no_partial_reload: bool,
-    pub segmented_reload: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Iw5AttachmentAddOns {
-    pub motion_tracker: bool,
-    pub silenced: bool,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Iw5AttachmentGeneral {
-    pub bolt_action: bool,
-    pub inherits_perks: bool,
-    pub enemy_crosshair_range: f32,
-    pub move_speed_scale: f32,
-    pub ads_move_speed_scale: f32,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Iw5AttachmentAmmunition {
-    pub max_ammo: i32,
-    pub start_ammo: i32,
-    pub clip_size: i32,
-    pub shot_count: i32,
-    pub reload_ammo_add: i32,
-    pub reload_start_add: i32,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Iw5AttachmentAimAssist {
-    pub auto_aim_range: f32,
-    pub aim_assist_range: f32,
-    pub aim_assist_range_ads: f32,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Iw5AttachmentDamage {
-    pub damage: i32,
-    pub min_damage: i32,
-    pub melee_damage: i32,
-    pub max_damage_range: f32,
-    pub min_damage_range: f32,
-    pub player_damage: i32,
-    pub min_player_damage: i32,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Iw5AttachmentIdleSettings {
-    pub hip_idle_amount: f32,
-    pub hip_idle_speed: f32,
-    pub idle_crouch_factor: f32,
-    pub idle_prone_factor: f32,
-    pub ads_idle_lerp_start_time: f32,
-    pub ads_idle_lerp_time: f32,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Iw5AttachmentHipSpread {
-    pub values: [f32; 12],
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Iw5AttachmentGunKick {
-    pub hip_reduced_kick_bullets: i32,
-    pub hip: [f32; 9],
-    pub ads_reduced_kick_bullets: i32,
-    pub ads: [f32; 9],
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Iw5AttachmentAdsSettings {
-    pub ads_spread: f32,
-    pub ads_aim_pitch: f32,
-    pub ads_trans_in_time: f32,
-    pub ads_trans_out_time: f32,
-    pub ads_reload_trans_time_ms: i32,
-    pub ads_crosshair_in_frac: f32,
-    pub ads_crosshair_out_frac: f32,
-    pub ads_zoom_fov: f32,
-    pub ads_zoom_in_frac: f32,
-    pub ads_zoom_out_frac: f32,
-    pub ads_bob_factor: f32,
-    pub ads_view_bob_mult: f32,
-    pub ads_view_error_min: f32,
-    pub ads_view_error_max: f32,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Iw5AttachmentScales {
-    pub ammunition: f32,
-    pub damage: f32,
-    pub damage_min: f32,
-    pub state_timers: f32,
-    pub fire_timers: f32,
-    pub idle_settings: f32,
-    pub ads_settings: f32,
-    pub ads_settings_main: f32,
-    pub hip_spread: f32,
-    pub gun_kick: f32,
-    pub view_kick: f32,
-    pub view_center: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -692,13 +567,6 @@ pub struct Iw5ConfigurationCandidate {
     pub primary_assets: Vec<String>,
     pub primary_ads_zoom_fov: Option<f32>,
     pub primary_ads_aim_pitch: Option<f32>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Iw5ReloadOverride {
-    pub attachment: u16,
-    pub reload_add_time_ms: i32,
-    pub reload_start_add_time_ms: i32,
 }
 
 impl Iw5AttachmentSelection {
@@ -1332,116 +1200,19 @@ impl WeaponCatalog {
         let Some(name) = geometry.name.and_then(|ptr| leftover_cstr_iw5(stream, ptr)) else {
             return;
         };
-        use fastfile_iw5::size as sz;
-        let body_at = |x86, x64| match stream.ptr_at(geometry.header, stream.layout(x86, x64)) {
-            Ok(fastfile_iw5::ZonePtr::Offset(ptr)) => Some(stream.resolve_alias(ptr)),
-            _ => None,
-        };
-        let sight = body_at(sz::ATTACH_SIGHT_OFF, 64)
-            .and_then(|body| read_iw5_attachment_sight(stream, body));
-        let ammo_general =
-            body_at(32, 56).and_then(|body| read_iw5_attachment_ammo_general(stream, body));
-        let reload = body_at(40, 72).and_then(|body| {
-            Some(Iw5AttachmentReload {
-                no_partial_reload: stream.u8_at(body, 0).ok()? != 0,
-                segmented_reload: stream.u8_at(body, 1).ok()? != 0,
-            })
-        });
-        let add_ons = body_at(sz::ATTACH_ADDONS_OFF, 80)
-            .and_then(|body| read_iw5_attachment_addons(stream, body));
-        let general = body_at(sz::ATTACH_GENERAL_OFF, 88)
-            .and_then(|body| read_iw5_attachment_general(stream, body));
-        let aim_assist = body_at(52, 96).and_then(|body| {
-            read_iw5_f32_block::<3>(stream, body).map(|values| Iw5AttachmentAimAssist {
-                auto_aim_range: values[0],
-                aim_assist_range: values[1],
-                aim_assist_range_ads: values[2],
-            })
-        });
-        let ammunition = body_at(sz::ATTACH_AMMUNITION_OFF, 104)
-            .and_then(|body| read_iw5_attachment_ammunition(stream, body));
-        let damage = body_at(60, 112).and_then(|body| read_iw5_attachment_damage(stream, body));
-        let location_damage =
-            body_at(64, 120).and_then(|body| read_iw5_f32_block::<19>(stream, body));
-        let idle_settings = body_at(68, 128).and_then(|body| {
-            read_iw5_f32_block::<6>(stream, body).map(|values| Iw5AttachmentIdleSettings {
-                hip_idle_amount: values[0],
-                hip_idle_speed: values[1],
-                idle_crouch_factor: values[2],
-                idle_prone_factor: values[3],
-                ads_idle_lerp_start_time: values[4],
-                ads_idle_lerp_time: values[5],
-            })
-        });
-        let ads_settings = body_at(sz::ATTACH_ADS_SETTINGS_OFF, 136)
-            .and_then(|body| read_iw5_attachment_ads(stream, body));
-        let ads_settings_main = body_at(sz::ATTACH_ADS_SETTINGS_MAIN_OFF, 144)
-            .and_then(|body| read_iw5_attachment_ads(stream, body));
-        let hip_spread = body_at(80, 152).and_then(|body| {
-            read_iw5_f32_block::<12>(stream, body).map(|values| Iw5AttachmentHipSpread { values })
-        });
-        let gun_kick = body_at(84, 160).and_then(|body| {
-            let read_group = |first: usize| {
-                let mut values = [0.0; 9];
-                for (index, value) in values.iter_mut().enumerate() {
-                    *value = stream.f32_at(body, first + index * 4).ok()?;
-                }
-                Some(values)
-            };
-            Some(Iw5AttachmentGunKick {
-                hip_reduced_kick_bullets: stream.i32_at(body, 0).ok()?,
-                hip: read_group(4)?,
-                ads_reduced_kick_bullets: stream.i32_at(body, 40).ok()?,
-                ads: read_group(44)?,
-            })
-        });
-        let view_kick = body_at(88, 168).and_then(|body| read_iw5_f32_block::<10>(stream, body));
-        let read_scale = |index: usize| {
-            stream
-                .f32_at(
-                    geometry.header,
-                    stream.layout(sz::ATTACH_SCALES_OFF, 208) + index * 4,
-                )
-                .unwrap_or(0.0)
-        };
-        let scales = Iw5AttachmentScales {
-            ammunition: read_scale(0),
-            damage: read_scale(1),
-            damage_min: read_scale(2),
-            state_timers: read_scale(3),
-            fire_timers: read_scale(4),
-            idle_settings: read_scale(5),
-            ads_settings: read_scale(6),
-            ads_settings_main: read_scale(7),
-            hip_spread: read_scale(8),
-            gun_kick: read_scale(9),
-            view_kick: read_scale(10),
-            view_center: read_scale(11),
-        };
-        let flags = stream.layout(sz::ATTACH_FLAGS_OFF, 260);
-        let display_name = match stream.ptr_at(geometry.header, stream.layout(4, 8)) {
-            Ok(fastfile_iw5::ZonePtr::Offset(ptr)) => {
-                leftover_cstr_iw5(stream, stream.resolve_alias(ptr))
-            }
-            _ => None,
-        };
+        let facts = &geometry.facts;
+        let ads_settings = facts.ads_settings;
         self.iw5_attachments.insert(
             name.clone(),
             Iw5ScopeRow {
                 scope: Some(name),
-                display_name,
-                attachment_type: stream
-                    .i32_at(geometry.header, stream.layout(8, 16))
-                    .unwrap_or(0),
-                weapon_type: stream
-                    .i32_at(geometry.header, stream.layout(12, 20))
-                    .unwrap_or(0),
-                weapon_class: stream
-                    .i32_at(geometry.header, stream.layout(16, 24))
-                    .unwrap_or(0),
-                load_index: stream
-                    .i32_at(geometry.header, stream.layout(156, 256))
-                    .unwrap_or(0),
+                display_name: facts
+                    .display_name
+                    .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
+                attachment_type: facts.attachment_type,
+                weapon_type: facts.weapon_type,
+                weapon_class: facts.weapon_class,
+                load_index: facts.load_index,
                 overlay: geometry.overlay_names[0].and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
                 overlay_lowres: geometry.overlay_names[1]
                     .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
@@ -1470,24 +1241,24 @@ impl WeaponCatalog {
                 ads_zoom_fov: ads_settings.map_or(0.0, |ads| ads.ads_zoom_fov),
                 ads_zoom_in_frac: ads_settings.map_or(0.0, |ads| ads.ads_zoom_in_frac),
                 ads_zoom_out_frac: ads_settings.map_or(0.0, |ads| ads.ads_zoom_out_frac),
-                sight,
-                ammo_general,
-                reload,
-                add_ons,
-                general,
-                aim_assist,
-                ammunition,
-                damage,
-                location_damage,
-                idle_settings,
+                sight: facts.sight,
+                ammo_general: facts.ammo_general,
+                reload: facts.reload,
+                add_ons: facts.add_ons,
+                general: facts.general,
+                aim_assist: facts.aim_assist,
+                ammunition: facts.ammunition,
+                damage: facts.damage,
+                location_damage: facts.location_damage,
+                idle_settings: facts.idle_settings,
                 ads_settings,
-                ads_settings_main,
-                hip_spread,
-                gun_kick,
-                view_kick,
-                scales,
-                hide_iron_sights: stream.u8_at(geometry.header, flags).unwrap_or(0) != 0,
-                share_ammo_with_alt: stream.u8_at(geometry.header, flags + 1).unwrap_or(0) != 0,
+                ads_settings_main: facts.ads_settings_main,
+                hip_spread: facts.hip_spread,
+                gun_kick: facts.gun_kick,
+                view_kick: facts.view_kick,
+                scales: facts.scales,
+                hide_iron_sights: facts.hide_iron_sights,
+                share_ammo_with_alt: facts.share_ammo_with_alt,
                 ..Default::default()
             },
         );
@@ -1814,6 +1585,7 @@ impl WeaponCatalog {
                 ads_fire_only: geometry.ads_fire_only,
                 melee_damage: geometry.melee_damage,
                 overlay_reticle: geometry.overlay_reticle,
+                overlay_interface: geometry.overlay_interface,
                 ads_overlay_width: geometry.ads_overlay_width,
                 ads_overlay_height: geometry.ads_overlay_height,
                 melee_time_ms: geometry.melee_time_ms,
@@ -2232,7 +2004,7 @@ impl WeaponCatalog {
         let iw5_attachment_slots = geometry
             .attachments
             .map(|name| name.and_then(|ptr| leftover_cstr_iw5(stream, ptr)));
-        let iw5_reload_overrides = read_iw5_reload_overrides(stream, &geometry);
+        let iw5_reload_overrides = geometry.reload_overrides(stream).collect();
         let iw5_fx_overrides = read_iw5_fx_overrides(stream, &geometry, fx_name_at_slot);
         let iw5_notetrack_overrides = read_iw5_notetrack_overrides(stream, strings, &geometry);
         let mut sz_xanims = geometry
@@ -2300,8 +2072,13 @@ impl WeaponCatalog {
             dpad_icon_image: None,
             dpad_icon_atlas: None,
             dpad_icon_ratio: 0,
-            kill_icon: None,
-            kill_icon_slot: None,
+            kill_icon: geometry
+                .kill_icon
+                .and_then(|mat| leftover_xstring_at_iw5(stream, mat, 0, 0)),
+            kill_icon_slot: geometry.kill_icon_slot.map(|slot| Ptr {
+                block: slot.block,
+                offset: slot.offset,
+            }),
             kill_icon_image: None,
             proj_trail: None,
             proj_trail_slot: None,
@@ -2410,8 +2187,16 @@ impl WeaponCatalog {
             dpad_icon_image: None,
             dpad_icon_atlas: None,
             dpad_icon_ratio: 0,
-            kill_icon: None,
-            kill_icon_slot: None,
+            kill_icon: leftover_t5_material_name_opt(
+                stream,
+                geometry.weap_def,
+                fastfile_t5::size::WEAPON_DEF_KILL_ICON_OFF,
+            ),
+            kill_icon_slot: leftover_t5_asset_slot(
+                stream,
+                geometry.weap_def,
+                fastfile_t5::size::WEAPON_DEF_KILL_ICON_OFF,
+            ),
             kill_icon_image: None,
             proj_trail: None,
             proj_trail_slot: None,
@@ -3120,6 +2905,10 @@ fn capture_t5_body_facts(
         select_requires_ammo_at_0x667: Some(leftover_t5_select_requires_ammo()),
         ..WeaponBodyFacts::default()
     };
+    if let Some(body) = geometry.weap_def {
+        facts.kill_icon_ratio = i32_at_t5(stream, body, sz::WEAPON_DEF_KILL_ICON_RATIO_OFF);
+        facts.flip_kill_icon = u8_at_t5(stream, body, sz::WEAPON_DEF_FLIP_KILL_ICON_OFF) != 0;
+    }
     if let Some(variant) = geometry.variant {
         facts.reload_time_ms = i32_at_t5(stream, variant, sz::WEAPON_VARIANT_RELOAD_TIME_OFF);
         facts.reload_empty_time_ms =
@@ -3210,6 +2999,7 @@ fn capture_t5_body_facts(
     facts.reload_ammo_add = i32_at_t5(stream, body, sz::WEAPON_DEF_RELOAD_AMMO_ADD_OFF);
     facts.reload_start_add = i32_at_t5(stream, body, sz::WEAPON_DEF_RELOAD_START_ADD_OFF);
     facts.overlay_reticle = i32_at_t5(stream, body, sz::WEAPON_DEF_ADS_OVERLAY_RETICLE_OFF);
+    facts.overlay_interface = i32_at_t5(stream, body, sz::WEAPON_DEF_ADS_OVERLAY_INTERFACE_OFF);
     facts.ads_overlay_width = f32_at_t5(stream, body, sz::WEAPON_DEF_ADS_OVERLAY_WIDTH_OFF);
     facts.ads_overlay_height = f32_at_t5(stream, body, sz::WEAPON_DEF_ADS_OVERLAY_HEIGHT_OFF);
     facts.i_reticle_side_size = i32_at_t5(stream, body, sz::WEAPON_DEF_RETICLE_SIDE_SIZE_OFF);
@@ -3380,6 +3170,7 @@ fn capture_iw5_body_facts(
         ads_overlay_width: geometry.ads_overlay_width,
         ads_overlay_height: geometry.ads_overlay_height,
         overlay_reticle: geometry.overlay_reticle,
+        overlay_interface: geometry.overlay_interface,
         ads_zoom_fov: geometry.ads_zoom_fov,
         ads_zoom_in_frac: geometry.ads_zoom_in_frac,
         ads_zoom_out_frac: geometry.ads_zoom_out_frac,
@@ -3398,6 +3189,8 @@ fn capture_iw5_body_facts(
     let Some(body) = geometry.weap_def else {
         return facts;
     };
+    facts.kill_icon_ratio = i32_at_iw5(stream, body, sz::WEAPON_DEF_KILL_ICON_RATIO_OFF, 1588);
+    facts.flip_kill_icon = u8_at_iw5(stream, body, sz::WEAPON_DEF_FLIP_KILL_ICON_OFF, 2455) != 0;
     facts.ads_aim_pitch = f32_at_iw5(stream, body, 1400, 1816);
     facts.ads_crosshair_in_frac = f32_at_iw5(stream, body, 1404, 1820);
     facts.ads_crosshair_out_frac = f32_at_iw5(stream, body, 1408, 1824);
@@ -3754,123 +3547,6 @@ fn leftover_cstr_iw5(
         .map(str::to_owned)
 }
 
-fn read_iw5_attachment_sight(
-    stream: &fastfile_iw5::ZoneStream<'_>,
-    body: fastfile_iw5::Ptr,
-) -> Option<Iw5AttachmentSight> {
-    let bit = |offset| stream.u8_at(body, offset).ok().map(|value| value != 0);
-    Some(Iw5AttachmentSight {
-        aim_down_sight: bit(0)?,
-        ads_fire: bit(1)?,
-        rechamber_while_ads: bit(2)?,
-        no_ads_when_mag_empty: bit(3)?,
-        can_hold_breath: bit(4)?,
-        can_variable_zoom: bit(5)?,
-        hide_rail: bit(6)?,
-    })
-}
-
-fn read_iw5_attachment_ammo_general(
-    stream: &fastfile_iw5::ZoneStream<'_>,
-    body: fastfile_iw5::Ptr,
-) -> Option<Iw5AttachmentAmmoGeneral> {
-    let flags = stream.layout(20, 24);
-    Some(Iw5AttachmentAmmoGeneral {
-        penetrate_type: stream.i32_at(body, 0).ok()?,
-        penetrate_multiplier: stream.f32_at(body, 4).ok()?,
-        impact_type: stream.i32_at(body, 8).ok()?,
-        fire_type: stream.i32_at(body, 12).ok()?,
-        rifle_bullet: stream.u8_at(body, flags).ok()? != 0,
-        armor_piercing: stream.u8_at(body, flags + 1).ok()? != 0,
-    })
-}
-
-fn read_iw5_attachment_addons(
-    stream: &fastfile_iw5::ZoneStream<'_>,
-    body: fastfile_iw5::Ptr,
-) -> Option<Iw5AttachmentAddOns> {
-    Some(Iw5AttachmentAddOns {
-        motion_tracker: stream.u8_at(body, 0).ok()? != 0,
-        silenced: stream.u8_at(body, 1).ok()? != 0,
-    })
-}
-
-fn read_iw5_attachment_general(
-    stream: &fastfile_iw5::ZoneStream<'_>,
-    body: fastfile_iw5::Ptr,
-) -> Option<Iw5AttachmentGeneral> {
-    Some(Iw5AttachmentGeneral {
-        bolt_action: stream.u8_at(body, 0).ok()? != 0,
-        inherits_perks: stream.u8_at(body, 1).ok()? != 0,
-        enemy_crosshair_range: stream.f32_at(body, 4).ok()?,
-        move_speed_scale: stream.f32_at(body, stream.layout(24, 32)).ok()?,
-        ads_move_speed_scale: stream.f32_at(body, stream.layout(28, 36)).ok()?,
-    })
-}
-
-fn read_iw5_attachment_ammunition(
-    stream: &fastfile_iw5::ZoneStream<'_>,
-    body: fastfile_iw5::Ptr,
-) -> Option<Iw5AttachmentAmmunition> {
-    Some(Iw5AttachmentAmmunition {
-        max_ammo: stream.i32_at(body, 0).ok()?,
-        start_ammo: stream.i32_at(body, 4).ok()?,
-        clip_size: stream.i32_at(body, 8).ok()?,
-        shot_count: stream.i32_at(body, 12).ok()?,
-        reload_ammo_add: stream.i32_at(body, 16).ok()?,
-        reload_start_add: stream.i32_at(body, 20).ok()?,
-    })
-}
-
-fn read_iw5_f32_block<const N: usize>(
-    stream: &fastfile_iw5::ZoneStream<'_>,
-    body: fastfile_iw5::Ptr,
-) -> Option<[f32; N]> {
-    let mut values = [0.0; N];
-    for (index, value) in values.iter_mut().enumerate() {
-        *value = stream.f32_at(body, index * 4).ok()?;
-    }
-    Some(values)
-}
-
-fn read_iw5_attachment_damage(
-    stream: &fastfile_iw5::ZoneStream<'_>,
-    body: fastfile_iw5::Ptr,
-) -> Option<Iw5AttachmentDamage> {
-    Some(Iw5AttachmentDamage {
-        damage: stream.i32_at(body, 0).ok()?,
-        min_damage: stream.i32_at(body, 4).ok()?,
-        melee_damage: stream.i32_at(body, 8).ok()?,
-        max_damage_range: stream.f32_at(body, 12).ok()?,
-        min_damage_range: stream.f32_at(body, 16).ok()?,
-        player_damage: stream.i32_at(body, 20).ok()?,
-        min_player_damage: stream.i32_at(body, 24).ok()?,
-    })
-}
-
-fn read_iw5_attachment_ads(
-    stream: &fastfile_iw5::ZoneStream<'_>,
-    body: fastfile_iw5::Ptr,
-) -> Option<Iw5AttachmentAdsSettings> {
-    let f = |offset| stream.f32_at(body, offset).ok();
-    Some(Iw5AttachmentAdsSettings {
-        ads_spread: f(0)?,
-        ads_aim_pitch: f(4)?,
-        ads_trans_in_time: f(8)?,
-        ads_trans_out_time: f(12)?,
-        ads_reload_trans_time_ms: stream.i32_at(body, 16).ok()?,
-        ads_crosshair_in_frac: f(20)?,
-        ads_crosshair_out_frac: f(24)?,
-        ads_zoom_fov: f(28)?,
-        ads_zoom_in_frac: f(32)?,
-        ads_zoom_out_frac: f(36)?,
-        ads_bob_factor: f(40)?,
-        ads_view_bob_mult: f(44)?,
-        ads_view_error_min: f(48)?,
-        ads_view_error_max: f(52)?,
-    })
-}
-
 fn leftover_iw5_weapdef_overlay_slot(
     stream: &fastfile_iw5::ZoneStream<'_>,
     weap_def: Option<fastfile_iw5::Ptr>,
@@ -4153,55 +3829,22 @@ fn leftover_iw5_anim_overrides(
     stream: &fastfile_iw5::ZoneStream<'_>,
     geometry: &fastfile_iw5::WeaponGeometry,
 ) -> Vec<LeftoverAnimOverride> {
-    use fastfile_iw5::size as sz;
-    let Some(arr) = geometry.anim_overrides else {
-        return Vec::new();
-    };
-    let n = geometry.anim_override_count.max(0) as usize;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let row = arr.at(i * stream.layout(sz::ANIM_OVERRIDE_ENTRY, 40));
-        let Ok(attachment1) = stream.u16_at(row, 0) else {
-            break;
-        };
-        let Ok(attachment2) = stream.u16_at(row, 2) else {
-            break;
-        };
-        let Ok(anim_tree_type) =
-            stream.i32_at(row, stream.layout(sz::ANIM_OVERRIDE_ANIM_TREE_TYPE_OFF, 24))
-        else {
-            break;
-        };
-        let Ok(anim_time_ms) =
-            stream.i32_at(row, stream.layout(sz::ANIM_OVERRIDE_ANIM_TIME_OFF, 28))
-        else {
-            break;
-        };
-        let Ok(alt_time_ms) = stream.i32_at(row, stream.layout(sz::ANIM_OVERRIDE_ALT_TIME_OFF, 36))
-        else {
-            break;
-        };
-        out.push(LeftoverAnimOverride {
-            attachment1,
-            attachment2,
-            anim_tree_type: anim_tree_type as u32,
-            override_anim: leftover_xstring_at_iw5(
-                stream,
-                row,
-                sz::ANIM_OVERRIDE_OVERRIDE_ANIM_OFF,
-                8,
-            ),
-            altmode_anim: leftover_xstring_at_iw5(
-                stream,
-                row,
-                sz::ANIM_OVERRIDE_ALTMODE_ANIM_OFF,
-                16,
-            ),
-            anim_time_ms,
-            alt_time_ms,
-        });
-    }
-    out
+    geometry
+        .anim_overrides(stream)
+        .map(|row| LeftoverAnimOverride {
+            attachment1: row.attachment1,
+            attachment2: row.attachment2,
+            anim_tree_type: row.anim_tree_type,
+            override_anim: row
+                .override_anim
+                .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
+            altmode_anim: row
+                .altmode_anim
+                .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
+            anim_time_ms: row.anim_time_ms,
+            alt_time_ms: row.alt_time_ms,
+        })
+        .collect()
 }
 
 fn leftover_xstring_at_iw5(
@@ -4237,58 +3880,20 @@ fn leftover_iw5_sound_overrides(
     stream: &fastfile_iw5::ZoneStream<'_>,
     geometry: &fastfile_iw5::WeaponGeometry,
 ) -> Vec<LeftoverSoundOverride> {
-    use fastfile_iw5::size as sz;
-    let Some(arr) = geometry.sound_overrides else {
-        return Vec::new();
-    };
-    let n = geometry.sound_override_count.max(0) as usize;
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let row = arr.at(i * stream.layout(sz::SOUND_OVERRIDE_ENTRY, 32));
-        let Ok(attachment1) = stream.u16_at(row, 0) else {
-            break;
-        };
-        let Ok(attachment2) = stream.u16_at(row, 2) else {
-            break;
-        };
-        let Ok(sound_type) = stream.i32_at(row, stream.layout(12, 24)) else {
-            break;
-        };
-        out.push(LeftoverSoundOverride {
-            attachment1,
-            attachment2,
-            sound_type: sound_type as u32,
-            override_sound: leftover_iw5_snd_alias_at(stream, row, 4, 8),
-            altmode_sound: leftover_iw5_snd_alias_at(stream, row, 8, 16),
-        });
-    }
-    out
-}
-
-fn read_iw5_reload_overrides(
-    stream: &fastfile_iw5::ZoneStream<'_>,
-    geometry: &fastfile_iw5::WeaponGeometry,
-) -> Vec<Iw5ReloadOverride> {
-    let Some(arr) = geometry.reload_overrides else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(geometry.reload_override_count.max(0) as usize);
-    for i in 0..geometry.reload_override_count.max(0) as usize {
-        let row = arr.at(i * fastfile_iw5::size::RELOAD_STATE_TIMER_ENTRY);
-        let (Ok(attachment), Ok(reload_add_time_ms), Ok(reload_start_add_time_ms)) = (
-            stream.u16_at(row, 0),
-            stream.i32_at(row, 4),
-            stream.i32_at(row, 8),
-        ) else {
-            break;
-        };
-        out.push(Iw5ReloadOverride {
-            attachment,
-            reload_add_time_ms,
-            reload_start_add_time_ms,
-        });
-    }
-    out
+    geometry
+        .sound_overrides(stream)
+        .map(|row| LeftoverSoundOverride {
+            attachment1: row.attachment1,
+            attachment2: row.attachment2,
+            sound_type: row.sound_type,
+            override_sound: row
+                .override_sound
+                .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
+            altmode_sound: row
+                .altmode_sound
+                .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
+        })
+        .collect()
 }
 
 fn read_iw5_combat_fx(
@@ -4324,32 +3929,16 @@ fn read_iw5_fx_overrides(
     geometry: &fastfile_iw5::WeaponGeometry,
     fx_name_at_slot: &dyn Fn(fastfile_iw5::Ptr) -> Option<String>,
 ) -> Vec<Iw5FxOverride> {
-    let Some(arr) = geometry.fx_overrides else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(geometry.fx_override_count.max(0) as usize);
-    for i in 0..geometry.fx_override_count.max(0) as usize {
-        let row = arr.at(i * stream.layout(fastfile_iw5::size::FX_OVERRIDE_ENTRY, 32));
-        let (Ok(attachment1), Ok(attachment2), Ok(fx_type)) = (
-            stream.u16_at(row, 0),
-            stream.u16_at(row, 2),
-            stream.i32_at(row, stream.layout(12, 24)),
-        ) else {
-            break;
-        };
-        let fx_name = |off| match stream.ptr_at(row, off) {
-            Ok(fastfile_iw5::ZonePtr::Offset(q)) => fx_name_at_slot(stream.resolve_alias(q)),
-            _ => None,
-        };
-        out.push(Iw5FxOverride {
-            attachment1,
-            attachment2,
-            fx_type: fx_type as u32,
-            override_fx: fx_name(stream.layout(4, 8)),
-            altmode_fx: fx_name(stream.layout(8, 16)),
-        });
-    }
-    out
+    geometry
+        .fx_overrides(stream)
+        .map(|row| Iw5FxOverride {
+            attachment1: row.attachment1,
+            attachment2: row.attachment2,
+            fx_type: row.fx_type,
+            override_fx: row.override_fx.and_then(fx_name_at_slot),
+            altmode_fx: row.altmode_fx.and_then(fx_name_at_slot),
+        })
+        .collect()
 }
 
 fn read_iw5_notetrack_overrides(
@@ -4357,29 +3946,16 @@ fn read_iw5_notetrack_overrides(
     strings: &fastfile_iw5::ScriptStrings,
     geometry: &fastfile_iw5::WeaponGeometry,
 ) -> Vec<Iw5NotetrackOverride> {
-    let Some(arr) = geometry.note_track_overrides else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(geometry.note_track_override_count.max(0) as usize);
-    for i in 0..geometry.note_track_override_count.max(0) as usize {
-        let row = arr.at(i * stream.layout(fastfile_iw5::size::NOTE_TRACK_SOUND_ENTRY, 24));
-        let Ok(attachment) = stream.u16_at(row, 0) else {
-            break;
-        };
-        let sound_map = leftover_iw5_script_string_map(
-            stream,
-            strings,
-            row,
-            stream.layout(4, 8),
-            stream.layout(8, 16),
-            24,
-        );
-        out.push(Iw5NotetrackOverride {
-            attachment,
-            sound_map,
-        });
-    }
-    out
+    geometry
+        .note_track_overrides(stream)
+        .map(|row| Iw5NotetrackOverride {
+            attachment: row.attachment,
+            sound_map: row
+                .sound_map
+                .map(|map| iw5_script_string_pairs(stream, strings, map, 24))
+                .unwrap_or_default(),
+        })
+        .collect()
 }
 
 fn apply_leftover_default_sound_overrides(sounds: &mut WeaponSoundAliases) {
@@ -4458,35 +4034,27 @@ fn leftover_iw5_script_string_map(
     values_off: usize,
     cap: usize,
 ) -> Vec<(String, String)> {
-    let keys = match stream.ptr_at(body, keys_off) {
-        Ok(fastfile_iw5::ZonePtr::Offset(q)) => stream.resolve_alias(q),
-        _ => return Vec::new(),
-    };
-    let values = match stream.ptr_at(body, values_off) {
-        Ok(fastfile_iw5::ZonePtr::Offset(q)) => stream.resolve_alias(q),
-        _ => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    for i in 0..cap {
-        let Ok(key_id) = stream.u16_at(keys, i * 2) else {
-            break;
-        };
-        if key_id == 0 {
-            break;
-        }
-        let Ok(val_id) = stream.u16_at(values, i * 2) else {
-            break;
-        };
-        let Some(key) = strings.get(stream, key_id).filter(|s| !s.is_empty()) else {
-            continue;
-        };
-        let val = strings
-            .get(stream, val_id)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(key);
-        out.push((key.to_owned(), val.to_owned()));
-    }
-    out
+    fastfile_iw5::ScriptStringMap::at(stream, body, keys_off, values_off)
+        .map(|map| iw5_script_string_pairs(stream, strings, map, cap))
+        .unwrap_or_default()
+}
+
+fn iw5_script_string_pairs(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    strings: &fastfile_iw5::ScriptStrings,
+    map: fastfile_iw5::ScriptStringMap,
+    cap: usize,
+) -> Vec<(String, String)> {
+    map.pairs(stream, cap)
+        .filter_map(|(key_id, val_id)| {
+            let key = strings.get(stream, key_id).filter(|s| !s.is_empty())?;
+            let val = strings
+                .get(stream, val_id)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(key);
+            Some((key.to_owned(), val.to_owned()))
+        })
+        .collect()
 }
 
 fn read_hide_tags_iw5(
@@ -5127,6 +4695,9 @@ fn merge_body_facts(dst: &mut WeaponBodyFacts, src: WeaponBodyFacts) {
     if dst.dual_wield_view_model_offset == 0.0 {
         dst.dual_wield_view_model_offset = src.dual_wield_view_model_offset;
     }
+    if dst.overlay_interface == 0 {
+        dst.overlay_interface = src.overlay_interface;
+    }
     if dst.overlay_reticle == 0 {
         dst.overlay_reticle = src.overlay_reticle;
         if dst.ads_overlay_width == 0.0 {
@@ -5209,7 +4780,7 @@ struct WeaponRow {
     prepared_attachments: Vec<String>,
 
     iw5_attachment_slots: [Option<String>; fastfile_iw5::size::WEAPON_ATTACHMENT_SLOT_COUNT],
-    iw5_reload_overrides: Vec<Iw5ReloadOverride>,
+    iw5_reload_overrides: Vec<fastfile_iw5::ReloadOverride>,
     iw5_anim_overrides: Vec<LeftoverAnimOverride>,
     iw5_fx_overrides: Vec<Iw5FxOverride>,
     iw5_notetrack_overrides: Vec<Iw5NotetrackOverride>,
@@ -5486,8 +5057,17 @@ impl WeaponBuild {
     }
 
     pub fn stamp_namespace(&mut self, ns: crate::AssetNamespace) {
+        let attachments = &self.registry.iw5_attachments;
         for row in self.registry.rows.iter_mut().skip(1) {
             row.namespace = ns;
+            if ns == crate::AssetNamespace::Iw5 {
+                if let Some((view, world)) =
+                    iw5_default_scope_models(&row.iw5_attachment_slots, attachments)
+                {
+                    row.attachment_view_models.extend(view);
+                    row.attachment_world_models.extend(world);
+                }
+            }
         }
         self.registry.rebuild_name_maps();
         self.registry.revision = mint_weapon_revision();
@@ -6200,7 +5780,7 @@ impl WeaponRegistry {
         self.iw5_attachments.get(native_name)
     }
 
-    pub fn iw5_reload_overrides_of(&self, id: u32) -> Option<&[Iw5ReloadOverride]> {
+    pub fn iw5_reload_overrides_of(&self, id: u32) -> Option<&[fastfile_iw5::ReloadOverride]> {
         let row = self.rows.get(id as usize)?;
         (row.namespace == crate::AssetNamespace::Iw5).then_some(row.iw5_reload_overrides.as_slice())
     }
@@ -6268,7 +5848,7 @@ impl WeaponRegistry {
         &self,
         id: u32,
         selection: Iw5AttachmentSelection,
-    ) -> Option<&Iw5ReloadOverride> {
+    ) -> Option<&fastfile_iw5::ReloadOverride> {
         self.iw5_reload_overrides_of(id)?
             .iter()
             .find(|row| row.attachment != 0 && selection.contains_condition(row.attachment))
@@ -6433,7 +6013,7 @@ impl WeaponRegistry {
         base_id: u32,
         selection: Iw5AttachmentSelection,
         base_value: impl FnOnce(WeaponBodyFacts) -> f32,
-        setting_value: impl Fn(Iw5AttachmentAdsSettings) -> f32,
+        setting_value: impl Fn(fastfile_iw5::AttachmentAdsSettings) -> f32,
     ) -> Option<f32> {
         let base = base_value(self.facts_of(base_id)?);
         let assets = self.iw5_primary_attachment_assets(base_id, selection)?;
@@ -6471,8 +6051,16 @@ impl WeaponRegistry {
         row.iw5_configuration = Some((base_id, native));
 
         let first = |models: &[Option<String>]| models.first().cloned().flatten();
-        let mut view = Vec::new();
-        let mut world = Vec::new();
+        let mut view = if scope.is_none() {
+            base.attachment_view_models.clone()
+        } else {
+            Vec::new()
+        };
+        let mut world = if scope.is_none() {
+            base.attachment_world_models.clone()
+        } else {
+            Vec::new()
+        };
         if let Some(scope) = scope {
             view.extend(first(&scope.view_models));
             view.extend(first(&scope.reticle_models));
@@ -7578,7 +7166,7 @@ impl WeaponRegistry {
     }
 }
 
-fn iw5_primary_ads(assets: &[&Iw5ScopeRow]) -> (Option<Iw5AttachmentAdsSettings>, f32) {
+fn iw5_primary_ads(assets: &[&Iw5ScopeRow]) -> (Option<fastfile_iw5::AttachmentAdsSettings>, f32) {
     let mut chosen = None;
     let mut scale_product = 1.0;
     for asset in assets {
@@ -7605,6 +7193,24 @@ fn iw5_primary_ads(assets: &[&Iw5ScopeRow]) -> (Option<Iw5AttachmentAdsSettings>
     (chosen, scale_product)
 }
 
+fn iw5_default_scope_models(
+    slots: &[Option<String>; fastfile_iw5::size::WEAPON_ATTACHMENT_SLOT_COUNT],
+    attachments: &HashMap<String, Iw5ScopeRow>,
+) -> Option<(Option<String>, Option<String>)> {
+    slots[..6]
+        .iter()
+        .filter_map(Option::as_deref)
+        .find_map(|name| {
+            if !name.ends_with("scope") || name.ends_with("vzscope") {
+                return None;
+            }
+            let asset = attachments.get(name)?;
+            let view = asset.view_models[0].clone();
+            let world = asset.world_models[0].clone();
+            (view.is_some() || world.is_some()).then_some((view, world))
+        })
+}
+
 fn iw5_first_block<T: Copy>(
     assets: &[&Iw5ScopeRow],
     block: impl Fn(&Iw5ScopeRow) -> Option<T>,
@@ -7612,7 +7218,10 @@ fn iw5_first_block<T: Copy>(
     assets.iter().find_map(|asset| block(asset))
 }
 
-fn iw5_scale_product(assets: &[&Iw5ScopeRow], scale: impl Fn(&Iw5AttachmentScales) -> f32) -> f32 {
+fn iw5_scale_product(
+    assets: &[&Iw5ScopeRow],
+    scale: impl Fn(&fastfile_iw5::AttachmentScales) -> f32,
+) -> f32 {
     assets
         .iter()
         .map(|asset| scale(&asset.scales))

@@ -144,6 +144,8 @@ pub(crate) fn update_match_start(
                     };
                     let text = if prefix.is_empty() {
                         name
+                    } else if prefix.contains("&&1") {
+                        prefix.replace("&&1", &name)
                     } else {
                         format!("{prefix}{name}")
                     };
@@ -195,7 +197,7 @@ pub(crate) fn update_match_start(
         cmds.push(Draw2dCmd {
             material_namespace: crate::images::HUD_CHROME_NAMESPACE,
             x: (placed.x + 0.5).floor(),
-            y: (placed.y + 0.5).floor(),
+            y: (placed.text_baseline_y() + 0.5).floor(),
             w: glyph.w,
             h: glyph.h,
             s0: 0.0,

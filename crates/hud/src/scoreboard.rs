@@ -252,16 +252,26 @@ fn team_presentation(
         );
     }
     let (key, color) = match team {
-        0 => ("CGAME_FFA", [0.76, 0.78, 0.10, 0.5]),
+        0 => ("", [0.76, 0.78, 0.10, 0.5]),
         1 => ("MPUI_AXIS", [0.25, 0.25, 0.25, 0.5]),
         2 => ("MPUI_ALLIES", [0.25, 0.25, 0.25, 0.5]),
         _ => ("CGAME_SPECTATORS", [0.25, 0.25, 0.25, 0.5]),
     };
-    (localized(strings, key), icon, color)
+    let name = if key.is_empty() {
+        String::new()
+    } else {
+        localized(strings, key)
+    };
+    (name, icon, color)
 }
 
-pub(crate) fn displayed(down: bool, phase: MatchPhase) -> bool {
-    down || matches!(phase, MatchPhase::Intermission | MatchPhase::PostGame)
+// Only intermission opens the scoreboard; the ended phase alone would cover the final killcam.
+pub(crate) fn displayed(down: bool, snap: &Snapshot, local: sim::ClientId) -> bool {
+    down || snap.meta.phase == MatchPhase::PostGame
+        || snap
+            .meta
+            .for_client(local)
+            .is_some_and(|m| m.lifecycle == ClientLifecycle::Intermission)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -285,7 +295,7 @@ pub(crate) fn update_scoreboard(
         return;
     };
     let down = actions.as_ref().is_some_and(|a| a.client.kb.scores.active);
-    if !displayed(down, snap.meta.phase) || !surface.is_ready() {
+    if !displayed(down, snap, local.0) || !surface.is_ready() {
         return;
     }
     let Some(catalog) = catalog.as_deref() else {
@@ -416,7 +426,11 @@ pub(crate) fn update_scoreboard(
             260.0,
             0.35,
             false,
-            &format!("{name}  ( {count} )"),
+            &if name.is_empty() {
+                format!("( {count} )")
+            } else {
+                format!("{name}  ( {count} )")
+            },
             WHITE,
         );
         y += 30.0;

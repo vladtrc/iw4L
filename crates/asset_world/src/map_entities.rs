@@ -978,6 +978,8 @@ fn numbered_pair(line: &str) -> Option<(EntityKey, &str)> {
         IW5_KEY_DESTRUCTIBLE_TYPE => EntityKey::DestructibleType,
         IW5_KEY_LT_ORIGIN => EntityKey::LtOrigin,
         "11996" => EntityKey::ScriptLabel,
+        "1782" => EntityKey::Radius,
+        "1783" => EntityKey::Height,
         "2009" => EntityKey::ScriptExploder,
         "7864" => EntityKey::ScriptPrefabExploder,
         named => named_key(named),

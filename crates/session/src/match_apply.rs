@@ -657,15 +657,8 @@ pub fn apply_prepared_match(
         stage_resource(&mut install, player_anim_sources);
         input_gate.local_cmds_enabled = false;
 
-        let clip = clip.map(|mut clip| InstalledClip {
-            static_models: std::mem::take(&mut clip.static_models),
-            shared: Arc::new(clip),
-        });
         stage_resource(&mut install, DynEntPhysWorld::default());
-        stage_resource(
-            &mut install,
-            DynEntPhysClip(clip.as_ref().map(|clip| Arc::clone(&clip.shared))),
-        );
+        stage_resource(&mut install, DynEntPhysClip(clip.clone()));
         let (sim_gap, lock_reasons, bot_class_ids) = install_clip_and_player(
             &mut sim,
             content,
@@ -934,7 +927,7 @@ struct MatchInstallPlan {
     player_anim_sources: assets::PlayerAnimSources,
     prepared_map: assets::PreparedMap,
     strings: assets::LocalizeCatalog,
-    clip: Option<ClipCollision>,
+    clip: Option<Arc<ClipCollision>>,
     pen_table: sim::PenetrationDepthTable,
     pen_table_loaded: bool,
     lochit_table: Option<[f32; sim::HITLOC_COUNT]>,
@@ -1040,18 +1033,25 @@ fn preflight_match_install(
             let arena = catalog
                 .rawfile_text("mp/basemaps.arena")
                 .map(str::to_owned)
-                .or_else(|| identity.and_then(|id| assets::read_basemaps_arena(&id.games_root)))
-                .ok_or("DOM arena faction definitions missing")?;
-            flags = crate::objectives::flag_models(catalog, &arena, zone)?;
-            for model in &flags {
-                if !matches!(
+                .or_else(|| identity.and_then(|id| assets::read_basemaps_arena(&id.games_root)));
+            flags = crate::objectives::flag_models(catalog, arena.as_deref(), zone)?;
+            let neutral = flags[0].clone();
+            for (index, model) in flags.iter_mut().enumerate() {
+                let captured = matches!(
                     prepared.world.map_xmodel_scene_assets.get_name(model),
                     Some(
                         assets::MapXModelSceneAsset::Iw4(_)
                             | assets::MapXModelSceneAsset::Iw5(_)
                             | assets::MapXModelSceneAsset::T5(_)
                     )
-                ) {
+                );
+                if !captured
+                    && index > 0
+                    && prepared_map.namespace != Some(assets::AssetNamespace::Iw4)
+                {
+                    diag::info!(Sim, "DOM flag model {model} unavailable; using {neutral}");
+                    *model = neutral.clone();
+                } else if !captured {
                     return Err(format!("DOM flag model unavailable: {model}"));
                 }
             }
@@ -1710,15 +1710,10 @@ fn authority_entity_model_install(world: &assets::PreparedWorld) -> AuthorityEnt
 
 /// What the two runtime owners of the map collision are given: one immutable
 /// backing they share, and the static models only the sim traces against.
-struct InstalledClip {
-    shared: Arc<ClipCollision>,
-    static_models: Vec<assets::ClipPlacedStaticModel>,
-}
-
 fn install_clip_and_player(
     sim: &mut sim::SimWorld,
     mut content: sim::SimContentBuilder,
-    clip: Option<InstalledClip>,
+    clip: Option<Arc<ClipCollision>>,
     authority_models: AuthorityEntityModelInstall,
     intermission_view: Option<sim::AuthoredSpawnPoint>,
     spawns_in: &[SpawnPoint],
@@ -1733,10 +1728,7 @@ fn install_clip_and_player(
     flag_descriptors: &[assets::FlagDescriptor],
 ) -> Result<(&'static str, Vec<Option<String>>, Vec<sim::ClassId>), InstallRefusal> {
     let clip = clip.ok_or_else(|| InstallRefusal::new("Required collision geometry is missing"))?;
-    let InstalledClip {
-        shared: clip,
-        static_models,
-    } = clip;
+    let static_models = &clip.static_models;
     let count = clip.brushes.len();
     let node_count = clip.nodes.len();
     let leaf_count = clip.leaves.len();
@@ -1780,11 +1772,11 @@ fn install_clip_and_player(
     let mesh = sim::SimClipMesh {
         tables: Arc::clone(&clip.mesh),
         static_models: static_models
-            .into_iter()
+            .iter()
             .map(|sm| sim::SimStaticModel {
                 index: sm.index,
-                name: sm.name,
-                model: sm.model,
+                name: sm.name.clone(),
+                model: sm.model.clone(),
             })
             .collect(),
         ..Default::default()

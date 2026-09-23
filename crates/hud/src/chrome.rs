@@ -394,7 +394,7 @@ fn paint_text(
             text: resolved.text,
             loc_key: resolved.loc_key,
 
-            style: crate::draw2d::TEXT_STYLE_UNREAD,
+            style: item.text_style,
             fx: None,
             glow: text_run_glow(font, style.glow_color),
         },
@@ -480,7 +480,7 @@ pub(crate) fn push_owner_text(
             text: text.to_owned(),
             loc_key: String::new(),
 
-            style: crate::draw2d::TEXT_STYLE_UNREAD,
+            style: args.item.text_style,
             fx: None,
             glow: None,
         },

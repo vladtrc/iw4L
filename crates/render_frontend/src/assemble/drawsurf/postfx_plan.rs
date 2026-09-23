@@ -41,6 +41,8 @@ pub const GLOW_SETUP_MATERIAL: &str = "glow_consistent_setup_color2";
 pub const GLOW_APPLY_MATERIAL: &str = "glow_apply_bloom";
 pub const GLOW_MATERIALS: &[&str] = &[GLOW_SETUP_MATERIAL, GLOW_APPLY_MATERIAL];
 
+pub const BLOOD_MATERIAL: &str = "splatter_alt";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PostFxAdmissionRefusal {
     MaterialMissing,
@@ -75,6 +77,12 @@ pub struct RuntimePostFx {
     pub port: RuntimeProgramPort,
     pub shader: Handle<bevy::shader::Shader>,
     pub shell: StableMaterialShell,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeBloodMaterial {
+    pub film: RuntimePostFx,
+    pub texture_slots: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -247,12 +255,76 @@ fn build_postfx_material(
     material_name: &'static str,
     require_film_state: bool,
 ) -> RuntimePostFxResources {
-    let (material, _, _) = match postfx_material_location(catalog, material_name) {
-        Ok(found) => found,
+    let film = match admit_unlit_2d(
+        catalog,
+        prepared,
+        programs,
+        shaders,
+        material_name,
+        require_film_state,
+    ) {
+        Ok(film) => film,
         Err(cause) => return RuntimePostFxResources::Refused(cause),
     };
+    let sampler_ok = film.port.abi().samplers.iter().all(|binding| {
+        binding.dimension == SamplerTextureDimension::D2
+            && matches!(
+                binding.source,
+                SamplerSource::CodeTexture {
+                    index: 8 | 10 | 11 | 12 | 15
+                }
+            )
+    });
+    if !sampler_ok {
+        return RuntimePostFxResources::Refused(PostFxAdmissionRefusal::SamplerAbiMismatch);
+    }
+    RuntimePostFxResources::Ready(vec![film])
+}
+
+pub(crate) fn build_runtime_blood(
+    catalog: &RuntimeMaterialCatalog,
+    prepared: &PreparedMaterialTable,
+    programs: &RuntimeProgramRegistry,
+    shaders: &[Handle<bevy::shader::Shader>],
+) -> Result<RuntimeBloodMaterial, PostFxAdmissionRefusal> {
+    let film = admit_unlit_2d(catalog, prepared, programs, shaders, BLOOD_MATERIAL, false)?;
+    let (material, _, _) = postfx_material_location(catalog, BLOOD_MATERIAL)?;
+    let texture_slots = film
+        .port
+        .abi()
+        .samplers
+        .iter()
+        .map(|binding| match binding.source {
+            SamplerSource::MaterialTexture { name_hash }
+                if binding.dimension == SamplerTextureDimension::D2 =>
+            {
+                material
+                    .textures
+                    .iter()
+                    .position(|(hash, _)| *hash == name_hash)
+                    .and_then(|slot| u8::try_from(slot).ok())
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or(PostFxAdmissionRefusal::SamplerAbiMismatch)?;
+    Ok(RuntimeBloodMaterial {
+        film,
+        texture_slots,
+    })
+}
+
+fn admit_unlit_2d(
+    catalog: &RuntimeMaterialCatalog,
+    prepared: &PreparedMaterialTable,
+    programs: &RuntimeProgramRegistry,
+    shaders: &[Handle<bevy::shader::Shader>],
+    material_name: &'static str,
+    require_film_state: bool,
+) -> Result<RuntimePostFx, PostFxAdmissionRefusal> {
+    let (material, _, _) = postfx_material_location(catalog, material_name)?;
     let Some(ordinal) = catalog.ordinal_for_material_name(material_name) else {
-        return RuntimePostFxResources::Refused(PostFxAdmissionRefusal::SortedOrdinalMissing);
+        return Err(PostFxAdmissionRefusal::SortedOrdinalMissing);
     };
     let packed = render_material::MaterialDrawKey::new(
         dpvs_iw4::pack(dpvs_iw4::GfxDrawSurfFields {
@@ -266,7 +338,7 @@ fn build_postfx_material(
     let sources = match admission_sources() {
         Ok(sources) => sources,
         Err(cause) => {
-            return RuntimePostFxResources::Refused(PostFxAdmissionRefusal::CodeSource(cause));
+            return Err(PostFxAdmissionRefusal::CodeSource(cause));
         }
     };
     let execution = match super::execute_material(
@@ -279,44 +351,32 @@ fn build_postfx_material(
     ) {
         Ok(execution) => execution,
         Err(cause) => {
-            return RuntimePostFxResources::Refused(PostFxAdmissionRefusal::Execute(cause));
+            return Err(PostFxAdmissionRefusal::Execute(cause));
         }
     };
     let Some(pass) = execution.pass(0).filter(|_| execution.pass_count() == 1) else {
-        return RuntimePostFxResources::Refused(PostFxAdmissionRefusal::PassCount {
+        return Err(PostFxAdmissionRefusal::PassCount {
             actual: execution.pass_count(),
         });
     };
     let actual_state = [pass.state.word0, pass.state.word1];
     if require_film_state && actual_state != STANDARD_FILM_STATE {
-        return RuntimePostFxResources::Refused(PostFxAdmissionRefusal::StateBitsMismatch {
+        return Err(PostFxAdmissionRefusal::StateBitsMismatch {
             actual: actual_state,
         });
     }
     let host_state = super::state::GfxPassState::from_bits(pass.state);
     if host_state.srgb_write_enable() {
-        return RuntimePostFxResources::Refused(PostFxAdmissionRefusal::SrgbWriteEnabled);
+        return Err(PostFxAdmissionRefusal::SrgbWriteEnabled);
     }
     if host_state.authored_alpha_test().is_some() {
-        return RuntimePostFxResources::Refused(PostFxAdmissionRefusal::AlphaTestEnabled);
+        return Err(PostFxAdmissionRefusal::AlphaTestEnabled);
     }
     let Some(port) = programs.get(pass.port).cloned() else {
-        return RuntimePostFxResources::Refused(PostFxAdmissionRefusal::PortMissing {
+        return Err(PostFxAdmissionRefusal::PortMissing {
             port: pass.port,
         });
     };
-    let sampler_ok = port.abi().samplers.iter().all(|binding| {
-        binding.dimension == SamplerTextureDimension::D2
-            && matches!(
-                binding.source,
-                SamplerSource::CodeTexture {
-                    index: 8 | 10 | 11 | 12 | 15
-                }
-            )
-    });
-    if !sampler_ok {
-        return RuntimePostFxResources::Refused(PostFxAdmissionRefusal::SamplerAbiMismatch);
-    }
     let Some(shell) = super::capture_stable_shell(
         catalog,
         prepared,
@@ -325,7 +385,7 @@ fn build_postfx_material(
         POSTFX_VERTEX_TYPE,
         &execution,
     ) else {
-        return RuntimePostFxResources::Refused(PostFxAdmissionRefusal::StableShellMissing);
+        return Err(PostFxAdmissionRefusal::StableShellMissing);
     };
     let Some((_, shader)) = programs
         .ports()
@@ -333,17 +393,17 @@ fn build_postfx_material(
         .zip(shaders)
         .find(|(candidate, _)| candidate.id() == pass.port)
     else {
-        return RuntimePostFxResources::Refused(PostFxAdmissionRefusal::ShaderHandleMissing {
+        return Err(PostFxAdmissionRefusal::ShaderHandleMissing {
             port: pass.port,
         });
     };
-    RuntimePostFxResources::Ready(vec![RuntimePostFx {
+    Ok(RuntimePostFx {
         name: material_name,
         generation: catalog.generation_id,
         port,
         shader: shader.clone(),
         shell,
-    }])
+    })
 }
 
 fn admission_sources() -> Result<RuntimeCodeSources, PostFxSourceRefusal> {

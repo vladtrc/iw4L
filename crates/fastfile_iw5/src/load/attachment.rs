@@ -1,6 +1,7 @@
 use super::snd::follow_snd_alias_custom;
 use super::{AssetLinkSink, asset_ptr_at, follow_name};
 use crate::asset_type::AssetType;
+use crate::attachment::read_attachment_facts;
 use crate::size as sz;
 use crate::zone::{AttachmentGeometry, Ptr, Result, XFILE_BLOCK_VIRTUAL, ZonePtr, ZoneStream};
 
@@ -129,6 +130,7 @@ pub(super) fn load_attachment(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkS
         overlay_height,
         overlay_reticle,
         thermal,
+        facts: read_attachment_facts(s, p),
     };
     links.capture_attachment(s, &geometry)?;
     s.pop()

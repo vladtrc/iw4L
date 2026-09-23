@@ -32,7 +32,7 @@ mod weaponbar;
 
 pub use draw2d::{
     Draw2dCmd, Draw2dCmdCensus, Draw2dList, Draw2dOp, Draw2dProvenance, Draw2dQuad,
-    TEXT_STYLE_HUDELEM, TEXT_STYLE_UNREAD, TextRunFx, tessellate, tessellate_fonts,
+    TEXT_STYLE_HUDELEM, TextRunFx, tessellate, tessellate_fonts,
 };
 pub use gaps::{GapCause, HudGap, HudPresentationGaps};
 pub use gpu_list::{HudTessBatch, HudTessGpuFrame, HudTessTechnique, HudTessVertex};

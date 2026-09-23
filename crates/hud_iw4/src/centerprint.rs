@@ -39,17 +39,5 @@ pub fn centerprint_replace_name(template: &str, name: &str) -> String {
 }
 
 fn replace_and_and_one(template: &str, value: &str) -> String {
-    let bytes = template.as_bytes();
-    let mut out = String::new();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if i + 2 < bytes.len() && bytes[i] == b'&' && bytes[i + 1] == b'&' && bytes[i + 2] == b'1' {
-            out.push_str(value);
-            i += 3;
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out
+    template.replace("&&1", value)
 }

@@ -43,13 +43,10 @@ pub use ammo::{
 };
 pub use blood::{
     HEALTH_FRAC_PM_TYPE_NONE, HUD_BLOOD_OVERLAY_LERP_RATE_DEFAULT, MSEC_TO_SEC,
-    PAIN_VISION_LERP_OUT_RATE_DEFAULT, PAIN_VISION_TRIGGER_HEALTH_DEFAULT,
-    SPLATTER_ALT_INTENSITY_SCALE, SPLATTER_ALT_MASK_SCALE, SPLATTER_GRID_HEIGHT,
+    PAIN_VISION_LERP_OUT_RATE_DEFAULT, PAIN_VISION_TRIGGER_HEALTH_DEFAULT, SPLATTER_GRID_HEIGHT,
     SPLATTER_GRID_WIDTH, SPLATTER_HEALTH_INTENSITY_SCALE, cg_blood_overlay_lerp,
     cg_get_health_fraction, cg_pain_vision_lerp_intensity, cg_pain_vision_must_clear,
     cg_pain_vision_wants_armed, cg_should_draw_blood_overlay, cg_splatter_envelope,
-    splatter_alt_sample_linear, splatter_alt_scale, splatter_alt_texel,
-    splatter_alt_texel_straight,
 };
 pub use centerprint::{
     CENTERPRINT_STRIDE, CG_CENTERPRINT_FADE_TAIL_MS, CG_CENTERTIME_DEFAULT_MS,
@@ -120,14 +117,14 @@ pub use gamemsg::{
     EMBED_HUD_ICON_SIZE_CLAMP_MAX, EMBED_HUD_ICON_SIZE_CLAMP_MIN, EMBED_HUD_ICON_SIZE_SCALE,
     EXE_LEFTGAME, GAME_MSG_CHAR_EM, GAME_MSG_WIN0_HORZ_ALIGN, GAME_MSG_WIN0_LINE_COUNT,
     GAME_MSG_WIN0_MODE, GAME_MSG_WIN0_MSG_TIME_MS, GAME_MSG_WIN0_TEXT_SCALE,
-    GAME_MSG_WIN0_VERT_ALIGN, GAME_MSG_WIN0_X, GAME_MSG_WIN0_Y, GAME_MSG_WINDOW_COUNT, HITLOC_HEAD,
-    HITLOC_HELMET, HITLOC_NONE, ITEM_TYPE_GAME_MESSAGE_WINDOW, KILLICON_BASE_SIZE, KILLICON_CRUSH,
-    KILLICON_DIED, KILLICON_FALLING, KILLICON_HEADSHOT, KILLICON_IMPACT, KILLICON_MELEE,
-    KILLICON_SHORT_SIZE, KILLICON_SUICIDE, KILLICON_WIDE_SIZE, MOD_HEAD_SHOT, MOD_MELEE,
-    MOD_SUICIDE, MP_CONNECTED, decode_hud_icon_size, embed_hud_icon_size_byte,
-    game_msg_win0_char_height, game_msg_win0_line_y, gamenotify_line, killicon_em_size,
-    killicon_stretch_uv, killicon_virtual_size, obituary_is_headshot, obituary_mod,
-    obituary_mod_killicon, pack_obituary_event_parm,
+    GAME_MSG_WIN0_TEXT_STYLE, GAME_MSG_WIN0_VERT_ALIGN, GAME_MSG_WIN0_X, GAME_MSG_WIN0_Y,
+    GAME_MSG_WINDOW_COUNT, HITLOC_HEAD, HITLOC_HELMET, HITLOC_NONE, ITEM_TYPE_GAME_MESSAGE_WINDOW,
+    KILLICON_BASE_SIZE, KILLICON_CRUSH, KILLICON_DIED, KILLICON_FALLING, KILLICON_HEADSHOT,
+    KILLICON_IMPACT, KILLICON_MELEE, KILLICON_SHORT_SIZE, KILLICON_SUICIDE, KILLICON_WIDE_SIZE,
+    MOD_HEAD_SHOT, MOD_MELEE, MOD_SUICIDE, MP_CONNECTED, decode_hud_icon_size,
+    embed_hud_icon_size_byte, game_msg_win0_char_height, game_msg_win0_line_y, gamenotify_line,
+    killicon_em_size, killicon_stretch_uv, killicon_virtual_size, obituary_is_headshot,
+    obituary_mod, obituary_mod_killicon, pack_obituary_event_parm,
 };
 pub use hudelem::{
     ALIGN_SCREEN_HORZ_SHIFT, DAMAGE_FEEDBACK_ALIGN_SCREEN, GAME_HUDELEM_ARCHIVED,
@@ -138,10 +135,11 @@ pub use hudelem::{
     OBJECTIVE_FLASH_HALF_MS, OBJECTIVE_MARKER_ALPHA, ORG_LEADING, ORG_MIDDLE, ORG_TRAILING,
     OUTCOME_ALIGN_SCREEN, PLAYERSTATE_HUD_ARCHIVAL, PLAYERSTATE_HUD_BANKS_END,
     PLAYERSTATE_HUD_CURRENT, SCORE_POPUP_ALIGN_SCREEN, TEXT_CENTERED_ALIGN_ORG, VERT_ALIGN_MIDDLE,
-    align_org, align_screen, bg_lerp_hud_colors, color_rgba, copy_in_use_prefix, flags,
-    hud_elem_glow_color, hud_elem_lerp_font_scale, hud_elem_material_size, hud_elem_movement_frac,
-    hud_elem_origin, hud_elem_placement, hud_elem_position, hud_elem_scale_frac,
-    hud_elem_screen_align, objective_flash_elem, rebase_archival_times, unpack_rgba,
+    VERT_ALIGN_TOP, align_org, align_screen, bg_lerp_hud_colors, color_rgba, copy_in_use_prefix,
+    flags, hud_elem_glow_color, hud_elem_lerp_font_scale, hud_elem_material_size,
+    hud_elem_movement_frac, hud_elem_origin, hud_elem_placement, hud_elem_position,
+    hud_elem_scale_frac, hud_elem_screen_align, objective_flash_elem, rebase_archival_times,
+    unpack_rgba,
 };
 pub use iris::{
     ADS_IRIS_ZOOM_ACTIVE_MIN, ADS_OVERLAY_FOUR_QUAD_LETTERBOX_SCALE, ADS_OVERLAY_ONE_QUAD_HALF,
@@ -249,11 +247,12 @@ pub use text_fx::{
     DECODE_CHARACTERS_GLOW_MATERIAL, DECODE_CHARACTERS_MATERIAL, DecayingLetter,
     FX_DECAY_LETTER_FADE_MS, FX_DECAY_TICKS_PER_SECOND, FX_DECODE_RENDERFLAGS,
     FX_EXTRA_CHAR_ATLAS_STEP, FX_EXTRA_CHAR_LETTER, FX_RANDOM_CHARS, FX_TYPING_LETTER_ALPHA,
-    HUDELEM_SOUND_SLOTS, PulseFxVars, TEXT_RENDERFLAG_BIG_SHADOW, TEXT_RENDERFLAG_DROP_SHADOW,
-    TEXT_RENDERFLAG_FX_DECODE, TEXT_RENDERFLAG_PADDING, TextPulseFx, TextPulseSound,
+    HUDELEM_SOUND_SLOTS, PulseFxVars, TEXT_OUTLINE_OFFSETS, TEXT_RENDERFLAG_BIG_SHADOW,
+    TEXT_RENDERFLAG_DROP_SHADOW, TEXT_RENDERFLAG_FX_DECODE, TEXT_RENDERFLAG_OUTLINE,
+    TEXT_RENDERFLAG_OUTLINE_EXTRA, TEXT_RENDERFLAG_PADDING, TextPulseFx, TextPulseSound,
     cl_play_text_fx_pulse_sounds, decode_fx_char_st, fx_decay_tick_count, get_decaying_letter_info,
     modulate_byte_colors, r_font_get_random_letter, rand_with_seed, seh_print_strlen,
-    setup_pulse_fx_vars, text_drop_shadow_offset,
+    setup_pulse_fx_vars, text_drop_shadow_offset, text_outline_size,
 };
 pub use view_projection::{
     R_INFINITE_PERSPECTIVE_K, R_SUBWINDOW_DEFAULT, R_SUBWINDOW_EDGE_EPS, R_ZNEAR_DEFAULT,

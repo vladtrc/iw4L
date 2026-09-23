@@ -173,6 +173,10 @@ pub(crate) fn update_reticle(
         hide_all(&mut quads);
         return;
     };
+    if ps.pm_type >= playerstate_iw4::PM_TYPE_DEAD {
+        hide_all(&mut quads);
+        return;
+    }
 
     if ps.f_weapon_pos_frac > ads_latch.last_frac + 1e-4 {
         ads_latch.position_to_ads = true;

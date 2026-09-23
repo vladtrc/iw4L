@@ -130,7 +130,7 @@ pub const HORZ_ALIGN_CENTER: i32 = 2;
 
 pub const VERT_ALIGN_MIDDLE: i32 = 2;
 
-pub const ALIGN_SCREEN_HORZ_SHIFT: i32 = 3;
+pub const ALIGN_SCREEN_HORZ_SHIFT: i32 = 4;
 
 #[must_use]
 pub const fn align_screen(horz: i32, vert: i32) -> i32 {
@@ -251,7 +251,7 @@ pub const fn align_org(horz: i32, vert: i32) -> i32 {
 
 pub const TEXT_CENTERED_ALIGN_ORG: i32 = align_org(ORG_MIDDLE, ORG_LEADING);
 
-const ALIGN_SCREEN_FIELD: i32 = 7;
+const ALIGN_SCREEN_FIELD: i32 = 15;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct HudElemPlacement {
@@ -259,6 +259,13 @@ pub struct HudElemPlacement {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+}
+
+impl HudElemPlacement {
+    #[must_use]
+    pub fn text_baseline_y(&self) -> f32 {
+        self.y + self.h
+    }
 }
 
 #[must_use]

@@ -294,8 +294,13 @@ pub(crate) fn update_scorebar(
     mut gaps: ResMut<HudPresentationGaps>,
     mut pass: ResMut<HudTessPass>,
     mut exprs: ResMut<crate::expr_cache::MenuExprCache>,
+    view: Option<Res<frame::ViewSubject>>,
 ) {
     if !surface.is_ready() {
+        return;
+    }
+    if view.is_some_and(|v| v.in_killcam()) {
+        hide(&mut pass);
         return;
     }
     let Some(snap) = presented.snapshot() else {

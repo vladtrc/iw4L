@@ -28,9 +28,16 @@ pub struct ExtractedFilm {
     pub shell: StableMaterialShell,
 }
 
+#[derive(Clone, Debug)]
+pub struct ExtractedBlood {
+    pub film: ExtractedFilm,
+    pub texture_slots: Vec<u8>,
+}
+
 #[derive(Resource, Default)]
 pub struct ExtractedPostFx {
     pub films: Vec<ExtractedFilm>,
+    pub blood: Option<ExtractedBlood>,
     pub sampler: Option<super::DecodedSampler>,
     pub depth_sampler: Option<super::DecodedSampler>,
     pub frame: DofFrame,

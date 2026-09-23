@@ -6,6 +6,28 @@ use sim::ClassId;
 
 const PER_GROUP: usize = 3;
 
+const BOT_PERKS: [[&str; 3]; 3] = [
+    [
+        "specialty_marathon",
+        "specialty_fastreload",
+        "specialty_scavenger",
+    ],
+    [
+        "specialty_bulletdamage",
+        "specialty_lightweight",
+        "specialty_coldblooded",
+    ],
+    [
+        "specialty_bulletaccuracy",
+        "specialty_heartbreaker",
+        "specialty_localjammer",
+    ],
+];
+
+fn bot_perks(offset: usize) -> [String; 3] {
+    std::array::from_fn(|tier| BOT_PERKS[tier][(offset + tier) % BOT_PERKS[tier].len()].to_owned())
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct UniqueLoadoutProjection {
     pub primaries: Vec<u32>,
@@ -121,6 +143,7 @@ pub fn project_unique_bot_classes(
         let secondary_key = weapons.namespaced_key_of(secondary).unwrap_or_default();
         let row = crate::ClassRow {
             weapons: [primary_key, secondary_key, String::new(), String::new()],
+            perks: bot_perks(offset),
             ..Default::default()
         };
         let projected = crate::project_class(class_id, &row, weapons, combat, equipment);

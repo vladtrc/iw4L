@@ -16,7 +16,7 @@ pub const SCORE_POPUP_FADE_MS: i32 = 750;
 
 pub const SCORE_POPUP_ALPHA: f32 = 0.85;
 
-pub const SCORE_POPUP_RGB: [f32; 3] = [0.85, 0.85, 0.85];
+pub const SCORE_POPUP_RGB: [f32; 3] = [1.0, 1.0, 0.5];
 
 pub const SCORE_POPUP_SORT: f32 = 10_000.0;
 

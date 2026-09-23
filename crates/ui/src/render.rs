@@ -758,18 +758,31 @@ pub(crate) fn warm_screen_images(
     catalog: &MenuCatalog,
     screen: &Screen,
     games: Option<&std::path::Path>,
+    installed_games: Option<&std::path::Path>,
     images: &mut Assets<Image>,
     cache: &mut MenuImageCache,
 ) {
+    let source = |stem: &str| {
+        if stem.contains(":material/") {
+            installed_games.or(games)
+        } else {
+            games
+        }
+    };
     if let Some(bg) = &screen.background {
-        cache.ensure(catalog, games, images, bg);
+        cache.ensure(catalog, source(bg), images, bg);
     }
     for widget in &screen.widgets {
         if !widget.style.background.is_empty() {
-            cache.ensure(catalog, games, images, &widget.style.background);
+            cache.ensure(
+                catalog,
+                source(&widget.style.background),
+                images,
+                &widget.style.background,
+            );
         }
         if !widget.icon.is_empty() {
-            cache.ensure(catalog, games, images, &widget.icon);
+            cache.ensure(catalog, source(&widget.icon), images, &widget.icon);
         }
     }
     for font in catalog.fonts.values() {

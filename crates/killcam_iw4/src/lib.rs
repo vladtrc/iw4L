@@ -31,8 +31,9 @@ pub use focus::{
     killcam_entity_index,
 };
 pub use lower_message::{
-    KC_INFO_PRESS_TO_RESPAWN, KC_INFO_PRESS_TO_SKIP, KC_INFO_WAITING_TO_SPAWN, LOWER_MESSAGE_ALPHA,
-    LOWER_TEXT_FONT_SIZE, LOWER_TEXT_Y, kc_info_loc_key,
+    KC_INFO_PRESS_TO_RESPAWN, KC_INFO_PRESS_TO_SKIP, KC_INFO_WAITING_TO_SPAWN, KC_TIMER_FONT_SCALE,
+    KC_TIMER_GREY, KC_TIMER_HUDELEM_FONT, KC_TIMER_Y, LOWER_MESSAGE_ALPHA, LOWER_TEXT_FONT_SIZE,
+    LOWER_TEXT_Y, kc_info_loc_key, kc_timer_fields,
 };
 pub use notify::NotifyKind;
 pub use round_end::{

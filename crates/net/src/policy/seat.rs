@@ -20,6 +20,8 @@ pub struct KillcamSession {
 
     pub kc_info_tus_ms: i32,
 
+    pub kc_timer_ends_at_ms: i32,
+
     pub final_kill: bool,
 }
 
@@ -175,6 +177,7 @@ pub fn snapshot_and_sample_for_viewer(
         viewer,
         session,
         sample.as_ref().map(|s| s.rebase_ms).unwrap_or(0),
+        now_ms,
     );
     (out, sample)
 }
@@ -227,6 +230,7 @@ fn overlay_killcam_hud(
     viewer: ClientId,
     session: &KillcamSession,
     rebase_ms: i32,
+    now_ms: i32,
 ) {
     let current = live
         .meta
@@ -247,6 +251,7 @@ fn overlay_killcam_hud(
         meta.killcam_hud = Some(sim::KillcamHud {
             final_kill: session.final_kill,
             time_until_respawn_ms: session.kc_info_tus_ms,
+            kc_timer_ms: session.kc_timer_ends_at_ms.saturating_sub(now_ms).max(0),
         });
         meta.hud_current = current;
         meta.hud_archival = archival;

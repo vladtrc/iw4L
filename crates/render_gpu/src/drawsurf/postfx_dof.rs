@@ -46,6 +46,16 @@ fn code_transpose_matrix_rows(m: Mat4) -> Vec<[u32; 4]> {
         .to_vec()
 }
 
+pub fn hud_2d_sources(width: f32, height: f32) -> Option<RuntimeCodeSources> {
+    let projection = hud_iw4::r_cmd_buf_set_2d_projection(width as i32, height as i32)?;
+    let mut sources = RuntimeCodeSources::default();
+    sources.set_constant(
+        CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0,
+        code_transpose_matrix_rows(Mat4::from_cols_array(&projection)),
+    );
+    Some(sources)
+}
+
 pub fn film_sources(
     width: u32,
     height: u32,

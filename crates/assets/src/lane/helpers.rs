@@ -537,13 +537,19 @@ fn normalize_bomb_sites(
     triggers: &mut [crate::MapUseTrigger],
     demolition_tag: &str,
 ) {
+    let has_dedicated_sites = ["a", "b"].into_iter().all(|label| {
+        triggers.iter().any(|trigger| {
+            trigger.targetname == demolition_tag
+                && trigger.script_label.trim_start_matches('_') == label
+        })
+    });
     let normalize = |value: &mut String| {
         *value = value
             .split_ascii_whitespace()
             .map(|token| {
                 if token == demolition_tag {
                     "bombzone"
-                } else if token == "bombzone" {
+                } else if token == "bombzone" && has_dedicated_sites {
                     "sd_bombzone"
                 } else {
                     token
@@ -571,7 +577,7 @@ fn normalize_bomb_sites(
                 "bombzone"
             }
             .to_owned();
-        } else if trigger.targetname == "bombzone" {
+        } else if trigger.targetname == "bombzone" && has_dedicated_sites {
             trigger.targetname = "sd_bombzone".to_owned();
         }
     }

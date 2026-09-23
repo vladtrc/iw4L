@@ -382,6 +382,8 @@ pub struct KillcamHud {
     pub final_kill: bool,
 
     pub time_until_respawn_ms: i32,
+
+    pub kc_timer_ms: i32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -578,6 +580,10 @@ pub struct ClientMatchState {
     pub score: i32,
 
     pub(crate) cur_death_streak: i32,
+
+    pub(crate) attackers_this_life: Vec<(ClientId, i32)>,
+
+    pub(crate) last_kill: Option<(ClientId, i32)>,
 
     pub(crate) combathigh_until_ms: Option<i32>,
 

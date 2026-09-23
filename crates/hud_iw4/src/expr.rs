@@ -569,7 +569,6 @@ fn run_op(
         | OP_DIVIDE
         | OP_MODULUS
         | OP_ADD
-        | OP_SUBTRACT
         | OP_LESSTHAN
         | OP_LESSTHANEQUALTO
         | OP_GREATERTHAN
@@ -579,6 +578,20 @@ fn run_op(
         | OP_AND
         | OP_OR => {
             let b = pop_data(data)?;
+            let a = pop_data(data)?;
+            data.push(logic_op(op, a, b)?);
+            Ok(())
+        }
+        OP_SUBTRACT => {
+            let b = pop_data(data)?;
+            if data.is_empty() {
+                match b {
+                    Operand::Int(v) => data.push(Operand::Int(v.wrapping_neg())),
+                    Operand::Float(v) => data.push(Operand::Float(-v)),
+                    Operand::Str(_) => {}
+                }
+                return Ok(());
+            }
             let a = pop_data(data)?;
             data.push(logic_op(op, a, b)?);
             Ok(())

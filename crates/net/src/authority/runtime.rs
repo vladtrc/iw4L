@@ -954,6 +954,7 @@ fn fanout_loopback(
     );
 
     let viewers: Vec<ClientId> = tick.snapshot.players.iter().map(|(id, _)| *id).collect();
+    let mut killedby_cards = Vec::new();
     let showing_final_killcam = tick_final_killcam(
         &mut pending_deaths,
         &mut seats,
@@ -963,17 +964,32 @@ fn fanout_loopback(
         &level,
         &mut kc_stats,
         &mut begin_notifies,
+        &mut killedby_cards,
     );
+    for (viewer, attacker) in killedby_cards {
+        queues
+            .world
+            .0
+            .push_player_card_slot(viewer, attacker, hud_iw4::PLAYER_CARD_SLOT_KILLEDBY);
+        queues
+            .world
+            .0
+            .push_player_card_open(viewer, hud_iw4::SCRIPT_MENU_KILLEDBY_DISPLAY);
+    }
 
     queues
         .end_game
         .start_from_journal(&tick.snapshot.meta.journal);
     let round_end_finished = level.contains(&killcam_iw4::NotifyKind::RoundEndFinished);
+    if round_end_finished && showing_final_killcam {
+        queues.world.0.reset_outcome();
+    }
     match queues
         .end_game
         .advance(clock.time_ms, round_end_finished, showing_final_killcam)
     {
         Some(EndGameTailOutput::SpawningIntermission) => {
+            queues.world.0.reset_outcome();
             queues.spawning_intermission.write(SpawningIntermission);
             let request_id = 20_000u32.saturating_add(queues.end_game.spawning_intermission);
             for (id, _) in tick.snapshot.meta.clients.iter() {

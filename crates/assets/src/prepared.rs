@@ -13,7 +13,7 @@ use crate::{
 /// nothing else. The pool itself is never nested inside an optional product.
 #[derive(Clone, Default)]
 pub struct MatchMaterials {
-    pub population: crate::MaterialDefinitions,
+    pub population: std::sync::Arc<crate::MaterialDefinitions>,
 
     pub common_profile_id: u64,
 
@@ -57,7 +57,7 @@ pub struct PreparedMap {
 }
 
 #[derive(Clone, Debug, Default, Resource)]
-pub struct PreparedWeapons(pub WeaponRegistry);
+pub struct PreparedWeapons(pub std::sync::Arc<WeaponRegistry>);
 
 #[derive(Clone, Debug, Default, Resource)]
 pub struct MatchType10SoundHints(pub Vec<String>);
@@ -66,7 +66,7 @@ pub struct MatchType10SoundHints(pub Vec<String>);
 pub struct PreparedFpvMeshes(pub FpvMeshCatalog);
 
 #[derive(Clone, Debug, Default, Resource)]
-pub struct PreparedBodies(pub BodyMeshCatalog);
+pub struct PreparedBodies(pub std::sync::Arc<BodyMeshCatalog>);
 
 #[derive(Clone, Debug, Default, Resource)]
 pub struct PreparedWorldWeapons(pub WorldWeaponCatalog);

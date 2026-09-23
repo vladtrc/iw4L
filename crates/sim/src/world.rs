@@ -876,6 +876,11 @@ impl SimState {
         self.outcome_hud_latched = latched;
     }
 
+    // The outcome must be gone before the final killcam plays.
+    pub fn reset_outcome(&mut self) {
+        crate::hudelem::clear_outcome_elems(&mut self.g_hudelems);
+    }
+
     pub(crate) fn hud_elem_slots_mut(&mut self) -> &mut Vec<crate::hudelem::GameHudElemSlot> {
         &mut self.g_hudelems
     }

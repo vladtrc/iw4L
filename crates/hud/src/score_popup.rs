@@ -194,7 +194,7 @@ pub(crate) fn update_score_popup(
         cmds: vec![Draw2dCmd {
             material_namespace: crate::images::HUD_CHROME_NAMESPACE,
             x: (placed.x + 0.5).floor(),
-            y: (placed.y + 0.5).floor(),
+            y: (placed.text_baseline_y() + 0.5).floor(),
             w: glyph.w,
             h: glyph.h,
             s0: 0.0,

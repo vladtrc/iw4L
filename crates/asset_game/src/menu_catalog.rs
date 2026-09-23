@@ -797,11 +797,10 @@ impl MenuSink {
             ]
             .map(str::to_owned),
         );
-        // Rank tables and their materials can arrive in separate UI zones.
         materials.extend(
             self.material_ts2d
                 .keys()
-                .filter(|name| name.starts_with("rank_"))
+                .filter(|name| name.starts_with("rank_") || name.starts_with("killicon"))
                 .cloned(),
         );
         if let Some(table) = self.catalog.string_table("mp/rankIconTable.csv") {

@@ -243,20 +243,20 @@ pub(crate) fn install(
 
 pub(crate) fn flag_models(
     catalog: &assets::MenuCatalog,
-    arena: &str,
+    arena: Option<&str>,
     zone: &str,
 ) -> Result<[String; 3], String> {
-    let row = assets::arena_charsets(arena, zone).ok_or("DOM map faction row missing")?;
+    let row = arena.and_then(|text| assets::arena_charsets(text, zone));
     let table = catalog
         .string_table(gamemode_iw4::FACTION_TABLE)
         .ok_or("DOM faction table missing")?;
     let axis = row
-        .axischar
-        .as_deref()
+        .as_ref()
+        .and_then(|row| row.axischar.as_deref())
         .unwrap_or(gamemode_iw4::DEFAULT_AXIS_CHARSET);
     let allies = row
-        .allieschar
-        .as_deref()
+        .as_ref()
+        .and_then(|row| row.allieschar.as_deref())
         .unwrap_or(gamemode_iw4::DEFAULT_ALLIES_CHARSET);
     let models = [
         gamemode_iw4::dom::FLAG_MODEL_NEUTRAL.to_owned(),

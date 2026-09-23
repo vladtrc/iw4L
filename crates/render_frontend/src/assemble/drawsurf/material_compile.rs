@@ -551,7 +551,10 @@ impl MaterialProgramCompile {
                 }
             }
         }
-        for &name in super::postfx_plan::GLOW_MATERIALS {
+        for &name in super::postfx_plan::GLOW_MATERIALS
+            .iter()
+            .chain([&super::postfx_plan::BLOOD_MATERIAL])
+        {
             match postfx_compile_location(catalog, name) {
                 Ok((set_i, pass_i)) => {
                     *type_hist.entry(POSTFX_VERTEX_TYPE).or_default() += 1;
@@ -567,7 +570,7 @@ impl MaterialProgramCompile {
                 Err(cause) => {
                     diag::warn!(
                         World,
-                        "post-fx glow compile skipped material={name} cause={cause:?}"
+                        "2D material compile skipped material={name} cause={cause:?}"
                     );
                 }
             }

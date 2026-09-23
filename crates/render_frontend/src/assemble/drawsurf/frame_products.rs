@@ -253,6 +253,8 @@ pub struct MaterialGeneration {
     pub exact_shaders: Vec<Handle<bevy::shader::Shader>>,
 
     pub postfx: super::RuntimePostFxResources,
+
+    pub blood: Option<super::RuntimeBloodMaterial>,
 }
 
 #[derive(Resource, Clone, Debug, Default)]
@@ -291,12 +293,16 @@ pub(crate) fn admit_material_generation(
             .map(RuntimeProgramPort::admitted_facts)
     });
     let postfx = super::build_runtime_postfx(&catalog, &prepared, &programs, &exact_shaders);
+    let blood = super::build_runtime_blood(&catalog, &prepared, &programs, &exact_shaders)
+        .inspect_err(|cause| diag::warn!(World, "blood material admission: RED cause={cause:?}"))
+        .ok();
     MaterialGeneration {
         catalog,
         prepared: Arc::new(prepared),
         programs,
         exact_shaders,
         postfx,
+        blood,
     }
 }
 

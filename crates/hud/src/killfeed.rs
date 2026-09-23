@@ -4,9 +4,9 @@ use assets::{MenuCatalog, PreparedLocalizedStrings, PreparedWeapons};
 use bevy::prelude::*;
 use hud_iw4::{
     GAME_MSG_WIN0_HORZ_ALIGN, GAME_MSG_WIN0_LINE_COUNT, GAME_MSG_WIN0_MSG_TIME_MS,
-    GAME_MSG_WIN0_TEXT_SCALE, GAME_MSG_WIN0_VERT_ALIGN, GAME_MSG_WIN0_X, KILLICON_DIED,
-    game_msg_win0_line_y, gamenotify_line, killicon_stretch_uv, killicon_virtual_size,
-    obituary_mod, obituary_mod_killicon, r_normalized_text_scale,
+    GAME_MSG_WIN0_TEXT_SCALE, GAME_MSG_WIN0_TEXT_STYLE, GAME_MSG_WIN0_VERT_ALIGN, GAME_MSG_WIN0_X,
+    KILLICON_DIED, game_msg_win0_line_y, gamenotify_line, killicon_stretch_uv,
+    killicon_virtual_size, obituary_mod, obituary_mod_killicon, r_normalized_text_scale,
 };
 use net::LocalPresentClient;
 
@@ -27,6 +27,8 @@ enum KillfeedLine {
         attacker: String,
         has_attacker: bool,
         victim: String,
+        attacker_team: i32,
+        victim_team: i32,
 
         kill_icon_ratio: i32,
 
@@ -119,6 +121,32 @@ fn pick_kill_icon(
     }
 }
 
+fn snapshot_client_team(presented: &net::PresentedSnapshot, client: i32) -> i32 {
+    if client < 0 {
+        return 0;
+    }
+    presented
+        .snapshot()
+        .and_then(|snap| snap.meta.for_client(sim::ClientId(client as u32)))
+        .map_or(0, |meta| meta.client_state_team)
+}
+
+fn obituary_name_color(local_team: i32, team: i32) -> [f32; 4] {
+    if !matches!(local_team, 1 | 2) || !matches!(team, 1 | 2) {
+        return [1.0, 1.0, 1.0, 1.0];
+    }
+    let rgb = if team == local_team {
+        gamemode_iw4::TEAM_COLOR_MY_TEAM
+    } else {
+        gamemode_iw4::TEAM_COLOR_ENEMY_TEAM
+    };
+    let mut color = [1.0; 4];
+    for (slot, value) in color.iter_mut().zip(rgb.split_whitespace()) {
+        *slot = value.parse().unwrap_or(1.0);
+    }
+    color
+}
+
 fn snapshot_client_name(presented: &net::PresentedSnapshot, client: i32) -> String {
     if client < 0 {
         return String::new();
@@ -145,6 +173,8 @@ pub(crate) fn cg_obituary(
     let pick = pick_kill_icon(&payload, weapons.as_deref());
     let attacker = snapshot_client_name(&presented, payload.attacker_entity_num);
     let victim = snapshot_client_name(&presented, payload.number);
+    let attacker_team = snapshot_client_team(&presented, payload.attacker_entity_num);
+    let victim_team = snapshot_client_team(&presented, payload.number);
     let now = sys_milliseconds() as i32;
     window.lines.push_back(KillfeedLine::Obituary {
         start_ms: now,
@@ -154,6 +184,8 @@ pub(crate) fn cg_obituary(
         has_attacker: (0..18).contains(&payload.attacker_entity_num)
             && payload.attacker_entity_num != payload.number,
         victim,
+        attacker_team,
+        victim_team,
         kill_icon_ratio: pick.ratio,
         flip_kill_icon: pick.flip,
     });
@@ -169,6 +201,7 @@ fn text_cmd(
     cmd_h: f32,
     material: String,
     text: String,
+    color: [f32; 4],
     site: &'static str,
 ) -> Draw2dCmd {
     Draw2dCmd {
@@ -181,7 +214,7 @@ fn text_cmd(
         t0: 0.0,
         s1: 1.0,
         t1: 1.0,
-        color: [1.0, 1.0, 1.0, 1.0],
+        color,
         material,
         op: Draw2dOp::TextRun {
             font: HUD_SMALL_FONT.to_owned(),
@@ -189,7 +222,7 @@ fn text_cmd(
             text,
             loc_key: String::new(),
 
-            style: crate::draw2d::TEXT_STYLE_UNREAD,
+            style: GAME_MSG_WIN0_TEXT_STYLE,
             fx: None,
             glow: None,
         },
@@ -286,14 +319,7 @@ pub(crate) fn update_killfeed(
         }
     }
 
-    if matches!(newest, KillfeedLine::Obituary { .. })
-        && presented
-            .snapshot()
-            .and_then(|s| s.meta.for_client(local.0))
-            .is_some_and(|meta| matches!(meta.client_state_team, 1 | 2))
-    {
-        gaps.raise(GapCause::ObituaryTeamColors);
-    }
+    let local_team = snapshot_client_team(&presented, local.0.0 as i32);
     let font = catalog.as_ref().and_then(|c| c.font(HUD_SMALL_FONT));
     let (nscale, font_material) = match font {
         Some(def) => (
@@ -331,7 +357,6 @@ pub(crate) fn update_killfeed(
         });
     }
 
-    let mut newest_icon_ok = true;
     for (i, line) in window.lines.iter().rev().enumerate() {
         let first_cmd = cmds.len();
         let age = now.saturating_sub(line.start_ms());
@@ -357,6 +382,7 @@ pub(crate) fn update_killfeed(
                         applied.h,
                         font_material.clone(),
                         text.clone(),
+                        [1.0; 4],
                         "killfeed_game_msg",
                     ));
                 }
@@ -367,6 +393,8 @@ pub(crate) fn update_killfeed(
                 attacker,
                 has_attacker,
                 victim,
+                attacker_team,
+                victim_team,
                 kill_icon_ratio,
                 flip_kill_icon,
                 ..
@@ -394,6 +422,7 @@ pub(crate) fn update_killfeed(
                             applied.h,
                             font_material.clone(),
                             attacker.clone(),
+                            obituary_name_color(local_team, *attacker_team),
                             "killfeed_obituary",
                         ));
                         x_virtual += attacker_w + GAME_MSG_WIN0_TEXT_SCALE * 4.0;
@@ -411,9 +440,6 @@ pub(crate) fn update_killfeed(
                     GAME_MSG_WIN0_VERT_ALIGN,
                 );
                 let icon_ok = hud_images.get(*icon_namespace, icon, &mut images).is_some();
-                if i == 0 {
-                    newest_icon_ok = icon_ok;
-                }
                 if !icon_ok {
                     gaps.raise(GapCause::ObituaryKillIconMissing {
                         name: icon.clone(),
@@ -456,6 +482,7 @@ pub(crate) fn update_killfeed(
                         applied.h,
                         font_material.clone(),
                         victim.clone(),
+                        obituary_name_color(local_team, *victim_team),
                         "killfeed_obituary",
                     ));
                 }
@@ -464,11 +491,6 @@ pub(crate) fn update_killfeed(
         for cmd in &mut cmds[first_cmd..] {
             cmd.color[3] *= alpha;
         }
-    }
-
-    if !newest_icon_ok {
-        hide(&mut pass);
-        return;
     }
 
     let list = Draw2dList { cmds };

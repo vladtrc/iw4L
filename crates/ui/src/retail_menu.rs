@@ -183,8 +183,16 @@ pub(crate) fn spawn_retail_shell(
         }
     }
     let games = paint.games.as_ref().and_then(|g| g.0.as_deref());
+    let installed_games = paint.identity.as_ref().map(|id| id.games_root.as_path());
     for screen in &screens {
-        warm_screen_images(catalog, screen, games, &mut paint.images, &mut paint.cache);
+        warm_screen_images(
+            catalog,
+            screen,
+            games,
+            installed_games,
+            &mut paint.images,
+            &mut paint.cache,
+        );
     }
     let has_retail_art = paint.cache.handles.contains_key("mw2_main_background")
         || paint.cache.handles.contains_key("mw2_main_mp_image");

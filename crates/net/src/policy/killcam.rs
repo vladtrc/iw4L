@@ -234,6 +234,7 @@ pub fn session_from_window_plan(
         focus: SeatFocus::hitscan(focus.0 as i32),
         ends_at_ms: now_ms.saturating_add(length_ms),
         kc_info_tus_ms: (time_until_respawn * 1000.0) as i32,
+        kc_timer_ends_at_ms: now_ms.saturating_add(killcam_seconds_to_ms(window.camtime)),
         final_kill: showing_final_killcam,
     })
 }
@@ -566,6 +567,7 @@ pub fn tick_final_killcam(
     level_notifies: &[NotifyKind],
     stats: &mut ScriptKillcamEmitStats,
     begin: &mut Vec<ClientId>,
+    killedby_cards: &mut Vec<(ClientId, ClientId)>,
 ) -> bool {
     let Some(mut final_pending) = pending.final_kc.take() else {
         return false;
@@ -592,6 +594,7 @@ pub fn tick_final_killcam(
                         begin,
                     ) {
                         stats.final_seats_armed = stats.final_seats_armed.saturating_add(1);
+                        killedby_cards.push((viewer, final_pending.focus));
                     } else {
                         stats.final_seats_refused = stats.final_seats_refused.saturating_add(1);
                     }

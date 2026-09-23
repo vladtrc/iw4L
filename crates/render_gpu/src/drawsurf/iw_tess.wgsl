@@ -17,10 +17,6 @@ struct Params {
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var color_tex: texture_2d<f32>;
 @group(0) @binding(2) var color_samp: sampler;
-#ifdef IW_TESS_SPLATTER
-@group(0) @binding(3) var mask_tex: texture_2d<f32>;
-@group(0) @binding(4) var mask_samp: sampler;
-#endif
 
 @vertex
 fn vs_tess(in: VsIn) -> VsOut {
@@ -38,14 +34,3 @@ fn vs_tess(in: VsIn) -> VsOut {
 fn fs_tess(in: VsOut) -> @location(0) vec4<f32> {
     return textureSample(color_tex, color_samp, in.uv) * in.color;
 }
-
-#ifdef IW_TESS_SPLATTER
-
-@fragment
-fn fs_splatter(in: VsOut) -> @location(0) vec4<f32> {
-    let color = textureSample(color_tex, color_samp, in.uv);
-    let mask_r = textureSample(mask_tex, mask_samp, in.uv).r;
-    let scale = max(5.0 * in.color.a - 4.0 * mask_r, 0.0);
-    return color * scale;
-}
-#endif

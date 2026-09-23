@@ -109,19 +109,7 @@ fn int_to_dec(n: i32, buf: &mut [u8; 16]) -> usize {
 }
 
 fn replace_and_and_one(template: &str, num: &str) -> String {
-    let bytes = template.as_bytes();
-    let mut out = String::new();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if i + 2 < bytes.len() && bytes[i] == b'&' && bytes[i + 1] == b'&' && bytes[i + 2] == b'1' {
-            out.push_str(num);
-            i += 3;
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    out
+    template.replace("&&1", num)
 }
 
 #[must_use]

@@ -16,7 +16,7 @@ use crate::gaps::ImageMiss;
 
 pub const HUD_CHROME_NAMESPACE: AssetNamespace = AssetNamespace::Iw4;
 
-const DATA_SAMPLED_IMAGES: &[&str] = &[BLOOD_OVERLAY_MASK];
+const DATA_SAMPLED_IMAGES: &[&str] = &[BLOOD_OVERLAY_MASK, BLOOD_OVERLAY_COLOR];
 
 pub(crate) const BLOOD_OVERLAY_MASK: &str = "blood_defocus_mask";
 pub(crate) const BLOOD_OVERLAY_COLOR: &str = "blood_defocus_color";

@@ -105,6 +105,8 @@ pub(crate) fn update_compass(
     mut latch: ResMut<CompassPingLatch>,
     mut ping_bus: ResMut<WeaponFirePingBus>,
     mut pass: ResMut<HudTessPass>,
+    view: Option<Res<frame::ViewSubject>>,
+    local_vars: Res<crate::playercard::UiLocalVars>,
 ) {
     take_fire_pings(
         &mut ping_bus,
@@ -113,7 +115,10 @@ pub(crate) fn update_compass(
         cg_clock.time(),
         &mut latch,
     );
-    if !surface.is_ready() {
+    let killed_by_showing = (crate::scorebar::sys_milliseconds() as i32)
+        .wrapping_sub(local_vars.int("ui_show_killedBy"))
+        < 4000;
+    if !surface.is_ready() || killed_by_showing || view.is_some_and(|v| v.in_killcam()) {
         hide(&mut pass);
         return;
     }

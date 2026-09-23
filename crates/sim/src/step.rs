@@ -1187,7 +1187,7 @@ fn apply_actions(world: &mut FrameWorld, tick: Tick, actions: &[(ClientId, Clien
                         killcam_entity_start_time: 0,
                     },
                 );
-                crate::score::apply_death_score(world, tick, *id, None);
+                crate::score::apply_death_score(world, tick, *id, None, None);
                 crate::damage::apply_player_killed(world, tick, *id, None, None);
                 crate::damage::push_suicide_obituary(world, tick, *id);
             }
@@ -1415,7 +1415,7 @@ fn apply_debug_damage(world: &mut FrameWorld, tick: Tick, id: ClientId, amount: 
             killcam_entity_start_time: 0,
         },
     );
-    crate::score::apply_death_score(world, tick, id, None);
+    crate::score::apply_death_score(world, tick, id, None, None);
     crate::damage::apply_player_killed(world, tick, id, None, None);
     crate::damage::push_suicide_obituary(world, tick, id);
 }

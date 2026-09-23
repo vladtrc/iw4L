@@ -157,31 +157,6 @@ pub enum Counter {
     CounterPostFxRefusal,
     CounterPostFxPlannedSteps,
     CounterPostFxExecutedSteps,
-
-    ProbeSubmits,
-    ProbeSubmitBodyMs,
-    ProbeSubmitValidateMs,
-    ProbeSubmitTransitionMs,
-    ProbeSubmitPendingMs,
-    ProbeSubmitBackendMs,
-    ProbeSubmitCleanupMs,
-    ProbeSubmitCallbacksMs,
-    ProbeCmdBufs,
-    ProbeEncodersRetired,
-    ProbeRetireInnerMs,
-    ProbeRetireTrackersMs,
-    ProbeRetireTempMs,
-    ProbeReleaseEncoderMs,
-    ProbeResets,
-    ProbeResetListMs,
-    ProbeFramebufferDestroyN,
-    ProbeFramebufferDestroyMs,
-    ProbePoolResetMs,
-    ProbeFramebufferCreateN,
-    ProbeFramebufferCreateMs,
-    ProbeEncodersAcquired,
-    ProbeEncodersBuilt,
-    ProbeEncodersOutstanding,
 }
 
 impl Span {
@@ -316,7 +291,7 @@ pub enum Unit {
 }
 
 impl Counter {
-    pub const COUNT: usize = Self::ProbeEncodersOutstanding as usize + 1;
+    pub const COUNT: usize = Self::CounterPostFxExecutedSteps as usize + 1;
 
     /// Every counter, in declaration order. The recorder indexes its arrays by
     /// `counter as usize`, so this and the enum must not drift.
@@ -381,30 +356,6 @@ impl Counter {
         Self::CounterPostFxRefusal,
         Self::CounterPostFxPlannedSteps,
         Self::CounterPostFxExecutedSteps,
-        Self::ProbeSubmits,
-        Self::ProbeSubmitBodyMs,
-        Self::ProbeSubmitValidateMs,
-        Self::ProbeSubmitTransitionMs,
-        Self::ProbeSubmitPendingMs,
-        Self::ProbeSubmitBackendMs,
-        Self::ProbeSubmitCleanupMs,
-        Self::ProbeSubmitCallbacksMs,
-        Self::ProbeCmdBufs,
-        Self::ProbeEncodersRetired,
-        Self::ProbeRetireInnerMs,
-        Self::ProbeRetireTrackersMs,
-        Self::ProbeRetireTempMs,
-        Self::ProbeReleaseEncoderMs,
-        Self::ProbeResets,
-        Self::ProbeResetListMs,
-        Self::ProbeFramebufferDestroyN,
-        Self::ProbeFramebufferDestroyMs,
-        Self::ProbePoolResetMs,
-        Self::ProbeFramebufferCreateN,
-        Self::ProbeFramebufferCreateMs,
-        Self::ProbeEncodersAcquired,
-        Self::ProbeEncodersBuilt,
-        Self::ProbeEncodersOutstanding,
     ];
 
     /// The name the counter carries in a trace and in the bench report.
@@ -470,30 +421,6 @@ impl Counter {
             Self::CounterPostFxRefusal => "postfx_refusal",
             Self::CounterPostFxPlannedSteps => "postfx_planned_steps",
             Self::CounterPostFxExecutedSteps => "postfx_executed_steps",
-            Self::ProbeSubmits => "probe_submits",
-            Self::ProbeSubmitBodyMs => "probe_submit_body",
-            Self::ProbeSubmitValidateMs => "probe_submit_validate",
-            Self::ProbeSubmitTransitionMs => "probe_submit_transition",
-            Self::ProbeSubmitPendingMs => "probe_submit_pending",
-            Self::ProbeSubmitBackendMs => "probe_submit_backend",
-            Self::ProbeSubmitCleanupMs => "probe_submit_cleanup",
-            Self::ProbeSubmitCallbacksMs => "probe_submit_callbacks",
-            Self::ProbeCmdBufs => "probe_cmd_bufs",
-            Self::ProbeEncodersRetired => "probe_encoders_retired",
-            Self::ProbeRetireInnerMs => "probe_retire_inner",
-            Self::ProbeRetireTrackersMs => "probe_retire_trackers",
-            Self::ProbeRetireTempMs => "probe_retire_temp",
-            Self::ProbeReleaseEncoderMs => "probe_release_encoder",
-            Self::ProbeResets => "probe_resets",
-            Self::ProbeResetListMs => "probe_reset_list",
-            Self::ProbeFramebufferDestroyN => "probe_fb_destroy_n",
-            Self::ProbeFramebufferDestroyMs => "probe_fb_destroy",
-            Self::ProbePoolResetMs => "probe_pool_reset",
-            Self::ProbeFramebufferCreateN => "probe_fb_create_n",
-            Self::ProbeFramebufferCreateMs => "probe_fb_create",
-            Self::ProbeEncodersAcquired => "probe_encoders_acquired",
-            Self::ProbeEncodersBuilt => "probe_encoders_built",
-            Self::ProbeEncodersOutstanding => "probe_encoders_outstanding",
         }
     }
 
@@ -523,22 +450,7 @@ impl Counter {
             | Self::RenderGpuFloatzMs
             | Self::RenderGpuPostfxMs
             | Self::RenderGpuFrameMs
-            | Self::RenderPrepareViewsMs
-            | Self::ProbeSubmitBodyMs
-            | Self::ProbeSubmitValidateMs
-            | Self::ProbeSubmitTransitionMs
-            | Self::ProbeSubmitPendingMs
-            | Self::ProbeSubmitBackendMs
-            | Self::ProbeSubmitCleanupMs
-            | Self::ProbeSubmitCallbacksMs
-            | Self::ProbeRetireInnerMs
-            | Self::ProbeRetireTrackersMs
-            | Self::ProbeRetireTempMs
-            | Self::ProbeReleaseEncoderMs
-            | Self::ProbeResetListMs
-            | Self::ProbeFramebufferDestroyMs
-            | Self::ProbePoolResetMs
-            | Self::ProbeFramebufferCreateMs => Unit::Milliseconds,
+            | Self::RenderPrepareViewsMs => Unit::Milliseconds,
             _ => Unit::Count,
         }
     }

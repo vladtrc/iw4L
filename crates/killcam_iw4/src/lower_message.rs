@@ -10,6 +10,23 @@ pub const LOWER_TEXT_FONT_SIZE: f32 = 1.6;
 
 pub const LOWER_MESSAGE_ALPHA: f32 = 0.85;
 
+pub const KC_TIMER_Y: f32 = 42.0;
+
+pub const KC_TIMER_HUDELEM_FONT: i32 = 6;
+
+pub const KC_TIMER_FONT_SCALE: f32 = 1.0;
+
+pub const KC_TIMER_GREY: f32 = 0.85;
+
+pub const fn kc_timer_fields(remaining_ms: i32) -> (i32, i32, i32) {
+    let tenths = if remaining_ms <= 0 {
+        0
+    } else {
+        remaining_ms / 100
+    };
+    (tenths / 600, tenths / 10 % 60, tenths % 10)
+}
+
 pub fn kc_info_loc_key(time_until_respawn: f32, game_ended: bool) -> Option<&'static str> {
     if gsc_truthy_f32(time_until_respawn) && !game_ended {
         if time_until_respawn > 0.0 {

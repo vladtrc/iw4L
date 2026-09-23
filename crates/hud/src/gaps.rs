@@ -313,8 +313,6 @@ pub enum GapCause {
 
     ObituaryNoClientInfo,
 
-    ObituaryTeamColors,
-
     ObituaryKillIconMissing {
         name: String,
         miss: ImageMiss,
@@ -470,7 +468,6 @@ impl ledger::GapCause for GapCause {
             | GapCause::SplashImageMissing { .. }
             | GapCause::SplashEmptyPaint { .. } => HudGap::EngineSplash,
             GapCause::ObituaryNoClientInfo
-            | GapCause::ObituaryTeamColors
             | GapCause::ObituaryKillIconMissing { .. }
             | GapCause::GameNotifyNoClientInfo => HudGap::Obituary,
             GapCause::TextDecodeFxAtlasMissing { .. }
@@ -620,9 +617,6 @@ impl fmt::Display for GapCause {
                     f,
                     "`{name}` Item_Paint emitted no tess quads for a live splash slot"
                 )
-            }
-            GapCause::ObituaryTeamColors => {
-                f.write_str("CG_UpdateTeamColors palette unavailable; team killfeed names untinted")
             }
             GapCause::ObituaryNoClientInfo => {
                 f.write_str("clientState.name empty; killfeed icon only")

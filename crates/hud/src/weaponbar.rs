@@ -77,6 +77,7 @@ struct WeaponbarExprHost<'a> {
     ms: i32,
     cg_time: i32,
     in_killcam: bool,
+    game_ended: bool,
     spectating_client: bool,
     local_vars: &'a UiLocalVars,
     catalog: Option<&'a MenuCatalog>,
@@ -182,8 +183,9 @@ impl ExprHost for WeaponbarExprHost<'_> {
         self.lock.ok_or(ExprError::Host("weapon lock"))
     }
     fn dvar_int(&self, name: &str) -> Result<i32, ExprError> {
-        if name.eq_ignore_ascii_case("g_hardcore")
-            || name.eq_ignore_ascii_case("scr_gameended")
+        if name.eq_ignore_ascii_case("scr_gameended") {
+            Ok(i32::from(self.game_ended))
+        } else if name.eq_ignore_ascii_case("g_hardcore")
             || name.eq_ignore_ascii_case("onlinegame")
             || name.eq_ignore_ascii_case("xblive_privatematch")
         {
@@ -476,6 +478,22 @@ fn background_stem(background: &str) -> Option<String> {
     }
 }
 
+const WEAPOVERLAYINTERFACE_JAVELIN: i32 = 1;
+
+fn weapon_lock_view(ps: &PlayerState, weapons: &PreparedWeapons) -> hud_iw4::WeaponLockView {
+    let viewmodel = bg_get_viewmodel_weapon_index(ps);
+    let ads_javelin = viewmodel > 0
+        && ps.f_weapon_pos_frac == 1.0
+        && weapons
+            .0
+            .facts_of(viewmodel)
+            .is_some_and(|facts| facts.overlay_interface == WEAPOVERLAYINTERFACE_JAVELIN);
+    hud_iw4::WeaponLockView {
+        ads_javelin,
+        ..Default::default()
+    }
+}
+
 fn ammo_hud_hidden(ps: &PlayerState) -> bool {
     (ps.e_flags & EFLAGS_HIDE_AMMO_HUD) != 0 || (ps.weap_flags & WEAPFLAGS_HIDE_AMMO_HUD) != 0
 }
@@ -553,13 +571,24 @@ pub(crate) fn update_weaponbar(
         ms: sys_milliseconds() as i32,
         cg_time: cg_clock.time(),
         in_killcam: view.as_deref().is_some_and(|v| v.in_killcam()),
+        game_ended: presented.snapshot().is_some_and(|s| {
+            matches!(
+                s.meta.phase,
+                sim::MatchPhase::Intermission | sim::MatchPhase::PostGame
+            )
+        }),
         spectating_client: false,
         local_vars: &local_vars,
         catalog: Some(catalog),
         menu: None,
         perk_slots: ps.perk_slots,
         weapon_script,
-        lock: None,
+        lock: Some(
+            weapons
+                .as_deref()
+                .map(|weapons| weapon_lock_view(ps, weapons))
+                .unwrap_or_default(),
+        ),
         frag_ammo,
         smoke_ammo,
         stock_ammo: ammo.as_ref().and_then(|a| a.stock).unwrap_or(0),

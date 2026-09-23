@@ -11,11 +11,21 @@ use gamemode_iw4::{FIRSTBLOOD_SCORE_INFO, FIRSTBLOOD_SPLASH_KEY, PrematchStep};
 
 pub const MATCH_TICK_MS: u32 = 50;
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct KillFacts {
+    pub one_shot: bool,
+    pub headshot: bool,
+    pub execution: bool,
+    pub posthumous: bool,
+    pub longshot: bool,
+}
+
 pub(crate) fn apply_death_score(
     world: &mut FrameWorld,
     tick: Tick,
     victim: ClientId,
     attacker: Option<ClientId>,
+    facts: Option<KillFacts>,
 ) {
     let had_copycat = {
         let meta = world.client_meta_mut(victim);
@@ -23,6 +33,7 @@ pub(crate) fn apply_death_score(
         meta.combathigh_until_ms = None;
         meta.pistoldeath_this_life = false;
         meta.laststand_until_ms = None;
+        meta.attackers_this_life.clear();
         let had = meta.copycat_this_life;
         meta.copycat_this_life = false;
         meta.copycat_class_this_life = false;
@@ -53,6 +64,16 @@ pub(crate) fn apply_death_score(
                 }
             }
         }
+        let comeback = world
+            .client_meta(attacker)
+            .is_some_and(|m| m.cur_death_streak > 3);
+        let now = crate::hudelem::hud_level_time_ms(tick);
+        let avenger = world.bootstrap_ref().kind.is_team()
+            && world
+                .client_meta(victim)
+                .and_then(|m| m.last_kill)
+                .is_some_and(|(killed, at)| killed != attacker && now - at <= 500);
+        world.client_meta_mut(attacker).last_kill = Some((victim, now));
         let (score, kills, deaths) = {
             let meta = world.client_meta_mut(attacker);
             meta.kills = meta.kills.saturating_add(1);
@@ -64,7 +85,6 @@ pub(crate) fn apply_death_score(
             let meta = world.client_meta_mut(victim);
             meta.cur_death_streak = meta.cur_death_streak.saturating_add(1);
         }
-        let now = crate::hudelem::hud_level_time_ms(tick);
         if let Some(row) = world.recent_kills.iter_mut().find(|row| row.0 == attacker) {
             row.1 = now;
             row.2 += 1;
@@ -72,11 +92,37 @@ pub(crate) fn apply_death_score(
             world.recent_kills.push((attacker, now, 1));
         }
         let num_kills = world.bump_num_kills();
-        let now_ms = crate::hudelem::hud_level_time_ms(tick);
-        world.record_score_popup(attacker, points as f32, now_ms);
+        world.record_score_popup(attacker, points as f32, now);
+        let facts = facts.unwrap_or_default();
+        if facts.one_shot {
+            world.push_hud_splash(attacker, "one_shot_kill", 0, 0);
+        }
         if num_kills == 1 {
-            world.push_hud_splash(attacker, FIRSTBLOOD_SPLASH_KEY, 0, FIRSTBLOOD_SCORE_INFO);
+            award_splash(
+                world,
+                attacker,
+                FIRSTBLOOD_SPLASH_KEY,
+                FIRSTBLOOD_SCORE_INFO,
+                now,
+            );
             broadcast_card(world, attacker, "callout_firstblood");
+        }
+        if comeback {
+            award_splash(world, attacker, "comeback", 100, now);
+        }
+        if facts.headshot {
+            award_splash(world, attacker, "headshot", points, now);
+        } else if facts.execution {
+            award_splash(world, attacker, "execution", 100, now);
+        }
+        if facts.posthumous {
+            award_splash(world, attacker, "posthumous", 25, now);
+        }
+        if avenger {
+            award_splash(world, attacker, "avenger", 50, now);
+        }
+        if facts.longshot {
+            award_splash(world, attacker, "longshot", 50, now);
         }
 
         let score_limit = world.bootstrap_ref().score_limit;
@@ -364,6 +410,11 @@ pub fn bootstrap_score_defaults() -> (i32, i32, u32) {
     (SCORE_LIMIT, SCORE_KILL_POINTS, TIME_LIMIT_MS)
 }
 
+fn award_splash(world: &mut FrameWorld, client: ClientId, key: &'static str, xp: i32, now: i32) {
+    world.push_hud_splash(client, key, 0, xp);
+    world.record_score_popup(client, xp as f32, now);
+}
+
 fn broadcast_card(world: &mut FrameWorld, source: ClientId, key: &'static str) {
     for recipient in world.client_ids_sorted() {
         world.push_player_card_slot(recipient, source, 5);
@@ -397,7 +448,7 @@ pub(crate) fn finish_recent_kills(world: &mut FrameWorld, tick: Tick) {
             _ => None,
         };
         if let Some((key, points)) = splash {
-            world.push_hud_splash(client, key, 0, points);
+            award_splash(world, client, key, points, now);
         }
         if count == 3 {
             broadcast_card(world, client, "callout_3xkill");

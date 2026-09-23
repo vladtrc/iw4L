@@ -1,6 +1,8 @@
 use super::attachment::follow_attachment_array;
 use super::snd::{follow_snd_alias_array, follow_snd_alias_custom};
-use super::{AssetLinkSink, asset_ptr_at, follow_name, load_asset_at_observed};
+use super::{
+    AssetLinkSink, asset_ptr_at, follow_name, load_asset_at_durable_slot, load_asset_at_observed,
+};
 use crate::asset_type::AssetType;
 use crate::size as sz;
 use crate::zone::{Ptr, Result, WeaponGeometry, XFILE_BLOCK_VIRTUAL, ZonePtr, ZoneStream};
@@ -131,7 +133,18 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
     }
 
     follow_name(s, p, s.layout(116, 192))?;
-    asset_ptr_at(s, links, AssetType::Material, p.at(s.layout(132, 216)))?;
+    // The complete def lives in TEMP and is overwritten by the next asset: keep a slot that outlives it.
+    let kill_icon_cell = p.at(s.layout(sz::WEAPON_COMPLETE_KILL_ICON_OFF, 216));
+    let referenced = match s.ptr_at(kill_icon_cell, 0)? {
+        ZonePtr::Offset(q) => Some(q),
+        _ => None,
+    };
+    let (kill_icon_slot, kill_icon) =
+        match load_asset_at_durable_slot(s, AssetType::Material, kill_icon_cell, links)? {
+            Some(Some(insert_slot)) => (Some(insert_slot), None),
+            Some(None) => (None, s.latest_material().and_then(|m| m.header)),
+            None => (referenced, None),
+        };
     asset_ptr_at(s, links, AssetType::Material, p.at(s.layout(136, 224)))?;
     s.plain_array(p, s.layout(172, 264), 4, 8, ai_knots)?;
     s.plain_array(p, s.layout(176, 272), 4, 8, player_knots)?;
@@ -167,16 +180,19 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         _ => None,
     };
 
-    let (ads_overlay_width, ads_overlay_height, overlay_reticle) = match weap_def {
+    let (ads_overlay_width, ads_overlay_height, overlay_reticle, overlay_interface) = match weap_def
+    {
         Some(body) => (
-            s.f32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_WIDTH_OFF, 1372))
+            s.f32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_WIDTH_OFF, 1388))
                 .unwrap_or(0.0),
-            s.f32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_HEIGHT_OFF, 1376))
+            s.f32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_HEIGHT_OFF, 1392))
                 .unwrap_or(0.0),
-            s.i32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_RETICLE_OFF, 1368))
+            s.i32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_RETICLE_OFF, 1384))
+                .unwrap_or(0),
+            s.i32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_INTERFACE_OFF, 1404))
                 .unwrap_or(0),
         ),
-        None => (0.0, 0.0, 0),
+        None => (0.0, 0.0, 0, 0),
     };
     let array_at = |s: &ZoneStream<'_>, off: usize| match s.ptr_at(p, off) {
         Ok(ZonePtr::Offset(q)) => Some(s.resolve_alias(q)),
@@ -184,6 +200,8 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
     };
     s.record_weapon(WeaponGeometry {
         name,
+        kill_icon_slot,
+        kill_icon,
         display_name,
         weap_def,
         gun_xmodel_name,
@@ -224,6 +242,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         ads_overlay_width,
         ads_overlay_height,
         overlay_reticle,
+        overlay_interface,
         attachments,
         anim_override_count: anim_overrides as i32,
         anim_overrides: anim_override_arr,

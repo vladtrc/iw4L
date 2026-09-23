@@ -346,6 +346,19 @@ fn is_outcome_reason(slot: &GameHudElemSlot, client_num: i32) -> bool {
         && (slot.elem.y - gamemode_iw4::OUTCOME_REASON_Y).abs() < 0.5
 }
 
+pub fn clear_outcome_elems(pool: &mut Vec<GameHudElemSlot>) {
+    pool.retain(|s| {
+        let placement = s.elem.elem_type == HE_TYPE_PLAYERNAME
+            && matches!(
+                s.elem.label,
+                gamemode_iw4::LABEL_FIRSTPLACE_NAME
+                    | gamemode_iw4::LABEL_SECONDPLACE_NAME
+                    | gamemode_iw4::LABEL_THIRDPLACE_NAME
+            );
+        !(placement || is_outcome_title(s, s.client_num) || is_outcome_reason(s, s.client_num))
+    });
+}
+
 pub fn sync_outcome_elems(
     pool: &mut Vec<GameHudElemSlot>,
     client: ClientId,

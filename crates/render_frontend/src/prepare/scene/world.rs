@@ -1054,7 +1054,7 @@ pub fn world_scene_from_draw(
         dyn_ent_instances.len(),
     );
     let assets::MatchMaterials {
-        population: mut global_materials,
+        population: global_materials,
         map_ids,
         common_profile_id,
         products_id,
@@ -1090,8 +1090,8 @@ pub fn world_scene_from_draw(
 
     let exact_material_images = global_materials
         .images
-        .iter_mut()
-        .map(|image| image.decoded.take())
+        .iter()
+        .map(|image| image.decoded.clone())
         .collect::<Vec<_>>();
     let exact_material_common = global_materials
         .images

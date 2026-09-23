@@ -198,8 +198,15 @@ fn game_map_label(map: &str) -> String {
 }
 
 fn game_preview_stem(map: &str) -> String {
-    let zone = map.split_once(':').map_or(map, |(_, zone)| zone);
-    format!("preview_{zone}")
+    let Some((game, zone)) = map.split_once(':') else {
+        return format!("preview_{map}");
+    };
+    let image = if game == "t5" {
+        format!("loadscreen_{zone}")
+    } else {
+        format!("preview_{zone}")
+    };
+    format!("{game}:material/{image}")
 }
 
 pub fn game_lobby(

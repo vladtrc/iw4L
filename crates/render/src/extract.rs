@@ -738,6 +738,24 @@ pub fn extract_postfx(
         None => extracted.films.clear(),
         _ => {}
     }
+    let blood = runtime.as_ref().and_then(|r| r.blood.as_ref());
+    if extracted.blood.as_ref().map(|b| b.film.generation) != blood.map(|b| b.film.generation) {
+        extracted.blood = blood.map(|blood| render_gpu::ExtractedBlood {
+            film: render_gpu::ExtractedFilm {
+                name: blood.film.name,
+                generation: blood.film.generation,
+                port: render_gpu::AdmittedExactPort {
+                    id: blood.film.port.id(),
+                    abi: blood.film.port.abi().clone(),
+                    module: blood.film.port.shared_module(),
+                    layout: blood.film.port.wgpu_layout().clone(),
+                },
+                shader: blood.film.shader.clone(),
+                shell: blood.film.shell.clone(),
+            },
+            texture_slots: blood.texture_slots.clone(),
+        });
+    }
     extracted.vision = film.current;
     extracted.frame = render_gpu::DofFrame {
         dof: render_gpu::DepthOfField {

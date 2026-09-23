@@ -1245,7 +1245,13 @@ pub fn decode_ui_image(
         let Some(main) = trees.main_for(key.namespace) else {
             return Ok(None);
         };
-        return decode_ui_image_from_main(main, &key.name);
+        if let Some(image) = decode_ui_image_from_main(main, &key.name)? {
+            return Ok(Some(image));
+        }
+        if let Some(zone) = key.name.strip_prefix("preview_mp_") {
+            return decode_ui_image_from_main(main, &format!("loadscreen_mp_{zone}"));
+        }
+        return Ok(None);
     }
     let name = crate::AssetRef::bare_name(image_name);
     for main in ui_decode_mains(games_root) {

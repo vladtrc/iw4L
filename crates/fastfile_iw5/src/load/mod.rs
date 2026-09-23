@@ -202,20 +202,29 @@ pub fn load_asset_at_observed(
     slot: Ptr,
     links: &mut dyn AssetLinkSink,
 ) -> Result<bool> {
+    load_asset_at_durable_slot(s, ty, slot, links).map(|loaded| loaded.is_some())
+}
+
+pub fn load_asset_at_durable_slot(
+    s: &mut ZoneStream<'_>,
+    ty: AssetType,
+    slot: Ptr,
+    links: &mut dyn AssetLinkSink,
+) -> Result<Option<Option<Ptr>>> {
     if s.wire_format() == Iw5WireFormat::X64 && ty == AssetType::SndDriverGlobals {
-        return Ok(false);
+        return Ok(None);
     }
     let pointer = s.ptr_at(slot, 0)?;
     s.push(XFILE_BLOCK_TEMP)?;
     let result = match pointer {
-        ZonePtr::Null => Ok(false),
+        ZonePtr::Null => Ok(None),
         ZonePtr::Offset(target) => {
             s.note_offset(target);
             links.alias(ty, slot, target)?;
             if ty == AssetType::Attachment {
                 s.alias_attachment_name(slot, target);
             }
-            Ok(false)
+            Ok(None)
         }
         ZonePtr::Following | ZonePtr::Insert => {
             let (load, insert_slot) = s.begin_body_with_insert(slot)?;
@@ -230,7 +239,7 @@ pub fn load_asset_at_observed(
                 s.commit_attachment_name(slot, insert_slot);
             }
             links.loaded(s, ty, slot, insert_slot)?;
-            Ok(true)
+            Ok(Some(insert_slot))
         }
     };
     s.pop()?;

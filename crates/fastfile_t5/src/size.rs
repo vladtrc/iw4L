@@ -587,6 +587,7 @@ pub const WEAPON_DEF_RELOAD_START_ADD_TIME_OFF: usize = 0x3f0;
 
 pub const WEAPON_DEF_RELOAD_END_TIME_OFF: usize = 0x3f4;
 pub const WEAPON_DEF_ADS_OVERLAY_RETICLE_OFF: usize = 0x4b4;
+pub const WEAPON_DEF_ADS_OVERLAY_INTERFACE_OFF: usize = 0x4b8;
 pub const WEAPON_DEF_ADS_OVERLAY_WIDTH_OFF: usize = 0x4bc;
 pub const WEAPON_DEF_ADS_OVERLAY_HEIGHT_OFF: usize = 0x4c0;
 
@@ -652,6 +653,9 @@ const _: () = assert!(WEAPON_DEF_RETICLE_SIDE_SIZE_OFF == WEAPON_DEF_RETICLE_SID
 const _: () = assert!(WEAPON_DEF_RETICLE_MIN_OFS_OFF == WEAPON_DEF_RETICLE_SIDE_SIZE_OFF + 4);
 
 pub const WEAPON_DEF_HUD_ICON_OFF: usize = 0x320;
+pub const WEAPON_DEF_KILL_ICON_OFF: usize = 0x578;
+pub const WEAPON_DEF_KILL_ICON_RATIO_OFF: usize = 0x57c;
+pub const WEAPON_DEF_FLIP_KILL_ICON_OFF: usize = 0x580;
 
 pub const WEAPON_DEF_HIP_RETICLE_SIDE_POS_OFF: usize = 0x4fc;
 const _: () =

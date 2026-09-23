@@ -215,6 +215,8 @@ pub const CODE_TRANSPOSE_WORLD_VIEW0: u16 = 0x66;
 pub const CODE_TRANSPOSE_WORLD_VIEW1: u16 = 0x72;
 pub const CODE_TRANSPOSE_WORLD_VIEW2: u16 = 0x7e;
 
+pub const CODE_INVERSE_WORLD_VIEW0: u16 = 0x65;
+
 pub const CODE_INVERSE_TRANSPOSE_WORLD_VIEW0: u16 = 0x67;
 
 pub const CODE_MATERIAL_COLOR: u16 = 0x24;
@@ -492,13 +494,18 @@ pub fn produce_sun_shadow_receiver_constants(
 }
 
 pub fn produce_world_view_family(sources: &mut RuntimeCodeSources, world_view: Mat4) {
+    let inverse = world_view.inverse();
+    sources.set_constant_rows(
+        CODE_INVERSE_WORLD_VIEW0,
+        &code_transpose_matrix_row4(inverse.transpose()),
+    );
     sources.set_constant_rows(
         CODE_TRANSPOSE_WORLD_VIEW0,
         &code_transpose_matrix_row4(world_view),
     );
     sources.set_constant_rows(
         CODE_INVERSE_TRANSPOSE_WORLD_VIEW0,
-        &code_transpose_matrix_row4(world_view.inverse()),
+        &code_transpose_matrix_row4(inverse),
     );
 }
 

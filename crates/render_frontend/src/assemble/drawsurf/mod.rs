@@ -60,4 +60,4 @@ pub use sun_shadow::*;
 pub use tess::*;
 pub use wgsl_disk_cache::{WGSL_CACHE_FORMAT, stats as wgsl_cache_stats};
 
-pub(crate) use postfx_plan::build_runtime_postfx;
+pub(crate) use postfx_plan::{build_runtime_blood, build_runtime_postfx};

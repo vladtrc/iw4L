@@ -21,6 +21,7 @@ use crate::scorebar::sys_milliseconds;
 pub struct PendingSplash {
     pub key: Option<String>,
     pub optional_number: i32,
+    queued: std::collections::VecDeque<(String, i32)>,
 }
 
 #[derive(Resource, Default)]
@@ -31,6 +32,7 @@ pub(crate) struct SplashSlots {
 pub(crate) struct SplashRaster;
 
 struct SplashExprHost<'a> {
+    menu: &'a assets::MenuDef,
     ms: i32,
     slots: &'a [SplashSlot; SPLASH_SLOT_COUNT],
     table: Option<&'a CapturedStringTable>,
@@ -71,12 +73,16 @@ impl ExprHost for SplashExprHost<'_> {
         self.ms
     }
     fn static_dvar_int(&self, index: i32) -> Result<i32, ExprError> {
-        match index {
-            22 => Ok(0),
-
-            26 => Ok(0),
-            _ => Err(ExprError::Host("static dvar")),
+        let name = self
+            .menu
+            .static_dvar_name(index)
+            .ok_or(ExprError::Host("static dvar name"))?;
+        if name.eq_ignore_ascii_case("splitscreen")
+            || name.eq_ignore_ascii_case("camera_thirdPerson")
+        {
+            return Ok(0);
         }
+        Err(ExprError::Host("static dvar"))
     }
     fn team_field(&self, _field: &str) -> Result<Operand, ExprError> {
         Err(ExprError::Host("team field"))
@@ -171,6 +177,14 @@ impl ExprHost for SplashExprHost<'_> {
         }
         Ok(Operand::Int(s.row))
     }
+    fn table_lookup_by_row(&self, table: &str, row: i32, col: i32) -> Result<Operand, ExprError> {
+        match self.table {
+            Some(t) if table.eq_ignore_ascii_case(SPLASH_TABLE_NAME) => {
+                Ok(Operand::Str(String::from(t.cell(row, col))))
+            }
+            _ => Err(ExprError::Host("splash host table")),
+        }
+    }
 }
 
 pub(crate) fn spawn_splash(root: &mut ChildSpawnerCommands) {
@@ -238,10 +252,16 @@ pub(crate) fn update_splash(
         return;
     }
     for cmd in received.read().filter(|cmd| cmd.slot == 0) {
-        pending.key = Some(cmd.key.clone());
-        pending.optional_number = cmd.optional;
+        pending.queued.push_back((cmd.key.clone(), cmd.optional));
     }
     let now_ms = sys_milliseconds() as i32;
+    expire_slots(&mut slots, now_ms);
+    if pending.key.is_none() && !slots.slots.iter().any(|s| s.live()) {
+        if let Some((key, optional)) = pending.queued.pop_front() {
+            pending.key = Some(key);
+            pending.optional_number = optional;
+        }
+    }
     let table = catalog
         .as_ref()
         .and_then(|c| c.string_table(SPLASH_TABLE_NAME));
@@ -253,7 +273,6 @@ pub(crate) fn update_splash(
         hide(&mut pass);
         return;
     }
-    expire_slots(&mut slots, now_ms);
 
     let live = slots.slots.iter().find(|s| s.live()).copied();
     let Some(live) = live else {
@@ -288,6 +307,7 @@ pub(crate) fn update_splash(
 
     let material = table.cell(live.row, SPLASH_COL_MATERIAL);
     let host = SplashExprHost {
+        menu,
         ms: now_ms,
         slots: &slots.slots,
         table: Some(table),

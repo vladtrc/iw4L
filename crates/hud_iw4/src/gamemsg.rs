@@ -20,6 +20,8 @@ pub const GAME_MSG_WIN0_VERT_ALIGN: i32 = ALIGN_USER_MAX;
 
 pub const GAME_MSG_WIN0_TEXT_SCALE: f32 = 0.375;
 
+pub const GAME_MSG_WIN0_TEXT_STYLE: i32 = 3;
+
 #[allow(dead_code)]
 pub const GAME_MSG_WIN0_FONT_ENUM: i32 = 0;
 

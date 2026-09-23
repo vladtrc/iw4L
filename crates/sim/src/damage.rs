@@ -635,6 +635,25 @@ pub(crate) fn apply_damage_attempt(
         return DamageOutcome::Refused(DamageRefusal::NonPositive);
     }
 
+    if intent.attacker != intent.target {
+        let now = crate::hudelem::hud_level_time_ms(tick);
+        let fresh = world
+            .player(intent.target)
+            .is_some_and(|ps| ps.health >= ps.max_health)
+            && meta_not_down(world, intent.target);
+        let meta = world.client_meta_mut(intent.target);
+        if fresh {
+            meta.attackers_this_life.clear();
+        }
+        if !meta
+            .attackers_this_life
+            .iter()
+            .any(|&(a, _)| a == intent.attacker)
+        {
+            meta.attackers_this_life.push((intent.attacker, now));
+        }
+    }
+
     let damage_dir = flinch_damage_dir(world, intent);
     let health_after = {
         let Some(ps) = world.player_mut(intent.target) else {
@@ -736,7 +755,14 @@ pub(crate) fn apply_damage_attempt(
             ..Default::default()
         },
     );
-    crate::score::apply_death_score(world, tick, commit.victim, Some(commit.attacker));
+    let facts = kill_facts(world, &commit, already_down, now);
+    crate::score::apply_death_score(
+        world,
+        tick,
+        commit.victim,
+        Some(commit.attacker),
+        Some(facts),
+    );
     apply_player_killed(
         world,
         tick,
@@ -745,6 +771,51 @@ pub(crate) fn apply_damage_attempt(
         Some(&commit),
     );
     DamageOutcome::Died(commit)
+}
+
+fn meta_not_down(world: &FrameWorld, client: ClientId) -> bool {
+    world
+        .client_meta(client)
+        .is_some_and(|m| m.laststand_until_ms.is_none())
+}
+
+fn kill_facts(
+    world: &FrameWorld,
+    commit: &DeathCommit,
+    already_down: bool,
+    now: i32,
+) -> crate::score::KillFacts {
+    let shot = matches!(commit.source, crate::DamageSource::Shot(_));
+    let headshot = shot && hud_iw4::obituary_is_headshot(commit.hitloc);
+    let sniper = world
+        .combat_facts_for(commit.weapon)
+        .is_some_and(|f| f.weap_class == 1);
+    let one_shot = sniper
+        && !matches!(commit.source, crate::DamageSource::Melee)
+        && world
+            .client_meta(commit.victim)
+            .is_some_and(|m| m.attackers_this_life == [(commit.attacker, now)]);
+    let attacker = world.client_meta(commit.attacker);
+    let attacker_alive = attacker.is_some_and(|m| m.lifecycle == ClientLifecycle::Alive);
+    let posthumous = attacker
+        .and_then(|m| m.dead_since_tick)
+        .is_some_and(|t| crate::hudelem::hud_level_time_ms(Tick(t)) + 800 < now);
+    let longshot = shot
+        && attacker_alive
+        && match (world.player(commit.attacker), world.player(commit.victim)) {
+            (Some(a), Some(v)) => {
+                let d = [0, 1, 2].map(|i| a.origin[i] - v.origin[i]);
+                d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 1536.0 * 1536.0
+            }
+            _ => false,
+        };
+    crate::score::KillFacts {
+        one_shot,
+        headshot: headshot && !already_down,
+        execution: headshot && already_down,
+        posthumous,
+        longshot,
+    }
 }
 
 fn pack_obituary_parm(world: &FrameWorld, commit: &DeathCommit) -> i32 {

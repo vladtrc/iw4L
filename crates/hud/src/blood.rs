@@ -148,7 +148,7 @@ pub(crate) fn update_blood_overlay(
     let Some(color) = hud_images.get_sampled_with_sampler(
         crate::images::HUD_CHROME_NAMESPACE,
         BLOOD_OVERLAY_COLOR,
-        HudSampling::Color,
+        HudSampling::Data,
         Some(binding.color_sampler),
         &mut images,
     ) else {

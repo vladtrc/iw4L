@@ -178,7 +178,7 @@ pub(crate) fn update_mantle_hint(
                     text: text.clone(),
                     loc_key: PLATFORM_MANTLE.to_owned(),
 
-                    style: crate::draw2d::TEXT_STYLE_UNREAD,
+                    style: item.text_style,
                     fx: None,
                     glow: None,
                 },

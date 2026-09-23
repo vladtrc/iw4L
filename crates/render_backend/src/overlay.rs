@@ -77,6 +77,8 @@ pub const CODE_TRANSPOSE_WORLD_VIEW0: u16 = 0x66;
 pub const CODE_TRANSPOSE_WORLD_VIEW1: u16 = 0x72;
 pub const CODE_TRANSPOSE_WORLD_VIEW2: u16 = 0x7e;
 
+pub const CODE_INVERSE_WORLD_VIEW0: u16 = 0x65;
+
 pub const CODE_INVERSE_TRANSPOSE_WORLD_VIEW0: u16 = 0x67;
 
 pub const CODE_MATERIAL_COLOR: u16 = 0x24;
@@ -136,8 +138,9 @@ pub fn overlay_smodel_tess_code_constants(
 pub struct OverlayCodeNeed {
     pub world0: bool,
     pub world_view: bool,
-    pub world_view_proj: bool,
     pub inverse_world_view: bool,
+    pub world_view_proj: bool,
+    pub inverse_transpose_world_view: bool,
     pub lighting_coords: bool,
     pub light_probe: bool,
 }
@@ -146,16 +149,18 @@ impl OverlayCodeNeed {
     pub const ALL: Self = Self {
         world0: true,
         world_view: true,
-        world_view_proj: true,
         inverse_world_view: true,
+        world_view_proj: true,
+        inverse_transpose_world_view: true,
         lighting_coords: true,
         light_probe: true,
     };
     pub const NONE: Self = Self {
         world0: false,
         world_view: false,
-        world_view_proj: false,
         inverse_world_view: false,
+        world_view_proj: false,
+        inverse_transpose_world_view: false,
         lighting_coords: false,
         light_probe: false,
     };
@@ -164,8 +169,9 @@ impl OverlayCodeNeed {
         match index {
             CODE_TRANSPOSE_WORLD0 => self.world0 = true,
             CODE_TRANSPOSE_WORLD_VIEW0 => self.world_view = true,
+            CODE_INVERSE_WORLD_VIEW0 => self.inverse_world_view = true,
             CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0 => self.world_view_proj = true,
-            CODE_INVERSE_TRANSPOSE_WORLD_VIEW0 => self.inverse_world_view = true,
+            CODE_INVERSE_TRANSPOSE_WORLD_VIEW0 => self.inverse_transpose_world_view = true,
             CODE_BASE_LIGHTING_COORDS => self.lighting_coords = true,
             CODE_LIGHT_PROBE_AMBIENT => self.light_probe = true,
             _ => {}
@@ -195,7 +201,7 @@ pub fn overlay_smodel_world_matrix(
             &code_transpose_matrix_row4(clip * world_from_local),
         );
     }
-    if (need.world_view || need.inverse_world_view)
+    if (need.world_view || need.inverse_world_view || need.inverse_transpose_world_view)
         && let Some(view) = view_from_world
     {
         let world_view = view * world_from_local;
@@ -205,10 +211,18 @@ pub fn overlay_smodel_world_matrix(
                 &code_transpose_matrix_row4(world_view),
             );
         }
+        let inverse = (need.inverse_world_view || need.inverse_transpose_world_view)
+            .then(|| world_view.inverse());
         if need.inverse_world_view {
             sources.set_constant_rows(
+                CODE_INVERSE_WORLD_VIEW0,
+                &code_transpose_matrix_row4(inverse.unwrap().transpose()),
+            );
+        }
+        if need.inverse_transpose_world_view {
+            sources.set_constant_rows(
                 CODE_INVERSE_TRANSPOSE_WORLD_VIEW0,
-                &code_transpose_matrix_row4(world_view.inverse()),
+                &code_transpose_matrix_row4(inverse.unwrap()),
             );
         }
     }
@@ -767,6 +781,7 @@ pub fn overlay_viewmodel_depth_hack(
     sources: &mut RuntimeCodeSources,
     viewmodel_clip_from_world: Mat4,
     view_origin: Vec3,
+    world_from_local: Mat4,
 ) {
     produce_depth_from_clip(sources, true);
     sources.set_constant_rows(
@@ -778,6 +793,6 @@ pub fn overlay_viewmodel_depth_hack(
     );
     sources.set_constant_rows(
         CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0,
-        &code_transpose_matrix_row4(viewmodel_clip_from_world),
+        &code_transpose_matrix_row4(viewmodel_clip_from_world * world_from_local),
     );
 }

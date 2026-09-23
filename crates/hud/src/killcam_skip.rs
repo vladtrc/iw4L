@@ -4,10 +4,14 @@ use assets::{MenuCatalog, PreparedLocalizedStrings};
 use bevy::prelude::*;
 use frame::ViewSubject;
 use hud_iw4::{
-    ALIGN_CENTER, ExprError, ExprHost, KEY_UNBOUND, Operand, hudelem_default_text_scale,
-    r_normalized_text_scale, replace_directive, ui_get_font_handle, unbound_directive,
+    ALIGN_CENTER, ALIGN_CENTER_SAFE, ExprError, ExprHost, KEY_UNBOUND, Operand,
+    hudelem_default_text_scale, r_normalized_text_scale, replace_directive, ui_get_font_handle,
+    unbound_directive,
 };
-use killcam_iw4::{LOWER_MESSAGE_ALPHA, LOWER_TEXT_FONT_SIZE, LOWER_TEXT_Y};
+use killcam_iw4::{
+    KC_TIMER_FONT_SCALE, KC_TIMER_GREY, KC_TIMER_HUDELEM_FONT, KC_TIMER_Y, LOWER_MESSAGE_ALPHA,
+    LOWER_TEXT_FONT_SIZE, LOWER_TEXT_Y, kc_timer_fields,
+};
 use net::{ClientActionInput, LocalPresentClient, PresentedSnapshot};
 
 use crate::chrome::{ChromeAssets, execute_chrome_menu, r_text_width};
@@ -57,22 +61,24 @@ fn resolve_directive(
     Some(unbound_directive(unbound, command))
 }
 
-struct KillcamExprHost {
+struct KillcamExprHost<'a> {
+    menu: Option<&'a assets::MenuDef>,
     ms: i32,
     seated: i32,
     game_ended: i32,
     scores_open: i32,
 }
 
-impl ExprHost for KillcamExprHost {
+impl ExprHost for KillcamExprHost<'_> {
     fn milliseconds(&self) -> i32 {
         self.ms
     }
     fn static_dvar_int(&self, index: i32) -> Result<i32, ExprError> {
-        match index {
-            4 => Ok(self.game_ended),
-            _ => Err(ExprError::Host("static dvar")),
-        }
+        let name = self
+            .menu
+            .and_then(|m| m.static_dvar_name(index))
+            .ok_or(ExprError::Host("static dvar name"))?;
+        self.dvar_int(name)
     }
     fn team_field(&self, _field: &str) -> Result<Operand, ExprError> {
         Err(ExprError::Host("team field"))
@@ -125,6 +131,75 @@ impl ExprHost for KillcamExprHost {
     }
 }
 
+fn kc_timer_cmd<'a>(
+    surface: &crate::surface::Hud2dSurface,
+    catalog: &'a MenuCatalog,
+    remaining_ms: i32,
+    fonts: &mut HashMap<String, &'a assets::FontDef>,
+    gaps: &mut HudPresentationGaps,
+) -> Option<Draw2dCmd> {
+    let elem = hud_iw4::HudElem {
+        elem_type: hud_iw4::HE_TYPE_TEXT,
+        y: KC_TIMER_Y,
+        font: KC_TIMER_HUDELEM_FONT,
+        font_scale: KC_TIMER_FONT_SCALE,
+        align_org: hud_iw4::align_org(hud_iw4::ORG_MIDDLE, hud_iw4::ORG_MIDDLE),
+        align_screen: hud_iw4::align_screen(ALIGN_CENTER_SAFE, hud_iw4::ALIGN_USER_MIN),
+        ..Default::default()
+    };
+    let text_scale = hud_iw4::hudelem_text_scale(elem.font, elem.font_scale);
+    let font_name = ui_get_font_handle(
+        hud_iw4::hudelem_font_ui_enum(elem.font),
+        surface.scale_virtual_to_real()[1],
+        text_scale,
+    );
+    let Some(font) = catalog.font(font_name) else {
+        gaps.raise(GapCause::FontMissing {
+            name: font_name.to_owned(),
+        });
+        return None;
+    };
+    fonts.entry(font_name.to_owned()).or_insert(font);
+    let (minutes, seconds, tenths) = kc_timer_fields(remaining_ms);
+    let text = format!("{minutes}:{seconds:02}.{tenths}");
+    let nscale = r_normalized_text_scale(font.pixel_height, text_scale);
+    let (horz_align, vert_align) = hud_iw4::hud_elem_screen_align(elem.align_screen);
+    let glyph = surface.apply_rect(0.0, 0.0, nscale, nscale, horz_align, vert_align);
+    let text_width = r_text_width(font, &text) as f32 * glyph.w;
+    let font_height = hud_iw4::hudelem_em_px(
+        elem.font,
+        elem.font_scale,
+        surface.scale_virtual_to_real()[1],
+    );
+    let placed =
+        hud_iw4::hud_elem_placement(surface.placement(), &elem, 0, text_width, font_height);
+    Some(Draw2dCmd {
+        material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+        x: (placed.x + 0.5).floor(),
+        y: (placed.text_baseline_y() + 0.5).floor(),
+        w: glyph.w,
+        h: glyph.h,
+        s0: 0.0,
+        t0: 0.0,
+        s1: 1.0,
+        t1: 1.0,
+        color: [KC_TIMER_GREY, KC_TIMER_GREY, KC_TIMER_GREY, 1.0],
+        material: assets::AssetRef::bare_name(&font.material).to_owned(),
+        op: Draw2dOp::TextRun {
+            font: font_name.to_owned(),
+            scale: nscale,
+            text,
+            loc_key: String::new(),
+
+            style: crate::draw2d::TEXT_STYLE_HUDELEM,
+            fx: None,
+            glow: None,
+        },
+        provenance: Draw2dProvenance::CgDraw { site: "kc_timer" },
+        layer: 1,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_killcam_skip(
     surface: Res<crate::surface::Hud2dSurface>,
@@ -167,6 +242,7 @@ pub(crate) fn update_killcam_skip(
         return;
     };
     let host = KillcamExprHost {
+        menu: catalog.get("killcam_fullscreen"),
         ms: sys_milliseconds() as i32,
         seated: 1,
         game_ended,
@@ -288,7 +364,7 @@ pub(crate) fn update_killcam_skip(
                 text,
                 loc_key: key.to_owned(),
 
-                style: crate::draw2d::TEXT_STYLE_UNREAD,
+                style: crate::draw2d::TEXT_STYLE_HUDELEM,
                 fx: None,
                 glow: None,
             },
@@ -297,6 +373,17 @@ pub(crate) fn update_killcam_skip(
             },
             layer: 1,
         });
+    }
+
+    if !input.menu_open {
+        if let Some(cmd) = kc_timer_cmd(&surface, catalog, hud.kc_timer_ms, &mut fonts, &mut gaps) {
+            let _ = hud_images.get(
+                crate::images::HUD_CHROME_NAMESPACE,
+                &cmd.material,
+                &mut images,
+            );
+            cmds.push(cmd);
+        }
     }
 
     let list = Draw2dList { cmds };

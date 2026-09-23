@@ -1143,6 +1143,7 @@ fn encode_client_meta(out: &mut WireWriter, meta: &ClientSnapshotMeta) {
         Some(hud) => {
             out.put_u8(if hud.final_kill { 2 } else { 1 });
             out.put_i32(hud.time_until_respawn_ms);
+            out.put_i32(hud.kc_timer_ms);
         }
     }
     out.put_u8(lifecycle_tag(meta.lifecycle));
@@ -1210,6 +1211,7 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
         tag @ (1 | 2) => Some(sim::KillcamHud {
             final_kill: tag == 2,
             time_until_respawn_ms: input.get_i32()?,
+            kc_timer_ms: input.get_i32()?,
         }),
         _ => return Err(WireError::Malformed("bad killcam HUD tag")),
     };

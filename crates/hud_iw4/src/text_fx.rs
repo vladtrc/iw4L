@@ -6,6 +6,13 @@ pub const TEXT_RENDERFLAG_FX_DECODE: u32 = 0x40;
 
 pub const TEXT_RENDERFLAG_PADDING: u32 = 0x80;
 
+pub const TEXT_RENDERFLAG_OUTLINE: u32 = 0x400;
+
+pub const TEXT_RENDERFLAG_OUTLINE_EXTRA: u32 = 0x800;
+
+pub const TEXT_OUTLINE_OFFSETS: [[f32; 2]; 4] =
+    [[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]];
+
 pub const FX_DECODE_RENDERFLAGS: u32 = TEXT_RENDERFLAG_FX_DECODE | TEXT_RENDERFLAG_PADDING;
 
 pub const DECODE_CHARACTERS_MATERIAL: &str = "decode_characters";
@@ -216,6 +223,18 @@ pub fn text_drop_shadow_offset(render_flags: u32) -> Option<f32> {
         1.0
     } else {
         2.0
+    })
+}
+
+#[must_use]
+pub fn text_outline_size(render_flags: u32) -> Option<f32> {
+    if render_flags & TEXT_RENDERFLAG_OUTLINE == 0 {
+        return None;
+    }
+    Some(if render_flags & TEXT_RENDERFLAG_OUTLINE_EXTRA == 0 {
+        1.0
+    } else {
+        1.3
     })
 }
 

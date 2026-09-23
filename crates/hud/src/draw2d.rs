@@ -38,8 +38,6 @@ pub struct TextRunGlow {
 
 pub const TEXT_STYLE_HUDELEM: i32 = 3;
 
-pub const TEXT_STYLE_UNREAD: i32 = -1;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TextRunFx {
     pub scene_time: i32,
@@ -576,6 +574,9 @@ fn text_run_quads(
 
     let shadow_offset = hud_iw4::text_drop_shadow_offset(render_flags);
     let shadow_color = [0.0, 0.0, 0.0, run_color[3]];
+    let outline_size = hud_iw4::text_outline_size(render_flags);
+    // Every outline is drawn before any face glyph.
+    let mut outline = Vec::new();
 
     let mut cursor_x = x;
     let mut color = run_color;
@@ -670,6 +671,30 @@ fn text_run_quads(
                 }
                 None => (material.to_owned(), glyph.s0, glyph.t0, glyph.s1, glyph.t1),
             };
+            if let Some(size) = outline_size {
+                for [dx, dy] in hud_iw4::TEXT_OUTLINE_OFFSETS {
+                    let (xy, st) = hud_iw4::rb_draw_stretch_pic_corners(
+                        gx + size * dx,
+                        gy + size * dy,
+                        gw,
+                        gh,
+                        s0,
+                        t0,
+                        s1,
+                        t1,
+                    );
+                    outline.push(Draw2dQuad {
+                        xy,
+                        st,
+                        color: shadow_color,
+                        material: quad_material.clone(),
+                        material_namespace,
+                        provenance: provenance.clone(),
+                        layer,
+                        clip,
+                    });
+                }
+            }
             if let Some(off) = shadow_offset {
                 let (xy, st) = hud_iw4::rb_draw_stretch_pic_corners(
                     gx + off,
@@ -712,7 +737,8 @@ fn text_run_quads(
         cursor_x += f32::from(advance) * x_scale;
         max_length_remaining = max_length_remaining.saturating_sub(1);
     }
-    out
+    outline.extend(out);
+    outline
 }
 
 fn quad_from_cmd(cmd: &Draw2dCmd, clip: Option<[f32; 4]>) -> Draw2dQuad {

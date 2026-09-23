@@ -2,11 +2,9 @@ use std::time::Instant;
 
 use bevy::prelude::*;
 use frame::{
-    AppScreen, LaunchIdentity, LaunchReport, LifeFrontPublished, LifeStarted, MatchTornDown,
-    UiDraw, ViewSubject,
+    AppScreen, LaunchIdentity, LaunchReport, LifeFrontPublished, LifeStarted, MatchTornDown, UiDraw,
 };
-use net::{ClientSet, LocalPresentClient, PresentedSnapshot, UpdatePhaseCensus};
-use sim::ClientLifecycle;
+use net::{ClientSet, UpdatePhaseCensus};
 
 use crate::blood::{BloodGpuJob, BloodOverlayLatch, HudRootVisible, update_blood_overlay};
 use crate::compass::{CompassRaster, spawn_compass, update_compass};
@@ -159,8 +157,8 @@ impl Plugin for HudPlugin {
     }
 }
 
-fn hud_root_should_show(screen: AppScreen, alive: bool, in_killcam: bool, ui_draw: bool) -> bool {
-    matches!(screen, AppScreen::InGame) && (alive || in_killcam) && ui_draw
+fn hud_root_should_show(screen: AppScreen, ui_draw: bool) -> bool {
+    matches!(screen, AppScreen::InGame) && ui_draw
 }
 
 fn hide_tess_when_hud_hidden(
@@ -304,27 +302,13 @@ fn ensure_hud_root(mut commands: Commands, existing: Query<Entity, With<HudRoot>
 
 fn sync_hud_visibility(
     screen: Res<AppScreen>,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
-    actions: Option<Res<net::ClientActionInput>>,
-    view: Option<Res<ViewSubject>>,
     ui_draw: Option<Res<UiDraw>>,
     input: Option<Res<frame::HudInputView>>,
     mut roots: Query<&mut Visibility, With<HudRoot>>,
     mut visible: ResMut<HudRootVisible>,
 ) {
-    let alive = presented
-        .snapshot()
-        .and_then(|s| s.meta.for_client(local.0))
-        .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive);
-    let scores_down = actions.as_ref().is_some_and(|a| a.client.kb.scores.active);
-    let scoreboard = presented
-        .snapshot()
-        .is_some_and(|s| crate::scoreboard::displayed(scores_down, s.meta.phase));
-    let in_killcam = view.as_deref().is_some_and(|v| v.in_killcam());
     let ui_on = ui_draw.is_some_and(|d| d.0);
-    let show = hud_root_should_show(*screen, alive || scoreboard, in_killcam, ui_on)
-        && !input.is_some_and(|input| input.menu_open);
+    let show = hud_root_should_show(*screen, ui_on) && !input.is_some_and(|input| input.menu_open);
     visible.0 = Some(i32::from(show));
     for mut vis in &mut roots {
         let want = if show {

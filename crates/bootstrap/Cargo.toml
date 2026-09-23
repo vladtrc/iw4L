@@ -33,7 +33,6 @@ replay.workspace = true
 session.workspace = true
 bots = { path = "../bots" }
 hud = { path = "../hud" }
-gpu_probe.workspace = true
 perf.workspace = true
 sha2.workspace = true
 serde_json.workspace = true

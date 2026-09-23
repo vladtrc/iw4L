@@ -2,14 +2,22 @@
 #![forbid(unsafe_code)]
 
 mod asset_type;
+mod attachment;
 mod content;
 mod envelope;
 mod load;
 pub mod size;
+mod weapon_override;
 mod wire;
 mod zone;
 
 pub use asset_type::AssetType;
+pub use attachment::{
+    AttachmentAddOns, AttachmentAdsSettings, AttachmentAimAssist, AttachmentAmmoGeneral,
+    AttachmentAmmunition, AttachmentDamage, AttachmentFacts, AttachmentGeneral, AttachmentGunKick,
+    AttachmentHipSpread, AttachmentIdleSettings, AttachmentReload, AttachmentScales,
+    AttachmentSight,
+};
 pub use content::{
     AssetSink, AssetTable, ScriptStrings, XASSET_ENTRY_LEN, XASSET_LIST_LEN, load_zone,
     open_asset_table,
@@ -19,6 +27,9 @@ pub use envelope::{
     MAGIC_UNSIGNED, Signing, ZONE_VERSION_PC, parse_file_header,
 };
 pub use load::{AssetLinkSink, load_asset_at, load_asset_at_observed, load_asset_body};
+pub use weapon_override::{
+    AnimOverride, FxOverride, NoteTrackOverride, ReloadOverride, ScriptStringMap, SoundOverride,
+};
 pub use wire::{Iw5WireFormat, WireAssetTable, WirePointer, WireTableError, read_wire_asset_table};
 pub use zone::{
     AttachmentGeometry, BLOCK_STACK_CAP, BlockType, ClipMapGeometry, ComWorldGeometry,

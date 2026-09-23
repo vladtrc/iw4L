@@ -1143,6 +1143,7 @@ pub struct WeaponGeometry {
     pub melee_damage: i32,
 
     pub overlay_reticle: i32,
+    pub overlay_interface: i32,
 
     pub ads_zoom_in_frac: f32,
 

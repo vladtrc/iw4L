@@ -33,6 +33,7 @@ bevy.workspace = true
 frame.workspace = true
 bcdec_rs.workspace = true
 serde_json.workspace = true
+async-lock.workspace = true
 png.workspace = true
 
 # `load_pool` puts its workers back on the process's CPUs (`session_load`).

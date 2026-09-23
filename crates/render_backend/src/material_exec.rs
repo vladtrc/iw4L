@@ -351,7 +351,12 @@ fn overlay_draw_material(
             if host_viewmodel_render_fx_flags(object_id) != 0
                 && let Some(clip) = runtime.frame.viewmodel_clip_from_world
             {
-                overlay_viewmodel_depth_hack(scratch, clip, runtime.frame.view_origin);
+                overlay_viewmodel_depth_hack(
+                    scratch,
+                    clip,
+                    runtime.frame.view_origin,
+                    world_from_local,
+                );
             }
         }
         RetainedDrawKind::ParticleCloud { clouds, .. } => {
@@ -433,7 +438,12 @@ fn overlay_draw_obj_only(
                 && xmodel_depth_hack(draw.key)
                 && let Some(clip) = runtime.frame.viewmodel_clip_from_world
             {
-                overlay_viewmodel_depth_hack(scratch, clip, runtime.frame.view_origin);
+                overlay_viewmodel_depth_hack(
+                    scratch,
+                    clip,
+                    runtime.frame.view_origin,
+                    smodel_code_world_from_local(&draw.kind),
+                );
             }
         }
         RetainedDrawKind::ParticleCloud { clouds, .. } => {

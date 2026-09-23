@@ -320,36 +320,6 @@ fn write_run_package(artifacts: &Path, lines: &[String]) -> Vec<String> {
         }
     }
 
-    let framebuffers = gpu_probe::framebuffers();
-    if !framebuffers.is_empty() {
-        let path = dir.join("framebuffers.csv");
-        match tables::write_framebuffers(&path, &framebuffers) {
-            Ok(()) => out.push(format!(
-                "run package: framebuffers.csv {} passes, {} keys",
-                framebuffers.len(),
-                framebuffers
-                    .iter()
-                    .map(|pass| pass.keys.len())
-                    .sum::<usize>()
-            )),
-            Err(error) => out.push(format!(
-                "run package: framebuffers.csv not written ({error})"
-            )),
-        }
-    }
-
-    let encoders = gpu_probe::encoders();
-    if !encoders.is_empty() {
-        let path = dir.join("encoders.csv");
-        match tables::write_encoders(&path, &encoders) {
-            Ok(()) => out.push(format!(
-                "run package: encoders.csv {} shapes",
-                encoders.len()
-            )),
-            Err(error) => out.push(format!("run package: encoders.csv not written ({error})")),
-        }
-    }
-
     let jobs = assets::load_jobs::snapshot();
     let path = dir.join("load_jobs.csv");
     if jobs.rows.is_empty() {
