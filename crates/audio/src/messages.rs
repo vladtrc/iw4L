@@ -40,6 +40,16 @@ pub struct WeaponSound {
     pub snd_ent: Option<u32>,
 }
 
+/// A weapon sound whose alias was bound to its row when the installed bank
+/// was. It plays that row; a bank other than `bank_revision` drops it.
+#[derive(Message, Clone, Debug)]
+pub struct BoundWeaponSound {
+    pub bank_revision: u64,
+    pub index: usize,
+    pub origin_inches: Option<[f32; 3]>,
+    pub snd_ent: Option<u32>,
+}
+
 #[derive(Message, Clone, Debug)]
 pub struct ViewmodelNotetracks {
     pub weapon: u32,

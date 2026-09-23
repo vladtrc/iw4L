@@ -498,6 +498,9 @@ impl ClipStore {
 pub(crate) struct PendingOneshot {
     pub namespace: AssetNamespace,
     pub alias: String,
+    /// The alias's row in the bank it was bound against, when the caller had
+    /// one; the start resumes on that row rather than on a name lookup.
+    pub bound: Option<usize>,
     pub variant: usize,
     pub volume: f32,
     pub pitch: f32,
@@ -596,6 +599,7 @@ pub(crate) fn clip_key_for_variant(
     bank: &SoundCatalog,
     ns: AssetNamespace,
     alias: &str,
+    bound: Option<usize>,
     variant: usize,
     loaded_name: Option<&str>,
     loaded_ns: Option<AssetNamespace>,
@@ -605,15 +609,21 @@ pub(crate) fn clip_key_for_variant(
     {
         return Some(ClipKey::Loaded(idx));
     }
-    if let Some(idx) = bank
-        .sound_in(ns, alias)
+    let sound = match bound {
+        Some(index) => bank.sound_at(index),
+        None => bank.sound_in(ns, alias),
+    };
+    if let Some(idx) = sound
         .and_then(|s| s.aliases.get(variant))
         .and_then(|row| row.loaded.bound_index())
     {
         return Some(ClipKey::Loaded(idx));
     }
-    bank.streamed_for_variant(ns, alias, variant)
-        .map(|(sns, dir, name)| ClipKey::Streamed { ns: sns, dir, name })
+    match bound {
+        Some(index) => bank.streamed_for_variant_at(index, variant),
+        None => bank.streamed_for_variant(ns, alias, variant),
+    }
+    .map(|(sns, dir, name)| ClipKey::Streamed { ns: sns, dir, name })
 }
 
 static WORKERS: AtomicU64 = AtomicU64::new(0);

@@ -29,7 +29,7 @@ struct ScriptModelDobjs {
 }
 
 struct PersistentScriptDobj {
-    dobj: assets::DObj,
+    dobj: std::sync::Arc<assets::DObj>,
     reuse_key: assets::dobj::DObjReuseKey,
 }
 
@@ -507,6 +507,7 @@ fn pose_script_models(
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<FpvLens>>,
     owners: Query<(Entity, &WorldScriptModelInstance, &Transform, &Visibility)>,
     mut persist: ResMut<ScriptModelDobjs>,
+    prepared: Res<crate::anim::model_materials::PreparedModelMaterials>,
     mut product: ResMut<ScriptModelPoseProduct>,
     select: Res<RenderFocusSelect>,
     mut focus: ResMut<RenderFocus>,
@@ -598,7 +599,14 @@ fn pose_script_models(
             .collect();
 
         let asset_index = if let Some(id) = owner_id {
-            if compose_or_reuse_script_dobj(&mut persist, id, &assets, &owner.dobj_state).is_none()
+            if compose_or_reuse_script_dobj(
+                &mut persist,
+                id,
+                &assets,
+                &owner.dobj_state,
+                &prepared,
+            )
+            .is_none()
             {
                 persist.by_id.remove(&id);
                 continue;
@@ -1064,11 +1072,14 @@ pub fn collect_presented_models<'a>(
     Some((models, skels))
 }
 
+/// A single-model composition takes the model's DObj prepared before Ready;
+/// only a composition a script built of several models is composed here.
 fn compose_or_reuse_script_dobj(
     persist: &mut ScriptModelDobjs,
     id: u32,
     catalog: &assets::MapXModelSceneCatalog,
     state: &assets::dobj::DObjSemanticState,
+    prepared: &crate::anim::model_materials::PreparedModelMaterials,
 ) -> Option<()> {
     let key = script_dobj_reuse_key(state);
     let reuse = persist
@@ -1079,7 +1090,14 @@ fn compose_or_reuse_script_dobj(
         return Some(());
     }
     let (specs, _) = collect_presented_models(catalog, state)?;
-    let dobj = assets::DObj::build(&specs).ok()?;
+    let single = match state.composition.models.as_slice() {
+        [only] => prepared.scene_dobj(&only.model).cloned(),
+        _ => None,
+    };
+    let dobj = match single {
+        Some(dobj) => dobj,
+        None => std::sync::Arc::new(assets::DObj::build(&specs).ok()?),
+    };
     persist.by_id.insert(
         id,
         PersistentScriptDobj {

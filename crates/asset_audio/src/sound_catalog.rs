@@ -640,6 +640,10 @@ impl SoundCatalog {
         found
     }
 
+    pub fn sound_at(&self, index: usize) -> Option<&CapturedSound> {
+        self.sounds.get(index)
+    }
+
     pub fn sound_in(&self, ns: AssetNamespace, alias: &str) -> Option<&CapturedSound> {
         self.index_in(ns, alias).map(|i| &self.sounds[i])
     }
@@ -920,6 +924,16 @@ impl SoundCatalog {
         self.streamed_from_row(ns, row)
     }
 
+    pub fn streamed_for_variant_at(
+        &self,
+        index: usize,
+        variant: usize,
+    ) -> Option<(AssetNamespace, String, String)> {
+        let sound = self.sounds.get(index)?;
+        let row = sound.aliases.get(variant)?;
+        self.streamed_from_row(ns_of(sound.game), row)
+    }
+
     fn streamed_from_row(
         &self,
         ns: AssetNamespace,
@@ -1075,6 +1089,17 @@ impl SoundCatalog {
         self.pick_loaded_outcome_depth(ns, alias, rng, avoid, 0)
     }
 
+    /// The same pick for an alias already bound to its row in this catalog.
+    pub fn pick_loaded_outcome_at<'a>(
+        &'a self,
+        index: usize,
+        rng: &mut u32,
+        avoid: Option<usize>,
+    ) -> Option<PickLoadedOutcome<'a>> {
+        let sound = self.sounds.get(index)?;
+        self.pick_from_sound(ns_of(sound.game), sound, rng, avoid, 0)
+    }
+
     fn pick_loaded_outcome_depth<'a>(
         &'a self,
         ns: AssetNamespace,
@@ -1084,6 +1109,17 @@ impl SoundCatalog {
         depth: u8,
     ) -> Option<PickLoadedOutcome<'a>> {
         let sound = self.sound_in(ns, alias)?;
+        self.pick_from_sound(ns, sound, rng, avoid, depth)
+    }
+
+    fn pick_from_sound<'a>(
+        &'a self,
+        ns: AssetNamespace,
+        sound: &'a CapturedSound,
+        rng: &mut u32,
+        avoid: Option<usize>,
+        depth: u8,
+    ) -> Option<PickLoadedOutcome<'a>> {
         if sound.aliases.is_empty() {
             return Some(PickLoadedOutcome {
                 variant_index: 0,

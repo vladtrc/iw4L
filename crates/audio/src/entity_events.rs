@@ -298,10 +298,7 @@ pub(crate) fn register_entity_event_audio(app: &mut App) {
 /// when it plays.
 #[derive(Clone, Debug)]
 enum NotetrackSound {
-    Bound {
-        namespace: assets::AssetNamespace,
-        index: usize,
-    },
+    Bound(usize),
     Unbound(String),
 }
 
@@ -338,10 +335,7 @@ impl NotetrackSoundTable {
             for (note, action) in weapons.notetrack_actions_of(weapon) {
                 let sound = action.sound_alias.as_deref().map(|alias| {
                     match bank.index_in(namespace, alias) {
-                        Some(index) => NotetrackSound::Bound {
-                            namespace: bank.namespace_of_alias(index),
-                            index,
-                        },
+                        Some(index) => NotetrackSound::Bound(index),
                         None => {
                             unbound += 1;
                             NotetrackSound::Unbound(alias.to_owned())
@@ -398,7 +392,7 @@ pub(crate) fn play_viewmodel_notetrack_messages(
     weapons: Option<Res<PreparedWeapons>>,
     bank: Option<Res<SoundBank>>,
     mut table: ResMut<NotetrackSoundTable>,
-    mut output: MessageWriter<WeaponSound>,
+    mut output: MessageWriter<crate::BoundWeaponSound>,
 ) {
     let bound_bank = bank
         .as_deref()
@@ -423,7 +417,7 @@ fn apply_viewmodel_notetrack(
     note: &str,
     bank: Option<&assets::SoundCatalog>,
     table: &mut NotetrackSoundTable,
-    output: &mut MessageWriter<WeaponSound>,
+    output: &mut MessageWriter<crate::BoundWeaponSound>,
 ) {
     if note.eq_ignore_ascii_case("end") {
         return;
@@ -453,13 +447,10 @@ fn apply_viewmodel_notetrack(
         });
     }
     match action.sound {
-        Some(NotetrackSound::Bound { namespace, index }) => {
-            let Some(alias) = bank.name_at(index) else {
-                return;
-            };
-            output.write(WeaponSound {
-                namespace,
-                alias: alias.to_owned(),
+        Some(NotetrackSound::Bound(index)) => {
+            output.write(crate::BoundWeaponSound {
+                bank_revision: bank.revision(),
+                index,
                 origin_inches: None,
                 snd_ent: Some(crate::SND_ENT_LOCAL),
             });

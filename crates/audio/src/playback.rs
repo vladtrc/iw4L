@@ -19,7 +19,8 @@ use crate::clip_store::{
     clip_keys_for_alias, deadline_for,
 };
 use crate::messages::{
-    AliasCommand, Footstep, LandSound, PlayAlias, SND_ENT_LOCAL, ViewmodelNotetracks, WeaponSound,
+    AliasCommand, BoundWeaponSound, Footstep, LandSound, PlayAlias, SND_ENT_LOCAL,
+    ViewmodelNotetracks, WeaponSound,
 };
 use crate::pcm::{LoopingPcmAudio, PcmAudio};
 use crate::space::{distance_inches, transform_inches};
@@ -157,6 +158,7 @@ impl Plugin for PlayerSoundPlugin {
             .add_message::<AliasCommand>()
             .add_message::<Footstep>()
             .add_message::<WeaponSound>()
+            .add_message::<BoundWeaponSound>()
             .add_message::<ViewmodelNotetracks>()
             .init_resource::<crate::entity_events::NotetrackSoundTable>()
             .add_message::<LandSound>()
@@ -169,6 +171,7 @@ impl Plugin for PlayerSoundPlugin {
                         .before(play_alias_messages)
                         .before(play_footstep_messages)
                         .before(play_weapon_sound_messages)
+                        .before(play_bound_weapon_sounds)
                         .before(play_land_sound_messages),
                     drain_pending_oneshots
                         .after(play_alias_messages)
@@ -182,8 +185,10 @@ impl Plugin for PlayerSoundPlugin {
                     play_alias_messages.after(FxSoundPublished),
                     play_footstep_messages,
                     crate::entity_events::play_viewmodel_notetrack_messages
-                        .before(play_weapon_sound_messages),
+                        .before(play_weapon_sound_messages)
+                        .before(play_bound_weapon_sounds),
                     play_weapon_sound_messages,
+                    play_bound_weapon_sounds.after(drain_pending_oneshots),
                     play_land_sound_messages,
                     crate::map_doors::update.before(crate::ambient::update_map_emitter_gain),
                     crate::destructible_loops::update
@@ -497,6 +502,62 @@ fn play_weapon_sound_messages(
     }
 }
 
+fn play_bound_weapon_sounds(
+    mut events: MessageReader<BoundWeaponSound>,
+    mut commands: Commands,
+    mut pcm_assets: ResMut<Assets<PcmAudio>>,
+    mut shared: ResMut<SharedPlayAssets>,
+    mut pick: ResMut<SoundPickState>,
+    mut gaps: ResMut<MissingAliasGaps>,
+    mut clips: Option<ResMut<ClipStore>>,
+    mut pending: ResMut<PendingStarts>,
+    mut occupancy: ResMut<VoiceOccupancy>,
+    mut decisions: ResMut<StartDecisions>,
+    bank: Option<Res<SoundBank>>,
+    iwd: Option<Res<SoundIwd>>,
+    epoch: Res<MatchEpoch>,
+    listeners: Query<&Transform, With<AmbientListener>>,
+) {
+    let Some(bank) = bank else {
+        for _ in events.read() {}
+        return;
+    };
+    let pose = listener_pose(&listeners);
+    let iwd = iwd.as_deref().map(|s| s.0.as_ref());
+    for event in events.read() {
+        if event.bank_revision != bank.0.revision() {
+            continue;
+        }
+        let Some(alias) = bank.0.name_at(event.index) else {
+            continue;
+        };
+        let namespace = bank.0.namespace_of_alias(event.index);
+        let outcome = play_oneshot_recorded(
+            &mut commands,
+            &mut pcm_assets,
+            &mut shared,
+            &bank.0,
+            iwd,
+            namespace,
+            alias,
+            Some(event.index),
+            event.origin_inches,
+            pose,
+            &mut pick,
+            clips.as_deref_mut(),
+            &mut pending,
+            &mut occupancy,
+            &mut decisions,
+            event.snd_ent,
+            SoundClass::Weapon,
+            epoch.0,
+        );
+        if outcome.allows_binding_fallback() {
+            gaps.record(alias);
+        }
+    }
+}
+
 fn play_land_sound_messages(
     mut events: MessageReader<LandSound>,
     mut commands: Commands,
@@ -725,6 +786,7 @@ fn drain_pending_oneshots(
                     iwd,
                     entry.namespace,
                     &entry.alias,
+                    entry.bound,
                     entry.origin_inches,
                     pose,
                     &mut pick,
@@ -784,6 +846,49 @@ pub(crate) fn play_alias_oneshot(
     class: SoundClass,
     epoch: u64,
 ) -> StartOutcome {
+    play_oneshot_recorded(
+        commands,
+        pcm_assets,
+        shared,
+        bank,
+        iwd,
+        namespace,
+        alias,
+        None,
+        origin_inches,
+        listener,
+        pick,
+        clips,
+        pending,
+        occupancy,
+        decisions,
+        snd_ent,
+        class,
+        epoch,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn play_oneshot_recorded(
+    commands: &mut Commands,
+    pcm_assets: &mut Assets<PcmAudio>,
+    shared: &mut SharedPlayAssets,
+    bank: &SoundCatalog,
+    iwd: Option<&NamespaceSoundIwd>,
+    namespace: AssetNamespace,
+    alias: &str,
+    bound: Option<usize>,
+    origin_inches: Option<[f32; 3]>,
+    listener: Option<(Vec3, Vec3)>,
+    pick: &mut SoundPickState,
+    clips: Option<&mut ClipStore>,
+    pending: &mut PendingStarts,
+    occupancy: &mut VoiceOccupancy,
+    decisions: &mut StartDecisions,
+    snd_ent: Option<u32>,
+    class: SoundClass,
+    epoch: u64,
+) -> StartOutcome {
     let started = play_alias_oneshot_at(
         commands,
         pcm_assets,
@@ -792,6 +897,7 @@ pub(crate) fn play_alias_oneshot(
         iwd,
         namespace,
         alias,
+        bound,
         origin_inches,
         listener,
         pick,
@@ -923,6 +1029,7 @@ fn play_alias_oneshot_at(
     iwd: Option<&NamespaceSoundIwd>,
     namespace: AssetNamespace,
     alias: &str,
+    bound: Option<usize>,
     origin_inches: Option<[f32; 3]>,
     listener: Option<(Vec3, Vec3)>,
     pick: &mut SoundPickState,
@@ -938,7 +1045,11 @@ fn play_alias_oneshot_at(
         .last_variant
         .get(&(namespace, alias.to_owned()))
         .copied();
-    let Some(outcome) = bank.pick_loaded_outcome(namespace, alias, &mut pick.lcg, avoid) else {
+    let picked = match bound {
+        Some(index) => bank.pick_loaded_outcome_at(index, &mut pick.lcg, avoid),
+        None => bank.pick_loaded_outcome(namespace, alias, &mut pick.lcg, avoid),
+    };
+    let Some(outcome) = picked else {
         return OneshotStart::failed(StartFailure::MissingAlias);
     };
     let variant_index = outcome.variant_index;
@@ -951,6 +1062,7 @@ fn play_alias_oneshot_at(
         bank,
         namespace,
         alias,
+        bound,
         variant_index,
         loaded_name,
         loaded_ns,
@@ -960,9 +1072,11 @@ fn play_alias_oneshot_at(
     let (volume, pitch, layer) = if let Some(picked) = &outcome.picked {
         (picked.volume, picked.pitch, picked.layer.clone())
     } else {
-        let row = bank
-            .sound_in(namespace, alias)
-            .and_then(|s| s.aliases.get(variant_index));
+        let row = match bound {
+            Some(index) => bank.sound_at(index),
+            None => bank.sound_in(namespace, alias),
+        }
+        .and_then(|s| s.aliases.get(variant_index));
         let (volume, pitch) = row
             .map(|row| streamed_row_volume_pitch(row, &mut pick.lcg))
             .unwrap_or((1.0, 1.0));
@@ -975,6 +1089,7 @@ fn play_alias_oneshot_at(
         clip.clone(),
         namespace,
         alias,
+        bound,
         variant_index,
         volume,
         pitch,
@@ -1005,6 +1120,7 @@ fn play_alias_oneshot_at(
         iwd,
         namespace,
         alias,
+        bound,
         origin_inches,
         listener,
         pick,
@@ -1037,6 +1153,7 @@ fn take_or_pending_clip(
     clip: ClipKey,
     namespace: AssetNamespace,
     alias: &str,
+    bound: Option<usize>,
     variant: usize,
     volume: f32,
     pitch: f32,
@@ -1062,6 +1179,7 @@ fn take_or_pending_clip(
                 pending.push_oneshot(PendingOneshot {
                     namespace,
                     alias: alias.to_owned(),
+                    bound,
                     variant,
                     volume,
                     pitch,
@@ -1089,6 +1207,7 @@ fn submit_prepared_oneshot(
     iwd: Option<&NamespaceSoundIwd>,
     namespace: AssetNamespace,
     alias: &str,
+    bound: Option<usize>,
     origin_inches: Option<[f32; 3]>,
     listener: Option<(Vec3, Vec3)>,
     pick: &mut SoundPickState,
@@ -1106,7 +1225,10 @@ fn submit_prepared_oneshot(
     pitch: f32,
     layer: Option<&str>,
 ) -> OneshotStart {
-    let sound = bank.sound_in(namespace, alias);
+    let sound = match bound {
+        Some(index) => bank.sound_at(index),
+        None => bank.sound_in(namespace, alias),
+    };
     let row = sound.and_then(|s| s.aliases.get(variant_index));
     let channel = sound.and_then(|s| s.ent_channel(variant_index));
     let mut world_detail: Option<String> = None;
@@ -1302,6 +1424,7 @@ fn play_secondary_layer(
         iwd,
         namespace,
         sec,
+        None,
         origin_inches,
         listener,
         pick,
