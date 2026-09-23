@@ -116,9 +116,9 @@ pub use pm_weapon::{
     pm_weapon_ordinary, pm_weapon_time_adjust, spawn_clip_stock, spawn_weapon_hand,
 };
 pub use reload::{
-    ReloadDelayedOutcome, pm_reload_clip, pm_weapon_allow_reload, pm_weapon_arm_reload_add_delay,
-    pm_weapon_process_input_wants_reload, pm_weapon_reload_delayed_action,
-    reload_weaponstate_may_credit,
+    DualMagTimes, ReloadDelayedOutcome, pm_reload_clip, pm_weapon_allow_reload,
+    pm_weapon_arm_reload_add_delay, pm_weapon_process_input_wants_reload,
+    pm_weapon_reload_delayed_action, reload_weaponstate_may_credit,
 };
 pub use spread::{
     AIM_SPREAD_AIR_DECAY, AIM_SPREAD_AIR_VIEWCHANGE, AIM_SPREAD_MOVE_SPEED_THRESHOLD_DEFAULT,
@@ -159,9 +159,9 @@ pub use weap_anim::{
 };
 pub use weap_anim_rate::{
     ACTION_GOAL_TIME_SECS, ACTIVE_GOAL_WEIGHT, ANIM_RATE_TABLE, AnimRateOffsets,
-    IDLE_INTERRUPT_GOAL_TIME_SECS, INACTIVE_GOAL_WEIGHT, WEAP_ANIM_EVENT_MASK,
+    IDLE_INTERRUPT_GOAL_TIME_SECS, INACTIVE_GOAL_WEIGHT, WEAP_ANIM_EVENT_MASK, WEAPON_ANIM_SLOTS,
     known_complete_rate_timer_offset, known_rate_timer_offset, playback_rate,
-    slot_for_weap_anim_event, slot_uses_native_rate,
+    slot_for_weap_anim_event, slot_uses_native_rate, weap_anim_extra,
 };
 pub use weapon_change::{
     PMF_CHANGE_BLOCK, PMF_LADDER as PMF_LADDER_WEAPON, check_for_change_admits,

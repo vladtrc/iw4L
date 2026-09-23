@@ -101,6 +101,15 @@ pub trait AssetLinkSink {
         Ok(())
     }
 
+    fn capture_attachment(
+        &mut self,
+        s: &ZoneStream<'_>,
+        geometry: &crate::zone::AttachmentGeometry,
+    ) -> Result<()> {
+        let _ = (s, geometry);
+        Ok(())
+    }
+
     fn xmodel_name_ptr(&self, _slot: Ptr) -> Option<Ptr> {
         None
     }
@@ -204,7 +213,7 @@ pub fn load_asset_at_observed(
             s.note_offset(target);
             links.alias(ty, slot, target)?;
             if ty == AssetType::Attachment {
-                s.alias_attachment_overlay(slot, target);
+                s.alias_attachment_name(slot, target);
             }
             Ok(false)
         }
@@ -218,7 +227,7 @@ pub fn load_asset_at_observed(
                 }
             }
             if ty == AssetType::Attachment {
-                s.commit_attachment_overlay(slot, insert_slot);
+                s.commit_attachment_name(slot, insert_slot);
             }
             links.loaded(s, ty, slot, insert_slot)?;
             Ok(true)

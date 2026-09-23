@@ -57,9 +57,8 @@ use super::shadowmap_spot_gpu::{
     ensure_shadowmap_spot_targets,
 };
 use super::shadowmap_sun_gpu::{
-    SHADOWMAP_SUN_COLOR_FORMAT, SHADOWMAP_SUN_DEPTH_FORMAT, ShadowmapSunGpu, SmodelShadowSpan,
-    bind_resident_smodel_index_epochs, ensure_shadowmap_sun_target, scissor_xywh,
-    smodel_shadow_geometry_reusable, upload_smodel_index_epochs, upload_xmodel_index_epochs,
+    SHADOWMAP_SUN_COLOR_FORMAT, SHADOWMAP_SUN_DEPTH_FORMAT, ShadowmapSunGpu,
+    ensure_shadowmap_sun_target, scissor_xywh,
 };
 use super::sm3_wgsl::{PASS_FRAGMENT_ENTRY, alpha_test_fragment_entry};
 use super::smodel_cache_gpu::SmodelCacheGpu;
@@ -138,6 +137,7 @@ impl std::ops::Deref for InstalledRenderWorld {
 pub struct RenderWorldData {
     pub generation: MaterialGenerationId,
     pub world_generation: frame::WorldGeneration,
+    pub world_products: frame::WorldProducts,
     pub smc_revision: Option<u64>,
     pub ports: Arc<Vec<super::AdmittedExactPort>>,
     pub static_geometry: Arc<ExtractedStaticGeometry>,
@@ -249,6 +249,7 @@ pub use pipeline::cached_lighting_port_variant;
 struct ExactColourGeometry {
     generation: MaterialGenerationId,
     world_generation: frame::WorldGeneration,
+    world_products: frame::WorldProducts,
     world_vertex: Option<Buffer>,
     world_layer: Option<Buffer>,
     world_index: Option<Buffer>,
@@ -394,7 +395,7 @@ fn open_scene_table_epoch(
 fn open_shadow_table_epoch(
     binding_cache: &mut ExactShadowBindingCache,
     shadow_table: &mut ShadowTextureTable,
-    scratch: &mut ColourSubmitScratch,
+    scratch: &mut ShadowSubmitScratch,
     uploaded: &RuntimeUploadedImageRegistry,
     generation: MaterialGenerationId,
 ) {
@@ -443,6 +444,8 @@ struct ShadowmapSunArena {
 struct ShadowmapSpotArena {
     generation: MaterialGenerationId,
     gpu: GpuConstantArena,
+
+    pack: ArenaPack,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1211,8 +1214,6 @@ struct ColourSubmitScratch {
     run_pack: RunPackCache,
 
     arena_pack: ArenaPack,
-    sun_exec: ShadowExecScratch,
-    spot_exec: ShadowExecScratch,
 
     executor: MaterialRunExecutor,
 
@@ -1227,10 +1228,19 @@ struct ColourSubmitScratch {
 
     skinned_tess: smodel_skinned::SmodelSkinnedTess,
 
+    prepared_scene_epoch: TableEpoch,
+}
+
+#[derive(Resource, Default)]
+struct ShadowSubmitScratch {
+    sun_exec: ShadowExecScratch,
+    spot_exec: ShadowExecScratch,
+
+    skinned_tess: smodel_skinned::SmodelSkinnedTess,
+
     sun_prepared: PreparedSunWork,
     spot_prepared: PreparedSpotWork,
 
-    prepared_scene_epoch: TableEpoch,
     prepared_shadow_epoch: TableEpoch,
 }
 
@@ -1488,20 +1498,20 @@ pub fn colour_ports_static(
 }
 
 pub fn colour_world_smodel_static(
-    gpu_world_generation: frame::WorldGeneration,
+    (gpu_world_generation, gpu_world_products): (frame::WorldGeneration, frame::WorldProducts),
     gpu_world_verts: usize,
     gpu_world_indices: usize,
     gpu_world_layer: usize,
     gpu_smodel_verts: usize,
     gpu_smodel_indices: usize,
-    cpu_world_generation: frame::WorldGeneration,
+    (cpu_world_generation, cpu_world_products): (frame::WorldGeneration, frame::WorldProducts),
     cpu_world_verts: usize,
     cpu_world_indices: usize,
     cpu_world_layer: usize,
     cpu_smodel_verts: usize,
     cpu_smodel_indices: usize,
 ) -> bool {
-    gpu_world_generation == cpu_world_generation
+    (gpu_world_generation == cpu_world_generation || gpu_world_products.same_as(cpu_world_products))
         && gpu_world_verts == cpu_world_verts
         && gpu_world_indices == cpu_world_indices
         && gpu_world_layer == cpu_world_layer
@@ -2327,13 +2337,6 @@ fn intern_packed_bank<E>(
     Ok((packed, false))
 }
 
-fn sweep_packed_bank_intern(
-    intern: &mut HashMap<PackedBankKey, (Arc<PassConstantBuffers>, u32)>,
-    stamp: u32,
-) {
-    intern.retain(|_, (_, seen)| *seen == stamp);
-}
-
 impl RunPackCache {
     fn begin(&mut self, serial: u64, pass_len: usize) {
         if self.serial != serial {
@@ -2352,7 +2355,8 @@ impl RunPackCache {
     }
 
     fn sweep_pack_intern(&mut self) {
-        sweep_packed_bank_intern(&mut self.intern, self.intern_stamp);
+        self.intern
+            .retain(|_, (_, seen)| *seen == self.intern_stamp);
     }
 
     fn pack(
@@ -4514,8 +4518,6 @@ struct PreparedSunPartition {
     envelope: super::backend::SunShadowPartitionPass,
     xmodel_draws: Vec<PreparedExactDraw>,
     skinned_draws: Vec<PreparedExactDraw>,
-    xmodel_index_epochs: Vec<Buffer>,
-    smodel_index_epochs: Vec<Buffer>,
 }
 
 #[derive(Default)]
@@ -4885,10 +4887,12 @@ fn prepare_shadowmap_spot(
     drop(prepare);
 
     if !all_prepared.is_empty() {
+        let ShadowmapSpotArena { gpu, pack, .. } = shadow_arena;
+        pack.begin_list();
         upload_constant_arena(
             &mut all_prepared,
-            &mut ArenaPack::default(),
-            &mut shadow_arena.gpu,
+            pack,
+            gpu,
             pipeline_res,
             registry,
             device,
@@ -4977,6 +4981,31 @@ fn record_shadowmap_spot(
         cause: rank_count_map(&work.miss_rows, 1),
         record_n,
     }
+}
+
+fn sun_model_index_span(
+    source_len: usize,
+    start: u32,
+    count: u32,
+) -> Result<(u32, u32, u32), String> {
+    if count == 0
+        || !count.is_multiple_of(3)
+        || (start as usize)
+            .checked_add(count as usize)
+            .is_none_or(|end| end > source_len)
+    {
+        return Err("SunModelIndexSourceMissing".into());
+    }
+    Ok((0, start, count))
+}
+
+#[derive(Clone, Copy)]
+struct SmodelShadowSpan {
+    draw_start: u32,
+    draw_count: u32,
+    ring_epoch: u32,
+    entry_start: u32,
+    entry_count: u32,
 }
 
 fn prepare_shadowmap_sun(
@@ -5128,11 +5157,7 @@ fn prepare_shadowmap_sun(
             draws,
             packed,
         );
-        if smodel_identity_changed {
-            shadowmap.invalidate_smodel_partition(pi);
-        }
         let emit_started = Instant::now();
-        let mut stream = ModelIndexStream::new();
         let mut xmodel_spans = Vec::with_capacity(packed.xmodel.len());
         for flush in &work.xmodel_flushes {
             let owner_start = flush.entry_start as usize;
@@ -5158,11 +5183,10 @@ fn prepare_shadowmap_sun(
             for (entry_offset, entry) in entries.iter().enumerate() {
                 let hit_start = entry.index_byte_offset / 2;
                 let hit_count = u32::from(entry.tri_count).saturating_mul(3);
-                match emit_local_xmodel_shadow_flush(
-                    extracted.frame.xmodel_indices.as_slice(),
+                match sun_model_index_span(
+                    extracted.frame.xmodel_indices.len(),
                     hit_start,
                     hit_count,
-                    &mut stream,
                 ) {
                     Ok((ring_epoch, draw_start, draw_count)) => {
                         xmodel_spans.push((
@@ -5181,69 +5205,53 @@ fn prepare_shadowmap_sun(
                 }
             }
         }
-        let xmodel_ring_epochs = stream.finish();
-        let smodel_reusable = smodel_shadow_geometry_reusable(
-            shadowmap.smodel_generation(pi),
-            generation,
-            shadowmap.smodel_spans(pi).len(),
-            packed.smodel.len(),
-        );
-        smodel_reusable_all &= smodel_reusable;
-        let mut smodel_ring_epochs = Vec::new();
-        if !smodel_reusable {
-            let mut smodel_stream = ModelIndexStream::new();
-            let mut smodel_spans = Vec::with_capacity(packed.smodel.len());
-            for flush in &work.smodel_flushes {
-                let owner_start = flush.entry_start as usize;
-                let owner_end = owner_start.saturating_add(flush.entry_count as usize);
-                let Some(entries) = packed.smodel.get(owner_start..owner_end) else {
-                    smodel_spans.extend((owner_start..owner_end).map(|_| None));
-                    *miss_rows
-                        .entry("SmodelDynamicProvenanceMissing".into())
-                        .or_default() += 1;
-                    continue;
-                };
-                if packed
-                    .smodel_draw_indices
-                    .get(owner_start..owner_end)
-                    .is_none()
-                {
-                    smodel_spans.extend(entries.iter().map(|_| None));
-                    *miss_rows
-                        .entry("SmodelDynamicProvenanceMissing".into())
-                        .or_default() += 1;
-                    continue;
-                }
-                for (entry_offset, entry) in entries.iter().enumerate() {
-                    let hit_start = entry.index_byte_offset / 2;
-                    let hit_count = u32::from(entry.tri_count).saturating_mul(3);
-                    match emit_local_smodel_shadow_flush(
-                        extracted.world.static_geometry.smodel_indices.as_slice(),
-                        hit_start,
-                        hit_count,
-                        &mut smodel_stream,
-                    ) {
-                        Ok((ring_epoch, draw_start, draw_count)) => {
-                            smodel_spans.push(Some(SmodelShadowSpan {
-                                draw_start,
-                                draw_count,
-                                ring_epoch,
-                                entry_start: u32::try_from(
-                                    owner_start.saturating_add(entry_offset),
-                                )
+        smodel_reusable_all &= !smodel_identity_changed;
+        let mut smodel_spans = Vec::with_capacity(packed.smodel.len());
+        for flush in &work.smodel_flushes {
+            let owner_start = flush.entry_start as usize;
+            let owner_end = owner_start.saturating_add(flush.entry_count as usize);
+            let Some(entries) = packed.smodel.get(owner_start..owner_end) else {
+                smodel_spans.extend((owner_start..owner_end).map(|_| None));
+                *miss_rows
+                    .entry("SmodelDynamicProvenanceMissing".into())
+                    .or_default() += 1;
+                continue;
+            };
+            if packed
+                .smodel_draw_indices
+                .get(owner_start..owner_end)
+                .is_none()
+            {
+                smodel_spans.extend(entries.iter().map(|_| None));
+                *miss_rows
+                    .entry("SmodelDynamicProvenanceMissing".into())
+                    .or_default() += 1;
+                continue;
+            }
+            for (entry_offset, entry) in entries.iter().enumerate() {
+                let hit_start = entry.index_byte_offset / 2;
+                let hit_count = u32::from(entry.tri_count).saturating_mul(3);
+                match sun_model_index_span(
+                    extracted.world.static_geometry.smodel_indices.len(),
+                    hit_start,
+                    hit_count,
+                ) {
+                    Ok((ring_epoch, draw_start, draw_count)) => {
+                        smodel_spans.push(Some(SmodelShadowSpan {
+                            draw_start,
+                            draw_count,
+                            ring_epoch,
+                            entry_start: u32::try_from(owner_start.saturating_add(entry_offset))
                                 .unwrap_or(u32::MAX),
-                                entry_count: 1,
-                            }));
-                        }
-                        Err(cause) => {
-                            smodel_spans.push(None);
-                            *miss_rows.entry(cause).or_default() += 1;
-                        }
+                            entry_count: 1,
+                        }));
+                    }
+                    Err(cause) => {
+                        smodel_spans.push(None);
+                        *miss_rows.entry(cause).or_default() += 1;
                     }
                 }
             }
-            smodel_ring_epochs = smodel_stream.finish();
-            shadowmap.stage_smodel_spans(pi, smodel_spans);
         }
         ms_emit += emit_started.elapsed().as_secs_f32() * 1000.0;
         let prepare_started = Instant::now();
@@ -5257,13 +5265,7 @@ fn prepare_shadowmap_sun(
             })
             .collect();
         let world_span_holes = as_u32(world_spans.iter().filter(|span| span.is_none()).count());
-        let smodel_span_holes = as_u32(
-            shadowmap
-                .smodel_spans(pi)
-                .iter()
-                .filter(|span| span.is_none())
-                .count(),
-        );
+        let smodel_span_holes = as_u32(smodel_spans.iter().filter(|span| span.is_none()).count());
         if world_span_holes > 0 {
             miss = miss.saturating_add(world_span_holes);
             *miss_rows
@@ -5323,7 +5325,7 @@ fn prepare_shadowmap_sun(
             if static_draws.smodel[pi][slot_i].is_some() {
                 continue;
             }
-            let Some(span) = shadowmap.smodel_spans(pi)[slot_i] else {
+            let Some(span) = smodel_spans[slot_i] else {
                 continue;
             };
             let owner_start = span.entry_start as usize;
@@ -5426,7 +5428,6 @@ fn prepare_shadowmap_sun(
             || plan.smodel_n != resident_smodel[pi].len()
             || retry_n != retry_before
             || smodel_identity_changed
-            || !smodel_reusable
         {
             plan.rebuild(generation, &resident_world[pi], &resident_smodel[pi]);
         }
@@ -5489,24 +5490,12 @@ fn prepare_shadowmap_sun(
             "iw4_shadowmap_sun_vs_arena",
             "iw4_shadowmap_sun_ps_arena",
         );
-        let xmodel_index_epochs =
-            upload_xmodel_index_epochs(shadowmap, pi, device, queue, &xmodel_ring_epochs);
-        let smodel_index_epochs = if smodel_reusable {
-            bind_resident_smodel_index_epochs(shadowmap, pi)
-        } else {
-            let epochs =
-                upload_smodel_index_epochs(shadowmap, pi, device, queue, &smodel_ring_epochs);
-            shadowmap.commit_smodel_partition(generation, pi);
-            epochs
-        };
         ms_arena += arena_started.elapsed().as_secs_f32() * 1000.0;
         partitions.push(PreparedSunPartition {
             pi,
             envelope,
             xmodel_draws,
             skinned_draws,
-            xmodel_index_epochs,
-            smodel_index_epochs,
         });
     }
     drop(prepare);
@@ -5603,8 +5592,13 @@ fn record_shadowmap_sun(
                 registry,
                 geometry,
                 world_index,
-                part.smodel_index_epochs.as_slice(),
-                part.xmodel_index_epochs.as_slice(),
+                geometry.smodel_index.as_slice(),
+                geometry
+                    .xmodel
+                    .index
+                    .buffer()
+                    .map(std::slice::from_ref)
+                    .unwrap_or_default(),
                 geometry.smodel_vertex.as_ref(),
                 geometry.xmodel.vertex.buffer(),
                 smodel_skinned_vertex,
@@ -6177,12 +6171,114 @@ struct PlacedPackKey {
     pass_index: u32,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct PlacedSpan {
     base: u32,
     len: usize,
     stamp: u32,
     version: u64,
+
+    vertex_len: u32,
+    pixel_len: u32,
+
+    lanes: Vec<SpanLane>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SpanLane {
+    pixel_stage: bool,
+    destination: u16,
+    row_count: u8,
+}
+
+impl SpanLane {
+    fn of(lane: &PackedCodeConstantLane) -> Self {
+        Self {
+            pixel_stage: matches!(lane.stage, RuntimeShaderStage::Pixel),
+            destination: lane.destination,
+            row_count: lane.row_count,
+        }
+    }
+}
+
+fn patch_span_lanes<'a>(
+    span: &mut [u8],
+    span_start: usize,
+    recorded: &[SpanLane],
+    lanes: impl Iterator<Item = SpanLaneWrite<'a>> + Clone,
+    vertex_len: usize,
+    pixel_len: usize,
+    slots: &[u32],
+    dirty: &mut Vec<(usize, usize)>,
+) -> Option<()> {
+    if recorded.len() != lanes.clone().count() {
+        return None;
+    }
+    let mut touched: Option<(usize, usize)> = None;
+    let mark = |at: usize, end: usize, touched: &mut Option<(usize, usize)>| match touched {
+        Some((lo, hi)) => {
+            *lo = (*lo).min(at);
+            *hi = (*hi).max(end);
+        }
+        None => *touched = Some((at, end)),
+    };
+    for (site, write) in recorded.iter().zip(lanes) {
+        if *site != write.site {
+            return None;
+        }
+        let (bank_off, bank_len) = if site.pixel_stage {
+            (vertex_len, pixel_len)
+        } else {
+            (0, vertex_len)
+        };
+        let first = usize::from(site.destination);
+        let count = usize::from(site.row_count);
+        if first.saturating_add(count) > bank_len || write.rows.len() != count {
+            return None;
+        }
+        let at = (bank_off + first) * 16;
+        let end = at + count * 16;
+        if end > span.len() {
+            return None;
+        }
+        let bytes: &[u8] = bytemuck::cast_slice(write.rows);
+        if span[at..end] != *bytes {
+            span[at..end].copy_from_slice(bytes);
+            mark(at, end, &mut touched);
+        }
+    }
+    let tail = (vertex_len + pixel_len) * 16;
+    let bytes: &[u8] = bytemuck::cast_slice(slots);
+    if tail + bytes.len() > span.len() {
+        return None;
+    }
+    if span[tail..tail + bytes.len()] != *bytes {
+        span[tail..tail + bytes.len()].copy_from_slice(bytes);
+        mark(tail, tail + bytes.len(), &mut touched);
+    }
+    if let Some((lo, hi)) = touched {
+        dirty.push((span_start + lo, span_start + hi));
+    }
+    Some(())
+}
+
+#[derive(Clone, Copy)]
+struct SpanLaneWrite<'a> {
+    site: SpanLane,
+    rows: &'a [[u32; 4]],
+}
+
+fn span_lane_writes<'a>(
+    lanes: impl Iterator<Item = &'a PackedCodeConstantLane> + Clone + 'a,
+) -> impl Iterator<Item = SpanLaneWrite<'a>> + Clone + 'a {
+    lanes.map(|lane| {
+        let first = usize::from(lane.first_row);
+        let end = first.saturating_add(usize::from(lane.row_count));
+        SpanLaneWrite {
+            site: SpanLane::of(lane),
+            rows: lane.rows.get(first..end).unwrap_or(&[]),
+        }
+    })
 }
 
 fn placed_pack_key(
@@ -6210,7 +6306,26 @@ fn take_exact_free(free: &mut Vec<(u32, usize)>, need: usize) -> Option<u32> {
     Some(free.swap_remove(i).0)
 }
 
-fn intern_placed_span<E>(
+struct SpanSource<'a, F> {
+    lanes: &'a [PackedCodeConstantLane],
+    overlay: &'a [PackedCodeConstantLane],
+    vertex_len: usize,
+    pixel_len: usize,
+    slots: &'a [u32],
+    pack: F,
+}
+
+impl<F> SpanSource<'_, F> {
+    fn writes(&self) -> impl Iterator<Item = SpanLaneWrite<'_>> + Clone {
+        span_lane_writes(self.lanes.iter().chain(self.overlay))
+    }
+
+    fn sites(&self) -> Vec<SpanLane> {
+        self.writes().map(|write| write.site).collect()
+    }
+}
+
+fn intern_placed_span<E, F>(
     intern: &mut HashMap<PlacedPackKey, PlacedSpan>,
     placed: &mut Vec<u8>,
     stamp: u32,
@@ -6219,46 +6334,84 @@ fn intern_placed_span<E>(
     dirty: &mut Vec<(usize, usize)>,
     free: &mut Vec<(u32, usize)>,
     scratch: &mut Vec<u8>,
-    miss: impl FnOnce(&mut Vec<u8>) -> Result<(), E>,
-) -> Result<(u32, bool), E> {
+    source: SpanSource<'_, F>,
+) -> Result<(u32, bool), E>
+where
+    F: FnOnce(&mut Vec<u8>) -> Result<(), E>,
+{
     if let Some(entry) = intern.get_mut(&key) {
         entry.stamp = stamp;
         if entry.version == version {
             return Ok((mark_placed_base(entry.base), true));
         }
-        scratch.clear();
-        let packed = scratch;
-        miss(packed)?;
         let start = entry.base as usize * 16;
+        if start.saturating_add(entry.len) <= placed.len()
+            && entry.vertex_len as usize == source.vertex_len
+            && entry.pixel_len as usize == source.pixel_len
+            && patch_span_lanes(
+                &mut placed[start..start + entry.len],
+                start,
+                &entry.lanes,
+                source.writes(),
+                source.vertex_len,
+                source.pixel_len,
+                source.slots,
+                dirty,
+            )
+            .is_some()
+        {
+            entry.version = version;
+            return Ok((mark_placed_base(entry.base), true));
+        }
+        scratch.clear();
+        let sites = source.sites();
+        let packed = scratch;
+        (source.pack)(packed)?;
         if packed.len() == entry.len && start.saturating_add(entry.len) <= placed.len() {
             placed[start..start + entry.len].copy_from_slice(packed);
             entry.version = version;
+            entry.lanes = sites;
+            entry.vertex_len = as_u32(source.vertex_len);
+            entry.pixel_len = as_u32(source.pixel_len);
             dirty.push((start, start + entry.len));
             return Ok((mark_placed_base(entry.base), true));
         }
         free.push((entry.base, entry.len));
-        let (base, start) = if let Some(base) = take_exact_free(free, packed.len()) {
-            let start = base as usize * 16;
-            placed[start..start + packed.len()].copy_from_slice(packed);
-            (base, start)
-        } else {
-            let start = placed.len();
-            placed.extend_from_slice(packed);
-            (
-                u32::try_from(start / 16).expect("exact constant arena row fits u32"),
-                start,
-            )
-        };
+        let (base, start) = place_span(placed, free, packed);
         entry.base = base;
         entry.len = packed.len();
         entry.version = version;
+        entry.lanes = sites;
+        entry.vertex_len = as_u32(source.vertex_len);
+        entry.pixel_len = as_u32(source.pixel_len);
         dirty.push((start, start + packed.len()));
         return Ok((mark_placed_base(base), false));
     }
     scratch.clear();
+    let sites = source.sites();
+    let vertex_len = source.vertex_len;
+    let pixel_len = source.pixel_len;
     let packed = scratch;
-    miss(packed)?;
-    let (base, start) = if let Some(base) = take_exact_free(free, packed.len()) {
+    (source.pack)(packed)?;
+    let (base, start) = place_span(placed, free, packed);
+    intern.insert(
+        key,
+        PlacedSpan {
+            base,
+            len: packed.len(),
+            stamp,
+            version,
+            vertex_len: as_u32(vertex_len),
+            pixel_len: as_u32(pixel_len),
+            lanes: sites,
+        },
+    );
+    dirty.push((start, start + packed.len()));
+    Ok((mark_placed_base(base), false))
+}
+
+fn place_span(placed: &mut Vec<u8>, free: &mut Vec<(u32, usize)>, packed: &[u8]) -> (u32, usize) {
+    if let Some(base) = take_exact_free(free, packed.len()) {
         let start = base as usize * 16;
         placed[start..start + packed.len()].copy_from_slice(packed);
         (base, start)
@@ -6269,18 +6422,7 @@ fn intern_placed_span<E>(
             u32::try_from(start / 16).expect("exact constant arena row fits u32"),
             start,
         )
-    };
-    intern.insert(
-        key,
-        PlacedSpan {
-            base,
-            len: packed.len(),
-            stamp,
-            version,
-        },
-    );
-    dirty.push((start, start + packed.len()));
-    Ok((mark_placed_base(base), false))
+    }
 }
 
 #[derive(Default)]
@@ -6400,6 +6542,9 @@ impl ArenaPack {
             pass_index,
         );
         let version = placed_span_version(executable.code_constant_id, overlay);
+        let Some(banks) = executable.local_banks else {
+            return Err(ConstantPackRefusal::MissingLocalBanks);
+        };
         self.placed_dirty_scratch.clear();
         let (base, hit) = intern_placed_span(
             &mut self.placed_seen,
@@ -6410,10 +6555,17 @@ impl ArenaPack {
             &mut self.placed_dirty_scratch,
             &mut self.placed_free,
             &mut self.pack_scratch,
-            |placed| {
-                port.pack_hit_into(executable, overlay, placed)?;
-                append_slot_rows(placed, slots);
-                Ok(())
+            SpanSource {
+                lanes: executable.code_constants,
+                overlay,
+                vertex_len: banks.vertex.len(),
+                pixel_len: banks.pixel.len(),
+                slots,
+                pack: |placed: &mut Vec<u8>| {
+                    port.pack_hit_into(executable, overlay, placed)?;
+                    append_slot_rows(placed, slots);
+                    Ok(())
+                },
             },
         )?;
         for (start, end) in self.placed_dirty_scratch.drain(..) {
@@ -6703,6 +6855,7 @@ pub(super) fn register(app: &mut App) {
         .init_resource::<ShadowmapSunArena>()
         .init_resource::<ShadowmapSpotArena>()
         .init_resource::<ColourSubmitScratch>()
+        .init_resource::<ShadowSubmitScratch>()
         .init_resource::<CameraPrepareState>()
         .init_resource::<CameraWorldPretess>()
         .init_resource::<prepare_camera::InstalledColourPass>()
@@ -6719,12 +6872,9 @@ pub(super) fn register(app: &mut App) {
                     .after(geometry::upload_exact_geometry)
                     .after(pipeline::kick_extracted_colour_pipelines)
                     .after(super::gpu_resources::prepare_uploaded_image_registry),
-                prepare_camera::prepare_shadow_passes
+                prepare_camera::prepare_colour_lanes
                     .in_set(RenderSystems::Prepare)
                     .after(prepare_camera::install_shared_colour_pass),
-                prepare_camera::prepare_camera_colour
-                    .in_set(RenderSystems::Prepare)
-                    .after(prepare_camera::prepare_shadow_passes),
             ),
         )
         .add_systems(

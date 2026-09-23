@@ -207,7 +207,7 @@ pub fn format_vertex_color_stats(stats: &VertexColorStats) -> String {
     )
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ModelSurfaceDraw {
     pub mesh: Mesh,
 
@@ -265,7 +265,7 @@ fn lod0_only_surfaces(draws: Vec<ModelSurfaceDraw>) -> [Vec<ModelSurfaceDraw>; 4
     lods
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ModelMesh {
     pub name: String,
 

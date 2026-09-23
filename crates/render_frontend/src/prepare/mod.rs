@@ -19,8 +19,8 @@ use crate::prepare::scene::cull::{
 use crate::prepare::scene::smodel_lighting::update_smodel_lighting;
 use crate::prepare::scene::spawn::{
     WorldSpawnJob, arm_world_spawn_on_install, despawn_fly_cameras_on_teardown,
-    despawn_world_entities_on_teardown, register_world_gpu_ready, release_world_images_on_teardown,
-    reset_world_spawn_on_teardown, shutdown_world_on_teardown, spawn_world, spawn_world_finish,
+    despawn_world_entities_on_teardown, register_world_gpu_ready, reset_world_spawn_on_teardown,
+    shutdown_world_on_teardown, spawn_world, spawn_world_finish,
 };
 use crate::prepare::scene::view_parms::stamp_prepared_scene_view;
 use crate::prepare::scene::world::WorldScene;
@@ -189,10 +189,10 @@ impl Plugin for RenderPreparePlugin {
                     .after(stamp_prepared_scene_view)
                     .in_set(WorkerCmdSet::CellStatic),
             )
+            .init_resource::<frame::Retiring>()
             .add_systems(
                 Update,
                 (
-                    release_world_images_on_teardown,
                     despawn_world_entities_on_teardown,
                     reset_world_spawn_on_teardown,
                     shutdown_world_on_teardown,

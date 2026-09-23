@@ -163,6 +163,7 @@ impl StageKey {
 pub enum StageOutcome {
     /// The owner confirmed the result is ready at its own boundary.
     Done,
+    Reused,
     /// The branch did not run at all.
     Skipped,
     /// The load was retargeted or aborted before this stage could finish.
@@ -175,12 +176,13 @@ pub enum StageOutcome {
 
 impl StageOutcome {
     pub fn is_success(self) -> bool {
-        matches!(self, Self::Done)
+        matches!(self, Self::Done | Self::Reused)
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Done => "done",
+            Self::Reused => "reused",
             Self::Skipped => "skipped",
             Self::Cancelled => "cancelled",
             Self::Abandoned => "abandoned",
@@ -361,6 +363,7 @@ impl LoadLaneTiming {
         }
         match self.outcome {
             None | Some(StageOutcome::Done) => "",
+            Some(StageOutcome::Reused) => " (reused)",
             Some(StageOutcome::Skipped) => " (skipped)",
             Some(StageOutcome::Cancelled) => " (canceled)",
             Some(StageOutcome::Abandoned) => " (interrupted)",
@@ -563,6 +566,18 @@ impl LoadProgress {
     }
 
     pub fn record_skipped_keyed(&self, key: StageKey) {
+        self.record_ended(key, StageOutcome::Skipped);
+    }
+
+    pub fn record_reused_scoped(&self, id: StageId, scope: impl Into<StageScope>) {
+        self.record_ended(StageKey::new(id, scope), StageOutcome::Reused);
+    }
+
+    fn record_ended(&self, key: StageKey, outcome: StageOutcome) {
+        if outcome == StageOutcome::Reused {
+            diag::info!(World, "load stage: {} reused", key.label());
+        }
+        let at = Instant::now();
         let slot = Arc::new(StageSlot {
             key,
             completed: AtomicU64::new(0),
@@ -571,11 +586,8 @@ impl LoadProgress {
             bytes: AtomicU64::new(0),
             weighed: AtomicBool::new(false),
             life: Mutex::new(StageLife {
-                started_at: None,
-                end: Some(StageEnd {
-                    at: Instant::now(),
-                    outcome: StageOutcome::Skipped,
-                }),
+                started_at: (outcome == StageOutcome::Reused).then_some(at),
+                end: Some(StageEnd { at, outcome }),
                 final_count: None,
                 final_bytes: None,
                 started_mem: MemSample::default(),
@@ -846,6 +858,10 @@ impl StageHandle {
 
     pub fn skip(self) {
         self.finish(StageOutcome::Skipped);
+    }
+
+    pub fn reuse(self) {
+        self.finish(StageOutcome::Reused);
     }
 
     pub fn finish_from<T, E>(self, result: &Result<T, E>) {

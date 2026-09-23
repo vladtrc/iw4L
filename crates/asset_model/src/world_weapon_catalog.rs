@@ -10,7 +10,7 @@ use asset_material::{MaterialCatalog, MaterialDefinitions};
 
 #[derive(Clone, Debug)]
 pub struct WorldWeaponEntry {
-    pub skel: ModelSkel,
+    pub skel: std::sync::Arc<ModelSkel>,
 
     pub material_names: Vec<Option<String>>,
 
@@ -22,7 +22,7 @@ impl WorldWeaponEntry {
         let (material_names, material_edges) =
             capture_xmodel_material_slots(&skel.surface_materials, materials.map(|c| &**c));
         Self {
-            skel,
+            skel: std::sync::Arc::new(skel),
             material_names,
             material_edges,
         }
@@ -52,7 +52,9 @@ impl WorldWeaponEntry {
 
 #[derive(Clone, Debug, Default)]
 pub struct WorldWeaponCatalog {
-    entries: HashMap<String, WorldWeaponEntry>,
+    identity: u64,
+    entries: Vec<WorldWeaponEntry>,
+    indices: HashMap<String, usize>,
     order: Vec<String>,
     zones: Vec<crate::ZoneOwner>,
 }
@@ -73,6 +75,14 @@ impl std::ops::Deref for WorldWeaponBuild {
 }
 
 impl WorldWeaponBuild {
+    pub fn seal_identity(&mut self) -> u64 {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        if self.catalog.identity == 0 {
+            self.catalog.identity = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.catalog.identity
+    }
+
     pub fn publish(self) -> WorldWeaponCatalog {
         self.catalog
     }
@@ -138,28 +148,36 @@ impl WorldWeaponBuild {
     }
 
     pub fn insert_captured(&mut self, skel: ModelSkel, materials: Option<&MaterialCatalog>) {
+        self.catalog.identity = 0;
         let name = skel.name.clone();
         let entry = WorldWeaponEntry::from_skel(skel, materials);
-        if let Some(pos) = self.catalog.order.iter().position(|n| n == &name) {
+        if let Some(&pos) = self.catalog.indices.get(&name) {
             self.catalog.zones[pos] = self.capture_zone;
+            self.catalog.entries[pos] = entry;
         } else {
+            self.catalog
+                .indices
+                .insert(name.clone(), self.catalog.entries.len());
             self.catalog.order.push(name.clone());
             self.catalog.zones.push(self.capture_zone);
+            self.catalog.entries.push(entry);
         }
-        self.catalog.entries.insert(name, entry);
     }
 
     pub fn absorb(&mut self, mut other: Self) -> usize {
+        self.catalog.identity = 0;
         let mut added = 0;
         let order = std::mem::take(&mut other.catalog.order);
-        for (i, name) in order.into_iter().enumerate() {
-            if self.catalog.entries.contains_key(&name) {
+        let entries = std::mem::take(&mut other.catalog.entries);
+        for (i, (name, entry)) in order.into_iter().zip(entries).enumerate() {
+            if self.catalog.indices.contains_key(&name) {
                 continue;
             }
-            let Some(entry) = other.catalog.entries.remove(&name) else {
-                continue;
-            };
+            self.catalog
+                .indices
+                .insert(name.clone(), self.catalog.entries.len());
             self.catalog.order.push(name.clone());
+            self.catalog.entries.push(entry);
             self.catalog.zones.push(
                 other
                     .catalog
@@ -168,20 +186,23 @@ impl WorldWeaponBuild {
                     .copied()
                     .unwrap_or(other.capture_zone),
             );
-            self.catalog.entries.insert(name, entry);
             added += 1;
         }
         added
     }
 
     pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
-        for entry in self.catalog.entries.values_mut() {
+        for entry in &mut self.catalog.entries {
             entry.resolve_materials(materials);
         }
     }
 }
 
 impl WorldWeaponCatalog {
+    pub fn identity(&self) -> u64 {
+        self.identity
+    }
+
     pub fn len(&self) -> usize {
         self.order.len()
     }
@@ -191,11 +212,11 @@ impl WorldWeaponCatalog {
     }
 
     pub fn get(&self, name: &str) -> Option<&WorldWeaponEntry> {
-        self.entries.get(name)
+        self.indices.get(name).and_then(|&index| self.get_at(index))
     }
 
     pub fn index_by_name(&self, name: &str) -> Option<usize> {
-        self.order.iter().position(|n| n == name)
+        self.indices.get(name).copied()
     }
 
     pub fn zone_of(&self, index: usize) -> crate::ZoneOwner {
@@ -203,8 +224,7 @@ impl WorldWeaponCatalog {
     }
 
     pub fn get_at(&self, index: usize) -> Option<&WorldWeaponEntry> {
-        let name = self.order.get(index)?;
-        self.entries.get(name)
+        self.entries.get(index)
     }
 
     pub fn name_at(&self, index: usize) -> Option<&str> {
@@ -216,16 +236,14 @@ impl WorldWeaponCatalog {
     }
 
     pub fn contains(&self, name: &str) -> bool {
-        self.entries.contains_key(name)
+        self.indices.contains_key(name)
     }
 
     pub fn material_edge_census(&self) -> AssetEdgeCensus {
         let mut census = AssetEdgeCensus::default();
-        for name in &self.order {
-            if let Some(entry) = self.entries.get(name) {
-                for edge in &entry.material_edges {
-                    census.push(*edge);
-                }
+        for entry in &self.entries {
+            for edge in &entry.material_edges {
+                census.push(*edge);
             }
         }
         census
@@ -233,10 +251,7 @@ impl WorldWeaponCatalog {
 
     pub fn material_unresolved_hints(&self) -> Vec<&str> {
         let mut names = Vec::new();
-        for name in &self.order {
-            let Some(entry) = self.entries.get(name) else {
-                continue;
-            };
+        for entry in &self.entries {
             for (edge, name) in entry.material_edges.iter().zip(entry.material_names.iter()) {
                 if edge.is_unresolved()
                     && let Some(name) = name.as_deref()
@@ -254,7 +269,7 @@ impl WorldWeaponCatalog {
     pub fn material_bound_zones(&self) -> String {
         crate::bound_zone_names(
             self.entries
-                .values()
+                .iter()
                 .flat_map(|entry| entry.material_edges.iter()),
         )
     }
@@ -263,7 +278,7 @@ impl WorldWeaponCatalog {
         let flash = self
             .order
             .iter()
-            .filter_map(|name| self.entries.get(name))
+            .filter_map(|name| self.get(name))
             .filter(|e| e.has_tag_flash())
             .count();
         let census = self.material_edge_census();

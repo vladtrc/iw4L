@@ -192,6 +192,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "approved_tests"
+version = "0.1.0"
+dependencies = [
+ "asset_transport",
+ "serde_json",
+]
+
+[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -324,6 +332,7 @@ dependencies = [
  "fastfile_t5",
  "fx_iw4",
  "weapon_iw4",
+ "xmodel_runtime",
 ]
 
 [[package]]
@@ -1912,6 +1921,7 @@ dependencies = [
  "bots",
  "console",
  "diag",
+ "gpu_probe",
  "hud",
  "libc",
  "net",
@@ -3032,6 +3042,10 @@ checksum = "fdf242682df893b86f33a73828fb09ca4b2d3bb6cc95249707fc684d27484b91"
 dependencies = [
  "bitflags 2.13.1",
 ]
+
+[[package]]
+name = "gpu_probe"
+version = "0.1.0"
 
 [[package]]
 name = "grid"
@@ -5024,6 +5038,7 @@ dependencies = [
  "dpvs_iw4",
  "frame",
  "fx_iw4",
+ "gpu_probe",
  "hud",
  "hud_iw4",
  "lighting_iw4",
@@ -5386,6 +5401,7 @@ name = "session"
 version = "0.1.0"
 dependencies = [
  "assets",
+ "audio",
  "bevy",
  "bots",
  "diag",

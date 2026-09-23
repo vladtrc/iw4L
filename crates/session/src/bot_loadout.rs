@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use assets::{AssetNamespace, LoadoutCatalogKind, WeaponRegistry};
+use assets::{AssetNamespace, FamilySlot, WeaponRegistry};
 use bots::unique_loadout::{UNIQUE_WEAPONS, UniqueGroup, family_stem, pair_unique_loadouts};
 use sim::ClassId;
 
@@ -26,9 +26,8 @@ pub fn project_unique_bot_classes(
     combat: &[sim::WeaponCombatFacts],
     equipment: &[sim::EquipmentRuntimeFacts],
 ) -> UniqueLoadoutProjection {
-    let rows = weapons.loadout_catalog();
-    let kind_by_id: HashMap<u32, LoadoutCatalogKind> =
-        rows.iter().map(|row| (row.id, row.kind)).collect();
+    let rows = gun_rows(weapons);
+    let kind_by_id: HashMap<u32, FamilySlot> = rows.iter().map(|row| (row.id, row.slot)).collect();
 
     let mut picked: HashSet<u32> = HashSet::new();
     let mut by_ns_group: HashMap<(AssetNamespace, UniqueGroup), Vec<u32>> = HashMap::new();
@@ -43,13 +42,7 @@ pub fn project_unique_bot_classes(
         let Some(ns) = weapons.namespace_of(id) else {
             continue;
         };
-        let Some(kind) = kind_by_id.get(&id) else {
-            continue;
-        };
-        if !matches!(
-            kind,
-            LoadoutCatalogKind::Primary | LoadoutCatalogKind::Secondary
-        ) {
+        if !kind_by_id.contains_key(&id) {
             continue;
         }
         let bucket = by_ns_group.entry((ns, row.group)).or_default();
@@ -62,12 +55,6 @@ pub fn project_unique_bot_classes(
     let unique_stems = unique_family_stems(weapons, &rows);
     let mut fill_candidates: Vec<(AssetNamespace, UniqueGroup, u32, String)> = Vec::new();
     for row in &rows {
-        if !matches!(
-            row.kind,
-            LoadoutCatalogKind::Primary | LoadoutCatalogKind::Secondary
-        ) {
-            continue;
-        }
         if picked.contains(&row.id) {
             continue;
         }
@@ -81,10 +68,7 @@ pub fn project_unique_bot_classes(
         let Some(ns) = weapons.namespace_of(row.id) else {
             continue;
         };
-        let Some(group_name) = row.item_group.as_deref() else {
-            continue;
-        };
-        let Some(group) = unique_group_from_item_group(group_name) else {
+        let Some(group) = unique_group_from_item_group(&row.item_group) else {
             continue;
         };
         let stem = family_stem(&row.name);
@@ -114,12 +98,12 @@ pub fn project_unique_bot_classes(
     for (_, ids) in buckets {
         for id in ids {
             match kind_by_id.get(&id) {
-                Some(LoadoutCatalogKind::Primary) => {
+                Some(FamilySlot::Primary) => {
                     if seen_p.insert(id) {
                         primaries.push(id);
                     }
                 }
-                Some(LoadoutCatalogKind::Secondary) => {
+                Some(FamilySlot::Secondary) => {
                     if seen_s.insert(id) {
                         secondaries.push(id);
                     }
@@ -135,15 +119,11 @@ pub fn project_unique_bot_classes(
         let class_id = first_id + offset as u32;
         let primary_key = weapons.namespaced_key_of(primary).unwrap_or_default();
         let secondary_key = weapons.namespaced_key_of(secondary).unwrap_or_default();
-        let projected = crate::project_class(
-            class_id,
-            [&primary_key, &secondary_key, "", ""],
-            ["", "", ""],
-            "",
-            weapons,
-            combat,
-            equipment,
-        );
+        let row = crate::ClassRow {
+            weapons: [primary_key, secondary_key, String::new(), String::new()],
+            ..Default::default()
+        };
+        let projected = crate::project_class(class_id, &row, weapons, combat, equipment);
         if projected.def.locked {
             continue;
         }
@@ -172,18 +152,36 @@ fn usable_gun_id(
         .then_some(id)
 }
 
+struct GunRow {
+    id: u32,
+    name: String,
+    item_group: String,
+    slot: FamilySlot,
+}
+
+fn gun_rows(weapons: &WeaponRegistry) -> Vec<GunRow> {
+    weapons
+        .weapon_families()
+        .offered()
+        .filter(|family| matches!(family.slot, FamilySlot::Primary | FamilySlot::Secondary))
+        .filter_map(|family| {
+            let id = family.base?;
+            Some(GunRow {
+                id,
+                name: weapons.name_of(id).to_owned(),
+                item_group: family.item_group.clone(),
+                slot: family.slot,
+            })
+        })
+        .collect()
+}
+
 fn unique_family_stems(
     weapons: &WeaponRegistry,
-    rows: &[assets::LoadoutCatalogRow],
+    rows: &[GunRow],
 ) -> HashMap<String, AssetNamespace> {
     let mut ns_by_stem: HashMap<String, HashSet<AssetNamespace>> = HashMap::new();
     for row in rows {
-        if !matches!(
-            row.kind,
-            LoadoutCatalogKind::Primary | LoadoutCatalogKind::Secondary
-        ) {
-            continue;
-        }
         let Some(ns) = weapons.namespace_of(row.id) else {
             continue;
         };

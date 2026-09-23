@@ -1,17 +1,12 @@
 //! The prepared first-person rig.
 //!
-//! Everything about the equipped composition that a pose does not change — the
-//! combined skeleton, the clip bindings, which surfaces are drawn, and where
-//! their vertices and indices sit in the published plan — is decided when that
-//! composition changes and then left alone. An ordinary frame evaluates bones
-//! and skins into the layout prepared here; it rediscovers none of it.
-//!
 //! The rig owns the whole first-person plan. Both hands of a dual-wield
 //! composition are slots in one layout, so the left gun is a second destination
 //! range over the same prepared model rather than a second pass over the same
 //! decisions.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bevy::math::{Mat4, Vec3};
 use render_scene::SmodelPassMaterial;
@@ -21,39 +16,10 @@ use crate::anim::fpv_pose::{
 };
 use crate::anim::xmodel_pose::{FpvSurfOwner, SkinLayout, build_skin_layout, skin_packed_into};
 use crate::draw::FpvSurfaceDraw;
-use anim_iw4::{dobj_surface_hidden, set_hide_part_bit};
+use anim_iw4::dobj_surface_hidden;
 use assets::{
-    AnimClip, AnimInstance, AssetNamespace, Attach, DObj, DObjError, FpvHands, FpvMeshCatalog,
-    FpvSkel, ModelPoseSrc, PartBits,
+    AnimInstance, FpvAssembly, FpvClipTracks, FpvMeshCatalog, FpvPartRole, FpvSkel, PartBits,
 };
-
-/// The scope attach tags, most specific first. A scope whose own root bone
-/// names a gun bone wins over any of them.
-const SCOPE_ATTACH_TAGS: &[&str] = &[
-    "tag_scope",
-    "tag_acog",
-    "tag_red_dot",
-    "tag_reflex",
-    "tag_hybrid",
-    "tag_thermal",
-    "tag_thermal_scope",
-    "tag_eotech",
-];
-
-const ROCKET_ATTACH_TAG: &str = "tag_clip";
-
-/// A frame whose composition still answers this key reuses the rig below it;
-/// anything else rebuilds.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FpvRigKey {
-    pub namespace: AssetNamespace,
-    pub gun: String,
-    pub hands: FpvHands,
-    pub scope: Option<String>,
-    pub rocket: Option<String>,
-    pub hide_tags: Vec<String>,
-    pub dual: bool,
-}
 
 /// One model inside the combined skeleton: where its bones start, and how its
 /// surfaces map onto a contiguous run of destination vertices.
@@ -71,15 +37,6 @@ struct PlanSlot {
     hand: usize,
     model: usize,
     dest_base: usize,
-}
-
-/// A clip bound to this rig's bones. The address identifies the clip the
-/// scheduler node held when the binding was made — the node owns an `Arc` of
-/// it, so a node still holding that clip is a node whose binding still stands.
-/// The address is compared, never dereferenced.
-struct TrackBinding {
-    clip: usize,
-    tracks: Vec<Option<usize>>,
 }
 
 /// The rows the plan publishes for as long as the composition holds.
@@ -108,19 +65,17 @@ pub struct FpvHandPose {
     pub bolt: FpvBoltFrame,
 }
 
-/// The material table is the session's: a surface whose authored material never
-/// made it in is not drawn, and the rig settles that once.
 pub struct FpvRigInputs<'a> {
     pub catalog: &'a FpvMeshCatalog,
     pub materials: &'a [SmodelPassMaterial],
     pub material_by_authored: &'a HashMap<usize, u32>,
+    pub clip_tracks: &'a FpvClipTracks,
+    pub clip_orders: [&'a [Option<usize>]; 2],
 }
 
 #[derive(Debug)]
 pub enum FpvRigError {
     Catalog(&'static str),
-    Skeleton(DObjError),
-    NoTagView,
     Layout(&'static str),
 }
 
@@ -128,84 +83,26 @@ impl core::fmt::Display for FpvRigError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Catalog(what) => write!(f, "{what} missing from the first-person catalog"),
-            Self::Skeleton(error) => write!(f, "combined skeleton: {error}"),
-            Self::NoTagView => write!(f, "combined skeleton has no tag_view"),
             Self::Layout(what) => write!(f, "{what}"),
         }
     }
 }
 
 pub struct PreparedFpvRig {
-    key: FpvRigKey,
+    assembly: Arc<FpvAssembly>,
+    dual: bool,
     generation: u64,
-    dobj: DObj,
     parts: PartBits,
-    view_bone: usize,
-    camera_bone: Option<usize>,
-    /// Bones of hands+gun. A dual-wield left hand publishes exactly those: the
-    /// scope and the rocket hang off the right gun, and the left never had them.
-    paired_bones: usize,
     tags: FpvBoltTags,
     models: Vec<PreparedModel>,
     slots: Vec<PlanSlot>,
-    tracks: [Vec<Option<TrackBinding>>; 2],
+    orders: [Vec<Option<usize>>; 2],
+    tracks: [Vec<Option<Vec<Option<usize>>>>; 2],
     pub geometry: PreparedFpvGeometry,
-}
-
-fn scope_attach_tag_name<'a>(gun_bones: &'a [String], scope_bones: &[String]) -> Option<&'a str> {
-    if let Some(root) = scope_bones.first()
-        && let Some(hit) = gun_bones
-            .iter()
-            .find(|name| name.eq_ignore_ascii_case(root))
-    {
-        return Some(hit.as_str());
-    }
-    for tag in SCOPE_ATTACH_TAGS {
-        let on_scope = scope_bones
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(tag));
-        if !on_scope {
-            continue;
-        }
-        if let Some(hit) = gun_bones.iter().find(|name| name.eq_ignore_ascii_case(tag)) {
-            return Some(hit.as_str());
-        }
-    }
-    gun_bones.iter().find_map(|name| {
-        SCOPE_ATTACH_TAGS
-            .iter()
-            .copied()
-            .find(|tag| name.eq_ignore_ascii_case(tag))
-            .map(|_| name.as_str())
-    })
-}
-
-fn bolt_tag_bone(dobj: &DObj, tag: &str) -> Option<u16> {
-    dobj.find(tag).and_then(|index| u16::try_from(index).ok())
 }
 
 pub fn leftover_scope_surf_is_lens(name: &str) -> bool {
     name.contains("lens")
-}
-
-/// The part bits a hide-tag set hides, or `None` when this model carries no
-/// per-surface part bits to test them against.
-fn hide_words(skel: &FpvSkel, hide_tags: &[String]) -> Option<[u32; 6]> {
-    if hide_tags.is_empty() || skel.surface_part_bits.len() != skel.surface_vertex_ranges.len() {
-        return None;
-    }
-    let mut words = [0u32; 6];
-    for bone in 0..skel.bone_names.len() {
-        if assets::bone_has_hidden_ancestor(
-            &skel.bone_names,
-            |b| skel.parent_of(b),
-            bone,
-            hide_tags,
-        ) {
-            set_hide_part_bit(&mut words, bone);
-        }
-    }
-    Some(words)
 }
 
 /// Which surfaces of one model reach the plan: not hidden by this weapon's hide
@@ -234,198 +131,73 @@ fn surface_admitted(
     admitted_materials.contains_key(&authored)
 }
 
-impl PreparedFpvRig {
-    pub fn key(&self) -> &FpvRigKey {
-        &self.key
+fn surf_owner(role: FpvPartRole) -> FpvSurfOwner {
+    match role {
+        FpvPartRole::Hands => FpvSurfOwner::Hands,
+        FpvPartRole::Gun => FpvSurfOwner::Gun,
+        FpvPartRole::Attachment => FpvSurfOwner::Scope,
+        FpvPartRole::Rocket => FpvSurfOwner::Rocket,
     }
+}
 
+impl PreparedFpvRig {
     /// A plan holding this generation is a plan whose indices, ranges,
     /// materials and draws are this rig's.
     pub fn generation(&self) -> u64 {
         self.generation
     }
 
-    /// Compares what the caller already holds instead of building a key to
-    /// throw away.
-    #[allow(clippy::too_many_arguments)]
     pub fn matches(
         &self,
-        namespace: AssetNamespace,
-        gun: &str,
-        hands: &FpvHands,
-        scope: Option<&str>,
-        rocket: Option<&str>,
-        hide_tags: &[String],
+        assembly: &Arc<FpvAssembly>,
         dual: bool,
+        orders: [&[Option<usize>]; 2],
     ) -> bool {
-        self.key.namespace == namespace
-            && self.key.gun == gun
-            && &self.key.hands == hands
-            && self.key.scope.as_deref() == scope
-            && self.key.rocket.as_deref() == rocket
-            && self.key.dual == dual
-            && self.key.hide_tags == hide_tags
+        Arc::ptr_eq(&self.assembly, assembly)
+            && self.dual == dual
+            && self.orders[0] == orders[0]
+            && self.orders[1] == orders[1]
     }
 
-    pub fn build(key: FpvRigKey, inputs: FpvRigInputs<'_>) -> Result<Self, FpvRigError> {
+    pub fn build(
+        assembly: Arc<FpvAssembly>,
+        dual: bool,
+        inputs: FpvRigInputs<'_>,
+    ) -> Result<Self, FpvRigError> {
         let catalog = inputs.catalog;
-        let ns = key.namespace;
-        let (hands_ns, hands_name) = key.hands.key().ok_or(FpvRigError::Catalog("view hands"))?;
-        let hands_i = catalog
-            .index_by_name(hands_ns, hands_name)
-            .ok_or(FpvRigError::Catalog("view hands"))?;
-        let gun_i = catalog
-            .index_by_name(ns, &key.gun)
-            .ok_or(FpvRigError::Catalog("gun model"))?;
         let skel_of = |index: usize| catalog.get_at(index).map(|entry| &entry.skel);
-        let pose_of = |index: usize| skel_of(index).and_then(|skel| skel.pose.as_ref());
 
-        let gun_skel = skel_of(gun_i).ok_or(FpvRigError::Catalog("gun model"))?;
-        let hands_pose = pose_of(hands_i).ok_or(FpvRigError::Catalog("view hands pose"))?;
-        let gun_pose = pose_of(gun_i).ok_or(FpvRigError::Catalog("gun model pose"))?;
-
-        // An attachment whose tag the gun does not carry is dropped here
-        // instead of being re-attempted, and re-refused, on every pose.
-        let mut specs: Vec<(&ModelPoseSrc, Option<Attach>)> = vec![
-            (hands_pose, None),
-            (
-                gun_pose,
-                Some(Attach {
-                    parent_model: 0,
-                    tag: "tag_weapon".into(),
-                }),
-            ),
-        ];
-        let mut dobj = DObj::build(&specs).map_err(FpvRigError::Skeleton)?;
-        let paired_bones = dobj.bone_count();
-        let mut attached: Vec<(usize, FpvSurfOwner)> = Vec::new();
-
-        if let Some(index) = key
-            .scope
-            .as_deref()
-            .and_then(|name| catalog.index_by_name(ns, name))
-            && let Some(skel) = skel_of(index)
-            && let Some(pose) = pose_of(index)
-            && let Some(tag) = scope_attach_tag_name(&gun_skel.bone_names, &skel.bone_names)
-        {
-            specs.push((
-                pose,
-                Some(Attach {
-                    parent_model: 1,
-                    tag: tag.to_owned(),
-                }),
-            ));
-            match DObj::build(&specs) {
-                Ok(next) => {
-                    dobj = next;
-                    attached.push((index, FpvSurfOwner::Scope));
-                }
-                Err(DObjError::AttachTag { .. }) => {
-                    specs.pop();
-                }
-                Err(error) => return Err(FpvRigError::Skeleton(error)),
-            }
-        }
-
-        if let Some(index) = key
-            .rocket
-            .as_deref()
-            .and_then(|name| catalog.index_by_name(ns, name))
-            && let Some(pose) = pose_of(index)
-            && gun_skel
-                .bone_names
-                .iter()
-                .any(|name| name.eq_ignore_ascii_case(ROCKET_ATTACH_TAG))
-        {
-            specs.push((
-                pose,
-                Some(Attach {
-                    parent_model: 1,
-                    tag: ROCKET_ATTACH_TAG.into(),
-                }),
-            ));
-            match DObj::build(&specs) {
-                Ok(next) => {
-                    dobj = next;
-                    attached.push((index, FpvSurfOwner::Rocket));
-                }
-                Err(DObjError::AttachTag { .. }) => {
-                    specs.pop();
-                }
-                Err(error) => return Err(FpvRigError::Skeleton(error)),
-            }
-        }
-
-        let view_bone = dobj.find("tag_view").ok_or(FpvRigError::NoTagView)?;
-        let camera_bone = dobj.find("tag_camera");
-        let tags = FpvBoltTags {
-            flash: bolt_tag_bone(&dobj, "tag_flash"),
-            flash_silenced: bolt_tag_bone(&dobj, "tag_flash_silenced"),
-            brass: bolt_tag_bone(&dobj, "tag_brass"),
-            knife: bolt_tag_bone(&dobj, "tag_knife_fx"),
-            laser: bolt_tag_bone(&dobj, fx_iw4::FX_LASER_TAG),
-        };
-
-        // Hide tags reach the gun only.
-        let mut models: Vec<PreparedModel> = Vec::new();
-        let mut bone_base = 0usize;
+        let mut models: Vec<PreparedModel> = Vec::with_capacity(assembly.parts.len());
         let mut packed_ok = true;
-        let prepare_model = |index: usize,
-                             owner: FpvSurfOwner,
-                             bone_base: usize,
-                             hide: &[String],
-                             models: &mut Vec<PreparedModel>,
-                             packed_ok: &mut bool|
-         -> Result<usize, FpvRigError> {
+        for part in &assembly.parts {
+            let index = part.model.order();
             let skel = skel_of(index).ok_or(FpvRigError::Catalog("model"))?;
-            let words = hide_words(skel, hide);
             let lod_range = skel.surfaces_for_lod(0);
             let first_surface = lod_range.start;
             let layout = build_skin_layout(skel, 0, |lod_local| {
                 surface_admitted(
                     skel,
-                    words.as_ref(),
+                    part.hide.as_ref(),
                     inputs.material_by_authored,
                     first_surface + lod_local,
                 )
             })
             .ok_or(FpvRigError::Layout("skin layout refused the model"))?;
             if skel.packed_vertices.len() != skel.positions.len() {
-                *packed_ok = false;
+                packed_ok = false;
             }
             models.push(PreparedModel {
                 catalog_entry: index,
-                owner,
-                bone_base,
+                owner: surf_owner(part.role),
+                bone_base: part.bone_base,
                 posed_surface_n: lod_range.len(),
                 layout,
             });
-            Ok(pose_of(index).map(|pose| pose.num_bones).unwrap_or(0))
-        };
-
-        bone_base += prepare_model(
-            hands_i,
-            FpvSurfOwner::Hands,
-            bone_base,
-            &[],
-            &mut models,
-            &mut packed_ok,
-        )?;
-        bone_base += prepare_model(
-            gun_i,
-            FpvSurfOwner::Gun,
-            bone_base,
-            &key.hide_tags,
-            &mut models,
-            &mut packed_ok,
-        )?;
-        for (index, owner) in attached {
-            bone_base += prepare_model(index, owner, bone_base, &[], &mut models, &mut packed_ok)?;
         }
 
         // Every hand's view hands first, then every hand's gun and whatever
         // hangs off it.
-        let hand_n = if key.dual { 2 } else { 1 };
+        let hand_n = if dual { 2 } else { 1 };
         let mut order: Vec<(usize, usize)> = Vec::new();
         for hand in 0..hand_n {
             order.push((hand, 0));
@@ -542,41 +314,35 @@ impl PreparedFpvRig {
         geometry.plan_draw_n = geometry.draws.len() as u32;
         geometry.plan_skip_n = posed_surface_n.saturating_sub(geometry.draws.len()) as u32;
 
+        let orders = inputs.clip_orders.map(<[Option<usize>]>::to_vec);
+        let tracks = [0, 1].map(|hand| {
+            orders[hand]
+                .iter()
+                .map(|order| assembly.compose_tracks((*order)?, inputs.clip_tracks))
+                .collect()
+        });
+        let tags = FpvBoltTags {
+            flash: assembly.tags.flash,
+            flash_silenced: assembly.tags.flash_silenced,
+            brass: assembly.tags.brass,
+            knife: assembly.tags.knife,
+            laser: assembly.tags.laser,
+        };
+
         static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let parts = dobj.all_parts();
+        let parts = assembly.dobj.all_parts();
         Ok(Self {
-            key,
+            assembly,
+            dual,
             generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            dobj,
             parts,
-            view_bone,
-            camera_bone,
-            paired_bones,
             tags,
             models,
             slots,
-            tracks: [Vec::new(), Vec::new()],
+            orders,
+            tracks,
             geometry,
         })
-    }
-
-    /// Bind whatever this hand started playing that is not bound already.
-    fn bind(&mut self, hand: usize, anims: &[PosedClip<'_>]) {
-        for anim in anims {
-            let node = anim.node;
-            if self.tracks[hand].len() <= node {
-                self.tracks[hand].resize_with(node + 1, || None);
-            }
-            let clip = core::ptr::from_ref::<AnimClip>(anim.clip) as usize;
-            if self.tracks[hand][node]
-                .as_ref()
-                .is_some_and(|binding| binding.clip == clip)
-            {
-                continue;
-            }
-            let tracks = self.dobj.tracks_for(anim.clip);
-            self.tracks[hand][node] = Some(TrackBinding { clip, tracks });
-        }
     }
 
     /// One hand's bones for this frame. No skeleton is built here.
@@ -589,14 +355,13 @@ impl PreparedFpvRig {
         if anims.is_empty() {
             return None;
         }
-        self.bind(hand, anims);
         let instances: Vec<AnimInstance<'_>> = anims
             .iter()
             .filter_map(|anim| {
-                let binding = self.tracks[hand].get(anim.node)?.as_ref()?;
+                let tracks = self.tracks[hand].get(anim.node)?.as_ref()?;
                 Some(AnimInstance {
                     clip: anim.clip,
-                    tracks: &binding.tracks,
+                    tracks,
                     time: anim.time,
                     weight: anim.weight,
                     parts: None,
@@ -609,17 +374,21 @@ impl PreparedFpvRig {
         {
             return None;
         }
-        let world = self.dobj.pose(&instances, &self.parts, Mat4::IDENTITY);
-        let skin = self.dobj.skin_matrices(&world);
-        let eye_from_world = tag_view_to_bevy_camera() * world[self.view_bone].inverse();
+        let world = self
+            .assembly
+            .dobj
+            .pose(&instances, &self.parts, Mat4::IDENTITY);
+        let skin = self.assembly.dobj.skin_matrices(&world);
+        let eye_from_world = tag_view_to_bevy_camera() * world[self.assembly.view_bone].inverse();
         let lens = self
+            .assembly
             .camera_bone
-            .map(|camera| tag_camera_lens_local(world[self.view_bone], world[camera]))
+            .map(|camera| tag_camera_lens_local(world[self.assembly.view_bone], world[camera]))
             .unwrap_or(Mat4::IDENTITY);
         let published = if hand == 0 {
             world.len()
         } else {
-            self.paired_bones.min(world.len())
+            self.assembly.paired_bones.min(world.len())
         };
         let shift = (offset != Vec3::ZERO).then(|| Mat4::from_translation(offset));
         let bones = world[..published]

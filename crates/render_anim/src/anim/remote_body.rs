@@ -610,6 +610,13 @@ pub fn occupy_remote_kit_dobj<'a>(
                             .map(|registry| assets::effective_hide_tags(&registry.0, weapon))
                             .unwrap_or_default(),
                     });
+                    for attachment in world_attachments(&registry.0, &catalog.0, weapon) {
+                        skels.push(KitModel {
+                            name: attachment.entry.skel.name.as_str(),
+                            skel: &attachment.entry.skel,
+                            hide_tags: Vec::new(),
+                        });
+                    }
                 }
             }
         }
@@ -629,6 +636,39 @@ pub struct RemoteModelSet<'a> {
     pub world_gun_gap: Option<WorldGunGap>,
     pub dobj_models: Vec<(&'a assets::ModelPoseSrc, Option<assets::Attach>)>,
     pub gun_model_index: usize,
+    pub attachments: Vec<(&'a assets::WorldWeaponEntry, usize)>,
+}
+
+pub(crate) struct WorldAttachment<'a> {
+    pub(crate) entry: &'a assets::WorldWeaponEntry,
+    pub(crate) index: assets::WorldWeaponIndex,
+    pub(crate) tag: String,
+}
+
+pub(crate) fn world_attachments<'a>(
+    registry: &assets::WeaponRegistry,
+    catalog: &'a assets::WorldWeaponCatalog,
+    weapon: u32,
+) -> Vec<WorldAttachment<'a>> {
+    if registry.world_catalog_identity() != catalog.identity() {
+        return Vec::new();
+    }
+    registry
+        .attachment_world_model_edges_of(weapon)
+        .iter()
+        .zip(registry.attachment_world_mounts_of(weapon))
+        .filter_map(|(edge, tag)| {
+            let index = edge.bound_index()?;
+            let entry = catalog.get_at(index)?;
+            entry.skel.pose.as_ref()?;
+            let tag = tag.as_ref()?;
+            Some(WorldAttachment {
+                entry,
+                index: assets::WorldWeaponIndex::from_order(index),
+                tag: tag.clone(),
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -638,15 +678,16 @@ pub struct WorldGunGap {
     pub world_model: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteModelLods {
     pub body: u8,
     pub head: Option<u8>,
     pub gun: Option<u8>,
+    pub attachments: Vec<Option<u8>>,
 }
 
 impl RemoteModelLods {
-    pub const fn tuple(self) -> (Option<u8>, Option<u8>, Option<u8>) {
+    pub const fn tuple(&self) -> (Option<u8>, Option<u8>, Option<u8>) {
         (Some(self.body), self.head, self.gun)
     }
 }
@@ -659,12 +700,21 @@ pub fn select_remote_lods(
     let mut slot_lod = |model: usize, skel: &assets::ModelSkel| -> Option<u8> {
         resolve_slot_lod(slot_lods, model, || camera_lod(skel))
     };
+    let body = slot_lod(0, &models.body.skel)?;
+    let head = models.head.and_then(|head| slot_lod(1, &head.skel));
+    let gun = models
+        .gun
+        .and_then(|gun| slot_lod(usize::from(models.head.is_some()) + 1, &gun.skel));
+    let attachments = models
+        .attachments
+        .iter()
+        .map(|(entry, model)| slot_lod(*model, &entry.skel))
+        .collect();
     Some(RemoteModelLods {
-        body: slot_lod(0, &models.body.skel)?,
-        head: models.head.and_then(|head| slot_lod(1, &head.skel)),
-        gun: models
-            .gun
-            .and_then(|gun| slot_lod(usize::from(models.head.is_some()) + 1, &gun.skel)),
+        body,
+        head,
+        gun,
+        attachments,
     })
 }
 
@@ -673,10 +723,13 @@ pub fn remote_dobj_reuse_key(
     body_name: &str,
     head_name: &str,
     gun_name: &str,
+    attachment_names: &[&str],
 ) -> assets::dobj::DObjReuseKey {
+    let mut parts = vec![body_name, head_name, gun_name];
+    parts.extend_from_slice(attachment_names);
     assets::dobj::DObjReuseKey {
         e_type,
-        model: assets::dobj::dobj_model_token(&[body_name, head_name, gun_name]),
+        model: assets::dobj::dobj_model_token(&parts),
     }
 }
 
@@ -742,6 +795,7 @@ pub fn select_remote_models<'a>(
     let gun_model_index = dobj_models.len();
 
     let mut world_gun_gap = None;
+    let mut attachments = Vec::new();
     let gun = match weapon {
         0 => None,
         index => {
@@ -779,6 +833,19 @@ pub fn select_remote_models<'a>(
                                     tag: tag.into(),
                                 }),
                             ));
+                            for attachment in world_attachments(&registry.0, &catalog.0, index) {
+                                let Some(pose) = attachment.entry.skel.pose.as_ref() else {
+                                    continue;
+                                };
+                                attachments.push((attachment.entry, dobj_models.len()));
+                                dobj_models.push((
+                                    pose,
+                                    Some(assets::Attach {
+                                        parent_model: gun_model_index,
+                                        tag: attachment.tag.into(),
+                                    }),
+                                ));
+                            }
                             Some(entry)
                         }
                     }
@@ -795,6 +862,7 @@ pub fn select_remote_models<'a>(
         world_gun_gap,
         dobj_models,
         gun_model_index,
+        attachments,
     })
 }
 
@@ -808,11 +876,17 @@ pub fn ensure_remote_dobj(
         .gun
         .map(|entry| entry.skel.name.as_str())
         .unwrap_or("");
+    let attachment_names: Vec<&str> = models
+        .attachments
+        .iter()
+        .map(|(entry, _)| entry.skel.name.as_str())
+        .collect();
     let reuse_key = remote_dobj_reuse_key(
         e_type,
         models.body_name.as_str(),
         models.head_name.as_str(),
         gun_name,
+        &attachment_names,
     );
     let slot = trees.get_mut(persist_key).expect("tree slot inserted");
     if !remote_dobj_reuses(slot.dobj.is_some(), slot.reuse_key, reuse_key) {
@@ -925,6 +999,7 @@ pub struct RemoteSkinModels<'a> {
     pub gun: Option<PendingGunSkin<'a>>,
     pub head_model: Option<u16>,
     pub gun_model: Option<u16>,
+    pub attachments: Vec<(PendingGunSkin<'a>, u16)>,
 }
 
 pub fn bind_remote_skin_models<'a>(
@@ -942,12 +1017,26 @@ pub fn bind_remote_skin_models<'a>(
             base: remote_dobj_model_base(dobj, models.gun_model_index, "gun")?,
         }),
     };
+    let attachments = models
+        .attachments
+        .iter()
+        .map(|&(entry, model)| {
+            Ok((
+                PendingGunSkin {
+                    entry,
+                    base: remote_dobj_model_base(dobj, model, "attachment")?,
+                },
+                model as u16,
+            ))
+        })
+        .collect::<Result<_, String>>()?;
     Ok(RemoteSkinModels {
         body: models.body,
         head,
         gun,
         head_model: head.map(|_| 1),
         gun_model: models.gun.map(|_| models.gun_model_index as u16),
+        attachments,
     })
 }
 

@@ -31,22 +31,32 @@ struct BankMaterial<'a> {
 fn bank_material<'a>(
     current: &'a [HudElem],
     archival: &'a [HudElem],
+    materials: &sim::HudMaterialCsOccupied,
     cg_time: i32,
-) -> (i32, Option<BankMaterial<'a>>) {
+) -> Option<BankMaterial<'a>> {
     let current_inuse = copy_in_use_prefix(current);
     let archival_inuse = copy_in_use_prefix(archival);
-    let inuse_n = (current_inuse.len() + archival_inuse.len()) as i32;
     let mut vis: Vec<BankMaterial<'a>> = Vec::new();
-    push_visible_materials(&mut vis, current_inuse, cg_time);
-    push_visible_materials(&mut vis, archival_inuse, cg_time);
+    push_visible_materials(&mut vis, current_inuse, materials, cg_time);
+    push_visible_materials(&mut vis, archival_inuse, materials, cg_time);
     vis.sort_by(|a, b| a.elem.sort.total_cmp(&b.elem.sort));
-    let last = vis.pop();
-    (inuse_n, last)
+    vis.pop()
 }
 
-fn push_visible_materials<'a>(vis: &mut Vec<BankMaterial<'a>>, src: &'a [HudElem], cg_time: i32) {
+fn push_visible_materials<'a>(
+    vis: &mut Vec<BankMaterial<'a>>,
+    src: &'a [HudElem],
+    materials: &sim::HudMaterialCsOccupied,
+    cg_time: i32,
+) {
     for elem in src {
         if elem.elem_type != HE_TYPE_MATERIAL {
+            continue;
+        }
+        let Some(index) = u8::try_from(elem.material_index).ok() else {
+            continue;
+        };
+        if sim::name_in_occupied(materials, index) != Some(DAMAGE_FEEDBACK_SHADER) {
             continue;
         }
         let color = bg_lerp_hud_colors(elem, cg_time);
@@ -159,23 +169,17 @@ pub(crate) fn update_hitmarker(
     }
 
     let snapshot = presented.snapshot();
-    let (_, bank) = match snapshot.and_then(|s| s.meta.for_client(local.0)) {
-        Some(meta) => bank_material(&meta.hud_current, &meta.hud_archival, cg_time),
-        None => (0, None),
-    };
+    let bank = snapshot.and_then(|s| {
+        let meta = s.meta.for_client(local.0)?;
+        bank_material(
+            &meta.hud_current,
+            &meta.hud_archival,
+            &s.meta.hud_materials,
+            cg_time,
+        )
+    });
 
     if let Some(mat) = bank {
-        let index = u8::try_from(mat.elem.material_index).unwrap_or(0);
-        let bound_hit_x = snapshot
-            .and_then(|s| sim::name_in_occupied(&s.meta.hud_materials, index))
-            .is_some_and(|name| name == DAMAGE_FEEDBACK_SHADER);
-        if !bound_hit_x {
-            gaps.raise(GapCause::HudElemMaterialUnbound {
-                material_index: mat.elem.material_index,
-            });
-            hide(&mut marker);
-            return;
-        }
         let alpha = mat.color[3] as f32 / 255.0;
         blit(
             &mut hud_images,
@@ -189,6 +193,13 @@ pub(crate) fn update_hitmarker(
             mat.elem.width as f32,
             mat.elem.height as f32,
             alpha,
+            Some(hud_iw4::hud_elem_placement(
+                surface.placement(),
+                mat.elem,
+                cg_time,
+                0.0,
+                0.0,
+            )),
         );
         return;
     }
@@ -218,6 +229,7 @@ pub(crate) fn update_hitmarker(
         pulse.width as f32,
         pulse.height as f32,
         alpha,
+        None,
     );
 }
 
@@ -234,6 +246,7 @@ fn blit(
     w: f32,
     h: f32,
     alpha: f32,
+    physical: Option<hud_iw4::HudElemPlacement>,
 ) {
     if !surface.is_ready() {
         gaps.clear(HudGap::Hitmarker);
@@ -252,21 +265,26 @@ fn blit(
     gaps.clear(HudGap::Hitmarker);
 
     let scale = PresentationScale::from_window(surface.width(), surface.height());
-    let placed = scale.place(
-        ScaleClass::ProjectionBound,
-        HorizontalAlign::Center,
-        VerticalAlign::Center,
-        x,
-        y,
-        w,
-        h,
-    );
+    let (left, top, width, height) = if let Some(placed) = physical {
+        (placed.x, placed.y, placed.w, placed.h)
+    } else {
+        let placed = scale.place(
+            ScaleClass::ProjectionBound,
+            HorizontalAlign::Center,
+            VerticalAlign::Center,
+            x,
+            y,
+            w,
+            h,
+        );
+        (placed.left, placed.top, placed.width, placed.height)
+    };
     for (mut node, mut image_node) in marker.iter_mut() {
         adopt_display(&mut node, Display::Flex);
-        node.left = Val::Px(placed.left);
-        node.top = Val::Px(placed.top);
-        node.width = Val::Px(placed.width);
-        node.height = Val::Px(placed.height);
+        node.left = Val::Px(left);
+        node.top = Val::Px(top);
+        node.width = Val::Px(width);
+        node.height = Val::Px(height);
         image_node.image = handle.clone();
         image_node.color = Color::srgba(1.0, 1.0, 1.0, alpha);
     }

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bevy::tasks::{TaskPool, TaskPoolBuilder};
 
@@ -13,7 +14,7 @@ use crate::{
     lane_capability::PreparedCapability,
     load_localize_catalog_in_lane,
     material_images::ImageDemandPlan,
-    open_zone, open_zone_shared, peek_zone_version,
+    open_zone_shared, peek_zone_version,
     progress::{LoadProgress, StageHandle, StageId},
 };
 use asset_transport::load_jobs::{self, JobKind};
@@ -21,6 +22,7 @@ use asset_transport::load_jobs::{self, JobKind};
 pub use asset_world::WorldDrawPolicy;
 
 static PROCESS_CPUS: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+static NEXT_COMMON_PROFILE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub fn publish_process_cpus(cpus: Vec<usize>) {
     let _ = PROCESS_CPUS.set(cpus);
@@ -66,109 +68,785 @@ fn set_thread_cpus(cpus: &[usize]) {
 #[cfg(not(target_os = "linux"))]
 fn set_thread_cpus(_cpus: &[usize]) {}
 
-pub fn load_shell_weapon_registry(
-    games: &crate::GamesRoot,
-) -> (
-    WeaponRegistry,
-    Vec<(crate::AssetNamespace, crate::CapturedStringTable)>,
-    Vec<String>,
-) {
-    let mut merged = crate::WeaponBuild::default();
-    let mut tables = Vec::new();
-    let mut report = Vec::new();
-    let progress = LoadProgress::default();
-    for (label, version) in [
-        ("iw4", fastfile_iw4::ZONE_VERSION_PC),
-        ("iw5", fastfile_iw5::ZONE_VERSION_PC),
-        ("t5", fastfile_t5::ZONE_VERSION_PC),
-    ] {
-        let found = match find_common_mp_for_envelope(games, version) {
-            Ok(found) => found,
-            Err(error) => {
-                report.push(format!("CAC {label}: {error}"));
-                continue;
-            }
-        };
-        let image = match open_zone(&found.path) {
-            Ok(image) => image,
-            Err(error) => {
-                report.push(format!(
-                    "CAC {label}: open {}: {error}",
-                    found.path.display()
-                ));
-                continue;
-            }
-        };
-        let mut census = lane(image.game).load_common_mp(
-            &found.path,
-            &image,
-            &progress,
-            false,
-            MaterialCatalog::default(),
-        );
-        let namespace = match label {
-            "iw4" => crate::AssetNamespace::Iw4,
-            "iw5" => crate::AssetNamespace::Iw5,
-            _ => crate::AssetNamespace::T5,
-        };
-
-        for zone in ["code_post_gfx_mp"] {
-            let part = crate::find_zone_for_tree(&found.path, zone).and_then(|zone| {
-                open_zone(&zone.path)
-                    .map(|image| (zone, image))
-                    .map_err(|e| e.to_string())
-            });
-            match part {
-                Ok((zone, image)) => {
-                    let ui = lane(image.game).load_common_mp(
-                        &zone.path,
-                        &image,
-                        &progress,
-                        false,
-                        MaterialCatalog::default(),
-                    );
-                    report.extend(
-                        ui.report
-                            .iter()
-                            .filter(|line| line.contains("stopped") || line.contains("statsTable:"))
-                            .map(|line| {
-                                format!(
-                                    "CAC {label} {zone_name}: {line}",
-                                    zone_name = zone.path.display()
-                                )
-                            }),
-                    );
-                    for table in ui.cac_tables {
-                        census.weapons.apply_stats_tables([&table]);
-                        report.push(format!(
-                            "CAC {label}: {zone_name} {} rows={}",
-                            table.name,
-                            table.rows,
-                            zone_name = zone.path.display()
-                        ));
-                        tables.push((namespace, table));
-                    }
-                }
-                Err(error) => report.push(format!("CAC {label} {zone}: {error}")),
-            }
-        }
-        for table in census.cac_tables {
-            tables.push((namespace, table));
-        }
-        let loaded = census.weapons.len();
-        merged.absorb(census.weapons);
-        report.push(format!(
-            "CAC {label}: path={} loaded={loaded} merged={}",
-            found.path.display(),
-            merged.len()
-        ));
-    }
-    (merged.publish(), tables, report)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommonKey {
+    runtime: Option<PathBuf>,
+    foreign: Option<PathBuf>,
 }
 
-#[derive(Default)]
+impl CommonKey {
+    fn for_match(zone_ff: Option<&Path>, runtime: Option<&Path>, report: &mut Vec<String>) -> Self {
+        Self {
+            runtime: runtime.map(Path::to_path_buf),
+            foreign: resolve_foreign_material_donor(zone_ff, runtime, report),
+        }
+    }
+
+    fn shell(games: &crate::GamesRoot, report: &mut Vec<String>) -> Self {
+        let runtime = match find_common_mp_for_envelope(games, fastfile_iw4::ZONE_VERSION_PC) {
+            Ok(found) => Some(found.path),
+            Err(error) => {
+                report.push(format!("CAC iw4: {error}"));
+                None
+            }
+        };
+        Self {
+            runtime,
+            foreign: None,
+        }
+    }
+}
+
+impl std::fmt::Display for CommonKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.runtime {
+            Some(path) => write!(f, "{}", path.display())?,
+            None => f.write_str("<no runtime common_mp>")?,
+        }
+        if let Some(foreign) = &self.foreign {
+            write!(f, " + {}", foreign.display())?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CommonCounts {
+    startup_count: usize,
+    t5_mat_count: usize,
+    t5_reuse_mat: usize,
+    t5_xanim_n: usize,
+    foreign_count: usize,
+    seed_mat: usize,
+    seed_img: usize,
+    common_reuse_mat: usize,
+    common_reuse_img: usize,
+}
+
+#[derive(Clone)]
+struct CommonProducts {
+    material_seed: MaterialCatalog,
+    shared_surfaces: asset_model::SharedXModelSurfaces,
+    scene_models: crate::MapXModelSceneCatalog,
+    light_defs: Vec<crate::CapturedLightDef>,
+    pen_table: weapon_iw4::PenetrationDepthTable,
+    pen_table_loaded: bool,
+    lochit_table: Option<[f32; weapon_iw4::HITLOC_COUNT]>,
+    tracers: crate::TracerCatalog,
+    xmodel_walk: crate::PreparedXModelWalkCensus,
+    s1_common_bytes: usize,
+    teamsets: std::collections::HashMap<String, crate::MapTeamSettings>,
+    film_visions:
+        std::collections::BTreeMap<String, Result<crate::FilmVision, crate::FilmVisionParseError>>,
+    weapons: WeaponBuild,
+    fpv_meshes: FpvMeshBuild,
+    world_weapons: WorldWeaponBuild,
+    projectile_meshes: ProjectileMeshBuild,
+    xanims: XAnimBuild,
+    player_anim_sources: crate::PlayerAnimSources,
+    fx: FxCatalog,
+    fx_models: crate::FxModelCatalog,
+    impact_fx: Option<crate::OwnedFxImpactTable>,
+    t5_xanims: XAnimBuild,
+    t5_fx: FxCatalog,
+    iw5_materials: MaterialCatalog,
+    strings: LocalizeCatalog,
+    counts: CommonCounts,
+    report: Vec<String>,
+    localize_report: Vec<String>,
+}
+
+struct KeptImages {
+    label: &'static str,
+    namespace: &'static str,
+    batch: crate::material_images::DecodedImageBatch,
+    job: load_jobs::Job,
+}
+
+pub struct CommonSet {
+    id: u64,
+    key: CommonKey,
+    products: CommonProducts,
+    donor_images: Flight<Vec<KeptImages>>,
+    fpv_plan: Option<ImageDemandPlan>,
+    retained: std::sync::Mutex<crate::material_images::PayloadRetention>,
+    cac_tables: Vec<(crate::AssetNamespace, crate::CapturedStringTable)>,
+    prepared_ms: f32,
+    ready_at: std::time::Instant,
+}
+
+impl CommonSet {
+    async fn donor_images(&self) -> &[KeptImages] {
+        self.donor_images.wait().await
+    }
+
+    fn donor_batches(&self) -> usize {
+        self.donor_images.get().map_or(0, Vec::len)
+    }
+
+    fn retain(&self, batch: &crate::material_images::DecodedImageBatch) -> u64 {
+        self.retained
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .keep(batch)
+    }
+
+    fn retained_bytes(&self) -> u64 {
+        self.retained
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .bytes()
+    }
+
+    fn retained_payloads(&self) -> usize {
+        self.retained
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .payloads()
+    }
+}
+
+struct Flight<T> {
+    done: std::sync::OnceLock<T>,
+    waiting: std::sync::Mutex<Vec<std::task::Waker>>,
+}
+
+impl<T> Flight<T> {
+    fn new() -> Self {
+        Self {
+            done: std::sync::OnceLock::new(),
+            waiting: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn get(&self) -> Option<&T> {
+        self.done.get()
+    }
+
+    fn land(&self, value: T) {
+        let _ = self.done.set(value);
+        let waiting = std::mem::take(
+            &mut *self
+                .waiting
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()),
+        );
+        for waker in waiting {
+            waker.wake();
+        }
+    }
+
+    fn wait(&self) -> impl std::future::Future<Output = &T> {
+        std::future::poll_fn(move |cx| {
+            if let Some(value) = self.done.get() {
+                return std::task::Poll::Ready(value);
+            }
+            let mut waiting = self
+                .waiting
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            // Checked again under the lock `land` takes before it wakes, or a
+            // value landing in between would leave this waiter asleep.
+            if let Some(value) = self.done.get() {
+                return std::task::Poll::Ready(value);
+            }
+            waiting.push(cx.waker().clone());
+            std::task::Poll::Pending
+        })
+    }
+}
+
+struct CommonFlight {
+    key: CommonKey,
+    set: Flight<Option<Arc<CommonSet>>>,
+}
+
+static COMMON: std::sync::Mutex<Option<Arc<CommonFlight>>> = std::sync::Mutex::new(None);
+
+struct FlightGuard(Option<Arc<CommonFlight>>);
+
+impl Drop for FlightGuard {
+    fn drop(&mut self) {
+        let Some(flight) = self.0.take() else {
+            return;
+        };
+        let mut slot = COMMON.lock().unwrap_or_else(|poison| poison.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &flight))
+        {
+            *slot = None;
+        }
+        drop(slot);
+        flight.set.land(None);
+    }
+}
+
+async fn ensure_common(key: CommonKey) -> (Arc<CommonSet>, &'static str) {
+    let (flight, reach) = {
+        let mut slot = COMMON.lock().unwrap_or_else(|poison| poison.into_inner());
+        match slot.as_ref() {
+            Some(flight) if flight.key == key => {
+                let reach = if flight.set.get().is_some() {
+                    "reused"
+                } else {
+                    "joined in flight"
+                };
+                (Arc::clone(flight), reach)
+            }
+            _ => {
+                let flight = Arc::new(CommonFlight {
+                    key: key.clone(),
+                    set: Flight::new(),
+                });
+                if let Some(previous) = slot.replace(Arc::clone(&flight)) {
+                    diag::info!(World, "common set: {} replaced by {key}", previous.key);
+                }
+                let running = Arc::clone(&flight);
+                load_pool()
+                    .spawn(async move {
+                        let mut guard = FlightGuard(Some(running));
+                        let set = prepare_common(key).await;
+                        if let Some(flight) = guard.0.take() {
+                            flight.set.land(Some(set));
+                        }
+                    })
+                    .detach();
+                (flight, "prepared")
+            }
+        }
+    };
+    diag::info!(World, "common set: {reach} for {}", flight.key);
+    match flight.set.wait().await {
+        Some(set) => (Arc::clone(set), reach),
+        None => panic!("common set for {} was not prepared", flight.key),
+    }
+}
+
+pub struct ShellCommon {
+    pub weapons: WeaponRegistry,
+    pub tables: Vec<(crate::AssetNamespace, crate::CapturedStringTable)>,
+    pub report: Vec<String>,
+}
+
+pub async fn load_shell_common(games: crate::GamesRoot) -> ShellCommon {
+    let mut report = Vec::new();
+    let key = CommonKey::shell(&games, &mut report);
+    let (common, reach) = ensure_common(key).await;
+    let weapons = common.products.weapons.clone().publish();
+    report.push(format!(
+        "CAC: {reach} common set {}; weapons={} (iw4={} iw5={} t5={}) tables={}",
+        common.key,
+        weapons.len(),
+        weapons.namespace_count(crate::AssetNamespace::Iw4),
+        weapons.namespace_count(crate::AssetNamespace::Iw5),
+        weapons.namespace_count(crate::AssetNamespace::T5),
+        common.cac_tables.len(),
+    ));
+    for (namespace, table) in &common.cac_tables {
+        report.push(format!(
+            "CAC {}: {} rows={}",
+            namespace.as_str(),
+            table.name,
+            table.rows
+        ));
+    }
+    ShellCommon {
+        weapons,
+        tables: common.cac_tables.clone(),
+        report,
+    }
+}
+
+async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
+    let started = std::time::Instant::now();
+    let progress = LoadProgress::default();
+    let pool = load_pool();
+    let anchor = key.runtime.clone();
+
+    let startup_walk = {
+        let anchor = anchor.clone();
+        let progress = progress.clone();
+        pool.spawn(async move { walk_startup_material_zones(anchor.as_ref(), &progress).await })
+    };
+
+    let mut donor_report = Vec::new();
+    let material_donor = key.foreign.clone();
+    let weapon_donor = resolve_iw5_weapon_donor(anchor.as_deref(), &mut donor_report);
+    let iw5_stats_walk = weapon_donor.clone().map(|donor| {
+        let progress = progress.clone();
+        pool.spawn(async move { walk_iw5_stats_tables(&donor, &progress) })
+    });
+    let shared_donor = match (&material_donor, &weapon_donor) {
+        (Some(material), Some(weapons)) if material == weapons => Some(material.clone()),
+        _ => None,
+    };
+    let (data_common_walk, mut iw5_weapon_walk) = match shared_donor {
+        Some(donor) => {
+            let progress = progress.clone();
+            let job = load_jobs::open(JobKind::ImageDecode).namespace("iw5");
+            (
+                ForeignCommonWork::Shared(
+                    pool.spawn(async move { walk_shared_iw5_common(&donor, &progress, job) }),
+                ),
+                None,
+            )
+        }
+        None => {
+            let material = material_donor.map(|donor| {
+                let progress = progress.clone();
+                let job = load_jobs::open(JobKind::ImageDecode).namespace("iw5");
+                pool.spawn(async move { walk_foreign_material_common(&donor, &progress, job) })
+            });
+            let weapons = weapon_donor.map(|donor| {
+                let progress = progress.clone();
+                let job = load_jobs::open(JobKind::ImageDecode).namespace("iw5");
+                pool.spawn(async move { walk_iw5_weapon_bundle(&donor, &progress, job) })
+            });
+            (ForeignCommonWork::Split(material), weapons)
+        }
+    };
+
+    let common_open = {
+        let anchor = anchor.clone();
+        let progress = progress.clone();
+        pool.spawn(async move {
+            let Some(path) = anchor else {
+                progress.record_skipped_scoped(StageId::CommonAssets, "common_mp");
+                return None;
+            };
+            let stage = progress.begin_scoped(StageId::CommonAssets, "common_mp", None);
+            let opened = open_zone_shared(&path);
+            finish_zone_open(stage, &opened);
+            Some((path, opened))
+        })
+    };
+
+    let t5_common_prep = {
+        let anchor = anchor.clone();
+        let progress = progress.clone();
+        pool.spawn(async move { t5_weapon_common_prep(anchor.as_deref(), &progress) })
+    };
+    let localize_walk = {
+        let anchor = anchor.clone();
+        let progress = progress.clone();
+        pool.spawn(async move {
+            let mut report = Vec::new();
+            let strings = match &anchor {
+                Some(path) => {
+                    let stage = progress.begin(StageId::Localization, None);
+                    let catalog = load_localized_strings_beside(path, &mut report, &stage);
+                    stage.done();
+                    catalog
+                }
+                None => {
+                    progress.record_skipped(StageId::Localization);
+                    report.push(
+                        "localize: no runtime common_mp — every on-screen string is a gap".into(),
+                    );
+                    LocalizeCatalog::default()
+                }
+            };
+            (strings, report)
+        })
+    };
+
+    let (material_seed, mut common_report, iw4_stats, startup_light_defs) = startup_walk.await;
+    let startup_count = material_seed.materials.len();
+
+    let t5_weapon_walk = {
+        let progress = progress.clone();
+        let job = load_jobs::open(JobKind::ImageDecode).namespace("t5");
+        pool.spawn(async move {
+            walk_t5_weapon_common(t5_common_prep.await, &progress, material_seed, job)
+        })
+    };
+
+    let T5WeaponCommon {
+        weapons: t5_weapons,
+        fpv: t5_fpv,
+        world_guns: t5_world_guns,
+        mut material_seed,
+        xanims: t5_xanims,
+        fx: t5_fx,
+        projectiles: t5_projectiles,
+        teamsets: t5_teamsets,
+        images: t5_images,
+        stats_tables: t5_stats,
+        report: t5_report,
+    } = t5_weapon_walk.await;
+    let t5_ids = t5_weapons.len();
+    let t5_fpv_n = t5_fpv.len();
+    let t5_xanim_n = t5_xanims.len();
+    let t5_reuse_mat = material_seed.link_reused_materials;
+    let t5_mat_count = material_seed
+        .materials
+        .len()
+        .saturating_sub(startup_count)
+        .saturating_add(t5_reuse_mat);
+    common_report.extend(t5_report);
+    let (foreign_materials, mut foreign_report, shared_bundle, foreign_images) =
+        match data_common_walk {
+            ForeignCommonWork::Shared(task) => {
+                let (materials, bundle, images, report) = task.await;
+                (materials, report, Some(bundle), images)
+            }
+            ForeignCommonWork::Split(Some(task)) => {
+                let (materials, images, report) = task.await;
+                (materials, report, None, images)
+            }
+            ForeignCommonWork::Split(None) => (MaterialCatalog::default(), Vec::new(), None, None),
+        };
+
+    common_report.append(&mut donor_report);
+    common_report.append(&mut foreign_report);
+
+    let foreign_count = foreign_materials.materials.len();
+    material_seed.absorb_asset_population(foreign_materials);
+
+    let mut shared_surfaces = asset_model::SharedXModelSurfaces::default();
+    let mut common_scene_models = crate::MapXModelSceneCatalog::default();
+    let mut common_light_defs = startup_light_defs;
+    let mut common_pen_table = weapon_iw4::PenetrationDepthTable::empty();
+    let mut common_pen_loaded = false;
+    let mut common_lochit_table = None;
+
+    let mut common_tracers = crate::TracerCatalog::default();
+    let mut xmodel_walk = crate::PreparedXModelWalkCensus::default();
+    let mut s1_common_bytes = 0;
+    let mut teamsets = t5_teamsets;
+    let mut common_film_visions = std::collections::BTreeMap::new();
+    let mut fpv_plan = None;
+    let mut iw4_census_stats = Vec::new();
+
+    let common_opened = common_open.await;
+
+    let (
+        mut weapons,
+        mut fpv_meshes,
+        mut world_weapons,
+        mut projectile_meshes,
+        mut xanims,
+        mut player_anim_sources,
+        common_fx,
+        common_fx_models,
+        common_impact,
+        material_seed,
+        mut common_walk_report,
+    ) = match common_opened {
+        Some((path, Ok(image))) => {
+            let mut census =
+                lane(image.game).load_common_mp(&path, &image, &progress, true, material_seed);
+            fpv_plan = census.pending_images.take().filter(|plan| !plan.is_empty());
+            shared_surfaces = census.shared_surfaces;
+            common_scene_models = census.scene_models;
+            common_light_defs.extend(census.light_defs);
+            common_pen_table = census.pen_table;
+            common_pen_loaded = census.pen_table_loaded;
+            common_lochit_table = census.lochit_table;
+            common_tracers = census.tracers;
+            xmodel_walk = census.xmodel_walk;
+            s1_common_bytes = census.s1_common_bytes;
+            teamsets.extend(census.teamsets);
+            common_film_visions = census.film_visions;
+            iw4_census_stats = census.cac_tables;
+            (
+                census.weapons,
+                census.fpv,
+                census.world_weapons,
+                census.projectile_meshes,
+                census.xanims,
+                census.player_anim_sources,
+                census.fx,
+                census.fx_models,
+                census.impact_fx,
+                census.material_population,
+                census.report,
+            )
+        }
+        Some((_, Err(error))) => (
+            crate::WeaponBuild::default(),
+            FpvMeshBuild::default(),
+            WorldWeaponBuild::default(),
+            ProjectileMeshBuild::default(),
+            XAnimBuild::default(),
+            crate::PlayerAnimSources::default(),
+            crate::FxCatalog::default(),
+            crate::FxModelCatalog::default(),
+            None,
+            material_seed,
+            vec![format!("common_mp models: open zone: {error}")],
+        ),
+        None => (
+            crate::WeaponBuild::default(),
+            FpvMeshBuild::default(),
+            WorldWeaponBuild::default(),
+            ProjectileMeshBuild::default(),
+            XAnimBuild::default(),
+            crate::PlayerAnimSources::default(),
+            crate::FxCatalog::default(),
+            crate::FxModelCatalog::default(),
+            None,
+            material_seed,
+            Vec::new(),
+        ),
+    };
+    common_report.append(&mut common_walk_report);
+    weapons.apply_stats_tables(&iw4_stats);
+
+    let common_reuse_mat = material_seed.link_reused_materials;
+    let common_reuse_img = material_seed.link_reused_images;
+    let seed_mat = material_seed.materials.len();
+    let seed_img = material_seed.images.len();
+
+    player_anim_sources.compile();
+    common_report.push(player_anim_sources.compile_report_line());
+    common_report.push(player_anim_sources.parse_report_line());
+
+    let (bundle, bundle_images, mut iw5_report) = match (iw5_weapon_walk.take(), shared_bundle) {
+        (Some(task), _) => task.await,
+        (None, Some(bundle)) => (bundle, None, Vec::new()),
+        (None, None) => (Iw5WeaponBundle::default(), None, Vec::new()),
+    };
+    let Iw5WeaponBundle {
+        weapons: mut iw5_weapons,
+        fpv: iw5_fpv,
+        world_guns: iw5_world_guns,
+        xanims: iw5_xanims,
+        materials: iw5_materials,
+        stats_tables: iw5_census_stats,
+    } = bundle;
+    let iw5_stats = match iw5_stats_walk {
+        Some(task) => {
+            let (tables, report) = task.await;
+            common_report.extend(report);
+            tables
+        }
+        None => Vec::new(),
+    };
+    iw5_weapons.apply_stats_tables(&iw5_stats);
+    let iw4_weapon_n = weapons.len();
+    let fpv_common_n = fpv_meshes.len();
+    let absorbed = iw5_weapons.len();
+    weapons.absorb(iw5_weapons);
+    let iw5_fpv_added = fpv_meshes.absorb(iw5_fpv);
+    let world_gun_common_n = world_weapons.len();
+    let iw5_world_added = world_weapons.absorb(iw5_world_guns);
+    let xanim_before_iw5 = xanims.len();
+    let iw5_xanim_added = xanims.absorb(iw5_xanims);
+    let iw5_mat_n = iw5_materials.materials.len();
+    common_report.append(&mut iw5_report);
+    common_report.push(format!(
+        "iw5 weapon bundle: donor={} absorbed={absorbed} catalog {iw4_weapon_n}→{} fpv {fpv_common_n}→{} (+{iw5_fpv_added} iw5 keys) world guns {world_gun_common_n}→{} (+{iw5_world_added} iw5 keys) xanims {xanim_before_iw5}→{} (+{iw5_xanim_added} iw5 keys) materials={iw5_mat_n} (absorbed after IW4 pool)",
+        absorbed,
+        weapons.len(),
+        fpv_meshes.len(),
+        world_weapons.len(),
+        xanims.len(),
+    ));
+    match weapons.resolve_index("iw5_msr") {
+        Ok(Some(id)) => {
+            let facts = weapons.facts_of(id);
+            common_report.push(format!(
+                "iw5_msr: id={id} gun={} world={} fire={:?} clip={:?} class={:?} type={:?} ftype={:?} bolt={:?} raise={:?} start={:?} dmg={:?} overlay={:?} overlay_img={:?} ov_w={:?} ov_h={:?}",
+                weapons.gun_xmodel_of(id).unwrap_or("<none>"),
+                weapons.world_model_of(id).unwrap_or("<none>"),
+                facts.map(|f| f.fire_time_ms),
+                facts.map(|f| f.clip_size),
+                facts.map(|f| f.weap_class),
+                facts.map(|f| f.weap_type),
+                facts.map(|f| f.fire_type),
+                facts.map(|f| f.bolt_action),
+                facts.map(|f| f.raise_time_ms),
+                facts.map(|f| f.start_ammo),
+                facts.map(|f| f.damage),
+                weapons.overlay_material_of(id),
+                weapons.overlay_image_of(id),
+                facts.map(|f| f.ads_overlay_width),
+                facts.map(|f| f.ads_overlay_height),
+            ));
+        }
+        Ok(None) | Err(_) => common_report.push("iw5_msr: not in merged catalog".into()),
+    }
+
+    let mut t5_weapons = t5_weapons;
+    let (t5_code_stats, t5_census_stats) = t5_stats;
+    t5_weapons.apply_stats_tables(&t5_code_stats);
+    let t5_absorbed = t5_weapons.len();
+    weapons.absorb(t5_weapons);
+    projectile_meshes.absorb(t5_projectiles);
+    let t5_fpv_added = fpv_meshes.absorb(t5_fpv);
+    let t5_world_added = world_weapons.absorb(t5_world_guns);
+    common_report.push(format!(
+        "t5 weapon absorb: donor={t5_ids} unique={t5_absorbed} fpv=+{t5_fpv_added}/{t5_fpv_n} world_guns=+{t5_world_added}; registry now {} (t5={})",
+        weapons.len(),
+        weapons.namespace_count(crate::AssetNamespace::T5)
+    ));
+    common_report.push(format!(
+        "FPV generation: common={fpv_common_n} iw5_keys={iw5_fpv_added} t5={t5_fpv_n} t5_keys={t5_fpv_added} collide={} merged={}",
+        fpv_meshes.collide_name_count(),
+        fpv_meshes.len()
+    ));
+
+    let cac_tables: Vec<(crate::AssetNamespace, crate::CapturedStringTable)> = [
+        (crate::AssetNamespace::Iw4, iw4_stats, iw4_census_stats),
+        (crate::AssetNamespace::Iw5, iw5_stats, iw5_census_stats),
+        (crate::AssetNamespace::T5, t5_code_stats, t5_census_stats),
+    ]
+    .into_iter()
+    .flat_map(|(namespace, code, common)| {
+        code.into_iter()
+            .chain(common)
+            .map(move |table| (namespace, table))
+    })
+    .collect();
+
+    weapons.set_family_tables(cac_tables.clone());
+    let iw5_prepared = weapons.prepare_iw5_configurations();
+    weapons.resolve_fpv_mesh_edges(&fpv_meshes);
+    common_report.push(format!(
+        "IW5 configurations: prepared={} refused={} {:?}",
+        iw5_prepared.prepared,
+        iw5_prepared.refused.len(),
+        iw5_prepared
+            .refused
+            .iter()
+            .map(|selection| format!(
+                "{} [{}]",
+                selection
+                    .family
+                    .as_ref()
+                    .map(|key| key.to_string())
+                    .unwrap_or_default(),
+                selection.attachments.join(" ")
+            ))
+            .collect::<Vec<_>>()
+    ));
+    let (strings, localize_report) = localize_walk.await;
+    common_report.extend(progress.timing_report());
+    let prepared_ms = started.elapsed().as_secs_f32() * 1000.0;
+    diag::info!(
+        World,
+        "common set: {key} prepared in {prepared_ms:.0}ms; donor images still decoding"
+    );
+
+    let mut material_seed = material_seed;
+    material_seed.mark_images_common_owned();
+    let mut iw5_materials = iw5_materials;
+    iw5_materials.mark_images_common_owned();
+    let set = Arc::new(CommonSet {
+        id: NEXT_COMMON_PROFILE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        key,
+        products: CommonProducts {
+            material_seed,
+            shared_surfaces,
+            scene_models: common_scene_models,
+            light_defs: common_light_defs,
+            pen_table: common_pen_table,
+            pen_table_loaded: common_pen_loaded,
+            lochit_table: common_lochit_table,
+            tracers: common_tracers,
+            xmodel_walk,
+            s1_common_bytes,
+            teamsets,
+            film_visions: common_film_visions,
+            weapons,
+            fpv_meshes,
+            world_weapons,
+            projectile_meshes,
+            xanims,
+            player_anim_sources,
+            fx: common_fx,
+            fx_models: common_fx_models,
+            impact_fx: common_impact,
+            t5_xanims,
+            t5_fx,
+            iw5_materials,
+            strings,
+            counts: CommonCounts {
+                startup_count,
+                t5_mat_count,
+                t5_reuse_mat,
+                t5_xanim_n,
+                foreign_count,
+                seed_mat,
+                seed_img,
+                common_reuse_mat,
+                common_reuse_img,
+            },
+            report: common_report,
+            localize_report,
+        },
+        donor_images: Flight::new(),
+        fpv_plan,
+        retained: std::sync::Mutex::new(Default::default()),
+        cac_tables,
+        prepared_ms,
+        ready_at: std::time::Instant::now(),
+    });
+
+    let keeping = Arc::clone(&set);
+    load_pool()
+        .spawn(async move {
+            let mut kept = Vec::new();
+            for (namespace, pending) in [
+                ("t5", t5_images),
+                ("iw5", foreign_images),
+                ("iw5", bundle_images),
+            ] {
+                let Some(pending) = pending else {
+                    continue;
+                };
+                let job = pending.job;
+                let (label, batch) = pending.join().await;
+                let batch = batch.into_kept();
+                keeping.retain(&batch);
+                kept.push(KeptImages {
+                    label,
+                    namespace,
+                    batch,
+                    job,
+                });
+            }
+            diag::info!(
+                World,
+                "common set: {} donor image batches kept, {} payloads ({:.1}MiB)",
+                kept.len(),
+                keeping.retained_payloads(),
+                keeping.retained_bytes() as f64 / (1024.0 * 1024.0),
+            );
+            keeping.donor_images.land(kept);
+        })
+        .detach();
+    set
+}
+
+fn walk_iw5_stats_tables(
+    donor: &Path,
+    progress: &LoadProgress,
+) -> (Vec<crate::CapturedStringTable>, Vec<String>) {
+    let found = match find_zone_for_tree(donor, "code_post_gfx_mp") {
+        Ok(found) => found,
+        Err(error) => {
+            return (
+                Vec::new(),
+                vec![format!("CAC iw5 code_post_gfx_mp: {error}")],
+            );
+        }
+    };
+    let population = walk_population_file(&found.path, progress, MaterialCatalog::default());
+    let line = format!(
+        "CAC iw5: {} tables={}",
+        found.path.display(),
+        population.cac_tables.len()
+    );
+    (population.cac_tables, vec![line])
+}
+
+#[derive(Default, Clone)]
 pub struct PreparedWorld {
     pub draw: Option<WorldDraw>,
+    pub dynamic_light: Option<crate::ResolvedLightDef>,
     pub static_model_meshes: Vec<crate::ModelMesh>,
 
     pub static_model_instances: Vec<Option<crate::StaticModelPlacement>>,
@@ -215,13 +893,10 @@ pub struct PreparedWorld {
     pub policy: WorldDrawPolicy,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PreparedMatch {
     pub world: PreparedWorld,
 
-    /// The effects the match installs. Published out of the world's build
-    /// catalog once the donors are absorbed, so what reaches the runtime has no
-    /// zone link map to resolve one more pointer with.
     pub fx: crate::FxDefinitions,
     pub materials: crate::MatchMaterials,
     pub clip: Option<ClipCollision>,
@@ -232,8 +907,6 @@ pub struct PreparedMatch {
 
     pub projectile_meshes: crate::ProjectileMeshCatalog,
     pub xanims: XAnimCatalog,
-    /// Death clip/husk edges stamped at Ready from GSC names. Install wraps
-    /// these rows; it does not look them up again.
     pub destructible_death: Vec<crate::DestructibleDeathRow>,
     pub player_anim_sources: crate::PlayerAnimSources,
 
@@ -249,13 +922,57 @@ pub struct PreparedMatch {
     pub lochit_table: Option<[f32; weapon_iw4::HITLOC_COUNT]>,
 
     pub xmodel_walk: crate::PreparedXModelWalkCensus,
+
+    pub sound: Option<Result<asset_audio::SoundCatalog, String>>,
 }
 
-/// What a match walk produced. A canceled walk has no prepared match at all,
-/// which is not the same as an empty one.
 pub enum MatchLoadOutcome {
     Ready(PreparedMatch),
     Canceled,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ZoneStamp {
+    path: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl ZoneStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            len: meta.len(),
+            modified: meta.modified().ok(),
+        })
+    }
+}
+
+struct ResidentMap {
+    zone: ZoneStamp,
+    common: Arc<CommonSet>,
+    prepared: PreparedMatch,
+}
+
+static RESIDENT_MAP: std::sync::Mutex<Option<ResidentMap>> = std::sync::Mutex::new(None);
+
+static NEXT_PRODUCTS_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn landed_common(key: &CommonKey) -> Option<Arc<CommonSet>> {
+    let slot = COMMON.lock().unwrap_or_else(|poison| poison.into_inner());
+    let flight = slot.as_ref().filter(|flight| flight.key == *key)?;
+    flight.set.get().cloned().flatten()
+}
+
+fn resident_copy(zone: &ZoneStamp, key: &CommonKey) -> Option<PreparedMatch> {
+    let common = landed_common(key)?;
+    let slot = RESIDENT_MAP
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let resident = slot.as_ref()?;
+    (resident.zone == *zone && Arc::ptr_eq(&resident.common, &common))
+        .then(|| resident.prepared.clone())
 }
 
 pub async fn load_prepared_match(
@@ -263,6 +980,72 @@ pub async fn load_prepared_match(
     common_mp: Result<PathBuf, String>,
     progress: LoadProgress,
 ) -> MatchLoadOutcome {
+    let stamp = zone_ff.as_deref().ok().and_then(ZoneStamp::of);
+    if let Some(stamp) = &stamp {
+        let key = CommonKey::for_match(
+            Some(&stamp.path),
+            common_mp.as_deref().ok(),
+            &mut Vec::new(),
+        );
+        let copying = std::time::Instant::now();
+        if let Some(mut prepared) = resident_copy(stamp, &key) {
+            progress.record_reused_scoped(StageId::CommonAssets, "shared common");
+            progress.record_reused_scoped(StageId::MapAssets, "resident");
+            progress.record_reused_scoped(StageId::Images, "map");
+            let line = format!(
+                "resident map: reused `{}` walk #{} — no zone opened, no decode; match copy {:.0}ms",
+                stamp.path.display(),
+                prepared.materials.products_id,
+                copying.elapsed().as_secs_f32() * 1000.0
+            );
+            diag::info!(World, "{line}");
+            prepared.report.push(line);
+            prepared.report.extend(progress.timing_report());
+            return MatchLoadOutcome::Ready(prepared);
+        }
+    }
+    let dropped = RESIDENT_MAP
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take();
+    if let Some(dropped) = dropped {
+        diag::info!(
+            World,
+            "resident map: `{}` walk #{} dropped before the next walk",
+            dropped.zone.path.display(),
+            dropped.prepared.materials.products_id
+        );
+    }
+    let (outcome, common) = walk_prepared_match(zone_ff, common_mp, progress.clone()).await;
+    let MatchLoadOutcome::Ready(mut prepared) = outcome else {
+        return outcome;
+    };
+    if let (Some(zone), Some(common)) = (stamp, common) {
+        let keeping = std::time::Instant::now();
+        let resident = prepared.clone();
+        prepared.report.push(format!(
+            "resident map: kept `{}` walk #{} for a same-map load ({:.0}ms)",
+            zone.path.display(),
+            prepared.materials.products_id,
+            keeping.elapsed().as_secs_f32() * 1000.0
+        ));
+        *RESIDENT_MAP
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(ResidentMap {
+            zone,
+            common,
+            prepared: resident,
+        });
+    }
+    prepared.report.extend(progress.timing_report());
+    MatchLoadOutcome::Ready(prepared)
+}
+
+async fn walk_prepared_match(
+    zone_ff: Result<PathBuf, String>,
+    common_mp: Result<PathBuf, String>,
+    progress: LoadProgress,
+) -> (MatchLoadOutcome, Option<Arc<CommonSet>>) {
     let zone_name = zone_ff
         .as_ref()
         .ok()
@@ -291,339 +1074,83 @@ pub async fn load_prepared_match(
             Ok::<_, String>((path, image))
         })
     };
-    let startup_walk = {
-        let zone_ff = zone_ff.clone();
-        let progress = progress.clone();
-        pool.spawn(
-            async move { walk_startup_material_zones(zone_ff.as_ref().ok(), &progress).await },
-        )
-    };
 
     let mut donor_report = Vec::new();
-    let material_donor = resolve_foreign_material_donor(
+    let key = CommonKey::for_match(
         zone_ff.as_ref().ok().map(PathBuf::as_path),
         common_mp.as_ref().ok().map(PathBuf::as_path),
         &mut donor_report,
     );
-    let weapon_donor = resolve_iw5_weapon_donor(
-        common_mp.as_ref().ok().map(PathBuf::as_path),
-        &mut donor_report,
-    );
-    let shared_donor = match (&material_donor, &weapon_donor) {
-        (Some(material), Some(weapons)) if material == weapons => Some(material.clone()),
-        _ => None,
-    };
-    let (data_common_walk, mut iw5_weapon_walk) = match shared_donor {
-        Some(donor) => {
-            let progress = progress.clone();
-            let job = load_jobs::open(JobKind::ImageDecode).namespace("iw5");
-            (
-                ForeignCommonWork::Shared(
-                    pool.spawn(async move { walk_shared_iw5_common(&donor, &progress, job) }),
-                ),
-                None,
-            )
-        }
-        None => {
-            let material = material_donor.map(|donor| {
-                let progress = progress.clone();
-                let job = load_jobs::open(JobKind::ImageDecode).namespace("iw5");
-                pool.spawn(async move { walk_foreign_material_common(&donor, &progress, job) })
-            });
-            let weapons = weapon_donor.map(|donor| {
-                let progress = progress.clone();
-                let job = load_jobs::open(JobKind::ImageDecode).namespace("iw5");
-                pool.spawn(async move { walk_iw5_weapon_bundle(&donor, &progress, job) })
-            });
-            (ForeignCommonWork::Split(material), weapons)
-        }
-    };
-
-    let common_open = {
-        let common_mp = common_mp.clone();
-        let progress = progress.clone();
-        pool.spawn(async move {
-            let Some(path) = common_mp.ok() else {
-                progress.record_skipped_scoped(StageId::CommonAssets, "common_mp");
-                return None;
-            };
-            let stage = progress.begin_scoped(StageId::CommonAssets, "common_mp", None);
-            let opened = open_zone_shared(&path);
-            finish_zone_open(stage, &opened);
-            Some((path, opened))
-        })
-    };
-
-    let t5_common_prep = {
-        let common_mp = common_mp.clone();
-        let progress = progress.clone();
-        pool.spawn(async move {
-            t5_weapon_common_prep(common_mp.as_ref().ok().map(PathBuf::as_path), &progress)
-        })
-    };
-    let localize_walk = {
-        let zone_ff = zone_ff.clone();
-        let progress = progress.clone();
-        pool.spawn(async move {
-            let mut report = Vec::new();
-            let strings = match &zone_ff {
-                Ok(path) => {
-                    let stage = progress.begin(StageId::Localization, None);
-                    let catalog = load_localized_strings_beside(path, &mut report, &stage);
-                    stage.done();
-                    catalog
-                }
-                Err(_) => {
-                    progress.record_skipped(StageId::Localization);
-                    report.push("localize: no zone path — every on-screen string is a gap".into());
-                    LocalizeCatalog::default()
-                }
-            };
-            (strings, report)
-        })
-    };
-
-    let (material_seed, mut common_report) = startup_walk.await;
+    let waiting = progress.begin_scoped(StageId::CommonAssets, "shared common", None);
+    let (common, reach) = ensure_common(key).await;
+    waiting.done();
     if progress.is_canceled() {
         diag::info!(
             World,
-            "match walk: canceled after the startup materials — load retargeted"
+            "match walk: canceled while the common set was prepared — load retargeted"
         );
-        return MatchLoadOutcome::Canceled;
-    }
-    let startup_count = material_seed.materials.len();
-
-    let t5_weapon_walk = {
-        let progress = progress.clone();
-        let job = load_jobs::open(JobKind::ImageDecode).namespace("t5");
-        pool.spawn(async move {
-            walk_t5_weapon_common(t5_common_prep.await, &progress, material_seed, job)
-        })
-    };
-
-    let (
-        t5_weapons,
-        t5_fpv,
-        t5_world_guns,
-        mut material_seed,
-        t5_xanims,
-        t5_fx,
-        t5_projectiles,
-        t5_teamsets,
-        t5_images,
-        t5_report,
-    ) = t5_weapon_walk.await;
-    let t5_ids = t5_weapons.len();
-    let t5_fpv_n = t5_fpv.len();
-    let t5_xanim_n = t5_xanims.len();
-    let t5_reuse_mat = material_seed.link_reused_materials;
-    let t5_mat_count = material_seed
-        .materials
-        .len()
-        .saturating_sub(startup_count)
-        .saturating_add(t5_reuse_mat);
-    common_report.extend(t5_report);
-    let (foreign_materials, mut foreign_report, shared_bundle, foreign_images) =
-        match data_common_walk {
-            ForeignCommonWork::Shared(task) => {
-                let (materials, bundle, images, report) = task.await;
-                (materials, report, Some(bundle), images)
-            }
-            ForeignCommonWork::Split(Some(task)) => {
-                let (materials, images, report) = task.await;
-                (materials, report, None, images)
-            }
-            ForeignCommonWork::Split(None) => (MaterialCatalog::default(), Vec::new(), None, None),
-        };
-
-    common_report.append(&mut donor_report);
-    common_report.append(&mut foreign_report);
-
-    let foreign_count = foreign_materials.materials.len();
-    material_seed.absorb_asset_population(foreign_materials);
-
-    let mut shared_surfaces = asset_model::SharedXModelSurfaces::default();
-    let mut common_scene_models = crate::MapXModelSceneCatalog::default();
-    let mut common_light_defs = Vec::new();
-    let mut common_pen_table = weapon_iw4::PenetrationDepthTable::empty();
-    let mut common_pen_loaded = false;
-    let mut common_lochit_table = None;
-
-    let mut common_tracers = crate::TracerCatalog::default();
-    let mut xmodel_walk = crate::PreparedXModelWalkCensus::default();
-    let mut s1_common_bytes = 0;
-    let mut teamsets = t5_teamsets;
-    let mut common_film_visions = std::collections::BTreeMap::new();
-    let mut common_images = None;
-
-    let common_images_job = load_jobs::open(JobKind::ImageDecode).namespace("iw4");
-    let common_opened = common_open.await;
-    if progress.is_canceled() {
-        diag::info!(
-            World,
-            "match walk: canceled before the common_mp walk — load retargeted"
-        );
-        return MatchLoadOutcome::Canceled;
+        return (MatchLoadOutcome::Canceled, None);
     }
 
-    let (
+    let cloning = std::time::Instant::now();
+    let CommonProducts {
+        material_seed,
+        shared_surfaces,
+        scene_models: common_scene_models,
+        light_defs: common_light_defs,
+        pen_table: common_pen_table,
+        pen_table_loaded: common_pen_loaded,
+        lochit_table: common_lochit_table,
+        tracers: mut common_tracers,
+        xmodel_walk,
+        s1_common_bytes,
+        teamsets,
+        film_visions: mut common_film_visions,
         mut weapons,
         mut fpv_meshes,
         mut world_weapons,
         mut projectile_meshes,
         mut xanims,
         mut player_anim_sources,
-        common_fx,
-        common_fx_models,
-        common_impact,
-        material_seed,
-        mut common_walk_report,
-    ) = match common_opened {
-        Some((path, Ok(image))) => {
-            let mut census =
-                lane(image.game).load_common_mp(&path, &image, &progress, true, material_seed);
-            // Held, not enqueued: every one of this plan's disputed claims was
-            // answered by a donor, and the donors have not finished. It decodes
-            // once the merged catalog can say which claims are still its own.
-            common_images = hold_image_plan(
-                "common_mp FPV",
-                census.pending_images.take(),
-                common_images_job,
-            );
-            shared_surfaces = census.shared_surfaces;
-            common_scene_models = census.scene_models;
-            common_light_defs = census.light_defs;
-            common_pen_table = census.pen_table;
-            common_pen_loaded = census.pen_table_loaded;
-            common_lochit_table = census.lochit_table;
-            common_tracers = census.tracers;
-            xmodel_walk = census.xmodel_walk;
-            s1_common_bytes = census.s1_common_bytes;
-            teamsets.extend(census.teamsets);
-            common_film_visions = census.film_visions;
-            (
-                census.weapons,
-                census.fpv,
-                census.world_weapons,
-                census.projectile_meshes,
-                census.xanims,
-                census.player_anim_sources,
-                census.fx,
-                census.fx_models,
-                census.impact_fx,
-                census.material_population,
-                census.report,
-            )
-        }
-        Some((_, Err(error))) => (
-            crate::WeaponBuild::default(),
-            FpvMeshBuild::default(),
-            WorldWeaponBuild::default(),
-            ProjectileMeshBuild::default(),
-            XAnimBuild::default(),
-            crate::PlayerAnimSources::default(),
-            crate::FxCatalog::default(),
-            crate::FxModelCatalog::default(),
-            None,
-            material_seed,
-            vec![format!("common_mp models: open zone: {error}")],
-        ),
-        None => (
-            crate::WeaponBuild::default(),
-            FpvMeshBuild::default(),
-            WorldWeaponBuild::default(),
-            ProjectileMeshBuild::default(),
-            XAnimBuild::default(),
-            crate::PlayerAnimSources::default(),
-            crate::FxCatalog::default(),
-            crate::FxModelCatalog::default(),
-            None,
-            material_seed,
-            Vec::new(),
-        ),
-    };
-    common_report.append(&mut common_walk_report);
-
-    let common_reuse_mat = material_seed.link_reused_materials;
-    let common_reuse_img = material_seed.link_reused_images;
-    let seed_mat = material_seed.materials.len();
-    let seed_img = material_seed.images.len();
-
-    player_anim_sources.compile();
-    common_report.push(player_anim_sources.compile_report_line());
-    common_report.push(player_anim_sources.parse_report_line());
-
-    let (bundle, bundle_images, mut iw5_report) = match (iw5_weapon_walk.take(), shared_bundle) {
-        (Some(task), _) => task.await,
-        (None, Some(bundle)) => (bundle, None, Vec::new()),
-        (None, None) => (Iw5WeaponBundle::default(), None, Vec::new()),
-    };
-    let Iw5WeaponBundle {
-        weapons: iw5_weapons,
-        fpv: iw5_fpv,
-        world_guns: iw5_world_guns,
-        xanims: iw5_xanims,
-        materials: iw5_materials,
-    } = bundle;
-    let iw4_weapon_n = weapons.len();
-    let fpv_common_n = fpv_meshes.len();
-    let absorbed = iw5_weapons.len();
-    weapons.absorb(iw5_weapons);
-    let iw5_fpv_added = fpv_meshes.absorb(iw5_fpv);
-    let world_gun_common_n = world_weapons.len();
-    let iw5_world_added = world_weapons.absorb(iw5_world_guns);
-    let xanim_before_iw5 = xanims.len();
-    let iw5_xanim_added = xanims.absorb(iw5_xanims);
+        fx: common_fx,
+        fx_models: common_fx_models,
+        impact_fx: common_impact,
+        t5_xanims,
+        t5_fx,
+        iw5_materials,
+        strings,
+        counts:
+            CommonCounts {
+                startup_count,
+                t5_mat_count,
+                t5_reuse_mat,
+                t5_xanim_n,
+                foreign_count,
+                seed_mat,
+                seed_img,
+                common_reuse_mat,
+                common_reuse_img,
+            },
+        report: mut common_report,
+        localize_report,
+    } = common.products.clone();
+    let clone_ms = cloning.elapsed().as_secs_f32() * 1000.0;
     let iw5_mat_n = iw5_materials.materials.len();
-    common_report.append(&mut iw5_report);
+    common_report.append(&mut donor_report);
     common_report.push(format!(
-        "iw5 weapon bundle: donor={} absorbed={absorbed} catalog {iw4_weapon_n}→{} fpv {fpv_common_n}→{} (+{iw5_fpv_added} iw5 keys) world guns {world_gun_common_n}→{} (+{iw5_world_added} iw5 keys) xanims {xanim_before_iw5}→{} (+{iw5_xanim_added} iw5 keys) materials={iw5_mat_n} (absorbed after IW4 pool)",
-        absorbed,
-        weapons.len(),
-        fpv_meshes.len(),
-        world_weapons.len(),
-        xanims.len(),
+        "common set: {reach} for {} (prepared in {:.0}ms, {:.1}s ago); match copy {clone_ms:.0}ms; {} donor image batches and {} kept payloads ({:.1}MiB) shared, not decoded again",
+        common.key,
+        common.prepared_ms,
+        common.ready_at.elapsed().as_secs_f32(),
+        common.donor_batches(),
+        common.retained_payloads(),
+        common.retained_bytes() as f64 / (1024.0 * 1024.0),
     ));
-    match weapons.resolve_index("iw5_msr") {
-        Ok(Some(id)) => {
-            let facts = weapons.facts_of(id);
-            common_report.push(format!(
-                "iw5_msr: id={id} gun={} world={} fire={:?} clip={:?} class={:?} type={:?} ftype={:?} bolt={:?} raise={:?} start={:?} dmg={:?} overlay={:?} overlay_img={:?} ov_w={:?} ov_h={:?}",
-                weapons.gun_xmodel_of(id).unwrap_or("<none>"),
-                weapons.world_model_of(id).unwrap_or("<none>"),
-                facts.map(|f| f.fire_time_ms),
-                facts.map(|f| f.clip_size),
-                facts.map(|f| f.weap_class),
-                facts.map(|f| f.weap_type),
-                facts.map(|f| f.fire_type),
-                facts.map(|f| f.bolt_action),
-                facts.map(|f| f.raise_time_ms),
-                facts.map(|f| f.start_ammo),
-                facts.map(|f| f.damage),
-                weapons.overlay_material_of(id),
-                weapons.overlay_image_of(id),
-                facts.map(|f| f.ads_overlay_width),
-                facts.map(|f| f.ads_overlay_height),
-            ));
-        }
-        Ok(None) | Err(_) => common_report.push("iw5_msr: not in merged catalog".into()),
-    }
-
-    let t5_absorbed = t5_weapons.len();
-    weapons.absorb(t5_weapons);
-    projectile_meshes.absorb(t5_projectiles);
-    let t5_fpv_added = fpv_meshes.absorb(t5_fpv);
-    let t5_world_added = world_weapons.absorb(t5_world_guns);
-    common_report.push(format!(
-        "t5 weapon absorb: donor={t5_ids} unique={t5_absorbed} fpv=+{t5_fpv_added}/{t5_fpv_n} world_guns=+{t5_world_added}; registry now {} (t5={})",
-        weapons.len(),
-        weapons.namespace_count(crate::AssetNamespace::T5)
-    ));
-    common_report.push(format!(
-        "FPV generation: common={fpv_common_n} iw5_keys={iw5_fpv_added} t5={t5_fpv_n} t5_keys={t5_fpv_added} collide={} merged={}",
-        fpv_meshes.collide_name_count(),
-        fpv_meshes.len()
-    ));
+    let common_images = hold_image_plan(
+        "common_mp FPV",
+        common.fpv_plan.clone(),
+        load_jobs::open(JobKind::ImageDecode).namespace("iw4"),
+    );
 
     let opened_map = map_open.await;
     if progress.is_canceled() {
@@ -632,7 +1159,7 @@ pub async fn load_prepared_match(
             World,
             "match walk: canceled before the map walk — load retargeted"
         );
-        return MatchLoadOutcome::Canceled;
+        return (MatchLoadOutcome::Canceled, None);
     }
     let (loaded, map_namespace) = match opened_map {
         Ok((path, image)) => {
@@ -673,6 +1200,7 @@ pub async fn load_prepared_match(
         xanims: map_xanims,
         mut facts,
         arena_bytes: s1_map_bytes,
+        sound,
         mut report,
         gaps,
     } = loaded;
@@ -733,6 +1261,30 @@ pub async fn load_prepared_match(
     let t5_xanim_added = xanims.absorb(t5_xanims);
     xanims.absorb_local(map_xanims);
     weapons.resolve_sz_xanim_edges(&xanims);
+    let weapon_clip_indices = weapons.bound_weapon_xanim_indices();
+    let clip_prewarm_started = std::time::Instant::now();
+    let failed_weapon_clips: Vec<_> = weapon_clip_indices
+        .iter()
+        .copied()
+        .filter(|&index| xanims.clip_at(index).is_none())
+        .collect();
+    report.push(format!(
+        "weapon XAnim CPU prewarm: linked={} decoded={} failed={} elapsed_ms={:.1}",
+        weapon_clip_indices.len(),
+        weapon_clip_indices.len() - failed_weapon_clips.len(),
+        failed_weapon_clips.len(),
+        clip_prewarm_started.elapsed().as_secs_f64() * 1000.0,
+    ));
+    for index in failed_weapon_clips.iter().take(16) {
+        report.push(format!(
+            "weapon XAnim decode gap: index={index} name={}",
+            xanims.name_at(*index).unwrap_or("<unknown>")
+        ));
+    }
+    let (note_actions, inline_note_actions) = weapons.resolve_notetrack_actions(&xanims);
+    report.push(format!(
+        "weapon notetrack actions linked: {note_actions} ({inline_note_actions} T5 inline)"
+    ));
     let sz_xanims = weapons.sz_xanim_edge_census();
     report.push(format!(
         "XAnim generation: common={common_xanim_count} t5={t5_xanim_n} t5_keys={t5_xanim_added} collide={} map={map_xanim_count} merged={}",
@@ -758,7 +1310,19 @@ pub async fn load_prepared_match(
     let map_fpv_added = fpv_meshes.absorb(map_fpv);
     fpv_meshes.set_map_namespace(map_namespace);
     weapons.resolve_fpv_mesh_edges(&fpv_meshes);
+    weapons.resolve_fpv_hands(&fpv_meshes, &bodies);
+    let assembly_started = std::time::Instant::now();
+    let assemblies = weapons.resolve_fpv_assemblies(&fpv_meshes, &xanims);
+    report.push(format!(
+        "FPV assemblies: built={} kit sides linked={} refused={} clip track tables={} elapsed_ms={:.1}",
+        assemblies.built,
+        assemblies.linked,
+        assemblies.refused,
+        assemblies.clip_tables,
+        assembly_started.elapsed().as_secs_f64() * 1000.0,
+    ));
 
+    world_weapons.seal_identity();
     weapons.resolve_world_model_edges(&world_weapons);
     let world_model_edges = weapons.world_model_edge_census();
     report.push(format!(
@@ -768,6 +1332,30 @@ pub async fn load_prepared_match(
         world_model_edges.unresolved,
         world_model_edges.absent,
     ));
+    let dependency_gaps = weapons.dependency_gaps();
+    let selectable_gap_ids: std::collections::BTreeSet<_> = dependency_gaps
+        .iter()
+        .map(|gap| gap.id)
+        .filter(|&id| weapons.describe_configuration(id).is_some())
+        .collect();
+    report.push(format!(
+        "weapon dependency audit: {} gaps in {} definitions; selectable={}",
+        dependency_gaps.len(),
+        dependency_gaps
+            .iter()
+            .map(|gap| gap.id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        selectable_gap_ids.len(),
+    ));
+    for gap in &dependency_gaps {
+        report.push(format!(
+            "weapon dependency gap: {} {} `{}`",
+            weapons.name_of(gap.id),
+            gap.kind,
+            gap.name
+        ));
+    }
     report.push(format!(
         "FPV map fanout: map={map_fpv_n} added={map_fpv_added} merged={} map_ns={map_namespace:?}",
         fpv_meshes.len()
@@ -881,18 +1469,38 @@ pub async fn load_prepared_match(
     // The donors first, and only then the plan that claims the same names
     // they do. Its claims are resolved against the catalog they leave behind
     // rather than against the one it was built from, which is why it waited.
-    for pending in [t5_images, foreign_images, bundle_images]
-        .into_iter()
-        .flatten()
-    {
-        apply_image_batch(&mut global, pending, &mut report).await;
+    for kept in common.donor_images().await {
+        let job = load_jobs::open(JobKind::ImageDecode)
+            .namespace(kept.namespace)
+            .canonical(kept.label)
+            .depends_on(kept.job)
+            .plan_ready()
+            .enqueued()
+            .started()
+            .finished()
+            .joined();
+        merge_image_batch(
+            &mut global,
+            kept.label,
+            kept.batch.share(),
+            job,
+            &mut report,
+        );
     }
     if let Some(held) = common_images
         && let Some(pending) = held.prune_then_enqueue(&mut global, &progress, &mut report)
     {
-        apply_image_batch(&mut global, pending, &mut report).await;
+        let job = pending.job;
+        let (label, batch) = pending.join().await;
+        let kept = common.retain(&batch);
+        report.push(format!(
+            "{label} payloads kept for the next map: +{:.1}MiB (common set holds {} payloads, {:.1}MiB)",
+            kept as f64 / (1024.0 * 1024.0),
+            common.retained_payloads(),
+            common.retained_bytes() as f64 / (1024.0 * 1024.0),
+        ));
+        merge_image_batch(&mut global, label, batch, job, &mut report);
     }
-
     if let Ok(path) = &zone_ff {
         let stage = progress.begin_scoped(StageId::Images, "merged", None);
         let decoded = crate::decode_material_color_maps(path, &mut global, &stage, load_pool());
@@ -907,6 +1515,11 @@ pub async fn load_prepared_match(
     }
     if let Some(draw) = world.draw.as_mut() {
         crate::resolve_primary_light_attenuation(draw, &global, &common_light_defs);
+        let dynamic_light_name =
+            (map_namespace == Some(crate::AssetNamespace::Iw4)).then_some("light_dynamic");
+        let dynamic_light = dynamic_light_name.and_then(|name| {
+            crate::resolve_named_light_def(name, &draw.light_defs, &common_light_defs, &global)
+        });
         let (ordinal, source) =
             crate::resolve_outdoor_image(draw.outdoor_image_name.as_deref(), &global);
         draw.outdoor_image = ordinal;
@@ -961,11 +1574,16 @@ pub async fn load_prepared_match(
                 .collect::<Vec<_>>(),
         ));
         if let Ok(path) = &zone_ff {
-            let requested: Vec<(usize, u8)> = draw
+            let mut requested: Vec<(usize, u8)> = draw
                 .primary_lights
                 .iter()
                 .filter_map(|light| Some((light.attenuation_image?, light.attenuation_sampler)))
                 .collect();
+            if let Some(dynamic) = dynamic_light
+                && let Some(image) = dynamic.attenuation_image
+            {
+                requested.push((image, dynamic.attenuation_sampler));
+            }
             let want: std::collections::BTreeSet<usize> =
                 requested.iter().map(|(index, _)| *index).collect();
             let want = want.len();
@@ -987,6 +1605,32 @@ pub async fn load_prepared_match(
         }
 
         crate::resolve_primary_light_attenuation(draw, &global, &common_light_defs);
+        let resolved_dynamic = dynamic_light_name.and_then(|name| {
+            crate::resolve_named_light_def(name, &draw.light_defs, &common_light_defs, &global)
+        });
+        let dynamic_decoded = resolved_dynamic
+            .and_then(|light| light.attenuation_image)
+            .is_some_and(|index| {
+                global
+                    .images
+                    .get(index)
+                    .is_some_and(|image| image.decoded.is_some())
+            });
+        report.push(format!(
+            "FX light_dynamic: image={:?} decoded={} width={:?} sampler={}",
+            resolved_dynamic.and_then(|light| light.attenuation_image),
+            dynamic_decoded,
+            resolved_dynamic.and_then(|light| light.falloff_image_width),
+            resolved_dynamic.map_or(0, |light| light.attenuation_sampler),
+        ));
+        world.dynamic_light =
+            resolved_dynamic.filter(|light| dynamic_decoded && light.falloff_image_width.is_some());
+        if dynamic_light_name.is_some() && world.dynamic_light.is_none() {
+            report.push(
+                "FX light_dynamic GAP: light definition or decoded attenuation image missing; additional FX lights unavailable"
+                    .into(),
+            );
+        }
     }
     let builtins = crate::decode_in_zone_builtin_images(&mut global);
     if builtins != 0 {
@@ -1301,7 +1945,6 @@ pub async fn load_prepared_match(
         }
     }
 
-    let (strings, localize_report) = localize_walk.await;
     report.extend(localize_report);
     let (directory_ms, opens, inflate_ms) = crate::iwd_read_cost();
     report.push(format!(
@@ -1394,8 +2037,6 @@ pub async fn load_prepared_match(
             set.fx_bytes as f64 / (1024.0 * 1024.0),
         ));
     }
-    report.extend(progress.timing_report());
-
     let fx = std::mem::take(&mut world.fx).publish();
     let xanims = xanims.publish();
     let destructible_death =
@@ -1408,12 +2049,14 @@ pub async fn load_prepared_match(
             row.husk.edge_kind()
         ));
     }
-    MatchLoadOutcome::Ready(PreparedMatch {
+    let prepared = PreparedMatch {
         fx,
         world,
         materials: crate::MatchMaterials {
             population: global,
             map_ids,
+            common_profile_id: common.id,
+            products_id: NEXT_PRODUCTS_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         },
         clip,
         weapons: weapons.publish(),
@@ -1432,7 +2075,9 @@ pub async fn load_prepared_match(
         pen_table_loaded: common_pen_loaded,
         lochit_table: common_lochit_table,
         xmodel_walk,
-    })
+        sound,
+    };
+    (MatchLoadOutcome::Ready(prepared), Some(common))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1446,7 +2091,7 @@ pub fn load_match_material_seed(
     let root = games_root_from_env()?;
     let runtime = find_zone_file_version(&root, "common_mp", fastfile_iw4::ZONE_VERSION_PC)?;
 
-    let (catalog, mut report) = bevy::tasks::futures_lite::future::block_on(
+    let (catalog, mut report, _, _) = bevy::tasks::futures_lite::future::block_on(
         walk_startup_material_zones(Some(&runtime.path), progress),
     );
     let catalog =
@@ -1511,6 +2156,15 @@ fn walk_material_file(
     progress: &LoadProgress,
     seed: MaterialCatalog,
 ) -> (MaterialCatalog, Vec<String>) {
+    let population = walk_population_file(path, progress, seed);
+    (population.materials, population.report)
+}
+
+fn walk_population_file(
+    path: &Path,
+    progress: &LoadProgress,
+    seed: MaterialCatalog,
+) -> crate::lane::MaterialPopulation {
     let zone_name = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
@@ -1519,14 +2173,12 @@ fn walk_material_file(
     let opened = open_zone_shared(path);
     finish_zone_open(stage, &opened);
     match opened {
-        Ok(image) => {
-            let pop = lane(image.game).load_material_population(path, &image, progress, seed);
-            (pop.materials, pop.report)
-        }
-        Err(error) => (
-            seed,
-            vec![format!("match materials: open {}: {error}", path.display())],
-        ),
+        Ok(image) => lane(image.game).load_material_population(path, &image, progress, seed),
+        Err(error) => crate::lane::MaterialPopulation {
+            materials: seed,
+            report: vec![format!("match materials: open {}: {error}", path.display())],
+            ..Default::default()
+        },
     }
 }
 
@@ -1557,7 +2209,8 @@ fn walk_t5_leftover_materials(
         ));
         return seed;
     }
-    let (leftover_startup, leftover_startup_report) = leftover_walk_t5_startup_materials(progress);
+    let (leftover_startup, _, leftover_startup_report) =
+        leftover_walk_t5_startup_materials(progress);
     report.extend(leftover_startup_report);
     let leftover_startup_n = leftover_startup.materials.len();
     let mut seed = seed;
@@ -1576,17 +2229,24 @@ fn walk_t5_leftover_materials(
     catalog
 }
 
-fn leftover_walk_t5_startup_materials(progress: &LoadProgress) -> (MaterialCatalog, Vec<String>) {
+fn leftover_walk_t5_startup_materials(
+    progress: &LoadProgress,
+) -> (
+    MaterialCatalog,
+    Vec<crate::CapturedStringTable>,
+    Vec<String>,
+) {
     let mut report = Vec::new();
     let root = match games_root_from_env() {
         Ok(root) => root,
         Err(error) => {
             report.push(format!("t5 leftover startup gfx: {error}"));
-            return (MaterialCatalog::default(), report);
+            return (MaterialCatalog::default(), Vec::new(), report);
         }
     };
     const ZONES: [&str; 2] = ["code_post_gfx_mp", "localized_code_post_gfx_mp"];
     let mut seed = MaterialCatalog::default();
+    let mut stats = Vec::new();
     for zone in ZONES {
         let found = match find_zone_file_version(&root, zone, fastfile_t5::ZONE_VERSION_PC) {
             Ok(found) => found,
@@ -1595,15 +2255,18 @@ fn leftover_walk_t5_startup_materials(progress: &LoadProgress) -> (MaterialCatal
                 continue;
             }
         };
-        let (catalog, walked) = walk_material_file(&found.path, progress, seed);
-        report.extend(walked);
-        seed = catalog;
+        let population = walk_population_file(&found.path, progress, seed);
+        report.extend(population.report);
+        if zone == "code_post_gfx_mp" {
+            stats = population.cac_tables;
+        }
+        seed = population.materials;
     }
     report.push(format!(
         "t5 leftover startup gfx: materials={}",
         seed.materials.len()
     ));
-    (seed, report)
+    (seed, stats, report)
 }
 
 fn walk_foreign_material_population(
@@ -1749,19 +2412,13 @@ fn capture_common_zone(
     }
 }
 
-/// Join one image plan, merge it into the catalog and write its census down.
-///
-/// Separate from the caller because the plans are not one list: the
-/// donors are applied first so that the plan claiming the same names can be
-/// pruned against the result, and both halves merge a batch exactly the same
-/// way.
-async fn apply_image_batch(
+fn merge_image_batch(
     global: &mut crate::MaterialDefinitions,
-    pending: PendingImages,
+    label: &str,
+    batch: crate::material_images::DecodedImageBatch,
+    job: load_jobs::Job,
     report: &mut Vec<String>,
 ) {
-    let job = pending.job;
-    let (label, batch) = pending.join().await;
     let requested = batch.stats.requested;
     let missing = batch.stats.missing;
     let unsupported = batch.stats.unsupported;
@@ -1962,6 +2619,7 @@ struct Iw5WeaponBundle {
     xanims: XAnimBuild,
 
     materials: MaterialCatalog,
+    stats_tables: Vec<crate::CapturedStringTable>,
 }
 
 fn resolve_iw5_weapon_donor(
@@ -2027,6 +2685,7 @@ fn walk_iw5_weapon_bundle(
             world_guns: census.world_weapons,
             xanims: census.xanims,
             materials: census.material_population,
+            stats_tables: census.cac_tables,
         },
         pending_images,
         report,
@@ -2084,6 +2743,7 @@ fn walk_shared_iw5_common(
             world_guns: census.world_weapons,
             xanims: census.xanims,
             materials: MaterialCatalog::default(),
+            stats_tables: census.cac_tables,
         },
         pending_images,
         report,
@@ -2096,6 +2756,7 @@ enum T5CommonPrep {
         donor: PathBuf,
         opened: Result<std::sync::Arc<crate::ZoneImage>, String>,
         leftover_startup: MaterialCatalog,
+        leftover_stats: Vec<crate::CapturedStringTable>,
         report: Vec<String>,
     },
 }
@@ -2123,7 +2784,8 @@ fn t5_weapon_common_prep(runtime_common: Option<&Path>, progress: &LoadProgress)
         ));
         return T5CommonPrep::Skip(report);
     }
-    let (leftover_startup, leftover_startup_report) = leftover_walk_t5_startup_materials(progress);
+    let (leftover_startup, leftover_stats, leftover_startup_report) =
+        leftover_walk_t5_startup_materials(progress);
     report.extend(leftover_startup_report);
     let stage = progress.begin_scoped(StageId::CommonAssets, "t5_weapons", None);
     let opened = open_zone_shared(&donor.path).map_err(|error| error.to_string());
@@ -2132,7 +2794,43 @@ fn t5_weapon_common_prep(runtime_common: Option<&Path>, progress: &LoadProgress)
         donor: donor.path,
         opened,
         leftover_startup,
+        leftover_stats,
         report,
+    }
+}
+
+struct T5WeaponCommon {
+    weapons: WeaponBuild,
+    fpv: FpvMeshBuild,
+    world_guns: WorldWeaponBuild,
+    material_seed: MaterialCatalog,
+    xanims: XAnimBuild,
+    fx: FxCatalog,
+    projectiles: crate::ProjectileMeshBuild,
+    teamsets: std::collections::HashMap<String, crate::MapTeamSettings>,
+    images: Option<PendingImages>,
+    stats_tables: (
+        Vec<crate::CapturedStringTable>,
+        Vec<crate::CapturedStringTable>,
+    ),
+    report: Vec<String>,
+}
+
+impl T5WeaponCommon {
+    fn empty(material_seed: MaterialCatalog, report: Vec<String>) -> Self {
+        Self {
+            weapons: crate::WeaponBuild::default(),
+            fpv: FpvMeshBuild::default(),
+            world_guns: WorldWeaponBuild::default(),
+            material_seed,
+            xanims: XAnimBuild::default(),
+            fx: FxCatalog::default(),
+            projectiles: crate::ProjectileMeshBuild::default(),
+            teamsets: Default::default(),
+            images: None,
+            stats_tables: (Vec::new(), Vec::new()),
+            report,
+        }
     }
 }
 
@@ -2141,40 +2839,16 @@ fn walk_t5_weapon_common(
     progress: &LoadProgress,
     material_seed: MaterialCatalog,
     job: load_jobs::Job,
-) -> (
-    WeaponBuild,
-    FpvMeshBuild,
-    WorldWeaponBuild,
-    MaterialCatalog,
-    XAnimBuild,
-    FxCatalog,
-    crate::ProjectileMeshBuild,
-    std::collections::HashMap<String, crate::MapTeamSettings>,
-    Option<PendingImages>,
-    Vec<String>,
-) {
-    let empty = |material_seed: MaterialCatalog, report: Vec<String>| {
-        (
-            crate::WeaponBuild::default(),
-            FpvMeshBuild::default(),
-            WorldWeaponBuild::default(),
-            material_seed,
-            XAnimBuild::default(),
-            FxCatalog::default(),
-            crate::ProjectileMeshBuild::default(),
-            Default::default(),
-            None,
-            report,
-        )
-    };
-    let (donor, opened, leftover_startup, mut report) = match prep {
-        T5CommonPrep::Skip(report) => return empty(material_seed, report),
+) -> T5WeaponCommon {
+    let (donor, opened, leftover_startup, leftover_stats, mut report) = match prep {
+        T5CommonPrep::Skip(report) => return T5WeaponCommon::empty(material_seed, report),
         T5CommonPrep::Ready {
             donor,
             opened,
             leftover_startup,
+            leftover_stats,
             report,
-        } => (donor, opened, leftover_startup, report),
+        } => (donor, opened, leftover_startup, leftover_stats, report),
     };
     let leftover_startup_n = leftover_startup.materials.len();
     let mut material_seed = material_seed;
@@ -2190,11 +2864,13 @@ fn walk_t5_weapon_common(
                 "t5 weapon common: open {}: {error}",
                 donor.display()
             ));
-            return empty(material_seed, report);
+            let mut empty = T5WeaponCommon::empty(material_seed, report);
+            empty.stats_tables.0 = leftover_stats;
+            return empty;
         }
     };
     let mut census = lane(image.game).load_common_mp(&donor, &image, progress, true, material_seed);
-    let pending_images = hold_image_plan("T5 common_mp", census.pending_images.take(), job)
+    let images = hold_image_plan("T5 common_mp", census.pending_images.take(), job)
         .map(|held| held.enqueue(progress));
     report.extend(census.report);
     report.push(format!(
@@ -2207,27 +2883,38 @@ fn walk_t5_weapon_common(
         census.xanims.len(),
         census.fx.len(),
     ));
-    (
-        census.weapons,
-        census.fpv,
-        census.world_weapons,
-        census.material_population,
-        census.xanims,
-        census.fx,
-        census.projectile_meshes,
-        census.teamsets,
-        pending_images,
+    T5WeaponCommon {
+        weapons: census.weapons,
+        fpv: census.fpv,
+        world_guns: census.world_weapons,
+        material_seed: census.material_population,
+        xanims: census.xanims,
+        fx: census.fx,
+        projectiles: census.projectile_meshes,
+        teamsets: census.teamsets,
+        images,
+        stats_tables: (leftover_stats, census.cac_tables),
         report,
-    )
+    }
 }
 
 async fn walk_startup_material_zones(
     map_path: Option<&PathBuf>,
     progress: &LoadProgress,
-) -> (MaterialCatalog, Vec<String>) {
+) -> (
+    MaterialCatalog,
+    Vec<String>,
+    Vec<crate::CapturedStringTable>,
+    Vec<crate::CapturedLightDef>,
+) {
     const STARTUP_ZONES: [&str; 3] = ["code_post_gfx_mp", "localized_code_post_gfx_mp", "patch_mp"];
     let Some(map_path) = map_path else {
-        return (MaterialCatalog::default(), Vec::new());
+        return (
+            MaterialCatalog::default(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
     };
     let games = games_root_from_env().ok();
 
@@ -2260,6 +2947,8 @@ async fn walk_startup_material_zones(
     let mut reuse_mat = 0usize;
     let mut reuse_img = 0usize;
     let mut zones_ok = 0usize;
+    let mut stats = Vec::new();
+    let mut light_defs = Vec::new();
     for (zone, task) in STARTUP_ZONES.into_iter().zip(opened) {
         match task.await {
             Ok((path, image)) => {
@@ -2278,6 +2967,10 @@ async fn walk_startup_material_zones(
                     path.display()
                 ));
                 seed = pop.materials;
+                light_defs.extend(pop.light_defs);
+                if zone == "code_post_gfx_mp" {
+                    stats = pop.cac_tables;
+                }
                 zones_ok += 1;
             }
             Err(gap) => report.push(format!("material generation startup gap: {zone}: {gap}")),
@@ -2295,7 +2988,7 @@ async fn walk_startup_material_zones(
         seed.materials.len(),
         seed.images.len(),
     ));
-    (seed, report)
+    (seed, report, stats, light_defs)
 }
 
 fn load_localized_strings_beside(

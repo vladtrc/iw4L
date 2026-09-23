@@ -8,6 +8,7 @@ use crate::asset_graph::{
 use crate::model_skel::{FpvSkel, capture_fpv_skel, capture_fpv_skel_iw5, capture_fpv_skel_t5};
 use crate::{ModelKind, model_kind};
 use asset_core::AssetNamespace;
+use asset_core::FpvMeshIndex;
 use asset_material::{MaterialCatalog, MaterialDefinitions};
 
 pub const VIEWHANDS_NAME: &str = "viewmodel_base_viewhands";
@@ -132,7 +133,7 @@ pub struct TagViewBind {
 #[derive(Clone, Debug)]
 pub struct FpvMeshEntry {
     pub namespace: AssetNamespace,
-    pub skel: FpvSkel,
+    pub skel: std::sync::Arc<FpvSkel>,
 
     pub material_names: Vec<Option<String>>,
 
@@ -142,7 +143,7 @@ pub struct FpvMeshEntry {
 impl FpvMeshEntry {
     fn from_skel(
         namespace: AssetNamespace,
-        skel: FpvSkel,
+        skel: std::sync::Arc<FpvSkel>,
         materials: Option<&MaterialCatalog>,
     ) -> Self {
         let (material_names, material_edges) =
@@ -201,7 +202,9 @@ impl FpvMeshEntry {
 
 #[derive(Clone, Debug, Default)]
 pub struct FpvMeshCatalog {
-    entries: HashMap<FpvMeshKey, FpvMeshEntry>,
+    identity: u64,
+    entries: Vec<FpvMeshEntry>,
+    indices: HashMap<FpvMeshKey, usize>,
     order: Vec<FpvMeshKey>,
 
     zones: Vec<crate::ZoneOwner>,
@@ -238,7 +241,10 @@ impl std::ops::Deref for FpvMeshBuild {
 
 impl FpvMeshBuild {
     pub fn publish(self) -> FpvMeshCatalog {
-        self.catalog
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mut catalog = self.catalog;
+        catalog.identity = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        catalog
     }
 
     pub fn set_strings(&mut self, strings: ScriptStrings) {
@@ -331,38 +337,40 @@ impl FpvMeshBuild {
     pub fn insert_in(
         &mut self,
         ns: AssetNamespace,
-        skel: FpvSkel,
+        skel: impl Into<std::sync::Arc<FpvSkel>>,
         materials: Option<&MaterialCatalog>,
     ) {
-        let entry = FpvMeshEntry::from_skel(ns, skel, materials);
+        let entry = FpvMeshEntry::from_skel(ns, skel.into(), materials);
         self.retain(entry.key(), entry);
     }
 
     fn retain(&mut self, key: FpvMeshKey, entry: FpvMeshEntry) {
-        if let Some(pos) = self.catalog.order.iter().position(|k| k == &key) {
+        if let Some(&pos) = self.catalog.indices.get(&key) {
             self.catalog.zones[pos] = self.capture_zone;
+            self.catalog.entries[pos] = entry;
         } else {
+            self.catalog
+                .indices
+                .insert(key.clone(), self.catalog.entries.len());
             self.catalog.order.push(key.clone());
             self.catalog.zones.push(self.capture_zone);
+            self.catalog.entries.push(entry);
         }
-        self.catalog.entries.insert(key, entry);
     }
 
     pub fn absorb(&mut self, mut other: Self) -> usize {
         let saved = self.capture_zone;
         let mut added = 0;
         let order = std::mem::take(&mut other.catalog.order);
-        for (i, key) in order.into_iter().enumerate() {
-            let Some(entry) = other.catalog.entries.remove(&key) else {
-                continue;
-            };
+        let entries = std::mem::take(&mut other.catalog.entries);
+        for (i, (key, entry)) in order.into_iter().zip(entries).enumerate() {
             self.capture_zone = other
                 .catalog
                 .zones
                 .get(i)
                 .copied()
                 .unwrap_or(other.capture_zone);
-            let vacant = !self.catalog.entries.contains_key(&key);
+            let vacant = !self.catalog.indices.contains_key(&key);
             self.retain(key, entry);
             if vacant {
                 added += 1;
@@ -373,16 +381,20 @@ impl FpvMeshBuild {
     }
 
     pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
-        for entry in self.catalog.entries.values_mut() {
+        for entry in &mut self.catalog.entries {
             entry.resolve_materials(materials);
         }
     }
 }
 
 impl FpvMeshCatalog {
+    pub fn identity(&self) -> u64 {
+        self.identity
+    }
+
     pub fn index_by_name(&self, ns: AssetNamespace, name: &str) -> Option<usize> {
         let key = FpvMeshKey::new(ns, name);
-        self.order.iter().position(|k| k == &key)
+        self.indices.get(&key).copied()
     }
 
     pub fn zone_of(&self, index: usize) -> crate::ZoneOwner {
@@ -390,8 +402,7 @@ impl FpvMeshCatalog {
     }
 
     pub fn get_at(&self, index: usize) -> Option<&FpvMeshEntry> {
-        let key = self.order.get(index)?;
-        self.entries.get(key)
+        self.entries.get(index)
     }
 
     pub fn name_at(&self, index: usize) -> Option<&str> {
@@ -400,7 +411,7 @@ impl FpvMeshCatalog {
 
     pub fn material_edge_census(&self) -> AssetEdgeCensus {
         let mut census = AssetEdgeCensus::default();
-        for entry in self.entries.values() {
+        for entry in &self.entries {
             for edge in &entry.material_edges {
                 census.push(*edge);
             }
@@ -410,7 +421,7 @@ impl FpvMeshCatalog {
 
     pub fn material_unresolved_hints(&self) -> Vec<&str> {
         let mut names = Vec::new();
-        for entry in self.entries.values() {
+        for entry in &self.entries {
             for (edge, name) in entry.material_edges.iter().zip(entry.material_names.iter()) {
                 if edge.is_unresolved()
                     && let Some(name) = name.as_deref()
@@ -428,17 +439,18 @@ impl FpvMeshCatalog {
     pub fn material_bound_zones(&self) -> String {
         crate::bound_zone_names(
             self.entries
-                .values()
+                .iter()
                 .flat_map(|entry| entry.material_edges.iter()),
         )
     }
 
     pub fn get(&self, ns: AssetNamespace, name: &str) -> Option<&FpvMeshEntry> {
-        self.entries.get(&FpvMeshKey::new(ns, name))
+        self.index_by_name(ns, name)
+            .and_then(|index| self.get_at(index))
     }
 
     pub fn bound_material_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.entries.values().flat_map(|entry| {
+        self.entries.iter().flat_map(|entry| {
             entry
                 .material_edges
                 .iter()
@@ -475,7 +487,7 @@ impl FpvMeshCatalog {
     }
 
     pub fn contains(&self, ns: AssetNamespace, name: &str) -> bool {
-        self.entries.contains_key(&FpvMeshKey::new(ns, name))
+        self.indices.contains_key(&FpvMeshKey::new(ns, name))
     }
 
     pub fn namespace_count(&self, ns: AssetNamespace) -> usize {
@@ -501,7 +513,7 @@ impl FpvMeshCatalog {
             if other == ns {
                 continue;
             }
-            if let Some(entry) = self.entries.get(&FpvMeshKey::new(other, name)) {
+            if let Some(entry) = self.get(other, name) {
                 return Some(entry);
             }
         }
@@ -510,7 +522,7 @@ impl FpvMeshCatalog {
 
     pub fn tag_view_count(&self) -> usize {
         self.entries
-            .values()
+            .iter()
             .filter(|e| e.skel.tag_view.is_some())
             .count()
     }
@@ -527,4 +539,163 @@ pub struct PoseStats {
     pub gun_rigid: usize,
     pub gun_blend: usize,
     pub idle_sampled: bool,
+}
+
+const SCOPE_ATTACH_TAGS: &[&str] = &[
+    "tag_scope",
+    "tag_acog",
+    "tag_red_dot",
+    "tag_reflex",
+    "tag_hybrid",
+    "tag_thermal",
+    "tag_thermal_scope",
+    "tag_eotech",
+];
+
+#[derive(Clone, Debug)]
+pub struct FpvMount {
+    pub model: FpvMeshIndex,
+    pub parent_model: usize,
+    pub tag: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct FpvMountPlan {
+    pub gun: FpvMeshIndex,
+    pub attachments: Vec<FpvMount>,
+    pub rocket: Option<FpvMount>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FpvMountError {
+    pub model: String,
+    pub detail: &'static str,
+}
+
+impl core::fmt::Display for FpvMountError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "FPV model `{}`: {}", self.model, self.detail)
+    }
+}
+
+fn scope_attach_tag_name<'a>(gun_bones: &'a [String], scope_bones: &[String]) -> Option<&'a str> {
+    if let Some(root) = scope_bones.first()
+        && let Some(hit) = gun_bones
+            .iter()
+            .find(|name| name.eq_ignore_ascii_case(root))
+    {
+        return Some(hit.as_str());
+    }
+    for tag in SCOPE_ATTACH_TAGS {
+        if !scope_bones
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(tag))
+        {
+            continue;
+        }
+        if let Some(hit) = gun_bones.iter().find(|name| name.eq_ignore_ascii_case(tag)) {
+            return Some(hit.as_str());
+        }
+    }
+    gun_bones.iter().find_map(|name| {
+        SCOPE_ATTACH_TAGS
+            .iter()
+            .copied()
+            .find(|tag| name.eq_ignore_ascii_case(tag))
+            .map(|_| name.as_str())
+    })
+}
+
+pub fn plan_fpv_mounts(
+    catalog: &FpvMeshCatalog,
+    gun: FpvMeshIndex,
+    attachments: &[FpvMeshIndex],
+    rocket: Option<FpvMeshIndex>,
+) -> Result<FpvMountPlan, FpvMountError> {
+    let gun_entry = catalog.get_at(gun.order()).ok_or_else(|| FpvMountError {
+        model: format!("#{}", gun.order()),
+        detail: "gun missing from FPV catalog",
+    })?;
+    let gun_skel = &gun_entry.skel;
+    if gun_skel.pose.is_none() {
+        return Err(FpvMountError {
+            model: gun_skel.name.clone(),
+            detail: "gun has no pose source",
+        });
+    }
+    let mut selected: Vec<FpvMount> = Vec::with_capacity(attachments.len());
+    for &model in attachments {
+        let entry = catalog.get_at(model.order()).ok_or_else(|| FpvMountError {
+            model: format!("#{}", model.order()),
+            detail: "attachment missing from FPV catalog",
+        })?;
+        let skel = &entry.skel;
+        if skel.pose.is_none() {
+            return Err(FpvMountError {
+                model: skel.name.clone(),
+                detail: "attachment has no pose source",
+            });
+        }
+        let on_attachment = skel.bone_names.first().and_then(|root| {
+            selected.iter().enumerate().rev().find_map(|(slot, mount)| {
+                let bones = &catalog.get_at(mount.model.order())?.skel.bone_names;
+                let hit = bones.iter().find(|name| name.eq_ignore_ascii_case(root))?;
+                Some((slot + 2, hit.as_str()))
+            })
+        });
+        let on_gun =
+            || scope_attach_tag_name(&gun_skel.bone_names, &skel.bone_names).map(|tag| (1, tag));
+        let root_on_gun = skel.bone_names.first().is_some_and(|root| {
+            gun_skel
+                .bone_names
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(root))
+        });
+        let joint = if root_on_gun {
+            on_gun()
+        } else {
+            on_attachment.or_else(on_gun)
+        };
+        let (parent_model, tag) = joint.ok_or_else(|| FpvMountError {
+            model: skel.name.clone(),
+            detail: "no compatible mount on gun or earlier attachment",
+        })?;
+        selected.push(FpvMount {
+            model,
+            parent_model,
+            tag: tag.to_owned(),
+        });
+    }
+    let rocket = rocket
+        .map(|model| {
+            let entry = catalog.get_at(model.order()).ok_or_else(|| FpvMountError {
+                model: format!("#{}", model.order()),
+                detail: "rocket missing from FPV catalog",
+            })?;
+            if entry.skel.pose.is_none() {
+                return Err(FpvMountError {
+                    model: entry.skel.name.clone(),
+                    detail: "rocket has no pose source",
+                });
+            }
+            let tag = gun_skel
+                .bone_names
+                .iter()
+                .find(|name| name.eq_ignore_ascii_case("tag_clip"))
+                .ok_or_else(|| FpvMountError {
+                    model: entry.skel.name.clone(),
+                    detail: "gun has no tag_clip rocket mount",
+                })?;
+            Ok(FpvMount {
+                model,
+                parent_model: 1,
+                tag: tag.clone(),
+            })
+        })
+        .transpose()?;
+    Ok(FpvMountPlan {
+        gun,
+        attachments: selected,
+        rocket,
+    })
 }

@@ -11,7 +11,7 @@ use hud_iw4::{
 };
 use net::{CgFrameClock, LocalPresentClient, PresentedSnapshot};
 
-use crate::chrome::{ChromeAssets, ChromeFrame, execute_chrome_menu};
+use crate::chrome::{ChromeAssets, ChromeFrame, ChromeMenuAnim, execute_chrome_menu_with_anim};
 use crate::draw2d::{Draw2dOp, tessellate_fonts};
 use crate::gaps::{GapCause, HudGap, HudPresentationGaps, ImageMiss};
 use crate::gpu_list::{HudTessPass, TessJob};
@@ -142,6 +142,9 @@ impl ExprHost for PlayerCardExprHost<'_> {
     fn gametype_name(&self) -> Result<Operand, ExprError> {
         Err(ExprError::Host("gametype"))
     }
+    fn weapon_lock(&self) -> Result<hud_iw4::WeaponLockView, ExprError> {
+        Err(ExprError::Host("weapon lock"))
+    }
     fn dvar_int(&self, name: &str) -> Result<i32, ExprError> {
         if name.eq_ignore_ascii_case("hiDef") {
             return Ok(1);
@@ -239,6 +242,9 @@ impl ExprHost for OpenMenuHost {
     }
     fn gametype_name(&self) -> Result<Operand, ExprError> {
         Err(ExprError::Host("gametype"))
+    }
+    fn weapon_lock(&self) -> Result<hud_iw4::WeaponLockView, ExprError> {
+        Err(ExprError::Host("weapon lock"))
     }
     fn get_perk(&self, _name: &str) -> Result<Operand, ExprError> {
         Ok(Operand::Str(String::new()))
@@ -484,11 +490,30 @@ pub(crate) fn update_playercard(
             menu: Some(menu),
             ..host
         };
+        let anim = match (menu_name, cache.broadcast.as_ref()) {
+            ("playercard_splash", Some((slot, _))) => {
+                let end = slot.start_ms.saturating_add(slot.duration_ms);
+                let (script, start) = if now_ms > end {
+                    (&menu.on_close_request, end)
+                } else {
+                    (&menu.on_open, slot.start_ms)
+                };
+                let lerp = hud_iw4::item_run_script_lerp(script, start);
+                for command in &lerp.leftover {
+                    gaps.raise(GapCause::MenuScriptUnsupported {
+                        menu: menu_name.to_owned(),
+                        command: command.clone(),
+                    });
+                }
+                lerp.anim(now_ms)
+            }
+            _ => ChromeMenuAnim::IDENTITY,
+        };
         let ChromeFrame {
-            list: mut frame_list,
+            list: frame_list,
             coverage: _,
-            vis_errors: _,
-        } = execute_chrome_menu(
+            vis_errors,
+        } = execute_chrome_menu_with_anim(
             menu,
             &host,
             &surface,
@@ -496,23 +521,15 @@ pub(crate) fn update_playercard(
                 catalog: Some(catalog),
                 localize: strings.as_ref().map(|s| &s.0),
             },
+            anim,
             &mut exprs,
         );
-        if menu_name == "playercard_splash"
-            && let Some((slot, _)) = &cache.broadcast
-        {
-            let end = slot.start_ms.saturating_add(slot.duration_ms);
-            let (script, start) = if now_ms > end {
-                (&menu.on_close_request, end)
-            } else {
-                (&menu.on_open, slot.start_ms)
-            };
-            let x = hud_iw4::item_run_script_lerp(script, start)
-                .x
-                .current_or(now_ms, 0.0);
-            for cmd in &mut frame_list.cmds {
-                cmd.x += x * surface.scale_virtual_to_real()[0];
-            }
+        for (item, err) in vis_errors {
+            gaps.raise(GapCause::MenuExpression {
+                menu: menu_name.to_owned(),
+                item,
+                err,
+            });
         }
         if frame_list.cmds.is_empty() {
             empty_paint = true;

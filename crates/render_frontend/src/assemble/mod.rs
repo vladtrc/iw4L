@@ -4,11 +4,35 @@ pub mod drawsurf;
 mod match_reset;
 pub mod pack;
 
+#[derive(bevy::ecs::schedule::ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct StaticSunAndFx;
+
+fn prepare_static_sun_and_fx(world: &mut World) {
+    let _prepare = perf::Span::HostStaticSunFxMs.enter();
+    world.run_schedule(StaticSunAndFx);
+}
+
 pub struct RenderAssemblePlugin;
 
 impl Plugin for RenderAssemblePlugin {
     fn build(&self, app: &mut App) {
         match_reset::register_match_reset_systems(app);
+        app.init_resource::<drawsurf::StaticSunCasters>()
+            .add_systems(StaticSunAndFx, drawsurf::bake_static_sun_shadow_casters)
+            .edit_schedule(StaticSunAndFx, |schedule| {
+                schedule.set_executor(bevy::ecs::schedule::MultiThreadedExecutor::new());
+            })
+            .add_systems(
+                Update,
+                prepare_static_sun_and_fx
+                    .in_set(frame::WorkerCmdSet::FxVerts)
+                    .after(frame::WorkerCmdSet::FxRemaining)
+                    .after(frame::WorkerCmdSet::SmodelCache)
+                    .after(drawsurf::update_command_context_code_sources)
+                    .after(crate::prepare::scene::cull::apply_dpvs_cull)
+                    .after(crate::prepare::scene::smodel_lighting::update_smodel_lighting),
+            );
+
         app.add_systems(
             Update,
             crate::assemble::drawsurf::tess::world::build_world_draw_gpu_plan
@@ -76,8 +100,10 @@ impl Plugin for RenderAssemblePlugin {
             Update,
             (
                 crate::assemble::drawsurf::open_frame_products
+                    .after(frame::WorkerCmdSet::FxVerts)
                     .after(crate::assemble::drawsurf::update_command_context_code_sources),
                 crate::assemble::drawsurf::bake_sun_shadow_casters
+                    .after(prepare_static_sun_and_fx)
                     .after(crate::assemble::drawsurf::open_frame_products)
                     .after(crate::assemble::drawsurf::rebuild_xmodel_draw_lane)
                     .after(frame::WorkerCmdSet::SmodelCache)

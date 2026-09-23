@@ -1681,7 +1681,12 @@ fn material_decoded_color(
                 .find(|t| t.semantic == TS_2D)
                 .and_then(|t| t.image)
         })?;
-    materials.images.get(img_i)?.decoded.clone()
+    materials
+        .images
+        .get(img_i)?
+        .decoded
+        .as_ref()
+        .map(|image| (**image).clone())
 }
 
 fn read_xmodel_name(

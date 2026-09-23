@@ -26,9 +26,9 @@ pub use authority::inbox::{
 };
 pub use authority::runtime::{
     AuthorityInputGate, AuthorityLoadHold, AuthorityPhaseCensus, AuthorityPhaseTrace,
-    AuthorityWorld, ClientShotSamples, DumpDeathLog, DumpGiveLog, FixedUpdateCensus,
-    ListenFanoutCensus, NetDiagnostics, PendingAcks, PendingAuthorityInput, PendingStepResult,
-    ScriptNotifyEmitStats, ServerTick, ServerTickData, authority_bookkeeping,
+    AuthorityWorld, ClientShotSamples, DumpConfigurationChangeLog, DumpDeathLog, DumpGiveLog,
+    FixedUpdateCensus, ListenFanoutCensus, NetDiagnostics, PendingAcks, PendingAuthorityInput,
+    PendingStepResult, ScriptNotifyEmitStats, ServerTick, ServerTickData, authority_bookkeeping,
     authority_should_tick,
 };
 pub use client::centity_runtime::{
@@ -169,4 +169,4 @@ pub use transport::udp_session::{CommittedAdmission, UdpAuthorityHub, UdpClientL
 pub use transport::udp_socket::{DEFAULT_RECV_BUDGET_PER_TICK, UdpDatagramSocket, UdpSendError};
 pub use transport::wire::{WireError, WireReader, WireWriter};
 
-pub const PROTOCOL_VERSION: u32 = 74;
+pub const PROTOCOL_VERSION: u32 = 76;

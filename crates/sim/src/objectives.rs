@@ -20,6 +20,35 @@ fn evaluate_round_clock(world: &mut FrameWorld, tick: Tick, remaining_ms: u32) {
     world.set_pending_match_clock(Some(emit));
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ObjectiveFlash {
+    pub teams: u8,
+
+    pub start_ms: u32,
+
+    pub stop_ms: Option<u32>,
+}
+
+impl ObjectiveFlash {
+    pub const AXIS: u8 = 1;
+
+    pub const ALLIES: u8 = 2;
+
+    #[must_use]
+    pub fn team_bit(team: Team) -> u8 {
+        match team {
+            Team::Axis => Self::AXIS,
+            Team::Allies => Self::ALLIES,
+            _ => 0,
+        }
+    }
+
+    #[must_use]
+    pub fn shows_to(&self, team: Team) -> bool {
+        self.teams & Self::team_bit(team) != 0
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ObjectiveView {
     pub id: u32,
@@ -31,6 +60,8 @@ pub struct ObjectiveView {
     pub capturing: Team,
     pub contested: bool,
     pub users: Vec<ClientId>,
+
+    pub flash: Option<ObjectiveFlash>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -139,10 +170,28 @@ impl ObjectiveMatch {
     }
 }
 
-pub(crate) fn sync_dom(world: &mut FrameWorld) {
+fn flash_audience(owner: Team, capturing: Team) -> u8 {
+    if capturing == Team::Free || capturing == owner {
+        return 0;
+    }
+    if owner == Team::Free {
+        ObjectiveFlash::team_bit(capturing)
+    } else {
+        ObjectiveFlash::AXIS | ObjectiveFlash::ALLIES
+    }
+}
+
+pub(crate) fn sync_dom(world: &mut FrameWorld, tick: Tick) {
     if world.bootstrap_ref().kind != GameModeKind::Domination {
         return;
     }
+    let now_ms = tick.0.saturating_mul(crate::MATCH_TICK_MS);
+    let previous: Vec<(u32, Option<ObjectiveFlash>)> = world
+        .objectives
+        .flags
+        .iter()
+        .map(|flag| (flag.id, flag.flash))
+        .collect();
     let flags = world
         .use_objects()
         .iter()
@@ -177,6 +226,39 @@ pub(crate) fn sync_dom(world: &mut FrameWorld) {
                     .iter()
                     .any(|(_, t, _)| *t == gamemode_iw4::ProxClaimTeam::Allies),
             users: o.touching.iter().map(|(id, _, _)| *id).collect(),
+            flash: {
+                let owner = match o.owner_team {
+                    gamemode_iw4::GameObjectTeam::Axis => Team::Axis,
+                    gamemode_iw4::GameObjectTeam::Allies => Team::Allies,
+                    _ => Team::Free,
+                };
+                let teams = flash_audience(owner, o.claim.as_team().unwrap_or(Team::Free));
+                let prior = previous
+                    .iter()
+                    .find(|(id, _)| *id == o.id)
+                    .and_then(|(_, flash)| *flash);
+                if teams != 0 {
+                    Some(
+                        prior
+                            .filter(|flash| flash.teams == teams && flash.stop_ms.is_none())
+                            .unwrap_or(ObjectiveFlash {
+                                teams,
+                                start_ms: now_ms,
+                                stop_ms: None,
+                            }),
+                    )
+                } else {
+                    prior
+                        .map(|flash| ObjectiveFlash {
+                            stop_ms: Some(flash.stop_ms.unwrap_or(now_ms)),
+                            ..flash
+                        })
+                        .filter(|flash| {
+                            now_ms.saturating_sub(flash.stop_ms.unwrap_or(now_ms))
+                                < crate::MATCH_TICK_MS.saturating_mul(2)
+                        })
+                }
+            },
         })
         .collect();
     world.objectives.flags = flags;
@@ -247,7 +329,7 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
     if !world.publishes_snapshot() {
         return;
     }
-    sync_dom(world);
+    sync_dom(world, tick);
     if world.bootstrap_ref().kind != GameModeKind::Demolition {
         return;
     }

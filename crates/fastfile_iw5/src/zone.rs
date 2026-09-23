@@ -291,106 +291,45 @@ pub struct ZoneStream<'a> {
     latest_vertex_decl: Option<VertexDeclGeometry>,
     weapon: Option<WeaponGeometry>,
     image_serial: u32,
-    attachment_overlays: [AttachmentOverlayRec; ATTACHMENT_OVERLAY_CAP],
-    attachment_overlay_n: usize,
-    attachment_overlay_overflow: usize,
-    attachment_load_n: usize,
-    weapons_scope_array_n: usize,
-    weapons_scope0_n: usize,
-    weapons_overlay_hit_n: usize,
-    latest_attachment_overlay: AttachmentOverlayGeometry,
+    attachment_names: [AttachmentNameRec; ATTACHMENT_NAME_CAP],
+    attachment_name_n: usize,
+    latest_attachment_name: Option<Ptr>,
 
     pub walk_stage: &'static str,
 }
 
-const ATTACHMENT_OVERLAY_CAP: usize = 256;
+const ATTACHMENT_NAME_CAP: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct AttachmentOverlayRec {
-    used: bool,
+struct AttachmentNameRec {
     key: Ptr,
-    overlay_name: Option<Ptr>,
-    overlay_lowres_name: Option<Ptr>,
-    overlay_emp_name: Option<Ptr>,
-    overlay_emp_lowres_name: Option<Ptr>,
-    scope_name: Option<Ptr>,
-    view_model_name: Option<Ptr>,
-    width: f32,
-    height: f32,
-    reticle: i32,
-    thermal: bool,
-    ads_settings_present: bool,
-    ads_zoom_fov: f32,
-    ads_zoom_in_frac: f32,
-    ads_zoom_out_frac: f32,
+    name: Option<Ptr>,
 }
 
-impl AttachmentOverlayRec {
+impl AttachmentNameRec {
     const EMPTY: Self = Self {
-        used: false,
         key: Ptr {
             block: 0,
             offset: 0,
         },
-        overlay_name: None,
-        overlay_lowres_name: None,
-        overlay_emp_name: None,
-        overlay_emp_lowres_name: None,
-        scope_name: None,
-        view_model_name: None,
-        width: 0.0,
-        height: 0.0,
-        reticle: 0,
-        thermal: false,
-        ads_settings_present: false,
-        ads_zoom_fov: 0.0,
-        ads_zoom_in_frac: 0.0,
-        ads_zoom_out_frac: 0.0,
+        name: None,
     };
 }
 
-impl AttachmentOverlayRec {
-    fn geometry(&self) -> AttachmentOverlayGeometry {
-        AttachmentOverlayGeometry {
-            overlay_name: self.overlay_name,
-            overlay_lowres_name: self.overlay_lowres_name,
-            overlay_emp_name: self.overlay_emp_name,
-            overlay_emp_lowres_name: self.overlay_emp_lowres_name,
-            scope_name: self.scope_name,
-            view_model_name: self.view_model_name,
-            width: self.width,
-            height: self.height,
-            reticle: self.reticle,
-            thermal: self.thermal,
-            ads_settings_present: self.ads_settings_present,
-            ads_zoom_fov: self.ads_zoom_fov,
-            ads_zoom_in_frac: self.ads_zoom_in_frac,
-            ads_zoom_out_frac: self.ads_zoom_out_frac,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct AttachmentOverlayGeometry {
-    pub overlay_name: Option<Ptr>,
-
-    pub overlay_lowres_name: Option<Ptr>,
-
-    pub overlay_emp_name: Option<Ptr>,
-
-    pub overlay_emp_lowres_name: Option<Ptr>,
-    pub scope_name: Option<Ptr>,
-
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AttachmentGeometry {
+    pub header: Ptr,
+    pub name: Option<Ptr>,
     pub view_model_name: Option<Ptr>,
-    pub width: f32,
-    pub height: f32,
-    pub reticle: i32,
+    pub world_model_name: Option<Ptr>,
+    pub view_model_names: [Option<Ptr>; crate::size::ATTACH_MODEL_COUNT],
+    pub world_model_names: [Option<Ptr>; crate::size::ATTACH_MODEL_COUNT],
+    pub reticle_model_names: [Option<Ptr>; crate::size::ATTACH_RETICLE_COUNT],
+    pub overlay_names: [Option<Ptr>; 4],
+    pub overlay_width: f32,
+    pub overlay_height: f32,
+    pub overlay_reticle: i32,
     pub thermal: bool,
-
-    pub ads_settings_present: bool,
-    pub ads_zoom_fov: f32,
-    pub ads_zoom_in_frac: f32,
-    pub ads_zoom_out_frac: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -424,6 +363,13 @@ pub struct WeaponGeometry {
 
     pub ads_out_rate: f32,
 
+    pub ads_trans_in_time_ms: i32,
+    pub ads_trans_out_time_ms: i32,
+
+    pub penetrate_multiplier: f32,
+
+    pub motion_tracker: bool,
+
     pub fire_time_ms: i32,
 
     pub clip_size: i32,
@@ -440,15 +386,11 @@ pub struct WeaponGeometry {
 
     pub ads_move_speed_scale: f32,
 
-    pub overlay_shader_name: Option<Ptr>,
-
-    pub scope0_name: Option<Ptr>,
-
     pub ads_overlay_width: f32,
     pub ads_overlay_height: f32,
     pub overlay_reticle: i32,
 
-    pub scope_overlays: [AttachmentOverlayGeometry; crate::size::WEAPON_SCOPE_COUNT],
+    pub attachments: [Option<Ptr>; crate::size::WEAPON_ATTACHMENT_SLOT_COUNT],
 
     pub anim_override_count: i32,
 
@@ -458,7 +400,17 @@ pub struct WeaponGeometry {
 
     pub sound_overrides: Option<Ptr>,
 
-    pub reload_override_add_time_ms: i32,
+    pub fx_override_count: i32,
+
+    pub fx_overrides: Option<Ptr>,
+
+    pub reload_override_count: i32,
+
+    pub reload_overrides: Option<Ptr>,
+
+    pub note_track_override_count: i32,
+
+    pub note_track_overrides: Option<Ptr>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1024,14 +976,9 @@ impl<'a> ZoneStream<'a> {
             latest_vertex_decl: None,
             weapon: None,
             image_serial: 0,
-            attachment_overlays: [AttachmentOverlayRec::EMPTY; ATTACHMENT_OVERLAY_CAP],
-            attachment_overlay_n: 0,
-            attachment_overlay_overflow: 0,
-            attachment_load_n: 0,
-            weapons_scope_array_n: 0,
-            weapons_scope0_n: 0,
-            weapons_overlay_hit_n: 0,
-            latest_attachment_overlay: AttachmentOverlayGeometry::default(),
+            attachment_names: [AttachmentNameRec::EMPTY; ATTACHMENT_NAME_CAP],
+            attachment_name_n: 0,
+            latest_attachment_name: None,
             walk_stage: "",
         })
     }
@@ -1246,116 +1193,41 @@ impl<'a> ZoneStream<'a> {
         self.weapon
     }
 
-    pub fn remember_attachment_overlay_key(
-        &mut self,
-        key: Ptr,
-        geometry: AttachmentOverlayGeometry,
-    ) {
-        if self
-            .attachment_overlays
-            .iter()
-            .take(self.attachment_overlay_n)
-            .any(|rec| rec.used && rec.key == key)
-        {
+    fn remember_attachment_name_key(&mut self, key: Ptr, name: Option<Ptr>) {
+        if self.attachment_name(key).is_some() || self.attachment_name_n >= ATTACHMENT_NAME_CAP {
             return;
         }
-        if self.attachment_overlay_n >= ATTACHMENT_OVERLAY_CAP {
-            self.attachment_overlay_overflow += 1;
-            return;
-        }
-        self.attachment_overlays[self.attachment_overlay_n] = AttachmentOverlayRec {
-            used: true,
-            key,
-            overlay_name: geometry.overlay_name,
-            overlay_lowres_name: geometry.overlay_lowres_name,
-            overlay_emp_name: geometry.overlay_emp_name,
-            overlay_emp_lowres_name: geometry.overlay_emp_lowres_name,
-            scope_name: geometry.scope_name,
-            view_model_name: geometry.view_model_name,
-            width: geometry.width,
-            height: geometry.height,
-            reticle: geometry.reticle,
-            thermal: geometry.thermal,
-            ads_settings_present: geometry.ads_settings_present,
-            ads_zoom_fov: geometry.ads_zoom_fov,
-            ads_zoom_in_frac: geometry.ads_zoom_in_frac,
-            ads_zoom_out_frac: geometry.ads_zoom_out_frac,
-        };
-        self.attachment_overlay_n += 1;
+        self.attachment_names[self.attachment_name_n] = AttachmentNameRec { key, name };
+        self.attachment_name_n += 1;
     }
 
-    pub fn set_latest_attachment_overlay(&mut self, geometry: AttachmentOverlayGeometry) {
-        self.latest_attachment_overlay = geometry;
+    pub fn set_latest_attachment_name(&mut self, name: Option<Ptr>) {
+        self.latest_attachment_name = name;
     }
 
-    pub fn latest_attachment_overlay(&self) -> AttachmentOverlayGeometry {
-        self.latest_attachment_overlay
-    }
-
-    pub fn commit_attachment_overlay(&mut self, slot: Ptr, insert_slot: Option<Ptr>) {
-        let geometry = self.latest_attachment_overlay;
-        self.remember_attachment_overlay_key(slot, geometry);
+    pub fn commit_attachment_name(&mut self, slot: Ptr, insert_slot: Option<Ptr>) {
+        let name = self.latest_attachment_name;
+        self.remember_attachment_name_key(slot, name);
         if let Some(insert_slot) = insert_slot {
-            self.remember_attachment_overlay_key(insert_slot, geometry);
+            self.remember_attachment_name_key(insert_slot, name);
         }
     }
 
-    pub fn alias_attachment_overlay(&mut self, slot: Ptr, target: Ptr) {
-        let Some(geometry) = self
-            .attachment_overlay(target)
-            .or_else(|| self.attachment_overlay(self.resolve_alias(target)))
+    pub fn alias_attachment_name(&mut self, slot: Ptr, target: Ptr) {
+        let Some(name) = self
+            .attachment_name(target)
+            .or_else(|| self.attachment_name(self.resolve_alias(target)))
         else {
             return;
         };
-        self.remember_attachment_overlay_key(slot, geometry);
+        self.remember_attachment_name_key(slot, name);
     }
 
-    pub fn attachment_overlay(&self, key: Ptr) -> Option<AttachmentOverlayGeometry> {
-        self.attachment_overlays
+    pub fn attachment_name(&self, key: Ptr) -> Option<Option<Ptr>> {
+        self.attachment_names[..self.attachment_name_n]
             .iter()
-            .take(self.attachment_overlay_n)
-            .find(|rec| rec.used && rec.key == key)
-            .map(AttachmentOverlayRec::geometry)
-    }
-
-    pub fn attachment_overlay_count(&self) -> usize {
-        self.attachment_overlay_n
-    }
-
-    pub fn attachment_overlay_overflow(&self) -> usize {
-        self.attachment_overlay_overflow
-    }
-
-    pub fn attachment_load_count(&self) -> usize {
-        self.attachment_load_n
-    }
-
-    pub fn note_attachment_load(&mut self) {
-        self.attachment_load_n += 1;
-    }
-
-    pub fn weapons_scope_array_count(&self) -> usize {
-        self.weapons_scope_array_n
-    }
-
-    pub fn weapons_scope0_count(&self) -> usize {
-        self.weapons_scope0_n
-    }
-
-    pub fn weapons_overlay_hit_count(&self) -> usize {
-        self.weapons_overlay_hit_n
-    }
-
-    pub fn note_weapon_scope_array(&mut self) {
-        self.weapons_scope_array_n += 1;
-    }
-
-    pub fn note_weapon_scope0(&mut self) {
-        self.weapons_scope0_n += 1;
-    }
-
-    pub fn note_weapon_overlay_hit(&mut self) {
-        self.weapons_overlay_hit_n += 1;
+            .find(|rec| rec.key == key)
+            .map(|rec| rec.name)
     }
 
     pub fn source_slice(&self, offset: usize, len: usize) -> Result<&[u8]> {

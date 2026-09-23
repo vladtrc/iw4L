@@ -19,6 +19,7 @@ fx_iw4.workspace = true
 hud_iw4.workspace = true
 hud = { path = "../hud" }
 lighting_iw4.workspace = true
+gpu_probe.workspace = true
 perf.workspace = true
 render_backend.workspace = true
 render_frame.workspace = true

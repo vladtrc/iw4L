@@ -337,6 +337,48 @@ impl DumpGiveLog {
     }
 }
 
+#[derive(Resource, Debug, Clone, Default)]
+pub struct DumpConfigurationChangeLog {
+    pub request_id: Option<u32>,
+    pub from: Option<u32>,
+    pub to: Option<u32>,
+    pub accepted: Option<bool>,
+    pub reject_reason: Option<&'static str>,
+}
+
+impl DumpConfigurationChangeLog {
+    fn push_journal(&mut self, journal: &[sim::EventRecord]) {
+        for rec in journal {
+            match rec.event {
+                SimEvent::ConfigurationChangeAccepted {
+                    request_id,
+                    from,
+                    to,
+                } => {
+                    self.request_id = Some(request_id);
+                    self.from = Some(from);
+                    self.to = Some(to);
+                    self.accepted = Some(true);
+                    self.reject_reason = None;
+                }
+                SimEvent::ConfigurationChangeRejected {
+                    request_id,
+                    from,
+                    to,
+                    reason,
+                } => {
+                    self.request_id = Some(request_id);
+                    self.from = Some(from);
+                    self.to = Some(to);
+                    self.accepted = Some(false);
+                    self.reject_reason = Some(reason.as_str());
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 fn player_origin_flags(
     players: &[(ClientId, playerstate_iw4::PlayerState)],
     id: ClientId,
@@ -760,6 +802,9 @@ fn sim_event_refuses(event: &sim::SimEvent, request_id: sim::ActionRequestId) ->
         }
         | sim::SimEvent::GiveRejected {
             request_id: rid, ..
+        }
+        | sim::SimEvent::ConfigurationChangeRejected {
+            request_id: rid, ..
         } => *rid == request_id,
         _ => false,
     }
@@ -798,6 +843,7 @@ struct FanoutQueues<'w> {
     fanout_census: ResMut<'w, ListenFanoutCensus>,
     deaths: ResMut<'w, DumpDeathLog>,
     gives: ResMut<'w, DumpGiveLog>,
+    configuration_changes: ResMut<'w, DumpConfigurationChangeLog>,
     actions: ResMut<'w, ClientActionInbox>,
     entity_slots: Option<Res<'w, crate::CEntitySlots>>,
     entity_notify_gaps: ResMut<'w, NetIdentityGaps>,
@@ -889,6 +935,9 @@ fn fanout_loopback(
     );
     queues.deaths.push_journal(&tick.snapshot.meta.journal);
     queues.gives.push_journal(&tick.snapshot.meta.journal);
+    queues
+        .configuration_changes
+        .push_journal(&tick.snapshot.meta.journal);
     pending_deaths.queue_spawn_for_deaths_without_timeline(&tick.snapshot.meta.journal);
     tick_death_timelines(
         &mut pending_deaths,
@@ -1499,6 +1548,7 @@ pub fn register_listen_runtime(app: &mut App) {
         .init_resource::<ListenFanoutCensus>()
         .init_resource::<DumpDeathLog>()
         .init_resource::<DumpGiveLog>()
+        .init_resource::<DumpConfigurationChangeLog>()
         .init_resource::<LastAuthorityRoster>()
         .init_resource::<PendingConnectionFaults>();
     let role = *app.world().resource::<RuntimeRole>();

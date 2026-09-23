@@ -40,7 +40,9 @@ pub fn arm_local_from_presented(
         return;
     };
 
-    look.angles = look_angles_from_degrees(ps.viewangles);
+    look.angles = look_angles_from_degrees(std::array::from_fn(|axis| {
+        ps.viewangles[axis] - ps.delta_angles[axis]
+    }));
     sim_cam.enabled = true;
     sim_cam.freeze_fly = false;
 
@@ -74,7 +76,9 @@ pub fn reset_look_on_life_started(
         let Some(ps) = presented.player(local.0) else {
             continue;
         };
-        look.angles = look_angles_from_degrees(ps.viewangles);
+        look.angles = look_angles_from_degrees(std::array::from_fn(|axis| {
+            ps.viewangles[axis] - ps.delta_angles[axis]
+        }));
     }
 }
 

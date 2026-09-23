@@ -186,6 +186,7 @@ pub struct SelfState {
     pub lifecycle: ClientLifecycle,
     pub origin: [f32; 3],
     pub viewangles: [f32; 3],
+    pub delta_angles: [f32; 3],
     pub view_height: f32,
     pub stance: Stance,
     pub health: i32,

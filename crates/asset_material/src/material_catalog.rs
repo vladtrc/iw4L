@@ -1,5 +1,6 @@
 use crate::asset_graph::{AssetRef, AssetRefCensus};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use bevy::prelude::{Image, Resource};
 use fastfile_iw4::{
@@ -56,8 +57,9 @@ pub struct AuthoredImage {
     pub depth: u16,
     pub level_count: u8,
     pub format: u32,
-    pub payload: Vec<u8>,
-    pub decoded: Option<Image>,
+    pub payload: Arc<Vec<u8>>,
+    pub decoded: Option<Arc<Image>>,
+    pub common_owned: bool,
     /// Which variant `decoded` is, when it came from a plan. `None` means it
     /// was decoded from this row's own inline payload or never decoded.
     pub decoded_variant: Option<ImageVariantId>,
@@ -493,6 +495,12 @@ impl std::ops::DerefMut for MaterialCatalog {
 }
 
 impl MaterialCatalog {
+    pub fn mark_images_common_owned(&mut self) {
+        for image in &mut self.images {
+            image.common_owned = true;
+        }
+    }
+
     /// Ends the build: drops the reference rows, resolves the technique-set
     /// edges, and hands the definitions on with the remap from provisional row
     /// to final row. The link state does not travel with them — it is dropped
@@ -574,6 +582,7 @@ impl MaterialCatalog {
                 self.images[index] = owned;
             } else if incoming.decoded.is_some() && self.images[index].decoded.is_none() {
                 self.images[index].decoded = incoming.decoded;
+                self.images[index].common_owned = incoming.common_owned;
             }
             index
         } else {
@@ -1365,8 +1374,9 @@ impl MaterialCatalog {
             depth: geometry.depth,
             level_count: geometry.level_count,
             format: geometry.format,
-            payload,
+            payload: Arc::new(payload),
             decoded: None,
+            common_owned: false,
             decoded_variant: None,
             decoded_by: None,
             pending_decode: None,
@@ -2339,8 +2349,9 @@ impl MaterialCatalog {
             depth: geometry.depth,
             level_count: geometry.level_count,
             format: geometry.format,
-            payload,
+            payload: Arc::new(payload),
             decoded: None,
+            common_owned: false,
             decoded_variant: None,
             decoded_by: None,
             pending_decode: None,
@@ -2652,8 +2663,9 @@ impl MaterialCatalog {
             depth: geometry.depth,
             level_count: geometry.level_count,
             format: geometry.format,
-            payload,
+            payload: Arc::new(payload),
             decoded: None,
+            common_owned: false,
             decoded_variant: None,
             decoded_by: None,
             pending_decode: None,

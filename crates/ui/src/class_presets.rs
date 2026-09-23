@@ -35,7 +35,7 @@ const DEFAULTS: [ClassPreset; 5] = [
     ClassPreset {
         name: "assault",
         primary: "iw4:weapon/ak47_mp",
-        primary_attachments: &["acog", "fmj"],
+        primary_attachments: &["acog"],
         secondary: "iw4:weapon/usp_mp",
         secondary_attachments: &[],
         lethal: "iw4:weapon/semtex_mp",

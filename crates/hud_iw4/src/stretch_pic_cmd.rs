@@ -276,19 +276,3 @@ fn read_f32(buf: &[u8], off: usize) -> Option<f32> {
     let b = buf.get(off..off + 4)?;
     Some(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
-
-pub const R_ATLAS_ANIM_FPS_DEFAULT: u32 = 15;
-
-pub fn r_adjust_atlas_tex_coords(rows: u8, columns: u8, fps: u32, clock_ms: u32) -> [f32; 4] {
-    if rows == 0 || columns == 0 || fps == 0 || (rows == 1 && columns == 1) {
-        return [0.0, 0.0, 1.0, 1.0];
-    }
-    let period = u32::from(rows) * u32::from(columns) * 1000 / fps;
-    assert!(period > 0, "r_atlasAnimFPS exceeds atlas period");
-    let frame = (clock_ms % period) * fps / 1000;
-    let ds = 1.0 / f32::from(columns);
-    let dt = 1.0 / f32::from(rows);
-    let s = (frame % u32::from(columns)) as f32 * ds;
-    let t = (frame / u32::from(columns)) as f32 * dt;
-    [s, t, s + ds, t + dt]
-}

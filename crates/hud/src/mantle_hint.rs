@@ -180,6 +180,7 @@ pub(crate) fn update_mantle_hint(
 
                     style: crate::draw2d::TEXT_STYLE_UNREAD,
                     fx: None,
+                    glow: None,
                 },
                 provenance: Draw2dProvenance::CgDraw {
                     site: "mantle_hint",

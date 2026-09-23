@@ -279,6 +279,7 @@ fn follow_public_join(
             | net::MasterBridgeState::Joining { .. }
             | net::MasterBridgeState::Failed { .. }
             | net::MasterBridgeState::Closed { .. }
+            | net::MasterBridgeState::Left { .. }
     );
     if drop_abandoned_browser_join(*saw_browser, in_flow, joining) && action.0.is_none() {
         action.0 = Some(net::MasterMenuAction::LeaveLobby);

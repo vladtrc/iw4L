@@ -95,20 +95,27 @@ pub fn decode_localized_text(raw: &[u8]) -> String {
 struct LocalizeSink {
     catalog: LocalizeCatalog,
     walked: usize,
+    sound: Option<asset_audio::ZoneSoundCapture>,
 }
 
 impl AssetLinkSink for LocalizeSink {
     fn loaded(
         &mut self,
-        _s: &ZoneStream<'_>,
-        _ty: AssetType,
-        _slot: Ptr,
-        _insert_slot: Option<Ptr>,
+        s: &ZoneStream<'_>,
+        ty: AssetType,
+        slot: Ptr,
+        insert_slot: Option<Ptr>,
     ) -> ZoneResult<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw4_loaded(s, ty, slot, insert_slot);
+        }
         Ok(())
     }
 
-    fn alias(&mut self, _ty: AssetType, _slot: Ptr, _target: Ptr) -> ZoneResult<()> {
+    fn alias(&mut self, ty: AssetType, slot: Ptr, target: Ptr) -> ZoneResult<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw4_alias(ty, slot, target);
+        }
         Ok(())
     }
 
@@ -116,6 +123,20 @@ impl AssetLinkSink for LocalizeSink {
         self.catalog.insert(name, &decode_localized_text(value));
         Ok(())
     }
+
+    fn capture_raw_file(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        zlib_compressed: bool,
+    ) -> ZoneResult<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.raw_file(name, data, zlib_compressed);
+        }
+        Ok(())
+    }
+
+    asset_audio::forward_iw4_sound!();
 }
 
 impl fastfile_iw4::AssetSink for LocalizeSink {
@@ -139,8 +160,19 @@ pub fn load_localize_catalog(path: &Path) -> Result<LocalizeCatalog, String> {
     let header = image.header().map_err(|e| e.to_string())?;
     let mut memory = ZoneMemory::for_header(&header);
     let mut stream = memory.stream(&image.bytes).map_err(|e| e.to_string())?;
-    let mut sink = LocalizeSink::default();
-    if let Err(e) = load_zone(&mut stream, &mut sink) {
+    let mut sink = LocalizeSink {
+        sound: asset_audio::ZoneSoundCapture::claim_common(
+            path,
+            asset_audio::ZoneGame::Iw4,
+            "localize",
+        ),
+        ..Default::default()
+    };
+    let walk = load_zone(&mut stream, &mut sink);
+    if let Some(sound) = sink.sound.take() {
+        sound.deposit(walk.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+    }
+    if let Err(e) = walk {
         diag::info!(
             Zone,
             "localize: {} stopped after {} assets ({} strings): {e}",
@@ -157,8 +189,19 @@ pub fn load_localize_catalog_iw5(path: &Path) -> Result<LocalizeCatalog, String>
     let header = image.iw5_header().map_err(|e| e.to_string())?;
     let mut memory = crate::Iw5ZoneMemory::for_header(&header);
     let mut stream = memory.stream(&image.bytes).map_err(|e| e.to_string())?;
-    let mut sink = Iw5LocalizeSink::default();
-    if let Err(e) = fastfile_iw5::load_zone(&mut stream, &mut sink) {
+    let mut sink = Iw5LocalizeSink {
+        sound: asset_audio::ZoneSoundCapture::claim_common(
+            path,
+            asset_audio::ZoneGame::Iw5,
+            "localize",
+        ),
+        ..Default::default()
+    };
+    let walk = fastfile_iw5::load_zone(&mut stream, &mut sink);
+    if let Some(sound) = sink.sound.take() {
+        sound.deposit(walk.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+    }
+    if let Err(e) = walk {
         diag::info!(
             Zone,
             "localize iw5: {} stopped ({} strings): {e}",
@@ -174,8 +217,19 @@ pub fn load_localize_catalog_t5(path: &Path) -> Result<LocalizeCatalog, String> 
     let header = image.t5_header().map_err(|e| e.to_string())?;
     let mut memory = crate::T5ZoneMemory::for_header(&header);
     let mut stream = memory.stream(&image.bytes).map_err(|e| e.to_string())?;
-    let mut sink = T5LocalizeSink::default();
-    if let Err(e) = fastfile_t5::load_zone(&mut stream, &mut sink) {
+    let mut sink = T5LocalizeSink {
+        sound: asset_audio::ZoneSoundCapture::claim_common(
+            path,
+            asset_audio::ZoneGame::T5,
+            "localize",
+        ),
+        ..Default::default()
+    };
+    let walk = fastfile_t5::load_zone(&mut stream, &mut sink);
+    if let Some(sound) = sink.sound.take() {
+        sound.deposit(walk.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+    }
+    if let Err(e) = walk {
         diag::info!(
             Zone,
             "localize t5: {} stopped ({} strings): {e}",
@@ -286,25 +340,32 @@ fn cached_localize_catalog(key: Option<&str>) -> Option<LocalizeCatalog> {
 struct Iw5LocalizeSink {
     catalog: LocalizeCatalog,
     walked: usize,
+    sound: Option<asset_audio::ZoneSoundCapture>,
 }
 
 impl fastfile_iw5::AssetLinkSink for Iw5LocalizeSink {
     fn loaded(
         &mut self,
-        _s: &fastfile_iw5::ZoneStream<'_>,
-        _ty: fastfile_iw5::AssetType,
-        _slot: fastfile_iw5::Ptr,
-        _insert_slot: Option<fastfile_iw5::Ptr>,
+        s: &fastfile_iw5::ZoneStream<'_>,
+        ty: fastfile_iw5::AssetType,
+        slot: fastfile_iw5::Ptr,
+        insert_slot: Option<fastfile_iw5::Ptr>,
     ) -> fastfile_iw5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw5_loaded(s, ty, slot, insert_slot);
+        }
         Ok(())
     }
 
     fn alias(
         &mut self,
-        _ty: fastfile_iw5::AssetType,
-        _slot: fastfile_iw5::Ptr,
-        _target: fastfile_iw5::Ptr,
+        ty: fastfile_iw5::AssetType,
+        slot: fastfile_iw5::Ptr,
+        target: fastfile_iw5::Ptr,
     ) -> fastfile_iw5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw5_alias(ty, slot, target);
+        }
         Ok(())
     }
 
@@ -312,6 +373,20 @@ impl fastfile_iw5::AssetLinkSink for Iw5LocalizeSink {
         self.catalog.insert(name, &decode_localized_text(value));
         Ok(())
     }
+
+    fn capture_raw_file(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        zlib_compressed: bool,
+    ) -> fastfile_iw5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.raw_file(name, data, zlib_compressed);
+        }
+        Ok(())
+    }
+
+    asset_audio::forward_iw5_sound!();
 }
 
 impl fastfile_iw5::AssetSink for Iw5LocalizeSink {
@@ -334,6 +409,7 @@ impl fastfile_iw5::AssetSink for Iw5LocalizeSink {
 struct T5LocalizeSink {
     catalog: LocalizeCatalog,
     walked: usize,
+    sound: Option<asset_audio::ZoneSoundCapture>,
 }
 
 impl fastfile_t5::AssetLinkSink for T5LocalizeSink {
@@ -360,6 +436,20 @@ impl fastfile_t5::AssetLinkSink for T5LocalizeSink {
         self.catalog.insert(name, &decode_localized_text(value));
         Ok(())
     }
+
+    fn capture_raw_file(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        zlib_compressed: bool,
+    ) -> fastfile_t5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.raw_file(name, data, zlib_compressed);
+        }
+        Ok(())
+    }
+
+    asset_audio::forward_t5_sound!();
 }
 
 impl fastfile_t5::AssetSink for T5LocalizeSink {

@@ -550,11 +550,14 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
         let meta = world.client_meta_mut(walker);
         meta.ammo_by_weapon
             .retain(|(id, _, _)| next.weapons.contains(&(*id as i32)));
+        meta.taped_mag_spent
+            .retain(|id| next.weapons.contains(&(*id as i32)));
         meta.set_ammo(weapon, clip, stock);
         meta.mirror_held_ammo(next.weapon);
     }
     if !already_has {
         let meta = world.client_meta_mut(walker);
+        meta.set_quick_reload_ready(weapon, true);
         meta.weapon_shot_count = 0;
         meta.burst_latch = false;
         meta.rechamber_pending = false;

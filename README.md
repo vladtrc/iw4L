@@ -57,6 +57,9 @@ writes anything back; caches, settings, demos and logs land in
 
 ## Build and run
 
+System packages first: [`docs/BUILD.md`](docs/BUILD.md) (Fedora / Debian /
+Arch — compiler, ALSA, udev, X11/Wayland headers).
+
 ```bash
 cp .env.example .env          # IW4L_GAMES — folder containing the game trees
 make map mp_boneyard          # run a map
@@ -75,6 +78,7 @@ Implementation notes live under `docs/`, one short file per area. Start at
 
 | file | about |
 | ---- | ----- |
+| [`docs/BUILD.md`](docs/BUILD.md)         | system packages per distro, Windows cross prerequisites     |
 | [`docs/RUN.md`](docs/RUN.md)           | running the game, console scripts, commands and traps |
 | [`docs/PERF.md`](docs/PERF.md)         | Perfetto tracing and performance analysis             |
 | [`docs/RENDER.md`](docs/RENDER.md)     | rendering pipeline                                    |

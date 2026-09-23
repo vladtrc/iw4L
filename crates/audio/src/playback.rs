@@ -93,6 +93,7 @@ impl MissingAliasGaps {
 pub(crate) struct SharedPlayAssets {
     dry: HashMap<ClipKey, Handle<PcmAudio>>,
     curves: HashMap<String, Arc<[[f32; 2]]>>,
+    common_dry_reuses: usize,
 }
 
 impl SharedPlayAssets {
@@ -101,11 +102,24 @@ impl SharedPlayAssets {
         pcm_assets: &mut Assets<PcmAudio>,
         clip: &ClipKey,
         pcm: PcmAudio,
+        clips: Option<&ClipStore>,
     ) -> Handle<PcmAudio> {
-        self.dry
-            .entry(clip.clone())
-            .or_insert_with(|| pcm_assets.add(pcm))
-            .clone()
+        if let Some(handle) = self.dry.get(clip) {
+            return handle.clone();
+        }
+        let handle = if let Some((handle, reused)) =
+            clips.and_then(|store| store.resident_dry_handle(clip, pcm_assets, &pcm))
+        {
+            if reused && self.common_dry_reuses == 0 {
+                diag::info!(Audio, "audio: first common dry handle reused: {clip:?}");
+            }
+            self.common_dry_reuses += usize::from(reused);
+            handle
+        } else {
+            pcm_assets.add(pcm)
+        };
+        self.dry.insert(clip.clone(), handle.clone());
+        handle
     }
 
     pub(crate) fn intern_curve(&mut self, name: &str, knots: &[(f32, f32)]) -> Arc<[[f32; 2]]> {
@@ -128,6 +142,7 @@ pub(crate) struct PlayerSoundPlugin;
 impl Plugin for PlayerSoundPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SoundPickState>()
+            .init_resource::<crate::clip_store::ResidentClipCache>()
             .init_resource::<MissingAliasGaps>()
             .init_resource::<SharedPlayAssets>()
             .init_resource::<StartDecisions>()
@@ -135,6 +150,7 @@ impl Plugin for PlayerSoundPlugin {
             .init_resource::<VoiceOccupancy>()
             .init_resource::<crate::ambient::MapAmbientBooted>()
             .init_resource::<crate::ambient::SoundBankLoadAttempted>()
+            .init_resource::<crate::ambient::ResidentSoundBank>()
             .init_resource::<crate::BobCycleTracker>()
             .add_audio_source::<PcmAudio>()
             .add_audio_source::<LoopingPcmAudio>()
@@ -179,10 +195,11 @@ impl Plugin for PlayerSoundPlugin {
             .add_systems(
                 Update,
                 (
-                    crate::ambient::start_sound_bank_walk
-                        .after(crate::ambient::stop_map_ambient_on_match_torn_down),
-                    crate::ambient::install_sound_bank.after(crate::ambient::start_sound_bank_walk),
-                    crate::ambient::stop_map_ambient_on_match_torn_down.after(SessionSwapApplied),
+                    crate::ambient::start_sound_bank_compose
+                        .after(crate::ambient::stop_map_ambient_on_match_end),
+                    crate::ambient::install_sound_bank
+                        .after(crate::ambient::start_sound_bank_compose),
+                    crate::ambient::stop_map_ambient_on_match_end.after(SessionSwapApplied),
                     reset_clip_prep_on_match_torn_down,
                 )
                     .in_set(ClientSet::Load),
@@ -199,6 +216,11 @@ fn reset_clip_prep_on_match_torn_down(
         return;
     }
     pending.clear();
+    diag::info!(
+        Audio,
+        "audio: common dry handles reused this match={}",
+        shared.common_dry_reuses
+    );
     *shared = SharedPlayAssets::default();
 }
 
@@ -523,10 +545,12 @@ fn play_land_sound_messages(
 
 fn drop_without_bank<'a>(aliases: impl Iterator<Item = &'a str>, decisions: &mut StartDecisions) {
     for alias in aliases {
-        diag::warn!(
-            Audio,
-            "audio: alias `{alias}` dropped — no SoundBank (typed gap)"
-        );
+        if !crate::AudioSilent::active() {
+            diag::warn!(
+                Audio,
+                "audio: alias `{alias}` dropped — no SoundBank (typed gap)"
+            );
+        }
         decisions.record(StartDecision {
             namespace: AssetNamespace::Iw4,
             alias: alias.to_owned(),
@@ -1145,7 +1169,7 @@ fn submit_prepared_oneshot(
             world_detail = Some(falloff_detail(dist, row.dist_min, row.dist_max, atten));
             pick.last_variant
                 .insert((namespace, alias.to_owned()), variant_index);
-            let _ = shared.dry_handle(pcm_assets, clip, pcm.clone());
+            let _ = shared.dry_handle(pcm_assets, clip, pcm.clone(), clips.as_deref());
             let live = pcm.with_live_pan();
             let live_pan = live.live_pan().expect("with_live_pan").clone();
             live_pan.set(pan_l, pan_r);
@@ -1191,7 +1215,7 @@ fn submit_prepared_oneshot(
             }
             pick.last_variant
                 .insert((namespace, alias.to_owned()), variant_index);
-            let handle = shared.dry_handle(pcm_assets, clip, pcm);
+            let handle = shared.dry_handle(pcm_assets, clip, pcm, clips.as_deref());
             let lease = voice_lease(bank, channel, snd_ent);
             let entity = crate::backend::spawn_oneshot(
                 commands,

@@ -1,10 +1,14 @@
 use std::sync::Arc;
 
-use assets::{GamesRoot, NamespaceSoundIwd, NamespaceTrees, load_mp_sound_bank};
-use bevy::{audio::Volume, prelude::*};
+use assets::{GamesRoot, NamespaceSoundIwd, NamespaceTrees, SoundCatalog, load_mp_sound_bank};
+use bevy::{
+    audio::Volume,
+    prelude::*,
+    tasks::{AsyncComputeTaskPool, Task, TaskPool, futures_lite::future},
+};
 use frame::{
-    ClientSet, LaunchIdentity, MatchTornDown, TeardownReason, UiPlayMusic, UiPlaySound,
-    UiStopMusic, register_ui_sound,
+    ClientSet, LaunchIdentity, ReturnedToMenu, UiPlayMusic, UiPlaySound, UiStopMusic,
+    register_ui_sound,
 };
 
 use crate::{
@@ -16,7 +20,22 @@ use crate::{
     start::StartDecisions,
 };
 
-const FRONTEND_SOUND_ZONE: &str = "code_post_gfx_mp";
+#[derive(Resource, Clone)]
+pub struct FrontendAudio {
+    pub bank: Arc<SoundCatalog>,
+    pub iwd: Arc<NamespaceSoundIwd>,
+}
+
+const FRONTEND_SOUND_ZONE: &str = "iw4:code_post_gfx_mp";
+
+#[derive(Resource)]
+struct FrontendAudioPrepare(Task<FrontendAudioWalked>);
+
+struct FrontendAudioWalked {
+    bank: Option<Arc<SoundCatalog>>,
+    iwd: Arc<NamespaceSoundIwd>,
+    lines: Vec<String>,
+}
 
 #[derive(Component)]
 struct MenuMusicBed {
@@ -31,10 +50,16 @@ struct PendingMenuBed {
 pub(crate) fn register_frontend_audio(app: &mut App) {
     register_ui_sound(app);
     app.init_resource::<PendingMenuBed>()
+        .add_message::<ReturnedToMenu>()
         .add_systems(
             Update,
-            restore_frontend_bank_on_disconnect
-                .after(crate::ambient::stop_map_ambient_on_match_torn_down)
+            (
+                start_frontend_audio_prepare,
+                install_frontend_audio_prepare.after(start_frontend_audio_prepare),
+                restore_frontend_audio_on_menu
+                    .after(install_frontend_audio_prepare)
+                    .after(crate::ambient::stop_map_ambient_on_match_end),
+            )
                 .in_set(ClientSet::Load),
         )
         .add_systems(
@@ -47,14 +72,29 @@ pub(crate) fn register_frontend_audio(app: &mut App) {
         );
 }
 
-pub(crate) fn restore_frontend_bank_on_disconnect(
-    mut torn: MessageReader<MatchTornDown>,
+fn start_frontend_audio_prepare(
+    frontend: Option<Res<FrontendAudio>>,
+    running: Option<Res<FrontendAudioPrepare>>,
     identity: Option<Res<LaunchIdentity>>,
+    silent: Option<Res<crate::AudioSilent>>,
+    loading: (
+        Option<Res<assets::MatchLoadBusy>>,
+        Option<Res<assets::MatchLoadRequest>>,
+        Option<Res<assets::MatchLoadAccepted>>,
+        Option<Res<assets::PreparedMatchReady>>,
+        Option<Res<crate::ambient::SoundBankCompose>>,
+    ),
     mut commands: Commands,
 ) {
-    if !torn
-        .read()
-        .any(|fact| fact.reason == TeardownReason::Disconnect)
+    if frontend.is_some() || running.is_some() || silent.is_some() {
+        return;
+    }
+    let (busy, request, accepted, ready, walk) = loading;
+    if busy.is_some_and(|busy| busy.0)
+        || request.is_some()
+        || accepted.is_some()
+        || ready.is_some()
+        || walk.is_some()
     {
         return;
     }
@@ -65,33 +105,87 @@ pub(crate) fn restore_frontend_bank_on_disconnect(
         return;
     }
     let games = GamesRoot(identity.games_root.clone());
-    let bank = match load_mp_sound_bank(&games, FRONTEND_SOUND_ZONE) {
-        Ok(loaded) => {
-            for line in loaded.gap_lines() {
-                diag::warn!(Audio, "audio: frontend {line}");
+    let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
+    let task = pool.spawn(async move {
+        let mut lines = Vec::new();
+        let bank = match load_mp_sound_bank(&games, FRONTEND_SOUND_ZONE) {
+            Ok(loaded) => {
+                lines.extend(loaded.gap_lines());
+                Some(Arc::new(loaded.catalog))
             }
-            let bank = Arc::new(loaded.catalog);
-            commands.insert_resource(crate::clip_store::PendingStarts::default());
-            commands.insert_resource(crate::playback::SharedPlayAssets::default());
-            commands.insert_resource(SoundBank(Arc::clone(&bank)));
-            diag::info!(Audio, "audio: frontend sound bank ready");
-            Some(bank)
+            Err(error) => {
+                lines.push(format!("frontend sound bank: {error}"));
+                None
+            }
+        };
+        let (indices, open_lines) = NamespaceSoundIwd::open(&NamespaceTrees::discover(&games));
+        lines.extend(open_lines);
+        FrontendAudioWalked {
+            bank,
+            iwd: Arc::new(indices),
+            lines,
         }
-        Err(error) => {
-            diag::warn!(Audio, "audio: frontend sound bank: {error}");
-            None
-        }
-    };
+    });
+    commands.insert_resource(FrontendAudioPrepare(task));
+}
 
-    let (indices, lines) = NamespaceSoundIwd::open(&NamespaceTrees::discover(&games));
-    for line in lines {
+fn install_frontend_audio_prepare(
+    mut prepare: Option<ResMut<FrontendAudioPrepare>>,
+    mut commands: Commands,
+) {
+    let Some(prepare) = prepare.as_deref_mut() else {
+        return;
+    };
+    let Some(walked) = future::block_on(future::poll_once(&mut prepare.0)) else {
+        return;
+    };
+    commands.remove_resource::<FrontendAudioPrepare>();
+    for line in walked.lines {
         diag::info!(Audio, "audio: frontend {line}");
     }
-    let iwd = Arc::new(indices);
-    commands.insert_resource(SoundIwd(Arc::clone(&iwd)));
-    if let Some(bank) = bank {
-        commands.insert_resource(ClipStore::start(bank, Some(iwd)));
+    let Some(bank) = walked.bank else {
+        diag::warn!(
+            Audio,
+            "audio: frontend sound bank did not build — the menu stays silent (typed gap)"
+        );
+        return;
+    };
+    commands.insert_resource(FrontendAudio {
+        bank,
+        iwd: walked.iwd,
+    });
+    diag::info!(Audio, "audio: frontend sound resident");
+}
+
+pub(crate) fn restore_frontend_audio_on_menu(
+    mut returned: MessageReader<ReturnedToMenu>,
+    frontend: Option<Res<FrontendAudio>>,
+    live: Option<Res<SoundBank>>,
+    silent: Option<Res<crate::AudioSilent>>,
+    mut commands: Commands,
+) {
+    if returned.read().count() == 0 || silent.is_some() {
+        return;
     }
+    let Some(frontend) = frontend else {
+        diag::warn!(
+            Audio,
+            "audio: no resident frontend bank — the menu runs without sound (typed gap)"
+        );
+        return;
+    };
+    if live.is_some_and(|live| Arc::ptr_eq(&live.0, &frontend.bank)) {
+        return;
+    }
+    commands.insert_resource(PendingStarts::default());
+    commands.insert_resource(SharedPlayAssets::default());
+    commands.insert_resource(SoundBank(Arc::clone(&frontend.bank)));
+    commands.insert_resource(SoundIwd(Arc::clone(&frontend.iwd)));
+    commands.insert_resource(ClipStore::start(
+        Arc::clone(&frontend.bank),
+        Some(Arc::clone(&frontend.iwd)),
+    ));
+    diag::info!(Audio, "audio: frontend sound restored");
 }
 
 fn play_ui_sound_messages(
@@ -110,7 +204,7 @@ fn play_ui_sound_messages(
     epoch: Res<crate::backend::MatchEpoch>,
 ) {
     let Some(bank) = bank else {
-        for event in events.read() {
+        for event in events.read().filter(|_| !crate::AudioSilent::active()) {
             diag::warn!(
                 Audio,
                 "audio: UiPlaySound `{}` dropped — no SoundBank (typed gap)",

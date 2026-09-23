@@ -10,7 +10,7 @@ use hud_iw4::{
     splash_replace_optional,
 };
 
-use crate::chrome::{ChromeAssets, ChromeFrame, ChromeMenuAnim, execute_chrome_menu_with_anim};
+use crate::chrome::{ChromeAssets, ChromeFrame, execute_chrome_menu_with_anim};
 use crate::draw2d::{Draw2dOp, tessellate_fonts};
 use crate::gaps::{GapCause, HudGap, HudPresentationGaps};
 use crate::gpu_list::{HudTessPass, TessJob};
@@ -98,6 +98,9 @@ impl ExprHost for SplashExprHost<'_> {
     }
     fn gametype_name(&self) -> Result<Operand, ExprError> {
         Err(ExprError::Host("gametype"))
+    }
+    fn weapon_lock(&self) -> Result<hud_iw4::WeaponLockView, ExprError> {
+        Err(ExprError::Host("weapon lock"))
     }
     fn splash_text(&self, slot: i32) -> Result<Operand, ExprError> {
         let Some(s) = self.slot(slot) else {
@@ -291,14 +294,17 @@ pub(crate) fn update_splash(
         localize: strings.as_ref().map(|s| &s.0),
     };
     let lerp = item_run_script_lerp(&menu.on_open, live.start_ms);
-    let anim = ChromeMenuAnim {
-        scale: lerp.scale.current_or(now_ms, 1.0),
-        alpha: lerp.alpha.current_or(now_ms, 1.0),
-    };
+    for command in &lerp.leftover {
+        gaps.raise(GapCause::MenuScriptUnsupported {
+            menu: menu_name.to_owned(),
+            command: command.clone(),
+        });
+    }
+    let anim = lerp.anim(now_ms);
     let ChromeFrame {
         list,
         coverage: _,
-        vis_errors: _,
+        vis_errors,
     } = execute_chrome_menu_with_anim(
         menu,
         &host,
@@ -310,6 +316,13 @@ pub(crate) fn update_splash(
         anim,
         &mut exprs,
     );
+    for (item, err) in vis_errors {
+        gaps.raise(GapCause::MenuExpression {
+            menu: menu_name.to_owned(),
+            item,
+            err,
+        });
+    }
 
     let mut fonts: HashMap<String, &assets::FontDef> = HashMap::new();
     for cmd in &list.cmds {

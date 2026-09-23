@@ -8,6 +8,7 @@ use crate::assemble::drawsurf::RuntimeLightmapHandles;
 use super::world::WorldScene;
 
 pub(crate) const IMAGE_BYTES_PER_OVERLAY_FRAME: u64 = 32 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_BYTES_PER_SLICE: u64 = 128 * 1024 * 1024;
 pub(crate) const IMAGES_PER_OVERLAY_FRAME: u32 = 16;
 
 pub(crate) fn overlay_count_byte_capped(
@@ -146,6 +147,59 @@ fn lightmap_page_bytes(page: &super::world::WorldLightmap) -> u64 {
         + image_bytes(&page.sun_mask_image)
 }
 
+#[derive(Resource, Default)]
+pub struct ResidentGpuImages {
+    profile_id: u64,
+    by_variant: std::collections::HashMap<assets::ImageVariantId, Handle<Image>>,
+    map: ResidentMapImages,
+}
+
+#[derive(Default)]
+struct ResidentMapImages {
+    products_id: u64,
+    exact: Vec<Option<Handle<Image>>>,
+    probes: Vec<Option<Handle<Image>>>,
+    lightmaps: Vec<Option<RuntimeLightmapHandles>>,
+}
+
+impl ResidentMapImages {
+    fn all_live(&self, images: &Assets<Image>) -> bool {
+        let live = |handle: &Handle<Image>| images.get(handle.id()).is_some();
+        self.exact.iter().chain(&self.probes).flatten().all(live)
+            && self.lightmaps.iter().flatten().all(|page| {
+                page.primary.iter().all(live)
+                    && page.secondary.iter().all(live)
+                    && page.secondary_b.iter().all(live)
+                    && live(&page.ambient_diagnostic)
+                    && live(&page.directional_diagnostic)
+                    && live(&page.sun_mask_diagnostic)
+            })
+    }
+}
+
+impl ResidentGpuImages {
+    fn use_profile(&mut self, profile_id: u64) {
+        if self.profile_id != profile_id {
+            self.by_variant.clear();
+            self.profile_id = profile_id;
+        }
+    }
+
+    fn get_live(
+        &mut self,
+        variant: assets::ImageVariantId,
+        images: &Assets<Image>,
+    ) -> Option<Handle<Image>> {
+        let handle = self.by_variant.get(&variant)?;
+        if images.get(handle.id()).is_some() {
+            Some(handle.clone())
+        } else {
+            self.by_variant.remove(&variant);
+            None
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct WorldImageUpload {
     pub done: u32,
@@ -173,7 +227,7 @@ pub struct WorldImageUpload {
     pub pipeline_world_materials: Arc<std::collections::HashSet<u16>>,
 
     pub pipeline_smodel_materials: Arc<std::collections::HashSet<u16>>,
-    exact_images: Vec<Option<Image>>,
+    exact_images: Vec<Option<Arc<Image>>>,
     exact_variants: Vec<Option<assets::ImageVariantId>>,
     /// One asset per prepared variant. Two catalog slots that hold the same
     /// variant hold byte-identical images with the same sampler and colour
@@ -184,7 +238,13 @@ pub struct WorldImageUpload {
     /// Slots that took another slot's handle, and the bytes that saved.
     pub reused_handles: u32,
     pub reused_handle_bytes: u64,
+    pub reused_common_handles: u32,
+    pub reused_common_bytes: u64,
     exact_handles: Vec<Option<Handle<Image>>>,
+    exact_common: Vec<bool>,
+    common_profile_id: u64,
+    products_id: u64,
+    pub resident: bool,
     exact_at: usize,
     probes: Vec<Option<Image>>,
     probe_handles: Vec<Option<Handle<Image>>>,
@@ -261,6 +321,11 @@ impl WorldImageUpload {
                 .collect(),
         );
         self.exact_images = std::mem::take(&mut scene.exact_material_images);
+        self.exact_common = std::mem::take(&mut scene.exact_material_common);
+        self.exact_common.resize(self.exact_images.len(), false);
+        self.common_profile_id = scene.common_profile_id;
+        self.products_id = scene.products_id;
+        self.resident = false;
         self.exact_variants = std::mem::take(&mut scene.exact_material_variants);
         self.exact_variants.resize(self.exact_images.len(), None);
         self.exact_by_variant.clear();
@@ -277,6 +342,11 @@ impl WorldImageUpload {
                 .primary_light_attenuation
                 .iter()
                 .filter_map(|light| light.image),
+        );
+        self.reachable_exact.extend(
+            scene
+                .dynamic_light
+                .and_then(|light| light.attenuation.image),
         );
         self.reachable_exact.extend(scene.outdoor_image);
         if let Some(sun) = scene.sun_effects {
@@ -305,12 +375,14 @@ impl WorldImageUpload {
             as u32;
         self.done = 0;
         self.skipped = 0;
+        self.reused_common_handles = 0;
+        self.reused_common_bytes = 0;
         self.handed_bytes = 0;
         self.bytes_total = self
             .exact_images
             .iter()
             .flatten()
-            .map(image_bytes)
+            .map(|image| image_bytes(image))
             .sum::<u64>()
             + self.probes.iter().flatten().map(image_bytes).sum::<u64>()
             + self
@@ -349,15 +421,21 @@ impl WorldImageUpload {
     pub fn until(
         &mut self,
         images: &mut Assets<Image>,
+        common: &mut ResidentGpuImages,
         deadline: Option<std::time::Instant>,
         max_this_frame: u32,
+        paced_byte_budget: u64,
     ) -> bool {
+        common.use_profile(self.common_profile_id);
+        if self.done == 0 && self.take_resident(common, images) {
+            return true;
+        }
         let start_done = self.done;
         let start_bytes = self.handed_bytes;
         let byte_budget = if max_this_frame == u32::MAX {
             u64::MAX
         } else {
-            IMAGE_BYTES_PER_OVERLAY_FRAME
+            paced_byte_budget
         };
         let capped = |done: u32, bytes: u64| {
             deadline.is_some_and(|end| std::time::Instant::now() >= end)
@@ -383,18 +461,22 @@ impl WorldImageUpload {
                 self.sync_stage();
                 continue;
             }
-            let bytes = image.as_ref().map(image_bytes).unwrap_or(0);
+            let bytes = image.as_ref().map(|image| image_bytes(image)).unwrap_or(0);
             let step = std::time::Instant::now();
             let mut handed = bytes;
             let variant = self.exact_variants[self.exact_at];
+            let common_owned = self.exact_common[self.exact_at];
             self.exact_handles[self.exact_at] = image.map(|image| {
                 // A slot whose variant is already an asset takes that handle
                 // and lets its own copy go: the two are the same texels under
                 // the same sampler, and a second `add` is a second texture.
                 let Some(variant) = variant else {
-                    return images.add(image);
+                    return images.add((*image).clone());
                 };
                 if let Some(handle) = self.exact_by_variant.get(&variant) {
+                    if common_owned && self.common_profile_id != 0 {
+                        common.by_variant.insert(variant, handle.clone());
+                    }
                     self.reused_handles = self.reused_handles.saturating_add(1);
                     self.reused_handle_bytes = self.reused_handle_bytes.saturating_add(bytes);
                     // Nothing was handed to the asset server: the slot took a
@@ -402,7 +484,22 @@ impl WorldImageUpload {
                     handed = 0;
                     return handle.clone();
                 }
-                let handle = images.add(image);
+                if common_owned
+                    && self.common_profile_id != 0
+                    && let Some(handle) = common.get_live(variant, images)
+                {
+                    self.reused_handles = self.reused_handles.saturating_add(1);
+                    self.reused_handle_bytes = self.reused_handle_bytes.saturating_add(bytes);
+                    self.reused_common_handles = self.reused_common_handles.saturating_add(1);
+                    self.reused_common_bytes = self.reused_common_bytes.saturating_add(bytes);
+                    handed = 0;
+                    self.exact_by_variant.insert(variant, handle.clone());
+                    return handle;
+                }
+                let handle = images.add((*image).clone());
+                if common_owned && self.common_profile_id != 0 {
+                    common.by_variant.insert(variant, handle.clone());
+                }
                 self.exact_by_variant.insert(variant, handle.clone());
                 handle
             });
@@ -476,10 +573,47 @@ impl WorldImageUpload {
         }
         // Every slot has been handed over: this is the boundary the owner
         // meant, not merely `done == total`.
+        if self.products_id != 0 {
+            common.map = ResidentMapImages {
+                products_id: self.products_id,
+                exact: self.exact_handles.clone(),
+                probes: self.probe_handles.clone(),
+                lightmaps: self.lightmap_handles.clone(),
+            };
+        }
         if let Some(stage) = self.upload_stage.take() {
             stage.set_completed(u64::from(self.done));
             stage.set_bytes(self.handed_bytes);
             stage.done();
+        }
+        true
+    }
+
+    fn take_resident(&mut self, common: &mut ResidentGpuImages, images: &Assets<Image>) -> bool {
+        let map = &common.map;
+        let same = self.products_id != 0
+            && map.products_id == self.products_id
+            && map.exact.len() == self.exact_handles.len()
+            && map.probes.len() == self.probe_handles.len()
+            && map.lightmaps.len() == self.lightmap_handles.len();
+        if !same || !map.all_live(images) {
+            common.map = ResidentMapImages::default();
+            return false;
+        }
+        self.exact_handles.clone_from(&map.exact);
+        self.probe_handles.clone_from(&map.probes);
+        self.lightmap_handles.clone_from(&map.lightmaps);
+        self.exact_images.clear();
+        self.probes.clear();
+        self.lightmaps.clear();
+        self.exact_at = 0;
+        self.probe_at = 0;
+        self.lightmap_at = 0;
+        self.done = self.total;
+        self.resident = true;
+        if let Some(stage) = self.upload_stage.take() {
+            stage.set_completed(u64::from(self.done));
+            stage.reuse();
         }
         true
     }

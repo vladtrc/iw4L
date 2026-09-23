@@ -60,8 +60,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
     follow_attachment_array(s, links, p, s.layout(16, 32), sz::WEAPON_SCOPE_COUNT)?;
     follow_attachment_array(s, links, p, s.layout(20, 40), sz::WEAPON_UNDERBARREL_COUNT)?;
     follow_attachment_array(s, links, p, s.layout(24, 48), sz::WEAPON_OTHER_ATTACH_COUNT)?;
-    let overlay = first_authored_scope_overlay(s, p);
-    let picked = pick_scope_overlay(&overlay);
+    let attachments = attachment_slot_names(s, p);
     let sz_xanims = follow_string_array(s, p, s.layout(28, 56), sz::WEAPON_ANIM_COUNT)?;
 
     let anim_overrides_off = s.layout(sz::WEAPON_COMPLETE_ANIM_OVERRIDES_OFF, 72);
@@ -120,7 +119,6 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         let arr = s.alloc_load(4, sz::RELOAD_STATE_TIMER_ENTRY * reload_overrides)?;
         s.fixup_slot(p.at(reload_overrides_off), arr)?;
     }
-    let reload_override_add_time_ms = leftover_iw5_base_reload_override_add(s, p, reload_overrides);
     let note_overrides_off = s.layout(68, 136);
     let note_overrides = s.i32_at(p, s.layout(64, 128))?.max(0) as usize;
     if s.begin_body(p.at(note_overrides_off))? {
@@ -163,43 +161,26 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         ),
         None => (0.0, 0.0, 0.0, 0.0),
     };
-    let mut ads_zoom_fov = s.f32_at(p, s.layout(sz::WEAPON_COMPLETE_ADS_ZOOM_FOV_OFF, 144))?;
-    if picked.ads_zoom_fov > 0.0 {
-        ads_zoom_fov = picked.ads_zoom_fov;
-    }
-    // Zero windows are authored: the overlay switches at full ADS.
-    let (ads_zoom_in_frac, ads_zoom_out_frac) = if picked.ads_settings_present {
-        (picked.ads_zoom_in_frac, picked.ads_zoom_out_frac)
-    } else {
-        (ads_zoom_in_frac, ads_zoom_out_frac)
-    };
+    let ads_zoom_fov = s.f32_at(p, s.layout(sz::WEAPON_COMPLETE_ADS_ZOOM_FOV_OFF, 144))?;
     let display_name = match s.ptr_at(p, s.layout(8, 16))? {
         ZonePtr::Offset(q) => Some(s.resolve_alias(q)),
         _ => None,
     };
 
     let (ads_overlay_width, ads_overlay_height, overlay_reticle) = match weap_def {
-        Some(body) => {
-            let weap_reticle = s
-                .i32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_RETICLE_OFF, 1368))
-                .unwrap_or(0);
-            let weap_w = s
-                .f32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_WIDTH_OFF, 1372))
-                .unwrap_or(0.0);
-            let weap_h = s
-                .f32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_HEIGHT_OFF, 1376))
-                .unwrap_or(0.0);
-            (
-                if weap_w > 0.0 { weap_w } else { picked.width },
-                if weap_h > 0.0 { weap_h } else { picked.height },
-                if weap_reticle != 0 {
-                    weap_reticle
-                } else {
-                    picked.reticle
-                },
-            )
-        }
-        None => (picked.width, picked.height, picked.reticle),
+        Some(body) => (
+            s.f32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_WIDTH_OFF, 1372))
+                .unwrap_or(0.0),
+            s.f32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_HEIGHT_OFF, 1376))
+                .unwrap_or(0.0),
+            s.i32_at(body, s.layout(sz::WEAPON_DEF_OVERLAY_RETICLE_OFF, 1368))
+                .unwrap_or(0),
+        ),
+        None => (0.0, 0.0, 0),
+    };
+    let array_at = |s: &ZoneStream<'_>, off: usize| match s.ptr_at(p, off) {
+        Ok(ZonePtr::Offset(q)) => Some(s.resolve_alias(q)),
+        _ => None,
     };
     s.record_weapon(WeaponGeometry {
         name,
@@ -223,6 +204,15 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         ads_zoom_out_frac,
         ads_in_rate,
         ads_out_rate,
+        ads_trans_in_time_ms: s
+            .i32_at(p, s.layout(sz::WEAPON_COMPLETE_ADS_TRANS_IN_TIME_OFF, 148))?,
+        ads_trans_out_time_ms: s
+            .i32_at(p, s.layout(sz::WEAPON_COMPLETE_ADS_TRANS_OUT_TIME_OFF, 152))?,
+        penetrate_multiplier: s.f32_at(
+            p,
+            s.layout(sz::WEAPON_COMPLETE_PENETRATE_MULTIPLIER_OFF, 176),
+        )?,
+        motion_tracker: s.u8_at(p, s.layout(sz::WEAPON_COMPLETE_MOTION_TRACKER_OFF, 280))? != 0,
         fire_time_ms: s.i32_at(p, s.layout(sz::WEAPON_COMPLETE_FIRE_TIME_OFF, 164))?,
         clip_size: s.i32_at(p, s.layout(sz::WEAPON_COMPLETE_CLIP_OFF, 156))?,
         impact_type: s.i32_at(p, s.layout(sz::WEAPON_COMPLETE_IMPACT_TYPE_OFF, 160))?,
@@ -231,91 +221,61 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         fire_type,
         move_speed_scale,
         ads_move_speed_scale,
-        overlay_shader_name: picked.overlay_name,
-        scope0_name: picked.scope_name,
         ads_overlay_width,
         ads_overlay_height,
         overlay_reticle,
-        scope_overlays: overlay,
+        attachments,
         anim_override_count: anim_overrides as i32,
         anim_overrides: anim_override_arr,
         sound_override_count: sound_overrides as i32,
         sound_overrides: sound_override_arr,
-        reload_override_add_time_ms,
+        fx_override_count: fx_overrides as i32,
+        fx_overrides: array_at(s, fx_overrides_off),
+        reload_override_count: reload_overrides as i32,
+        reload_overrides: array_at(s, reload_overrides_off),
+        note_track_override_count: note_overrides as i32,
+        note_track_overrides: array_at(s, note_overrides_off),
     });
     s.pop()
 }
 
-fn leftover_iw5_base_reload_override_add(s: &ZoneStream<'_>, complete: Ptr, count: usize) -> i32 {
-    if count == 0 {
-        return 0;
-    }
-    let arr = match s.ptr_at(
-        complete,
-        s.layout(sz::WEAPON_COMPLETE_RELOAD_OVERRIDES_OFF, 120),
-    ) {
-        Ok(ZonePtr::Offset(q)) => s.resolve_alias(q),
-        _ => return 0,
-    };
-    for i in 0..count {
-        let entry = arr.at(i * sz::RELOAD_STATE_TIMER_ENTRY);
-        if s.u16_at(entry, 0).unwrap_or(1) != 0 {
-            continue;
-        }
-        let add = s
-            .i32_at(entry, sz::RELOAD_STATE_TIMER_ADD_TIME_OFF)
-            .unwrap_or(0);
-        if add > 0 {
-            return add;
-        }
-    }
-    0
-}
-
-fn first_authored_scope_overlay(
-    s: &mut ZoneStream<'_>,
+fn attachment_slot_names(
+    s: &ZoneStream<'_>,
     complete: Ptr,
-) -> [crate::zone::AttachmentOverlayGeometry; sz::WEAPON_SCOPE_COUNT] {
-    let mut rows = [crate::zone::AttachmentOverlayGeometry::default(); sz::WEAPON_SCOPE_COUNT];
+) -> [Option<Ptr>; sz::WEAPON_ATTACHMENT_SLOT_COUNT] {
+    let mut names = [None; sz::WEAPON_ATTACHMENT_SLOT_COUNT];
     let width = s.pointer_bytes();
-    let arr = match s.ptr_at(complete, s.layout(sz::WEAPON_COMPLETE_SCOPES_OFF, 32)) {
-        Ok(ZonePtr::Offset(q)) => {
-            s.note_weapon_scope_array();
-            s.resolve_alias(q)
-        }
-        _ => return rows,
-    };
-    for (i, row) in rows.iter_mut().enumerate() {
-        let cell = arr.at(i * width);
-        let offset_target = match s.ptr_at(cell, 0) {
-            Ok(ZonePtr::Offset(q)) => Some(q),
-            _ => continue,
+    let groups = [
+        (s.layout(16, 32), sz::WEAPON_SCOPE_COUNT),
+        (s.layout(20, 40), sz::WEAPON_UNDERBARREL_COUNT),
+        (s.layout(24, 48), sz::WEAPON_OTHER_ATTACH_COUNT),
+    ];
+    let mut out = names.iter_mut();
+    for (field, count) in groups {
+        let arr = match s.ptr_at(complete, field) {
+            Ok(ZonePtr::Offset(q)) => Some(s.resolve_alias(q)),
+            _ => None,
         };
-        s.note_weapon_scope0();
-        let rec = s.attachment_overlay(cell).or_else(|| {
-            let q = offset_target?;
-            s.attachment_overlay(q)
-                .or_else(|| s.attachment_overlay(s.resolve_alias(q)))
-        });
-        if let Some(rec) = rec {
-            if rec.overlay_name.is_some() && !rec.thermal {
-                s.note_weapon_overlay_hit();
-            }
-            *row = rec;
+        for i in 0..count {
+            let Some(dest) = out.next() else {
+                break;
+            };
+            let Some(arr) = arr else {
+                continue;
+            };
+            let cell = arr.at(i * width);
+            *dest = s
+                .attachment_name(cell)
+                .or_else(|| match s.ptr_at(cell, 0) {
+                    Ok(ZonePtr::Offset(q)) => s
+                        .attachment_name(q)
+                        .or_else(|| s.attachment_name(s.resolve_alias(q))),
+                    _ => None,
+                })
+                .flatten();
         }
     }
-    rows
-}
-
-fn pick_scope_overlay(
-    rows: &[crate::zone::AttachmentOverlayGeometry; sz::WEAPON_SCOPE_COUNT],
-) -> crate::zone::AttachmentOverlayGeometry {
-    for rec in rows {
-        if rec.overlay_name.is_some() && !rec.thermal {
-            return *rec;
-        }
-    }
-    crate::zone::AttachmentOverlayGeometry::default()
+    names
 }
 
 fn load_weapon_def(

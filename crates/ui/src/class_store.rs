@@ -55,42 +55,18 @@ impl SessionClassStore {
 
 impl From<&ClassSlotState> for HostClassSlot {
     fn from(slot: &ClassSlotState) -> Self {
-        let equipped_variant = |base: &str, variants: &[String]| {
-            variants
-                .iter()
-                .find_map(|variant| resolve_attachment_variant(base, variant))
-                .unwrap_or_else(|| base.to_owned())
-        };
         Self {
             name: slot.name.clone(),
-            primary: equipped_variant(&slot.primary, &slot.primary_attachments),
-            secondary: equipped_variant(&slot.secondary, &slot.secondary_attachments),
+            primary: slot.primary.clone(),
+            primary_attachments: slot.primary_attachments.clone(),
+            secondary: slot.secondary.clone(),
+            secondary_attachments: slot.secondary_attachments.clone(),
             lethal: slot.lethal.clone(),
             tactical: slot.tactical.clone(),
             perks: [slot.perk1.clone(), slot.perk2.clone(), slot.perk3.clone()],
             deathstreak: slot.deathstreak.clone(),
         }
     }
-}
-
-fn resolve_attachment_variant(base: &str, att: &str) -> Option<String> {
-    if assets::AssetKey::parse(att).is_ok() {
-        return Some(att.to_owned());
-    }
-    if att.is_empty() || att.contains(':') || att.contains('/') {
-        return None;
-    }
-    let key = assets::AssetKey::parse(base).ok()?;
-    let stem = key.name.strip_suffix("_mp").unwrap_or(&key.name);
-    let composed = format!(
-        "{}:{}/{}_{}_mp",
-        key.namespace.as_str(),
-        key.kind.as_str(),
-        stem,
-        att
-    );
-    assets::AssetKey::parse(&composed).ok()?;
-    Some(composed)
 }
 
 pub(crate) fn sync_host_class_loadouts(

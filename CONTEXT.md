@@ -186,15 +186,13 @@ Out:
 * **probe code** — a `main` that prints a struct, a temporary `pub fn dump_*`,
   an `examples/` binary that already answered its question, a `#[test]` written
   to call one function once and eyeball the output;
-* **a test that only asserts the code ran** — no expected value, or an expected
-  value copied from what the code printed today. It cannot fail for a reason
-  anyone cares about; it buys a false green and costs the run time forever;
 * **debug leftovers** — `dbg!`, an `eprintln!` behind no flag, a commented-out
   block kept just in case, a feature flag whose only user was the probe.
 
-Stays: a test that would have caught the bug this iteration fixed, and a probe
-somebody will rerun to reproduce a measurement — and that one lives in the
-artifact (`<N>-…/probe.rs.txt`), not in `crates/`.
+Tests live in one place: `crates/approved_tests`, owner-approved scenarios
+only ([its README](crates/approved_tests/README.md)). Every other test is
+probe code. A probe somebody will rerun lives in the artifact
+(`<N>-…/probe.rs.txt`), not in `crates/`.
 
 Deleting a probe does not delete the evidence. The artifact keeps the output,
 the log and the verdict, which is what the next agent reads anyway; the
@@ -213,14 +211,20 @@ investigation. Fixes, probes, reverts and "try this" do not survive as
 separate objects. History that has already been pushed is not rewritten —
 [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
-**Tests.** Disposable by default. A test stays when rewriting it would cost
-more than keeping it: cross-system behaviour, a network contract, a state
-machine, a bug that took a week to see. Helper tests, agent self-checks,
-one-shot snapshots go out. Doubt deletes.
+**Tests.** Only `crates/approved_tests`, and only scenarios the owner approved
+by name. Anything else goes, however useful; `make publish-check` refuses it.
 
-**Comments.** Current architecture only. No address, no offset, no function
-number, no "as in the original", no diary of how it was found. If deleting
-the comment loses nothing, it was already noise.
+**Comments.** None by default. A comment stays only if, without it, the next
+edit would break something the code cannot show: an ordering, a race, a
+lifetime, an upgrade hazard. Everything else is **deleted, not shortened** —
+restating the name, narrating what the code does, who calls it, what it
+replaced, why it changed, how it was found. Shortening a comment that should
+not exist is not a pass. Doubt deletes.
+
+Never, in any form: an address, an offset, a function number, a source
+`file:line`, an engine or script function name, an iteration tag (`I28.2`,
+`P08`), "as in the original", "retail does", "used to", "no longer", "this
+replaces". A new doc comment is judged by the same rule as a line comment.
 
 **Names.** IW4L domain. An original identifier that does not mean anything
 here is a citation, not a name, and it does not land. The structure of the
@@ -235,8 +239,7 @@ runtime, or as the traces of a dig?* The second answer is not a push.
 ```
 1. ship every mrs/ clone that is ready
 2. on the resulting master: delete, rename, strip
-   — probes go without asking
-   — a test you are not sure about goes too
+   — probes and tests outside approved_tests go without asking
 3. stop. the human reads the diff
 4. one commit, short message, the effect
 5. make publish-check
@@ -252,7 +255,7 @@ section is incomplete** — and that section is what decides between `-FINAL`,
 `-PART` and `-READY`.
 
 It also says what came back out of the tree and what stayed on purpose — which
-probes were removed, which test is there because it would have caught this bug.
+probes and tests were removed.
 A slice that added no scaffolding says that in one line; it is an answer, not an
 omission.
 

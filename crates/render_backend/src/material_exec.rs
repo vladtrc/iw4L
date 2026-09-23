@@ -688,7 +688,10 @@ impl MaterialRunExecutor {
             OverlayMode::Full
         };
         self.last_overlay = Some(overlay_key);
-        let recycled = self.run.take().map(|run| run.execution);
+        let mut recycled = self.run.take().map(|run| run.execution);
+        if let Some(execution) = recycled.as_mut() {
+            execution.release_code_rows();
+        }
         // Before the overlay, not after: the shell a run will bind is decided
         // by the share key alone, so what it reads is known while there is
         // still a chance not to compute the rest. `retain_shells_for` comes

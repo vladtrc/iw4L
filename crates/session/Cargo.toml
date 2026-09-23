@@ -10,6 +10,7 @@ diag.workspace = true
 bevy.workspace = true
 frame.workspace = true
 assets.workspace = true
+audio.workspace = true
 net.workspace = true
 render.workspace = true
 render_frontend.workspace = true

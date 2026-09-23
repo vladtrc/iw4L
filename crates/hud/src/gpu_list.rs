@@ -443,6 +443,7 @@ pub(crate) fn pack_splatter_alt(
     quad: &Draw2dQuad,
     color: Handle<Image>,
     mask: Handle<Image>,
+    state_bits: [u32; 2],
 ) -> PackedList {
     let mut packed = PackedList::default();
     packed.vertices.extend(pack_quad_verts(quad));
@@ -451,7 +452,7 @@ pub(crate) fn pack_splatter_alt(
         image: color,
         mask: Some(mask),
         technique: HudTessTechnique::SplatterAlt,
-        state_bits: None,
+        state_bits: Some(state_bits),
         first_index: 0,
         index_count: 6,
         first_vertex: 0,

@@ -315,8 +315,9 @@ pub fn decode_material_color_maps(
                 ..
             } => {
                 let slot = &mut catalog.images[image_index];
-                slot.decoded = Some(wrap_payload(&payload, wrap));
+                slot.decoded = Some(Arc::new(wrap_payload(&payload, wrap)));
                 slot.decoded_variant = variant;
+                slot.common_owned = false;
                 stats.decoded += 1;
             }
             ImageOutcome::Missing { gap } => {
@@ -407,8 +408,9 @@ pub fn decode_color_or_2d_for_names(
         } = outcome
         {
             let slot = &mut catalog.images[image_index];
-            slot.decoded = Some(wrap_payload(&payload, wrap));
+            slot.decoded = Some(Arc::new(wrap_payload(&payload, wrap)));
             slot.decoded_variant = variant;
+            slot.common_owned = false;
             n += 1;
         }
     }
@@ -508,7 +510,7 @@ pub fn decode_catalog_images_from_iwd(
         } = outcome
         {
             let slot = &mut catalog.images[image_index];
-            slot.decoded = Some(wrap_payload(&payload, wrap));
+            slot.decoded = Some(Arc::new(wrap_payload(&payload, wrap)));
             slot.decoded_variant = variant;
             n += 1;
         }
@@ -553,7 +555,7 @@ pub fn decode_in_zone_builtin_images(catalog: &mut MaterialDefinitions) -> usize
         gpu.texture_descriptor.mip_level_count = levels;
         gpu.data = Some(mips.into_payload());
         gpu.sampler = ImageSampler::Descriptor(sampler_from_iw4(0, levels, false));
-        image.decoded = Some(gpu);
+        image.decoded = Some(Arc::new(gpu));
         decoded += 1;
     }
     decoded
@@ -1143,13 +1145,14 @@ pub fn decode_reflection_probe_cubemap(source: &AuthoredImage) -> Result<Image, 
     Ok(image)
 }
 
-fn sampler_from_iw4(
+pub fn sampler_from_iw4(
     sampler_state: u8,
     levels: u32,
     alpha_test_color: bool,
 ) -> ImageSamplerDescriptor {
     let clamp_u = (sampler_state >> 5) & 1 != 0;
     let clamp_v = (sampler_state >> 6) & 1 != 0;
+    let clamp_w = (sampler_state >> 7) & 1 != 0;
     let filter = sampler_state & 0b111;
     let mip_map = (sampler_state >> 3) & 0b11;
     let anisotropy = match filter {
@@ -1174,7 +1177,11 @@ fn sampler_from_iw4(
         } else {
             ImageAddressMode::Repeat
         },
-        address_mode_w: ImageAddressMode::Repeat,
+        address_mode_w: if clamp_w {
+            ImageAddressMode::ClampToEdge
+        } else {
+            ImageAddressMode::Repeat
+        },
         mag_filter: point,
         min_filter: point,
         mipmap_filter: if alpha_test_color {
@@ -2060,6 +2067,7 @@ pub fn retail_lightmap_bake(
     ]
 }
 
+#[derive(Clone)]
 pub struct ImageDemandPlan {
     id: u64,
     zone_ff: PathBuf,
@@ -2085,6 +2093,7 @@ pub struct ImageDemandPlan {
 /// merge keeps. A claim the merge drops is then a decode that was wasted and
 /// not also a copy, and two claims on one archive entry are one buffer until
 /// they are placed.
+#[derive(Clone)]
 struct PreparedImage {
     name: String,
     payload: Arc<PreparedPayload>,
@@ -2126,6 +2135,42 @@ impl Drop for DecodedImageBatch {
             self.queued = false;
             UNAPPLIED_BATCHES.fetch_sub(1, Ordering::Relaxed);
         }
+    }
+}
+
+#[derive(Default)]
+pub struct PayloadRetention {
+    held: HashMap<usize, Arc<PreparedPayload>>,
+    bytes: u64,
+}
+
+impl PayloadRetention {
+    pub fn keep(&mut self, batch: &DecodedImageBatch) -> u64 {
+        let mut added = 0;
+        for image in &batch.decoded {
+            let key = Arc::as_ptr(&image.payload) as usize;
+            if let std::collections::hash_map::Entry::Vacant(slot) = self.held.entry(key) {
+                added += image.payload.bytes();
+                slot.insert(Arc::clone(&image.payload));
+            }
+        }
+        self.bytes += added;
+        RETAINED_PAYLOAD_BYTES.fetch_add(added, Ordering::Relaxed);
+        added
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    pub fn payloads(&self) -> usize {
+        self.held.len()
+    }
+}
+
+impl Drop for PayloadRetention {
+    fn drop(&mut self) {
+        RETAINED_PAYLOAD_BYTES.fetch_sub(self.bytes, Ordering::Relaxed);
     }
 }
 
@@ -2251,6 +2296,14 @@ impl ImageMergeCensus {
 /// while its payloads stay alive for whoever else asked.
 static RESIDENT_PAYLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
 
+static RETAINED_PAYLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
+
+fn gated_payload_bytes() -> u64 {
+    RESIDENT_PAYLOAD_BYTES
+        .load(Ordering::Relaxed)
+        .saturating_sub(RETAINED_PAYLOAD_BYTES.load(Ordering::Relaxed))
+}
+
 /// Plans that finished and whose results nobody has applied yet. It is the
 /// admission gate's other half: one plan always runs, so the ceiling can
 /// throttle the load but never stop it.
@@ -2299,15 +2352,13 @@ fn wait_for_decode_budget() -> (u64, bool) {
     let budget = decode_budget_bytes();
     let since = std::time::Instant::now();
     let mut waited = false;
-    while UNAPPLIED_BATCHES.load(Ordering::Relaxed) > 0
-        && RESIDENT_PAYLOAD_BYTES.load(Ordering::Relaxed) >= budget
-    {
+    while UNAPPLIED_BATCHES.load(Ordering::Relaxed) > 0 && gated_payload_bytes() >= budget {
         if since.elapsed() >= BUDGET_WAIT_LIMIT {
             diag::warn!(
                 Zone,
                 "image decode budget: started a plan anyway after {:.1}s with {} MiB resident over the {} MiB threshold and {} finished result(s) unapplied",
                 since.elapsed().as_secs_f32(),
-                RESIDENT_PAYLOAD_BYTES.load(Ordering::Relaxed) >> 20,
+                gated_payload_bytes() >> 20,
                 budget >> 20,
                 UNAPPLIED_BATCHES.load(Ordering::Relaxed),
             );
@@ -2562,6 +2613,32 @@ impl ImageDemandPlan {
 }
 
 impl DecodedImageBatch {
+    #[must_use]
+    pub fn into_kept(mut self) -> Self {
+        if self.queued {
+            self.queued = false;
+            UNAPPLIED_BATCHES.fetch_sub(1, Ordering::Relaxed);
+        }
+        self
+    }
+
+    pub fn share(&self) -> Self {
+        let served = self.decoded.iter().map(|image| image.payload.bytes()).sum();
+        Self {
+            plan: self.plan,
+            decoded: self.decoded.clone(),
+            stats: self.stats.clone(),
+            queued: false,
+            newly_prepared_bytes: 0,
+            reused_bytes: served,
+            reused_variants: self.decoded.len(),
+            claimed_rows: self.claimed_rows,
+            canonical_variants: self.canonical_variants,
+            pruned_variants: self.pruned_variants,
+            pruned_rows: self.pruned_rows,
+        }
+    }
+
     /// Hand the decoded images to the merged catalog and say what happened.
     ///
     /// A claimed row does not always survive the merge: another source can
@@ -2618,7 +2695,7 @@ impl DecodedImageBatch {
             // known that a row wants it — and where, if nobody else is holding
             // the texels, the buffer moves into the image instead of being
             // copied into it.
-            let image = wrap_owned_payload(prepared.payload, prepared.wrap);
+            let image = Arc::new(wrap_owned_payload(prepared.payload, prepared.wrap));
             census.final_cpu_bytes += image_bytes(&image);
             for index in indices {
                 if let Some(slot) = catalog.images.get_mut(index) {
@@ -2863,7 +2940,7 @@ fn decode_inline(
                 ..
             } => {
                 let slot = &mut catalog.images[image_index];
-                slot.decoded = Some(wrap_payload(&payload, wrap));
+                slot.decoded = Some(Arc::new(wrap_payload(&payload, wrap)));
                 slot.decoded_variant = variant;
                 stats.decoded += 1;
             }

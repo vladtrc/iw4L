@@ -40,6 +40,7 @@ pub struct LoadedWorld {
     /// Bytes the zone arenas held while the walk read them. The arenas
     /// themselves die with the walk; only their size travels.
     pub arena_bytes: usize,
+    pub sound: Option<Result<asset_audio::SoundCatalog, String>>,
     pub report: Vec<String>,
     pub gaps: Vec<LaneGap>,
 }
@@ -124,16 +125,20 @@ pub struct CommonCensus {
 
 pub struct MaterialPopulation {
     pub materials: crate::MaterialCatalog,
+    pub light_defs: Vec<crate::CapturedLightDef>,
     pub walked: usize,
     pub report: Vec<String>,
+    pub cac_tables: Vec<crate::CapturedStringTable>,
 }
 
 impl Default for MaterialPopulation {
     fn default() -> Self {
         Self {
             materials: crate::MaterialCatalog::default(),
+            light_defs: Vec::new(),
             walked: 0,
             report: Vec::new(),
+            cac_tables: Vec::new(),
         }
     }
 }

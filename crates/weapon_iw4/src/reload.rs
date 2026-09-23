@@ -1,6 +1,33 @@
 use crate::pm_weapon::{WeaponCombatFacts, WeaponHandState};
 use crate::weaponstate::WeaponState;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DualMagTimes {
+    pub reload_ms: i32,
+    pub reload_empty_ms: i32,
+    pub add_ms: i32,
+    pub empty_add_ms: i32,
+}
+
+fn quick_reload(hand: &WeaponHandState, facts: &WeaponCombatFacts) -> Option<DualMagTimes> {
+    facts.dual_mag.filter(|_| hand.quick_reload)
+}
+
+pub fn reload_segment(
+    hand: &WeaponHandState,
+    facts: &WeaponCombatFacts,
+    empty: bool,
+) -> (i32, u32) {
+    use crate::weap_anim::weap_anim_event as ev;
+    let (ms, anim) = match (quick_reload(hand, facts), empty) {
+        (Some(q), false) => (q.reload_ms, ev::RELOAD_QUICK),
+        (Some(q), true) => (q.reload_empty_ms, ev::RELOAD_QUICK_EMPTY),
+        (None, false) => (facts.reload_duration_ms(false), ev::RELOAD),
+        (None, true) => (facts.reload_duration_ms(true), ev::RELOAD_EMPTY),
+    };
+    (ms.max(1), anim)
+}
+
 pub fn pm_weapon_allow_reload(hand: &WeaponHandState, facts: &WeaponCombatFacts) -> bool {
     if hand.stock <= 0 || hand.clip >= facts.clip_size {
         return false;
@@ -76,10 +103,17 @@ pub fn pm_weapon_arm_reload_add_delay(
         }
         Ok(WeaponState::Reloading) | Ok(WeaponState::ReloadingInterrupt) => {
             let empty = hand.clip <= 0 && facts.weap_type == 0;
-            let add = if empty && facts.reload_empty_add_time_ms > 0 {
-                facts.reload_empty_add_time_ms
+            let quick = quick_reload(hand, facts);
+            let add = match quick {
+                Some(q) if empty && q.empty_add_ms > 0 => q.empty_add_ms,
+                _ if empty && facts.reload_empty_add_time_ms > 0 => facts.reload_empty_add_time_ms,
+                Some(q) => q.add_ms,
+                None => facts.reload_add_time_ms,
+            };
+            let full_ms = if quick.is_some() {
+                facts.reload_duration_ms(empty)
             } else {
-                facts.reload_add_time_ms
+                full_ms
             };
             if add > 0 && full_ms > 0 && add < full_ms {
                 add
@@ -164,8 +198,12 @@ pub fn pm_weapon_reload_delayed_action(
     if facts.bolt_action && hand.rechamber_pending && hand.weapon != 0 {
         return bolt_reload_delayed_action(hand, facts);
     }
+    let shells = pm_reload_clip(hand, facts);
+    if facts.dual_mag.is_some() {
+        hand.quick_reload = !hand.quick_reload;
+    }
     ReloadDelayedOutcome {
-        shells: pm_reload_clip(hand, facts),
+        shells,
         rechamber_event: false,
     }
 }

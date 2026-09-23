@@ -216,10 +216,7 @@ pub use asset_world::{
     FilmVision, FilmVisionParseError, MaterialSortTrigger, SurfaceCastsSunShadow, WorldCapture,
     parse_film_vision_rawfile, world_capture_from_casters,
 };
-pub use attachment_hide::{
-    AttachmentVisual, attachment_catalog, bare_weapon_id, bone_has_hidden_ancestor,
-    effective_hide_tags, resolve_weapon_for_attachments, surface_visible,
-};
+pub use attachment_hide::{bone_has_hidden_ancestor, effective_hide_tags, surface_visible};
 pub use body_catalog::{BODY_SPINE_BONES, BodyMeshBuild, BodyMeshCatalog, BodyMeshEntry};
 pub use cac_stats::{
     CacAuthoredCategory, CacPerkRow, CacPerkSlot, CacStatBar, CacWeaponFact, CacWeaponPreview,
@@ -266,8 +263,8 @@ pub use dyn_ents::{
 pub use ent_channel::{EntChannel, parse_ent_channel_file};
 pub use fastfile_iw4::GlyphCapture;
 pub use fpv_catalog::{
-    FpvHands, FpvMeshBuild, FpvMeshCatalog, FpvMeshEntry, FpvMeshKey, PoseStats, TagViewBind,
-    VIEWHANDS_NAME, VIEWHANDS_NAME_T5,
+    FpvHands, FpvMeshBuild, FpvMeshCatalog, FpvMeshEntry, FpvMeshKey, FpvMountPlan, PoseStats,
+    TagViewBind, VIEWHANDS_NAME, VIEWHANDS_NAME_T5,
 };
 pub use fx_catalog::{
     FxBankSound, FxCatalog, FxChildEdge, FxDefinitions, FxElemMaterial, FxElemMaterialReason,
@@ -318,7 +315,7 @@ pub use map_script_sound::{
 };
 pub use match_load::{
     MapLoadApproval, MatchLoadAbort, MatchLoadAccepted, MatchLoadBusy, MatchLoadDispatch,
-    MatchLoadRequest, PreparedMatchReady,
+    MatchLoadRequest, PreparedMatchReady, PreparedMatchSound,
 };
 pub use material_catalog::{
     AssetPointerIdentity, AssetRefDumpCensus, AuthoredImage, AuthoredMaterial, AuthoredShader,
@@ -345,12 +342,12 @@ pub use material_images::{
     decode_material_color_maps, decode_menu_background, decode_reflection_probe_cubemap,
     decode_ui_image, decode_ui_image_from_main, decode_zone_image_rgba, game_main_for_zone,
     iwd_entry_reads, iwd_read_cost, last_image_working_set, mip_cache_cost, retail_lightmap_bake,
-    retail_lit_color, shared_payload_copy_cost, shared_variant_census,
+    retail_lit_color, sampler_from_iw4, shared_payload_copy_cost, shared_variant_census,
 };
 pub use menu_catalog::{
-    CapturedStringTable, FontDef, HUD_CHROME_MENUS, ITEM_TYPE_BUTTON, ITEM_TYPE_TEXT, MenuCatalog,
-    MenuDef, MenuItem, MenuRect, MenuSetLocalVar, UI_MENU_ZONES, ZoneUiImage, load_menu_catalog,
-    load_ui_menu_catalog, ui_games_root,
+    CapturedStringTable, FontDef, HUD_CHROME_MENUS, HudMaterialPlan, HudMaterialTextureBinding,
+    ITEM_TYPE_BUTTON, ITEM_TYPE_TEXT, MenuCatalog, MenuDef, MenuItem, MenuRect, MenuSetLocalVar,
+    UI_MENU_ZONES, ZoneUiImage, load_menu_catalog, load_ui_menu_catalog, ui_games_root,
 };
 pub use model_lighting::{
     BlockedReason, GridView, LitFragmentTileCensus, OwnedLightGrid, SampledLighting,
@@ -391,6 +388,10 @@ pub use playeranim_parse::{
 };
 pub use plugin::AssetPlugin;
 
+pub use asset_game::{
+    AttachmentChoice, AttachmentOption, ConfigurationRefusal, FamilyKey, FamilySlot, LoadoutRules,
+    ResolvedConfiguration, WeaponFamilies, WeaponFamily, WeaponSelection,
+};
 pub use map_load_process::MapLoadProcess;
 pub use prepared::{
     MapFacts, MatchMaterials, MatchType10SoundHints, PreparedBodies, PreparedBodyClips,
@@ -407,9 +408,10 @@ pub use projectile_mesh_catalog::{
     ProjectileMeshBuild, ProjectileMeshCatalog, ProjectileMeshEntry,
 };
 pub use session_load::{
-    MatchLoadOutcome, MatchMaterialSeed, PreparedMatch, PreparedWorld, WorldDrawPolicy,
-    apply_match_material_map, load_match_material_catalog, load_match_material_seed, load_pool,
-    load_prepared_match, load_shell_weapon_registry, load_workers, publish_process_cpus,
+    MatchLoadOutcome, MatchMaterialSeed, PreparedMatch, PreparedWorld, ShellCommon,
+    WorldDrawPolicy, apply_match_material_map, load_match_material_catalog,
+    load_match_material_seed, load_pool, load_prepared_match, load_shell_common, load_workers,
+    publish_process_cpus,
 };
 pub use soldiers::{
     SoldierKit, SoldierKits, arms_for_body, body_has_tp_attach_bones, ffa_assignment_is_axis,
@@ -420,7 +422,10 @@ pub use sound_catalog::{
     LoadedSoundPcm, MSS_PCM, PickLoadedOutcome, PickedSound, SoundAliasKey, SoundCatalog,
     lerp_range, pick_weighted_variant_index, snd_advance_lcg, snd_unit_random,
 };
-pub use sound_load::{LoadedSoundBank, load_mp_sound_bank, load_sound_catalog, namespace_for_zone};
+pub use sound_load::{
+    LoadedSoundBank, SoundSources, compose_sound_bank, gather_sound_sources, load_mp_sound_bank,
+    load_sound_catalog, namespace_for_zone,
+};
 pub use sound_load_iw5::load_sound_catalog_iw5;
 pub use sound_load_t5::load_sound_catalog_t5;
 pub use sound_wma_t5::{
@@ -458,27 +463,32 @@ pub use tracer_catalog::{
 };
 pub use weapon_anim_dispatch::{
     ACTION_GOAL_TIME_SECS, ACTIVE_GOAL_WEIGHT, ANIM_RATE_TABLE, AnimRateOffsets,
-    IDLE_INTERRUPT_GOAL_TIME_SECS, INACTIVE_GOAL_WEIGHT, WEAP_ANIM_EVENT_MASK,
+    IDLE_INTERRUPT_GOAL_TIME_SECS, INACTIVE_GOAL_WEIGHT, WEAP_ANIM_EVENT_MASK, WEAPON_ANIM_SLOTS,
     known_complete_rate_timer_offset, known_rate_timer_offset, playback_rate,
-    slot_for_weap_anim_event, slot_uses_native_rate,
+    slot_for_weap_anim_event, slot_uses_native_rate, weap_anim_extra,
 };
 pub use weapon_animations::{AdsOverlayConvention, WeaponAnimSlot, WeaponAnimations};
 pub use weapon_catalog::{
-    CacOffhandBucket, CatalogWeapon, LoadoutCatalogKind, LoadoutCatalogRow, NotetrackConvention,
-    T5_NOTE_RUMBLE_PREFIX, T5_NOTE_SOUND_PREFIX, UnknownWeaponName, WeaponBodyFacts, WeaponBuild,
-    WeaponCatalog, WeaponCombatFx, WeaponHudMaterialEdges, WeaponKickFacts, WeaponProjectileFx,
-    WeaponRegistry, WeaponReticleAssets, WeaponSoundAliases, WeaponSoundSlot, WeaponSwayFacts,
-    cac_offhand_bucket, gsc_weapon_script_name, gun_candidates_from_idle, overlay_name_is_hud_iris,
-    t5_inline_note_alias,
+    CacOffhandBucket, CatalogWeapon, Iw5ConfigurationCandidate, LinkedNotetrackAction,
+    NotetrackConvention, T5_NOTE_RUMBLE_PREFIX, T5_NOTE_SOUND_PREFIX, UnknownWeaponName,
+    WeaponBodyFacts, WeaponBuild, WeaponCatalog, WeaponCombatFx, WeaponDependencyGap,
+    WeaponHudMaterialEdges, WeaponKickFacts, WeaponProjectileFx, WeaponRegistry,
+    WeaponReticleAssets, WeaponSoundAliases, WeaponSoundSlot, WeaponSwayFacts, cac_offhand_bucket,
+    gsc_weapon_script_name, overlay_name_is_hud_iris, t5_inline_note_alias,
+};
+pub use weapon_catalog::{
+    FpvAssembly, FpvAssemblyCensus, FpvAssemblyPart, FpvAssemblyTags, FpvClipTracks, FpvPartRole,
+    FpvSideAssemblies,
 };
 pub use world_draw::{
     CapturedLightDef, DpvsWorldData, GfxBrushModelBounds, GfxBrushModelSurfs, OwnedPortal,
-    RetailWorldVertexPayload, SunEffectsCapture, WorldBatch, WorldDraw, WorldLightRegionHull,
-    WorldLightmap, WorldLightmapGap, WorldPrimaryLight, WorldReflectionProbe, WorldShadowGeometry,
-    brush_model_vertex_centroid, build_world_draw,
+    ResolvedLightDef, RetailWorldVertexPayload, SunEffectsCapture, WorldBatch, WorldDraw,
+    WorldLightRegionHull, WorldLightmap, WorldLightmapGap, WorldPrimaryLight, WorldReflectionProbe,
+    WorldShadowGeometry, brush_model_vertex_centroid, build_world_draw,
 };
 pub(crate) use world_draw::{
-    capture_light_defs, resolve_outdoor_image, resolve_primary_light_attenuation,
+    capture_light_defs, resolve_named_light_def, resolve_outdoor_image,
+    resolve_primary_light_attenuation,
 };
 pub use world_iw5::build_iw5_world_draw;
 pub(crate) use world_iw5::capture_iw5_light_defs;

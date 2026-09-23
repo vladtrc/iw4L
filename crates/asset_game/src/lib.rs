@@ -14,6 +14,7 @@ use asset_world::decode_rawfile_text;
 pub mod arena;
 mod attachment_hide;
 mod cac_stats;
+mod fpv_assembly;
 mod fx_catalog;
 mod fx_model_catalog;
 mod graph_support;
@@ -26,10 +27,12 @@ mod tracer_catalog;
 mod weapon_anim_dispatch;
 mod weapon_animations;
 mod weapon_catalog;
+mod weapon_families;
 
 pub use arena::*;
 pub use attachment_hide::*;
 pub use cac_stats::*;
+pub use fpv_assembly::*;
 pub use fx_catalog::*;
 pub use fx_model_catalog::*;
 pub use graph_support::AuthoredRef;
@@ -42,6 +45,7 @@ pub use tracer_catalog::*;
 pub use weapon_anim_dispatch::*;
 pub use weapon_animations::*;
 pub use weapon_catalog::*;
+pub use weapon_families::*;
 
 pub mod asset_graph {
     pub(crate) use crate::graph_support::*;

@@ -1,4 +1,4 @@
-use assets::{NotetrackConvention, PreparedWeapons, WeaponSoundAliases, WeaponSoundSlot};
+use assets::{LinkedNotetrackAction, PreparedWeapons, WeaponSoundSlot};
 use bevy::prelude::*;
 use net::{CEntity, EntityEventKind, LocalPresentClient, PresentedSnapshot};
 
@@ -296,45 +296,22 @@ pub(crate) fn play_viewmodel_notetrack_messages(
     mut output: MessageWriter<WeaponSound>,
 ) {
     for batch in notes.read() {
-        let aliases = weapons
-            .as_deref()
-            .and_then(|weapons| weapons.0.sounds_of(batch.weapon));
         let namespace = weapons
             .as_deref()
             .and_then(|weapons| weapons.0.namespace_of(batch.weapon))
             .unwrap_or(assets::AssetNamespace::Iw4);
         for name in &batch.names {
-            apply_viewmodel_notetrack(name, aliases, namespace, &mut output);
+            let action = weapons
+                .as_deref()
+                .and_then(|weapons| weapons.0.notetrack_action_of(batch.weapon, name));
+            apply_viewmodel_notetrack(name, action, namespace, &mut output);
         }
-    }
-}
-
-pub(crate) fn notetrack_rumble_and_sound(
-    note: &str,
-    aliases: Option<&WeaponSoundAliases>,
-) -> (Option<String>, Option<String>) {
-    let convention = aliases.map(|a| a.notetrack_convention).unwrap_or_default();
-    match convention {
-        NotetrackConvention::SoundMap => (
-            aliases.and_then(|a| {
-                weapon_iw4::play_note_mapped_rumble_alias(note, a.notetrack_rumble_map.as_slice())
-                    .map(str::to_owned)
-            }),
-            aliases.and_then(|a| {
-                weapon_iw4::play_note_mapped_sound_alias(note, a.notetrack_sound_map.as_slice())
-                    .map(str::to_owned)
-            }),
-        ),
-        NotetrackConvention::InlinePrefix => (
-            assets::t5_inline_note_alias(note, assets::T5_NOTE_RUMBLE_PREFIX).map(str::to_owned),
-            assets::t5_inline_note_alias(note, assets::T5_NOTE_SOUND_PREFIX).map(str::to_owned),
-        ),
     }
 }
 
 fn apply_viewmodel_notetrack(
     note: &str,
-    aliases: Option<&WeaponSoundAliases>,
+    action: Option<&LinkedNotetrackAction>,
     namespace: assets::AssetNamespace,
     output: &mut MessageWriter<WeaponSound>,
 ) {
@@ -348,17 +325,17 @@ fn apply_viewmodel_notetrack(
             "audio: NVG notetrack `{note}` has no cgMedia alias (typed gap)"
         );
     }
-    let (rumble, sound) = notetrack_rumble_and_sound(note, aliases);
-    if let Some(rumble) = rumble.as_deref() {
+    let rumble = action.and_then(|action| action.rumble_alias.as_deref());
+    if let Some(rumble) = rumble {
         diag::warn!(
             Audio,
             "audio: notetrack rumble `{rumble}` is not ported (typed gap)"
         );
     }
-    if let Some(alias) = sound {
+    if let Some(alias) = action.and_then(|action| action.sound_alias.as_deref()) {
         output.write(WeaponSound {
             namespace,
-            alias,
+            alias: alias.to_owned(),
             origin_inches: None,
             snd_ent: Some(crate::SND_ENT_LOCAL),
         });

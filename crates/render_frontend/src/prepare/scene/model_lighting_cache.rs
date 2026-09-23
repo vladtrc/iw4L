@@ -294,11 +294,11 @@ pub(crate) fn dobj_lighting_box_half(radii: &[f32], parents: &[u8]) -> Option<[f
 
 pub(crate) fn fpv_dobj_lighting_box_half(
     catalog: &FpvMeshCatalog,
-    ns: assets::AssetNamespace,
-    gun_xmodel: &str,
+    hands_index: assets::FpvMeshIndex,
+    gun_index: assets::FpvMeshIndex,
 ) -> Option<[f32; 3]> {
-    let hands = catalog.hands_in(ns)?;
-    let gun = catalog.get(ns, gun_xmodel)?;
+    let hands = catalog.get_at(hands_index.order())?;
+    let gun = catalog.get_at(gun_index.order())?;
     let r_hands = hands.skel.radius?;
     let r_gun = gun.skel.radius?;
     dobj_lighting_box_half(&[r_hands, r_gun], &[DOBJ_RADIUS_PARENT_ROOT, 0])
@@ -366,7 +366,8 @@ pub fn enqueue_fpv_model_lighting(
     let box_half = session_vm.as_ref().and_then(|session| {
         let handles = session.0.as_ref()?;
         let catalog = fpv_meshes.as_ref()?;
-        fpv_dobj_lighting_box_half(&catalog.0, handles.fpv.namespace, &handles.fpv.gun_xmodel)
+        (catalog.0.identity() == handles.catalog_id).then_some(())?;
+        fpv_dobj_lighting_box_half(&catalog.0, handles.fpv.hands_index, handles.fpv.gun_index)
     });
     let lookup_fallback = atpoint.fallback(origin, box_half);
     requests.request(ModelLightingRequest {

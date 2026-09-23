@@ -158,7 +158,16 @@ impl ZoneLane for Iw5Lane {
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(crate::AssetNamespace::Iw5);
+        sink.sound = Some(asset_audio::ZoneSoundCapture::for_map(
+            path,
+            asset_audio::ZoneGame::Iw5,
+            "map",
+        ));
         let walked = fastfile_iw5::load_zone(&mut stream, &mut sink);
+        let map_sound = sink
+            .sound
+            .take()
+            .map(|sound| sound.finish(walked.as_ref().map(|_| ()).map_err(|e| e.to_string())));
         match &walked {
             Ok(_) => report.push(format!("zone walk: complete, {} assets", sink.walked)),
             Err(e) => report.push(format!(
@@ -275,6 +284,7 @@ impl ZoneLane for Iw5Lane {
             return Self::finish_loaded(
                 path,
                 LoadedWorld {
+                    sound: map_sound,
                     world: PreparedWorld {
                         exp_fog,
                         createart_name,
@@ -575,6 +585,7 @@ impl ZoneLane for Iw5Lane {
                 Self::finish_loaded(
                     path,
                     LoadedWorld {
+                        sound: map_sound,
                         materials: map_materials,
                         world: PreparedWorld {
                             min: draw.stats.min,
@@ -620,6 +631,7 @@ impl ZoneLane for Iw5Lane {
                 Self::finish_loaded(
                     path,
                     LoadedWorld {
+                        sound: map_sound,
                         world: PreparedWorld {
                             exp_fog,
                             createart_name,
@@ -675,7 +687,15 @@ impl ZoneLane for Iw5Lane {
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(crate::AssetNamespace::Iw5);
+        sink.sound = asset_audio::ZoneSoundCapture::claim_common(
+            path,
+            asset_audio::ZoneGame::Iw5,
+            "common census",
+        );
         let walk = fastfile_iw5::load_zone(&mut stream, &mut sink);
+        if let Some(sound) = sink.sound.take() {
+            sound.deposit(walk.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+        }
         let mut report = vec![format!("common_mp (IW5): walked {} assets", sink.walked)];
         if let Err(error) = walk {
             report.push(format!(
@@ -807,7 +827,15 @@ impl ZoneLane for Iw5Lane {
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(crate::AssetNamespace::Iw5);
+        sink.sound = asset_audio::ZoneSoundCapture::claim_common(
+            path,
+            asset_audio::ZoneGame::Iw5,
+            "material population",
+        );
         let walk = fastfile_iw5::load_zone(&mut stream, &mut sink);
+        if let Some(sound) = sink.sound.take() {
+            sound.deposit(walk.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+        }
         let mut report = Vec::new();
         if let Err(error) = walk {
             report.push(format!(
@@ -825,8 +853,10 @@ impl ZoneLane for Iw5Lane {
         ));
         MaterialPopulation {
             walked: sink.walked,
+            light_defs: Vec::new(),
             materials: sink.materials,
             report,
+            cac_tables: sink.stats_tables.into_values().collect(),
         }
     }
 }

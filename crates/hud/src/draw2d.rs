@@ -24,7 +24,16 @@ pub enum Draw2dOp {
         style: i32,
 
         fx: Option<TextRunFx>,
+
+        glow: Option<TextRunGlow>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextRunGlow {
+    pub material: String,
+
+    pub color: [f32; 4],
 }
 
 pub const TEXT_STYLE_HUDELEM: i32 = 3;
@@ -140,6 +149,7 @@ fn op_extra(op: &Draw2dOp) -> String {
             loc_key,
             style,
             fx,
+            glow,
         } => {
             let fx = match fx {
                 Some(fx) => format!(
@@ -152,9 +162,16 @@ fn op_extra(op: &Draw2dOp) -> String {
                 ),
                 None => String::new(),
             };
+            let glow = match glow {
+                Some(glow) => format!(
+                    " glow=({:?} [{:.3},{:.3},{:.3},{:.3}])",
+                    glow.material, glow.color[0], glow.color[1], glow.color[2], glow.color[3]
+                ),
+                None => String::new(),
+            };
             let flags = hud_iw4::r_draw_text_render_flags(*style);
             format!(
-                " font={font:?} scale={scale:.4} text={text:?} loc={loc_key:?} style={style} flags={flags:#x}{fx}"
+                " font={font:?} scale={scale:.4} text={text:?} loc={loc_key:?} style={style} flags={flags:#x}{fx}{glow}"
             )
         }
         Draw2dOp::StretchPic | Draw2dOp::ClipRect => String::new(),
@@ -255,6 +272,8 @@ struct CmdHost {
     layer: u8,
     glyph_material: Option<String>,
 
+    glow: Option<TextRunGlow>,
+
     scene_time: Option<i32>,
 }
 
@@ -292,6 +311,7 @@ pub fn tessellate_fonts(
                 text,
                 fx,
                 style,
+                glow,
                 ..
             } => {
                 if fonts.get(font).is_none() {
@@ -330,6 +350,7 @@ pub fn tessellate_fonts(
                             provenance: cmd.provenance.clone(),
                             layer: cmd.layer,
                             glyph_material: Some(cmd.material.clone()),
+                            glow: glow.clone(),
                             scene_time: fx.map(|fx| fx.scene_time),
                         });
                         slots.push(CmdSlot::Buf);
@@ -362,6 +383,7 @@ pub fn tessellate_fonts(
                             provenance: cmd.provenance.clone(),
                             layer: cmd.layer,
                             glyph_material: None,
+                            glow: None,
                             scene_time: None,
                         });
                         slots.push(CmdSlot::Buf);
@@ -437,6 +459,31 @@ pub fn tessellate_fonts(
                             census.skip_n += 1;
                             continue;
                         };
+                        let fx = parsed
+                            .fx
+                            .zip(host.scene_time)
+                            .map(|(fx, scene_time)| TextRunFx {
+                                scene_time,
+                                fx: fx.fx,
+                            });
+                        if let Some(glow) = &host.glow {
+                            out.extend(text_run_quads(
+                                def,
+                                parsed.text,
+                                parsed.x,
+                                parsed.y,
+                                parsed.x_scale,
+                                parsed.y_scale,
+                                glow.color,
+                                host.clip,
+                                &glow.material,
+                                host.material_namespace,
+                                host.provenance.clone(),
+                                host.layer,
+                                parsed.render_flags & !hud_iw4::TEXT_RENDERFLAG_DROP_SHADOW,
+                                fx,
+                            ));
+                        }
                         out.extend(text_run_quads(
                             def,
                             parsed.text,
@@ -451,13 +498,7 @@ pub fn tessellate_fonts(
                             host.provenance.clone(),
                             host.layer,
                             parsed.render_flags,
-                            parsed
-                                .fx
-                                .zip(host.scene_time)
-                                .map(|(fx, scene_time)| TextRunFx {
-                                    scene_time,
-                                    fx: fx.fx,
-                                }),
+                            fx,
                         ));
                     }
                     _ => census.skip_n += 1,

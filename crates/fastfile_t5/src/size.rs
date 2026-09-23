@@ -513,6 +513,10 @@ pub const WEAPON_VARIANT_CLIP_SIZE_OFF: usize = 0x20;
 
 pub const WEAPON_VARIANT_RELOAD_TIME_OFF: usize = 0x24;
 pub const WEAPON_VARIANT_RELOAD_EMPTY_TIME_OFF: usize = 0x28;
+pub const WEAPON_VARIANT_RELOAD_QUICK_TIME_OFF: usize = 0x2c;
+pub const WEAPON_VARIANT_RELOAD_QUICK_EMPTY_TIME_OFF: usize = 0x30;
+
+pub const WEAPON_VARIANT_DUAL_MAG_OFF: usize = 0x85;
 
 pub const WEAPON_VARIANT_ADS_TRANS_IN_OFF: usize = 0x34;
 pub const WEAPON_VARIANT_ADS_TRANS_OUT_OFF: usize = 0x38;
@@ -576,6 +580,8 @@ pub const WEAPON_DEF_FIRE_DELAY_OFF: usize = 0x378;
 pub const WEAPON_DEF_RELOAD_ADD_TIME_OFF: usize = 0x3dc;
 
 pub const WEAPON_DEF_RELOAD_EMPTY_ADD_TIME_OFF: usize = 0x3e0;
+pub const WEAPON_DEF_RELOAD_QUICK_ADD_TIME_OFF: usize = 0x3e4;
+pub const WEAPON_DEF_RELOAD_QUICK_EMPTY_ADD_TIME_OFF: usize = 0x3e8;
 pub const WEAPON_DEF_RELOAD_START_TIME_OFF: usize = 0x3ec;
 pub const WEAPON_DEF_RELOAD_START_ADD_TIME_OFF: usize = 0x3f0;
 
@@ -704,6 +710,8 @@ pub mod weap_anim {
     pub const RELOAD_EMPTY: usize = 0xB;
     pub const RELOAD_START: usize = 0xC;
     pub const RELOAD_END: usize = 0xD;
+    pub const RELOAD_QUICK: usize = 0xE;
+    pub const RELOAD_QUICK_EMPTY: usize = 0xF;
     pub const RAISE: usize = 0x10;
     pub const FIRST_RAISE: usize = 0x11;
     pub const DROP: usize = 0x12;

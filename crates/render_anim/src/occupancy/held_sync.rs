@@ -6,7 +6,7 @@ use net::{ClientSet, LocalPresentClient, PresentedSnapshot};
 use crate::gaps::{RenderGap, RenderGapCause, RenderPresentationGaps};
 use crate::occupancy::fpv_present::{
     FpvHeldLife, FpvHeldSettled, FpvPlacementRoot, FpvState, FpvStatusGap, PendingFpvSpawn,
-    PendingFpvSpawnRequest, SessionViewmodel, resolve_fpv_gun_name,
+    PendingFpvSpawnRequest, SessionViewmodel, resolve_fpv_gun,
 };
 use weapon_iw4::bg_get_viewmodel_weapon_index;
 
@@ -154,22 +154,19 @@ pub fn sync_fpv_to_held_weapon(
         weapons.as_ref().map(|r| &r.0),
         fpv_meshes.as_ref().map(|r| &r.0),
     ) {
-        (Some(reg), Some(fpv)) => match resolve_fpv_gun_name(reg, fpv, held) {
-            Some((gun, from_gun_xmodel)) => {
-                let idle_anim = reg.idle_anim_of(held).map(str::to_owned);
-
+        (Some(reg), Some(fpv)) => match resolve_fpv_gun(reg, fpv, held) {
+            Some(gun_index) => {
                 for entity in &existing_fpv {
                     commands.entity(entity).try_despawn();
                 }
                 session_vm.0 = None;
                 pending_fpv.0 = Some(PendingFpvSpawnRequest {
-                    gun_xmodel: gun,
+                    gun_index,
+                    catalog_id: fpv.identity(),
                     weapon_id: held,
-                    idle_anim,
-                    from_gun_xmodel,
                 });
                 settled.0 = None;
-                FpvState::Queued { from_gun_xmodel }
+                FpvState::Queued
             }
             None => {
                 for entity in &existing_fpv {

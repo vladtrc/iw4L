@@ -2,6 +2,19 @@ pub const GFX_DRAW_METHOD_LIT_BEGIN: u8 = 9;
 
 pub const TECHNIQUE_NONE: u8 = 0x32;
 
+pub const TECHNIQUE_LIGHT_SPOT: u8 = 37;
+pub const TECHNIQUE_LIGHT_OMNI: u8 = 38;
+pub const TECHNIQUE_LIGHT_SPOT_SHADOW: u8 = 39;
+
+pub const fn additional_light_tech_type(gfx_light_type: u8, has_shadow_map: bool) -> u8 {
+    match gfx_light_type {
+        crate::GFX_LIGHT_TYPE_SPOT if has_shadow_map => TECHNIQUE_LIGHT_SPOT_SHADOW,
+        crate::GFX_LIGHT_TYPE_SPOT => TECHNIQUE_LIGHT_SPOT,
+        crate::GFX_LIGHT_TYPE_OMNI => TECHNIQUE_LIGHT_OMNI,
+        _ => TECHNIQUE_NONE,
+    }
+}
+
 pub const LIT_TECH_COL_COUNT: u8 = 7;
 
 pub const LIT_TECH_SURF_ROWS: u8 = 16;

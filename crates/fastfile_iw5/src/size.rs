@@ -86,6 +86,8 @@ pub const WEAPON_HIDE_TAG_COUNT: usize = 32;
 pub const WEAPON_SCOPE_COUNT: usize = 6;
 pub const WEAPON_UNDERBARREL_COUNT: usize = 3;
 pub const WEAPON_OTHER_ATTACH_COUNT: usize = 4;
+pub const WEAPON_ATTACHMENT_SLOT_COUNT: usize =
+    WEAPON_SCOPE_COUNT + WEAPON_UNDERBARREL_COUNT + WEAPON_OTHER_ATTACH_COUNT;
 
 pub const WEAPON_ATTACHMENT: usize = 164;
 
@@ -95,6 +97,13 @@ pub const ATTACH_VIEW_MODELS_OFF: usize = 24;
 pub const ATTACH_RETICLE_OFF: usize = 28;
 
 pub const ATTACH_ADS_SETTINGS_OFF: usize = 72;
+pub const ATTACH_SIGHT_OFF: usize = 36;
+pub const ATTACH_ADDONS_OFF: usize = 44;
+pub const ATTACH_GENERAL_OFF: usize = 48;
+pub const ATTACH_AMMUNITION_OFF: usize = 56;
+pub const ATTACH_ADS_SETTINGS_MAIN_OFF: usize = 76;
+pub const ATTACH_SCALES_OFF: usize = 108;
+pub const ATTACH_FLAGS_OFF: usize = 160;
 pub const ATTACH_MODEL_COUNT: usize = 16;
 pub const ATTACH_RETICLE_COUNT: usize = 8;
 
@@ -103,7 +112,11 @@ pub const WEAPON_COMPLETE_SCOPES_OFF: usize = 16;
 pub const WEAPON_COMPLETE_HIDE_TAGS_OFF: usize = 0x0c;
 
 pub const WEAPON_COMPLETE_ADS_ZOOM_FOV_OFF: usize = 0x48;
+pub const WEAPON_COMPLETE_ADS_TRANS_IN_TIME_OFF: usize = 0x4c;
+pub const WEAPON_COMPLETE_ADS_TRANS_OUT_TIME_OFF: usize = 0x50;
 pub const WEAPON_COMPLETE_CLIP_OFF: usize = 0x54;
+pub const WEAPON_COMPLETE_PENETRATE_MULTIPLIER_OFF: usize = 0x68;
+pub const WEAPON_COMPLETE_MOTION_TRACKER_OFF: usize = 0xb4;
 
 pub const WEAPON_COMPLETE_IMPACT_TYPE_OFF: usize = 0x58;
 pub const WEAPON_COMPLETE_FIRE_TIME_OFF: usize = 0x5c;
@@ -248,6 +261,14 @@ pub const WEAPON_DEF_NOTE_RUMBLE_KEYS_OFF: usize = 32;
 pub const WEAPON_DEF_NOTE_RUMBLE_VALUES_OFF: usize = 36;
 pub const WEAPON_DEF_NOTE_RUMBLE_MAP_COUNT: usize = 16;
 
+pub const WEAPON_DEF_VIEW_FLASH_OFF: usize = 72;
+pub const WEAPON_DEF_WORLD_FLASH_OFF: usize = 76;
+pub const WEAPON_DEF_VIEW_SHELL_EJECT_OFF: usize = 280;
+pub const WEAPON_DEF_WORLD_SHELL_EJECT_OFF: usize = 284;
+pub const WEAPON_DEF_VIEW_LAST_SHOT_EJECT_OFF: usize = 288;
+pub const WEAPON_DEF_WORLD_LAST_SHOT_EJECT_OFF: usize = 292;
+const _: () = assert!(WEAPON_DEF_SND_PICKUP_OFF == WEAPON_DEF_WORLD_FLASH_OFF + 4);
+
 pub const WEAPON_DEF_SND_PICKUP_OFF: usize = 80;
 pub const WEAPON_DEF_SND_PICKUP_PLAYER_OFF: usize = 84;
 pub const WEAPON_DEF_SND_AMMO_PICKUP_OFF: usize = 88;
@@ -337,6 +358,7 @@ pub const ANIM_OVERRIDE_OVERRIDE_ANIM_OFF: usize = 4;
 pub const ANIM_OVERRIDE_ALTMODE_ANIM_OFF: usize = 8;
 pub const ANIM_OVERRIDE_ANIM_TREE_TYPE_OFF: usize = 12;
 pub const ANIM_OVERRIDE_ANIM_TIME_OFF: usize = 16;
+pub const ANIM_OVERRIDE_ALT_TIME_OFF: usize = 20;
 pub const SOUND_OVERRIDE_ENTRY: usize = 16;
 
 pub const WEAPON_COMPLETE_SOUND_OVERRIDE_COUNT_OFF: usize = 40;

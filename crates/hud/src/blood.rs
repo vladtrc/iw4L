@@ -10,13 +10,10 @@ use playerstate_iw4::KillCamMode;
 use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance, tessellate};
 use crate::gaps::{GapCause, HudGap, HudPresentationGaps};
 use crate::gpu_list::{PackedList, pack_splatter_alt};
-use crate::images::HudImages;
+use crate::images::{BLOOD_OVERLAY_COLOR, BLOOD_OVERLAY_MASK, HudImages, HudSampling};
 
 #[derive(Resource, Default, Clone, Debug)]
 pub(crate) struct HudRootVisible(pub Option<i32>);
-
-const BLOOD_OVERLAY_IMAGE: &str = "blood_defocus_color";
-const BLOOD_OVERLAY_MASK: &str = "blood_defocus_mask";
 
 #[derive(Resource, Default)]
 pub(crate) struct BloodOverlayLatch {
@@ -137,21 +134,36 @@ pub(crate) fn update_blood_overlay(
         return;
     }
 
-    let Some(color) = hud_images.get(
+    let binding = match hud_images.blood_material_binding() {
+        Ok(binding) => binding,
+        Err(detail) => {
+            gaps.raise(GapCause::BloodOverlayMaterialUnsupported {
+                detail: detail.to_owned(),
+            });
+            request_hide(&mut job, latch.packed.is_empty());
+            return;
+        }
+    };
+
+    let Some(color) = hud_images.get_sampled_with_sampler(
         crate::images::HUD_CHROME_NAMESPACE,
-        BLOOD_OVERLAY_IMAGE,
+        BLOOD_OVERLAY_COLOR,
+        HudSampling::Color,
+        Some(binding.color_sampler),
         &mut images,
     ) else {
         gaps.raise(GapCause::BloodOverlayImageMissing {
-            name: BLOOD_OVERLAY_IMAGE.to_owned(),
+            name: BLOOD_OVERLAY_COLOR.to_owned(),
             miss: hud_images.miss_reason(),
         });
         request_hide(&mut job, latch.packed.is_empty());
         return;
     };
-    let Some(mask) = hud_images.get(
+    let Some(mask) = hud_images.get_sampled_with_sampler(
         crate::images::HUD_CHROME_NAMESPACE,
         BLOOD_OVERLAY_MASK,
+        HudSampling::Data,
+        Some(binding.mask_sampler),
         &mut images,
     ) else {
         gaps.raise(GapCause::BloodOverlayImageMissing {
@@ -175,7 +187,7 @@ pub(crate) fn update_blood_overlay(
             s1: 1.0,
             t1: 1.0,
             color: [1.0, 1.0, 1.0, latch.intensity],
-            material: BLOOD_OVERLAY_IMAGE.into(),
+            material: BLOOD_OVERLAY_COLOR.into(),
             op: Draw2dOp::StretchPic,
             provenance: Draw2dProvenance::CgDraw {
                 site: "blood_overlay",
@@ -187,7 +199,7 @@ pub(crate) fn update_blood_overlay(
         request_hide(&mut job, latch.packed.is_empty());
         return;
     };
-    latch.packed = pack_splatter_alt(&quad, color, mask);
+    latch.packed = pack_splatter_alt(&quad, color, mask, binding.state);
     latch.last_w = Some(win_w);
     latch.last_h = Some(win_h);
     latch.last_gpu_intensity = Some(latch.intensity);

@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use assets::{MenuCatalog, PreparedLocalizedStrings};
 use bevy::prelude::*;
 use hud_iw4::{
-    ALIGN_CENTER, HE_TYPE_VALUE, HudElem, bg_lerp_hud_colors, copy_in_use_prefix,
-    hud_elem_lerp_font_scale, hudelem_font_ui_enum, hudelem_text_scale, ui_get_font_handle,
+    HE_TYPE_VALUE, HudElem, bg_lerp_hud_colors, copy_in_use_prefix, hud_elem_lerp_font_scale,
+    hud_elem_placement, hud_elem_screen_align, hudelem_font_ui_enum, hudelem_text_scale,
+    ui_get_font_handle,
 };
 use net::{CgFrameClock, LocalPresentClient, PresentedSnapshot};
 
@@ -34,8 +35,10 @@ fn sprintf_g(value: f32) -> String {
 }
 
 struct LiveValue {
+    elem: HudElem,
     value: f32,
     color: [u8; 4],
+    glow: Option<[f32; 4]>,
     font_scale: f32,
     font: i32,
     fx: Option<crate::draw2d::TextRunFx>,
@@ -56,7 +59,7 @@ fn live_value<'a>(
             if elem.elem_type != HE_TYPE_VALUE {
                 continue;
             }
-            if (elem.y - gamemode_iw4::SCORE_POPUP_Y).abs() > 1.0 {
+            if elem.sort != gamemode_iw4::SCORE_POPUP_SORT {
                 continue;
             }
             if best.is_none_or(|b| elem.sort >= b.sort) {
@@ -80,8 +83,10 @@ fn live_value<'a>(
         })
         .unwrap_or_else(|| hud_elem_lerp_font_scale(elem, cg_time));
     Some(LiveValue {
+        elem: *elem,
         value: elem.value,
         color,
+        glow: hud_iw4::hud_elem_glow_color(elem, color),
         font_scale,
         font: elem.font,
         fx: crate::hudelem::hudelem_text_fx(elem, cg_time),
@@ -124,8 +129,10 @@ pub(crate) fn update_score_popup(
         return;
     };
     let Some(LiveValue {
+        elem,
         value,
         color,
+        glow,
         font_scale,
         font: elem_font,
         fx,
@@ -170,15 +177,12 @@ pub(crate) fn update_score_popup(
     let text = format!("{plus}{}", sprintf_g(value));
 
     let nscale = hud_iw4::r_normalized_text_scale(font.pixel_height, text_scale);
-    let measured = r_text_width(font, &text) as f32 * nscale;
-    let applied = surface.apply_rect(
-        gamemode_iw4::SCORE_POPUP_X - measured / 2.0,
-        gamemode_iw4::SCORE_POPUP_Y,
-        nscale,
-        nscale,
-        ALIGN_CENTER,
-        ALIGN_CENTER,
-    );
+    let (horz, vert) = hud_elem_screen_align(elem.align_screen);
+    let glyph = surface.apply_rect(0.0, 0.0, nscale, nscale, horz, vert);
+    let text_width = r_text_width(font, &text) as f32 * glyph.w;
+    let font_height =
+        hud_iw4::hudelem_em_px(elem.font, font_scale, surface.scale_virtual_to_real()[1]);
+    let placed = hud_elem_placement(surface.placement(), &elem, cg_time, text_width, font_height);
     let material = assets::AssetRef::bare_name(&font.material).to_owned();
     let face = [
         color[0] as f32 / 255.0,
@@ -189,10 +193,10 @@ pub(crate) fn update_score_popup(
     let list = Draw2dList {
         cmds: vec![Draw2dCmd {
             material_namespace: crate::images::HUD_CHROME_NAMESPACE,
-            x: (applied.x + 0.5).floor(),
-            y: (applied.y + 0.5).floor(),
-            w: applied.w,
-            h: applied.h,
+            x: (placed.x + 0.5).floor(),
+            y: (placed.y + 0.5).floor(),
+            w: glyph.w,
+            h: glyph.h,
             s0: 0.0,
             t0: 0.0,
             s1: 1.0,
@@ -208,6 +212,7 @@ pub(crate) fn update_score_popup(
                 style: crate::draw2d::TEXT_STYLE_HUDELEM,
 
                 fx,
+                glow: glow.and_then(|color| crate::chrome::text_run_glow(font, color)),
             },
             provenance: Draw2dProvenance::HudElem { index: 0 },
             layer: 1,

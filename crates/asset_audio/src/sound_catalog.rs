@@ -66,7 +66,7 @@ pub struct LoadedSoundPcm {
     pub(crate) channels: i32,
     pub samples: u32,
     pub block_size: u32,
-    pub(crate) pcm: Vec<u8>,
+    pub(crate) pcm: std::sync::Arc<[u8]>,
 
     pub zone: ZoneOwner,
 
@@ -91,14 +91,14 @@ impl LoadedSoundPcm {
             channels,
             samples: 0,
             block_size: 0,
-            pcm,
+            pcm: pcm.into(),
             zone: ZoneOwner::default(),
             seek_table,
         }
     }
 
     pub fn t5_adpcm_bytes(&self) -> Option<&[u8]> {
-        (self.format == 6).then_some(self.pcm.as_slice())
+        (self.format == 6).then_some(&self.pcm[..])
     }
 
     pub fn channels(&self) -> i32 {
@@ -109,6 +109,10 @@ impl LoadedSoundPcm {
     /// runtime ClipStore, never to this shared catalog entry.
     pub fn encoded_bytes(&self) -> &[u8] {
         &self.pcm
+    }
+
+    pub fn encoded_arc(&self) -> std::sync::Arc<[u8]> {
+        self.pcm.clone()
     }
 
     pub fn format(&self) -> i32 {
@@ -1352,7 +1356,7 @@ impl AssetLinkSink for SoundCatalog {
             channels,
             samples,
             block_size,
-            pcm: pcm_bytes,
+            pcm: pcm_bytes.into(),
             zone: self.capture_zone,
             ..Default::default()
         });

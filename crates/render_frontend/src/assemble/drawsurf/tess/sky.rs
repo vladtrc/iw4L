@@ -112,7 +112,7 @@ pub fn build_sky_model_draw_plan(
         &geometry.surface_ranges(),
         geometry.decoded_vertices().len(),
     );
-    revisions.bump_vertices();
+    revisions.bump_surfaces();
     revisions.bump_draws();
     commands.insert_resource(SkyModelDrawPlan {
         geometry,

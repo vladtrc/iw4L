@@ -1,8 +1,8 @@
 use hud_iw4::{
     DAMAGE_FEEDBACK_ALIGN_SCREEN, GAME_HUDELEM_CAPACITY, HE_TYPE_FREE, HE_TYPE_MATERIAL,
     HE_TYPE_PLAYERNAME, HE_TYPE_TEXT, HE_TYPE_VALUE, HUDELEM_BANK_CAPACITY, HudElem,
-    MATCH_START_ALIGN_SCREEN, OUTCOME_ALIGN_SCREEN, SCORE_POPUP_ALIGN_SCREEN, color_rgba, flags,
-    rebase_archival_times, unpack_rgba,
+    MATCH_START_ALIGN_SCREEN, OUTCOME_ALIGN_SCREEN, SCORE_POPUP_ALIGN_SCREEN,
+    TEXT_CENTERED_ALIGN_ORG, color_rgba, flags, rebase_archival_times, unpack_rgba,
 };
 use playerstate_iw4::ENTITYNUM_NONE;
 
@@ -167,6 +167,7 @@ pub fn pulse_score_popup(slot: &mut GameHudElemSlot, amount: f32, now_ms: i32) {
     slot.elem.x = SCORE_POPUP_X;
     slot.elem.y = SCORE_POPUP_Y;
     slot.elem.align_screen = SCORE_POPUP_ALIGN_SCREEN;
+    slot.elem.align_org = TEXT_CENTERED_ALIGN_ORG;
     slot.elem.font = SCORE_POPUP_FONT_INDEX;
     slot.elem.font_scale = SCORE_POPUP_MAX_FONT_SCALE;
     slot.elem.from_font_scale = from_font_scale;
@@ -255,6 +256,7 @@ pub fn sync_match_start_elems(
         slot.elem.from_font_scale = gamemode_iw4::MATCH_START_TEXT_FONT_SCALE;
         slot.elem.font = gamemode_iw4::MATCH_START_TEXT_FONT;
         slot.elem.align_screen = MATCH_START_ALIGN_SCREEN;
+        slot.elem.align_org = TEXT_CENTERED_ALIGN_ORG;
         slot.elem.sort = gamemode_iw4::MATCH_START_SORT;
         slot.elem.flags = flags::HIDEWHENINMENU;
         slot.elem.color_rgba = match_start_rgba();
@@ -270,6 +272,7 @@ pub fn sync_match_start_elems(
         slot.elem.y = gamemode_iw4::MATCH_START_VALUE_Y;
         slot.elem.font = gamemode_iw4::MATCH_START_VALUE_FONT;
         slot.elem.align_screen = MATCH_START_ALIGN_SCREEN;
+        slot.elem.align_org = TEXT_CENTERED_ALIGN_ORG;
         slot.elem.sort = gamemode_iw4::MATCH_START_SORT;
         slot.elem.flags = flags::HIDEWHENINMENU;
         slot.elem.value = display.count as f32;
@@ -392,6 +395,7 @@ pub fn sync_outcome_elems(
         slot.elem.font_scale = scale;
         slot.elem.from_font_scale = scale;
         slot.elem.align_screen = OUTCOME_ALIGN_SCREEN;
+        slot.elem.align_org = TEXT_CENTERED_ALIGN_ORG;
         slot.elem.sort = gamemode_iw4::MATCH_START_SORT;
         slot.elem.color_rgba = color_rgba(255, 255, 255, 255);
         slot.elem.from_color_rgba = color_rgba(255, 255, 255, 255);
@@ -462,6 +466,7 @@ pub fn sync_outcome_elems(
         slot.elem.font_scale = *scale;
         slot.elem.from_font_scale = *scale;
         slot.elem.align_screen = OUTCOME_ALIGN_SCREEN;
+        slot.elem.align_org = TEXT_CENTERED_ALIGN_ORG;
         slot.elem.sort = gamemode_iw4::MATCH_START_SORT;
         slot.elem.color_rgba = color_rgba(255, 255, 255, 255);
         slot.elem.from_color_rgba = color_rgba(255, 255, 255, 255);
@@ -535,6 +540,7 @@ pub fn sync_hint_elems(
     slot.elem.font_scale = gamemode_iw4::HINT_FONT_SCALE;
     slot.elem.from_font_scale = gamemode_iw4::HINT_FONT_SCALE;
     slot.elem.align_screen = OUTCOME_ALIGN_SCREEN;
+    slot.elem.align_org = TEXT_CENTERED_ALIGN_ORG;
     slot.elem.sort = gamemode_iw4::MATCH_START_SORT;
     slot.elem.color_rgba = color_rgba(255, 255, 255, 255);
     slot.elem.from_color_rgba = color_rgba(255, 255, 255, 255);

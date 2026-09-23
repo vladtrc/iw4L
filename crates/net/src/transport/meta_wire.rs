@@ -4,14 +4,14 @@ use std::hash::Hash;
 use playerstate_iw4::AnimPair;
 use sim::{
     AreaEntityLinkSnapshot, AreaEntityWorldSnapshot, AreaSectorSnapshot, ClassId,
-    ClassRejectReason, ClientAction, ClientId, ClientLifecycle, ClientSnapshotMeta, DamageSource,
-    DestructibleLoopSound, DroppedItemAmmo, EntityEventPayload, EntityEventRecord,
-    EntityKernelOccupiedSnapshot, EntityKernelSlotSnapshot, EntityKernelSnapshot, EntityRef,
-    EntityRelations, EntityRunKind, EventAudience, EventRecord, EventSequence, GiveRejectReason,
-    GlassCause, GlassPieceSnapshot, GlassPieceState, GlassShatterSeed, ItemPickupRecord,
-    LifeSequence, LoadoutSpec, MatchEndReason, MatchPhase, PelletFxRecord, PlayerCorpsePool,
-    PlayerCorpseSlot, RngDebugMeta, ScriptModelId, SimEvent, SnapshotMeta, Tick,
-    WorldObjectSnapshot,
+    ClassRejectReason, ClientAction, ClientId, ClientLifecycle, ClientSnapshotMeta,
+    ConfigurationChangeRejectReason, DamageSource, DestructibleLoopSound, DroppedItemAmmo,
+    EntityEventPayload, EntityEventRecord, EntityKernelOccupiedSnapshot, EntityKernelSlotSnapshot,
+    EntityKernelSnapshot, EntityRef, EntityRelations, EntityRunKind, EventAudience, EventRecord,
+    EventSequence, GiveRejectReason, GlassCause, GlassPieceSnapshot, GlassPieceState,
+    GlassShatterSeed, ItemPickupRecord, LifeSequence, LoadoutSpec, MatchEndReason, MatchPhase,
+    PelletFxRecord, PlayerCorpsePool, PlayerCorpseSlot, RngDebugMeta, ScriptModelId, SimEvent,
+    SnapshotMeta, SpawnPick, Tick, WorldObjectSnapshot,
 };
 
 use crate::transport::wire::{WireError, WireReader, WireWriter};
@@ -439,6 +439,16 @@ pub(crate) fn encode_action(out: &mut WireWriter, action: &ClientAction) {
             out.put_u32(request_id);
             out.put_u32(weapon);
         }
+        ClientAction::ChangeWeaponConfiguration {
+            request_id,
+            from,
+            to,
+        } => {
+            out.put_u8(15);
+            out.put_u32(request_id);
+            out.put_u32(from);
+            out.put_u32(to);
+        }
         ClientAction::Move {
             request_id,
             origin,
@@ -470,6 +480,24 @@ pub(crate) fn encode_action(out: &mut WireWriter, action: &ClientAction) {
         ClientAction::SpawnClient { request_id } => {
             out.put_u8(8);
             out.put_u32(request_id);
+        }
+        ClientAction::ForceSpawn { request_id, pick } => {
+            out.put_u8(14);
+            out.put_u32(request_id);
+            match pick {
+                SpawnPick::Seeded(seed) => {
+                    out.put_u8(0);
+                    out.put_u32(seed as u32);
+                    out.put_u32((seed >> 32) as u32);
+                }
+                SpawnPick::At { origin, yaw } => {
+                    out.put_u8(1);
+                    out.put_f32(origin[0]);
+                    out.put_f32(origin[1]);
+                    out.put_f32(origin[2]);
+                    out.put_f32(yaw);
+                }
+            }
         }
         ClientAction::SpawnIntermission { request_id } => {
             out.put_u8(12);
@@ -522,6 +550,11 @@ pub(crate) fn decode_action(input: &mut WireReader<'_>) -> Result<ClientAction, 
             request_id: input.get_u32()?,
             weapon: input.get_u32()?,
         }),
+        15 => Ok(ClientAction::ChangeWeaponConfiguration {
+            request_id: input.get_u32()?,
+            from: input.get_u32()?,
+            to: input.get_u32()?,
+        }),
         7 => Ok(ClientAction::Move {
             request_id: input.get_u32()?,
             origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
@@ -544,6 +577,22 @@ pub(crate) fn decode_action(input: &mut WireReader<'_>) -> Result<ClientAction, 
         13 => Ok(ClientAction::UseCopycat {
             request_id: input.get_u32()?,
         }),
+        14 => {
+            let request_id = input.get_u32()?;
+            let pick = match input.get_u8()? {
+                0 => {
+                    let lo = input.get_u32()? as u64;
+                    let hi = input.get_u32()? as u64;
+                    SpawnPick::Seeded(lo | hi << 32)
+                }
+                1 => SpawnPick::At {
+                    origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+                    yaw: input.get_f32()?,
+                },
+                _ => return Err(WireError::Malformed("unknown SpawnPick tag")),
+            };
+            Ok(ClientAction::ForceSpawn { request_id, pick })
+        }
         _ => Err(WireError::Malformed("unknown ClientAction tag")),
     }
 }
@@ -928,6 +977,8 @@ fn encode_entity_event_record(out: &mut WireWriter, record: &EntityEventRecord) 
     out.put_i32(payload.event_parm);
     out.put_u32(payload.weapon);
     out.put_u32(payload.correlation);
+    out.put_u16(payload.pellet);
+    out.put_u8(payload.hand);
     for value in payload.origin {
         out.put_f32(value);
     }
@@ -965,6 +1016,8 @@ fn decode_entity_event_record(input: &mut WireReader<'_>) -> Result<EntityEventR
             event_parm: input.get_i32()?,
             weapon: input.get_u32()?,
             correlation: input.get_u32()?,
+            pellet: input.get_u16()?,
+            hand: input.get_u8()?,
             origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
             origin2: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
             direction: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
@@ -980,6 +1033,7 @@ fn encode_pellet_fx_record(out: &mut WireWriter, record: &PelletFxRecord) {
     out.put_u32(record.weapon);
     out.put_u32(record.correlation);
     out.put_u16(record.pellet);
+    out.put_u8(record.hand);
     for value in record.start {
         out.put_f32(value);
     }
@@ -1000,6 +1054,7 @@ fn decode_pellet_fx_record(input: &mut WireReader<'_>) -> Result<PelletFxRecord,
         weapon: input.get_u32()?,
         correlation: input.get_u32()?,
         pellet: input.get_u16()?,
+        hand: input.get_u8()?,
         start: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
         end: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
         normal: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
@@ -1114,6 +1169,11 @@ fn encode_client_meta(out: &mut WireWriter, meta: &ClientSnapshotMeta) {
         out.put_i32(*clip);
         out.put_i32(*stock);
     }
+    debug_assert!(meta.taped_mag_spent.len() <= u8::MAX as usize);
+    out.put_u8(meta.taped_mag_spent.len() as u8);
+    for weapon in &meta.taped_mag_spent {
+        out.put_u32(*weapon);
+    }
     out.put_u8(meta.weapon_shot_count);
     out.put_u8(u8::from(meta.burst_latch));
     out.put_u8(u8::from(meta.rechamber_pending));
@@ -1175,6 +1235,11 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
         let stock = input.get_i32()?;
         ammo_by_weapon.push((weapon, clip, stock));
     }
+    let spent_rows = input.get_u8()? as usize;
+    let mut taped_mag_spent = Vec::with_capacity(spent_rows);
+    for _ in 0..spent_rows {
+        taped_mag_spent.push(input.get_u32()?);
+    }
     let weapon_shot_count = input.get_u8()?;
     let burst_latch = input.get_u8()? != 0;
     let rechamber_pending = input.get_u8()? != 0;
@@ -1212,6 +1277,7 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
         kills,
         deaths,
         ammo_by_weapon,
+        taped_mag_spent,
         weapon_shot_count,
         burst_latch,
         rechamber_pending,
@@ -1497,6 +1563,28 @@ pub(crate) fn encode_event(out: &mut WireWriter, event: &SimEvent) {
             out.put_u32(weapon);
             out.put_u8(give_reject_reason_tag(reason));
         }
+        SimEvent::ConfigurationChangeAccepted {
+            request_id,
+            from,
+            to,
+        } => {
+            out.put_u8(16);
+            out.put_u32(request_id);
+            out.put_u32(from);
+            out.put_u32(to);
+        }
+        SimEvent::ConfigurationChangeRejected {
+            request_id,
+            from,
+            to,
+            reason,
+        } => {
+            out.put_u8(17);
+            out.put_u32(request_id);
+            out.put_u32(from);
+            out.put_u32(to);
+            out.put_u8(configuration_change_reject_reason_tag(reason));
+        }
     }
 }
 
@@ -1571,6 +1659,17 @@ pub(crate) fn decode_event(input: &mut WireReader<'_>) -> Result<SimEvent, WireE
             weapon: input.get_u32()?,
             reason: give_reject_reason_from_tag(input.get_u8()?)?,
         }),
+        16 => Ok(SimEvent::ConfigurationChangeAccepted {
+            request_id: input.get_u32()?,
+            from: input.get_u32()?,
+            to: input.get_u32()?,
+        }),
+        17 => Ok(SimEvent::ConfigurationChangeRejected {
+            request_id: input.get_u32()?,
+            from: input.get_u32()?,
+            to: input.get_u32()?,
+            reason: configuration_change_reject_reason_from_tag(input.get_u8()?)?,
+        }),
         _ => Err(WireError::Malformed("unknown SimEvent tag")),
     }
 }
@@ -1634,6 +1733,7 @@ fn give_reject_reason_tag(reason: GiveRejectReason) -> u8 {
         GiveRejectReason::InvalidWeapon => 2,
         GiveRejectReason::UnknownWeaponId => 3,
         GiveRejectReason::EmptyCombatProfile => 4,
+        GiveRejectReason::UnsupportedWeapon => 5,
     }
 }
 
@@ -1643,7 +1743,39 @@ fn give_reject_reason_from_tag(tag: u8) -> Result<GiveRejectReason, WireError> {
         2 => Ok(GiveRejectReason::InvalidWeapon),
         3 => Ok(GiveRejectReason::UnknownWeaponId),
         4 => Ok(GiveRejectReason::EmptyCombatProfile),
+        5 => Ok(GiveRejectReason::UnsupportedWeapon),
         _ => Err(WireError::Malformed("unknown GiveRejectReason tag")),
+    }
+}
+
+fn configuration_change_reject_reason_tag(reason: ConfigurationChangeRejectReason) -> u8 {
+    match reason {
+        ConfigurationChangeRejectReason::NotAlive => 1,
+        ConfigurationChangeRejectReason::StaleSource => 2,
+        ConfigurationChangeRejectReason::InvalidTarget => 3,
+        ConfigurationChangeRejectReason::DifferentFamily => 4,
+        ConfigurationChangeRejectReason::Busy => 7,
+        ConfigurationChangeRejectReason::NoInventorySlot => 5,
+        ConfigurationChangeRejectReason::AmmoTableFull => 6,
+        ConfigurationChangeRejectReason::SharedAmmoConflict => 8,
+    }
+}
+
+fn configuration_change_reject_reason_from_tag(
+    tag: u8,
+) -> Result<ConfigurationChangeRejectReason, WireError> {
+    match tag {
+        1 => Ok(ConfigurationChangeRejectReason::NotAlive),
+        2 => Ok(ConfigurationChangeRejectReason::StaleSource),
+        3 => Ok(ConfigurationChangeRejectReason::InvalidTarget),
+        4 => Ok(ConfigurationChangeRejectReason::DifferentFamily),
+        7 => Ok(ConfigurationChangeRejectReason::Busy),
+        5 => Ok(ConfigurationChangeRejectReason::NoInventorySlot),
+        6 => Ok(ConfigurationChangeRejectReason::AmmoTableFull),
+        8 => Ok(ConfigurationChangeRejectReason::SharedAmmoConflict),
+        _ => Err(WireError::Malformed(
+            "unknown ConfigurationChangeRejectReason tag",
+        )),
     }
 }
 
@@ -2436,6 +2568,14 @@ fn encode_objective_view(out: &mut WireWriter, v: &sim::ObjectiveView) {
     for id in &v.users {
         out.put_u32(id.0);
     }
+    match v.flash {
+        Some(flash) => {
+            out.put_u8(flash.teams);
+            out.put_u32(flash.start_ms);
+            objective_optional(out, flash.stop_ms);
+        }
+        None => out.put_u8(0),
+    }
 }
 fn objective_team(input: &mut WireReader<'_>) -> Result<gamemode_iw4::Team, WireError> {
     gamemode_iw4::Team::from_retail_u8(input.get_u8()?)
@@ -2462,6 +2602,18 @@ fn decode_objective_view(input: &mut WireReader<'_>) -> Result<sim::ObjectiveVie
     for _ in 0..count {
         users.push(ClientId(input.get_u32()?));
     }
+    let teams = input.get_u8()?;
+    let flash = match teams {
+        0 => None,
+        teams if teams & !(sim::ObjectiveFlash::AXIS | sim::ObjectiveFlash::ALLIES) == 0 => {
+            Some(sim::ObjectiveFlash {
+                teams,
+                start_ms: input.get_u32()?,
+                stop_ms: read_objective_optional(input)?,
+            })
+        }
+        _ => return Err(WireError::Malformed("objective flash")),
+    };
     Ok(sim::ObjectiveView {
         id,
         model_source,
@@ -2472,6 +2624,7 @@ fn decode_objective_view(input: &mut WireReader<'_>) -> Result<sim::ObjectiveVie
         capturing,
         contested,
         users,
+        flash,
     })
 }
 fn objective_optional(out: &mut WireWriter, value: Option<u32>) {

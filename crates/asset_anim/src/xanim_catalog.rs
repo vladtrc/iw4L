@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
@@ -34,7 +33,7 @@ impl XAnimKey {
 #[derive(Clone, Debug)]
 pub struct CapturedXAnim {
     pub namespace: AssetNamespace,
-    pub parts: RawXAnimParts,
+    pub parts: Arc<RawXAnimParts>,
 }
 
 impl CapturedXAnim {
@@ -45,13 +44,15 @@ impl CapturedXAnim {
 
 #[derive(Debug)]
 pub struct XAnimCatalog {
-    by_ns: HashMap<AssetNamespace, HashMap<String, CapturedXAnim>>,
+    entries: Vec<CapturedXAnim>,
+
+    indices: HashMap<XAnimKey, usize>,
 
     order: Vec<XAnimKey>,
 
     zones: Vec<ZoneOwner>,
 
-    decoded: Mutex<HashMap<AssetNamespace, HashMap<String, Arc<AnimClip>>>>,
+    decoded: Mutex<Vec<Option<Arc<AnimClip>>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -66,10 +67,11 @@ pub struct XAnimBuild {
 impl Default for XAnimCatalog {
     fn default() -> Self {
         Self {
-            by_ns: HashMap::new(),
+            entries: Vec::new(),
+            indices: HashMap::new(),
             order: Vec::new(),
             zones: Vec::new(),
-            decoded: Mutex::new(HashMap::new()),
+            decoded: Mutex::new(Vec::new()),
         }
     }
 }
@@ -94,7 +96,8 @@ impl Clone for XAnimCatalog {
             .unwrap_or_else(|poison| poison.into_inner())
             .clone();
         Self {
-            by_ns: self.by_ns.clone(),
+            entries: self.entries.clone(),
+            indices: self.indices.clone(),
             order: self.order.clone(),
             zones: self.zones.clone(),
             decoded: Mutex::new(decoded),
@@ -120,28 +123,15 @@ impl XAnimCatalog {
     }
 
     pub fn get(&self, ns: AssetNamespace, name: &str) -> Option<&CapturedXAnim> {
-        let map = self.by_ns.get(&ns)?;
-        if let Some(hit) = map.get(name) {
-            return Some(hit);
-        }
-        if name.as_bytes().iter().any(|&b| b.is_ascii_uppercase()) {
-            map.get(ascii_lower(name).as_str())
-        } else {
-            None
-        }
+        self.entries.get(self.index_by_name(ns, name)?)
     }
 
     fn has_key(&self, key: &XAnimKey) -> bool {
-        self.by_ns
-            .get(&key.namespace)
-            .is_some_and(|map| map.contains_key(&key.name))
+        self.indices.contains_key(key)
     }
 
     pub fn index_by_name(&self, ns: AssetNamespace, name: &str) -> Option<usize> {
-        let lowered = ascii_lookup(name);
-        self.order
-            .iter()
-            .position(|n| n.namespace == ns && n.name == lowered.as_ref())
+        self.indices.get(&XAnimKey::new(ns, name)).copied()
     }
 
     pub fn zone_of(&self, index: usize) -> ZoneOwner {
@@ -153,34 +143,27 @@ impl XAnimCatalog {
     }
 
     pub fn clip_at(&self, index: usize) -> Option<Arc<AnimClip>> {
-        let key = self.order.get(index)?;
-        self.clip(key.namespace, &key.name)
-    }
-
-    pub fn clip(&self, ns: AssetNamespace, name: &str) -> Option<Arc<AnimClip>> {
-        let lowered = ascii_lookup(name);
-        let name = lowered.as_ref();
+        let captured = self.entries.get(index)?;
         {
             let decoded = self
                 .decoded
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            if let Some(clip) = decoded.get(&ns).and_then(|map| map.get(name)) {
+            if let Some(clip) = decoded.get(index).and_then(Option::as_ref) {
                 return Some(Arc::clone(clip));
             }
         }
-        let captured = self.by_ns.get(&ns)?.get(name)?;
-        let clip = AnimClip::from_parts(&captured.parts).ok()?;
-        let arc = Arc::new(clip);
+        let arc = Arc::new(AnimClip::from_parts(&captured.parts).ok()?);
         let mut decoded = self
             .decoded
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        decoded
-            .entry(ns)
-            .or_default()
-            .insert(name.to_owned(), Arc::clone(&arc));
-        Some(arc)
+        let slot = decoded.get_mut(index)?;
+        Some(Arc::clone(slot.get_or_insert(arc)))
+    }
+
+    pub fn clip(&self, ns: AssetNamespace, name: &str) -> Option<Arc<AnimClip>> {
+        self.clip_at(self.index_by_name(ns, name)?)
     }
 
     pub fn decode(&self, ns: AssetNamespace, name: &str) -> Option<AnimClip> {
@@ -250,35 +233,25 @@ impl XAnimBuild {
         self.retain(key, captured);
     }
 
-    fn take_row(&mut self, key: &XAnimKey) -> Option<CapturedXAnim> {
-        self.catalog
-            .by_ns
-            .get_mut(&key.namespace)?
-            .remove(&key.name)
-    }
-
     fn retain(&mut self, key: XAnimKey, captured: CapturedXAnim) {
-        if let Some(pos) = self.catalog.order.iter().position(|n| n == &key) {
+        let mut decoded = self
+            .catalog
+            .decoded
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(&pos) = self.catalog.indices.get(&key) {
             self.catalog.zones[pos] = self.capture_zone;
+            self.catalog.entries[pos] = captured;
+            decoded[pos] = None;
         } else {
+            self.catalog
+                .indices
+                .insert(key.clone(), self.catalog.entries.len());
             self.catalog.order.push(key.clone());
             self.catalog.zones.push(self.capture_zone);
+            self.catalog.entries.push(captured);
+            decoded.push(None);
         }
-        {
-            let mut decoded = self
-                .catalog
-                .decoded
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            if let Some(map) = decoded.get_mut(&key.namespace) {
-                map.remove(&key.name);
-            }
-        }
-        self.catalog
-            .by_ns
-            .entry(key.namespace)
-            .or_default()
-            .insert(key.name, captured);
     }
 
     pub fn absorb(&mut self, mut local: Self) -> usize {
@@ -287,10 +260,8 @@ impl XAnimBuild {
         let saved_ns = self.capture_ns;
         let mut added = 0;
         let order = std::mem::take(&mut local.catalog.order);
-        for (i, key) in order.into_iter().enumerate() {
-            let Some(captured) = local.take_row(&key) else {
-                continue;
-            };
+        let entries = std::mem::take(&mut local.catalog.entries);
+        for (i, (key, captured)) in order.into_iter().zip(entries).enumerate() {
             let vacant = !self.catalog.has_key(&key);
             self.capture_zone = local
                 .catalog
@@ -385,7 +356,7 @@ impl XAnimBuild {
             AssetNamespace::Iw5,
             CapturedXAnim {
                 namespace: AssetNamespace::Iw5,
-                parts: RawXAnimParts {
+                parts: Arc::new(RawXAnimParts {
                     name: name.to_owned(),
                     data_byte,
                     data_short,
@@ -401,7 +372,7 @@ impl XAnimBuild {
                     notifies,
                     indices,
                     delta_trans: None,
-                },
+                }),
             },
         );
     }
@@ -478,7 +449,7 @@ impl XAnimBuild {
             AssetNamespace::T5,
             CapturedXAnim {
                 namespace: AssetNamespace::T5,
-                parts: RawXAnimParts {
+                parts: Arc::new(RawXAnimParts {
                     name: name.to_owned(),
                     data_byte,
                     data_short,
@@ -494,7 +465,7 @@ impl XAnimBuild {
                     notifies,
                     indices,
                     delta_trans: None,
-                },
+                }),
             },
         );
     }
@@ -580,7 +551,7 @@ impl AssetLinkSink for XAnimBuild {
 
         self.insert_captured(CapturedXAnim {
             namespace: AssetNamespace::Iw4,
-            parts: RawXAnimParts {
+            parts: Arc::new(RawXAnimParts {
                 name: name.to_owned(),
                 data_byte,
                 data_short,
@@ -596,7 +567,7 @@ impl AssetLinkSink for XAnimBuild {
                 notifies,
                 indices,
                 delta_trans,
-            },
+            }),
         });
         let _ = geometry.frequency;
         Ok(())
@@ -605,14 +576,6 @@ impl AssetLinkSink for XAnimBuild {
 
 fn ascii_lower(name: &str) -> String {
     name.to_ascii_lowercase()
-}
-
-fn ascii_lookup(name: &str) -> Cow<'_, str> {
-    if name.as_bytes().iter().all(|&b| !b.is_ascii_uppercase()) {
-        Cow::Borrowed(name)
-    } else {
-        Cow::Owned(name.to_ascii_lowercase())
-    }
 }
 
 fn copy_u8(s: &ZoneStream<'_>, ptr: Option<Ptr>, count: usize) -> Vec<u8> {

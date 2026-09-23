@@ -119,11 +119,8 @@ pub(crate) fn register_combat_fx_systems(app: &mut App) {
                 .in_set(frame::WorkerCmdSet::FxRemaining),
         )
         .add_systems(
-            Update,
-            generate_fx_transaction
-                .pipe(commit_fx_transaction)
-                .after(frame::WorkerCmdSet::FxRemaining)
-                .in_set(frame::WorkerCmdSet::FxVerts),
+            crate::assemble::StaticSunAndFx,
+            generate_fx_transaction.pipe(commit_fx_transaction),
         )
         .add_systems(
             Update,
@@ -435,6 +432,7 @@ struct FxPresentEnv<'w, 's> {
 
 #[allow(clippy::too_many_arguments)]
 fn generate_fx_transaction(
+    _main_thread: bevy::ecs::system::NonSendMarker,
     mut host: ResMut<HostFxSystem>,
     catalog: Option<Res<PreparedFxCatalog>>,
     dvars: Res<FxMarkDvars>,
@@ -612,23 +610,6 @@ fn commit_fx_transaction(
         &mut env.staged_models,
     );
     model_plan.publish_rebuild(&mut env.staged_models);
-    for light in &out.omni_lights {
-        match lighting_iw4::r_add_omni_light_to_scene_allows(
-            world_present,
-            light.radius,
-            env.dlights.scene.len() as u32,
-        ) {
-            Ok(()) => env.dlights.scene.push(lighting_iw4::r_omni_light_pack(
-                light.origin,
-                light.radius,
-                light.color_bgr,
-            )),
-            Err(lighting_iw4::AddOmniLightRefuse::Cap) => {
-                env.dlights.cap_full = env.dlights.cap_full.saturating_add(1);
-            }
-            Err(_) => {}
-        }
-    }
     let spot_cone = lighting_iw4::SpotLightConeDvars::register_defaults();
     for light in &out.spot_lights {
         match lighting_iw4::r_add_omni_light_to_scene_allows(
@@ -642,6 +623,23 @@ fn commit_fx_transaction(
                 light.radius,
                 light.color_bgr,
                 spot_cone,
+            )),
+            Err(lighting_iw4::AddOmniLightRefuse::Cap) => {
+                env.dlights.cap_full = env.dlights.cap_full.saturating_add(1);
+            }
+            Err(_) => {}
+        }
+    }
+    for light in &out.omni_lights {
+        match lighting_iw4::r_add_omni_light_to_scene_allows(
+            world_present,
+            light.radius,
+            env.dlights.scene.len() as u32,
+        ) {
+            Ok(()) => env.dlights.scene.push(lighting_iw4::r_omni_light_pack(
+                light.origin,
+                light.radius,
+                light.color_bgr,
             )),
             Err(lighting_iw4::AddOmniLightRefuse::Cap) => {
                 env.dlights.cap_full = env.dlights.cap_full.saturating_add(1);
@@ -2677,7 +2675,8 @@ fn drain_bullet_hit_fx(
             payload.attacker_entity_num,
             payload.weapon,
             payload.correlation,
-            0,
+            payload.pellet,
+            payload.hand,
             payload.origin2,
             payload.origin,
             payload.direction,
@@ -2733,6 +2732,7 @@ fn drain_pellet_fx(
             record.weapon,
             record.correlation,
             record.pellet,
+            record.hand,
             record.start,
             record.end,
             record.normal,

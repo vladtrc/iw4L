@@ -299,7 +299,7 @@ impl RetailWorldVertexPayload {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct WorldDraw {
     pub batches: Vec<WorldBatch>,
 
@@ -416,7 +416,7 @@ pub struct WorldSunLight {
     pub specular: [f32; 4],
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct WorldBatch {
     pub mesh: Mesh,
     pub packed_indices: Vec<u32>,
@@ -428,7 +428,7 @@ pub struct WorldBatch {
     pub reflection_probe_index: u8,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct WorldLightmap {
     pub primary_image: Option<Image>,
 
@@ -502,6 +502,44 @@ pub struct CapturedLightDef {
     pub attenuation_width: Option<u16>,
     pub attenuation_sampler: u8,
     pub lmap_lookup_start: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ResolvedLightDef {
+    pub attenuation_image: Option<usize>,
+    pub attenuation_sampler: u8,
+    pub falloff_image_width: Option<u16>,
+    pub lmap_lookup_start: i32,
+}
+
+pub fn resolve_named_light_def(
+    name: &str,
+    map_defs: &[CapturedLightDef],
+    common_defs: &[CapturedLightDef],
+    catalog: &MaterialDefinitions,
+) -> Option<ResolvedLightDef> {
+    let def = find_light_def(name, map_defs, common_defs)?;
+    let image = def
+        .attenuation_image_name
+        .as_deref()
+        .and_then(|name| catalog.image_index_by_name(name));
+    let width = image
+        .and_then(|index| catalog.images.get(index))
+        .and_then(|image| {
+            image
+                .decoded
+                .as_ref()
+                .and_then(|decoded| u16::try_from(decoded.texture_descriptor.size.width).ok())
+                .or(Some(image.width))
+        })
+        .filter(|&width| width != 0)
+        .or(def.attenuation_width.filter(|&width| width != 0));
+    Some(ResolvedLightDef {
+        attenuation_image: image,
+        attenuation_sampler: def.attenuation_sampler,
+        falloff_image_width: width,
+        lmap_lookup_start: def.lmap_lookup_start,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]

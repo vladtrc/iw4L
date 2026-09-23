@@ -33,6 +33,7 @@ pub(super) fn draw_exact_colour(
         (
             mut focus_submit,
             mut scratch,
+            mut shadow_scratch,
             mut cam,
             mut working_set,
             mut texture_table,
@@ -50,6 +51,7 @@ pub(super) fn draw_exact_colour(
         (
             ResMut<FocusedOwnerSubmitState>,
             ResMut<ColourSubmitScratch>,
+            ResMut<ShadowSubmitScratch>,
             ResMut<CameraPrepareState>,
             ResMut<crate::ColourWorkingSet>,
             ResMut<SceneTextureTables>,
@@ -98,7 +100,7 @@ pub(super) fn draw_exact_colour(
     }
 
     let scene_epoch = scratch.prepared_scene_epoch;
-    let shadow_epoch = scratch.prepared_shadow_epoch;
+    let shadow_epoch = shadow_scratch.prepared_shadow_epoch;
     let table_epoch_ok = scene_epoch.generation == extracted.world.generation
         && binding_cache.generation == extracted.world.generation
         && shadow_binding.generation == extracted.world.generation
@@ -138,11 +140,15 @@ pub(super) fn draw_exact_colour(
     let light = products.0.product(FrameProductKind::Light);
     let emissive = products.0.product(FrameProductKind::Emissive);
     scratch.skinned_tess.upload(&device, &queue);
+    shadow_scratch.skinned_tess.upload(&device, &queue);
     let tess = std::mem::take(&mut scratch.skinned_tess);
+    let shadow_tess = std::mem::take(&mut shadow_scratch.skinned_tess);
     let smodel_skinned_vertex = tess.vertex_buffer();
     let smodel_skinned_index = tess.index_buffer();
-    let sun_prepared = std::mem::take(&mut scratch.sun_prepared);
-    let spot_prepared = std::mem::take(&mut scratch.spot_prepared);
+    let shadow_skinned_vertex = shadow_tess.vertex_buffer();
+    let shadow_skinned_index = shadow_tess.index_buffer();
+    let sun_prepared = std::mem::take(&mut shadow_scratch.sun_prepared);
+    let spot_prepared = std::mem::take(&mut shadow_scratch.spot_prepared);
     let sun_started = colour_census_clock(census_on);
     let sun_submit = record_shadowmap_sun(
         sun_prepared,
@@ -154,8 +160,8 @@ pub(super) fn draw_exact_colour(
         &shadow_arena,
         &static_draws,
         &mut context,
-        smodel_skinned_vertex,
-        smodel_skinned_index,
+        shadow_skinned_vertex,
+        shadow_skinned_index,
     );
     let spot_submit = record_shadowmap_spot(
         spot_prepared,
@@ -166,8 +172,8 @@ pub(super) fn draw_exact_colour(
         &mut shadow_table,
         &spot_arena,
         &mut context,
-        smodel_skinned_vertex,
-        smodel_skinned_index,
+        shadow_skinned_vertex,
+        shadow_skinned_index,
     );
     let mut record_n = sun_submit.record_n;
     record_n.add(spot_submit.record_n);

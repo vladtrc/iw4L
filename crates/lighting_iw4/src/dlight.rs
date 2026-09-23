@@ -106,63 +106,78 @@ pub fn cull_point_and_radius_from_planes(
     })
 }
 
-#[must_use]
-pub fn spot_dlight0_frustum_culls(
-    slots: &[SceneDlight],
-    planes: Option<&[[f32; 4]]>,
-) -> Option<bool> {
-    let Some(first) = slots.first() else {
-        return Some(true);
-    };
-    if first.light.light_type != GFX_LIGHT_TYPE_SPOT {
-        return Some(true);
-    }
-    let planes = planes.filter(|p| !p.is_empty())?;
-    Some(cull_point_and_radius_from_planes(
-        planes,
-        first.light.origin,
-        first.light.radius,
-    ))
-}
-
-#[must_use]
-pub fn spot_dlight0_special_copy_allows(
-    limit: u32,
-    sm3: bool,
-    slots: &[SceneDlight],
-    frustum_culls: Option<bool>,
-) -> bool {
-    if limit == 0 || !sm3 {
-        return false;
-    }
-    let Some(first) = slots.first() else {
-        return false;
-    };
-    if first.light.light_type != GFX_LIGHT_TYPE_SPOT {
-        return false;
-    }
-    matches!(frustum_culls, Some(false))
-}
-
 pub fn append_scene_dlights_to_backend(
     slots: &[SceneDlight],
     view: [f32; 3],
     limit: u32,
     sm3: bool,
-    frustum_culls_dlight0: Option<bool>,
+    planes: Option<&[[f32; 4]]>,
     dest: &mut [GfxLightPack],
 ) -> usize {
-    let mut w = 0usize;
-    if spot_dlight0_special_copy_allows(limit, sm3, slots, frustum_culls_dlight0) && w < dest.len()
-    {
-        dest[w] = slots[0].light;
-        w += 1;
+    if limit == 0 {
+        return 0;
     }
-    let mut ids = [0usize; R_DLIGHT_LIMIT_MAX as usize];
-    let n = dlight_select_visible(slots, view, limit, &mut ids);
-    for &i in &ids[..n] {
+    let mut w = 0usize;
+    if sm3 && let Some(planes) = planes.filter(|planes| !planes.is_empty()) {
+        let spot = slots
+            .iter()
+            .filter(|slot| {
+                !slot.used
+                    && slot.light.light_type == GFX_LIGHT_TYPE_SPOT
+                    && slot.light.radius > 0.0
+                    && !cull_point_and_radius_from_planes(
+                        planes,
+                        slot.light.origin,
+                        slot.light.radius,
+                    )
+            })
+            .min_by(|a, b| {
+                match (
+                    dlight_partition_prefers(&a.light, &b.light, view),
+                    dlight_partition_prefers(&b.light, &a.light, view),
+                ) {
+                    (true, false) => core::cmp::Ordering::Less,
+                    (false, true) => core::cmp::Ordering::Greater,
+                    _ => core::cmp::Ordering::Equal,
+                }
+            });
+        if let Some(spot) = spot
+            && w < dest.len()
+        {
+            dest[w] = spot.light;
+            w += 1;
+        }
+    }
+    let mut omni_ids = [0usize; R_DLIGHT_SCENE_CAP as usize];
+    let mut omni_n = 0usize;
+    for (index, slot) in slots.iter().enumerate() {
+        if omni_n == omni_ids.len() {
+            break;
+        }
+        if !slot.used && slot.light.light_type != GFX_LIGHT_TYPE_SPOT {
+            omni_ids[omni_n] = index;
+            omni_n += 1;
+        }
+    }
+    let omni_limit = core::cmp::min(limit, R_DLIGHT_LIMIT_MAX) as usize;
+    if omni_n > omni_limit {
+        omni_ids[..omni_n].sort_by(|&a, &b| {
+            let lhs = &slots[a].light;
+            let rhs = &slots[b].light;
+            match (
+                dlight_partition_prefers(lhs, rhs, view),
+                dlight_partition_prefers(rhs, lhs, view),
+            ) {
+                (true, false) => core::cmp::Ordering::Less,
+                (false, true) => core::cmp::Ordering::Greater,
+                _ => a.cmp(&b),
+            }
+        });
+        omni_n = omni_limit;
+    }
+    for &i in &omni_ids[..omni_n] {
         let light = slots[i].light;
-        if dlight_copies_to_backend(&light) && w < dest.len() {
+        if w < dest.len() {
             dest[w] = light;
             w += 1;
         }

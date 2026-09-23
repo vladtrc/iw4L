@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::hash::Hash;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -84,6 +85,156 @@ pub(crate) struct PreparedPcm {
     sample_rate: u32,
 }
 
+#[derive(Clone)]
+struct LoadedClipKey {
+    encoded: Arc<[u8]>,
+    format: i32,
+    rate: u32,
+    bits: i32,
+    channels: i32,
+    samples: u32,
+    block_size: u32,
+    seek_table: Vec<u32>,
+}
+
+impl PartialEq for LoadedClipKey {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.encoded, &other.encoded)
+            && self.format == other.format
+            && self.rate == other.rate
+            && self.bits == other.bits
+            && self.channels == other.channels
+            && self.samples == other.samples
+            && self.block_size == other.block_size
+            && self.seek_table == other.seek_table
+    }
+}
+
+impl Eq for LoadedClipKey {}
+
+impl std::hash::Hash for LoadedClipKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.encoded) as *const u8 as usize).hash(state);
+        self.format.hash(state);
+        self.rate.hash(state);
+        self.bits.hash(state);
+        self.channels.hash(state);
+        self.samples.hash(state);
+        self.block_size.hash(state);
+        self.seek_table.hash(state);
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum ResidentClipKey {
+    Common(LoadedClipKey),
+    Map(LoadedClipKey),
+    Streamed(ClipKey),
+}
+
+impl ResidentClipKey {
+    fn common(&self) -> bool {
+        matches!(self, Self::Common(_))
+    }
+}
+
+fn resident_clip_key(bank: &SoundCatalog, key: &ClipKey) -> Option<ResidentClipKey> {
+    let ClipKey::Loaded(index) = key else {
+        return Some(ResidentClipKey::Streamed(key.clone()));
+    };
+    let sound = bank.pcm_at(*index)?;
+    let common = matches!(
+        sound.zone.as_str(),
+        "code_post_gfx_mp"
+            | "localized_code_post_gfx_mp"
+            | "patch_mp"
+            | "common_mp"
+            | "localized_common_mp"
+    );
+    let loaded = LoadedClipKey {
+        encoded: sound.encoded_arc(),
+        format: sound.format(),
+        rate: sound.rate,
+        bits: sound.bits(),
+        channels: sound.channels(),
+        samples: sound.samples,
+        block_size: sound.block_size,
+        seek_table: sound.seek_table.clone(),
+    };
+    Some(if common {
+        ResidentClipKey::Common(loaded)
+    } else {
+        ResidentClipKey::Map(loaded)
+    })
+}
+
+#[derive(Default)]
+struct ResidentClipCacheInner {
+    profile_id: u64,
+    bank: std::sync::Weak<SoundCatalog>,
+    prepared: HashMap<ResidentClipKey, PreparedPcm>,
+    dry_handles: HashMap<ResidentClipKey, Handle<PcmAudio>>,
+}
+
+#[derive(Resource, Clone, Default)]
+pub(crate) struct ResidentClipCache(Arc<Mutex<ResidentClipCacheInner>>);
+
+impl ResidentClipCache {
+    fn use_profile(&self, profile_id: u64) {
+        let mut inner = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        if inner.profile_id != profile_id {
+            inner.prepared.clear();
+            inner.dry_handles.clear();
+            inner.profile_id = profile_id;
+        }
+    }
+
+    fn use_bank(&self, bank: &Arc<SoundCatalog>) {
+        let mut inner = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        if std::sync::Weak::ptr_eq(&inner.bank, &Arc::downgrade(bank)) {
+            return;
+        }
+        inner.prepared.retain(|key, _| key.common());
+        inner.dry_handles.retain(|key, _| key.common());
+        inner.bank = Arc::downgrade(bank);
+    }
+
+    fn ready(&self, profile_id: u64, key: &ResidentClipKey) -> Option<PreparedPcm> {
+        let inner = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        (profile_id != 0 && inner.profile_id == profile_id)
+            .then(|| inner.prepared.get(key).cloned())
+            .flatten()
+    }
+
+    fn remember(&self, profile_id: u64, key: ResidentClipKey, pcm: PreparedPcm) {
+        let mut inner = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        if profile_id != 0 && inner.profile_id == profile_id {
+            inner.prepared.entry(key).or_insert(pcm);
+        }
+    }
+
+    fn dry_handle(
+        &self,
+        profile_id: u64,
+        key: ResidentClipKey,
+        assets: &mut Assets<PcmAudio>,
+        pcm: &PcmAudio,
+    ) -> Option<(Handle<PcmAudio>, bool)> {
+        let mut inner = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        if profile_id == 0 || inner.profile_id != profile_id {
+            return None;
+        }
+        if let Some(handle) = inner.dry_handles.get(&key)
+            && assets.get(handle.id()).is_some()
+        {
+            return Some((handle.clone(), true));
+        }
+        let handle = assets.add(pcm.clone());
+        inner.dry_handles.insert(key, handle.clone());
+        Some((handle, false))
+    }
+}
+
 impl PreparedPcm {
     pub(crate) fn into_audio(self) -> Option<PcmAudio> {
         PcmAudio::from_prepared(self.samples, self.channels, self.sample_rate)
@@ -96,13 +247,39 @@ impl PreparedPcm {
 /// only decoder here that gains anything from the grouping.
 pub const PREP_BATCH: usize = 64;
 
+/// Kept after the sender so the channel closes before these workers are joined.
+struct ClipWorkers {
+    handles: Vec<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for ClipWorkers {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        let mut joined = 0;
+        for handle in self.handles.drain(..) {
+            if handle.join().is_err() {
+                diag::warn!(Audio, "audio: clip prep worker panicked during retirement");
+            }
+            joined += 1;
+        }
+        if joined != 0 {
+            diag::info!(Audio, "audio: clip prep workers joined={joined}");
+        }
+    }
+}
+
 #[derive(Resource)]
 pub struct ClipStore {
     bank: Arc<SoundCatalog>,
     tx: Sender<ClipJob>,
     queued: HashSet<ClipKey>,
     outcomes: Arc<Mutex<HashMap<ClipKey, Result<PreparedPcm, ClipError>>>>,
-    workers: usize,
+    workers: ClipWorkers,
+    clip_cache: Option<ResidentClipCache>,
+    common_profile_id: u64,
+    reused_clips: usize,
+    reused_bytes: u64,
 
     match_live: bool,
     late_prepares: u32,
@@ -110,23 +287,42 @@ pub struct ClipStore {
 
 impl ClipStore {
     pub fn start(bank: Arc<SoundCatalog>, iwd: Option<Arc<NamespaceSoundIwd>>) -> Self {
+        Self::start_with_common(bank, iwd, 0, None)
+    }
+
+    pub(crate) fn start_with_common(
+        bank: Arc<SoundCatalog>,
+        iwd: Option<Arc<NamespaceSoundIwd>>,
+        common_profile_id: u64,
+        clip_cache: Option<ResidentClipCache>,
+    ) -> Self {
+        if let Some(cache) = &clip_cache {
+            cache.use_profile(common_profile_id);
+            cache.use_bank(&bank);
+        }
         let workers = std::thread::available_parallelism()
             .map(|n| n.get().saturating_sub(2).clamp(1, 4))
             .unwrap_or(1);
         let (tx, rx) = channel::<ClipJob>();
         let rx = Arc::new(Mutex::new(rx));
         let outcomes = Arc::new(Mutex::new(HashMap::new()));
-        let mut started_workers = 0;
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = Vec::with_capacity(workers);
         for slot in 0..workers {
             let rx = Arc::clone(&rx);
             let bank = Arc::clone(&bank);
             let iwd = iwd.clone();
             let outcomes = Arc::clone(&outcomes);
+            let clip_cache = clip_cache.clone();
+            let stop_worker = Arc::clone(&stop);
 
             let spawned = std::thread::Builder::new()
                 .name(format!("clip-prep-{slot}"))
                 .spawn(move || {
                     loop {
+                        if stop_worker.load(Ordering::Acquire) {
+                            return;
+                        }
                         // A match queues every clip it needs at once, and one
                         // of the decoders below is an external process whose
                         // startup costs more than the decode. So a worker takes
@@ -146,6 +342,9 @@ impl ClipStore {
                             }
                             jobs
                         };
+                        if stop_worker.load(Ordering::Acquire) {
+                            return;
+                        }
                         for job in &jobs {
                             QUEUE_WAIT_NS.fetch_add(
                                 job.queued_at.elapsed().as_nanos() as u64,
@@ -153,6 +352,18 @@ impl ClipStore {
                             );
                         }
                         let prepared = prepare_jobs(&bank, iwd.as_deref(), &jobs);
+                        if stop_worker.load(Ordering::Acquire) {
+                            return;
+                        }
+                        if let Some(cache) = &clip_cache {
+                            for (job, result) in jobs.iter().zip(&prepared) {
+                                if let Ok(pcm) = result
+                                    && let Some(key) = resident_clip_key(&bank, &job.key)
+                                {
+                                    cache.remember(common_profile_id, key, pcm.clone());
+                                }
+                            }
+                        }
                         let mut guard =
                             outcomes.lock().unwrap_or_else(|poison| poison.into_inner());
                         for (job, result) in jobs.into_iter().zip(prepared) {
@@ -161,24 +372,43 @@ impl ClipStore {
                     }
                 });
             match spawned {
-                Ok(_) => started_workers += 1,
+                Ok(handle) => handles.push(handle),
                 Err(e) => diag::warn!(Audio, "audio: clip prep worker {slot} not started ({e})"),
             }
         }
-        WORKERS.fetch_add(started_workers as u64, Ordering::Relaxed);
+        WORKERS.fetch_add(handles.len() as u64, Ordering::Relaxed);
         Self {
             bank,
             tx,
             queued: HashSet::new(),
             outcomes,
-            workers: started_workers,
+            workers: ClipWorkers { handles, stop },
+            clip_cache,
+            common_profile_id,
+            reused_clips: 0,
+            reused_bytes: 0,
             match_live: false,
             late_prepares: 0,
         }
     }
 
     pub fn workers(&self) -> usize {
-        self.workers
+        self.workers.handles.len()
+    }
+
+    pub fn reused_resident(&self) -> (usize, u64) {
+        (self.reused_clips, self.reused_bytes)
+    }
+
+    pub(crate) fn resident_dry_handle(
+        &self,
+        clip: &ClipKey,
+        assets: &mut Assets<PcmAudio>,
+        pcm: &PcmAudio,
+    ) -> Option<(Handle<PcmAudio>, bool)> {
+        let cache = self.clip_cache.as_ref()?;
+        let key = resident_clip_key(&self.bank, clip)?;
+        cache.dry_handle(self.common_profile_id, key, assets, pcm)
     }
 
     pub fn arm_match_live(&mut self) {
@@ -215,6 +445,18 @@ impl ClipStore {
     pub(crate) fn request(&mut self, key: ClipKey) -> bool {
         REQUESTS.fetch_add(1, Ordering::Relaxed);
         if self.ready(&key).is_some() {
+            return false;
+        }
+        if let Some(pcm) = self.clip_cache.as_ref().and_then(|cache| {
+            resident_clip_key(&self.bank, &key)
+                .and_then(|source| cache.ready(self.common_profile_id, &source))
+        }) {
+            self.reused_clips += 1;
+            self.reused_bytes += (pcm.samples.len() * size_of::<f32>()) as u64;
+            self.outcomes
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .insert(key, Ok(pcm));
             return false;
         }
         if !self.queued.insert(key.clone()) {

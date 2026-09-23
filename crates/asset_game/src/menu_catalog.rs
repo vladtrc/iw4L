@@ -249,6 +249,8 @@ pub struct MenuCatalog {
 
     pub material_state_bits: BTreeMap<String, asset_iw4::ColorPassAgreement<[u32; 2]>>,
 
+    pub material_2d_plans: BTreeMap<String, HudMaterialPlan>,
+
     pub material_images: BTreeMap<String, String>,
     pub lists: Vec<(String, i32)>,
     pub walked: usize,
@@ -256,9 +258,75 @@ pub struct MenuCatalog {
     pub font_headers: usize,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HudMaterialPlan {
+    pub technique_slots: Option<u64>,
+    pub state_bits_entry: Option<[u8; asset_iw4::size::TECHNIQUE_SLOT_COUNT]>,
+    pub state_rows: Vec<[u32; 2]>,
+    pub unlit_pass_states: Vec<[u32; 2]>,
+    pub unlit_pass_count: Option<u8>,
+    pub textures: Vec<HudMaterialTextureBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HudMaterialTextureBinding {
+    pub name_hash: u32,
+    pub name_start: u8,
+    pub name_end: u8,
+    pub sampler_state: u8,
+    pub semantic: u8,
+    pub image: Option<String>,
+}
+
 impl MenuCatalog {
     pub fn get(&self, name: &str) -> Option<&MenuDef> {
         self.menus.get(name)
+    }
+
+    pub fn played_sound_aliases(&self) -> std::collections::BTreeSet<&str> {
+        fn scan<'a>(script: &'a str, out: &mut std::collections::BTreeSet<&'a str>) {
+            for command in script.split(';') {
+                let mut words = command
+                    .split_whitespace()
+                    .map(|word| word.trim_matches('"'));
+                if words
+                    .next()
+                    .is_some_and(|verb| verb.eq_ignore_ascii_case("play"))
+                    && let Some(alias) = words.next().filter(|alias| !alias.is_empty())
+                {
+                    out.insert(alias);
+                }
+            }
+        }
+        let mut out = std::collections::BTreeSet::new();
+        for menu in self.menus.values() {
+            if !menu.sound_name.is_empty() {
+                out.insert(menu.sound_name.as_str());
+            }
+            for script in menu
+                .on_open
+                .iter()
+                .chain(&menu.on_close)
+                .chain(&menu.on_close_request)
+                .chain(&menu.on_esc)
+            {
+                scan(script, &mut out);
+            }
+            for item in &menu.items {
+                if !item.focus_sound.is_empty() {
+                    out.insert(item.focus_sound.as_str());
+                }
+                for script in item
+                    .action
+                    .iter()
+                    .chain(&item.mouse_enter)
+                    .chain(&item.on_focus)
+                {
+                    scan(script, &mut out);
+                }
+            }
+        }
+        out
     }
 
     pub fn font(&self, name: &str) -> Option<&FontDef> {
@@ -322,6 +390,7 @@ impl MenuCatalog {
             self.rawfiles.insert(name, text);
         }
         self.material_state_bits.extend(other.material_state_bits);
+        self.material_2d_plans.extend(other.material_2d_plans);
         for (name, image) in other.material_images {
             self.material_images.insert(name, image);
         }
@@ -421,6 +490,7 @@ fn load_menu_catalog_with_iwd(path: &Path, games: Option<&Path>) -> Result<MenuC
         script_set_stack: Vec::new(),
         image_links: HashMap::new(),
         images: Vec::new(),
+        technique_links: HashMap::new(),
         material_ts2d: HashMap::new(),
         loading_asset: None,
     };
@@ -434,6 +504,12 @@ fn load_menu_catalog_with_iwd(path: &Path, games: Option<&Path>) -> Result<MenuC
 #[derive(Clone, Copy)]
 enum ImageLink {
     Direct(usize),
+    Alias(Ptr),
+}
+
+#[derive(Clone, Copy)]
+enum TechniqueLink {
+    Direct(fastfile_iw4::TechniqueSetGeometry),
     Alias(Ptr),
 }
 
@@ -453,6 +529,8 @@ struct MenuSink {
     image_links: HashMap<Ptr, ImageLink>,
     images: Vec<CapturedZoneImage>,
 
+    technique_links: HashMap<Ptr, TechniqueLink>,
+
     material_ts2d: HashMap<String, usize>,
 
     loading_asset: Option<(usize, AssetType, Ptr)>,
@@ -460,6 +538,57 @@ struct MenuSink {
 
 fn ptr_key(p: Ptr) -> (u8, u32) {
     (p.block, p.offset)
+}
+
+fn hud_pass_state_bits(
+    state_bits_entry: Option<&[u8; asset_iw4::size::TECHNIQUE_SLOT_COUNT]>,
+    table: &[[u32; 2]],
+    technique_slots: Option<u64>,
+) -> asset_iw4::ColorPassAgreement<[u32; 2]> {
+    let technique_slots = technique_slots.filter(|&slots| slots != 0).or_else(|| {
+        state_bits_entry.map(|entries| {
+            entries
+                .iter()
+                .enumerate()
+                .filter(|&(_, &entry)| entry != u8::MAX)
+                .fold(0u64, |slots, (i, _)| slots | 1 << i)
+        })
+    });
+    if let Some(slots) = technique_slots
+        && let Some(row) = asset_iw4::color_pass_row_for_tech_type_pass(
+            state_bits_entry,
+            table,
+            slots,
+            asset_iw4::TECHNIQUE_UNLIT,
+            0,
+        )
+    {
+        return asset_iw4::ColorPassAgreement::Agreed(row);
+    }
+    asset_iw4::color_pass_agreement(state_bits_entry, table, technique_slots, |bits| bits)
+}
+
+fn hud_unlit_pass_states(
+    state_bits_entry: Option<&[u8; asset_iw4::size::TECHNIQUE_SLOT_COUNT]>,
+    table: &[[u32; 2]],
+    technique_set: Option<fastfile_iw4::TechniqueSetGeometry>,
+) -> (Option<u8>, Vec<[u32; 2]>) {
+    let count = technique_set
+        .filter(|set| set.technique_slots_scanned & (1 << asset_iw4::TECHNIQUE_UNLIT) != 0)
+        .map(|set| set.pass_count_by_slot[asset_iw4::TECHNIQUE_UNLIT]);
+    let states = (0..usize::from(count.unwrap_or(0)))
+        .map(|pass| {
+            asset_iw4::color_pass_row_for_tech_type_pass(
+                state_bits_entry,
+                table,
+                technique_set.map_or(0, |set| set.technique_slots),
+                asset_iw4::TECHNIQUE_UNLIT,
+                pass,
+            )
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    (count, states)
 }
 
 impl MenuSink {
@@ -490,6 +619,34 @@ impl MenuSink {
             match self.image_links.get(&slot).copied()? {
                 ImageLink::Direct(index) => return Some(index),
                 ImageLink::Alias(target) => slot = target,
+            }
+        }
+        None
+    }
+
+    fn bind_technique(&mut self, slot: Ptr, link: TechniqueLink) {
+        if block_is_aliasable(slot.block) {
+            self.technique_links.insert(slot, link);
+        }
+    }
+
+    fn material_technique_set(
+        &self,
+        s: &ZoneStream<'_>,
+        field: Ptr,
+    ) -> Option<fastfile_iw4::TechniqueSetGeometry> {
+        match s.ptr_at(field, 0).ok()? {
+            ZonePtr::Null => None,
+            ZonePtr::Offset(target) => self.resolve_technique_set(target),
+            ZonePtr::Following | ZonePtr::Insert => s.latest_technique_set(),
+        }
+    }
+
+    fn resolve_technique_set(&self, mut slot: Ptr) -> Option<fastfile_iw4::TechniqueSetGeometry> {
+        for _ in 0..32 {
+            match self.technique_links.get(&slot).copied()? {
+                TechniqueLink::Direct(set) => return Some(set),
+                TechniqueLink::Alias(target) => slot = target,
             }
         }
         None
@@ -541,34 +698,58 @@ impl MenuSink {
                 Some([s.u32_at(p, 0).ok()?, s.u32_at(p, 4).ok()?])
             })
             .collect();
+        let technique_set = geometry
+            .technique_set
+            .and_then(|field| self.material_technique_set(s, field));
+        let technique_slots = technique_set.map(|set| set.technique_slots);
         if geometry.state_bits_count > 0 {
             self.catalog.material_state_bits.insert(
                 key.clone(),
-                asset_iw4::color_pass_agreement(None, &bits, None, |bits| bits),
+                hud_pass_state_bits(geometry.state_bits_entry.as_ref(), &bits, technique_slots),
             );
         }
-        let Some(table) = geometry.textures else {
-            return;
-        };
+        let (unlit_pass_count, unlit_pass_states) =
+            hud_unlit_pass_states(geometry.state_bits_entry.as_ref(), &bits, technique_set);
         let mut ts2d = None;
         let mut color = None;
-        for i in 0..geometry.texture_count {
-            let texture = table.at(i * geometry.texture_stride);
-            let Ok(semantic) = s.u8_at(texture, 7) else {
-                continue;
-            };
-            if semantic == 11 {
-                continue;
-            }
-            let Some(image) = self.resolve_image(texture.at(8)) else {
-                continue;
-            };
-            if semantic == TS_2D {
-                ts2d = Some(image);
-            } else if semantic == TS_COLOR_MAP {
-                color = Some(image);
+        let mut bindings = Vec::with_capacity(geometry.texture_count);
+        if let Some(table) = geometry.textures {
+            for i in 0..geometry.texture_count {
+                let texture = table.at(i * geometry.texture_stride);
+                let Ok(semantic) = s.u8_at(texture, 7) else {
+                    continue;
+                };
+                let image = (semantic != 11)
+                    .then(|| self.resolve_image(texture.at(8)))
+                    .flatten();
+                bindings.push(HudMaterialTextureBinding {
+                    name_hash: s.u32_at(texture, 0).unwrap_or(0),
+                    name_start: s.u8_at(texture, 4).unwrap_or(0),
+                    name_end: s.u8_at(texture, 5).unwrap_or(0),
+                    sampler_state: s.u8_at(texture, 6).unwrap_or(0),
+                    semantic,
+                    image: image.and_then(|index| self.images.get(index).map(|i| i.name.clone())),
+                });
+                if let Some(image) = image {
+                    if semantic == TS_2D {
+                        ts2d = Some(image);
+                    } else if semantic == TS_COLOR_MAP {
+                        color = Some(image);
+                    }
+                }
             }
         }
+        self.catalog.material_2d_plans.insert(
+            key.clone(),
+            HudMaterialPlan {
+                technique_slots,
+                state_bits_entry: geometry.state_bits_entry,
+                state_rows: bits,
+                unlit_pass_states,
+                unlit_pass_count,
+                textures: bindings,
+            },
+        );
         if let Some(image) = ts2d.or(color) {
             if let Some(captured) = self.images.get(image) {
                 self.catalog
@@ -774,6 +955,15 @@ impl AssetLinkSink for MenuSink {
                 }
                 return Ok(());
             }
+            AssetType::TechniqueSet => {
+                if let Some(set) = s.latest_technique_set() {
+                    self.bind_technique(slot, TechniqueLink::Direct(set));
+                    if let Some(ins) = insert_slot {
+                        self.bind_technique(ins, TechniqueLink::Direct(set));
+                    }
+                }
+                return Ok(());
+            }
             AssetType::Material => s
                 .latest_material()
                 .and_then(|g| g.name)
@@ -801,6 +991,9 @@ impl AssetLinkSink for MenuSink {
     fn alias(&mut self, ty: AssetType, slot: Ptr, target: Ptr) -> fastfile_iw4::Result<()> {
         if ty == AssetType::Image {
             self.bind_image(slot, ImageLink::Alias(target));
+        }
+        if ty == AssetType::TechniqueSet {
+            self.bind_technique(slot, TechniqueLink::Alias(target));
         }
         if let Some(name) = self.names.get(&ptr_key(target)).cloned() {
             self.bind_name(slot, &name);

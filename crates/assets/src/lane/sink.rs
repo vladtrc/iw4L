@@ -6,8 +6,145 @@ use fastfile_iw4::{
 };
 
 use super::helpers::MapXModelCatalog;
+
 fn is_cac_table(name: &str) -> bool {
-    crate::is_stats_table_name(name) || name.eq_ignore_ascii_case("mp/attachmentTable.csv")
+    crate::is_stats_table_name(name)
+        || name.eq_ignore_ascii_case("mp/attachmentTable.csv")
+        || name.eq_ignore_ascii_case("mp/attachmentCombos.csv")
+}
+
+fn iw5_cac_table(
+    s: &fastfile_iw5::ZoneStream<'_>,
+    header: fastfile_iw5::Ptr,
+) -> Option<crate::CapturedStringTable> {
+    let name = match s.ptr_at(header, 0).ok() {
+        Some(fastfile_iw5::ZonePtr::Offset(p)) => {
+            s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned()
+        }
+        _ => return None,
+    };
+    if !is_cac_table(&name) {
+        return None;
+    }
+    let columns = s.i32_at(header, s.layout(4, 8)).unwrap_or(0).max(0) as usize;
+    let rows = s.i32_at(header, s.layout(8, 12)).unwrap_or(0).max(0) as usize;
+    let cells_n = columns.saturating_mul(rows);
+    let arr = match s.ptr_at(header, s.layout(12, 16)).ok() {
+        Some(fastfile_iw5::ZonePtr::Offset(p)) => s.resolve_alias(p),
+        _ => {
+            return Some(crate::CapturedStringTable {
+                name,
+                columns,
+                rows,
+                cells: Vec::new(),
+            });
+        }
+    };
+    let mut cells = Vec::with_capacity(cells_n);
+    let cell_sz = s.layout(fastfile_iw5::size::STRING_TABLE_CELL, 16);
+    for i in 0..cells_n {
+        let cell = arr.at(i * cell_sz);
+        let value = match s.ptr_at(cell, 0).ok() {
+            Some(fastfile_iw5::ZonePtr::Offset(p)) => {
+                s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned()
+            }
+            _ => String::new(),
+        };
+        cells.push(value);
+    }
+    Some(crate::CapturedStringTable {
+        name,
+        columns,
+        rows,
+        cells,
+    })
+}
+
+fn t5_cac_table(
+    s: &fastfile_t5::ZoneStream<'_>,
+    header: fastfile_t5::Ptr,
+) -> Option<crate::CapturedStringTable> {
+    let name = match s.ptr_at(header, 0).ok() {
+        Some(fastfile_t5::ZonePtr::Offset(p)) => {
+            s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned()
+        }
+        _ => return None,
+    };
+    if !is_cac_table(&name) {
+        return None;
+    }
+    let columns = s.i32_at(header, 4).unwrap_or(0).max(0) as usize;
+    let rows = s.i32_at(header, 8).unwrap_or(0).max(0) as usize;
+    let cells_n = columns.saturating_mul(rows);
+    let arr = match s.ptr_at(header, 12).ok() {
+        Some(fastfile_t5::ZonePtr::Offset(p)) => s.resolve_alias(p),
+        _ => {
+            return Some(crate::CapturedStringTable {
+                name,
+                columns,
+                rows,
+                cells: Vec::new(),
+            });
+        }
+    };
+    let mut cells = Vec::with_capacity(cells_n);
+    let cell_sz = fastfile_t5::size::STRING_TABLE_CELL;
+    for i in 0..cells_n {
+        let cell = arr.at(i * cell_sz);
+        let value = match s.ptr_at(cell, 0).ok() {
+            Some(fastfile_t5::ZonePtr::Offset(p)) => {
+                s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned()
+            }
+            _ => String::new(),
+        };
+        cells.push(value);
+    }
+    Some(crate::CapturedStringTable {
+        name,
+        columns,
+        rows,
+        cells,
+    })
+}
+
+fn iw4_cac_table(s: &ZoneStream<'_>, header: Ptr) -> Option<crate::CapturedStringTable> {
+    let name = match s.ptr_at(header, 0).ok() {
+        Some(ZonePtr::Offset(p)) => s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned(),
+        _ => return None,
+    };
+    if !is_cac_table(&name) {
+        return None;
+    }
+    let columns = s.i32_at(header, s.layout(4, 8)).unwrap_or(0).max(0) as usize;
+    let rows = s.i32_at(header, s.layout(8, 12)).unwrap_or(0).max(0) as usize;
+    let cells_n = columns.saturating_mul(rows);
+    let arr = match s.ptr_at(header, s.layout(12, 16)).ok() {
+        Some(ZonePtr::Offset(p)) => s.resolve_alias(p),
+        _ => {
+            return Some(crate::CapturedStringTable {
+                name,
+                columns,
+                rows,
+                cells: Vec::new(),
+            });
+        }
+    };
+    let mut cells = Vec::with_capacity(cells_n);
+    let cell_sz = s.layout(asset_iw4::size::STRING_TABLE_CELL, 16);
+    for i in 0..cells_n {
+        let cell = arr.at(i * cell_sz);
+        let value = match s.ptr_at(cell, 0).ok() {
+            Some(ZonePtr::Offset(p)) => s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned(),
+            _ => String::new(),
+        };
+        cells.push(value);
+    }
+    Some(crate::CapturedStringTable {
+        name,
+        columns,
+        rows,
+        cells,
+    })
 }
 use crate::{
     BodyMeshBuild, FpvMeshBuild, FxCatalog, ImpactFxCatalog, MaterialCatalog, ModelKind,
@@ -59,6 +196,8 @@ pub(crate) struct ZoneWalkSink {
     xmodel_names: HashMap<Ptr, Ptr>,
     xmodel_surfaces: HashMap<Ptr, Ptr>,
     xmodel_surface_names: HashMap<Ptr, Ptr>,
+
+    pub sound: Option<asset_audio::ZoneSoundCapture>,
 }
 
 #[derive(Default)]
@@ -89,6 +228,9 @@ pub(crate) struct CommonWalkSink {
     xmodel_names_t5: HashMap<fastfile_t5::Ptr, fastfile_t5::Ptr>,
     strings_iw5: fastfile_iw5::ScriptStrings,
     xmodel_names_iw5: HashMap<fastfile_iw5::Ptr, fastfile_iw5::Ptr>,
+    fx_names_iw5: HashMap<fastfile_iw5::Ptr, String>,
+    fx_aliases_iw5: HashMap<fastfile_iw5::Ptr, fastfile_iw5::Ptr>,
+    last_fx_name_iw5: Option<String>,
 
     pub light_def_table: usize,
     pub light_def_bodies: usize,
@@ -101,6 +243,8 @@ pub(crate) struct CommonWalkSink {
     pub stats_tables: BTreeMap<String, crate::CapturedStringTable>,
 
     pub film_visions: BTreeMap<String, Result<crate::FilmVision, crate::FilmVisionParseError>>,
+
+    pub sound: Option<asset_audio::ZoneSoundCapture>,
 }
 
 impl ZoneWalkSink {
@@ -216,6 +360,9 @@ impl fastfile_iw5::AssetLinkSink for ZoneWalkSink {
         slot: fastfile_iw5::Ptr,
         insert_slot: Option<fastfile_iw5::Ptr>,
     ) -> fastfile_iw5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw5_loaded(stream, ty, slot, insert_slot);
+        }
         self.materials.iw5_loaded(stream, ty, slot, insert_slot);
         if ty == fastfile_iw5::AssetType::XModel {
             self.map_xmodels.capture_iw5(
@@ -250,6 +397,9 @@ impl fastfile_iw5::AssetLinkSink for ZoneWalkSink {
         slot: fastfile_iw5::Ptr,
         target: fastfile_iw5::Ptr,
     ) -> fastfile_iw5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw5_alias(ty, slot, target);
+        }
         self.materials.iw5_alias(ty, slot, target);
         if ty == fastfile_iw5::AssetType::XModel {
             self.map_xmodels.alias(
@@ -283,6 +433,9 @@ impl fastfile_iw5::AssetLinkSink for ZoneWalkSink {
         data: &[u8],
         zlib_compressed: bool,
     ) -> fastfile_iw5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.raw_file(name, data, zlib_compressed);
+        }
         self.compass.capture(name, data, zlib_compressed);
         if crate::is_createart_source(name) {
             self.createart_name = Some(name.to_owned());
@@ -296,6 +449,8 @@ impl fastfile_iw5::AssetLinkSink for ZoneWalkSink {
         }
         Ok(())
     }
+
+    asset_audio::forward_iw5_sound!();
 }
 
 impl fastfile_iw5::AssetSink for CommonWalkSink {
@@ -318,7 +473,17 @@ impl fastfile_iw5::AssetSink for CommonWalkSink {
             }
         }
         if loaded && ty == fastfile_iw5::AssetType::Weapon {
-            self.weapons.capture_iw5(s, &self.strings_iw5);
+            let fx_name_at_slot = |mut slot| {
+                for _ in 0..8 {
+                    if let Some(name) = self.fx_names_iw5.get(&slot) {
+                        return Some(name.clone());
+                    }
+                    slot = *self.fx_aliases_iw5.get(&slot)?;
+                }
+                None
+            };
+            self.weapons
+                .capture_iw5(s, &self.strings_iw5, &fx_name_at_slot);
         }
         self.asset_walked();
         Ok(())
@@ -326,6 +491,27 @@ impl fastfile_iw5::AssetSink for CommonWalkSink {
 }
 
 impl fastfile_iw5::AssetLinkSink for CommonWalkSink {
+    fn capture_fx(
+        &mut self,
+        stream: &fastfile_iw5::ZoneStream<'_>,
+        geometry: fastfile_iw5::FxEffectDefGeometry,
+    ) -> fastfile_iw5::Result<()> {
+        self.last_fx_name_iw5 = geometry
+            .name
+            .and_then(|ptr| stream.cstr(ptr).ok())
+            .map(str::to_owned);
+        Ok(())
+    }
+
+    fn capture_attachment(
+        &mut self,
+        stream: &fastfile_iw5::ZoneStream<'_>,
+        geometry: &fastfile_iw5::AttachmentGeometry,
+    ) -> fastfile_iw5::Result<()> {
+        self.weapons.capture_iw5_attachment(stream, geometry);
+        Ok(())
+    }
+
     fn loaded(
         &mut self,
         stream: &fastfile_iw5::ZoneStream<'_>,
@@ -333,7 +519,18 @@ impl fastfile_iw5::AssetLinkSink for CommonWalkSink {
         slot: fastfile_iw5::Ptr,
         insert_slot: Option<fastfile_iw5::Ptr>,
     ) -> fastfile_iw5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw5_loaded(stream, ty, slot, insert_slot);
+        }
         self.materials.iw5_loaded(stream, ty, slot, insert_slot);
+        if ty == fastfile_iw5::AssetType::Fx {
+            if let Some(name) = self.last_fx_name_iw5.take() {
+                self.fx_names_iw5.insert(slot, name.clone());
+                if let Some(insert_slot) = insert_slot {
+                    self.fx_names_iw5.insert(insert_slot, name);
+                }
+            }
+        }
         if ty == fastfile_iw5::AssetType::XModel {
             self.fpv_meshes
                 .capture_iw5(stream, &self.strings_iw5, &self.materials);
@@ -359,7 +556,13 @@ impl fastfile_iw5::AssetLinkSink for CommonWalkSink {
         slot: fastfile_iw5::Ptr,
         target: fastfile_iw5::Ptr,
     ) -> fastfile_iw5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw5_alias(ty, slot, target);
+        }
         self.materials.iw5_alias(ty, slot, target);
+        if ty == fastfile_iw5::AssetType::Fx {
+            self.fx_aliases_iw5.insert(slot, target);
+        }
         if ty == fastfile_iw5::AssetType::XModel {
             if let Some(&name) = self.xmodel_names_iw5.get(&target) {
                 self.xmodel_names_iw5.insert(slot, name);
@@ -389,50 +592,25 @@ impl fastfile_iw5::AssetLinkSink for CommonWalkSink {
         s: &fastfile_iw5::ZoneStream<'_>,
         header: fastfile_iw5::Ptr,
     ) -> fastfile_iw5::Result<()> {
-        let name = match s.ptr_at(header, 0).ok() {
-            Some(fastfile_iw5::ZonePtr::Offset(p)) => {
-                s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned()
-            }
-            _ => return Ok(()),
-        };
-        if !is_cac_table(&name) {
-            return Ok(());
+        if let Some(table) = iw5_cac_table(s, header) {
+            self.keep_stats_table(table);
         }
-        let columns = s.i32_at(header, s.layout(4, 8)).unwrap_or(0).max(0) as usize;
-        let rows = s.i32_at(header, s.layout(8, 12)).unwrap_or(0).max(0) as usize;
-        let cells_n = columns.saturating_mul(rows);
-        let arr = match s.ptr_at(header, s.layout(12, 16)).ok() {
-            Some(fastfile_iw5::ZonePtr::Offset(p)) => s.resolve_alias(p),
-            _ => {
-                self.keep_stats_table(crate::CapturedStringTable {
-                    name,
-                    columns,
-                    rows,
-                    cells: Vec::new(),
-                });
-                return Ok(());
-            }
-        };
-        let mut cells = Vec::with_capacity(cells_n);
-        let cell_sz = s.layout(fastfile_iw5::size::STRING_TABLE_CELL, 16);
-        for i in 0..cells_n {
-            let cell = arr.at(i * cell_sz);
-            let value = match s.ptr_at(cell, 0).ok() {
-                Some(fastfile_iw5::ZonePtr::Offset(p)) => {
-                    s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned()
-                }
-                _ => String::new(),
-            };
-            cells.push(value);
-        }
-        self.keep_stats_table(crate::CapturedStringTable {
-            name,
-            columns,
-            rows,
-            cells,
-        });
         Ok(())
     }
+
+    fn capture_raw_file(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        zlib_compressed: bool,
+    ) -> fastfile_iw5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.raw_file(name, data, zlib_compressed);
+        }
+        Ok(())
+    }
+
+    asset_audio::forward_iw5_sound!();
 }
 
 impl fastfile_t5::AssetSink for CommonWalkSink {
@@ -585,6 +763,9 @@ impl fastfile_t5::AssetLinkSink for CommonWalkSink {
         data: &[u8],
         zlib_compressed: bool,
     ) -> fastfile_t5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.raw_file(name, data, zlib_compressed);
+        }
         if let Some((key, icons)) =
             crate::t5_settings_from_teamset_rawfile(name, data, zlib_compressed)
         {
@@ -598,50 +779,13 @@ impl fastfile_t5::AssetLinkSink for CommonWalkSink {
         s: &fastfile_t5::ZoneStream<'_>,
         header: fastfile_t5::Ptr,
     ) -> fastfile_t5::Result<()> {
-        let name = match s.ptr_at(header, 0).ok() {
-            Some(fastfile_t5::ZonePtr::Offset(p)) => {
-                s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned()
-            }
-            _ => return Ok(()),
-        };
-        if !is_cac_table(&name) {
-            return Ok(());
+        if let Some(table) = t5_cac_table(s, header) {
+            self.keep_stats_table(table);
         }
-        let columns = s.i32_at(header, 4).unwrap_or(0).max(0) as usize;
-        let rows = s.i32_at(header, 8).unwrap_or(0).max(0) as usize;
-        let cells_n = columns.saturating_mul(rows);
-        let arr = match s.ptr_at(header, 12).ok() {
-            Some(fastfile_t5::ZonePtr::Offset(p)) => s.resolve_alias(p),
-            _ => {
-                self.keep_stats_table(crate::CapturedStringTable {
-                    name,
-                    columns,
-                    rows,
-                    cells: Vec::new(),
-                });
-                return Ok(());
-            }
-        };
-        let mut cells = Vec::with_capacity(cells_n);
-        let cell_sz = fastfile_t5::size::STRING_TABLE_CELL;
-        for i in 0..cells_n {
-            let cell = arr.at(i * cell_sz);
-            let value = match s.ptr_at(cell, 0).ok() {
-                Some(fastfile_t5::ZonePtr::Offset(p)) => {
-                    s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned()
-                }
-                _ => String::new(),
-            };
-            cells.push(value);
-        }
-        self.keep_stats_table(crate::CapturedStringTable {
-            name,
-            columns,
-            rows,
-            cells,
-        });
         Ok(())
     }
+
+    asset_audio::forward_t5_sound!();
 }
 
 impl fastfile_t5::AssetSink for ZoneWalkSink {
@@ -748,6 +892,9 @@ impl fastfile_t5::AssetLinkSink for ZoneWalkSink {
         data: &[u8],
         zlib_compressed: bool,
     ) -> fastfile_t5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.raw_file(name, data, zlib_compressed);
+        }
         self.compass.capture(name, data, zlib_compressed);
         if let Some(text) = asset_world::decode_rawfile_text(data, zlib_compressed) {
             self.script_sound.capture(name, text.as_bytes(), false);
@@ -814,6 +961,8 @@ impl fastfile_t5::AssetLinkSink for ZoneWalkSink {
         self.materials.t5_nested_vertex_decl_alias(slot, target);
         Ok(())
     }
+
+    asset_audio::forward_t5_sound!();
 }
 
 impl AssetSink for ZoneWalkSink {
@@ -858,6 +1007,9 @@ impl AssetLinkSink for ZoneWalkSink {
         slot: Ptr,
         insert_slot: Option<Ptr>,
     ) -> fastfile_iw4::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw4_loaded(stream, ty, slot, insert_slot);
+        }
         self.materials.loaded(stream, ty, slot, insert_slot)?;
         if ty == AssetType::Fx {
             self.fx.note_loaded(slot, insert_slot);
@@ -887,6 +1039,9 @@ impl AssetLinkSink for ZoneWalkSink {
     }
 
     fn alias(&mut self, ty: AssetType, slot: Ptr, target: Ptr) -> fastfile_iw4::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw4_alias(ty, slot, target);
+        }
         self.materials.alias(ty, slot, target)?;
         if ty == AssetType::Fx {
             self.fx.note_alias(slot, target);
@@ -917,6 +1072,9 @@ impl AssetLinkSink for ZoneWalkSink {
         data: &[u8],
         zlib_compressed: bool,
     ) -> fastfile_iw4::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.raw_file(name, data, zlib_compressed);
+        }
         self.compass.capture(name, data, zlib_compressed);
         self.script_sound.capture(name, data, zlib_compressed);
         if crate::is_createart_source(name) {
@@ -1012,6 +1170,8 @@ impl AssetLinkSink for ZoneWalkSink {
     fn xmodel_name_ptr(&self, slot: Ptr) -> Option<Ptr> {
         self.xmodel_names.get(&slot).copied()
     }
+
+    asset_audio::forward_iw4_sound!();
 }
 
 impl AssetSink for CommonWalkSink {
@@ -1061,6 +1221,9 @@ impl AssetLinkSink for CommonWalkSink {
         slot: Ptr,
         insert_slot: Option<Ptr>,
     ) -> fastfile_iw4::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw4_loaded(stream, ty, slot, insert_slot);
+        }
         self.materials.loaded(stream, ty, slot, insert_slot)?;
         if ty == AssetType::Fx {
             self.fx.note_loaded(slot, insert_slot);
@@ -1100,6 +1263,9 @@ impl AssetLinkSink for CommonWalkSink {
     }
 
     fn alias(&mut self, ty: AssetType, slot: Ptr, target: Ptr) -> fastfile_iw4::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw4_alias(ty, slot, target);
+        }
         self.materials.alias(ty, slot, target)?;
         if ty == AssetType::Fx {
             self.fx.note_alias(slot, target);
@@ -1133,6 +1299,9 @@ impl AssetLinkSink for CommonWalkSink {
         data: &[u8],
         zlib_compressed: bool,
     ) -> fastfile_iw4::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.raw_file(name, data, zlib_compressed);
+        }
         self.player_anim_sources
             .capture(name, data, zlib_compressed);
         if let Some(table) = crate::capture_pen_table(name, data, zlib_compressed) {
@@ -1160,46 +1329,9 @@ impl AssetLinkSink for CommonWalkSink {
         s: &ZoneStream<'_>,
         header: Ptr,
     ) -> fastfile_iw4::Result<()> {
-        let name = match s.ptr_at(header, 0).ok() {
-            Some(ZonePtr::Offset(p)) => s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned(),
-            _ => return Ok(()),
-        };
-        if !is_cac_table(&name) {
-            return Ok(());
+        if let Some(table) = iw4_cac_table(s, header) {
+            self.keep_stats_table(table);
         }
-        let columns = s.i32_at(header, s.layout(4, 8)).unwrap_or(0).max(0) as usize;
-        let rows = s.i32_at(header, s.layout(8, 12)).unwrap_or(0).max(0) as usize;
-        let cells_n = columns.saturating_mul(rows);
-        let arr = match s.ptr_at(header, s.layout(12, 16)).ok() {
-            Some(ZonePtr::Offset(p)) => s.resolve_alias(p),
-            _ => {
-                self.keep_stats_table(crate::CapturedStringTable {
-                    name,
-                    columns,
-                    rows,
-                    cells: Vec::new(),
-                });
-                return Ok(());
-            }
-        };
-        let mut cells = Vec::with_capacity(cells_n);
-        let cell_sz = s.layout(asset_iw4::size::STRING_TABLE_CELL, 16);
-        for i in 0..cells_n {
-            let cell = arr.at(i * cell_sz);
-            let value = match s.ptr_at(cell, 0).ok() {
-                Some(ZonePtr::Offset(p)) => {
-                    s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned()
-                }
-                _ => String::new(),
-            };
-            cells.push(value);
-        }
-        self.keep_stats_table(crate::CapturedStringTable {
-            name,
-            columns,
-            rows,
-            cells,
-        });
         Ok(())
     }
 
@@ -1252,6 +1384,8 @@ impl AssetLinkSink for CommonWalkSink {
     fn xmodel_name_ptr(&self, slot: Ptr) -> Option<Ptr> {
         self.xmodel_names.get(&slot).copied()
     }
+
+    asset_audio::forward_iw4_sound!();
 }
 
 #[derive(Default)]
@@ -1259,6 +1393,10 @@ pub(crate) struct MaterialPopulationSink {
     pub walked: usize,
     pub stage: Option<StageHandle>,
     pub materials: MaterialCatalog,
+
+    pub stats_tables: BTreeMap<String, crate::CapturedStringTable>,
+
+    pub sound: Option<asset_audio::ZoneSoundCapture>,
 }
 
 impl MaterialPopulationSink {
@@ -1287,6 +1425,12 @@ impl MaterialPopulationSink {
 
     pub(crate) fn set_capture_ns(&mut self, ns: crate::AssetNamespace) {
         self.materials.set_capture_ns(ns);
+    }
+
+    fn keep_stats_table(&mut self, table: Option<crate::CapturedStringTable>) {
+        if let Some(table) = table {
+            self.stats_tables.insert(table.name.clone(), table);
+        }
     }
 }
 
@@ -1320,16 +1464,45 @@ impl AssetLinkSink for MaterialPopulationSink {
         slot: Ptr,
         insert_slot: Option<Ptr>,
     ) -> fastfile_iw4::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw4_loaded(stream, ty, slot, insert_slot);
+        }
         self.materials.loaded(stream, ty, slot, insert_slot)
     }
 
     fn alias(&mut self, ty: AssetType, slot: Ptr, target: Ptr) -> fastfile_iw4::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw4_alias(ty, slot, target);
+        }
         self.materials.alias(ty, slot, target)
     }
 
     fn linked_asset_name(&self, slot: Ptr) -> Option<&str> {
         self.materials.linked_asset_name(slot)
     }
+
+    fn capture_raw_file(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        zlib_compressed: bool,
+    ) -> fastfile_iw4::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.raw_file(name, data, zlib_compressed);
+        }
+        Ok(())
+    }
+
+    fn capture_string_table(
+        &mut self,
+        s: &ZoneStream<'_>,
+        header: Ptr,
+    ) -> fastfile_iw4::Result<()> {
+        self.keep_stats_table(iw4_cac_table(s, header));
+        Ok(())
+    }
+
+    asset_audio::forward_iw4_sound!();
 }
 
 impl fastfile_iw5::AssetSink for MaterialPopulationSink {
@@ -1356,6 +1529,9 @@ impl fastfile_iw5::AssetLinkSink for MaterialPopulationSink {
         slot: fastfile_iw5::Ptr,
         insert_slot: Option<fastfile_iw5::Ptr>,
     ) -> fastfile_iw5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw5_loaded(stream, ty, slot, insert_slot);
+        }
         self.materials.iw5_loaded(stream, ty, slot, insert_slot);
         Ok(())
     }
@@ -1366,9 +1542,35 @@ impl fastfile_iw5::AssetLinkSink for MaterialPopulationSink {
         slot: fastfile_iw5::Ptr,
         target: fastfile_iw5::Ptr,
     ) -> fastfile_iw5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.iw5_alias(ty, slot, target);
+        }
         self.materials.iw5_alias(ty, slot, target);
         Ok(())
     }
+
+    fn capture_raw_file(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        zlib_compressed: bool,
+    ) -> fastfile_iw5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.raw_file(name, data, zlib_compressed);
+        }
+        Ok(())
+    }
+
+    fn capture_string_table(
+        &mut self,
+        s: &fastfile_iw5::ZoneStream<'_>,
+        header: fastfile_iw5::Ptr,
+    ) -> fastfile_iw5::Result<()> {
+        self.keep_stats_table(iw5_cac_table(s, header));
+        Ok(())
+    }
+
+    asset_audio::forward_iw5_sound!();
 }
 
 impl fastfile_t5::AssetSink for MaterialPopulationSink {
@@ -1446,6 +1648,29 @@ impl fastfile_t5::AssetLinkSink for MaterialPopulationSink {
         self.materials.t5_nested_vertex_decl_alias(slot, target);
         Ok(())
     }
+
+    fn capture_raw_file(
+        &mut self,
+        name: &str,
+        data: &[u8],
+        zlib_compressed: bool,
+    ) -> fastfile_t5::Result<()> {
+        if let Some(sound) = self.sound.as_mut() {
+            sound.raw_file(name, data, zlib_compressed);
+        }
+        Ok(())
+    }
+
+    fn capture_string_table(
+        &mut self,
+        s: &fastfile_t5::ZoneStream<'_>,
+        header: fastfile_t5::Ptr,
+    ) -> fastfile_t5::Result<()> {
+        self.keep_stats_table(t5_cac_table(s, header));
+        Ok(())
+    }
+
+    asset_audio::forward_t5_sound!();
 }
 
 #[derive(Default)]

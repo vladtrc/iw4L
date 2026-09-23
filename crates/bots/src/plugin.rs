@@ -393,7 +393,9 @@ fn think_bots(mut p: ThinkBots) {
                 server_time: p.clock.time_ms,
                 ..playerstate_iw4::UserCmd::default()
             };
-            cmd.angles = look_angles_from_degrees(obs.self_state.viewangles);
+            let (view, delta) = (obs.self_state.viewangles, obs.self_state.delta_angles);
+            cmd.angles =
+                look_angles_from_degrees(std::array::from_fn(|axis| view[axis] - delta[axis]));
             cmd.weapon = obs.self_state.weapon;
             cmd.weapon_mapped = obs.self_state.weapon;
             cmd

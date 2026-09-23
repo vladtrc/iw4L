@@ -46,6 +46,7 @@ pub fn observe_focused(
         lifecycle: meta.lifecycle,
         origin: ps.origin,
         viewangles: ps.viewangles,
+        delta_angles: ps.delta_angles,
         view_height: ps.view_height_current,
         stance: crate::observation::Stance::from_view_height(ps.view_height_current),
         health: ps.health,

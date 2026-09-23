@@ -126,6 +126,8 @@ pub enum ColliderId {
     Player {
         client: ClientId,
 
+        life: LifeSequence,
+
         hitloc: u8,
     },
 
@@ -1053,6 +1055,77 @@ pub fn bullet_trace_with_entity_models(
     )
 }
 
+enum DObjGeometryVerdict {
+    Hit(TraceCandidate),
+    Missed,
+    Unavailable,
+}
+
+pub(crate) fn coll_tris_clip_available(coll: Option<&AuthorityDObjCollTrace>, mask: u32) -> bool {
+    coll.is_some_and(|coll| {
+        coll.model.coll_lod >= 0
+            && coll
+                .model
+                .surfs
+                .iter()
+                .any(|surf| surf.contents & mask != 0 && !surf.tris.is_empty())
+    })
+}
+
+fn trace_dobj_coll_tris(
+    coll: Option<&AuthorityDObjCollTrace>,
+    owner: AuthorityModelOwner,
+    query: &BulletTraceQuery,
+) -> DObjGeometryVerdict {
+    let Some(coll) = coll else {
+        return DObjGeometryVerdict::Unavailable;
+    };
+    if !coll_tris_clip_available(Some(coll), query.mask) {
+        return DObjGeometryVerdict::Unavailable;
+    }
+    let (Some(local_start), Some(local_end)) = (
+        world_point_to_entity(coll.world_from_model, query.start),
+        world_point_to_entity(coll.world_from_model, query.end),
+    ) else {
+        return DObjGeometryVerdict::Unavailable;
+    };
+    let mut tr = trace_iw4::Trace {
+        fraction: 1.0,
+        ..trace_iw4::Trace::default()
+    };
+    let bone = clipmap_iw4::xmodel_trace_line_animated(
+        coll.model.as_ref(),
+        &mut tr,
+        local_start,
+        local_end,
+        query.mask,
+        &coll.bones,
+        &coll.hide_part_bits,
+    );
+    if bone < 0 {
+        return DObjGeometryVerdict::Missed;
+    }
+    let Ok(bone) = u16::try_from(bone) else {
+        return DObjGeometryVerdict::Missed;
+    };
+    DObjGeometryVerdict::Hit(TraceCandidate {
+        fraction: tr.fraction,
+        endpos: [
+            query.start[0] + (query.end[0] - query.start[0]) * tr.fraction,
+            query.start[1] + (query.end[1] - query.start[1]) * tr.fraction,
+            query.start[2] + (query.end[2] - query.start[2]) * tr.fraction,
+        ],
+        normal: entity_normal_to_world(coll.world_from_model, tr.normal),
+        collider: ColliderId::EntityDObjBone {
+            owner,
+            bone,
+            part_classification: 0,
+            surface_flags: tr.surface_flags,
+        },
+        startsolid: false,
+    })
+}
+
 fn bullet_trace_filtered(
     brushes: &[SimBrush],
     bsp: &SimClipBsp,
@@ -1122,6 +1195,7 @@ fn bullet_trace_filtered(
             for bone in &pose.bones {
                 let collider = ColliderId::Player {
                     client: pose.client,
+                    life: pose.life_sequence,
                     hitloc: bone.part_classification,
                 };
                 match ray_obb(query.start, query.end, bone, collider) {
@@ -1142,6 +1216,7 @@ fn bullet_trace_filtered(
                 return TraceOutcome::StartSolid {
                     collider: Some(ColliderId::Player {
                         client: pose.client,
+                        life: pose.life_sequence,
                         hitloc: 0,
                     }),
                     end: query.start,
@@ -1208,49 +1283,13 @@ fn bullet_trace_filtered(
         if !dobj_contents_match_mask(geom.dobj_contents, query.mask) {
             continue;
         }
-        if let Some(coll) = dobj_geom.coll.as_ref() {
-            let Some(local_start) = world_point_to_entity(coll.world_from_model, query.start)
-            else {
+        match trace_dobj_coll_tris(dobj_geom.coll.as_ref(), geom.owner, query) {
+            DObjGeometryVerdict::Hit(candidate) => {
+                candidates.push(candidate);
                 continue;
-            };
-            let Some(local_end) = world_point_to_entity(coll.world_from_model, query.end) else {
-                continue;
-            };
-            let mut tr = trace_iw4::Trace {
-                fraction: 1.0,
-                ..trace_iw4::Trace::default()
-            };
-            let bone = clipmap_iw4::xmodel_trace_line_animated(
-                coll.model.as_ref(),
-                &mut tr,
-                local_start,
-                local_end,
-                query.mask,
-                &coll.bones,
-                &coll.hide_part_bits,
-            );
-            if bone >= 0 {
-                if let Ok(bone) = u16::try_from(bone) {
-                    let collider = ColliderId::EntityDObjBone {
-                        owner: geom.owner,
-                        bone,
-                        part_classification: 0,
-                        surface_flags: tr.surface_flags,
-                    };
-                    candidates.push(TraceCandidate {
-                        fraction: tr.fraction,
-                        endpos: [
-                            query.start[0] + (query.end[0] - query.start[0]) * tr.fraction,
-                            query.start[1] + (query.end[1] - query.start[1]) * tr.fraction,
-                            query.start[2] + (query.end[2] - query.start[2]) * tr.fraction,
-                        ],
-                        normal: entity_normal_to_world(coll.world_from_model, tr.normal),
-                        collider,
-                        startsolid: false,
-                    });
-                    continue;
-                }
             }
+            DObjGeometryVerdict::Missed => continue,
+            DObjGeometryVerdict::Unavailable => {}
         }
         for bone in &dobj_geom.bones {
             let collider = ColliderId::EntityDObjBone {
@@ -2158,6 +2197,7 @@ fn ray_aabb(start: [f32; 3], end: [f32; 3], pose: &PlayerCollisionPose) -> RayAa
         RayAabb::Hit(mut c) => {
             c.collider = ColliderId::Player {
                 client: pose.client,
+                life: pose.life_sequence,
                 hitloc: 0,
             };
             RayAabb::Hit(c)
@@ -2191,7 +2231,6 @@ fn ray_aabb_box(start: [f32; 3], end: [f32; 3], mins: [f32; 3], maxs: [f32; 3]) 
         n[axis] = if inv < 0.0 { 1.0 } else { -1.0 };
         if t1 > t2 {
             core::mem::swap(&mut t1, &mut t2);
-            n[axis] = -n[axis];
         }
         if t1 > tmin {
             tmin = t1;
@@ -2375,10 +2414,9 @@ fn ray_obb(
         let inverse = direction[axis].recip();
         let mut near = (-bone.half_size[axis] - local_start[axis]) * inverse;
         let mut far = (bone.half_size[axis] - local_start[axis]) * inverse;
-        let mut sign = if inverse < 0.0 { 1.0 } else { -1.0 };
+        let sign = if inverse < 0.0 { 1.0 } else { -1.0 };
         if near > far {
             core::mem::swap(&mut near, &mut far);
-            sign = -sign;
         }
         if near > tmin {
             tmin = near;
@@ -2450,7 +2488,7 @@ pub const COLLISION_COVERAGE: &[CollisionCoverageRow] = &[
     CollisionCoverageRow {
         id: "script_model_xbone_obb",
         support: CoverageSupport::Supported,
-        note: "posed collSurf Bounds as abs-AABB cull; hits are XModelTraceLineAnimated collTris when captured and collLod>=0 with MASK_SHOT surfs, else fixture/bounds OBB; collTris miss falls through to those boxes; XModel+0xfc of 0 is unspecified",
+        note: "posed collSurf Bounds as abs-AABB cull; a model with captured collTris (collLod>=0, MASK_SHOT surfs) is clipped by them alone, hit or miss; fixture/bounds OBB clip only where no collTris were captured; XModel contents of 0 is unspecified",
     },
     CollisionCoverageRow {
         id: "static_model_collision",

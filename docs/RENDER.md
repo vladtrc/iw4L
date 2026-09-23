@@ -28,7 +28,10 @@ zone → asset_iw4 IR → prepare/scene/world.rs (our own types) → spawn.rs (G
 static models and the viewmodel are three emitters into one list, not three
 renderers. Lighting is `lighting_iw4` (light grid) with
 `prepare/scene/smodel_lighting.rs` and `model_lighting_atlas.rs`, shadows
-`assemble/drawsurf/sun_shadow.rs`.
+`assemble/drawsurf/sun_shadow.rs`. A local `StaticSunAndFx` schedule overlaps
+static sun partition preparation on workers with FX on the main thread. It joins
+before frame products consume either result; dynamic casters merge afterward.
+Sun model draws reuse the colour geometry’s index buffers.
 
 ## GPU-side ownership: `render_gpu/src/drawsurf/colour_submit/`, three owners
 

@@ -29,12 +29,23 @@ pub enum ClientAction {
         weapon: u32,
     },
 
+    ChangeWeaponConfiguration {
+        request_id: ActionRequestId,
+        from: u32,
+        to: u32,
+    },
+
     ForceDeath {
         request_id: ActionRequestId,
     },
 
     SpawnClient {
         request_id: ActionRequestId,
+    },
+
+    ForceSpawn {
+        request_id: ActionRequestId,
+        pick: SpawnPick,
     },
 
     SpawnIntermission {
@@ -72,6 +83,12 @@ pub enum ClientAction {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpawnPick {
+    Seeded(u64),
+    At { origin: [f32; 3], yaw: f32 },
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TickInput {
     pub cmds: Vec<(ClientId, UserCmd)>,
@@ -100,8 +117,10 @@ pub fn action_request_id(action: &ClientAction) -> ActionRequestId {
         | ClientAction::LeaveMatch { request_id }
         | ClientAction::SelectClass { request_id, .. }
         | ClientAction::GiveWeapon { request_id, .. }
+        | ClientAction::ChangeWeaponConfiguration { request_id, .. }
         | ClientAction::ForceDeath { request_id }
         | ClientAction::SpawnClient { request_id }
+        | ClientAction::ForceSpawn { request_id, .. }
         | ClientAction::SpawnIntermission { request_id }
         | ClientAction::SetMatchPhase { request_id, .. }
         | ClientAction::Move { request_id, .. }

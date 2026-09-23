@@ -53,11 +53,22 @@ pub struct PreparedMatchReady {
     pub prepared: PreparedMatch,
 }
 
+#[derive(Resource)]
+pub struct PreparedMatchSound {
+    pub load_key: frame::LocalLoadKey,
+    pub zone: String,
+    pub common_profile_id: u64,
+    pub products_id: u64,
+    pub sound: Result<asset_audio::SoundCatalog, String>,
+}
+
 fn start_match_load(
     mut commands: Commands,
     request: Option<Res<MatchLoadRequest>>,
     busy: Option<Res<MatchLoadTask>>,
+    retiring: Option<Res<frame::Retiring>>,
     abort: Option<Res<MatchLoadAbort>>,
+    mut waiting_for_retirement: Local<Option<u64>>,
     mut inflight: ResMut<MatchLoadBusy>,
 ) {
     let Some(request) = request else {
@@ -67,6 +78,7 @@ fn start_match_load(
         .as_ref()
         .is_some_and(|abort| abort.0 == request.request_id)
     {
+        *waiting_for_retirement = None;
         commands.remove_resource::<MatchLoadRequest>();
         if busy.is_none() {
             inflight.0 = false;
@@ -81,6 +93,25 @@ fn start_match_load(
     if busy.is_some() {
         return;
     }
+    if retiring.as_ref().is_some_and(|retiring| retiring.busy()) {
+        if *waiting_for_retirement != Some(request.request_id) {
+            diag::info!(
+                World,
+                "match load: request #{} waits for retired resources",
+                request.request_id
+            );
+            *waiting_for_retirement = Some(request.request_id);
+        }
+        return;
+    }
+    if *waiting_for_retirement == Some(request.request_id) {
+        diag::info!(
+            World,
+            "match load: request #{} resumes after retirement",
+            request.request_id
+        );
+    }
+    *waiting_for_retirement = None;
     let zone_ff = request.zone_ff.clone();
     let common_mp = request.common_mp.clone();
     let progress = request.progress.clone();
@@ -212,7 +243,7 @@ fn poll_match_load(
     inflight.0 = false;
     commands.remove_resource::<MatchLoadTask>();
     commands.remove_resource::<MatchLoadAccepted>();
-    let Some(ready) = outcome else {
+    let Some(mut ready) = outcome else {
         diag::info!(
             World,
             "match load: walk request #{request_id} returned canceled — nothing prepared"
@@ -228,6 +259,17 @@ fn poll_match_load(
         );
         return;
     }
+    commands.insert_resource(PreparedMatchSound {
+        load_key: ready.load_key,
+        zone: ready.zone.clone(),
+        common_profile_id: ready.prepared.materials.common_profile_id,
+        products_id: ready.prepared.materials.products_id,
+        sound: ready
+            .prepared
+            .sound
+            .take()
+            .unwrap_or_else(|| Err("the map zone never opened".to_owned())),
+    });
     commands.insert_resource(ready);
 }
 

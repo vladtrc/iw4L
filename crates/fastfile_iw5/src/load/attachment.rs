@@ -2,13 +2,11 @@ use super::snd::follow_snd_alias_custom;
 use super::{AssetLinkSink, asset_ptr_at, follow_name};
 use crate::asset_type::AssetType;
 use crate::size as sz;
-use crate::zone::{Ptr, Result, XFILE_BLOCK_VIRTUAL, ZonePtr, ZoneStream};
+use crate::zone::{AttachmentGeometry, Ptr, Result, XFILE_BLOCK_VIRTUAL, ZonePtr, ZoneStream};
 
 pub(super) fn load_attachment(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink) -> Result<()> {
     s.walk_stage = "attachment";
     let p = s.alloc_load(4, s.layout(sz::WEAPON_ATTACHMENT, 264))?;
-    s.note_attachment_load();
-    s.set_latest_attachment_overlay(crate::zone::AttachmentOverlayGeometry::default());
     s.push(XFILE_BLOCK_VIRTUAL)?;
     follow_name(s, p, 0)?;
     follow_name(s, p, s.layout(4, 8))?;
@@ -78,7 +76,8 @@ pub(super) fn load_attachment(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkS
             s.fixup_slot(p.at(field), body)?;
         }
     }
-    remember_ads_overlay(s, links, p)?;
+    let (overlay_names, overlay_width, overlay_height, overlay_reticle, thermal) =
+        load_ads_overlay(s, links, p)?;
     let ui = s.layout(96, 184);
     if s.begin_body(p.at(ui))? {
         let body = s.alloc_load(4, s.layout(sz::ATT_UI, 32))?;
@@ -106,93 +105,101 @@ pub(super) fn load_attachment(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkS
         asset_ptr_at(s, links, AssetType::Fx, body.at(s.layout(84, 120)))?;
         follow_snd_alias_custom(s, body.at(s.layout(88, 128)))?;
     }
+    let name = match s.ptr_at(p, 0)? {
+        ZonePtr::Offset(q) => Some(s.resolve_alias(q)),
+        _ => None,
+    };
+    s.set_latest_attachment_name(name);
+    let geometry = AttachmentGeometry {
+        header: p,
+        name,
+        view_model_name: first_model_name(s, links, p, s.layout(sz::ATTACH_VIEW_MODELS_OFF, 40)),
+        world_model_name: first_model_name(s, links, p, s.layout(sz::ATTACH_WORLD_MODELS_OFF, 32)),
+        view_model_names: core::array::from_fn(|i| {
+            model_name_at(s, links, p, s.layout(sz::ATTACH_VIEW_MODELS_OFF, 40), i)
+        }),
+        world_model_names: core::array::from_fn(|i| {
+            model_name_at(s, links, p, s.layout(sz::ATTACH_WORLD_MODELS_OFF, 32), i)
+        }),
+        reticle_model_names: core::array::from_fn(|i| {
+            model_name_at(s, links, p, s.layout(sz::ATTACH_RETICLE_OFF, 48), i)
+        }),
+        overlay_names,
+        overlay_width,
+        overlay_height,
+        overlay_reticle,
+        thermal,
+    };
+    links.capture_attachment(s, &geometry)?;
     s.pop()
 }
 
-fn remember_ads_overlay(
+fn load_ads_overlay(
     s: &mut ZoneStream<'_>,
     links: &mut dyn AssetLinkSink,
     att: Ptr,
-) -> Result<()> {
+) -> Result<([Option<Ptr>; 4], f32, f32, i32, bool)> {
     let slot = att.at(s.layout(sz::ATTACH_ADS_OVERLAY_OFF, 176));
-    let mut overlay_name = None;
-    let mut overlay_lowres_name = None;
-    let mut overlay_emp_name = None;
-    let mut overlay_emp_lowres_name = None;
-    let mut width = 0.0;
-    let mut height = 0.0;
-    let mut reticle = 0;
-    let mut thermal = false;
-    let shader_off = sz::ADS_OVERLAY_SHADER_OFF;
-    let lowres_off = s.layout(sz::ADS_OVERLAY_SHADER_LOWRES_OFF, 8);
-    let emp_off = s.layout(sz::ADS_OVERLAY_SHADER_EMP_OFF, 16);
-    let emp_lowres_off = s.layout(sz::ADS_OVERLAY_SHADER_EMP_LOWRES_OFF, 24);
-    let width_off = s.layout(sz::ADS_OVERLAY_WIDTH_OFF, 36);
-    let height_off = s.layout(sz::ADS_OVERLAY_HEIGHT_OFF, 40);
-    let reticle_off = s.layout(sz::ADS_OVERLAY_RETICLE_OFF, 32);
-    let thermal_off = s.layout(sz::ADS_OVERLAY_THERMAL_OFF, 56);
+    let offs = [
+        sz::ADS_OVERLAY_SHADER_OFF,
+        s.layout(sz::ADS_OVERLAY_SHADER_LOWRES_OFF, 8),
+        s.layout(sz::ADS_OVERLAY_SHADER_EMP_OFF, 16),
+        s.layout(sz::ADS_OVERLAY_SHADER_EMP_LOWRES_OFF, 24),
+    ];
+    let mut names = [None; 4];
+    let mut body = None;
     if s.begin_body(slot)? {
-        let body = s.alloc_load(4, s.layout(sz::ATT_ADS_OVERLAY, 64))?;
-        s.fixup_slot(slot, body)?;
-        for (off, dest) in [
-            (shader_off, &mut overlay_name),
-            (lowres_off, &mut overlay_lowres_name),
-            (emp_off, &mut overlay_emp_name),
-            (emp_lowres_off, &mut overlay_emp_lowres_name),
-        ] {
-            asset_ptr_at(s, links, AssetType::Material, body.at(off))?;
-            *dest = overlay_shader_name_at(s, body, off);
+        let loaded = s.alloc_load(4, s.layout(sz::ATT_ADS_OVERLAY, 64))?;
+        s.fixup_slot(slot, loaded)?;
+        body = Some(loaded);
+        for (off, dest) in offs.into_iter().zip(&mut names) {
+            asset_ptr_at(s, links, AssetType::Material, loaded.at(off))?;
+            *dest = overlay_shader_name_at(s, loaded, off);
         }
-        width = s.f32_at(body, width_off).unwrap_or(0.0);
-        height = s.f32_at(body, height_off).unwrap_or(0.0);
-        reticle = s.i32_at(body, reticle_off).unwrap_or(0);
-        thermal = s.u8_at(body, thermal_off).unwrap_or(0) != 0;
-    } else if let Ok(ZonePtr::Offset(q)) = s.ptr_at(att, s.layout(sz::ATTACH_ADS_OVERLAY_OFF, 176))
-    {
-        let body = s.resolve_alias(q);
-        overlay_name = overlay_shader_name_at(s, body, shader_off);
-        overlay_lowres_name = overlay_shader_name_at(s, body, lowres_off);
-        overlay_emp_name = overlay_shader_name_at(s, body, emp_off);
-        overlay_emp_lowres_name = overlay_shader_name_at(s, body, emp_lowres_off);
-        width = s.f32_at(body, width_off).unwrap_or(0.0);
-        height = s.f32_at(body, height_off).unwrap_or(0.0);
-        reticle = s.i32_at(body, reticle_off).unwrap_or(0);
-        thermal = s.u8_at(body, thermal_off).unwrap_or(0) != 0;
+    } else if let Ok(ZonePtr::Offset(q)) = s.ptr_at(slot, 0) {
+        let loaded = s.resolve_alias(q);
+        body = Some(loaded);
+        for (off, dest) in offs.into_iter().zip(&mut names) {
+            *dest = overlay_shader_name_at(s, loaded, off);
+        }
     }
-    let scope_name = match s.ptr_at(att, 0) {
-        Ok(ZonePtr::Offset(q)) => Some(s.resolve_alias(q)),
-        _ => None,
-    };
-    let view_model_name = first_view_model_name(s, links, att);
-    let ads_settings = ads_settings_zoom(s, att);
-    let (ads_zoom_fov, ads_zoom_in_frac, ads_zoom_out_frac) = ads_settings.unwrap_or_default();
-    s.set_latest_attachment_overlay(crate::zone::AttachmentOverlayGeometry {
-        overlay_name,
-        overlay_lowres_name,
-        overlay_emp_name,
-        overlay_emp_lowres_name,
-        scope_name,
-        view_model_name,
-        width,
-        height,
-        reticle,
-        thermal,
-        ads_settings_present: ads_settings.is_some(),
-        ads_zoom_fov,
-        ads_zoom_in_frac,
-        ads_zoom_out_frac,
-    });
-    Ok(())
+    let width = body
+        .and_then(|p| s.f32_at(p, s.layout(sz::ADS_OVERLAY_WIDTH_OFF, 36)).ok())
+        .unwrap_or(0.0);
+    let height = body
+        .and_then(|p| s.f32_at(p, s.layout(sz::ADS_OVERLAY_HEIGHT_OFF, 40)).ok())
+        .unwrap_or(0.0);
+    let reticle = body
+        .and_then(|p| s.i32_at(p, s.layout(sz::ADS_OVERLAY_RETICLE_OFF, 32)).ok())
+        .unwrap_or(0);
+    let thermal = body
+        .and_then(|p| s.u8_at(p, s.layout(sz::ADS_OVERLAY_THERMAL_OFF, 56)).ok())
+        .unwrap_or(0)
+        != 0;
+    Ok((names, width, height, reticle, thermal))
 }
 
-fn first_view_model_name(s: &ZoneStream<'_>, links: &dyn AssetLinkSink, att: Ptr) -> Option<Ptr> {
-    let slot = match s
-        .ptr_at(att, s.layout(sz::ATTACH_VIEW_MODELS_OFF, 40))
-        .ok()?
-    {
+fn first_model_name(
+    s: &ZoneStream<'_>,
+    links: &dyn AssetLinkSink,
+    att: Ptr,
+    field: usize,
+) -> Option<Ptr> {
+    model_name_at(s, links, att, field, 0)
+}
+
+fn model_name_at(
+    s: &ZoneStream<'_>,
+    links: &dyn AssetLinkSink,
+    att: Ptr,
+    field: usize,
+    index: usize,
+) -> Option<Ptr> {
+    let slot = match s.ptr_at(att, field).ok()? {
         ZonePtr::Offset(q) => s.resolve_alias(q),
         _ => return None,
     };
+    let slot = slot.at(index * s.pointer_bytes());
     match s.ptr_at(slot, 0).ok()? {
         ZonePtr::Offset(q) => {
             let body = s.resolve_alias(q);
@@ -205,18 +212,6 @@ fn first_view_model_name(s: &ZoneStream<'_>, links: &dyn AssetLinkSink, att: Ptr
         }
         _ => links.xmodel_name_ptr(slot),
     }
-}
-
-fn ads_settings_zoom(s: &ZoneStream<'_>, att: Ptr) -> Option<(f32, f32, f32)> {
-    let body = match s.ptr_at(att, s.layout(sz::ATTACH_ADS_SETTINGS_OFF, 136)) {
-        Ok(ZonePtr::Offset(q)) => s.resolve_alias(q),
-        _ => return None,
-    };
-    Some((
-        s.f32_at(body, sz::ATT_ADS_ZOOM_FOV_OFF).unwrap_or(0.0),
-        s.f32_at(body, sz::ATT_ADS_ZOOM_IN_FRAC_OFF).unwrap_or(0.0),
-        s.f32_at(body, sz::ATT_ADS_ZOOM_OUT_FRAC_OFF).unwrap_or(0.0),
-    ))
 }
 
 fn overlay_shader_name_at(s: &ZoneStream<'_>, overlay_body: Ptr, off: usize) -> Option<Ptr> {

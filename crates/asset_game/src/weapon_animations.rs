@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use asset_iw4::size::{WEAPON_ANIM_COUNT, weap_anim};
+use asset_core::{AssetEdge, XAnimSpace};
+use asset_iw4::size::weap_anim;
+use weapon_iw4::{WEAPON_ANIM_SLOTS, weap_anim_extra};
 
 use crate::weapon_catalog::WeaponRegistry;
 use asset_anim::XAnimCatalog;
@@ -45,6 +47,8 @@ pub enum WeaponAnimSlot {
     ReloadEmpty = weap_anim::RELOAD_EMPTY as u8,
     ReloadStart = weap_anim::RELOAD_START as u8,
     ReloadEnd = weap_anim::RELOAD_END as u8,
+    ReloadQuick = weap_anim_extra::RELOAD_QUICK as u8,
+    ReloadQuickEmpty = weap_anim_extra::RELOAD_QUICK_EMPTY as u8,
     Raise = weap_anim::RAISE as u8,
     FirstRaise = weap_anim::FIRST_RAISE as u8,
     Drop = weap_anim::DROP as u8,
@@ -83,6 +87,8 @@ impl WeaponAnimSlot {
             weap_anim::RELOAD_EMPTY => Self::ReloadEmpty,
             weap_anim::RELOAD_START => Self::ReloadStart,
             weap_anim::RELOAD_END => Self::ReloadEnd,
+            weap_anim_extra::RELOAD_QUICK => Self::ReloadQuick,
+            weap_anim_extra::RELOAD_QUICK_EMPTY => Self::ReloadQuickEmpty,
             weap_anim::RAISE => Self::Raise,
             weap_anim::FIRST_RAISE => Self::FirstRaise,
             weap_anim::DROP => Self::Drop,
@@ -137,10 +143,15 @@ pub struct WeaponAnimations {
 
     pub reload_end_time_ms: i32,
 
+    pub reload_quick_time_ms: i32,
+
+    pub reload_quick_empty_time_ms: i32,
+
     pub ads_overlay: AdsOverlayConvention,
 
     pub inherits_perks: bool,
-    clips: [Option<Arc<AnimClip>>; WEAPON_ANIM_COUNT],
+    clips: [Option<Arc<AnimClip>>; WEAPON_ANIM_SLOTS],
+    clip_orders: [Option<usize>; WEAPON_ANIM_SLOTS],
 }
 
 impl std::fmt::Debug for WeaponAnimations {
@@ -157,26 +168,13 @@ impl std::fmt::Debug for WeaponAnimations {
 }
 
 impl WeaponAnimations {
-    pub fn resolve(
-        name: impl Into<String>,
-        sz_xanims: &[Option<String>; WEAPON_ANIM_COUNT],
-        fire_time_ms: i32,
-        raise_time_ms: i32,
-        mut resolve_clip: impl FnMut(&str) -> Option<Arc<AnimClip>>,
-    ) -> Self {
-        let clips = std::array::from_fn(|index| {
-            sz_xanims
-                .get(index)
-                .and_then(|slot| slot.as_deref())
-                .filter(|name| !name.is_empty())
-                .and_then(|name| resolve_clip(name))
-        });
+    pub fn empty(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            fire_time_ms,
+            fire_time_ms: 0,
             melee_time_ms: 0,
             melee_charge_time_ms: 0,
-            raise_time_ms,
+            raise_time_ms: 0,
             drop_time_ms: 0,
             quick_drop_time_ms: 0,
             quick_raise_time_ms: 0,
@@ -187,9 +185,12 @@ impl WeaponAnimations {
             reload_empty_time_ms: 0,
             reload_start_time_ms: 0,
             reload_end_time_ms: 0,
+            reload_quick_time_ms: 0,
+            reload_quick_empty_time_ms: 0,
             ads_overlay: AdsOverlayConvention::WeightIsFrac,
             inherits_perks: false,
-            clips,
+            clips: [const { None }; WEAPON_ANIM_SLOTS],
+            clip_orders: [None; WEAPON_ANIM_SLOTS],
         }
     }
 
@@ -242,13 +243,25 @@ impl WeaponAnimations {
     }
 
     pub fn from_registry(registry: &WeaponRegistry, index: u32, xanims: &XAnimCatalog) -> Self {
+        Self::from_registry_edges(registry, index, registry.sz_xanim_edges_of(index), xanims)
+    }
+
+    pub fn from_registry_edges(
+        registry: &WeaponRegistry,
+        index: u32,
+        edges: Option<&[AssetEdge<XAnimSpace>; WEAPON_ANIM_SLOTS]>,
+        xanims: &XAnimCatalog,
+    ) -> Self {
         let name = registry.name_of(index).to_owned();
-        let clips = std::array::from_fn(|slot| {
-            registry
-                .sz_xanim_edges_of(index)
+        let clips: [Option<Arc<AnimClip>>; WEAPON_ANIM_SLOTS] = std::array::from_fn(|slot| {
+            edges
                 .and_then(|row| row.get(slot).copied())
                 .and_then(|edge| edge.bound_index())
                 .and_then(|order| xanims.clip_at(order))
+        });
+        let clip_orders = std::array::from_fn(|slot| {
+            clips[slot].as_ref()?;
+            edges?.get(slot)?.bound_index()
         });
         Self {
             name,
@@ -266,23 +279,14 @@ impl WeaponAnimations {
             reload_empty_time_ms: 0,
             reload_start_time_ms: 0,
             reload_end_time_ms: 0,
+            reload_quick_time_ms: 0,
+            reload_quick_empty_time_ms: 0,
             ads_overlay: AdsOverlayConvention::WeightIsFrac,
             inherits_perks: false,
             clips,
+            clip_orders,
         }
         .with_registry_facts(registry, index)
-    }
-
-    pub fn from_registry_table(
-        registry: &WeaponRegistry,
-        index: u32,
-        sz_xanims: Option<&[Option<String>; WEAPON_ANIM_COUNT]>,
-        resolve_clip: impl FnMut(&str) -> Option<Arc<AnimClip>>,
-    ) -> Self {
-        let name = registry.name_of(index).to_owned();
-        let empty = [const { None }; WEAPON_ANIM_COUNT];
-        let sz_xanims = sz_xanims.unwrap_or(&empty);
-        Self::resolve(name, sz_xanims, 0, 0, resolve_clip).with_registry_facts(registry, index)
     }
 
     fn with_registry_facts(mut self, registry: &WeaponRegistry, index: u32) -> Self {
@@ -297,6 +301,8 @@ impl WeaponAnimations {
             registry.sprint_timers_of(index);
         let (reload_time_ms, reload_empty_time_ms, reload_start_time_ms, reload_end_time_ms) =
             registry.reload_timers_of(index);
+        (self.reload_quick_time_ms, self.reload_quick_empty_time_ms) =
+            registry.quick_reload_timers_of(index).unwrap_or_default();
         self.with_fire_raise(fire_time_ms, raise_time_ms)
             .with_switch_timers(drop_time_ms, quick_drop_time_ms, quick_raise_time_ms)
             .with_sprint_timers(
@@ -331,6 +337,10 @@ impl WeaponAnimations {
 
     pub fn clip(&self, slot: WeaponAnimSlot) -> Option<&Arc<AnimClip>> {
         self.clips[slot.index()].as_ref()
+    }
+
+    pub fn clip_orders(&self) -> &[Option<usize>; WEAPON_ANIM_SLOTS] {
+        &self.clip_orders
     }
 
     pub fn clip_at(&self, index: usize) -> Option<&Arc<AnimClip>> {

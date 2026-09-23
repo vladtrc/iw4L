@@ -11,9 +11,13 @@ use crate::{
 ///
 /// Geometry keeps references — local material indices and, after the merge,
 /// nothing else. The pool itself is never nested inside an optional product.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct MatchMaterials {
     pub population: crate::MaterialDefinitions,
+
+    pub common_profile_id: u64,
+
+    pub products_id: u64,
 
     /// map-zone-local material index -> row in `population`
     pub map_ids: Vec<Option<usize>>,

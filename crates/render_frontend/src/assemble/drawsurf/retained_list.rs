@@ -5,7 +5,7 @@ use dpvs_iw4::{
     pack_particle_cloud_draw_surf, pack_xmodel_rigid_skinned_draw_surf,
     with_reflection_probe_index,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -249,6 +249,10 @@ pub struct XModelDrawLane {
     pub emissive: Vec<RetainedDrawItem>,
     pub distortion: Vec<RetainedDrawItem>,
 
+    colour_source: Vec<u32>,
+    emissive_source: Vec<u32>,
+    distortion_source: Vec<u32>,
+
     pub membership_revision: u64,
     membership_hash: u64,
 
@@ -423,8 +427,12 @@ pub(crate) fn mix_draw_membership(id: &mut u64, item: &RetainedDrawItem) {
     super::list::mix_content_id(id, c);
 }
 
-fn xmodel_lane_layout_hash(xmodel: &XModelDrawPlan) -> u64 {
+fn xmodel_lane_layout_hash(
+    xmodel: &XModelDrawPlan,
+    catalog: &super::material_runtime::RuntimeMaterialCatalog,
+) -> u64 {
     let mut id = super::list::CONTENT_ID_SEED;
+    super::list::mix_content_id(&mut id, catalog.generation_id.0);
     super::list::mix_content_id(&mut id, xmodel.topology_revision);
     super::list::mix_content_id(&mut id, xmodel.draws.len() as u64);
     for draw in &xmodel.draws {
@@ -525,53 +533,32 @@ fn fx_lane_layout_hash(
     id
 }
 
-fn overlay_xmodel_lane_payload(
-    xmodel: &XModelDrawPlan,
-    catalog: &super::material_runtime::RuntimeMaterialCatalog,
-    lane: &mut XModelDrawLane,
-) -> bool {
-    let mut by_slot = HashMap::<(u16, u32), (Mat4, u32, Option<[u8; 4]>, bool, Option<u32>)>::new();
-    for draw in &xmodel.draws {
-        if matches!(
-            draw.colour_refusal,
-            Some(super::tess::xmodel::XModelColourRefusal::CameraFrustum)
-        ) {
-            continue;
-        }
-        let Some(mat) = xmodel.materials.get(draw.material as usize) else {
-            continue;
-        };
-        if mat.model_lighting_required && draw.lighting_handle == 0 {
-            continue;
-        }
-        let Some(material_sorted_index) = mat.material_sorted_index else {
-            continue;
-        };
-        if catalog
-            .material_for_sorted_ordinal(material_sorted_index)
-            .and_then(|material| material.baked_draw_surf)
-            .is_none()
-        {
-            continue;
-        }
-        by_slot.entry((draw.object_id, draw.surface)).or_insert((
-            draw.world_from_local,
-            draw.lighting_handle,
-            draw.packed_lighting,
-            draw.is_scope,
-            draw.scene_entnum,
-        ));
-    }
-    let mut seen = HashSet::<(u16, u32)>::new();
-    for item in lane
-        .colour
-        .iter_mut()
-        .chain(lane.emissive.iter_mut())
-        .chain(lane.distortion.iter_mut())
+fn overlay_xmodel_lane_payload(xmodel: &XModelDrawPlan, lane: &mut XModelDrawLane) -> bool {
+    let XModelDrawLane {
+        colour,
+        emissive,
+        distortion,
+        colour_source,
+        emissive_source,
+        distortion_source,
+        ..
+    } = lane;
+    if colour.len() != colour_source.len()
+        || emissive.len() != emissive_source.len()
+        || distortion.len() != distortion_source.len()
     {
+        return false;
+    }
+    let items = colour
+        .iter_mut()
+        .chain(emissive.iter_mut())
+        .chain(distortion.iter_mut());
+    let sources = colour_source
+        .iter()
+        .chain(emissive_source.iter())
+        .chain(distortion_source.iter());
+    for (item, &source) in items.zip(sources) {
         let RetainedDrawKind::XModel {
-            surface,
-            object_id,
             world_from_local,
             lighting_handle,
             packed_lighting,
@@ -582,18 +569,39 @@ fn overlay_xmodel_lane_payload(
         else {
             continue;
         };
-        let slot = (*object_id, *surface);
-        let Some(&(pose, handle, packed, scope, entnum)) = by_slot.get(&slot) else {
+        let Some(draw) = xmodel.draws.get(source as usize) else {
             return false;
         };
-        *world_from_local = pose;
-        *lighting_handle = handle;
-        *packed_lighting = packed;
-        *is_scope = scope;
-        *scene_entnum = entnum;
-        seen.insert(slot);
+        *world_from_local = draw.world_from_local;
+        *lighting_handle = draw.lighting_handle;
+        *packed_lighting = draw.packed_lighting;
+        *is_scope = draw.is_scope;
+        *scene_entnum = draw.scene_entnum;
     }
-    seen.len() == by_slot.len()
+    true
+}
+
+fn sort_xmodel_lane(items: &mut [RetainedDrawItem], sources: &mut [u32], order: &mut Vec<u32>) {
+    debug_assert_eq!(items.len(), sources.len());
+    order.clear();
+    order.extend(0..u32::try_from(items.len()).unwrap_or(u32::MAX));
+    order.sort_unstable_by_key(|&i| {
+        let item = &items[i as usize];
+        (item.host_sort_key(), retained_draw_order_tie(&item.kind))
+    });
+    for start in 0..order.len() {
+        let mut at = start;
+        loop {
+            let from = order[at] as usize;
+            order[at] = u32::try_from(at).unwrap_or(u32::MAX);
+            if from == start {
+                break;
+            }
+            items.swap(at, from);
+            sources.swap(at, from);
+            at = from;
+        }
+    }
 }
 
 fn overlay_fx_lane_payload(
@@ -1743,12 +1751,10 @@ pub(crate) fn rebuild_xmodel_draw_lane(
             .zip(prepared.as_ref().filter(|v| v.ready).map(|v| v.eye)),
     );
 
-    let layout = xmodel_lane_layout_hash(&xmodel);
+    let layout = xmodel_lane_layout_hash(&xmodel, &runtime.catalog);
     lane.merge_packed_n = xmodel.packed_rows().map(|rows| rows.len() as u32);
     lane.fx_object_id_exhausted = xmodel.fx_object_id_exhausted;
-    if layout == lane.membership_hash
-        && overlay_xmodel_lane_payload(&xmodel, &runtime.catalog, &mut lane)
-    {
+    if layout == lane.membership_hash && overlay_xmodel_lane_payload(&xmodel, &mut lane) {
         lane.payload_revision = xmodel.revision;
         perf::Counter::XmodelLayoutOverlay.emit(1.0);
         return;
@@ -1758,6 +1764,9 @@ pub(crate) fn rebuild_xmodel_draw_lane(
     lane.colour.clear();
     lane.emissive.clear();
     lane.distortion.clear();
+    lane.colour_source.clear();
+    lane.emissive_source.clear();
+    lane.distortion_source.clear();
     lane.merge_packed_n = xmodel.packed_rows().map(|rows| rows.len() as u32);
     lane.sorted = 0;
     lane.object_id_standin = 0;
@@ -1767,7 +1776,8 @@ pub(crate) fn rebuild_xmodel_draw_lane(
     lane.skipped_camera_frustum = 0;
     lane.skipped_no_lighting = 0;
 
-    for draw in &xmodel.draws {
+    for (source, draw) in xmodel.draws.iter().enumerate() {
+        let source = u32::try_from(source).unwrap_or(u32::MAX);
         if matches!(
             draw.colour_refusal,
             Some(super::tess::xmodel::XModelColourRefusal::CameraFrustum)
@@ -1824,9 +1834,16 @@ pub(crate) fn rebuild_xmodel_draw_lane(
             &runtime.catalog,
         );
         lane.distortion.push(item);
+        lane.distortion_source.push(source);
         match super::frame_product_kind_for_camera_region(item.camera_region) {
-            Some(super::FrameProductKind::Emissive) => lane.emissive.push(item),
-            Some(super::FrameProductKind::Colour) => lane.colour.push(item),
+            Some(super::FrameProductKind::Emissive) => {
+                lane.emissive.push(item);
+                lane.emissive_source.push(source);
+            }
+            Some(super::FrameProductKind::Colour) => {
+                lane.colour.push(item);
+                lane.colour_source.push(source);
+            }
             Some(_) | None => {}
         }
         lane.sorted = lane.sorted.saturating_add(1);
@@ -1834,11 +1851,21 @@ pub(crate) fn rebuild_xmodel_draw_lane(
             lane.object_id_standin = lane.object_id_standin.saturating_add(1);
         }
     }
-    let order =
-        |item: &RetainedDrawItem| (item.host_sort_key(), retained_draw_order_tie(&item.kind));
-    lane.colour.sort_unstable_by_key(order);
-    lane.emissive.sort_unstable_by_key(order);
-    lane.distortion.sort_unstable_by_key(order);
+    let mut order = Vec::new();
+    {
+        let XModelDrawLane {
+            colour,
+            emissive,
+            distortion,
+            colour_source,
+            emissive_source,
+            distortion_source,
+            ..
+        } = &mut *lane;
+        sort_xmodel_lane(colour, colour_source, &mut order);
+        sort_xmodel_lane(emissive, emissive_source, &mut order);
+        sort_xmodel_lane(distortion, distortion_source, &mut order);
+    }
     lane.membership_hash = layout;
     lane.membership_revision = lane.membership_revision.wrapping_add(1);
     lane.payload_revision = xmodel.revision;

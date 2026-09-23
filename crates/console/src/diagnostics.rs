@@ -69,7 +69,7 @@ fn finish_replay_playback(
         return;
     }
     match swap.as_mut() {
-        Some(swap) => match swap.request_menu() {
+        Some(swap) => match swap.request_leave() {
             Ok(id) => diag::info!(
                 Console,
                 "demo: ended after {} ticks — disconnect to menu (swap #{id})",

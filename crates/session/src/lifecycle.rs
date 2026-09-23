@@ -1,8 +1,9 @@
 use bevy::prelude::*;
+use bevy::tasks::{AsyncComputeTaskPool, TaskPool};
 use frame::{
     AppScreen, ClassSelectHandoff, HasWorld, LaunchIdentity, LocalLoadKey, MapLoadApproved,
-    MapLoadFailed, MatchInstalled, MatchKey, MatchTornDown, RuntimeRole, TeardownReason,
-    WorldGeneration,
+    MapLoadFailed, MatchInstalled, MatchKey, MatchTornDown, Retiring, ReturnedToMenu, RuntimeRole,
+    TeardownReason, WorldGeneration,
 };
 use net::{AuthorityLoadHold, ClientSet, MatchDescriptor, PresentedSnapshot};
 
@@ -31,7 +32,9 @@ pub enum SessionSwapTarget {
         quit_on_end: bool,
     },
 
-    Menu,
+    Menu {
+        leave_session: bool,
+    },
 }
 
 #[derive(Debug)]
@@ -41,6 +44,8 @@ struct PendingSessionSwap {
     phase: SessionSwapPhase,
 
     abort_install: bool,
+
+    tore_down_world: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +74,7 @@ impl SessionSwapRequest {
             Some(pending) => {
                 pending.id == request_id
                     && pending.phase == SessionSwapPhase::WaitingForInstall
-                    && !matches!(pending.target, SessionSwapTarget::Menu)
+                    && !matches!(pending.target, SessionSwapTarget::Menu { .. })
             }
             None => request_id == 0 && self.next_id == 0,
         }
@@ -93,32 +98,49 @@ impl SessionSwapRequest {
     }
 
     pub fn request_menu(&mut self) -> Result<u64, String> {
-        if let Some(pending) = self.pending.as_mut() {
-            match &pending.target {
-                SessionSwapTarget::Menu => Ok(pending.id),
-                SessionSwapTarget::Zone(zone) => {
-                    diag::info!(
-                        Sim,
-                        "session: disconnect superseded in-flight map `{zone}` (swap #{}) → menu",
-                        pending.id
-                    );
-                    pending.target = SessionSwapTarget::Menu;
-                    pending.abort_install = true;
-                    Ok(pending.id)
-                }
-                SessionSwapTarget::Demo { name, .. } => {
-                    diag::info!(
-                        Sim,
-                        "session: disconnect superseded in-flight demo `{name}` (swap #{}) → menu",
-                        pending.id
-                    );
-                    pending.target = SessionSwapTarget::Menu;
-                    pending.abort_install = true;
-                    Ok(pending.id)
-                }
-            }
+        self.request_return(false)
+    }
+
+    pub fn request_leave(&mut self) -> Result<u64, String> {
+        self.request_return(true)
+    }
+
+    fn request_return(&mut self, leave_session: bool) -> Result<u64, String> {
+        let Some(pending) = self.pending.as_mut() else {
+            return self.begin(SessionSwapTarget::Menu { leave_session });
+        };
+        let verb = if leave_session {
+            "disconnect"
         } else {
-            self.begin(SessionSwapTarget::Menu)
+            "match end"
+        };
+        match &mut pending.target {
+            SessionSwapTarget::Menu {
+                leave_session: already,
+            } => {
+                *already = *already || leave_session;
+                Ok(pending.id)
+            }
+            SessionSwapTarget::Zone(zone) => {
+                diag::info!(
+                    Sim,
+                    "session: {verb} superseded in-flight map `{zone}` (swap #{}) → menu",
+                    pending.id
+                );
+                pending.target = SessionSwapTarget::Menu { leave_session };
+                pending.abort_install = true;
+                Ok(pending.id)
+            }
+            SessionSwapTarget::Demo { name, .. } => {
+                diag::info!(
+                    Sim,
+                    "session: {verb} superseded in-flight demo `{name}` (swap #{}) → menu",
+                    pending.id
+                );
+                pending.target = SessionSwapTarget::Menu { leave_session };
+                pending.abort_install = true;
+                Ok(pending.id)
+            }
         }
     }
 
@@ -131,13 +153,17 @@ impl SessionSwapRequest {
         let target_s = match &target {
             SessionSwapTarget::Zone(zone) => format!("zone:{zone}"),
             SessionSwapTarget::Demo { name, .. } => format!("demo:{name}"),
-            SessionSwapTarget::Menu => "menu".into(),
+            SessionSwapTarget::Menu {
+                leave_session: true,
+            } => "leave".into(),
+            SessionSwapTarget::Menu { .. } => "menu".into(),
         };
         self.pending = Some(PendingSessionSwap {
             id,
             target,
             phase: SessionSwapPhase::Requested,
             abort_install: false,
+            tore_down_world: false,
         });
         perf::swap(id, "requested", &target_s);
         Ok(id)
@@ -168,6 +194,7 @@ pub fn run_teardown(
     signon: Option<Res<net::SignonState>>,
     bridge: Option<Res<net::MasterBridge>>,
     mut gaps: ResMut<TeardownGaps>,
+    mut retiring: ResMut<Retiring>,
     mut torn: MessageWriter<MatchTornDown>,
 ) {
     let Some(reason) = request.0.take() else {
@@ -220,10 +247,12 @@ pub fn run_teardown(
         "session: match torn down ({reason:?}); teardown ran, {} declared gaps",
         gaps.0.len()
     );
-    perf::match_torn(match reason {
-        TeardownReason::Disconnect => "Disconnect",
-        TeardownReason::Replaced => "Replaced",
-    });
+    perf::match_torn(reason.label());
+    diag::lifecycle_boundary(
+        "local_session_revoked",
+        &format!(" reason={}", reason.label()),
+    );
+    retiring.mark_teardown();
     torn.write(MatchTornDown {
         reason,
         world_generation: torn_generation,
@@ -259,13 +288,13 @@ fn stamp_runtime_role(
 
 fn teardown_reason_for(target: &SessionSwapTarget) -> TeardownReason {
     match target {
-        SessionSwapTarget::Menu => TeardownReason::Disconnect,
+        SessionSwapTarget::Menu {
+            leave_session: true,
+        } => TeardownReason::Disconnect,
+        SessionSwapTarget::Menu { .. } => TeardownReason::MatchEnded,
         SessionSwapTarget::Zone(_) | SessionSwapTarget::Demo { .. } => TeardownReason::Replaced,
     }
 }
-
-#[derive(Resource, Default, Debug)]
-struct PendingDisconnectFact(bool);
 
 fn load_key_for_swap(request_id: u64, bridge: Option<&net::MasterBridge>) -> LocalLoadKey {
     let Some(bridge) = bridge else {
@@ -293,14 +322,25 @@ fn occupy_after_teardown(
     role: &mut Option<ResMut<RuntimeRole>>,
     identity: &mut Option<ResMut<LaunchIdentity>>,
     approved: &mut MessageWriter<MapLoadApproved>,
-    disconnect_fact: &mut PendingDisconnectFact,
+    menu: &mut MessageWriter<ReturnedToMenu>,
+    leave: &mut Option<ResMut<net::PendingMasterMenuAction>>,
     bridge: Option<&net::MasterBridge>,
 ) -> Option<SessionSwapCompletion> {
     match pending.target.clone() {
-        SessionSwapTarget::Menu => {
+        SessionSwapTarget::Menu { leave_session } => {
             stamp_runtime_role(role, identity, RuntimeRole::Listen);
 
-            disconnect_fact.0 = true;
+            if leave_session
+                && bridge.is_some()
+                && let Some(action) = leave.as_mut()
+                && action.0.is_none()
+            {
+                action.0 = Some(net::MasterMenuAction::LeaveLobby);
+            }
+            menu.write(ReturnedToMenu {
+                swap_id: pending.id,
+                had_world: pending.tore_down_world,
+            });
             Some(SessionSwapCompletion {
                 id: pending.id,
                 result: SessionSwapResult::Menu,
@@ -345,7 +385,8 @@ fn run_session_swap(
     mut torn: MessageReader<MatchTornDown>,
     mut failed: MessageReader<MapLoadFailed>,
     mut installed: MessageReader<MatchInstalled>,
-    mut disconnect_fact: ResMut<PendingDisconnectFact>,
+    mut menu: MessageWriter<ReturnedToMenu>,
+    mut leave: Option<ResMut<net::PendingMasterMenuAction>>,
     bridge: Option<Res<net::MasterBridge>>,
 ) {
     let mut finish: Option<SessionSwapCompletion> = None;
@@ -355,10 +396,11 @@ fn run_session_swap(
             pending.abort_install = false;
         }
         let expected_teardown = teardown_reason_for(&pending.target);
-        let menu_accepts_replaced = matches!(pending.target, SessionSwapTarget::Menu);
+        let menu_accepts_replaced = matches!(pending.target, SessionSwapTarget::Menu { .. });
         match pending.phase {
             SessionSwapPhase::Requested if has_world.is_some_and(|world| world.0) => {
                 teardown.0 = Some(expected_teardown);
+                pending.tore_down_world = true;
                 pending.phase = SessionSwapPhase::WaitingForTeardown;
             }
             SessionSwapPhase::Requested | SessionSwapPhase::WaitingForTeardown
@@ -373,19 +415,21 @@ fn run_session_swap(
                     &mut role,
                     &mut identity,
                     &mut approved,
-                    &mut disconnect_fact,
+                    &mut menu,
+                    &mut leave,
                     bridge.as_deref(),
                 );
             }
             SessionSwapPhase::WaitingForInstall
-                if matches!(pending.target, SessionSwapTarget::Menu) =>
+                if matches!(pending.target, SessionSwapTarget::Menu { .. }) =>
             {
                 finish = occupy_after_teardown(
                     pending,
                     &mut role,
                     &mut identity,
                     &mut approved,
-                    &mut disconnect_fact,
+                    &mut menu,
+                    &mut leave,
                     bridge.as_deref(),
                 );
             }
@@ -393,6 +437,20 @@ fn run_session_swap(
                 if let Some(fact) = failed.read().find(|fact| fact.request_id == pending.id) =>
             {
                 stamp_runtime_role(&mut role, &mut identity, RuntimeRole::Listen);
+                if let Some(identity) = identity.as_mut() {
+                    identity.zone.clear();
+                }
+                menu.write(ReturnedToMenu {
+                    swap_id: pending.id,
+                    had_world: pending.tore_down_world,
+                });
+                diag::warn!(
+                    Sim,
+                    "session: map `{}` failed (swap #{}): {} — returned to menu",
+                    fact.zone,
+                    pending.id,
+                    fact.error
+                );
                 finish = Some(SessionSwapCompletion {
                     id: pending.id,
                     result: SessionSwapResult::Failed {
@@ -426,39 +484,44 @@ fn run_session_swap(
     }
 }
 
-fn emit_disconnect_fact(
-    mut pending: ResMut<PendingDisconnectFact>,
-    mut torn: MessageWriter<MatchTornDown>,
-) {
-    if !pending.0 {
-        return;
-    }
-    pending.0 = false;
-    perf::match_torn("Disconnect");
-    torn.write(MatchTornDown {
-        reason: TeardownReason::Disconnect,
-        world_generation: frame::WorldGeneration(None),
-        match_key: MatchKey::NONE,
-        match_epoch: 0,
-    });
-}
-
 fn run_exit_level(
     mut called: MessageReader<frame::ExitLevelCalled>,
     mut transition: ResMut<SessionSwapRequest>,
-    bridge: Option<Res<net::MasterBridge>>,
 ) {
     if called.read().next().is_none() {
         return;
     }
-    if let Some(bridge) = bridge.as_ref()
-        && matches!(bridge.state(), net::MasterBridgeState::Hosting { .. })
-    {
-        bridge.close_hosted_session();
-    }
     match transition.request_menu() {
         Ok(id) => diag::info!(Sim, "session: exitLevel( false ) → lobby (swap #{id})"),
         Err(err) => diag::info!(Sim, "session: exitLevel refused — {err}"),
+    }
+}
+
+fn retire_handed_over(mut retiring: ResMut<Retiring>) {
+    let (batch, teardown) = retiring.take_batch();
+    if batch.is_empty() {
+        return;
+    }
+    let values = batch.len();
+    let guard = retiring.ship(teardown);
+    AsyncComputeTaskPool::get_or_init(TaskPool::default)
+        .spawn(async move {
+            drop(batch);
+            if guard.settle() == Some(0) {
+                diag::lifecycle_boundary("retirement_settled", &format!(" values={values}"));
+            }
+        })
+        .detach();
+    let (jobs, total, waiting) = retiring.counts();
+    diag::info!(
+        Sim,
+        "session: retired {values} value(s) off the frame (batches={jobs} values={total} waiting={waiting})"
+    );
+    if teardown {
+        diag::lifecycle_boundary(
+            "old_runtime_teardown_complete",
+            &format!(" values={values} in_flight={}", retiring.in_flight()),
+        );
     }
 }
 
@@ -501,7 +564,11 @@ fn run_peer_lobby_return(
     if signon.phase.is_failed()
         || matches!(
             held.as_ref(),
-            Some(net::MasterBridgeState::Failed { .. } | net::MasterBridgeState::Closed { .. })
+            Some(
+                net::MasterBridgeState::Failed { .. }
+                    | net::MasterBridgeState::Closed { .. }
+                    | net::MasterBridgeState::Left { .. }
+            )
         )
     {
         let incarnation = bridge
@@ -647,13 +714,15 @@ pub fn register_lifecycle(app: &mut App) {
     app.init_resource::<TeardownRequest>()
         .init_resource::<SessionSwapRequest>()
         .init_resource::<TeardownGaps>()
-        .init_resource::<PendingDisconnectFact>()
         .init_resource::<WorldGeneration>()
+        .init_resource::<frame::WorldProducts>()
         .init_resource::<LiveWorldIdentity>()
+        .init_resource::<Retiring>()
         .add_message::<MapLoadApproved>()
         .add_message::<MapLoadFailed>()
         .add_message::<MatchInstalled>()
         .add_message::<MatchTornDown>()
+        .add_message::<ReturnedToMenu>()
         .configure_sets(Update, frame::SessionSwapApplied.in_set(ClientSet::Load))
         .add_systems(
             Update,
@@ -664,7 +733,6 @@ pub fn register_lifecycle(app: &mut App) {
                 run_udp_peer_lobby_return,
                 run_teardown,
                 run_session_swap,
-                emit_disconnect_fact,
             )
                 .chain()
                 .in_set(frame::SessionSwapApplied),
@@ -674,5 +742,6 @@ pub fn register_lifecycle(app: &mut App) {
             stamp_loaded_zone
                 .after(crate::apply_prepared_match)
                 .in_set(ClientSet::Load),
-        );
+        )
+        .add_systems(Update, retire_handed_over.in_set(ClientSet::Diag));
 }

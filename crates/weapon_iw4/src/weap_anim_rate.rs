@@ -24,6 +24,15 @@ impl AnimRateOffsets {
     }
 }
 
+pub const WEAPON_ANIM_SLOTS: usize = WEAPON_ANIM_COUNT + 2;
+
+pub mod weap_anim_extra {
+    use super::WEAPON_ANIM_COUNT;
+
+    pub const RELOAD_QUICK: usize = WEAPON_ANIM_COUNT;
+    pub const RELOAD_QUICK_EMPTY: usize = WEAPON_ANIM_COUNT + 1;
+}
+
 pub const ANIM_RATE_TABLE: [AnimRateOffsets; WEAPON_ANIM_COUNT] = [
     AnimRateOffsets::NATIVE,
     AnimRateOffsets::NATIVE,
@@ -176,6 +185,8 @@ pub fn slot_for_weap_anim_event(masked_event: u32) -> Option<usize> {
         0x1e => weap_anim::DETONATE,
         0x1f => weap_anim::NIGHTVISION_WEAR,
         0x20 => weap_anim::NIGHTVISION_REMOVE,
+        0x21 => weap_anim_extra::RELOAD_QUICK,
+        0x22 => weap_anim_extra::RELOAD_QUICK_EMPTY,
         _ => weap_anim::IDLE,
     })
 }

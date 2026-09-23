@@ -31,6 +31,8 @@ pub struct AcceptedShot {
     pub shot_id: ShotId,
     pub attacker: ClientId,
     pub attacker_life: LifeSequence,
+
+    pub hand: u8,
     pub weapon: u32,
     pub ammo_used: i32,
     pub origin: [f32; 3],
@@ -53,6 +55,7 @@ pub struct Emission {
     pub pellet: PelletId,
     pub attacker: ClientId,
     pub attacker_life: LifeSequence,
+    pub hand: u8,
     pub weapon: u32,
     pub origin: [f32; 3],
     pub direction: [f32; 3],
@@ -63,6 +66,33 @@ pub struct Emission {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerCollisionRepresentation {
     StandingAabbV1,
+    PosedBonesV1,
+}
+
+impl PlayerCollisionRepresentation {
+    pub const fn dump_label(self) -> &'static str {
+        match self {
+            Self::StandingAabbV1 => "aabb",
+            Self::PosedBonesV1 => "bones",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntityClipKind {
+    CollTris,
+    BoneBoxes,
+    LinkedBrush,
+}
+
+impl EntityClipKind {
+    pub const fn dump_label(self) -> &'static str {
+        match self {
+            Self::CollTris => "colltris",
+            Self::BoneBoxes => "boxes",
+            Self::LinkedBrush => "brush",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,6 +122,8 @@ pub struct ShotCollisionVerdict {
     pub model_key: Option<String>,
 
     pub end: Option<[f32; 3]>,
+
+    pub entity_clip: Option<EntityClipKind>,
 
     pub impact_n: u32,
 
@@ -210,6 +242,7 @@ pub(crate) fn advance_weapon_command(
             0
         };
 
+        let quick_reload = facts.dual_mag.is_some() && meta.quick_reload_ready(ammo_weapon);
         let mut hands = [
             WeaponHandState {
                 weapon: started_weapon,
@@ -225,6 +258,7 @@ pub(crate) fn advance_weapon_command(
                 rechamber_pending: meta.rechamber_pending,
                 delayed_rechamber: false,
                 weapon_restrict_kick_time: ps.weapon_restrict_kick_time,
+                quick_reload,
             },
             WeaponHandState {
                 weapon: started_weapon,
@@ -240,6 +274,7 @@ pub(crate) fn advance_weapon_command(
                 rechamber_pending: false,
                 delayed_rechamber: false,
                 weapon_restrict_kick_time: ps.weapon_restrict_kick_time_secondary,
+                quick_reload,
             },
         ];
         let mut wcmd = WeaponCmd {
@@ -414,6 +449,9 @@ pub(crate) fn advance_weapon_command(
         meta.weapon_shot_count = hand0.shot_count;
         meta.burst_latch = hand0.burst_latch;
         meta.rechamber_pending = hand0.rechamber_pending;
+        if facts.dual_mag.is_some() && started_weapon != 0 {
+            meta.set_quick_reload_ready(started_weapon, hand0.quick_reload);
+        }
 
         if ammo_index != 0 || clip_index != 0 {
             if let Some(ps_mut) = world.player_mut(*id) {
@@ -540,6 +578,7 @@ pub(crate) fn advance_weapon_command(
                         shot_id,
                         attacker: *id,
                         attacker_life: life,
+                        hand: _hand_i,
                         weapon,
                         ammo_used,
                         origin,
@@ -806,6 +845,7 @@ pub(crate) fn phase_emit(world: &FrameWorld, shots: &[AcceptedShot]) -> Vec<Emis
                 pellet: PelletId(pellet),
                 attacker: shot.attacker,
                 attacker_life: shot.attacker_life,
+                hand: shot.hand,
                 weapon: shot.weapon,
                 origin: shot.origin,
                 direction: spread_pellet_direction(shot.angles, shot.spread_degrees, &mut rng),
@@ -905,7 +945,12 @@ pub(crate) fn phase_trace(
             shot_id: em.shot_id,
             pellet: em.pellet,
             attacker: em.attacker,
-            geometry: shot_collision_geometry(terminal, query.players.verdict, entity_epoch),
+            geometry: shot_collision_geometry(
+                terminal,
+                query.players.verdict,
+                entity_epoch,
+                player_representation(terminal, &query.players.poses),
+            ),
             terminal,
             startsolid,
             bone_center,
@@ -913,6 +958,7 @@ pub(crate) fn phase_trace(
             xmodel_contents,
             model_key,
             end: segments.last().map(|s| s.end),
+            entity_clip: entity_clip_kind(terminal, &query.entities.rows),
             impact_n,
             event_n,
         });
@@ -934,6 +980,7 @@ pub(crate) fn phase_trace(
             if !exit
                 && let Some(ColliderId::Player {
                     client: victim,
+                    life: victim_life,
                     hitloc,
                 }) = segment.collider
             {
@@ -950,7 +997,7 @@ pub(crate) fn phase_trace(
                         attacker: em.attacker,
                         attacker_life: em.attacker_life,
                         target: victim,
-                        target_life: vmeta.life_sequence,
+                        target_life: victim_life,
                         weapon: em.weapon,
                         amount: scaled,
                         killcam_entity_start_time: 0,
@@ -981,13 +1028,14 @@ pub(crate) fn phase_trace(
                 event_parm: i32::from(flesh_flags),
                 weapon: em.weapon,
                 correlation: em.shot_id.0,
+                pellet: em.pellet.0,
+                hand: em.hand,
                 origin: segment.end,
                 origin2: segment.start,
                 direction: segment.normal,
                 surf_type: segment.surf_type,
                 surface_flags: segment.surface_flags,
                 simulation_flags: u8::from(segment.penetrated),
-                ..Default::default()
             };
             let victim = match segment.collider {
                 Some(ColliderId::Player { client, .. }) => Some(client),
@@ -1016,6 +1064,7 @@ pub(crate) fn phase_trace(
                         weapon: em.weapon,
                         correlation: em.shot_id.0,
                         pellet: em.pellet.0,
+                        hand: em.hand,
                         start: segment.start,
                         end: segment.end,
                         normal: segment.normal,
@@ -1186,6 +1235,7 @@ fn fire_weapon_melee(
     match segment.collider {
         Some(ColliderId::Player {
             client: victim,
+            life: victim_life,
             hitloc,
         }) => {
             if let Some(vmeta) = world.client_meta(victim)
@@ -1197,7 +1247,7 @@ fn fire_weapon_melee(
                     attacker,
                     attacker_life,
                     target: victim,
-                    target_life: vmeta.life_sequence,
+                    target_life: victim_life,
                     weapon,
                     amount,
                     killcam_entity_start_time: 0,
@@ -1285,14 +1335,52 @@ fn dobj_hit_dump(
     )
 }
 
+fn player_representation(
+    terminal: Option<ColliderId>,
+    poses: &[crate::bullet_collision::PlayerCollisionPose],
+) -> PlayerCollisionRepresentation {
+    let Some(ColliderId::Player { client, .. }) = terminal else {
+        return PlayerCollisionRepresentation::StandingAabbV1;
+    };
+    match poses.iter().find(|pose| pose.client == client) {
+        Some(pose) if !pose.bones.is_empty() => PlayerCollisionRepresentation::PosedBonesV1,
+        _ => PlayerCollisionRepresentation::StandingAabbV1,
+    }
+}
+
+fn entity_clip_kind(
+    terminal: Option<ColliderId>,
+    rows: &[EntityCollisionTraceGeom],
+) -> Option<EntityClipKind> {
+    match terminal {
+        Some(ColliderId::EntityLinkedBrush { .. }) => Some(EntityClipKind::LinkedBrush),
+        Some(ColliderId::EntityDObjBone { owner, .. }) => {
+            let coll = rows
+                .iter()
+                .find(|row| row.owner == owner)
+                .and_then(|row| row.collision.as_ref())
+                .and_then(|collision| collision.coll.as_ref());
+            Some(
+                if crate::bullet_collision::coll_tris_clip_available(coll, MASK_BULLET_WORLD) {
+                    EntityClipKind::CollTris
+                } else {
+                    EntityClipKind::BoneBoxes
+                },
+            )
+        }
+        _ => None,
+    }
+}
+
 fn shot_collision_geometry(
     terminal: Option<ColliderId>,
     player_history: HistorySampleVerdict,
     entity_epoch: Option<EntityCollisionEpoch>,
+    representation: PlayerCollisionRepresentation,
 ) -> ShotCollisionGeometry {
     match terminal {
         Some(ColliderId::Player { .. }) => ShotCollisionGeometry::Player {
-            representation: PlayerCollisionRepresentation::StandingAabbV1,
+            representation,
             history: player_history,
         },
         Some(ColliderId::EntityDObjBone { .. } | ColliderId::EntityLinkedBrush { .. }) => {
@@ -1304,7 +1392,7 @@ fn shot_collision_geometry(
         Some(ColliderId::World { .. }) => ShotCollisionGeometry::World,
         None => match player_history {
             HistorySampleVerdict::Refused { .. } => ShotCollisionGeometry::Player {
-                representation: PlayerCollisionRepresentation::StandingAabbV1,
+                representation,
                 history: player_history,
             },
             _ => ShotCollisionGeometry::Miss,

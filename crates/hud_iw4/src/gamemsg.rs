@@ -78,8 +78,6 @@ pub const MP_CONNECTED: &str = "MP_CONNECTED";
 
 pub const ITEM_TYPE_GAME_MESSAGE_WINDOW: i32 = 0x13;
 
-pub const OBITUARY_WEAPON_INDEX_LIMIT: i32 = 0x578;
-
 pub fn game_msg_win0_char_height() -> f32 {
     GAME_MSG_WIN0_TEXT_SCALE * GAME_MSG_CHAR_EM
 }
@@ -126,11 +124,7 @@ pub fn killicon_stretch_uv(flip_kill_icon: bool) -> (f32, f32) {
 }
 
 pub fn obituary_mod(event_parm: i32) -> Option<i32> {
-    if event_parm < OBITUARY_WEAPON_INDEX_LIMIT {
-        None
-    } else {
-        Some(event_parm - OBITUARY_WEAPON_INDEX_LIMIT)
-    }
+    (event_parm < 0).then(|| -1 - event_parm)
 }
 
 pub fn obituary_mod_killicon(means_of_death: i32) -> Option<&'static str> {
@@ -177,7 +171,7 @@ pub fn pack_obituary_event_parm(
         _ => false,
     };
     if pack_mod {
-        means_of_death + OBITUARY_WEAPON_INDEX_LIMIT
+        -1 - means_of_death
     } else {
         weapon as i32
     }

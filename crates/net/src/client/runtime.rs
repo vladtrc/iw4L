@@ -1184,7 +1184,7 @@ pub fn publish_presented(
     let previous = presented.player(local.0).copied();
     let armed = prediction.0.is_armed();
     let frame_interpolation = clock.accumulator_ms / AUTHORITY_MS as f32;
-    let interpolation_previous = if !armed && *role == RuntimeRole::Replay {
+    let interpolation_previous = if *role == RuntimeRole::Replay {
         last_adopted
             .snap
             .clone()
@@ -1203,26 +1203,28 @@ pub fn publish_presented(
             .then(|| interpolate_player_state(previous_local, next_local, frame_interpolation))
     });
     *present_census = PresentLocalCensus {
-        choice: Some(if armed {
+        choice: Some(if interpolated.is_some() {
+            "interpolated"
+        } else if armed {
             PresentedSnapshot::presentation_local_choice(
                 snapshot_local,
                 predicted_ps.as_ref(),
                 previous.as_ref(),
             )
-        } else if interpolated.is_some() {
-            "interpolated"
         } else {
             PresentedSnapshot::presentation_local_choice_unarmed(snapshot_local)
         }),
         snapshot_delta_time: snapshot_local.map(|ps| ps.delta_time),
         predicted_delta_time: predicted_ps.as_ref().map(|ps| ps.delta_time),
     };
-    let mut predicted = if armed {
-        PresentedSnapshot::presentation_local_player_state(snapshot_local, predicted_ps, previous)
-    } else {
-        interpolated.unwrap_or_else(|| {
-            PresentedSnapshot::presentation_local_player_state_unarmed(snapshot_local)
-        })
+    let mut predicted = match interpolated {
+        Some(interpolated) => interpolated,
+        None if armed => PresentedSnapshot::presentation_local_player_state(
+            snapshot_local,
+            predicted_ps,
+            previous,
+        ),
+        None => PresentedSnapshot::presentation_local_player_state_unarmed(snapshot_local),
     };
     let render_time_ms = if *role == RuntimeRole::Replay {
         (snapshot.tick.0 as i32 + 1) * AUTHORITY_MS + clock.accumulator_ms as i32

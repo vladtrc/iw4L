@@ -17,13 +17,27 @@ pub const CAPTURE_SETTLE_FRAMES: u32 = 30;
 
 pub const CAPTURE_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(180);
 
-/// How long the exit path waits for a screenshot still being written.
-///
-/// A demo ends in `std::process::exit`, which kills the I/O workers wherever
-/// they are, so the file has to be finished before the process leaves. Bounded
-/// so that a stuck write costs the run a few seconds and a truthful log line
-/// rather than a hang.
+/// How long a scenario exit waits for a screenshot still being written. The
+/// process exit kills I/O workers, so the file must be finished first.
 const CAPTURE_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+const USER_QUIT_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+static EXIT_DRAIN_BUDGET_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(CAPTURE_DRAIN_LIMIT.as_millis() as u64);
+
+fn exit_drain_budget() -> std::time::Duration {
+    std::time::Duration::from_millis(
+        EXIT_DRAIN_BUDGET_MS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+pub fn exit_is_user_quit() {
+    EXIT_DRAIN_BUDGET_MS.fetch_min(
+        USER_QUIT_DRAIN_LIMIT.as_millis() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CaptureRequest {
@@ -163,7 +177,7 @@ fn arm_write_drain_at_exit() {
         fn atexit(callback: extern "C" fn()) -> i32;
     }
     extern "C" fn drain_writes() {
-        let until = std::time::Instant::now() + CAPTURE_DRAIN_LIMIT;
+        let until = std::time::Instant::now() + exit_drain_budget();
         while WRITES_IN_FLIGHT.load(Ordering::Relaxed) > 0 && std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
@@ -223,6 +237,10 @@ impl CaptureQueue {
         }
         self.exit_when_drained = true;
         true
+    }
+
+    pub fn owed_at_exit(&self) -> (usize, usize) {
+        (self.pending.len(), self.writing)
     }
 
     /// Book every write a worker finished since the last look.
@@ -421,7 +439,8 @@ pub(crate) fn report_unwritten_captures(
     if exit.read().next().is_none() {
         return;
     }
-    let until = std::time::Instant::now() + CAPTURE_DRAIN_LIMIT;
+    let budget = exit_drain_budget();
+    let until = std::time::Instant::now() + budget;
     while queue.writing > 0 && std::time::Instant::now() < until {
         std::thread::sleep(std::time::Duration::from_millis(2));
         queue.collect_writes();
@@ -429,9 +448,9 @@ pub(crate) fn report_unwritten_captures(
     if queue.writing > 0 {
         diag::error!(
             Launch,
-            "screenshot: {} write(s) had not finished after {}s — the files they were encoding are incomplete",
+            "screenshot: {} write(s) had not finished after {}ms — the files they were encoding are incomplete",
             queue.writing,
-            CAPTURE_DRAIN_LIMIT.as_secs(),
+            budget.as_millis(),
         );
     }
     for path in queue.pending_paths() {

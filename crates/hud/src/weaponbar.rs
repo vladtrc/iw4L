@@ -83,6 +83,8 @@ struct WeaponbarExprHost<'a> {
     menu: Option<&'a assets::MenuDef>,
     perk_slots: [u32; 8],
     weapon_script: String,
+
+    lock: Option<hud_iw4::WeaponLockView>,
     frag_ammo: i32,
     smoke_ammo: i32,
     stock_ammo: i32,
@@ -175,6 +177,9 @@ impl ExprHost for WeaponbarExprHost<'_> {
     }
     fn gametype_name(&self) -> Result<Operand, ExprError> {
         Err(ExprError::Host("gametype"))
+    }
+    fn weapon_lock(&self) -> Result<hud_iw4::WeaponLockView, ExprError> {
+        self.lock.ok_or(ExprError::Host("weapon lock"))
     }
     fn dvar_int(&self, name: &str) -> Result<i32, ExprError> {
         if name.eq_ignore_ascii_case("g_hardcore")
@@ -554,6 +559,7 @@ pub(crate) fn update_weaponbar(
         menu: None,
         perk_slots: ps.perk_slots,
         weapon_script,
+        lock: None,
         frag_ammo,
         smoke_ammo,
         stock_ammo: ammo.as_ref().and_then(|a| a.stock).unwrap_or(0),
@@ -780,7 +786,7 @@ fn paint_action_slot(
     let Some(weapons) = state.weapons else {
         return OwnerDrawPaint::Gap(ChromeGapKind::MaterialExp);
     };
-    let Some((material, ratio, atlas)) = weapons.0.dpad_icon_of(weapon) else {
+    let Some((material, ratio)) = weapons.0.dpad_icon_of(weapon) else {
         return OwnerDrawPaint::Gap(ChromeGapKind::MaterialExp);
     };
 
@@ -804,17 +810,5 @@ fn paint_action_slot(
         Draw2dOp::StretchPic,
         frame,
     );
-    if let Some(cmd) = frame.list.cmds.last_mut() {
-        let [s0, t0, s1, t1] = hud_iw4::r_adjust_atlas_tex_coords(
-            atlas[0],
-            atlas[1],
-            hud_iw4::R_ATLAS_ANIM_FPS_DEFAULT,
-            crate::scorebar::sys_milliseconds() as u32,
-        );
-        cmd.s0 = s0;
-        cmd.t0 = t0;
-        cmd.s1 = s1;
-        cmd.t1 = t1;
-    }
     OwnerDrawPaint::Painted
 }

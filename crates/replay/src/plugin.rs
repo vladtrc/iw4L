@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use frame::{MatchTornDown, SessionSwapApplied};
+use frame::{MatchTornDown, ReturnedToMenu, SessionSwapApplied};
 use net::{
     AUTHORITY_MS, AuthorityClock, AuthorityLoadHold, AuthoritySet, ClientClock, ClientSet,
     ReceivedTick, ReceivedTicks, RuntimeRole, ServerTick, ServerTime, authority_should_tick,
@@ -99,11 +99,12 @@ impl Plugin for ReplayPlugin {
 fn sync_theater_occupancy(
     mut commands: Commands,
     mut torn: MessageReader<MatchTornDown>,
+    mut returned: MessageReader<ReturnedToMenu>,
     mut pending: ResMut<PendingReplayArm>,
     mut ring: ResMut<ClipRing>,
     role: Res<RuntimeRole>,
 ) {
-    if torn.read().count() > 0 {
+    if torn.read().count() > 0 || returned.read().count() > 0 {
         ring.clear();
         commands.remove_resource::<ReplayPlayback>();
         perf::theater(0, None, None);

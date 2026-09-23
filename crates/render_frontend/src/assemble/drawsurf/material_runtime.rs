@@ -557,17 +557,12 @@ fn original_remap_resolution() -> RemapResolution {
     RemapResolution::SelfSet
 }
 
-fn source_generation_id(source: &assets::MaterialDefinitions) -> MaterialGenerationId {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for material in &source.materials {
-        for byte in material.name.as_str().as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        hash ^= material.draw_surf;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    MaterialGenerationId(hash)
+fn mint_material_generation_id() -> MaterialGenerationId {
+    // The generation is a runtime identity, not a content checksum. Material
+    // names and draw-surf keys can stay equal while shaders, images or map
+    // overrides change, so every captured table needs a distinct ID.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    MaterialGenerationId(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 fn program_hash(program: &[u8]) -> u64 {
@@ -1489,7 +1484,7 @@ pub fn capture_runtime_catalog(source: &assets::MaterialDefinitions) -> RuntimeM
         .collect();
 
     RuntimeMaterialCatalog {
-        generation_id: source_generation_id(source),
+        generation_id: mint_material_generation_id(),
         materials,
         material_indices_by_name,
         technique_sets,

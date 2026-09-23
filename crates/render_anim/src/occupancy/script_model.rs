@@ -1170,6 +1170,10 @@ pub fn pose_script_dobj_with_materials(
             lod,
         )?;
         let key = assets::MapXModelAssetKey(skel.name.clone());
+        let mut posed = posed;
+        for surface in &mut posed {
+            surface.model = model as u16;
+        }
         for surface in &posed {
             materials.push(
                 catalog.and_then(|catalog| catalog.surface_material(&key, surface.surface_index)),

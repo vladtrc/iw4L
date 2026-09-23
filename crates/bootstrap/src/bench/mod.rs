@@ -87,6 +87,10 @@ pub fn enabled() -> bool {
     perf::stats::enabled()
 }
 
+pub fn announce_runtime(app: &mut App) {
+    app.add_systems(Last, facts::announce);
+}
+
 /// Arm the milestone watcher and queue the settled screenshot of the spawned
 /// world. Called once, with the app assembled and the load request in place.
 ///
@@ -131,7 +135,7 @@ pub fn insert(
     app.add_systems(Last, (milestones::poll, facts::collect));
 }
 
-/// Playing a demo ends in `std::process::exit` (`console::exit_replay_process`),
+/// Every exit ends in `std::process::exit` (`console::exit_process`),
 /// so `App::run` never returns and nothing after it runs. Perfetto survives that
 /// on an `atexit` handler; the report needs the same one, or `make bench <demo>`
 /// would measure a whole run and print nothing.
@@ -313,6 +317,36 @@ fn write_run_package(artifacts: &Path, lines: &[String]) -> Vec<String> {
                 },
             )),
             Err(error) => out.push(format!("run package: frames.csv not written ({error})")),
+        }
+    }
+
+    let framebuffers = gpu_probe::framebuffers();
+    if !framebuffers.is_empty() {
+        let path = dir.join("framebuffers.csv");
+        match tables::write_framebuffers(&path, &framebuffers) {
+            Ok(()) => out.push(format!(
+                "run package: framebuffers.csv {} passes, {} keys",
+                framebuffers.len(),
+                framebuffers
+                    .iter()
+                    .map(|pass| pass.keys.len())
+                    .sum::<usize>()
+            )),
+            Err(error) => out.push(format!(
+                "run package: framebuffers.csv not written ({error})"
+            )),
+        }
+    }
+
+    let encoders = gpu_probe::encoders();
+    if !encoders.is_empty() {
+        let path = dir.join("encoders.csv");
+        match tables::write_encoders(&path, &encoders) {
+            Ok(()) => out.push(format!(
+                "run package: encoders.csv {} shapes",
+                encoders.len()
+            )),
+            Err(error) => out.push(format!("run package: encoders.csv not written ({error})")),
         }
     }
 

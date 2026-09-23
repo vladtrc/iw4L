@@ -32,12 +32,20 @@ observation windows. The `&` suffix is a loud refusal to wait (`map mp_rust &`),
 The 120 s gate timeout aborts the rest with an echo; parsing is
 `crates/console/src/`. Hand-typed `dump`/`clip`/`screenshot` pass through any
 wait while preserving the queue, which inside `--cmds` takes an explicit `!`.
+A hand-typed `quit`/`exit`/`disconnect` goes further: it jumps **every** hold,
+`wait 60s` included, and releases it. A `quit` written into `--cmds` does not —
+it is part of the script and waits its turn.
 
 ## Verbs and traps
 
 `map spawn class give attach name kill damage move tp look nudge press hold
-release bind bot wait mark record stoprecord clip demo dump screenshot ui disconnect quit`
-plus the debug `force_match_start` / `showpos`. `bot` is
+release bind bot wait mark record stoprecord clip demo dump screenshot ui disconnect quit
+finish_run`
+plus the debug `force_match_start` / `showpos`. `quit` leaves now and abandons
+whatever screenshot was queued or half-written; `finish_run` is the scripted
+ending that waits for those files first. `disconnect` leaves the session, not
+just the world — it also leaves the room, or closes it when hosting, and works
+with no map installed. `bot` is
 `add | hold | tp | give | fire`; `dump [name]` writes the current snapshot into
 `dumps/`. `clip` writes the last available 45 s into `clips/<ULID>/` (demo + dump)
 on host and clients — the host records authority, a client the snapshots it

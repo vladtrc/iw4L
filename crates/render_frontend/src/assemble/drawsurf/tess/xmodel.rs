@@ -187,6 +187,7 @@ struct XModelTopologyKey {
 struct XModelMergeStamp {
     topology: XModelTopologyKey,
     vertices: [u64; 8],
+    materials: [u64; 8],
     draws: [u64; 8],
     producer_revision: [u64; 8],
     fpv_world: [u32; 16],
@@ -231,6 +232,16 @@ const ADMIT_FX: u8 = 1 << 5;
 const ADMIT_DYNENT: u8 = 1 << 6;
 const ADMIT_SKY: u8 = 1 << 7;
 
+struct ProducerKeys {
+    generation: [u64; 8],
+    topology: [u64; 8],
+    admission: [u64; 8],
+    vertices: [u64; 8],
+    materials: [u64; 8],
+    draws: [u64; 8],
+    producer_revision: [u64; 8],
+}
+
 fn producer_keys(
     fpv: &FpvDrawPlan,
     bodies: &RemoteBodyDrawPlan,
@@ -240,11 +251,11 @@ fn producer_keys(
     fx_models: &FxModelDrawPlan,
     dynents: &DynEntDrawPlan,
     sky: Option<&super::sky::SkyModelDrawPlan>,
-) -> ([u64; 8], [u64; 8], [u64; 8], [u64; 8], [u64; 8], [u64; 8]) {
+) -> ProducerKeys {
     let sky_rev = sky.map(|sky| sky.revisions).unwrap_or_default();
     let sky_gen = sky.map(|sky| sky.generation).unwrap_or(0);
-    (
-        [
+    ProducerKeys {
+        generation: [
             fpv.generation,
             bodies.generation,
             scripts.generation,
@@ -254,7 +265,7 @@ fn producer_keys(
             dynents.generation,
             sky_gen,
         ],
-        [
+        topology: [
             fpv.revisions.topology,
             bodies.revisions.topology,
             scripts.revisions.topology,
@@ -264,7 +275,7 @@ fn producer_keys(
             dynents.revisions.topology,
             sky_rev.topology,
         ],
-        [
+        admission: [
             fpv.revisions.admission,
             bodies.revisions.admission,
             scripts.revisions.admission,
@@ -274,7 +285,7 @@ fn producer_keys(
             dynents.revisions.admission,
             sky_rev.admission,
         ],
-        [
+        vertices: [
             fpv.revisions.vertices,
             bodies.revisions.vertices,
             scripts.revisions.vertices,
@@ -284,7 +295,17 @@ fn producer_keys(
             dynents.revisions.vertices,
             sky_rev.vertices,
         ],
-        [
+        materials: [
+            fpv.revisions.materials,
+            bodies.revisions.materials,
+            scripts.revisions.materials,
+            missiles.revisions.materials,
+            items.revisions.materials,
+            fx_models.revisions.materials,
+            dynents.revisions.materials,
+            sky_rev.materials,
+        ],
+        draws: [
             fpv.revisions.draws,
             bodies.revisions.draws,
             scripts.revisions.draws,
@@ -294,7 +315,7 @@ fn producer_keys(
             dynents.revisions.draws,
             sky_rev.draws,
         ],
-        [
+        producer_revision: [
             fpv.revision,
             bodies.revision,
             scripts.revision,
@@ -304,7 +325,7 @@ fn producer_keys(
             dynents.revision,
             0,
         ],
-    )
+    }
 }
 
 fn xmodel_merge_stamp(
@@ -339,7 +360,7 @@ fn xmodel_merge_stamp(
         scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
     }
     let sky_eye = sky.map(|(_, eye)| [eye.x.to_bits(), eye.y.to_bits(), eye.z.to_bits()]);
-    let (generation, topology, admission, vertices, draws, producer_revision) = producer_keys(
+    let keys = producer_keys(
         fpv,
         bodies,
         scripts,
@@ -351,14 +372,15 @@ fn xmodel_merge_stamp(
     );
     XModelMergeStamp {
         topology: XModelTopologyKey {
-            generation,
-            topology,
-            admission,
+            generation: keys.generation,
+            topology: keys.topology,
+            admission: keys.admission,
             occupancy: occupancy.finish(),
         },
-        vertices,
-        draws,
-        producer_revision,
+        vertices: keys.vertices,
+        materials: keys.materials,
+        draws: keys.draws,
+        producer_revision: keys.producer_revision,
         fpv_world: mat4_bits(fpv.world_from_local),
         fpv_lighting: fpv.lighting_handle,
         fpv_scene_light: fpv.scene_light_index,
@@ -702,11 +724,8 @@ fn dense_fx_object_ids(
 }
 
 fn concat_draws_changed(prev: XModelMergeStamp, stamp: &XModelMergeStamp) -> bool {
-    // `vertices` is in here because a producer that changed its material list
-    // bumps that revision, and the concat refresh rebuilds the merged material
-    // list along with the draws.
     prev.draws != stamp.draws
-        || prev.vertices != stamp.vertices
+        || prev.materials != stamp.materials
         || prev.fpv_world != stamp.fpv_world
         || prev.fpv_lighting != stamp.fpv_lighting
         || prev.fpv_scene_light != stamp.fpv_scene_light
@@ -884,16 +903,19 @@ fn append_concat_owner_draws(
     materials: &[SmodelPassMaterial],
     draws: impl IntoIterator<Item = XModelSurfaceDraw>,
 ) {
-    let draws: Vec<XModelSurfaceDraw> = draws.into_iter().collect();
-    if draws.is_empty() {
-        return;
-    }
     let mat_base = merged.materials.len() as u32;
-    merged.materials.extend_from_slice(materials);
+    let mut any = false;
     for mut d in draws {
+        if !any {
+            any = true;
+            merged.materials.extend_from_slice(materials);
+        }
         d.surface = d.surface.saturating_add(*range_base);
         d.material = d.material.saturating_add(mat_base);
         merged.draws.push(d);
+    }
+    if !any {
+        return;
     }
     *range_base = range_base.saturating_add(surface_n as u32);
 }

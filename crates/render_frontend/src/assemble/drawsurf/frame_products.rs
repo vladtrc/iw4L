@@ -608,7 +608,14 @@ fn compact_product_draws(
             persist.compact_seen.clear();
         }
         let draw = product.ordered_draws[input];
-        let draw_tech = if remap_lit {
+        let draw_tech = if product.kind == FrameProductKind::Light {
+            let index = dpvs_iw4::GfxDrawSurf { packed: draw.key }.scene_light_index();
+            let light_type = light_types.get(usize::from(index)).copied().unwrap_or(0);
+            TechType(lighting_iw4::additional_light_tech_type(
+                light_type,
+                spot_shadowed.contains(&index),
+            ))
+        } else if remap_lit {
             super::colour_lit_technique(
                 tech_type,
                 draw.key,
@@ -882,7 +889,10 @@ pub(crate) fn open_frame_products(
         inputs.t5_falloff.extend_from_slice(&map.t5_falloff);
     }
     inputs.map_light_n = inputs.primary_lights.len();
-    if let Some(fx) = fx_dlights.as_ref() {
+    if let (Some(fx), Some(dynamic)) = (
+        fx_dlights.as_ref(),
+        primary_lights.as_ref().and_then(|map| map.dynamic),
+    ) {
         let view = prepared
             .as_ref()
             .map(|view| view.eye.to_array())
@@ -907,12 +917,14 @@ pub(crate) fn open_frame_products(
             view,
             lighting_iw4::R_DLIGHT_LIMIT_DEFAULT,
             true,
-            lighting_iw4::spot_dlight0_frustum_culls(&slots, planes),
+            planes,
             &mut extra,
         );
-        for light in extra.iter().take(n).copied() {
+        for mut light in extra.iter().take(n).copied() {
+            light.falloff_image_width = dynamic.falloff_image_width;
+            light.lmap_lookup_start = dynamic.lmap_lookup_start;
             inputs.primary_lights.push(light);
-            inputs.attenuation.push(LightAttenuationBind::default());
+            inputs.attenuation.push(dynamic.attenuation);
             inputs.t5_falloff.push(T5LightFalloffPack::default());
         }
     }
@@ -1103,13 +1115,17 @@ fn try_reuse_spot_compact(
     true
 }
 
-pub(crate) fn bake_sun_shadow_casters(
-    inputs: Res<FrameAssemblyInputs>,
+#[derive(Resource, Default)]
+pub(crate) struct StaticSunCasters {
+    partitions: Option<[super::SunShadowCasterPlan; 2]>,
+    visibility_counts: [usize; 4],
+}
+
+pub(crate) fn bake_static_sun_shadow_casters(
     generation: Res<MaterialGeneration>,
     frame: Res<MaterialFrameInputs>,
     scene: Option<Res<crate::prepare::scene::world::WorldScene>>,
     world_plan: Option<Res<WorldDrawGpuPlan>>,
-    xmodel_plan: Option<Res<super::XModelDrawPlan>>,
     smodel_plan: (
         Option<Res<super::SmodelGpuPlan>>,
         Res<crate::prepare::scene::smodel_geom_cache::LodRampDvar>,
@@ -1118,12 +1134,13 @@ pub(crate) fn bake_sun_shadow_casters(
         Option<Res<crate::prepare::scene::smodel_lighting::WorldSmodelLighting>>,
     ),
     mut casters: ResMut<super::SunShadowCasterPlan>,
-    mut present: ResMut<super::SunShadowMapPresent>,
+    mut staged: ResMut<StaticSunCasters>,
     mut sun_staging: Local<super::SunShadowStaging>,
 ) {
+    let _static = perf::Span::HostStaticSunMs.enter();
     let (smodel_plan, lod_ramp, smc_cache, pretess, smodel_lighting) = smodel_plan;
     let camera_view = frame.view_from_world;
-    present.0 = false;
+    staged.partitions = None;
     let super::SunShadowStaging {
         surface_vis: sun_surface_vis,
         smodel_vis: sun_smodel_vis,
@@ -1156,7 +1173,6 @@ pub(crate) fn bake_sun_shadow_casters(
         let (msb_near, msb_far) = sun_frustum_draw_msb.split_at_mut(1);
 
         let lod_origin_eye = camera_view.map(|view| view.inverse().transform_point3(Vec3::ZERO));
-        let gen_changed = casters.generation_id != inputs.catalog_generation;
         let buckets = super::retained_list::SmodelBucketBakeSrc {
             pretess_enable: pretess.enabled,
             cache: smc_cache.as_deref(),
@@ -1171,7 +1187,7 @@ pub(crate) fn bake_sun_shadow_casters(
 
         // Each partition owns its visibility -> LOD -> bake chain. Only the
         // final merge needs both results; intermediate joins serialize the chains.
-        let [(mut near, draw0), (mut far, draw1)] = ComputeTaskPool::get()
+        let [(near, draw0), (far, draw1)] = ComputeTaskPool::get()
             .scope(|scope| {
                 for (planes, surface_vis, smodel_vis, frustum_msb, bsp_ids, smodel_ids) in [
                     (
@@ -1231,86 +1247,120 @@ pub(crate) fn bake_sun_shadow_casters(
             .try_into()
             .expect("two sun partitions");
         *sun_draw_cell_n = draw0.max(draw1);
-        let (mut ordered0, ordered1) = super::retained_list::merge_sun_shadow_caster_partitions(
-            &mut near,
-            &mut far,
-            xmodel_plan.as_deref(),
-            &generation.catalog,
-            [planes0.as_slice(), planes1.as_slice()],
-        );
-        let sun_near_n = ordered0.len();
-        ordered0.extend(ordered1);
-        *casters = near;
         casters.bsp_ids = bsp_ids;
         casters.smodel_ids = smodel_ids;
         casters.bsp_ids_far = bsp_ids_far;
         casters.smodel_ids_far = smodel_ids_far;
-        casters.sun_near_n = sun_near_n;
-        casters.items = ordered0;
-        casters.world_eligible = casters.world_eligible.saturating_add(far.world_eligible);
-        casters.world_missing_key = casters
-            .world_missing_key
-            .saturating_add(far.world_missing_key);
-        casters.smodel_eligible = casters.smodel_eligible.saturating_add(far.smodel_eligible);
-        casters.smodel_excluded = casters.smodel_excluded.saturating_add(far.smodel_excluded);
-        casters.smodel_missing_key = casters
-            .smodel_missing_key
-            .saturating_add(far.smodel_missing_key);
-        casters.xmodel_eligible = casters.xmodel_eligible.saturating_add(far.xmodel_eligible);
-        casters.xmodel_skipped_viewmodel = casters
-            .xmodel_skipped_viewmodel
-            .saturating_add(far.xmodel_skipped_viewmodel);
-        casters.xmodel_missing_key = casters
-            .xmodel_missing_key
-            .saturating_add(far.xmodel_missing_key);
-        casters.smodel_bucket_flush_n = casters
-            .smodel_bucket_flush_n
-            .saturating_add(far.smodel_bucket_flush_n);
-        casters.smodel_bucket_rigid_n = casters
-            .smodel_bucket_rigid_n
-            .saturating_add(far.smodel_bucket_rigid_n);
-        casters.smodel_bucket_skinned_n = casters
-            .smodel_bucket_skinned_n
-            .saturating_add(far.smodel_bucket_skinned_n);
-        casters.smodel_bucket_cached_n = casters
-            .smodel_bucket_cached_n
-            .saturating_add(far.smodel_bucket_cached_n);
-        casters.smodel_bucket_unread_n = casters
-            .smodel_bucket_unread_n
-            .saturating_add(far.smodel_bucket_unread_n);
-        casters.smodel_bucket_consume_n = casters
-            .smodel_bucket_consume_n
-            .saturating_add(far.smodel_bucket_consume_n);
-        casters.smodel_bucket_context_refused_n = casters
-            .smodel_bucket_context_refused_n
-            .saturating_add(far.smodel_bucket_context_refused_n);
-        casters.cutout_plus23 = casters.cutout_plus23.saturating_add(far.cutout_plus23);
-        casters.cutout_missing_key = casters
-            .cutout_missing_key
-            .saturating_add(far.cutout_missing_key);
-        casters.cutout_empty_ib = casters.cutout_empty_ib.saturating_add(far.cutout_empty_ib);
-        casters.cutout_custom0 = casters.cutout_custom0.saturating_add(far.cutout_custom0);
-        casters
-            .smodel_pretess_indices
-            .extend(far.smodel_pretess_indices);
-
-        if gen_changed {
-            diag::info!(
-                World,
-                "sun-shadow casters: world eligible={} missing_key={} smodel eligible={} excluded={} missing_key={} drawn_items={} vis0={} vis1={} smodel_vis0={} smodel_vis1={} near_n={}",
-                casters.world_eligible,
-                casters.world_missing_key,
-                casters.smodel_eligible,
-                casters.smodel_excluded,
-                casters.smodel_missing_key,
-                casters.items.len(),
+        if casters.generation_id != generation.catalog.generation_id {
+            staged.visibility_counts = [
                 sun_surface_vis[0].iter().filter(|&&b| b != 0).count(),
                 sun_surface_vis[1].iter().filter(|&&b| b != 0).count(),
                 sun_smodel_vis[0].iter().filter(|&&b| b != 0).count(),
                 sun_smodel_vis[1].iter().filter(|&&b| b != 0).count(),
-                casters.sun_near_n,
-            );
+            ];
         }
+        staged.partitions = Some([near, far]);
+    }
+}
+
+pub(crate) fn bake_sun_shadow_casters(
+    inputs: Res<FrameAssemblyInputs>,
+    generation: Res<MaterialGeneration>,
+    frame: Res<MaterialFrameInputs>,
+    xmodel_plan: Option<Res<super::XModelDrawPlan>>,
+    mut staged: ResMut<StaticSunCasters>,
+    mut casters: ResMut<super::SunShadowCasterPlan>,
+    mut present: ResMut<super::SunShadowMapPresent>,
+) {
+    present.0 = false;
+    let Some([mut near, mut far]) = staged.partitions.take() else {
+        return;
+    };
+    let Some(sun_frame) = frame.sun_shadow else {
+        return;
+    };
+    let planes0 = sun_frame.partitions[0].clip_planes;
+    let planes1 = sun_frame.partitions[1].clip_planes;
+    let gen_changed = casters.generation_id != inputs.catalog_generation;
+    near.bsp_ids = std::mem::take(&mut casters.bsp_ids);
+    near.smodel_ids = std::mem::take(&mut casters.smodel_ids);
+    near.bsp_ids_far = std::mem::take(&mut casters.bsp_ids_far);
+    near.smodel_ids_far = std::mem::take(&mut casters.smodel_ids_far);
+    let (mut ordered0, ordered1) = super::retained_list::merge_sun_shadow_caster_partitions(
+        &mut near,
+        &mut far,
+        xmodel_plan.as_deref(),
+        &generation.catalog,
+        [planes0.as_slice(), planes1.as_slice()],
+    );
+    let sun_near_n = ordered0.len();
+    ordered0.extend(ordered1);
+    *casters = near;
+    casters.sun_near_n = sun_near_n;
+    casters.items = ordered0;
+    casters.world_eligible = casters.world_eligible.saturating_add(far.world_eligible);
+    casters.world_missing_key = casters
+        .world_missing_key
+        .saturating_add(far.world_missing_key);
+    casters.smodel_eligible = casters.smodel_eligible.saturating_add(far.smodel_eligible);
+    casters.smodel_excluded = casters.smodel_excluded.saturating_add(far.smodel_excluded);
+    casters.smodel_missing_key = casters
+        .smodel_missing_key
+        .saturating_add(far.smodel_missing_key);
+    casters.xmodel_eligible = casters.xmodel_eligible.saturating_add(far.xmodel_eligible);
+    casters.xmodel_skipped_viewmodel = casters
+        .xmodel_skipped_viewmodel
+        .saturating_add(far.xmodel_skipped_viewmodel);
+    casters.xmodel_missing_key = casters
+        .xmodel_missing_key
+        .saturating_add(far.xmodel_missing_key);
+    casters.smodel_bucket_flush_n = casters
+        .smodel_bucket_flush_n
+        .saturating_add(far.smodel_bucket_flush_n);
+    casters.smodel_bucket_rigid_n = casters
+        .smodel_bucket_rigid_n
+        .saturating_add(far.smodel_bucket_rigid_n);
+    casters.smodel_bucket_skinned_n = casters
+        .smodel_bucket_skinned_n
+        .saturating_add(far.smodel_bucket_skinned_n);
+    casters.smodel_bucket_cached_n = casters
+        .smodel_bucket_cached_n
+        .saturating_add(far.smodel_bucket_cached_n);
+    casters.smodel_bucket_unread_n = casters
+        .smodel_bucket_unread_n
+        .saturating_add(far.smodel_bucket_unread_n);
+    casters.smodel_bucket_consume_n = casters
+        .smodel_bucket_consume_n
+        .saturating_add(far.smodel_bucket_consume_n);
+    casters.smodel_bucket_context_refused_n = casters
+        .smodel_bucket_context_refused_n
+        .saturating_add(far.smodel_bucket_context_refused_n);
+    casters.cutout_plus23 = casters.cutout_plus23.saturating_add(far.cutout_plus23);
+    casters.cutout_missing_key = casters
+        .cutout_missing_key
+        .saturating_add(far.cutout_missing_key);
+    casters.cutout_empty_ib = casters.cutout_empty_ib.saturating_add(far.cutout_empty_ib);
+    casters.cutout_custom0 = casters.cutout_custom0.saturating_add(far.cutout_custom0);
+    casters
+        .smodel_pretess_indices
+        .extend(far.smodel_pretess_indices);
+
+    if gen_changed {
+        diag::info!(
+            World,
+            "sun-shadow casters: world eligible={} missing_key={} smodel eligible={} excluded={} missing_key={} drawn_items={} vis0={} vis1={} smodel_vis0={} smodel_vis1={} near_n={}",
+            casters.world_eligible,
+            casters.world_missing_key,
+            casters.smodel_eligible,
+            casters.smodel_excluded,
+            casters.smodel_missing_key,
+            casters.items.len(),
+            staged.visibility_counts[0],
+            staged.visibility_counts[1],
+            staged.visibility_counts[2],
+            staged.visibility_counts[3],
+            casters.sun_near_n,
+        );
     }
 
     present.0 = !casters.items.is_empty();
@@ -1590,7 +1640,7 @@ pub(crate) fn execute_camera_products(
 ) {
     let _post_execute = perf::Span::HostPostExecuteMs.enter();
     let (retained, xmodel_lane, fx_lane) = lanes;
-    let (_, static_colour, static_emissive, static_distortion, _) =
+    let (_, static_colour, static_emissive, static_distortion, world_run_surfs) =
         retained.live_for(inputs.world_generation);
     let sort_key_distortion = scene
         .as_deref()
@@ -1667,6 +1717,7 @@ pub(crate) fn execute_camera_products(
             &inputs,
             scene.as_deref(),
             gfx.as_deref().map(|g| &g.scene),
+            world_run_surfs,
             &spot_lights.0,
             retained.generation_id,
             draw_method.tech_type(),
@@ -1860,6 +1911,7 @@ pub(crate) fn execute_camera_products(
         &inputs,
         scene.as_deref(),
         gfx.as_deref().map(|g| &g.scene),
+        world_run_surfs,
         &spot_lights.0,
         retained.generation_id,
         draw_method.tech_type(),
@@ -1897,6 +1949,7 @@ fn fill_dlight_light(
     inputs: &FrameAssemblyInputs,
     scene: Option<&crate::prepare::scene::world::WorldScene>,
     gfx: Option<&render_scene::GfxScene>,
+    world_run_surfs: &[u16],
     spot_shadowed: &[u8],
     generation_id: MaterialGenerationId,
     tech_type: TechType,
@@ -1927,6 +1980,7 @@ fn fill_dlight_light(
                 dlight.radius,
                 scene,
                 gfx,
+                world_run_surfs,
             ) {
                 let mut row = *draw;
                 row.key = super::with_scene_light_index(draw.key, index);

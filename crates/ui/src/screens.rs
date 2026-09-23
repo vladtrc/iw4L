@@ -986,6 +986,7 @@ pub fn find_lobbies(
         }
         Some(net::MasterBridgeState::Hosting { .. })
         | Some(net::MasterBridgeState::Joined { .. })
+        | Some(net::MasterBridgeState::Left { .. })
         | None => None,
     };
     let mut widgets = retail_lobby_background("find_lobbies");
@@ -2126,7 +2127,11 @@ fn class_preview_card(index: usize, slot: &ClassSlotState, tables: CacTables<'_>
                 0.2,
                 &attachments
                     .iter()
-                    .map(|attachment| tables.weapon_caption(attachment))
+                    .map(|attachment| {
+                        tables.weapon_caption(&crate::class_setup::attachment_preview_key(
+                            weapon, attachment,
+                        ))
+                    })
                     .collect::<Vec<_>>()
                     .join(", "),
             ));
@@ -2411,15 +2416,7 @@ fn popup_preview(
         let firearm = tables.loadout.is_some_and(|catalog| {
             [ClassEditRow::Primary, ClassEditRow::Secondary]
                 .into_iter()
-                .any(|row| {
-                    catalog.options(row).iter().any(|base| {
-                        base == value
-                            || catalog
-                                .attachment_variants(row, base)
-                                .iter()
-                                .any(|variant| variant == value)
-                    })
-                })
+                .any(|row| catalog.options(row).iter().any(|base| base == value))
         });
         let (w, h) = if weapon && firearm {
             (200.0, 100.0)
@@ -2511,6 +2508,31 @@ fn popup_stat_bars(prefix: &str, popup: &Popup, tables: CacTables<'_>, value: &s
     widgets
 }
 
+fn toggled_attachments(
+    chosen: &[String],
+    name: &str,
+    rules: assets::LoadoutRules,
+) -> Option<Vec<String>> {
+    let mut next = chosen.to_vec();
+    if let Some(at) = next.iter().position(|item| item == name) {
+        next.remove(at);
+    } else {
+        if rules.max_attachments == 0 {
+            return None;
+        }
+        next.push(name.to_owned());
+    }
+    Some(next)
+}
+
+fn attachment_row_caption(caption: &str, selected: bool, allowed: bool) -> String {
+    match (selected, allowed) {
+        (true, _) => format!("{caption}  [on]"),
+        (false, true) => caption.to_owned(),
+        (false, false) => format!("{caption}  (locked)"),
+    }
+}
+
 fn class_attachment_picker(
     scratch: &ClassSetupScratch,
     catalog: &ClassLoadoutCatalog,
@@ -2522,7 +2544,15 @@ fn class_attachment_picker(
         .get(scratch.selected)
         .map(|slot| slot.row_value(row))
         .unwrap_or("");
-    let variants = catalog.attachment_variants(row, weapon);
+    let slot = scratch.slots.get(scratch.selected);
+    let chosen = slot
+        .map(|slot| match row {
+            ClassEditRow::Secondary => slot.secondary_attachments.as_slice(),
+            _ => slot.primary_attachments.as_slice(),
+        })
+        .unwrap_or(&[]);
+    let rules = slot.map(ClassSlotState::loadout_rules).unwrap_or_default();
+    let variants = catalog.attachments(row, weapon);
     let mut crumbs = vec![tables.edit_row_caption(row)];
     if let Some(category) = scratch.picker_category {
         crumbs.push(tables.folder_caption(category));
@@ -2550,23 +2580,32 @@ fn class_attachment_picker(
         ));
     }
     for (index, variant) in variants.iter().enumerate() {
+        let preview = crate::class_setup::attachment_preview_key(weapon, variant);
         let start = scratch.picker_page * crate::class_setup::PICKER_PAGE_SIZE;
         if !(start..start + crate::class_setup::PICKER_PAGE_SIZE).contains(&(index + 1)) {
             continue;
         }
-        widgets.push(popup.row(
-            &format!("class_setup/attachment/{index}"),
-            index + 1 - start,
-            &tables.weapon_caption(variant),
-            vec![ScreenCmd::Emit(UiIntent::CacPickAttachment(Some(
-                variant.clone(),
-            )))],
-        ));
+        widgets.push(
+            popup.row(
+                &format!("class_setup/attachment/{index}"),
+                index + 1 - start,
+                &attachment_row_caption(
+                    &tables.weapon_caption(&preview),
+                    chosen.contains(variant),
+                    toggled_attachments(chosen, variant, rules)
+                        .and_then(|next| catalog.check_attachments(row, weapon, &next, rules).ok())
+                        .is_some(),
+                ),
+                vec![ScreenCmd::Emit(UiIntent::CacPickAttachment(Some(
+                    variant.clone(),
+                )))],
+            ),
+        );
         widgets.extend(popup_preview(
             &format!("class_setup/attachment/preview/{}", index + 1),
             &popup,
             tables,
-            variant,
+            &preview,
             true,
         ));
     }
@@ -2594,7 +2633,7 @@ fn class_attachment_picker(
             300.0,
             34.0,
             0.24,
-            "NO LOADED COMPLETEDEF VARIANTS FOR THIS WEAPON",
+            "NO ATTACHMENTS OFFERED FOR THIS WEAPON",
         ));
     }
     widgets.push(hidden_cancel("class_setup/attachment_cancel"));

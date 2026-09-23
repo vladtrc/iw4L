@@ -12,7 +12,7 @@ ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
 
 .PHONY: map export-gltf play bench bench-load-session bench-live bench-overhead bench-perf menu menu-shots scenario chaos lifecycle-all lifecycle-swap lifecycle-replace lifecycle-play-in lifecycle-demo-out lifecycle-demo-map launcher deploy logs loc clean help
 .PHONY: build-windows setup-windows release publish provision
-.PHONY: mr publish-check
+.PHONY: mr publish-check approved
 .PHONY: $(ARGS)
 
 $(ARGS):
@@ -281,6 +281,12 @@ logs:
 #                         Empty / dir / non-rs refuse: `cargo fmt --all`
 #                         rewrites files this branch does not own.
 FILES ?=
+# The one owner-approved end-to-end scenario (crates/approved_tests/README.md).
+# Cold cache by default; ARGS='--seed N' | '--replay <run.json>' | '--cache shared'.
+approved: require-games
+	cd $(ROOT) && $(CARGO) build --profile play -p launcher
+	cd $(ROOT) && $(CARGO) run --quiet -p approved_tests -- heavy_gameplay_lifecycle $(ARGS)
+
 # What a push would publish: nothing under `context/`, no `.env`, no key, no
 # piece of a game install, and no retail offsets left over in the code. It is a
 # grep, not a proof of provenance — where the code came from is README/NOTICE.

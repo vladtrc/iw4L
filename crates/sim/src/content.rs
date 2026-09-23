@@ -3,7 +3,7 @@ use crate::spawn::{AuthoredSpawnPoint, MatchBootstrap};
 use crate::world::SimBrush;
 use weapon_iw4::WeaponCombatFacts;
 
-pub const CONTENT_DIGEST_SCHEME: u64 = 13;
+pub const CONTENT_DIGEST_SCHEME: u64 = 14;
 
 #[derive(Clone, Copy)]
 struct Digest(u64);
@@ -105,6 +105,13 @@ fn hash_combat(h: &mut Digest, combat: &[WeaponCombatFacts]) {
         h.i32(row.reload_start_add_time_ms);
         h.i32(row.reload_start_add);
         h.bool(row.no_partial_reload);
+        h.bool(row.dual_mag.is_some());
+        if let Some(q) = row.dual_mag {
+            h.i32(q.reload_ms);
+            h.i32(q.reload_empty_ms);
+            h.i32(q.add_ms);
+            h.i32(q.empty_add_ms);
+        }
         h.bool(row.inherits_perks);
         h.i32(row.sprint_raise_time_ms);
         h.i32(row.sprint_drop_time_ms);
@@ -142,6 +149,17 @@ fn hash_combat(h: &mut Digest, combat: &[WeaponCombatFacts]) {
         for value in row.location_damage {
             h.f32(value);
         }
+    }
+}
+
+fn hash_weapon_admission(h: &mut Digest, runnable: &[bool], transition_groups: &[u32]) {
+    h.u64(runnable.len() as u64);
+    for &allowed in runnable {
+        h.bool(allowed);
+    }
+    h.u64(transition_groups.len() as u64);
+    for &group in transition_groups {
+        h.u32(group);
     }
 }
 
@@ -296,6 +314,8 @@ fn hash_script_models(h: &mut Digest, script_models: &[crate::EntityCollisionCap
 
 pub fn content_digest_v2(
     combat: &[WeaponCombatFacts],
+    runnable: &[bool],
+    transition_groups: &[u32],
     equipment: &[crate::EquipmentRuntimeFacts],
     bootstrap: &MatchBootstrap,
     clip_brushes: &[SimBrush],
@@ -304,6 +324,7 @@ pub fn content_digest_v2(
     let mut h = Digest::new();
     h.u64(CONTENT_DIGEST_SCHEME);
     hash_combat(&mut h, combat);
+    hash_weapon_admission(&mut h, runnable, transition_groups);
     hash_equipment(&mut h, equipment);
     hash_classes(&mut h, &bootstrap.classes);
     hash_spawns(&mut h, &bootstrap.spawns);
@@ -326,6 +347,8 @@ pub struct ContentComponents {
 
 pub fn content_components_v2(
     combat: &[WeaponCombatFacts],
+    runnable: &[bool],
+    transition_groups: &[u32],
     equipment: &[crate::EquipmentRuntimeFacts],
     bootstrap: &MatchBootstrap,
     clip_brushes: &[SimBrush],
@@ -347,6 +370,7 @@ pub fn content_components_v2(
 
     let mut weapons = component(b'W');
     hash_combat(&mut weapons, combat);
+    hash_weapon_admission(&mut weapons, runnable, transition_groups);
     hash_equipment(&mut weapons, equipment);
 
     let mut classes = component(b'C');

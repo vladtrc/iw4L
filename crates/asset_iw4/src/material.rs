@@ -6,6 +6,8 @@ pub const CODE_CONST_MODEL_LIGHTING: u16 = 0x3a;
 
 pub const TECHNIQUE_COLOR_BAND_FIRST: usize = 4;
 
+pub const TECHNIQUE_UNLIT: usize = 4;
+
 pub const SORT_KEY_SKY: u8 = 2;
 
 pub const SORT_KEY_SKYBOX: u8 = 3;

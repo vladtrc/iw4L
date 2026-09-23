@@ -15,20 +15,30 @@ const FLOAT_RECT_W: u32 = 2;
 
 const FLOAT_RECT_H: u32 = 3;
 
-const FLOAT_FORECOLOR_R: u32 = 4;
+const FLOAT_FORECOLOR: u32 = 4;
 
-const FLOAT_FORECOLOR_G: u32 = 5;
+const FLOAT_GLOWCOLOR: u32 = 9;
 
-const FLOAT_FORECOLOR_B: u32 = 6;
+const FLOAT_BACKCOLOR: u32 = 14;
 
-const FLOAT_FORECOLOR_RGB: u32 = 7;
+const FLOAT_COLOR_SLOTS: u32 = 5;
 
-const FLOAT_FORECOLOR_A: u32 = 8;
+const FLOAT_TARGET_COUNT: u32 = FLOAT_BACKCOLOR + FLOAT_COLOR_SLOTS;
+
+fn assign_color_slot(color: &mut [f32; 4], slot: u32, value: f32) {
+    match slot {
+        0..=2 => color[slot as usize] = value,
+        3 => color[..3].fill(value),
+        _ => color[3] = value,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChromeGapKind {
     VisExp,
     FloatExp,
+
+    FloatExpTarget,
     MaterialExp,
     OwnerDraw,
     RetailFont,
@@ -98,18 +108,7 @@ pub(crate) struct ChromeFrame {
     pub(crate) vis_errors: Vec<(usize, String)>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ChromeMenuAnim {
-    pub scale: f32,
-    pub alpha: f32,
-}
-
-impl ChromeMenuAnim {
-    pub(crate) const IDENTITY: Self = Self {
-        scale: 1.0,
-        alpha: 1.0,
-    };
-}
+pub(crate) type ChromeMenuAnim = hud_iw4::MenuAnim;
 
 pub(crate) fn execute_chrome_menu(
     menu: &MenuDef,
@@ -189,7 +188,7 @@ pub(crate) fn execute_chrome_menu_ex(
             }
         }
     }
-    let parent = match apply_menu_float_rect(&menu.rect, menu, host, exprs) {
+    let mut parent = match apply_menu_float_rect(&menu.rect, menu, host, exprs) {
         Ok(rect) => rect,
         Err(err) => {
             frame
@@ -201,6 +200,8 @@ pub(crate) fn execute_chrome_menu_ex(
             return frame;
         }
     };
+    parent.x += anim.offset[0];
+    parent.y += anim.offset[1];
     for (index, item) in menu.items.iter().enumerate() {
         let hook = owner_draw.as_mut().map(|h| {
             let h: &mut dyn FnMut(OwnerDrawArgs<'_>, &mut ChromeFrame) -> OwnerDrawPaint = &mut **h;
@@ -238,24 +239,28 @@ fn paint_item(
             return;
         }
     }
-    let rect = match apply_float_rect(parent, &menu.rect, item, host, exprs) {
-        Ok(rect) => rect,
+    let style = match evaluate_item_style(parent, &menu.rect, item, host, exprs, anim) {
+        Ok(style) => style,
         Err(err) => {
             frame.vis_errors.push((index, format!("floatexp {err:?}")));
             frame.coverage.gap(index, ChromeGapKind::FloatExp);
             return;
         }
     };
+    if let Some(target) = style.unsupported {
+        frame
+            .vis_errors
+            .push((index, format!("floatexp target {target}")));
+        frame.coverage.gap(index, ChromeGapKind::FloatExpTarget);
+    }
+    let rect = style.rect;
     if item.owner_draw != 0 {
-        let mut color = item.fore_color;
-        apply_float_forecolor(item, host, exprs, &mut color);
-        color[3] *= anim.alpha;
         let args = OwnerDrawArgs {
             menu,
             index,
             item,
             rect,
-            color,
+            color: style.fore_color,
             surface,
             assets,
             anim,
@@ -275,18 +280,16 @@ fn paint_item(
                 menu,
                 index,
                 item,
-                rect,
+                &style,
                 material,
                 surface,
-                host,
                 anim,
-                exprs,
                 &mut frame.list,
             );
 
             if has_text(item) && item.style != 5 {
                 paint_text(
-                    menu, index, item, &rect, host, surface, assets, anim, exprs, frame,
+                    menu, index, item, &style, host, surface, assets, anim, exprs, frame,
                 );
             } else {
                 frame.coverage.painted();
@@ -295,7 +298,7 @@ fn paint_item(
         Ok(None) => {
             if has_text(item) {
                 paint_text(
-                    menu, index, item, &rect, host, surface, assets, anim, exprs, frame,
+                    menu, index, item, &style, host, surface, assets, anim, exprs, frame,
                 );
             } else {
                 frame.coverage.painted();
@@ -316,7 +319,7 @@ fn paint_text(
     menu: &MenuDef,
     index: usize,
     item: &MenuItem,
-    rect: &MenuRect,
+    style: &EvaluatedItemStyle,
     host: &impl ExprHost,
     surface: &crate::surface::Hud2dSurface,
     assets: ChromeAssets<'_>,
@@ -353,6 +356,7 @@ fn paint_text(
     let scale = r_normalized_text_scale(font.pixel_height, draw_text_scale);
     let measured_w = ui_text_width(font, &resolved.text, item.text_scale);
     let measured_h = ui_text_height(item.text_scale);
+    let rect = &style.rect;
     let (x, y) = item_text_origin(
         rect.x,
         rect.y,
@@ -372,46 +376,6 @@ fn paint_text(
         rect.horz_align as i32,
         rect.vert_align as i32,
     );
-    let mut color = item.fore_color;
-    apply_float_forecolor(item, host, exprs, &mut color);
-    color[3] *= anim.alpha;
-    let provenance = Draw2dProvenance::MenuItem {
-        menu: menu.name.clone(),
-        index,
-    };
-    if item.glow_color[3] > 0.0 {
-        let mut glow = item.glow_color;
-        glow[3] *= anim.alpha;
-        let glow_material = if font.glow_material.is_empty() {
-            assets::AssetRef::bare_name(&font.material).to_owned()
-        } else {
-            assets::AssetRef::bare_name(&font.glow_material).to_owned()
-        };
-        frame.list.cmds.push(Draw2dCmd {
-            material_namespace: crate::images::HUD_CHROME_NAMESPACE,
-            x: (applied.x + 0.5).floor(),
-            y: (applied.y + 0.5).floor(),
-            w: applied.w,
-            h: applied.h,
-            s0: 0.0,
-            t0: 0.0,
-            s1: 1.0,
-            t1: 1.0,
-            color: glow,
-            material: glow_material,
-            op: Draw2dOp::TextRun {
-                font: font_name.to_owned(),
-                scale,
-                text: resolved.text.clone(),
-                loc_key: resolved.loc_key.clone(),
-
-                style: crate::draw2d::TEXT_STYLE_UNREAD,
-                fx: None,
-            },
-            provenance: provenance.clone(),
-            layer: 1,
-        });
-    }
     frame.list.cmds.push(Draw2dCmd {
         material_namespace: crate::images::HUD_CHROME_NAMESPACE,
         x: (applied.x + 0.5).floor(),
@@ -422,7 +386,7 @@ fn paint_text(
         t0: 0.0,
         s1: 1.0,
         t1: 1.0,
-        color,
+        color: style.fore_color,
         material: assets::AssetRef::bare_name(&font.material).to_owned(),
         op: Draw2dOp::TextRun {
             font: font_name.to_owned(),
@@ -432,11 +396,30 @@ fn paint_text(
 
             style: crate::draw2d::TEXT_STYLE_UNREAD,
             fx: None,
+            glow: text_run_glow(font, style.glow_color),
         },
-        provenance,
+        provenance: Draw2dProvenance::MenuItem {
+            menu: menu.name.clone(),
+            index,
+        },
         layer: 1,
     });
     frame.coverage.painted();
+}
+
+pub(crate) fn text_run_glow(font: &FontDef, color: [f32; 4]) -> Option<crate::draw2d::TextRunGlow> {
+    if color[3] <= 0.0 {
+        return None;
+    }
+    let material = if font.glow_material.is_empty() {
+        &font.material
+    } else {
+        &font.glow_material
+    };
+    Some(crate::draw2d::TextRunGlow {
+        material: assets::AssetRef::bare_name(material).to_owned(),
+        color,
+    })
 }
 
 pub(crate) fn push_owner_text(
@@ -499,6 +482,7 @@ pub(crate) fn push_owner_text(
 
             style: crate::draw2d::TEXT_STYLE_UNREAD,
             fx: None,
+            glow: None,
         },
         provenance: Draw2dProvenance::OwnerDraw(args.item.owner_draw),
         layer: 1,
@@ -646,36 +630,84 @@ fn background_stem(raw: &str) -> Option<String> {
     }
 }
 
-fn apply_float_rect(
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EvaluatedItemStyle {
+    pub rect: MenuRect,
+    pub fore_color: [f32; 4],
+    pub glow_color: [f32; 4],
+    pub back_color: [f32; 4],
+
+    pub unsupported: Option<u32>,
+}
+
+impl EvaluatedItemStyle {
+    pub fn fill_color(&self, item: &MenuItem) -> [f32; 4] {
+        if item.style == 1 {
+            self.back_color
+        } else {
+            self.fore_color
+        }
+    }
+}
+
+fn evaluate_item_style(
     parent: &MenuRect,
     captured_parent: &MenuRect,
     item: &MenuItem,
     host: &impl ExprHost,
     exprs: &mut MenuExprCache,
-) -> Result<MenuRect, ExprError> {
-    let mut rect = item.rect;
-
-    rect.x += parent.x - captured_parent.x;
-    rect.y += parent.y - captured_parent.y;
+    anim: ChromeMenuAnim,
+) -> Result<EvaluatedItemStyle, ExprError> {
+    let mut style = EvaluatedItemStyle {
+        rect: item.rect,
+        fore_color: item.fore_color,
+        glow_color: item.glow_color,
+        back_color: item.back_color,
+        unsupported: None,
+    };
+    style.rect.x += parent.x - captured_parent.x;
+    style.rect.y += parent.y - captured_parent.y;
     for &(key, ref dump) in &item.float_exp {
         if dump.is_empty() {
+            continue;
+        }
+        if key >= FLOAT_TARGET_COUNT {
+            style.unsupported.get_or_insert(key);
             continue;
         }
         let value = match exprs.evaluate_float(dump, host) {
             Ok(value) => value,
             Err(err) if key <= FLOAT_RECT_H => return Err(err),
-
-            Err(_) => continue,
+            Err(_) => {
+                style.unsupported.get_or_insert(key);
+                continue;
+            }
         };
         match key {
-            FLOAT_RECT_X => rect.x = parent.x + value,
-            FLOAT_RECT_Y => rect.y = parent.y + value,
-            FLOAT_RECT_W => rect.w = value,
-            FLOAT_RECT_H => rect.h = value,
-            _ => {}
+            FLOAT_RECT_X => style.rect.x = parent.x + value,
+            FLOAT_RECT_Y => style.rect.y = parent.y + value,
+            FLOAT_RECT_W => style.rect.w = value,
+            FLOAT_RECT_H => style.rect.h = value,
+            _ => {
+                let (color, base) = if key < FLOAT_GLOWCOLOR {
+                    (&mut style.fore_color, FLOAT_FORECOLOR)
+                } else if key < FLOAT_BACKCOLOR {
+                    (&mut style.glow_color, FLOAT_GLOWCOLOR)
+                } else {
+                    (&mut style.back_color, FLOAT_BACKCOLOR)
+                };
+                assign_color_slot(color, key - base, value);
+            }
         }
     }
-    Ok(rect)
+    for color in [
+        &mut style.fore_color,
+        &mut style.glow_color,
+        &mut style.back_color,
+    ] {
+        color[3] *= anim.alpha;
+    }
+    Ok(style)
 }
 
 fn apply_menu_float_rect(
@@ -683,60 +715,41 @@ fn apply_menu_float_rect(
     menu: &MenuDef,
     host: &impl ExprHost,
     exprs: &mut MenuExprCache,
-) -> Result<MenuRect, ExprError> {
+) -> Result<MenuRect, String> {
     let mut rect = *base;
     for &(key, ref dump) in &menu.float_exp {
         if dump.is_empty() {
             continue;
         }
-        let value = exprs.evaluate_float(dump, host)?;
         match key {
-            FLOAT_RECT_X => rect.x = value,
-            FLOAT_RECT_Y => rect.y = value,
-            FLOAT_RECT_W => rect.w = value,
-            FLOAT_RECT_H => rect.h = value,
-            _ => {}
+            FLOAT_RECT_X | FLOAT_RECT_Y | FLOAT_RECT_W | FLOAT_RECT_H => {
+                let value = exprs
+                    .evaluate_float(dump, host)
+                    .map_err(|err| format!("target {key}, expression `{dump}`: {err:?}"))?;
+                match key {
+                    FLOAT_RECT_X => rect.x = value,
+                    FLOAT_RECT_Y => rect.y = value,
+                    FLOAT_RECT_W => rect.w = value,
+                    _ => rect.h = value,
+                }
+            }
+            _ => return Err(format!("unsupported target {key}, expression `{dump}`")),
         }
     }
     Ok(rect)
-}
-
-fn apply_float_forecolor(
-    item: &MenuItem,
-    host: &impl ExprHost,
-    exprs: &mut MenuExprCache,
-    color: &mut [f32; 4],
-) {
-    for &(key, ref dump) in &item.float_exp {
-        if dump.is_empty() {
-            continue;
-        }
-        let Ok(value) = exprs.evaluate_float(dump, host) else {
-            continue;
-        };
-        match key {
-            FLOAT_FORECOLOR_R => color[0] = value,
-            FLOAT_FORECOLOR_G => color[1] = value,
-            FLOAT_FORECOLOR_B => color[2] = value,
-            FLOAT_FORECOLOR_RGB => color[..3].fill(value),
-            FLOAT_FORECOLOR_A => color[3] = value,
-            _ => {}
-        }
-    }
 }
 
 fn push_stretch(
     menu: &MenuDef,
     index: usize,
     item: &MenuItem,
-    rect: MenuRect,
+    style: &EvaluatedItemStyle,
     material: String,
     surface: &crate::surface::Hud2dSurface,
-    host: &impl ExprHost,
     anim: ChromeMenuAnim,
-    exprs: &mut MenuExprCache,
     list: &mut Draw2dList,
 ) {
+    let rect = style.rect;
     if rect.w.abs() <= f32::EPSILON || rect.h.abs() <= f32::EPSILON {
         return;
     }
@@ -745,31 +758,7 @@ fn push_stretch(
         return;
     }
     let applied = surface.apply_rect(x, y, w, h, rect.horz_align as i32, rect.vert_align as i32);
-
-    let mut color = if item.style == 1 {
-        item.back_color
-    } else {
-        item.fore_color
-    };
-    if item.style == 1 {
-        for &(key, ref dump) in &item.float_exp {
-            if !(14..=18).contains(&key) || dump.is_empty() {
-                continue;
-            }
-            let Ok(value) = exprs.evaluate_float(dump, host) else {
-                continue;
-            };
-            match key {
-                14..=16 => color[(key - 14) as usize] = value,
-                17 => color[..3].fill(value),
-                18 => color[3] = value,
-                _ => unreachable!(),
-            }
-        }
-    } else {
-        apply_float_forecolor(item, host, exprs, &mut color);
-    }
-    color[3] *= anim.alpha;
+    let color = style.fill_color(item);
     list.cmds.push(Draw2dCmd {
         material_namespace: crate::images::HUD_CHROME_NAMESPACE,
         x: applied.x,

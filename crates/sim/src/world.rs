@@ -270,6 +270,8 @@ pub struct SimContentBuilder {
     clip_cmodels: SimClipCmodels,
     weapon_def_scales: Vec<(f32, f32, f32)>,
     weapon_combat: Vec<WeaponCombatFacts>,
+    weapon_runnable: Vec<bool>,
+    weapon_transition_groups: Vec<u32>,
     bullet_pen: Vec<weapon_iw4::BulletPenFacts>,
     pen_table: weapon_iw4::PenetrationDepthTable,
     pen_table_loaded: bool,
@@ -299,6 +301,14 @@ impl SimContentBuilder {
 
     pub fn set_weapon_combat_table(&mut self, rows: Vec<WeaponCombatFacts>) {
         self.weapon_combat = rows;
+    }
+
+    pub fn set_weapon_runnable_table(&mut self, runnable: Vec<bool>) {
+        self.weapon_runnable = runnable;
+    }
+
+    pub fn set_weapon_transition_groups(&mut self, groups: Vec<u32>) {
+        self.weapon_transition_groups = groups;
     }
 
     pub fn set_bullet_pen_facts(&mut self, rows: Vec<weapon_iw4::BulletPenFacts>) {
@@ -1331,6 +1341,8 @@ impl SimState {
     fn recompute_content_digest(&mut self) {
         self.content_digest = crate::content::content_digest_v2(
             &self.content.data.weapon_combat,
+            &self.content.data.weapon_runnable,
+            &self.content.data.weapon_transition_groups,
             &self.content.data.equipment_runtime,
             &self.bootstrap,
             &self.content.data.clip_brushes,
@@ -1338,6 +1350,8 @@ impl SimState {
         );
         self.content_components = crate::content::content_components_v2(
             &self.content.data.weapon_combat,
+            &self.content.data.weapon_runnable,
+            &self.content.data.weapon_transition_groups,
             &self.content.data.equipment_runtime,
             &self.bootstrap,
             &self.content.data.clip_brushes,
@@ -1358,6 +1372,26 @@ impl SimState {
             .get(weapon as usize)
             .copied()
             .filter(|f| f.is_usable())
+    }
+
+    pub(crate) fn can_transition_weapon(&self, from: u32, to: u32) -> bool {
+        if from == 0 || from == to {
+            return false;
+        }
+        let groups = &self.content.data.weapon_transition_groups;
+        let Some(&group) = groups.get(from as usize) else {
+            return false;
+        };
+        group != 0 && groups.get(to as usize) == Some(&group)
+    }
+
+    pub(crate) fn weapon_runnable(&self, id: u32) -> bool {
+        self.content
+            .data
+            .weapon_runnable
+            .get(id as usize)
+            .copied()
+            .unwrap_or(false)
     }
 
     fn reset_area_entity_world(&mut self) {
@@ -2286,11 +2320,25 @@ impl SimState {
                     }
                 };
                 HistorySample {
-                    poses: frame.poses.clone(),
+                    poses: self.poses_of_current_life(&frame.poses),
                     verdict,
                 }
             }
         }
+    }
+
+    fn poses_of_current_life(
+        &self,
+        poses: &[crate::bullet_collision::PlayerCollisionPose],
+    ) -> Vec<crate::bullet_collision::PlayerCollisionPose> {
+        poses
+            .iter()
+            .filter(|pose| {
+                self.client_meta(pose.client)
+                    .is_none_or(|meta| meta.life_sequence == pose.life_sequence)
+            })
+            .cloned()
+            .collect()
     }
 
     fn lagcomp_entities(
@@ -3399,6 +3447,57 @@ impl SimState {
             self.prematch.display(),
             now_ms,
         );
+    }
+
+    pub fn collision_census(&self) -> crate::CollisionCensus {
+        use crate::collision_census::{
+            CollisionCensus, ModelCollisionCensus, WorldClipCensus, entity_clip_census,
+            player_clip_census,
+        };
+
+        let mesh = self.clip_mesh();
+        let world = WorldClipCensus {
+            brushes: self.clip_brushes().len() as u32,
+            bsp_nodes: self.clip_bsp().nodes.len() as u32,
+            bsp_leaves: self.clip_bsp().leaves.len() as u32,
+            leafbrushes: self.clip_bsp().leafbrushes.len() as u32,
+            mesh_tris: (mesh.tables.tri_indices.len() / 3) as u32,
+            cmodels: self.clip_cmodels().models.len() as u32,
+            static_models: mesh.static_models.len() as u32,
+            static_models_with_tris: mesh
+                .static_models
+                .iter()
+                .filter(|sm| sm.model.coll.surfs.iter().any(|s| !s.tris.is_empty()))
+                .count() as u32,
+            pen_table_loaded: self.content.data.pen_table_loaded,
+        };
+
+        let poses = self
+            .collision_history
+            .latest_poses()
+            .map(|(_, poses)| poses);
+        let players = player_clip_census(
+            poses.unwrap_or(&[]),
+            self.player_body_materialize_error.clone(),
+        );
+
+        let entities = entity_clip_census(
+            &self.entity_collision_capabilities,
+            crate::bullet_collision::MASK_BULLET_WORLD,
+        );
+
+        let mut kits = Vec::new();
+        for kit in &self.content.data.player_kits {
+            kits.push(ModelCollisionCensus::of(&kit.body_key, kit.body.as_deref()));
+            kits.push(ModelCollisionCensus::of(&kit.head_key, kit.head.as_deref()));
+        }
+
+        CollisionCensus {
+            world,
+            players,
+            entities,
+            kits,
+        }
     }
 
     pub fn hitvol_dump(

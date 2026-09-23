@@ -17,8 +17,6 @@ use render_scene::{
     XModelSurfaceDraw, scene_quat_from_angles,
 };
 
-pub const ITEM_INDEX_STRIDE: i32 = 0x578;
-
 pub const ITEM_LIGHTING_Z_OFS: f32 = 4.0;
 
 #[derive(Resource, Default)]
@@ -32,6 +30,9 @@ struct OccupiedItem {
     origin: [f32; 3],
     angles: [f32; 3],
     name: String,
+    model: assets::WorldWeaponIndex,
+    attachments: Vec<(assets::WorldWeaponIndex, String)>,
+    key: String,
     lighting_origin: [f32; 3],
 }
 
@@ -42,7 +43,8 @@ struct ItemPoseProduct {
 }
 
 struct ItemPosedAsset {
-    name: String,
+    key: String,
+    models: Vec<assets::WorldWeaponIndex>,
     surfaces: Vec<PosedModelSurface>,
 }
 
@@ -53,6 +55,7 @@ struct ItemPosedOwner {
     origin: [f32; 3],
     angles: [f32; 3],
     name: String,
+    model: assets::WorldWeaponIndex,
     lighting_origin: [f32; 3],
 }
 
@@ -99,7 +102,7 @@ pub fn item_lighting_origin(origin: [f32; 3]) -> [f32; 3] {
 }
 
 fn item_weapon_index(index: i32) -> Option<u32> {
-    u32::try_from(index.rem_euclid(ITEM_INDEX_STRIDE)).ok()
+    u32::try_from(index).ok().filter(|&weapon| weapon != 0)
 }
 
 fn item_world_from_local(origin: [f32; 3], angles: [f32; 3]) -> Mat4 {
@@ -190,10 +193,32 @@ fn occupy_item_scene_ents(
         let Some(entry) = weapons_reg.and_then(|reg| reg.world_model_entry(weapon, catalog)) else {
             continue;
         };
+        let Some(model_index) = weapons_reg
+            .and_then(|reg| reg.world_model_edge_of(weapon))
+            .and_then(|edge| edge.bound_index())
+        else {
+            continue;
+        };
         let name = entry.skel.name.as_str();
         let Some(_pose) = entry.skel.pose.as_ref() else {
             continue;
         };
+        let attachments = weapons_reg
+            .map(|reg| crate::anim::remote_body::world_attachments(reg, catalog, weapon))
+            .unwrap_or_default();
+        let mut key = name.to_owned();
+        for attachment in &attachments {
+            key.push('+');
+            key.push_str(&attachment.entry.skel.name);
+        }
+        let mut models = vec![scene_skels.model(name, &entry.skel, 0)];
+        models.extend(attachments.iter().map(|attachment| {
+            scene_skels.model(
+                attachment.entry.skel.name.as_str(),
+                &attachment.entry.skel,
+                0,
+            )
+        }));
         let origin = evaluate_origin(es, at_time);
         let lighting_origin = item_lighting_origin(origin);
         let apos = Trajectory {
@@ -213,8 +238,8 @@ fn occupy_item_scene_ents(
             radius: entry.skel.radius,
             entnum,
             quat: Some(scene_quat_from_angles(angles)),
-            occupy_model_n: 1,
-            models: vec![scene_skels.model(name, &entry.skel, 0)],
+            occupy_model_n: u8::try_from(models.len()).unwrap_or(u8::MAX),
+            models,
             hide_part_bits: [0; 6],
             store_skin: true,
         });
@@ -224,6 +249,12 @@ fn occupy_item_scene_ents(
             origin,
             angles,
             name: name.to_owned(),
+            model: assets::WorldWeaponIndex::from_order(model_index),
+            attachments: attachments
+                .iter()
+                .map(|attachment| (attachment.index, attachment.tag.to_owned()))
+                .collect(),
+            key,
             lighting_origin,
         });
     }
@@ -256,43 +287,61 @@ fn pose_items(
         if slot.hidden {
             continue;
         }
-        let asset_index = if let Some(index) = product
-            .assets
-            .iter()
-            .position(|asset| asset.name == row.name)
-        {
-            index
-        } else {
-            let Some(entry) = catalog.get(&row.name) else {
-                continue;
+        let asset_index =
+            if let Some(index) = product.assets.iter().position(|asset| asset.key == row.key) {
+                index
+            } else {
+                let Some(entry) = catalog.get_at(row.model.order()) else {
+                    continue;
+                };
+                let Some(pose) = entry.skel.pose.as_ref() else {
+                    continue;
+                };
+                let mut skels = vec![&*entry.skel];
+                let mut model_indices = vec![row.model];
+                let mut dobj_models = vec![(pose, None)];
+                for (model, tag) in &row.attachments {
+                    let Some(attachment) = catalog.get_at(model.order()) else {
+                        continue;
+                    };
+                    let Some(pose) = attachment.skel.pose.as_ref() else {
+                        continue;
+                    };
+                    skels.push(&*attachment.skel);
+                    model_indices.push(*model);
+                    dobj_models.push((
+                        pose,
+                        Some(assets::Attach {
+                            parent_model: 0,
+                            tag: tag.clone(),
+                        }),
+                    ));
+                }
+                let Some(dobj) = assets::DObj::build(&dobj_models).ok() else {
+                    continue;
+                };
+                let dobj_state = assets::dobj::DObjSemanticState::bind_pose(row.name.clone(), 1, 1);
+                let Ok(request) = dobj_state.resolve_request(|_| None) else {
+                    continue;
+                };
+                let Some((surfaces, _)) = pose_script_dobj_with_materials(
+                    None,
+                    &skels,
+                    &dobj,
+                    &request,
+                    None,
+                    slot.skin_entries,
+                ) else {
+                    continue;
+                };
+                let index = product.assets.len();
+                product.assets.push(ItemPosedAsset {
+                    key: row.key.clone(),
+                    models: model_indices,
+                    surfaces,
+                });
+                index
             };
-            let Some(pose) = entry.skel.pose.as_ref() else {
-                continue;
-            };
-            let Some(dobj) = assets::DObj::build(&[(pose, None)]).ok() else {
-                continue;
-            };
-            let dobj_state = assets::dobj::DObjSemanticState::bind_pose(row.name.clone(), 1, 1);
-            let Ok(request) = dobj_state.resolve_request(|_| None) else {
-                continue;
-            };
-            let Some((surfaces, _)) = pose_script_dobj_with_materials(
-                None,
-                &[&entry.skel],
-                &dobj,
-                &request,
-                None,
-                slot.skin_entries,
-            ) else {
-                continue;
-            };
-            let index = product.assets.len();
-            product.assets.push(ItemPosedAsset {
-                name: row.name.clone(),
-                surfaces,
-            });
-            index
-        };
         product.owners.push(ItemPosedOwner {
             asset_index,
             index: row.index,
@@ -300,6 +349,7 @@ fn pose_items(
             origin: row.origin,
             angles: row.angles,
             name: row.name.clone(),
+            model: row.model,
             lighting_origin: row.lighting_origin,
         });
     }
@@ -364,17 +414,16 @@ fn append_item_draws(
         let asset_index = if let Some(index) = plan
             .assets
             .iter()
-            .position(|asset| asset.model == posed.name)
+            .position(|asset| asset.model == posed.key)
         {
             index
         } else {
-            let Some(entry) = catalog.get(&posed.name) else {
-                continue;
-            };
             let materials: Vec<Option<SmodelPassMaterial>> = posed
                 .surfaces
                 .iter()
                 .map(|surface| {
+                    let entry =
+                        catalog.get_at(posed.models.get(usize::from(surface.model))?.order())?;
                     let present_name = entry.material_present_name(surface.surface_index)?;
                     if let Some(material) = material_cache.get(present_name) {
                         return Some(material.clone());
@@ -393,12 +442,12 @@ fn append_item_draws(
             }
             let index = plan.assets.len();
             plan.assets.push(ItemAssetDraw {
-                model: posed.name.clone(),
+                model: posed.key.clone(),
                 surfaces,
             });
             index
         };
-        let Some(entry) = catalog.get(&row.name) else {
+        let Some(entry) = catalog.get_at(row.model.order()) else {
             continue;
         };
         let box_half = entry

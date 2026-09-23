@@ -153,6 +153,7 @@ pub fn play_pellet_segment(
     weapon: u32,
     correlation: u32,
     pellet: u16,
+    hand: u8,
     seg_start: [f32; 3],
     seg_end: [f32; 3],
     normal: [f32; 3],
@@ -198,7 +199,7 @@ pub fn play_pellet_segment(
         .first_segment_of_pellet(source_id, correlation, pellet)
         .then(|| {
             if own_shot {
-                fpv_bolts.flash[0]
+                fpv_bolts.flash[usize::from(hand).min(fpv_bolts.flash.len() - 1)]
             } else {
                 u16::try_from(attacker_entity_num)
                     .ok()

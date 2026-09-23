@@ -95,6 +95,9 @@ impl ExprHost for KillcamExprHost {
     fn gametype_name(&self) -> Result<Operand, ExprError> {
         Ok(Operand::Str(String::from("MPUI_DEATHMATCH")))
     }
+    fn weapon_lock(&self) -> Result<hud_iw4::WeaponLockView, ExprError> {
+        Err(ExprError::Host("weapon lock"))
+    }
     fn dvar_int(&self, name: &str) -> Result<i32, ExprError> {
         if name.eq_ignore_ascii_case("scr_gameended") {
             Ok(self.game_ended)
@@ -287,6 +290,7 @@ pub(crate) fn update_killcam_skip(
 
                 style: crate::draw2d::TEXT_STYLE_UNREAD,
                 fx: None,
+                glow: None,
             },
             provenance: Draw2dProvenance::CgDraw {
                 site: "killcam_skip",

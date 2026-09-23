@@ -4,14 +4,14 @@ use std::sync::Arc;
 use asset_iw4::snd_attenuate;
 use assets::{
     AssetNamespace, GamesRoot, LoadedSoundBank, NamespaceSoundIwd, NamespaceTrees, SoundCatalog,
-    load_mp_sound_bank, namespace_for_zone,
+    compose_sound_bank, gather_sound_sources, namespace_for_zone,
 };
 use bevy::{
     audio::{AudioSink, AudioSinkPlayback, Volume},
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, TaskPool, futures_lite::future},
 };
-use frame::MatchTornDown;
+use frame::{MatchTornDown, ReturnedToMenu};
 
 use crate::backend::{AudioScope, MatchEpoch, Voice};
 use crate::pcm::{LoopingPcmAudio, PcmAudio};
@@ -48,23 +48,46 @@ pub struct MapAmbientBooted(pub bool);
 #[derive(Resource, Default)]
 pub(crate) struct SoundBankLoadAttempted(pub bool);
 
-/// How long a sound bank walk may run before it is worth a line of its own.
-const SOUND_BANK_WALK_STALL: std::time::Duration = std::time::Duration::from_secs(20);
+const SOUND_BANK_COMPOSE_STALL: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Resource)]
-pub(crate) struct SoundBankWalk {
+pub(crate) struct SoundBankCompose {
     load_key: frame::LocalLoadKey,
     zone: String,
-    task: Task<SoundBankWalked>,
+    iwd: IwdOpen,
+    bank: Option<Task<ComposedBank>>,
+    common_profile_id: u64,
+    products_id: u64,
     started: std::time::Instant,
     stall_reported: bool,
 }
 
-struct SoundBankWalked {
-    loaded: Result<LoadedSoundBank, String>,
-    indices: NamespaceSoundIwd,
-    lines: Vec<String>,
+enum IwdOpen {
+    Opening(Task<(NamespaceSoundIwd, Vec<String>)>),
+    Open(Arc<NamespaceSoundIwd>),
+}
+
+struct ComposedBank {
+    loaded: Result<(Arc<SoundCatalog>, usize), String>,
     namespace: AssetNamespace,
+    reused: bool,
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct ResidentSoundBank(Option<ResidentBank>);
+
+struct ResidentBank {
+    zone: String,
+    iwd: Arc<NamespaceSoundIwd>,
+    bank: Option<ResidentComposed>,
+}
+
+struct ResidentComposed {
+    products_id: u64,
+    common_profile_id: u64,
+    catalog: Arc<SoundCatalog>,
+    namespace: AssetNamespace,
+    gaps: usize,
 }
 
 #[derive(Resource)]
@@ -79,18 +102,20 @@ pub fn stop_map_ambient(commands: &mut Commands, ambient: &Query<Entity, With<Ma
     }
 }
 
-pub(crate) fn stop_map_ambient_on_match_torn_down(
+pub(crate) fn stop_map_ambient_on_match_end(
     mut torn: MessageReader<MatchTornDown>,
+    mut returned: MessageReader<ReturnedToMenu>,
     ambient: Query<Entity, With<MapAmbient>>,
     mut booted: ResMut<MapAmbientBooted>,
     mut attempted: ResMut<SoundBankLoadAttempted>,
     mut epoch: ResMut<MatchEpoch>,
-    walk: Option<Res<SoundBankWalk>>,
+    compose: Option<Res<SoundBankCompose>>,
     accepted: Option<Res<assets::MatchLoadAccepted>>,
     mut commands: Commands,
 ) {
     let retired: Vec<_> = torn.read().map(|fact| fact.world_generation).collect();
-    if retired.is_empty() {
+    let left_session = returned.read().count() > 0;
+    if retired.is_empty() && !left_session {
         return;
     }
     epoch.bump();
@@ -98,36 +123,48 @@ pub(crate) fn stop_map_ambient_on_match_torn_down(
     booted.0 = false;
     commands.remove_resource::<assets::CreateFxOneshotEmitters>();
 
-    let walk_is_for_the_incoming_map =
-        walk.as_ref()
+    let compose_is_for_the_incoming_map = !left_session
+        && compose
+            .as_ref()
             .zip(accepted.as_ref())
-            .is_some_and(|(walk, accepted)| {
-                walk.load_key == accepted.load_key
+            .is_some_and(|(compose, accepted)| {
+                compose.load_key == accepted.load_key
                     && !retired.contains(&frame::WorldGeneration::from_install(
-                        walk.load_key.local_load_request_id,
+                        compose.load_key.local_load_request_id,
                     ))
             });
-    if !walk_is_for_the_incoming_map {
-        commands.remove_resource::<SoundBankWalk>();
+    if !compose_is_for_the_incoming_map {
+        commands.remove_resource::<SoundBankCompose>();
+        commands.remove_resource::<assets::PreparedMatchSound>();
         attempted.0 = false;
     }
-    commands.remove_resource::<SoundBankNamespace>();
-    commands.remove_resource::<SoundBank>();
-    commands.remove_resource::<SoundIwd>();
-
-    commands.remove_resource::<crate::ClipStore>();
+    commands.queue(|world: &mut bevy::prelude::World| {
+        frame::retire::retire_resources(world, |batch| {
+            batch
+                .resource::<SoundBankNamespace>()
+                .resource::<SoundBank>()
+                .resource::<SoundIwd>()
+                .resource::<crate::ClipStore>();
+        });
+    });
     perf::ambient_hold(i64::from(booted.0));
     diag::info!(Audio, "audio: map ambient stopped (SND_StopAmbient)");
 }
 
-pub(crate) fn start_sound_bank_walk(
+pub(crate) fn start_sound_bank_compose(
     mut attempted: ResMut<SoundBankLoadAttempted>,
     accepted: Option<Res<assets::MatchLoadAccepted>>,
     abort: Option<Res<assets::MatchLoadAbort>>,
     identity: Option<Res<frame::LaunchIdentity>>,
+    silent: Option<Res<crate::AudioSilent>>,
+    resident: Res<ResidentSoundBank>,
     mut commands: Commands,
 ) {
     if attempted.0 {
+        return;
+    }
+    if silent.is_some() {
+        attempted.0 = true;
         return;
     }
     let Some(accepted) = accepted else {
@@ -145,140 +182,221 @@ pub(crate) fn start_sound_bank_walk(
     attempted.0 = true;
     let games = GamesRoot(identity.games_root.clone());
     let zone = accepted.zone.clone();
-    let walked_zone = zone.clone();
+    let opened_zone = zone.clone();
 
-    let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
-    let task = pool.spawn(async move {
-        // Each stage announces itself as it finishes: the walk holds AudioReady,
-        // the world spawn and the host's admission behind it, so a stage that
-        // never returns has to be readable from the log of the run it hung.
-        let started = std::time::Instant::now();
-        let stage = |what: &str, at: std::time::Instant| {
-            diag::info!(
-                Audio,
-                "audio: sound bank walk `{walked_zone}`: {what} at {:.0}ms",
-                at.elapsed().as_secs_f32() * 1000.0
-            );
-        };
-        let loaded = load_mp_sound_bank(&games, &walked_zone);
-        stage("catalog", started);
-        let mut trees = NamespaceTrees::discover(&games);
-        stage("namespace trees", started);
-        if let Ok(zone) = assets::find_zone_file(&games, &walked_zone) {
-            trees.adopt_zone(&zone.path);
+    let iwd = match resident.0.as_ref().filter(|resident| resident.zone == zone) {
+        Some(resident) => {
+            diag::info!(Audio, "audio: sound archives for `{zone}` reused");
+            IwdOpen::Open(Arc::clone(&resident.iwd))
         }
-        stage("zone anchor", started);
-        let (indices, lines) = NamespaceSoundIwd::open(&trees);
-        stage("iwd archives", started);
-        let map_ns = namespace_for_zone(&games, &walked_zone);
-        stage("done", started);
-        SoundBankWalked {
-            loaded,
-            indices,
-            lines,
-            namespace: map_ns,
+        None => {
+            let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
+            IwdOpen::Opening(pool.spawn(async move {
+                let mut trees = NamespaceTrees::discover(&games);
+                if let Ok(zone) = assets::find_zone_file(&games, &opened_zone) {
+                    trees.adopt_zone(&zone.path);
+                }
+                NamespaceSoundIwd::open(&trees)
+            }))
         }
-    });
-    commands.insert_resource(SoundBankWalk {
+    };
+    commands.insert_resource(SoundBankCompose {
         load_key: accepted.load_key,
         zone,
-        task,
+        iwd,
+        bank: None,
+        common_profile_id: 0,
+        products_id: 0,
         started: std::time::Instant::now(),
         stall_reported: false,
     });
 }
 
 pub(crate) fn install_sound_bank(
-    mut walk: Option<ResMut<SoundBankWalk>>,
+    mut compose: Option<ResMut<SoundBankCompose>>,
     identity: Option<Res<frame::LaunchIdentity>>,
     accepted: Option<Res<assets::MatchLoadAccepted>>,
     abort: Option<Res<assets::MatchLoadAbort>>,
+    mut map_sound: Option<ResMut<assets::PreparedMatchSound>>,
     mut epoch: ResMut<MatchEpoch>,
+    resident_clips: Res<crate::clip_store::ResidentClipCache>,
+    mut resident: ResMut<ResidentSoundBank>,
     mut commands: Commands,
 ) {
-    let Some(walk) = walk.as_deref_mut() else {
+    let Some(compose) = compose.as_deref_mut() else {
         return;
     };
 
-    // `MatchLoadAccepted` is removed the moment the map walk returns, which is
-    // normally *before* this one does — its absence means the load finished,
-    // not that the session moved on, and dropping the bank on it loses the race
-    // to whichever walk is slower on the machine. Only a *different* accepted
-    // load supersedes this one.
     let superseded = accepted
         .as_ref()
-        .is_some_and(|accepted| accepted.load_key != walk.load_key);
-    if abort.is_some_and(|abort| abort.0 == walk.load_key.local_load_request_id) || superseded {
+        .is_some_and(|accepted| accepted.load_key != compose.load_key);
+    if abort.is_some_and(|abort| abort.0 == compose.load_key.local_load_request_id) || superseded {
         diag::info!(
             Audio,
             "audio: sound bank for `{}` dropped — the session moved on",
-            walk.zone
+            compose.zone
         );
-        commands.remove_resource::<SoundBankWalk>();
+        commands.remove_resource::<SoundBankCompose>();
         return;
     }
-    // The load key above already says this walk belongs to the accepted load.
-    // `identity.zone` is a separate display spelling the session stamps on its
-    // own schedule, so gating the install on it means a bank that never
-    // installs when the two never converge — and a bank that never installs
-    // holds AudioReady, the world spawn, and with it the host's
-    // `HostWorldReady`, down forever with nothing said.
+    // Install on the load key, not `identity.zone`: gating on a display spelling
+    // that never converges would hold AudioReady and the world spawn forever.
     let identity_zone = identity.as_ref().map(|identity| identity.zone.as_str());
-    if let Some(zone) = identity_zone.filter(|zone| *zone != walk.zone) {
+    if let Some(zone) = identity_zone.filter(|zone| *zone != compose.zone) {
         diag::warn!(
             Audio,
             "audio: launch identity says `{zone}` while the accepted load walked `{}` — installing on the load key",
-            walk.zone
+            compose.zone
         );
     }
-    let Some(walked) = future::block_on(future::poll_once(&mut walk.task)) else {
-        if !walk.stall_reported && walk.started.elapsed() >= SOUND_BANK_WALK_STALL {
-            walk.stall_reported = true;
+
+    if let IwdOpen::Opening(task) = &mut compose.iwd {
+        if let Some((indices, lines)) = future::block_on(future::poll_once(task)) {
+            for line in lines {
+                diag::info!(Audio, "{line}");
+            }
+            compose.iwd = IwdOpen::Open(Arc::new(indices));
+        }
+    }
+    if compose.bank.is_none() {
+        if let Some(arrived) = map_sound.as_deref_mut() {
+            if arrived.load_key == compose.load_key {
+                compose.common_profile_id = arrived.common_profile_id;
+                let products_id = arrived.products_id;
+                let map = std::mem::replace(&mut arrived.sound, Err(String::new()));
+                commands.remove_resource::<assets::PreparedMatchSound>();
+                let kept = resident
+                    .0
+                    .as_ref()
+                    .filter(|resident| resident.zone == compose.zone)
+                    .and_then(|resident| resident.bank.as_ref())
+                    .filter(|bank| {
+                        bank.products_id == products_id
+                            && bank.common_profile_id == compose.common_profile_id
+                    })
+                    .map(|bank| ComposedBank {
+                        loaded: Ok((Arc::clone(&bank.catalog), bank.gaps)),
+                        namespace: bank.namespace,
+                        reused: true,
+                    });
+                let games = identity
+                    .as_ref()
+                    .map(|identity| GamesRoot(identity.games_root.clone()));
+                let zone = compose.zone.clone();
+                let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
+                compose.bank = Some(pool.spawn(async move {
+                    if let Some(kept) = kept {
+                        return kept;
+                    }
+                    let Some(games) = games else {
+                        return ComposedBank {
+                            loaded: Err("no launch identity to find the zones by".to_owned()),
+                            namespace: AssetNamespace::Iw4,
+                            reused: false,
+                        };
+                    };
+                    let namespace = namespace_for_zone(&games, &zone);
+                    let loaded = assets::find_zone_file(&games, &zone).map(|found| {
+                        let sources = gather_sound_sources(&games, &found.path);
+                        let LoadedSoundBank { catalog, gaps, .. } =
+                            compose_sound_bank(sources, &zone, namespace, map);
+                        (Arc::new(catalog), gaps.len())
+                    });
+                    ComposedBank {
+                        loaded,
+                        namespace,
+                        reused: false,
+                    }
+                }));
+                compose.products_id = products_id;
+            }
+        }
+    }
+
+    let composed = match (&compose.iwd, compose.bank.as_mut()) {
+        (IwdOpen::Open(_), Some(bank)) => future::block_on(future::poll_once(bank)),
+        _ => None,
+    };
+    let Some(composed) = composed else {
+        if !compose.stall_reported && compose.started.elapsed() >= SOUND_BANK_COMPOSE_STALL {
+            compose.stall_reported = true;
             diag::warn!(
                 Audio,
-                "audio: sound bank walk for `{}` still running after {:.0}s — AudioReady, the world spawn and host admission all wait on it",
-                walk.zone,
-                walk.started.elapsed().as_secs_f32()
+                "audio: sound bank for `{}` still not composed after {:.0}s (archives {}, map sound {}) — AudioReady, the world spawn and host admission all wait on it",
+                compose.zone,
+                compose.started.elapsed().as_secs_f32(),
+                if matches!(compose.iwd, IwdOpen::Open(_)) {
+                    "open"
+                } else {
+                    "opening"
+                },
+                if compose.bank.is_some() {
+                    "arrived"
+                } else {
+                    "pending"
+                },
             );
         }
         return;
     };
-    commands.remove_resource::<SoundBankWalk>();
-    let SoundBankWalked {
+    commands.remove_resource::<SoundBankCompose>();
+    let IwdOpen::Open(iwd) = std::mem::replace(&mut compose.iwd, IwdOpen::Open(Arc::default()))
+    else {
+        unreachable!("the bank is polled only once the archives are open");
+    };
+    let ComposedBank {
         loaded,
-        indices,
-        lines,
         namespace,
-    } = walked;
-    for line in lines {
-        diag::info!(Audio, "{line}");
-    }
+        reused,
+    } = composed;
     match loaded {
-        Ok(loaded) => {
+        Ok((bank, gaps)) => {
             epoch.bump();
-            if indices.is_empty() {
+            if iwd.is_empty() {
                 diag::warn!(
                     Audio,
                     "audio: no IWD sound archives for `{}` — streamed aliases will gap",
-                    walk.zone
+                    compose.zone
                 );
             }
-            let iwd = Arc::new(indices);
             commands.insert_resource(SoundIwd(Arc::clone(&iwd)));
-            let bank = Arc::new(loaded.catalog);
+            resident.0 = Some(ResidentBank {
+                zone: compose.zone.clone(),
+                iwd: Arc::clone(&iwd),
+                bank: Some(ResidentComposed {
+                    products_id: compose.products_id,
+                    common_profile_id: compose.common_profile_id,
+                    catalog: Arc::clone(&bank),
+                    namespace,
+                    gaps,
+                }),
+            });
 
-            commands.insert_resource(crate::ClipStore::start(Arc::clone(&bank), Some(iwd)));
+            let new_clips = crate::ClipStore::start_with_common(
+                Arc::clone(&bank),
+                Some(iwd),
+                compose.common_profile_id,
+                Some(resident_clips.clone()),
+            );
+            commands.queue(move |world: &mut World| {
+                frame::retire::retire_resources(world, |batch| {
+                    batch.resource::<crate::ClipStore>();
+                });
+                world.insert_resource(new_clips);
+            });
             commands.insert_resource(crate::clip_store::PendingStarts::default());
             commands.insert_resource(crate::playback::SharedPlayAssets::default());
             commands.insert_resource(SoundBank(bank));
             diag::info!(
                 Audio,
-                "audio: sound bank ready for {} ({} zone gaps)",
-                walk.zone,
-                loaded.gaps.len()
+                "audio: sound bank {} for {} ({} zone gaps) in {:.0}ms",
+                if reused { "reused" } else { "ready" },
+                compose.zone,
+                gaps,
+                compose.started.elapsed().as_secs_f32() * 1000.0
             );
             commands.insert_resource(SoundBankNamespace {
-                zone: walk.zone.clone(),
+                zone: compose.zone.clone(),
                 namespace,
             });
         }
@@ -286,7 +404,7 @@ pub(crate) fn install_sound_bank(
             diag::warn!(
                 Audio,
                 "audio: sound bank load failed for {}: {e}",
-                walk.zone
+                compose.zone
             );
         }
     }

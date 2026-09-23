@@ -111,7 +111,16 @@ impl ZoneLane for T5Lane {
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(crate::AssetNamespace::T5);
+        sink.sound = Some(asset_audio::ZoneSoundCapture::for_map(
+            path,
+            asset_audio::ZoneGame::T5,
+            "map",
+        ));
         let walked = fastfile_t5::load_zone(&mut stream, &mut sink);
+        let map_sound = sink
+            .sound
+            .take()
+            .map(|sound| sound.finish(walked.as_ref().map(|_| ()).map_err(|e| e.to_string())));
         match &walked {
             Ok(_) => report.push(format!("zone walk: complete, {} assets", sink.walked)),
             Err(e) => report.push(format!(
@@ -252,6 +261,7 @@ impl ZoneLane for T5Lane {
             report.push("no GfxWorld retained — nothing to draw".into());
             let dm_spawns = dm_spawn_points_t5(&stream);
             let mut loaded = LoadedWorld {
+                sound: map_sound,
                 world: PreparedWorld {
                     policy: WorldDrawPolicy::t5(),
                     exp_fog,
@@ -540,9 +550,11 @@ impl ZoneLane for T5Lane {
                 let min = draw.stats.min;
                 let max = draw.stats.max;
                 LoadedWorld {
+                    sound: map_sound,
                     materials: map_materials,
                     world: PreparedWorld {
                         draw: Some(draw),
+                        dynamic_light: None,
                         static_model_meshes,
                         static_model_instances,
                         map_xmodel_scene_assets,
@@ -591,6 +603,7 @@ impl ZoneLane for T5Lane {
                 report.push(format!("T5 world mesh: {e}"));
                 let dm_spawns = dm_spawn_points_t5(&stream);
                 let mut loaded = LoadedWorld {
+                    sound: map_sound,
                     world: PreparedWorld {
                         policy: WorldDrawPolicy::t5(),
                         exp_fog,
@@ -650,7 +663,15 @@ impl ZoneLane for T5Lane {
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(crate::AssetNamespace::T5);
+        sink.sound = asset_audio::ZoneSoundCapture::claim_common(
+            path,
+            asset_audio::ZoneGame::T5,
+            "common census",
+        );
         let walk = fastfile_t5::load_zone(&mut stream, &mut sink);
+        if let Some(sound) = sink.sound.take() {
+            sound.deposit(walk.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+        }
         let mut report = vec![format!("common_mp (T5): walked {} assets", sink.walked)];
         if let Err(error) = walk {
             report.push(format!(
@@ -801,7 +822,15 @@ impl ZoneLane for T5Lane {
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(crate::AssetNamespace::T5);
+        sink.sound = asset_audio::ZoneSoundCapture::claim_common(
+            path,
+            asset_audio::ZoneGame::T5,
+            "material population",
+        );
         let walk = fastfile_t5::load_zone(&mut stream, &mut sink);
+        if let Some(sound) = sink.sound.take() {
+            sound.deposit(walk.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+        }
         let mut report = Vec::new();
         if let Err(error) = walk {
             report.push(format!(
@@ -819,8 +848,10 @@ impl ZoneLane for T5Lane {
         ));
         MaterialPopulation {
             walked: sink.walked,
+            light_defs: Vec::new(),
             materials: sink.materials,
             report,
+            cac_tables: sink.stats_tables.into_values().collect(),
         }
     }
 }

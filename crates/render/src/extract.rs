@@ -161,6 +161,7 @@ pub fn seal_render_frame(
     static_identity: (
         Option<Res<render_frontend::assemble::drawsurf::StaticDrawLane>>,
         Option<Res<frame::WorldGeneration>>,
+        Option<Res<frame::WorldProducts>>,
     ),
     xmodel: Option<Res<XModelDrawPlan>>,
     fx: Option<Res<FxCodeMeshPlan>>,
@@ -179,7 +180,8 @@ pub fn seal_render_frame(
         Option<Res<PublishedRenderFrame>>,
     ),
 ) {
-    let (retained, world_generation) = static_identity;
+    let (retained, world_generation, world_products) = static_identity;
+    let world_products = world_products.map(|products| *products).unwrap_or_default();
     let (runtime, mat_frame, assembly, products) = material;
     let Some(runtime) = runtime.as_ref() else {
         insert_empty_colour(&mut commands);
@@ -240,13 +242,13 @@ pub fn seal_render_frame(
 
     let skip_world_smodel = existing_world.as_ref().is_some_and(|world| {
         render_gpu::colour_world_smodel_static(
-            world.world_generation,
+            (world.world_generation, world.world_products),
             world.static_geometry.world_vertices.len(),
             world.static_geometry.world_indices.len(),
             world.static_geometry.world_layer.len(),
             world.static_geometry.smodel_vertices.len(),
             world.static_geometry.smodel_indices.len(),
-            world_generation,
+            (world_generation, world_products),
             world_v,
             world_i,
             world_layer_n,
@@ -534,6 +536,7 @@ pub fn seal_render_frame(
         catalog: Some(Arc::clone(&runtime.catalog)),
         prepared: Some(Arc::clone(&runtime.prepared)),
         world_generation,
+        world_products,
         smc_revision,
         ports: Arc::new(ports),
         static_geometry: Arc::new(render_gpu::ExtractedStaticGeometry {

@@ -40,6 +40,7 @@ pub enum AuthorityWeaponProfile {
 pub struct SessionWeaponManifestRow {
     pub id: SessionWeaponId,
     pub key: AssetKey,
+    pub attachments: Vec<String>,
     pub authority: ManifestFact<AuthorityWeaponProfile>,
 
     pub presentation: ManifestFact<u64>,
@@ -61,15 +62,19 @@ pub struct SessionContentManifest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionManifestError {
     MissingWeaponKey(SessionWeaponId),
-    DuplicateWeaponKey(AssetKey),
+    DuplicateWeaponKey(AssetKey, Vec<String>),
 }
 
 impl core::fmt::Display for SessionManifestError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::MissingWeaponKey(id) => write!(f, "session weapon {} has no durable key", id.0),
-            Self::DuplicateWeaponKey(key) => {
-                write!(f, "duplicate durable session weapon key `{key}`")
+            Self::DuplicateWeaponKey(key, attachments) => {
+                write!(
+                    f,
+                    "duplicate durable session weapon key `{key}` [{}]",
+                    attachments.join(" ")
+                )
             }
         }
     }
@@ -100,8 +105,9 @@ impl SessionContentManifest {
             let key = registry
                 .key_of(raw_id)
                 .ok_or(SessionManifestError::MissingWeaponKey(id))?;
-            if !keys.insert(key.clone()) {
-                return Err(SessionManifestError::DuplicateWeaponKey(key));
+            let attachments = registry.prepared_attachments_of(raw_id).to_vec();
+            if !keys.insert((key.clone(), attachments.clone())) {
+                return Err(SessionManifestError::DuplicateWeaponKey(key, attachments));
             }
             let authority = if combat
                 .get(raw_id as usize)
@@ -121,6 +127,7 @@ impl SessionContentManifest {
             weapons.push(SessionWeaponManifestRow {
                 id,
                 key,
+                attachments,
                 authority,
                 presentation: ManifestFact::Unavailable(
                     ManifestGap::AtomicWeaponPresentationBundleNotInstalled,
@@ -167,6 +174,10 @@ impl SessionContentManifest {
         for row in &self.weapons {
             digest.u32(row.id.0);
             digest.asset_key(&row.key);
+            digest.u64(row.attachments.len() as u64);
+            for name in &row.attachments {
+                digest.bytes(name.as_bytes());
+            }
             digest.authority_fact(&row.authority);
             digest.u64_fact(&row.presentation);
         }

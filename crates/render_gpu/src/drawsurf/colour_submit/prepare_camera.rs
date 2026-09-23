@@ -1,8 +1,17 @@
+use bevy::tasks::{ComputeTaskPool, TaskPool};
 use dpvs_iw4::GfxDrawSurf;
 
 use super::*;
 
-pub(super) fn prepare_camera_colour(
+fn run_colour_lanes(camera: CameraLane<'_>, shadow: ShadowLane<'_>) {
+    let _prepare = perf::Span::RenderColourPrepareMs.enter();
+    ComputeTaskPool::get_or_init(TaskPool::default).scope(|scope| {
+        scope.spawn(async move { prepare_shadow_passes(shadow) });
+        prepare_camera_colour(camera);
+    });
+}
+
+pub(super) fn prepare_colour_lanes(
     views: Query<
         (
             &ViewTarget,
@@ -12,51 +21,157 @@ pub(super) fn prepare_camera_colour(
         ),
         With<Camera3d>,
     >,
-    world: Res<InstalledRenderWorld>,
-    frame: Res<PublishedRenderFrame>,
-    installed: Res<InstalledColourPass>,
-    geometry: Res<ExactColourGeometry>,
-    pipeline: Res<ExactColourPipeline>,
-    registry: Res<ExactPipelineRegistry>,
-    device: Res<RenderDevice>,
-    queue: Res<RenderQueue>,
-
-    pipeline_cache: Res<PipelineCache>,
-    mut smodel_cache_gpu: ResMut<SmodelCacheGpu>,
+    (world, frame, installed, geometry, pipeline, registry, device, queue, uploaded): (
+        Res<InstalledRenderWorld>,
+        Res<PublishedRenderFrame>,
+        Res<InstalledColourPass>,
+        Res<ExactColourGeometry>,
+        Res<ExactColourPipeline>,
+        Res<ExactPipelineRegistry>,
+        Res<RenderDevice>,
+        Res<RenderQueue>,
+        Res<RuntimeUploadedImageRegistry>,
+    ),
     (
-        mut uploaded,
-        mut binding_cache,
+        mut smodel_cache_gpu,
+        mut colour_binding_cache,
         mut constant_arena,
         mut census,
-        mut floatz,
-        mut floatz_pipelines,
-        dof,
-        mut resolved_scene,
         mut scratch,
         mut texture_table,
-        (mut cam, mut pretess),
+        mut cam,
+        mut pretess,
     ): (
-        ResMut<RuntimeUploadedImageRegistry>,
+        ResMut<SmodelCacheGpu>,
         ResMut<ExactColourBindingCache>,
         ResMut<ExactConstantArena>,
         ResMut<ExactColourSubmitCensus>,
-        ResMut<ExactFloatZResolve>,
-        ResMut<SpecializedRenderPipelines<ExactFloatZResolve>>,
-        Res<super::super::postfx::ExtractedPostFx>,
-        ResMut<super::super::resolved_scene::ResolvedScene>,
         ResMut<ColourSubmitScratch>,
         ResMut<SceneTextureTables>,
-        (ResMut<CameraPrepareState>, ResMut<CameraWorldPretess>),
+        ResMut<CameraPrepareState>,
+        ResMut<CameraWorldPretess>,
+    ),
+    (
+        mut shadow_binding_cache,
+        mut shadow_table,
+        mut shadow_arena,
+        mut spot_arena,
+        mut static_draws,
+        mut shadowmap,
+        mut spotmap,
+        mut shadow_scratch,
+    ): (
+        ResMut<ExactShadowBindingCache>,
+        ResMut<ShadowTextureTable>,
+        ResMut<ShadowmapSunArena>,
+        ResMut<ShadowmapSpotArena>,
+        ResMut<ResidentShadowStaticDraws>,
+        ResMut<ShadowmapSunGpu>,
+        ResMut<ShadowmapSpotGpu>,
+        ResMut<ShadowSubmitScratch>,
     ),
 ) {
-    let extracted = ExtractedColourRefs::new(&world, &frame);
+    let mut cameras = views.iter();
+    let view = cameras.next();
+    let extra_views = cameras.count();
+    run_colour_lanes(
+        CameraLane {
+            view,
+            extra_views,
+            world: &world,
+            frame: &frame,
+            installed: &installed,
+            geometry: &geometry,
+            pipeline: &pipeline,
+            registry: &registry,
+            device: &device,
+            queue: &queue,
+            uploaded: &uploaded,
+            smodel_cache_gpu: &mut smodel_cache_gpu,
+            binding_cache: &mut colour_binding_cache,
+            constant_arena: &mut constant_arena,
+            census: &mut census,
+            scratch: &mut scratch,
+            texture_table: &mut texture_table,
+            cam: &mut cam,
+            pretess: &mut pretess,
+        },
+        ShadowLane {
+            world: &world,
+            frame: &frame,
+            installed: &installed,
+            geometry: &geometry,
+            pipeline: &pipeline,
+            registry: &registry,
+            device: &device,
+            queue: &queue,
+            uploaded: &uploaded,
+            binding_cache: &mut shadow_binding_cache,
+            shadow_table: &mut shadow_table,
+            shadow_arena: &mut shadow_arena,
+            spot_arena: &mut spot_arena,
+            static_draws: &mut static_draws,
+            shadowmap: &mut shadowmap,
+            spotmap: &mut spotmap,
+            scratch: &mut shadow_scratch,
+        },
+    );
+}
+
+pub(super) struct CameraLane<'a> {
+    pub view: Option<CameraTargetView<'a>>,
+    pub extra_views: usize,
+    pub world: &'a InstalledRenderWorld,
+    pub frame: &'a PublishedRenderFrame,
+    pub installed: &'a InstalledColourPass,
+    pub geometry: &'a ExactColourGeometry,
+    pub pipeline: &'a ExactColourPipeline,
+    pub registry: &'a ExactPipelineRegistry,
+    pub device: &'a RenderDevice,
+    pub queue: &'a RenderQueue,
+    pub uploaded: &'a RuntimeUploadedImageRegistry,
+    pub smodel_cache_gpu: &'a mut SmodelCacheGpu,
+    pub binding_cache: &'a mut ExactColourBindingCache,
+    pub constant_arena: &'a mut ExactConstantArena,
+    pub census: &'a mut ExactColourSubmitCensus,
+    pub scratch: &'a mut ColourSubmitScratch,
+    pub texture_table: &'a mut SceneTextureTables,
+    pub cam: &'a mut CameraPrepareState,
+    pub pretess: &'a mut CameraWorldPretess,
+}
+
+pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
+    let CameraLane {
+        view,
+        extra_views,
+        world,
+        frame,
+        installed,
+        geometry,
+        pipeline,
+        registry,
+        device,
+        queue,
+        uploaded,
+        smodel_cache_gpu,
+        binding_cache,
+        constant_arena,
+        census,
+        scratch,
+        texture_table,
+        cam,
+        pretess,
+    } = lane;
+    let _span = perf::Span::RenderPrepareCameraMs.enter();
+    let extracted = ExtractedColourRefs::new(world, frame);
     let products = &extracted.frame.frame_products;
     *cam = CameraPrepareState::default();
     let census_on = perf::recording();
     if census_on {
-        reset_exact_colour_census(&mut census);
+        reset_exact_colour_census(census);
     }
     census.submitted_keys.clear();
+    scratch.skinned_tess.begin_frame();
     if !installed.ready {
         return;
     }
@@ -74,11 +189,10 @@ pub(super) fn prepare_camera_colour(
         return;
     }
 
-    let mut cameras = views.iter();
-    let Some((target, depth, extracted_view, msaa)) = cameras.next() else {
+    let Some((target, _depth, _extracted_view, msaa)) = view else {
         return;
     };
-    let extra = cameras.count();
+    let extra = extra_views;
     if extra > 0 {
         cam.last_refusal = Some(GpuSubmitRefusal::MultipleCameraViews {
             views: as_u32(extra.saturating_add(1)),
@@ -86,6 +200,8 @@ pub(super) fn prepare_camera_colour(
         return;
     }
     let samples = msaa.map_or(1, Msaa::samples);
+    let needs_floatz = installed.camera.needs_floatz;
+    let needs_resolved_scene = installed.camera.needs_resolved_scene;
     let mut ready_draws = 0u32;
     let mut refused_draws = 0u32;
 
@@ -117,57 +233,6 @@ pub(super) fn prepare_camera_colour(
     let mut last_glass_probe_sampler: Option<u32> = None;
     let mut markmesh_hits = 0usize;
     let mut glassmesh_hits = 0usize;
-
-    floatz.resolved_frame = None;
-    let needs_floatz = dof.frame.dof.active()
-        || colour.has_codemesh
-        || light.has_codemesh
-        || emissive.has_codemesh
-        || colour.binds_code_texture(super::CODE_TEXTURE_FLOATZ)
-        || light.binds_code_texture(super::CODE_TEXTURE_FLOATZ)
-        || emissive.binds_code_texture(super::CODE_TEXTURE_FLOATZ);
-    let distortion = products.0.product(FrameProductKind::Distortion);
-    let needs_resolved_scene =
-        (matches!(distortion.status, FrameProductStatus::ResolveReady { .. })
-            && !distortion.ordered_draws.is_empty())
-            || colour.binds_code_texture(super::CODE_TEXTURE_RESOLVED_POST_SUN)
-            || light.binds_code_texture(super::CODE_TEXTURE_RESOLVED_POST_SUN)
-            || emissive.binds_code_texture(super::CODE_TEXTURE_RESOLVED_POST_SUN);
-    if needs_resolved_scene {
-        let (view, _resized) = resolved_scene.ensure(&device, target.main_texture());
-        uploaded.publish_frame_target(|registry| &mut registry.resolved_post_sun, Some(view));
-    }
-    let mut _floatz_blit = 0u32;
-    let mut _resolved_scene_copy = 0u32;
-    if needs_floatz {
-        let size = depth.texture.size();
-        let (view, _resized) = floatz::ensure_target(&mut floatz, &device, size.width, size.height);
-        if view.is_some() {
-            uploaded.publish_frame_target(|registry| &mut registry.float_z, view);
-        }
-
-        floatz::prepare_blit(
-            &mut floatz,
-            &pipeline_cache,
-            &device,
-            &queue,
-            &mut floatz_pipelines,
-            depth.view(),
-            samples,
-            floatz::znear_from_clip_from_view(extracted_view.clip_from_view).unwrap_or(0.0),
-            extracted.frame.exec_frame.viewmodel_near,
-        );
-    } else {
-        floatz::forget_blit(&mut floatz);
-    }
-
-    open_scene_table_epoch(
-        &mut binding_cache,
-        &mut texture_table,
-        &mut scratch,
-        &uploaded,
-        extracted.world.generation,
-    );
 
     scratch.clear();
     let mut prepared = std::mem::take(&mut scratch.prepared);
@@ -263,7 +328,7 @@ pub(super) fn prepare_camera_colour(
             &geometry.world_surface_ranges,
         );
         let reuse = pretess.layout.take().and_then(|layout| layout.index);
-        let index = world_pretess_dest_ib(&device, &queue, reuse, gathered.indices.as_slice());
+        let index = world_pretess_dest_ib(device, queue, reuse, gathered.indices.as_slice());
         pretess.epoch = pretess.epoch.wrapping_add(1);
         pretess.layout = Some(WorldPretessLayout {
             key: pretess_key,
@@ -284,7 +349,7 @@ pub(super) fn prepare_camera_colour(
             &pack_plan.packed,
             &pack_plan.work,
             world_run_surfs,
-            &pretess,
+            pretess,
         );
     }
     if census_on {
@@ -322,12 +387,12 @@ pub(super) fn prepare_camera_colour(
     let run_pack = std::mem::take(&mut scratch.run_pack);
     let mut exact_prepare = ExactPrepare {
         extracted,
-        geometry: &geometry,
-        pretess: Some(&pretess),
-        pipeline_res: pipeline.as_ref(),
-        registry: &registry,
-        device: &device,
-        uploaded: &uploaded,
+        geometry,
+        pretess: Some(pretess),
+        pipeline_res: pipeline,
+        registry,
+        device,
+        uploaded,
         spot_shadow_select: None,
         sampler_table,
         textures: PrepareTextureTables::Scene {
@@ -399,9 +464,7 @@ pub(super) fn prepare_camera_colour(
             }),
             |view| {
                 let vertex_type = MaterialRunExecutor::vertex_type(view, item, tech);
-                executor
-                    .execute(view, item, tech, vertex_type, true)
-                    .map(|()| ())
+                executor.execute(view, item, tech, vertex_type, true)
             },
         );
         let execution = match executed {
@@ -452,7 +515,7 @@ pub(super) fn prepare_camera_colour(
             execution_binds_code_texture(execution, super::CODE_TEXTURE_SHADOWMAP_SPOT);
         let spot_select = if binds_spot_shadow {
             let light = GfxDrawSurf { packed: item.key }.scene_light_index();
-            spot_rt_for_light(&products, light)
+            spot_rt_for_light(products, light)
         } else {
             None
         };
@@ -471,7 +534,7 @@ pub(super) fn prepare_camera_colour(
             last_refusal = Some(cause);
             continue;
         }
-        if spot_shadow_view_missing(&uploaded, binds_spot_shadow, spot_select) {
+        if spot_shadow_view_missing(uploaded, binds_spot_shadow, spot_select) {
             let cause = GpuSubmitRefusal::ProductDependencyNotReady {
                 product: FrameProductKind::SpotShadow,
             };
@@ -622,8 +685,8 @@ pub(super) fn prepare_camera_colour(
             }
         }
     }
-    let prepare_cost = std::mem::take(&mut exact_prepare.cost);
     exact_prepare.run_pack.sweep_pack_intern();
+    let prepare_cost = std::mem::take(&mut exact_prepare.cost);
     let run_pack = std::mem::take(&mut exact_prepare.run_pack);
     drop(exact_prepare);
     scratch.run_pack = run_pack;
@@ -636,8 +699,8 @@ pub(super) fn prepare_camera_colour(
     if viewmodel_colour_submits_when_pipelines_ready(viewmodel_pipeline_gap) {
         ready_draws = ready_draws
             .saturating_add(u32::try_from(pending_viewmodel_keys.len()).unwrap_or(u32::MAX));
-        submitted_keys.extend(pending_viewmodel_keys.drain(..));
-        prepared.extend(pending_viewmodel_prepared.drain(..));
+        submitted_keys.append(&mut pending_viewmodel_keys);
+        prepared.append(&mut pending_viewmodel_prepared);
     } else {
         refused_draws = refused_draws.saturating_add(u32::try_from(viewmodel_held).unwrap_or(0));
         pipeline_not_ready =
@@ -658,10 +721,10 @@ pub(super) fn prepare_camera_colour(
             &mut prepared,
             &mut arena_pack,
             &mut constant_arena.gpu,
-            pipeline.as_ref(),
-            &registry,
-            &device,
-            &queue,
+            pipeline,
+            registry,
+            device,
+            queue,
             "iw4_exact_vs_constant_arena",
             "iw4_exact_ps_constant_arena",
         );
@@ -672,7 +735,7 @@ pub(super) fn prepare_camera_colour(
             census.pack_arena_pixel_n = Some(as_u32(arena_pixel_n));
         }
         let smodel_ib_skip = smodel_cache_gpu.write_dynamic_indices(
-            &queue,
+            queue,
             extracted.world.smodel_pretess_indices.as_slice(),
             extracted.world.smodel_index_layout_revision,
         );
@@ -733,46 +796,63 @@ pub(super) fn prepare_camera_colour(
 pub(super) struct InstalledColourPass {
     ready: bool,
     sun_shadow_view_ready: bool,
+    camera: CameraFrameTargets,
 }
 
-pub(super) fn prepare_shadow_passes(
-    world: Res<InstalledRenderWorld>,
-    frame: Res<PublishedRenderFrame>,
-    installed: Res<InstalledColourPass>,
-    geometry: Res<ExactColourGeometry>,
-    pipeline: Res<ExactColourPipeline>,
-    registry: Res<ExactPipelineRegistry>,
-    device: Res<RenderDevice>,
-    queue: Res<RenderQueue>,
-    (
+#[derive(Clone, Copy, Default)]
+struct CameraFrameTargets {
+    needs_floatz: bool,
+    needs_resolved_scene: bool,
+}
+
+pub(super) struct ShadowLane<'a> {
+    pub world: &'a InstalledRenderWorld,
+    pub frame: &'a PublishedRenderFrame,
+    pub installed: &'a InstalledColourPass,
+    pub geometry: &'a ExactColourGeometry,
+    pub pipeline: &'a ExactColourPipeline,
+    pub registry: &'a ExactPipelineRegistry,
+    pub device: &'a RenderDevice,
+    pub queue: &'a RenderQueue,
+    pub uploaded: &'a RuntimeUploadedImageRegistry,
+    pub binding_cache: &'a mut ExactShadowBindingCache,
+    pub shadow_table: &'a mut ShadowTextureTable,
+    pub shadow_arena: &'a mut ShadowmapSunArena,
+    pub spot_arena: &'a mut ShadowmapSpotArena,
+    pub static_draws: &'a mut ResidentShadowStaticDraws,
+    pub shadowmap: &'a mut ShadowmapSunGpu,
+    pub spotmap: &'a mut ShadowmapSpotGpu,
+    pub scratch: &'a mut ShadowSubmitScratch,
+}
+
+pub(super) fn prepare_shadow_passes(lane: ShadowLane<'_>) {
+    let ShadowLane {
+        world,
+        frame,
+        installed,
+        geometry,
+        pipeline,
+        registry,
+        device,
+        queue,
         uploaded,
-        mut binding_cache,
-        mut shadow_table,
-        mut shadow_arena,
-        mut spot_arena,
-        mut static_draws,
-        mut shadowmap,
-        mut spotmap,
-        mut scratch,
-    ): (
-        Res<RuntimeUploadedImageRegistry>,
-        ResMut<ExactShadowBindingCache>,
-        ResMut<ShadowTextureTable>,
-        ResMut<ShadowmapSunArena>,
-        ResMut<ShadowmapSpotArena>,
-        ResMut<ResidentShadowStaticDraws>,
-        ResMut<ShadowmapSunGpu>,
-        ResMut<ShadowmapSpotGpu>,
-        ResMut<ColourSubmitScratch>,
-    ),
-) {
+        binding_cache,
+        shadow_table,
+        shadow_arena,
+        spot_arena,
+        static_draws,
+        shadowmap,
+        spotmap,
+        scratch,
+    } = lane;
+    let _span = perf::Span::RenderPrepareShadowMs.enter();
     if !installed.ready {
         return;
     }
     let Some(sampler_table) = world.sampler_table.as_ref() else {
         return;
     };
-    let extracted = ExtractedColourRefs::new(&world, &frame);
+    let extracted = ExtractedColourRefs::new(world, frame);
     let products = &extracted.frame.frame_products;
     let mut sun_exec = std::mem::take(&mut scratch.sun_exec);
     let mut spot_exec = std::mem::take(&mut scratch.spot_exec);
@@ -780,17 +860,17 @@ pub(super) fn prepare_shadow_passes(
     let sun_prepared = prepare_shadowmap_sun(
         products,
         extracted,
-        &geometry,
-        pipeline.as_ref(),
-        &registry,
-        &device,
-        &queue,
-        &uploaded,
-        &mut binding_cache,
-        &mut shadow_table,
-        &mut shadow_arena,
-        &mut shadowmap,
-        &mut static_draws,
+        geometry,
+        pipeline,
+        registry,
+        device,
+        queue,
+        uploaded,
+        binding_cache,
+        shadow_table,
+        shadow_arena,
+        shadowmap,
+        static_draws,
         sampler_table,
         &mut sun_exec,
         &mut scratch.skinned_tess,
@@ -798,16 +878,16 @@ pub(super) fn prepare_shadow_passes(
     let spot_prepared = prepare_shadowmap_spot(
         products,
         extracted,
-        &geometry,
-        pipeline.as_ref(),
-        &registry,
-        &device,
-        &queue,
-        &uploaded,
-        &mut binding_cache,
-        &mut shadow_table,
-        &mut spot_arena,
-        &mut spotmap,
+        geometry,
+        pipeline,
+        registry,
+        device,
+        queue,
+        uploaded,
+        binding_cache,
+        shadow_table,
+        spot_arena,
+        spotmap,
         sampler_table,
         &mut spot_exec,
         &mut scratch.skinned_tess,
@@ -819,22 +899,58 @@ pub(super) fn prepare_shadow_passes(
 }
 
 pub(super) fn install_shared_colour_pass(
+    views: Query<
+        (
+            &ViewTarget,
+            &ViewDepthTexture,
+            &ExtractedView,
+            Option<&Msaa>,
+        ),
+        With<Camera3d>,
+    >,
     world: Res<InstalledRenderWorld>,
     frame: Res<PublishedRenderFrame>,
     pipeline: Res<ExactColourPipeline>,
+    pipeline_cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
-    mut uploaded: ResMut<RuntimeUploadedImageRegistry>,
-    mut binding_cache: ResMut<ExactColourBindingCache>,
-    mut shadow_binding: ResMut<ExactShadowBindingCache>,
-    mut constant_arena: ResMut<ExactConstantArena>,
-    mut texture_table: ResMut<SceneTextureTables>,
-    mut shadow_table: ResMut<ShadowTextureTable>,
-    mut scratch: ResMut<ColourSubmitScratch>,
-    mut shadow_arena: ResMut<ShadowmapSunArena>,
-    mut spot_arena: ResMut<ShadowmapSpotArena>,
-    mut shadowmap: ResMut<ShadowmapSunGpu>,
-    mut spotmap: ResMut<ShadowmapSpotGpu>,
-    mut installed: ResMut<InstalledColourPass>,
+    queue: Res<RenderQueue>,
+    dof: Res<super::super::postfx::ExtractedPostFx>,
+    (
+        mut uploaded,
+        mut binding_cache,
+        mut shadow_binding,
+        mut constant_arena,
+        mut texture_table,
+        mut shadow_table,
+        (mut scratch, mut shadow_scratch),
+    ): (
+        ResMut<RuntimeUploadedImageRegistry>,
+        ResMut<ExactColourBindingCache>,
+        ResMut<ExactShadowBindingCache>,
+        ResMut<ExactConstantArena>,
+        ResMut<SceneTextureTables>,
+        ResMut<ShadowTextureTable>,
+        (ResMut<ColourSubmitScratch>, ResMut<ShadowSubmitScratch>),
+    ),
+    (
+        mut shadow_arena,
+        mut spot_arena,
+        mut shadowmap,
+        mut spotmap,
+        mut floatz,
+        mut floatz_pipelines,
+        mut resolved_scene,
+        mut installed,
+    ): (
+        ResMut<ShadowmapSunArena>,
+        ResMut<ShadowmapSpotArena>,
+        ResMut<ShadowmapSunGpu>,
+        ResMut<ShadowmapSpotGpu>,
+        ResMut<ExactFloatZResolve>,
+        ResMut<SpecializedRenderPipelines<ExactFloatZResolve>>,
+        ResMut<super::super::resolved_scene::ResolvedScene>,
+        ResMut<InstalledColourPass>,
+    ),
 ) {
     *installed = InstalledColourPass::default();
     let extracted = ExtractedColourRefs::new(&world, &frame);
@@ -842,15 +958,10 @@ pub(super) fn install_shared_colour_pass(
     let Some(shared) = install_shared_colour_resources(SharedColourInstall {
         products,
         extracted,
-        pipeline: pipeline.as_ref(),
+        pipeline: &pipeline,
         device: &device,
         uploaded: &mut uploaded,
-        binding_cache: &mut binding_cache,
-        shadow_binding: &mut shadow_binding,
         constant_arena: &mut constant_arena,
-        texture_table: &mut texture_table,
-        shadow_table: &mut shadow_table,
-        scratch: &mut scratch,
         shadow_arena: &mut shadow_arena,
         spot_arena: &mut spot_arena,
         shadowmap: &mut shadowmap,
@@ -858,10 +969,133 @@ pub(super) fn install_shared_colour_pass(
     }) else {
         return;
     };
+    let mut cameras = views.iter();
+    let camera_view = match (cameras.next(), cameras.count()) {
+        (view, 0) => view,
+        _ => None,
+    };
+    let camera = install_camera_frame_targets(CameraTargetInstall {
+        view: camera_view,
+        extracted,
+        dof: &dof,
+        pipeline_cache: &pipeline_cache,
+        device: &device,
+        queue: &queue,
+        uploaded: &mut uploaded,
+        floatz: &mut floatz,
+        floatz_pipelines: &mut floatz_pipelines,
+        resolved_scene: &mut resolved_scene,
+    });
+    let generation = extracted.world.generation;
+    open_scene_table_epoch(
+        &mut binding_cache,
+        &mut texture_table,
+        &mut scratch,
+        &uploaded,
+        generation,
+    );
+    open_shadow_table_epoch(
+        &mut shadow_binding,
+        &mut shadow_table,
+        &mut shadow_scratch,
+        &uploaded,
+        generation,
+    );
     *installed = InstalledColourPass {
         ready: true,
         sun_shadow_view_ready: shared.sun_shadow_view_ready,
+        camera,
     };
+}
+
+type CameraTargetView<'a> = (
+    &'a ViewTarget,
+    &'a ViewDepthTexture,
+    &'a ExtractedView,
+    Option<&'a Msaa>,
+);
+
+struct CameraTargetInstall<'a, 'r> {
+    view: Option<CameraTargetView<'a>>,
+    extracted: ExtractedColourRefs<'r>,
+    dof: &'a super::super::postfx::ExtractedPostFx,
+    pipeline_cache: &'a PipelineCache,
+    device: &'a RenderDevice,
+    queue: &'a RenderQueue,
+    uploaded: &'a mut RuntimeUploadedImageRegistry,
+    floatz: &'a mut ExactFloatZResolve,
+    floatz_pipelines: &'a mut SpecializedRenderPipelines<ExactFloatZResolve>,
+    resolved_scene: &'a mut super::super::resolved_scene::ResolvedScene,
+}
+
+fn install_camera_frame_targets(install: CameraTargetInstall<'_, '_>) -> CameraFrameTargets {
+    let extracted = install.extracted;
+    let products = &extracted.frame.frame_products;
+    let colour = products.0.product(FrameProductKind::Colour);
+    let light = products.0.product(FrameProductKind::Light);
+    let emissive = products.0.product(FrameProductKind::Emissive);
+    if colour.ordered_draws.is_empty()
+        && light.ordered_draws.is_empty()
+        && emissive.ordered_draws.is_empty()
+    {
+        return CameraFrameTargets::default();
+    }
+    let Some((target, depth, extracted_view, msaa)) = install.view else {
+        return CameraFrameTargets::default();
+    };
+    let samples = msaa.map_or(1, Msaa::samples);
+
+    install.floatz.resolved_frame = None;
+    let needs_floatz = install.dof.frame.dof.active()
+        || colour.has_codemesh
+        || light.has_codemesh
+        || emissive.has_codemesh
+        || colour.binds_code_texture(super::CODE_TEXTURE_FLOATZ)
+        || light.binds_code_texture(super::CODE_TEXTURE_FLOATZ)
+        || emissive.binds_code_texture(super::CODE_TEXTURE_FLOATZ);
+    let distortion = products.0.product(FrameProductKind::Distortion);
+    let needs_resolved_scene =
+        (matches!(distortion.status, FrameProductStatus::ResolveReady { .. })
+            && !distortion.ordered_draws.is_empty())
+            || colour.binds_code_texture(super::CODE_TEXTURE_RESOLVED_POST_SUN)
+            || light.binds_code_texture(super::CODE_TEXTURE_RESOLVED_POST_SUN)
+            || emissive.binds_code_texture(super::CODE_TEXTURE_RESOLVED_POST_SUN);
+    if needs_resolved_scene {
+        let (view, _resized) = install
+            .resolved_scene
+            .ensure(install.device, target.main_texture());
+        install
+            .uploaded
+            .publish_frame_target(|registry| &mut registry.resolved_post_sun, Some(view));
+    }
+    if needs_floatz {
+        let size = depth.texture.size();
+        let (view, _resized) =
+            floatz::ensure_target(install.floatz, install.device, size.width, size.height);
+        if view.is_some() {
+            install
+                .uploaded
+                .publish_frame_target(|registry| &mut registry.float_z, view);
+        }
+
+        floatz::prepare_blit(
+            install.floatz,
+            install.pipeline_cache,
+            install.device,
+            install.queue,
+            install.floatz_pipelines,
+            depth.view(),
+            samples,
+            floatz::znear_from_clip_from_view(extracted_view.clip_from_view).unwrap_or(0.0),
+            extracted.frame.exec_frame.viewmodel_near,
+        );
+    } else {
+        floatz::forget_blit(install.floatz);
+    }
+    CameraFrameTargets {
+        needs_floatz,
+        needs_resolved_scene,
+    }
 }
 
 struct SharedColourInstall<'a, 'r> {
@@ -870,12 +1104,7 @@ struct SharedColourInstall<'a, 'r> {
     pipeline: &'r ExactColourPipeline,
     device: &'r RenderDevice,
     uploaded: &'a mut RuntimeUploadedImageRegistry,
-    binding_cache: &'a mut ExactColourBindingCache,
-    shadow_binding: &'a mut ExactShadowBindingCache,
     constant_arena: &'a mut ExactConstantArena,
-    texture_table: &'a mut SceneTextureTables,
-    shadow_table: &'a mut ShadowTextureTable,
-    scratch: &'a mut ColourSubmitScratch,
     shadow_arena: &'a mut ShadowmapSunArena,
     spot_arena: &'a mut ShadowmapSpotArena,
     shadowmap: &'a mut ShadowmapSunGpu,
@@ -920,21 +1149,6 @@ fn install_shared_colour_resources(
         install.uploaded,
         install.spotmap,
         install.device,
-    );
-
-    open_scene_table_epoch(
-        install.binding_cache,
-        install.texture_table,
-        install.scratch,
-        install.uploaded,
-        generation,
-    );
-    open_shadow_table_epoch(
-        install.shadow_binding,
-        install.shadow_table,
-        install.scratch,
-        install.uploaded,
-        generation,
     );
     Some(SharedColourResources {
         sun_shadow_view_ready,

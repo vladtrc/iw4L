@@ -8,6 +8,7 @@ quinn-proto = { git = "https://github.com/quinn-rs/quinn", rev = "f650e0f213b01e
 resolver = "3"
 members = [
     "crates/anim_iw4",
+    "crates/approved_tests",
     "crates/asset_core",
     "crates/asset_anim",
     "crates/asset_audio",
@@ -35,6 +36,7 @@ members = [
     "crates/frame",
     "crates/fx",
     "crates/fx_iw4",
+    "crates/gpu_probe",
     "crates/gamemode_iw4",
     "crates/hud",
     "crates/hud_iw4",
@@ -135,6 +137,7 @@ frame = { path = "crates/frame" }
 fx = { path = "crates/fx" }
 fx_iw4 = { path = "crates/fx_iw4" }
 gamemode_iw4 = { path = "crates/gamemode_iw4" }
+gpu_probe = { path = "crates/gpu_probe" }
 hud = { path = "crates/hud" }
 hud_iw4 = { path = "crates/hud_iw4" }
 killcam_iw4 = { path = "crates/killcam_iw4" }

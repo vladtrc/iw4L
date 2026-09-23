@@ -16,7 +16,8 @@ render_spans AS (
   WHERE ts >= active.start
     AND dur >= 0
     AND name IN (
-      'wall', 'PostUpdate', 'Present', 'extract_wait', 'render_thread',
+      'wall', 'PostUpdate', 'Present', 'extract_wait', 'receive_render_world', 'extract_body', 'dispatch_render_world',
+      'static_sun_fx', 'static_sun', 'render_thread',
       'render_render', 'post_execute', 'post_rebuild', 'colour_submit',
       'skin_model', 'cull'
     )

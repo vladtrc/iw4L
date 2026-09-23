@@ -2,16 +2,102 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bevy::diagnostic::{DiagnosticPath, DiagnosticsStore};
+use bevy::ecs::schedule::MainThreadExecutor;
 use bevy::prelude::*;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
-use bevy::render::pipelined_rendering::RenderExtractApp;
+use bevy::render::pipelined_rendering::{RenderAppChannels, RenderExtractApp};
 use bevy::render::renderer::{PendingCommandBuffers, RenderGraph, RenderGraphSystems};
 use bevy::render::{Render, RenderApp, RenderSystems};
+use bevy::tasks::ComputeTaskPool;
 
 const RENDER_FRAME_LOG_EVERY: u32 = 64;
 
+const GPU_PROBE_COUNTERS: [(perf::Counter, gpu_probe::Slot); gpu_probe::Slot::COUNT] = [
+    (perf::Counter::ProbeSubmits, gpu_probe::Slot::Submits),
+    (perf::Counter::ProbeSubmitBodyMs, gpu_probe::Slot::BodyNs),
+    (
+        perf::Counter::ProbeSubmitValidateMs,
+        gpu_probe::Slot::ValidateNs,
+    ),
+    (
+        perf::Counter::ProbeSubmitTransitionMs,
+        gpu_probe::Slot::TransitionNs,
+    ),
+    (
+        perf::Counter::ProbeSubmitPendingMs,
+        gpu_probe::Slot::PendingNs,
+    ),
+    (
+        perf::Counter::ProbeSubmitBackendMs,
+        gpu_probe::Slot::BackendNs,
+    ),
+    (
+        perf::Counter::ProbeSubmitCleanupMs,
+        gpu_probe::Slot::CleanupNs,
+    ),
+    (
+        perf::Counter::ProbeSubmitCallbacksMs,
+        gpu_probe::Slot::CallbackNs,
+    ),
+    (perf::Counter::ProbeCmdBufs, gpu_probe::Slot::CmdBufs),
+    (
+        perf::Counter::ProbeEncodersRetired,
+        gpu_probe::Slot::EncodersRetired,
+    ),
+    (
+        perf::Counter::ProbeRetireInnerMs,
+        gpu_probe::Slot::RetireInnerNs,
+    ),
+    (
+        perf::Counter::ProbeRetireTrackersMs,
+        gpu_probe::Slot::RetireTrackersNs,
+    ),
+    (
+        perf::Counter::ProbeRetireTempMs,
+        gpu_probe::Slot::RetireTempNs,
+    ),
+    (
+        perf::Counter::ProbeReleaseEncoderMs,
+        gpu_probe::Slot::ReleaseEncoderNs,
+    ),
+    (perf::Counter::ProbeResets, gpu_probe::Slot::ResetCalls),
+    (
+        perf::Counter::ProbeResetListMs,
+        gpu_probe::Slot::ResetListNs,
+    ),
+    (
+        perf::Counter::ProbeFramebufferDestroyN,
+        gpu_probe::Slot::FramebufferDestroyN,
+    ),
+    (
+        perf::Counter::ProbeFramebufferDestroyMs,
+        gpu_probe::Slot::FramebufferDestroyNs,
+    ),
+    (
+        perf::Counter::ProbePoolResetMs,
+        gpu_probe::Slot::PoolResetNs,
+    ),
+    (
+        perf::Counter::ProbeFramebufferCreateN,
+        gpu_probe::Slot::FramebufferCreateN,
+    ),
+    (
+        perf::Counter::ProbeFramebufferCreateMs,
+        gpu_probe::Slot::FramebufferCreateNs,
+    ),
+    (
+        perf::Counter::ProbeEncodersAcquired,
+        gpu_probe::Slot::EncodersAcquired,
+    ),
+    (
+        perf::Counter::ProbeEncodersBuilt,
+        gpu_probe::Slot::EncodersBuilt,
+    ),
+];
+
 #[derive(Clone, Default)]
 pub(crate) struct RenderFrameSample {
+    gpu_probe: Option<gpu_probe::Drained>,
     /// The frame that was open when this render frame's extract began — the
     /// frame whose wall the render work ran inside. The main world reads the
     /// finished sample a frame or more later, so without this the stage
@@ -725,6 +811,16 @@ fn thread_stage_end(slot: Res<SharedRenderStagesSlot>) {
     }
 }
 
+fn drain_gpu_probe(slot: Res<SharedRenderStagesSlot>) {
+    if !gpu_probe::live() {
+        return;
+    }
+    let drained = gpu_probe::drain();
+    if let Ok(mut guard) = slot.0.lock() {
+        guard.working.gpu_probe = Some(drained);
+    }
+}
+
 fn publish_render_frame(slot: Res<SharedRenderStagesSlot>) {
     if let Ok(mut guard) = slot.0.lock()
         && guard.thread_closed
@@ -874,7 +970,7 @@ pub fn register_render_frame_diag(app: &mut App) {
     app.insert_resource(slot.clone())
         .init_resource::<RenderFrameDiag>();
 
-    wrap_pipelined_extract_wait(app);
+    instrument_pipelined_extract(app);
 
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         diag::warn!(
@@ -901,6 +997,7 @@ pub fn register_render_frame_diag(app: &mut App) {
     let mut default_extract = render_app.take_extract();
     let extract_slot = slot.clone();
     render_app.set_extract(move |main_world, render_world| {
+        let _body = perf::Span::RenderExtractBodyMs.enter();
         if let Ok(mut guard) = extract_slot.0.lock() {
             guard.begin_render_frame();
         }
@@ -919,6 +1016,9 @@ pub fn register_render_frame_diag(app: &mut App) {
         (
             thread_stage_start.before(RenderSystems::ExtractCommands),
             thread_stage_end.after(RenderSystems::PostCleanup),
+            drain_gpu_probe
+                .after(thread_stage_end)
+                .before(publish_render_frame),
             publish_render_frame.after(thread_stage_end),
             extract_commands_stage_start.before(RenderSystems::ExtractCommands),
             extract_commands_stage_end
@@ -1009,16 +1109,33 @@ pub fn register_render_frame_diag(app: &mut App) {
     );
 }
 
-fn wrap_pipelined_extract_wait(app: &mut App) {
+// Mirrors Bevy 0.19 `renderer_extract` to time the ownership boundaries; keep
+// its executor servicing and shutdown semantics when upgrading Bevy.
+fn instrument_pipelined_extract(app: &mut App) {
     let Some(extract_app) = app.get_sub_app_mut(RenderExtractApp) else {
         return;
     };
-    let mut default_extract = extract_app.take_extract();
-    extract_app.set_extract(move |main_world, sub_world| {
-        let _wait = perf::Span::RenderRenderExtractWaitMs.enter();
-        if let Some(f) = default_extract.as_mut() {
-            f(main_world, sub_world);
-        }
+    extract_app.set_extract(|main_world, _| {
+        main_world.resource_scope(|world, executor: Mut<MainThreadExecutor>| {
+            world.resource_scope(|world, mut channels: Mut<RenderAppChannels>| {
+                let render_app = {
+                    let _receive = perf::Span::RenderReceiveWorldMs.enter();
+                    ComputeTaskPool::get()
+                        .scope_with_executor(true, Some(&*executor.0), |scope| {
+                            scope.spawn(async { channels.recv().await });
+                        })
+                        .pop()
+                        .unwrap()
+                };
+                if let Some(mut render_app) = render_app {
+                    render_app.extract(world);
+                    let _dispatch = perf::Span::RenderDispatchWorldMs.enter();
+                    channels.send_blocking(render_app);
+                } else {
+                    world.write_message(AppExit::error());
+                }
+            });
+        });
     });
 }
 
@@ -1225,6 +1342,18 @@ pub fn sample_render_frame_diag(
                     if let Some(value) = value {
                         counter.emit_at(f64::from(value), sample.origin_frame);
                     }
+                }
+                if let Some(probe) = sample.gpu_probe {
+                    for (counter, slot) in GPU_PROBE_COUNTERS {
+                        let value = probe.get(slot);
+                        let value = match counter.unit() {
+                            perf::Unit::Milliseconds => value as f64 / 1.0e6,
+                            perf::Unit::Count => value as f64,
+                        };
+                        counter.emit_at(value, sample.origin_frame);
+                    }
+                    perf::Counter::ProbeEncodersOutstanding
+                        .emit_at(probe.outstanding as f64, sample.origin_frame);
                 }
                 if let Some(pending) = sample.graph_submit_pending_n {
                     perf::Counter::RenderGraphSubmitPendingN

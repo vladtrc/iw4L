@@ -22,6 +22,8 @@ pub mod weap_anim_event {
     pub const SPRINT_LOOP: u32 = 0x18;
     pub const SPRINT_OUT: u32 = 0x19;
     pub const HOLD_FIRE: u32 = 0x1d;
+    pub const RELOAD_QUICK: u32 = 0x21;
+    pub const RELOAD_QUICK_EMPTY: u32 = 0x22;
 }
 
 pub fn pm_start_weapon_anim(weap_anim: &mut i32, event: u32) {

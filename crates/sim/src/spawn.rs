@@ -637,17 +637,22 @@ pub(crate) fn decide_spawn_seeded_report(
     if world.use_start_spawns() {
         order.sort_by_key(|index| !start_candidates.contains(index));
     }
+    try_spawn_order(world, &spawns, &order, avoid)
+}
+
+fn try_spawn_order(
+    world: &FrameWorld,
+    spawns: &[AuthoredSpawnPoint],
+    order: &[usize],
+    avoid: &[[f32; 3]],
+) -> SpawnAttemptReport {
     let mut report = SpawnAttemptReport::default();
-    for &source_index in &order {
+    for &source_index in order {
         report.tried += 1;
         let point = &spawns[source_index];
         match ground_spawn(world, point.origin) {
             Ok(traced_origin) => {
-                if avoid.iter().any(|other| {
-                    (other[0] - traced_origin[0]).abs() < PLAYER_MAXS[0] - PLAYER_MINS[0]
-                        && (other[1] - traced_origin[1]).abs() < PLAYER_MAXS[1] - PLAYER_MINS[1]
-                        && (other[2] - traced_origin[2]).abs() < PLAYER_MAXS[2] - PLAYER_MINS[2]
-                }) {
+                if occupied(avoid, traced_origin) {
                     report.rejected.push((source_index, SpawnReject::Occupied));
                     continue;
                 }
@@ -665,6 +670,70 @@ pub(crate) fn decide_spawn_seeded_report(
     }
     if report.accepted.is_none() && !report.rejected.is_empty() {
         report.rejected.push((usize::MAX, SpawnReject::AllRejected));
+    }
+    report
+}
+
+fn occupied(avoid: &[[f32; 3]], origin: [f32; 3]) -> bool {
+    avoid.iter().any(|other| {
+        (other[0] - origin[0]).abs() < PLAYER_MAXS[0] - PLAYER_MINS[0]
+            && (other[1] - origin[1]).abs() < PLAYER_MAXS[1] - PLAYER_MINS[1]
+            && (other[2] - origin[2]).abs() < PLAYER_MAXS[2] - PLAYER_MINS[2]
+    })
+}
+
+pub const FORCED_SPAWN_SOURCE: usize = usize::MAX;
+
+pub(crate) fn decide_forced_spawn(
+    world: &FrameWorld,
+    pick: crate::SpawnPick,
+    avoid: &[[f32; 3]],
+    client_state_team: i32,
+) -> SpawnAttemptReport {
+    let mut refused_at = None;
+    let seed = match pick {
+        crate::SpawnPick::Seeded(seed) => seed,
+        crate::SpawnPick::At { origin, yaw } => {
+            match ground_spawn(world, origin) {
+                Ok(traced) if !occupied(avoid, traced) => {
+                    return SpawnAttemptReport {
+                        tried: 1,
+                        rejected: Vec::new(),
+                        accepted: Some(SpawnDecision {
+                            classname: String::from("forced"),
+                            source_index: FORCED_SPAWN_SOURCE,
+                            raw_origin: origin,
+                            raw_angles: [0.0, yaw, 0.0],
+                            traced_origin: traced,
+                        }),
+                    };
+                }
+                Ok(_) => refused_at = Some(SpawnReject::Occupied),
+                Err(reason) => refused_at = Some(reason),
+            }
+            0
+        }
+    };
+    let spawns = world.bootstrap_ref().spawns.clone();
+    let kind = world.bootstrap_ref().kind;
+    let mut order = spawn_candidate_indices_for(&spawns, kind, client_state_team, false);
+    let mut rng = MatchRng::new(seed);
+    for j in (1..order.len()).rev() {
+        let k = rng.next_index(j + 1);
+        order.swap(j, k);
+    }
+    let mut report = if order.is_empty() {
+        SpawnAttemptReport {
+            tried: 0,
+            rejected: vec![(0, SpawnReject::NoAuthoredCandidates)],
+            accepted: None,
+        }
+    } else {
+        try_spawn_order(world, &spawns, &order, avoid)
+    };
+    if let Some(reason) = refused_at {
+        report.tried += 1;
+        report.rejected.insert(0, (FORCED_SPAWN_SOURCE, reason));
     }
     report
 }

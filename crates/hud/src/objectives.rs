@@ -4,12 +4,77 @@ use crate::draw2d::{
 use bevy::prelude::*;
 use gamemode_iw4::{GameModeKind, Team};
 
+fn previous_progress(previous: Option<(&sim::Snapshot, f32)>, id: u32) -> Option<(f32, f32)> {
+    let (snapshot, phase) = previous?;
+    let state = &snapshot.meta.objectives;
+    let found = state
+        .flags
+        .iter()
+        .chain(state.bombs.iter().map(|site| &site.view))
+        .find(|view| view.id == id)?;
+    Some((found.progress, phase))
+}
+
+fn interpolated_progress(
+    view: &sim::ObjectiveView,
+    previous: Option<(&sim::Snapshot, f32)>,
+) -> f32 {
+    match previous_progress(previous, view.id) {
+        Some((before, phase)) => before + (view.progress - before) * phase.clamp(0.0, 1.0),
+        None => view.progress,
+    }
+}
+
+fn marker_color(view: &sim::ObjectiveView, team: Team, cg_time: i32) -> [f32; 4] {
+    let rgba = if let Some(flash) = view.flash.filter(|flash| flash.shows_to(team)) {
+        let time = flash
+            .stop_ms
+            .map_or(cg_time, |stop| cg_time.min(stop as i32));
+        let elem = hud_iw4::objective_flash_elem(
+            [255, 255, 255],
+            hud_iw4::OBJECTIVE_MARKER_ALPHA,
+            flash.start_ms as i32,
+            time,
+        );
+        if let Some(stop_ms) = flash.stop_ms.filter(|stop| cg_time >= *stop as i32) {
+            let from = hud_iw4::bg_lerp_hud_colors(&elem, stop_ms as i32);
+            let to_alpha = (hud_iw4::OBJECTIVE_MARKER_ALPHA * 255.0) as u8;
+            let fade = hud_iw4::HudElem {
+                from_color_rgba: hud_iw4::color_rgba(255, 255, 255, from[3]),
+                color_rgba: hud_iw4::color_rgba(255, 255, 255, to_alpha),
+                fade_start_time: stop_ms as i32,
+                fade_time: sim::MATCH_TICK_MS as i32,
+                ..Default::default()
+            };
+            hud_iw4::bg_lerp_hud_colors(&fade, cg_time)
+        } else {
+            hud_iw4::bg_lerp_hud_colors(&elem, cg_time)
+        }
+    } else {
+        [
+            255,
+            255,
+            255,
+            (hud_iw4::OBJECTIVE_MARKER_ALPHA * 255.0) as u8,
+        ]
+    };
+    [
+        rgba[0] as f32 / 255.0,
+        rgba[1] as f32 / 255.0,
+        rgba[2] as f32 / 255.0,
+        rgba[3] as f32 / 255.0,
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn draw(
     surface: &crate::surface::Hud2dSurface,
     catalog: &assets::MenuCatalog,
     strings: Option<&assets::LocalizeCatalog>,
     snapshot: &sim::Snapshot,
+    previous: Option<(&sim::Snapshot, f32)>,
     local: sim::ClientId,
+    cg_time: i32,
     camera: Option<(&Camera, &GlobalTransform)>,
 ) -> Vec<Draw2dQuad> {
     let mode = snapshot.meta.kind;
@@ -54,6 +119,7 @@ pub(crate) fn draw(
                 loc_key: String::new(),
                 style: crate::draw2d::TEXT_STYLE_HUDELEM,
                 fx: None,
+                glow: None,
             },
             provenance: Draw2dProvenance::Objective,
             layer: 1,
@@ -106,7 +172,7 @@ pub(crate) fn draw(
     for (view, destroyed) in &entries {
         let friendly = view.owner == team;
 
-        let color = [1.0; 4];
+        let color = marker_color(view, team, cg_time);
         if !destroyed && let Some((camera, transform)) = camera {
             let point = Vec3::from_array(view.origin)
                 + Vec3::Z
@@ -177,9 +243,8 @@ pub(crate) fn draw(
                     bg.h,
                     [0.0, 0.0, 0.0, 0.5],
                 ));
-                let width = (120.0 * view.progress.clamp(0.0, 1.0) + 0.5)
-                    .floor()
-                    .max(1.0);
+                let progress = interpolated_progress(view, previous);
+                let width = (120.0 * progress.clamp(0.0, 1.0) + 0.5).floor().max(1.0);
                 let bar = surface.apply_rect(260.0, 174.5, width, 9.0, 0, 0);
                 graphics.push(quad(
                     "progress_bar_fill".into(),

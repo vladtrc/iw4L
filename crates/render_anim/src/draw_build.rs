@@ -284,7 +284,7 @@ pub fn append_script_model_asset(
         XMODEL_PACKED_UNAVAILABLE,
     );
 
-    plan.revisions.bump_vertices();
+    plan.revisions.bump_surfaces();
     let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.vertices.len());
     let rev = plan.revision;
     plan.revision = stamp_plan_geometry(&mut plan.revisions, rev, topology);
@@ -387,7 +387,7 @@ pub fn overwrite_script_model_asset(
     if let Some(asset) = plan.assets.get_mut(asset_index) {
         asset.dobj_state = dobj_state;
     }
-    plan.revisions.bump_vertices();
+    plan.revisions.bump_surfaces();
     plan.revision = plan.revision.wrapping_add(1);
     true
 }
@@ -478,7 +478,7 @@ pub fn retain_script_model_assets(plan: &mut ScriptModelDrawPlan, keep: &[bool])
     // indices, it does not make this a different plan, and a revision that
     // restarts at zero is one a consumer can mistake for the one it last saw.
     next.revisions = plan.revisions;
-    next.revisions.bump_vertices();
+    next.revisions.bump_surfaces();
     next.generation = plan.generation.wrapping_add(1);
     next.revision = plan.revision;
     next.revisions.bump_admission();
@@ -535,7 +535,7 @@ pub fn append_missile_surfaces(
         XMODEL_PACKED_UNAVAILABLE,
     );
 
-    plan.revisions.bump_vertices();
+    plan.revisions.bump_surfaces();
     asset_surfaces
 }
 
@@ -586,7 +586,7 @@ pub fn append_item_surfaces(
         XMODEL_PACKED_UNAVAILABLE,
     );
 
-    plan.revisions.bump_vertices();
+    plan.revisions.bump_surfaces();
     asset_surfaces
 }
 
@@ -640,7 +640,7 @@ pub fn append_dynent_surfaces(
         XMODEL_PACKED_UNAVAILABLE,
     );
 
-    plan.revisions.bump_vertices();
+    plan.revisions.bump_surfaces();
     asset_surfaces
 }
 
@@ -761,7 +761,7 @@ pub fn install_prepared_fpv_plan(
     plan.scope_lens_plan_n = Some(geometry.scope_lens_plan_n);
     plan.plan_draw_n = Some(geometry.plan_draw_n);
     plan.plan_skip_n = Some(geometry.plan_skip_n);
-    plan.revisions.bump_vertices();
+    plan.revisions.bump_surfaces();
     let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.decoded_n);
     let revision = plan.revision;
     plan.revision = stamp_plan_geometry(&mut plan.revisions, revision, topology);
@@ -798,7 +798,7 @@ pub fn clear_fpv_draw_plan(plan: &mut FpvDrawPlan, lighting_handle: u32) {
     plan.scope_lens_plan_n = Some(0);
     plan.plan_draw_n = Some(0);
     plan.plan_skip_n = Some(0);
-    plan.revisions.bump_vertices();
+    plan.revisions.bump_surfaces();
     let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, 0);
     let revision = plan.revision;
     plan.revision = stamp_plan_geometry(&mut plan.revisions, revision, topology);

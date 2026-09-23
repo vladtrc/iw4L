@@ -100,6 +100,12 @@ pub struct ConsoleDispatch {
     pub wait_playing: bool,
     pub wait_playing_elapsed: f32,
 
+    pub wait_tick: Option<u32>,
+    pub wait_tick_elapsed: f32,
+
+    pub wait_alive: Option<(sim::ClientId, sim::LifeSequence)>,
+    pub wait_alive_elapsed: f32,
+
     pub quit_jumps: u64,
 
     pub fifo_jumps: u64,
@@ -108,6 +114,7 @@ pub struct ConsoleDispatch {
 impl ConsoleDispatch {
     pub fn release(&mut self) {
         self.paused = false;
+        self.wait_remaining = 0.0;
         self.wait_world = false;
         self.wait_spawn = false;
         self.wait_spawn_admit = false;
@@ -116,6 +123,8 @@ impl ConsoleDispatch {
         self.wait_ambient = false;
         self.wait_move = None;
         self.wait_playing = false;
+        self.wait_tick = None;
+        self.wait_alive = None;
     }
 }
 
@@ -131,6 +140,7 @@ const WAIT_WORLD_TIMEOUT_SECS: f32 = 120.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum WaitKind {
     Seconds(f32),
+    Ticks(u32),
     World,
     Spawn,
     Torn,
@@ -143,6 +153,9 @@ pub(crate) fn parse_wait_args(args: &[String]) -> WaitKind {
         Some(s) if s.eq_ignore_ascii_case("spawn") => WaitKind::Spawn,
         Some(s) if s.eq_ignore_ascii_case("torn") => WaitKind::Torn,
         Some(s) if s.eq_ignore_ascii_case("ambient") => WaitKind::Ambient,
+        Some(s) if s.ends_with(['t', 'T']) && s[..s.len() - 1].parse::<u32>().is_ok() => {
+            WaitKind::Ticks(s[..s.len() - 1].parse().unwrap_or(0))
+        }
         other => {
             let secs = other
                 .and_then(|s| s.trim_end_matches(['s', 'S']).parse::<f32>().ok())
@@ -284,7 +297,6 @@ impl Plugin for ConsolePlugin {
             .init_resource::<crate::ConsoleQueue>()
             .init_resource::<crate::ConsoleLine>()
             .init_resource::<crate::weapon_dispatch::WeaponArgCompletions>()
-            .init_resource::<crate::feature_dispatch::ReplayProcessExit>()
             .init_resource::<crate::user_settings::PendingMenuBinding>()
             .init_resource::<crate::user_settings::UserSettingsPersistence>()
             .add_message::<ConsoleCommand>()
@@ -321,6 +333,7 @@ impl Plugin for ConsolePlugin {
                         crate::feature_dispatch::route_ui_commands,
                         crate::feature_dispatch::route_capture_commands,
                         crate::feature_dispatch::route_state_dump_commands,
+                        crate::feature_dispatch::route_hitvol_commands,
                         crate::feature_dispatch::route_debug_feature_commands,
                         crate::feature_dispatch::route_session_commands,
                         crate::feature_dispatch::resume_lifecycle_commands,
@@ -332,7 +345,11 @@ impl Plugin for ConsolePlugin {
                     )
                         .chain(),
                     (
-                        crate::weapon_dispatch::echo_give_results,
+                        (
+                            crate::weapon_dispatch::echo_give_results,
+                            crate::weapon_dispatch::echo_configuration_change_results,
+                        )
+                            .chain(),
                         crate::debug_move::route_debug_move_commands,
                         crate::debug_script_mover::route_debug_script_mover_commands,
                         crate::debug_draw_method::route_debug_draw_method_commands,
@@ -368,7 +385,7 @@ impl Plugin for ConsolePlugin {
                 Last,
                 (
                     paint_scrollback_selection,
-                    crate::feature_dispatch::exit_replay_process,
+                    crate::feature_dispatch::exit_process,
                 )
                     .chain(),
             );
@@ -1654,8 +1671,12 @@ fn world_is_torn(has_world: Option<&HasWorld>, scene: Option<&WorldScene>) -> bo
     !has_world.is_some_and(|h| h.0) && !scene.is_some_and(|s| s.spawned)
 }
 
-fn promote_interactive_interrupt(queue: &mut ConsoleCommandQueue, dispatch: &mut ConsoleDispatch) {
-    if !dispatch.paused {
+fn promote_interactive_interrupt(
+    waiting: bool,
+    queue: &mut ConsoleCommandQueue,
+    dispatch: &mut ConsoleDispatch,
+) {
+    if !waiting {
         return;
     }
     let Some(idx) = queue.0.iter().position(|cmd| {
@@ -1688,12 +1709,14 @@ fn abort_script_on_wait_timeout(
     capacity: usize,
 ) {
     let before = queue.0.len();
-    queue.0.retain(|cmd| cmd.name == "quit");
+    queue
+        .0
+        .retain(|cmd| matches!(cmd.name.as_str(), "quit" | "exit" | "finish_run"));
     let kept = queue.0.len();
     let dropped = before - kept;
     let msg = format!(
         "{kind}: timed out after {WAIT_WORLD_TIMEOUT_SECS:.0}s ({detail}) — \
-         script aborted, {dropped} queued commands dropped, kept quit={kept}"
+         script aborted, {dropped} queued commands dropped, kept exit={kept}"
     );
     diag::warn!(Console, "{msg}");
     console.echo(msg, capacity);
@@ -1712,11 +1735,13 @@ fn dispatch_console_command(
     has_world: Option<Res<HasWorld>>,
     ambient_booted: Option<Res<audio::MapAmbientBooted>>,
     presented: Option<Res<PresentedSnapshot>>,
-    authority: Option<Res<net::AuthorityWorld>>,
-    mut mark_clock: Local<Option<std::time::Instant>>,
+    (authority, clock): (
+        Option<Res<net::AuthorityWorld>>,
+        Option<Res<net::AuthorityClock>>,
+    ),
+    local: Option<Res<net::LocalPresentClient>>,
     mut mark_sequence: Local<u64>,
 ) {
-    let mark_epoch = *mark_clock.get_or_insert_with(std::time::Instant::now);
     let capacity = settings.log_capacity;
 
     let waiting = dispatch.paused
@@ -1727,6 +1752,8 @@ fn dispatch_console_command(
         || dispatch.wait_ambient
         || dispatch.wait_move.is_some()
         || dispatch.wait_playing
+        || dispatch.wait_tick.is_some()
+        || dispatch.wait_alive.is_some()
         || dispatch.wait_remaining > 0.0;
     if waiting
         && let Some(index) = queue.0.iter().position(|cmd| {
@@ -1742,7 +1769,7 @@ fn dispatch_console_command(
         submitted.write(command);
         return;
     }
-    promote_interactive_interrupt(&mut queue, &mut dispatch);
+    promote_interactive_interrupt(waiting, &mut queue, &mut dispatch);
     if dispatch.paused {
         return;
     }
@@ -1915,6 +1942,59 @@ fn dispatch_console_command(
             }
         }
     }
+    if let Some((client, life)) = dispatch.wait_alive {
+        let alive = authority
+            .as_ref()
+            .and_then(|w| w.0.client_meta(client))
+            .is_some_and(|m| m.lifecycle == sim::ClientLifecycle::Alive && m.life_sequence != life);
+        if alive {
+            dispatch.wait_alive = None;
+            diag::info!(
+                Console,
+                "force_spawn: Alive after {:.1}s",
+                dispatch.wait_alive_elapsed
+            );
+        } else {
+            dispatch.wait_alive_elapsed += time.delta_secs();
+            if dispatch.wait_alive_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
+                dispatch.wait_alive = None;
+                abort_script_on_wait_timeout(
+                    "force_spawn",
+                    "no newer life became Alive",
+                    &mut queue,
+                    &mut console,
+                    capacity,
+                );
+            } else {
+                return;
+            }
+        }
+    }
+    if let Some(until) = dispatch.wait_tick {
+        let now = clock.as_ref().map(|c| c.tick);
+        if now.is_some_and(|now| now.wrapping_sub(until) < u32::MAX / 2) {
+            dispatch.wait_tick = None;
+            diag::info!(
+                Console,
+                "wait ticks: tick {until} after {:.1}s",
+                dispatch.wait_tick_elapsed
+            );
+        } else {
+            dispatch.wait_tick_elapsed += time.delta_secs();
+            if dispatch.wait_tick_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
+                dispatch.wait_tick = None;
+                abort_script_on_wait_timeout(
+                    "wait ticks",
+                    "authority clock did not reach the tick",
+                    &mut queue,
+                    &mut console,
+                    capacity,
+                );
+            } else {
+                return;
+            }
+        }
+    }
     if dispatch.wait_remaining > 0.0 {
         dispatch.wait_remaining = (dispatch.wait_remaining - time.delta_secs()).max(0.0);
         return;
@@ -1929,12 +2009,12 @@ fn dispatch_console_command(
         let sync = !command.background
             && matches!(
                 command.name.as_str(),
-                "map" | "disconnect" | "demo" | "play" | "spawn"
+                "map" | "map_restart" | "disconnect" | "demo" | "play" | "spawn"
             );
         if command.background
             && matches!(
                 command.name.as_str(),
-                "map" | "disconnect" | "demo" | "play" | "spawn"
+                "map" | "map_restart" | "disconnect" | "demo" | "play" | "spawn"
             )
         {
             diag::info!(Console, "{} &: async — FIFO not blocked", command.name);
@@ -1968,7 +2048,7 @@ fn dispatch_console_command(
                 return;
             }
             *mark_sequence += 1;
-            let ns = mark_epoch.elapsed().as_nanos();
+            let ns = diag::process_elapsed_ns();
             let label = &command.args[0];
 
             let rss = assets::process_resident_bytes()
@@ -1977,8 +2057,14 @@ fn dispatch_console_command(
             let heap = diag::process_live_heap_bytes()
                 .map(|bytes| format!(" heap_mib={}", bytes >> 20))
                 .unwrap_or_default();
+            let facts = mark_match_facts(
+                authority.as_deref(),
+                clock.as_deref(),
+                presented.as_deref(),
+                local.as_deref(),
+            );
             let line = format!(
-                "benchmark-mark: pid={} seq={} ns={ns} label={label}{rss}{heap}",
+                "benchmark-mark: pid={} seq={} ns={ns} label={label}{rss}{heap}{facts}",
                 std::process::id(),
                 *mark_sequence
             );
@@ -2029,6 +2115,18 @@ fn dispatch_console_command(
                         diag::info!(Console, "wait ambient: until MapAmbientBooted");
                     }
                 }
+                WaitKind::Ticks(n) => match clock.as_ref() {
+                    Some(clock) => {
+                        dispatch.wait_tick = Some(clock.tick.wrapping_add(n));
+                        dispatch.wait_tick_elapsed = 0.0;
+                        diag::info!(Console, "wait: {n} ticks from tick {}", clock.tick);
+                    }
+                    None => {
+                        let msg = format!("wait: {n}t needs an authority clock; not holding");
+                        diag::warn!(Console, "{msg}");
+                        console.echo(msg, capacity);
+                    }
+                },
                 WaitKind::Seconds(secs) => {
                     dispatch.wait_remaining = secs;
                     diag::info!(Console, "wait: {secs:.1}s");
@@ -2038,6 +2136,49 @@ fn dispatch_console_command(
         }
         submitted.write(command);
     }
+}
+
+fn mark_match_facts(
+    authority: Option<&net::AuthorityWorld>,
+    clock: Option<&net::AuthorityClock>,
+    presented: Option<&PresentedSnapshot>,
+    local: Option<&net::LocalPresentClient>,
+) -> String {
+    let Some(authority) = authority else {
+        return String::new();
+    };
+    let board = authority.0.clients_scoreboard();
+    let alive = board
+        .iter()
+        .filter(|(_, m)| m.lifecycle == sim::ClientLifecycle::Alive)
+        .count();
+    let kills: i32 = board.iter().map(|(_, m)| m.kills).sum();
+    let deaths: i32 = board.iter().map(|(_, m)| m.deaths).sum();
+    let mut out = format!(
+        " tick={} clients={} alive={alive} kills={kills} deaths={deaths}",
+        clock.map(|c| c.tick).unwrap_or(0),
+        board.len()
+    );
+    if let Some(local) = local {
+        let meta = authority.0.client_meta(local.0);
+        let life = meta
+            .map(|m| format!("{:?}", m.lifecycle))
+            .unwrap_or_else(|| "absent".into());
+        out.push_str(&format!(" local={life}"));
+        if let Some(meta) = meta {
+            out.push_str(&format!(
+                " local_life={} local_deaths={}",
+                meta.life_sequence.0, meta.deaths
+            ));
+        }
+        if let Some(ps) = presented.and_then(|p| p.alive_player(local.0)) {
+            out.push_str(&format!(
+                " origin={:.1},{:.1},{:.1} yaw={:.1}",
+                ps.origin[0], ps.origin[1], ps.origin[2], ps.viewangles[1]
+            ));
+        }
+    }
+    out
 }
 
 fn console_suggestions(state: &ConsoleState, registry: &ConsoleRegistry) -> Vec<String> {

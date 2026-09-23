@@ -21,14 +21,14 @@ pub use envelope::{
 pub use load::{AssetLinkSink, load_asset_at, load_asset_at_observed, load_asset_body};
 pub use wire::{Iw5WireFormat, WireAssetTable, WirePointer, WireTableError, read_wire_asset_table};
 pub use zone::{
-    BLOCK_STACK_CAP, BlockType, ClipMapGeometry, ComWorldGeometry, FxEffectDefGeometry,
-    GfxImageGeometry, GfxLightDefGeometry, GfxLightGridGeometry, GfxLightmapPair, GfxWorldGeometry,
-    MAX_LIGHT_DEFS, MAX_LIGHTMAP_PAGES, MAX_XFILE_COUNT, MapEntsGeometry, MaterialGeometry,
-    PTR_SIZE, Ptr, Result, ShaderGeometry, TECHNIQUE_ARGUMENT_CAP, TECHNIQUE_PASS_ROW_CAP,
-    TechniqueArgumentGeometry, TechniqueGraphGeometry, TechniquePassGeometry, TechniqueSetGeometry,
-    VertexDeclGeometry, WeaponGeometry, XAnimPartsGeometry, XFILE_BLOCK_CALLBACK,
-    XFILE_BLOCK_INDEX, XFILE_BLOCK_LARGE, XFILE_BLOCK_PHYSICAL, XFILE_BLOCK_RUNTIME,
-    XFILE_BLOCK_SCRIPT, XFILE_BLOCK_TEMP, XFILE_BLOCK_VERTEX, XFILE_BLOCK_VIRTUAL,
-    XFILE_HEADER_LEN, XModelGeometry, ZoneError, ZoneHeader, ZonePtr, ZoneStream,
-    block_is_aliasable, parse_zone_header,
+    AttachmentGeometry, BLOCK_STACK_CAP, BlockType, ClipMapGeometry, ComWorldGeometry,
+    FxEffectDefGeometry, GfxImageGeometry, GfxLightDefGeometry, GfxLightGridGeometry,
+    GfxLightmapPair, GfxWorldGeometry, MAX_LIGHT_DEFS, MAX_LIGHTMAP_PAGES, MAX_XFILE_COUNT,
+    MapEntsGeometry, MaterialGeometry, PTR_SIZE, Ptr, Result, ShaderGeometry,
+    TECHNIQUE_ARGUMENT_CAP, TECHNIQUE_PASS_ROW_CAP, TechniqueArgumentGeometry,
+    TechniqueGraphGeometry, TechniquePassGeometry, TechniqueSetGeometry, VertexDeclGeometry,
+    WeaponGeometry, XAnimPartsGeometry, XFILE_BLOCK_CALLBACK, XFILE_BLOCK_INDEX, XFILE_BLOCK_LARGE,
+    XFILE_BLOCK_PHYSICAL, XFILE_BLOCK_RUNTIME, XFILE_BLOCK_SCRIPT, XFILE_BLOCK_TEMP,
+    XFILE_BLOCK_VERTEX, XFILE_BLOCK_VIRTUAL, XFILE_HEADER_LEN, XModelGeometry, ZoneError,
+    ZoneHeader, ZonePtr, ZoneStream, block_is_aliasable, parse_zone_header,
 };

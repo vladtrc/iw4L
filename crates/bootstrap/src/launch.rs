@@ -55,6 +55,44 @@ fn launch_report(
     }
 }
 
+#[derive(Resource)]
+struct ShellCommonTask {
+    task: bevy::tasks::Task<assets::ShellCommon>,
+    perk_table: Option<assets::CapturedStringTable>,
+    started: std::time::Instant,
+}
+
+fn install_class_catalog(mut commands: Commands, shell: Option<ResMut<ShellCommonTask>>) {
+    use bevy::tasks::futures_lite::future;
+    let Some(mut shell) = shell else {
+        return;
+    };
+    let Some(common) = future::block_on(future::poll_once(&mut shell.task)) else {
+        return;
+    };
+    for line in &common.report {
+        diag::info!(Launch, "{line}");
+    }
+    let mut class_catalog =
+        ClassLoadoutCatalog::from_weapon_registry(std::sync::Arc::new(common.weapons))
+            .with_weapon_tables(&common.tables);
+    if let Some(table) = shell.perk_table.as_ref() {
+        class_catalog = class_catalog.with_perk_table(table);
+    }
+    diag::info!(
+        Launch,
+        "CAC menu: primary={} secondary={} lethal={} tactical={} excluded={} ({:.0}ms after the menu started)",
+        class_catalog.primary.len(),
+        class_catalog.secondary.len(),
+        class_catalog.lethal.len(),
+        class_catalog.tactical.len(),
+        class_catalog.excluded.len(),
+        shell.started.elapsed().as_secs_f32() * 1000.0,
+    );
+    commands.insert_resource(class_catalog);
+    commands.remove_resource::<ShellCommonTask>();
+}
+
 fn launch_identity(config: &LaunchConfig) -> LaunchIdentity {
     LaunchIdentity {
         role_label: format!("{:?}", config.role),
@@ -156,6 +194,7 @@ fn run_menu(games: assets::GamesRoot, artifacts: PathBuf) {
              missing base files; DLC maps alone are insufficient.\n\nSearch details: {error}"
         ))
     });
+    let shell_common = assets::load_pool().spawn(assets::load_shell_common(games.clone()));
     let (menus, menu_report) = load_ui_menu_catalog(&ui_games);
     for line in &menu_report {
         diag::info!(Launch, "{line}");
@@ -227,25 +266,12 @@ fn run_menu(games: assets::GamesRoot, artifacts: PathBuf) {
             None
         }
     };
-    let (shell_weapons, cac_tables, cac_report) = assets::load_shell_weapon_registry(&games);
-    for line in &cac_report {
-        diag::info!(Launch, "{line}");
-    }
-    let mut class_catalog =
-        ClassLoadoutCatalog::from_weapon_registry(&shell_weapons).with_weapon_tables(&cac_tables);
-    if let Some(table) = menus.string_table("mp/perkTable.csv") {
-        class_catalog = class_catalog.with_perk_table(table);
-    }
-    diag::info!(
-        Launch,
-        "CAC menu: primary={} secondary={} lethal={} tactical={} excluded={}",
-        class_catalog.primary.len(),
-        class_catalog.secondary.len(),
-        class_catalog.lethal.len(),
-        class_catalog.tactical.len(),
-        class_catalog.excluded.len(),
-    );
-    app.insert_resource(class_catalog);
+    app.insert_resource(ShellCommonTask {
+        task: shell_common,
+        perk_table: menus.string_table("mp/perkTable.csv").cloned(),
+        started: std::time::Instant::now(),
+    })
+    .add_systems(Update, install_class_catalog);
     match load_mp_localized_strings(&ui_games, "iw4:code_post_gfx_mp") {
         Ok(loc) => {
             diag::info!(Launch, "menu: {} localize keys", loc.len());
@@ -254,16 +280,21 @@ fn run_menu(games: assets::GamesRoot, artifacts: PathBuf) {
         Err(error) => diag::warn!(Launch, "menu: localize: {error}"),
     }
     app.insert_resource(menus);
-    match load_mp_sound_bank(&ui_games, "iw4:code_post_gfx_mp") {
+    let menu_bank = match load_mp_sound_bank(&ui_games, "iw4:code_post_gfx_mp") {
         Ok(loaded) => {
             diag::info!(Launch, "menu: sound bank ready");
             for line in loaded.gap_lines() {
                 diag::warn!(Launch, "menu: {line}");
             }
-            app.insert_resource(SoundBank(std::sync::Arc::new(loaded.catalog)));
+            let bank = std::sync::Arc::new(loaded.catalog);
+            app.insert_resource(SoundBank(std::sync::Arc::clone(&bank)));
+            Some(bank)
         }
-        Err(error) => diag::warn!(Launch, "menu: sound bank: {error}"),
-    }
+        Err(error) => {
+            diag::warn!(Launch, "menu: sound bank: {error}");
+            None
+        }
+    };
 
     let (menu_iwd, lines) = NamespaceSoundIwd::open(&namespace_trees);
     for line in lines {
@@ -271,9 +302,15 @@ fn run_menu(games: assets::GamesRoot, artifacts: PathBuf) {
     }
     let menu_iwd = std::sync::Arc::new(menu_iwd);
     app.insert_resource(SoundIwd(std::sync::Arc::clone(&menu_iwd)));
-    if let Some(bank) = app.world().get_resource::<SoundBank>() {
-        let bank = std::sync::Arc::clone(&bank.0);
-        app.insert_resource(audio::ClipStore::start(bank, Some(menu_iwd)));
+    if let Some(bank) = menu_bank {
+        app.insert_resource(audio::ClipStore::start(
+            std::sync::Arc::clone(&bank),
+            Some(std::sync::Arc::clone(&menu_iwd)),
+        ));
+        app.insert_resource(audio::FrontendAudio {
+            bank,
+            iwd: menu_iwd,
+        });
     }
     app.insert_resource(launch_identity(&config))
         .insert_resource(MenuMapList(maps))
@@ -504,6 +541,7 @@ fn run_map(
     if let Some(capture) = CaptureRequest::from_env() {
         queue_launch_capture(&mut app, capture);
     }
+    bench::announce_runtime(&mut app);
     let bench = bench::enabled();
     if bench {
         bench::insert(

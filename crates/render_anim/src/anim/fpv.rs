@@ -286,6 +286,8 @@ impl FpvPresentState {
 #[derive(Debug)]
 pub struct EquippedFpv {
     pub gun_xmodel: String,
+    pub gun_index: assets::FpvMeshIndex,
+    pub hands_index: assets::FpvMeshIndex,
     pub namespace: assets::AssetNamespace,
     pub hands: assets::FpvHands,
     pub controller: ViewmodelController,
@@ -296,6 +298,8 @@ pub struct EquippedFpv {
 impl EquippedFpv {
     pub fn new(
         gun_xmodel: impl Into<String>,
+        gun_index: assets::FpvMeshIndex,
+        hands_index: assets::FpvMeshIndex,
         namespace: assets::AssetNamespace,
         hands: assets::FpvHands,
         controller: ViewmodelController,
@@ -303,6 +307,8 @@ impl EquippedFpv {
     ) -> Self {
         Self {
             gun_xmodel: gun_xmodel.into(),
+            gun_index,
+            hands_index,
             namespace,
             hands,
             controller,

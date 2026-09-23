@@ -25,6 +25,7 @@ pub struct PosedModelSurface {
     pub material: Option<usize>,
     pub packed_vertices: Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
     pub owner: FpvSurfOwner,
+    pub model: u16,
 }
 
 pub struct PosedSmodelSurface {
@@ -255,6 +256,7 @@ pub(crate) fn meshes_from_blended(
             material: None,
             packed_vertices: posed_packed.unwrap_or_default(),
             owner: FpvSurfOwner::Gun,
+            model: 0,
         }]);
     }
     let lod_range = skel.surfaces_for_lod(lod);
@@ -344,6 +346,7 @@ pub(crate) fn meshes_from_blended(
             material: skel.surface_materials[surface_index].map(|i| i.get()),
             packed_vertices,
             owner: FpvSurfOwner::Gun,
+            model: 0,
         });
     }
     Some(out)

@@ -238,6 +238,9 @@ impl ExprHost for ScorebarExprHost<'_> {
             None => Err(hud_iw4::ExprError::Host("gametype loc")),
         }
     }
+    fn weapon_lock(&self) -> Result<hud_iw4::WeaponLockView, hud_iw4::ExprError> {
+        Err(hud_iw4::ExprError::Host("weapon lock"))
+    }
 }
 
 fn status_of_item(text_key: &str, text_exp: &str) -> Option<ScorebarStatus> {
@@ -381,7 +384,7 @@ pub(crate) fn update_scorebar(
     let ChromeFrame {
         mut list,
         coverage: _,
-        vis_errors: _,
+        vis_errors,
     } = execute_chrome_menu(
         menu,
         &host,
@@ -392,6 +395,13 @@ pub(crate) fn update_scorebar(
         },
         &mut exprs,
     );
+    for (item, err) in vis_errors {
+        gaps.raise(GapCause::MenuExpression {
+            menu: menu.name.clone(),
+            item,
+            err,
+        });
+    }
     let mut fonts: HashMap<String, &assets::FontDef> = HashMap::new();
     for cmd in &mut list.cmds {
         if let Ok(mut key) = assets::AssetKey::parse(&cmd.material) {

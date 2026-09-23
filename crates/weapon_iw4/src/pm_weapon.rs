@@ -135,6 +135,8 @@ pub struct CapturedCombatInput {
     pub hip_gun_kick_reduced_kick_bullets: i32,
 
     pub location_damage: [f32; crate::HITLOC_COUNT],
+
+    pub dual_mag: Option<crate::reload::DualMagTimes>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -256,6 +258,8 @@ pub struct WeaponCombatFacts {
     pub hip_gun_kick_reduced_kick_bullets: i32,
 
     pub location_damage: [f32; crate::HITLOC_COUNT],
+
+    pub dual_mag: Option<crate::reload::DualMagTimes>,
 }
 
 impl Default for WeaponCombatFacts {
@@ -340,6 +344,7 @@ impl WeaponCombatFacts {
             ads_gun_kick_reduced_kick_bullets: 0,
             hip_gun_kick_reduced_kick_bullets: 0,
             location_damage: crate::LOCATION_DAMAGE_IDENTITY,
+            dual_mag: None,
         }
     }
 
@@ -449,6 +454,7 @@ impl WeaponCombatFacts {
             ads_gun_kick_reduced_kick_bullets: input.ads_gun_kick_reduced_kick_bullets,
             hip_gun_kick_reduced_kick_bullets: input.hip_gun_kick_reduced_kick_bullets,
             location_damage: input.location_damage,
+            dual_mag: input.dual_mag,
         })
     }
 
@@ -574,6 +580,8 @@ pub struct WeaponHandState {
     pub delayed_rechamber: bool,
 
     pub weapon_restrict_kick_time: i32,
+
+    pub quick_reload: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1202,17 +1210,10 @@ fn pm_begin_weapon_reload(hand: &mut WeaponHandState, facts: &WeaponCombatFacts)
         return true;
     }
     let empty = reload_from_empty_clip(hand, facts);
-    let full = facts.reload_duration_ms(empty).max(1);
+    let (full, anim) = crate::reload::reload_segment(hand, facts, empty);
     hand.weaponstate = WeaponState::Reloading as i32;
     hand.weapon_time = full;
-    crate::weap_anim::pm_start_weapon_anim(
-        &mut hand.weap_anim,
-        if empty {
-            crate::weap_anim::weap_anim_event::RELOAD_EMPTY
-        } else {
-            crate::weap_anim::weap_anim_event::RELOAD
-        },
-    );
+    crate::weap_anim::pm_start_weapon_anim(&mut hand.weap_anim, anim);
     crate::reload::pm_weapon_arm_reload_add_delay(hand, facts, full);
     true
 }
@@ -1268,12 +1269,7 @@ fn begin_reload_loop(
     pm_type: i32,
 ) -> Option<WeaponTickEvent> {
     let empty = reload_from_empty_clip(hand, facts);
-    let full = facts.reload_duration_ms(empty).max(1);
-    let anim = if empty {
-        crate::weap_anim::weap_anim_event::RELOAD_EMPTY
-    } else {
-        crate::weap_anim::weap_anim_event::RELOAD
-    };
+    let (full, anim) = crate::reload::reload_segment(hand, facts, empty);
     if pm_type < 8 {
         crate::weap_anim::pm_start_weapon_anim(&mut hand.weap_anim, anim);
     }
@@ -1367,5 +1363,6 @@ pub fn spawn_weapon_hand(weapon: u32, facts: &WeaponCombatFacts) -> WeaponHandSt
         rechamber_pending: false,
         delayed_rechamber: false,
         weapon_restrict_kick_time: 0,
+        quick_reload: facts.dual_mag.is_some(),
     }
 }

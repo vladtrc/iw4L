@@ -109,14 +109,28 @@ pub fn splatter_alt_scale(intensity: f32, mask_r: f32) -> f32 {
     intensity * SPLATTER_ALT_INTENSITY_SCALE - mask_r * SPLATTER_ALT_MASK_SCALE
 }
 
-pub fn splatter_alt_texel(color_rgba: [u8; 4], mask_r: u8, intensity: f32) -> [u8; 4] {
-    let scale = splatter_alt_scale(intensity, mask_r as f32 / 255.0).max(0.0);
-    let mut out = [0u8; 4];
-    for i in 0..4 {
-        let v = (color_rgba[i] as f32 / 255.0) * scale;
-        out[i] = (v.min(1.0) * 255.0) as u8;
+fn srgb_byte_to_linear(value: u8) -> f32 {
+    let encoded = value as f32 / 255.0;
+    if encoded <= 0.04045 {
+        encoded / 12.92
+    } else {
+        libm::powf((encoded + 0.055) / 1.055, 2.4)
     }
-    out
+}
+
+pub fn splatter_alt_sample_linear(color_rgba: [u8; 4], mask_r: u8, intensity: f32) -> [f32; 4] {
+    let scale = splatter_alt_scale(intensity, mask_r as f32 / 255.0).max(0.0);
+    [
+        srgb_byte_to_linear(color_rgba[0]) * scale,
+        srgb_byte_to_linear(color_rgba[1]) * scale,
+        srgb_byte_to_linear(color_rgba[2]) * scale,
+        (color_rgba[3] as f32 / 255.0) * scale,
+    ]
+}
+
+pub fn splatter_alt_texel(color_rgba: [u8; 4], mask_r: u8, intensity: f32) -> [u8; 4] {
+    splatter_alt_sample_linear(color_rgba, mask_r, intensity)
+        .map(|value| (value.min(1.0) * 255.0) as u8)
 }
 
 pub fn splatter_alt_texel_straight(color_rgba: [u8; 4], mask_r: u8, intensity: f32) -> [u8; 4] {

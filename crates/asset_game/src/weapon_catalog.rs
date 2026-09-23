@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn mint_weapon_revision() -> u64 {
@@ -11,9 +12,11 @@ use crate::asset_graph::{
     ProjectileModelSpace, TracerSpace, WorldWeaponSpace, XAnimSpace, ZoneOwner,
 };
 use asset_iw4::size::{WEAPON_ANIM_COUNT, weap_anim};
+
 use fastfile_iw4::{
     Ptr, ScriptStrings, WeaponIdleCapture, WeaponMovementOfsCapture, ZonePtr, ZoneStream,
 };
+use weapon_iw4::{WEAPON_ANIM_SLOTS, weap_anim_extra};
 use weapon_iw4::{WeaponIdleInputs, WeaponMovementOfsInputs};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -161,6 +164,8 @@ pub struct WeaponBodyFacts {
 
     pub penetrate_multiplier: f32,
 
+    pub motion_tracker: bool,
+
     pub rifle_bullet: bool,
     pub inventory_type: i32,
     pub fire_type: i32,
@@ -182,6 +187,8 @@ pub struct WeaponBodyFacts {
 
     pub reload_start_add_time_ms: i32,
     pub reload_end_time_ms: i32,
+
+    pub dual_mag: Option<weapon_iw4::DualMagTimes>,
 
     pub kill_icon_ratio: i32,
 
@@ -401,18 +408,6 @@ impl WeaponSwayFacts {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LoadoutCatalogKind {
-    Primary,
-    Secondary,
-
-    Equipment { offhand_class: i32 },
-
-    AttachmentVariant { base_id: u32 },
-
-    NonPlayer,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacOffhandBucket {
     Lethal,
     Tactical,
@@ -424,18 +419,6 @@ pub fn cac_offhand_bucket(offhand_class: i32) -> Option<CacOffhandBucket> {
         2 | 3 => Some(CacOffhandBucket::Tactical),
         _ => None,
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LoadoutCatalogRow {
-    pub id: u32,
-    pub key: crate::AssetKey,
-    pub name: String,
-    pub kind: LoadoutCatalogKind,
-
-    pub weap_class: i32,
-
-    pub item_group: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -460,9 +443,13 @@ pub struct CatalogWeapon {
 
     pub scope_name: Option<String>,
 
-    pub scope_viewmodel: Option<String>,
-
     pub scope_rows: [Iw5ScopeRow; 6],
+
+    pub iw5_attachment_slots: [Option<String>; fastfile_iw5::size::WEAPON_ATTACHMENT_SLOT_COUNT],
+    pub iw5_reload_overrides: Vec<Iw5ReloadOverride>,
+    pub iw5_anim_overrides: Vec<LeftoverAnimOverride>,
+    pub iw5_fx_overrides: Vec<Iw5FxOverride>,
+    pub iw5_notetrack_overrides: Vec<Iw5NotetrackOverride>,
 
     pub hud_icon: Option<String>,
     pub hud_icon_slot: Option<Ptr>,
@@ -504,11 +491,11 @@ pub struct CatalogWeapon {
 
     pub rocket_model: Option<String>,
 
-    pub sz_xanims: [Option<String>; WEAPON_ANIM_COUNT],
+    pub sz_xanims: [Option<String>; WEAPON_ANIM_SLOTS],
 
-    pub sz_xanims_right: [Option<String>; WEAPON_ANIM_COUNT],
+    pub sz_xanims_right: [Option<String>; WEAPON_ANIM_SLOTS],
 
-    pub sz_xanims_left: [Option<String>; WEAPON_ANIM_COUNT],
+    pub sz_xanims_left: [Option<String>; WEAPON_ANIM_SLOTS],
 
     pub hide_tags: Vec<String>,
 
@@ -523,17 +510,253 @@ pub struct CatalogWeapon {
 #[derive(Clone, Debug, Default)]
 pub struct Iw5ScopeRow {
     pub scope: Option<String>,
+    pub display_name: Option<String>,
+    pub attachment_type: i32,
+    pub weapon_type: i32,
+    pub weapon_class: i32,
+    pub load_index: i32,
     pub overlay: Option<String>,
     pub overlay_lowres: Option<String>,
     pub overlay_emp: Option<String>,
     pub overlay_emp_lowres: Option<String>,
     pub view_model: Option<String>,
+    pub world_model: Option<String>,
+    pub view_models: [Option<String>; fastfile_iw5::size::ATTACH_MODEL_COUNT],
+    pub world_models: [Option<String>; fastfile_iw5::size::ATTACH_MODEL_COUNT],
+    pub reticle_models: [Option<String>; fastfile_iw5::size::ATTACH_RETICLE_COUNT],
     pub thermal: bool,
     pub width: f32,
     pub height: f32,
     pub ads_zoom_fov: f32,
     pub ads_zoom_in_frac: f32,
     pub ads_zoom_out_frac: f32,
+    pub sight: Option<Iw5AttachmentSight>,
+    pub ammo_general: Option<Iw5AttachmentAmmoGeneral>,
+    pub reload: Option<Iw5AttachmentReload>,
+    pub add_ons: Option<Iw5AttachmentAddOns>,
+    pub general: Option<Iw5AttachmentGeneral>,
+    pub aim_assist: Option<Iw5AttachmentAimAssist>,
+    pub ammunition: Option<Iw5AttachmentAmmunition>,
+    pub damage: Option<Iw5AttachmentDamage>,
+    pub location_damage: Option<[f32; 19]>,
+    pub idle_settings: Option<Iw5AttachmentIdleSettings>,
+    pub ads_settings: Option<Iw5AttachmentAdsSettings>,
+    pub ads_settings_main: Option<Iw5AttachmentAdsSettings>,
+    pub hip_spread: Option<Iw5AttachmentHipSpread>,
+    pub gun_kick: Option<Iw5AttachmentGunKick>,
+    pub view_kick: Option<[f32; 10]>,
+    pub scales: Iw5AttachmentScales,
+    pub hide_iron_sights: bool,
+    pub share_ammo_with_alt: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Iw5AttachmentSight {
+    pub aim_down_sight: bool,
+    pub ads_fire: bool,
+    pub rechamber_while_ads: bool,
+    pub no_ads_when_mag_empty: bool,
+    pub can_hold_breath: bool,
+    pub can_variable_zoom: bool,
+    pub hide_rail: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Iw5AttachmentAmmoGeneral {
+    pub penetrate_type: i32,
+    pub penetrate_multiplier: f32,
+    pub impact_type: i32,
+    pub fire_type: i32,
+    pub rifle_bullet: bool,
+    pub armor_piercing: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Iw5AttachmentReload {
+    pub no_partial_reload: bool,
+    pub segmented_reload: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Iw5AttachmentAddOns {
+    pub motion_tracker: bool,
+    pub silenced: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Iw5AttachmentGeneral {
+    pub bolt_action: bool,
+    pub inherits_perks: bool,
+    pub enemy_crosshair_range: f32,
+    pub move_speed_scale: f32,
+    pub ads_move_speed_scale: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Iw5AttachmentAmmunition {
+    pub max_ammo: i32,
+    pub start_ammo: i32,
+    pub clip_size: i32,
+    pub shot_count: i32,
+    pub reload_ammo_add: i32,
+    pub reload_start_add: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Iw5AttachmentAimAssist {
+    pub auto_aim_range: f32,
+    pub aim_assist_range: f32,
+    pub aim_assist_range_ads: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Iw5AttachmentDamage {
+    pub damage: i32,
+    pub min_damage: i32,
+    pub melee_damage: i32,
+    pub max_damage_range: f32,
+    pub min_damage_range: f32,
+    pub player_damage: i32,
+    pub min_player_damage: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Iw5AttachmentIdleSettings {
+    pub hip_idle_amount: f32,
+    pub hip_idle_speed: f32,
+    pub idle_crouch_factor: f32,
+    pub idle_prone_factor: f32,
+    pub ads_idle_lerp_start_time: f32,
+    pub ads_idle_lerp_time: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Iw5AttachmentHipSpread {
+    pub values: [f32; 12],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Iw5AttachmentGunKick {
+    pub hip_reduced_kick_bullets: i32,
+    pub hip: [f32; 9],
+    pub ads_reduced_kick_bullets: i32,
+    pub ads: [f32; 9],
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Iw5AttachmentAdsSettings {
+    pub ads_spread: f32,
+    pub ads_aim_pitch: f32,
+    pub ads_trans_in_time: f32,
+    pub ads_trans_out_time: f32,
+    pub ads_reload_trans_time_ms: i32,
+    pub ads_crosshair_in_frac: f32,
+    pub ads_crosshair_out_frac: f32,
+    pub ads_zoom_fov: f32,
+    pub ads_zoom_in_frac: f32,
+    pub ads_zoom_out_frac: f32,
+    pub ads_bob_factor: f32,
+    pub ads_view_bob_mult: f32,
+    pub ads_view_error_min: f32,
+    pub ads_view_error_max: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Iw5AttachmentScales {
+    pub ammunition: f32,
+    pub damage: f32,
+    pub damage_min: f32,
+    pub state_timers: f32,
+    pub fire_timers: f32,
+    pub idle_settings: f32,
+    pub ads_settings: f32,
+    pub ads_settings_main: f32,
+    pub hip_spread: f32,
+    pub gun_kick: f32,
+    pub view_kick: f32,
+    pub view_center: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Iw5AttachmentSelection {
+    pub scope: u8,
+    pub underbarrel: u8,
+    pub others: u8,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Iw5ConfigurationCandidate {
+    pub selection: crate::WeaponSelection,
+    pub base_id: u32,
+    pub native: Result<Iw5AttachmentSelection, crate::ConfigurationRefusal>,
+    pub primary_assets: Vec<String>,
+    pub primary_ads_zoom_fov: Option<f32>,
+    pub primary_ads_aim_pitch: Option<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Iw5ReloadOverride {
+    pub attachment: u16,
+    pub reload_add_time_ms: i32,
+    pub reload_start_add_time_ms: i32,
+}
+
+impl Iw5AttachmentSelection {
+    pub fn fields(self) -> u16 {
+        u16::from(self.scope) | (u16::from(self.underbarrel) << 3) | (u16::from(self.others) << 5)
+    }
+
+    fn override_candidates(self) -> [u16; 3] {
+        let mut candidates = [0; 3];
+        let mut count = 0;
+        let mut push = |condition| {
+            candidates[count.min(2)] = condition;
+            count += 1;
+        };
+        if (1..=6).contains(&self.scope) {
+            push(u16::from(self.scope));
+        }
+        if (1..=3).contains(&self.underbarrel) {
+            push(u16::from(self.underbarrel) << 3);
+        }
+        for bit in 0..4 {
+            if self.others & (1 << bit) != 0 {
+                push(1 << (5 + bit));
+            }
+        }
+        candidates
+    }
+
+    pub fn contains_condition(self, condition: u16) -> bool {
+        if condition == 0 {
+            return true;
+        }
+        self.override_candidates().contains(&condition)
+    }
+}
+
+fn iw5_best_pair_override<'a, T>(
+    rows: &'a [T],
+    selection: Iw5AttachmentSelection,
+    override_type: u32,
+    fields: impl Fn(&T) -> (u16, u16, u32),
+) -> Option<&'a T> {
+    let candidates = selection.override_candidates();
+    let mut best = None;
+    let mut best_score = 0;
+    for row in rows {
+        let (first, second, row_type) = fields(row);
+        if row_type != override_type {
+            continue;
+        }
+        let score = u8::from(first != 0 && candidates.contains(&first))
+            + u8::from(second != 0 && candidates.contains(&second));
+        if score > best_score {
+            best = Some(row);
+            best_score = score;
+        }
+    }
+    best
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -609,6 +832,19 @@ pub fn t5_inline_note_alias<'a>(note: &'a str, prefix: &str) -> Option<&'a str> 
     head.eq_ignore_ascii_case(prefix)
         .then_some(tail)
         .filter(|alias| !alias.is_empty())
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct LinkedNotetrackAction {
+    pub sound_alias: Option<String>,
+    pub rumble_alias: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WeaponDependencyGap {
+    pub id: u32,
+    pub kind: &'static str,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -828,6 +1064,7 @@ pub struct LeftoverAnimOverride {
     pub override_anim: Option<String>,
     pub altmode_anim: Option<String>,
     pub anim_time_ms: i32,
+    pub alt_time_ms: i32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -837,6 +1074,21 @@ pub struct LeftoverSoundOverride {
     pub sound_type: u32,
     pub override_sound: Option<String>,
     pub altmode_sound: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Iw5FxOverride {
+    pub attachment1: u16,
+    pub attachment2: u16,
+    pub fx_type: u32,
+    pub override_fx: Option<String>,
+    pub altmode_fx: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Iw5NotetrackOverride {
+    pub attachment: u16,
+    pub sound_map: Vec<(String, String)>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -994,7 +1246,7 @@ impl CatalogWeapon {
         name: impl Into<String>,
         weap_def: Option<(u8, u32)>,
         gun_xmodel: Option<String>,
-        sz_xanims: [Option<String>; WEAPON_ANIM_COUNT],
+        sz_xanims: [Option<String>; WEAPON_ANIM_SLOTS],
         fire_time_ms: i32,
         raise_time_ms: i32,
         move_speed_scale: f32,
@@ -1012,8 +1264,12 @@ impl CatalogWeapon {
             reticle_side_slot: None,
             overlay_material_slot: None,
             scope_name: None,
-            scope_viewmodel: None,
             scope_rows: Default::default(),
+            iw5_attachment_slots: std::array::from_fn(|_| None),
+            iw5_reload_overrides: Vec::new(),
+            iw5_anim_overrides: Vec::new(),
+            iw5_fx_overrides: Vec::new(),
+            iw5_notetrack_overrides: Vec::new(),
             hud_icon: None,
             hud_icon_slot: None,
             pickup_icon: None,
@@ -1042,8 +1298,8 @@ impl CatalogWeapon {
             projectile_model: None,
             rocket_model: None,
             sz_xanims,
-            sz_xanims_right: [const { None }; WEAPON_ANIM_COUNT],
-            sz_xanims_left: [const { None }; WEAPON_ANIM_COUNT],
+            sz_xanims_right: [const { None }; WEAPON_ANIM_SLOTS],
+            sz_xanims_left: [const { None }; WEAPON_ANIM_SLOTS],
             hide_tags: Vec::new(),
             sounds: WeaponSoundAliases::default(),
             combat_fx: WeaponCombatFx::default(),
@@ -1064,9 +1320,179 @@ impl CatalogWeapon {
 pub struct WeaponCatalog {
     entries: Vec<CatalogWeapon>,
     strings: ScriptStrings,
+    iw5_attachments: HashMap<String, Iw5ScopeRow>,
 }
 
 impl WeaponCatalog {
+    pub fn capture_iw5_attachment(
+        &mut self,
+        stream: &fastfile_iw5::ZoneStream<'_>,
+        geometry: &fastfile_iw5::AttachmentGeometry,
+    ) {
+        let Some(name) = geometry.name.and_then(|ptr| leftover_cstr_iw5(stream, ptr)) else {
+            return;
+        };
+        use fastfile_iw5::size as sz;
+        let body_at = |x86, x64| match stream.ptr_at(geometry.header, stream.layout(x86, x64)) {
+            Ok(fastfile_iw5::ZonePtr::Offset(ptr)) => Some(stream.resolve_alias(ptr)),
+            _ => None,
+        };
+        let sight = body_at(sz::ATTACH_SIGHT_OFF, 64)
+            .and_then(|body| read_iw5_attachment_sight(stream, body));
+        let ammo_general =
+            body_at(32, 56).and_then(|body| read_iw5_attachment_ammo_general(stream, body));
+        let reload = body_at(40, 72).and_then(|body| {
+            Some(Iw5AttachmentReload {
+                no_partial_reload: stream.u8_at(body, 0).ok()? != 0,
+                segmented_reload: stream.u8_at(body, 1).ok()? != 0,
+            })
+        });
+        let add_ons = body_at(sz::ATTACH_ADDONS_OFF, 80)
+            .and_then(|body| read_iw5_attachment_addons(stream, body));
+        let general = body_at(sz::ATTACH_GENERAL_OFF, 88)
+            .and_then(|body| read_iw5_attachment_general(stream, body));
+        let aim_assist = body_at(52, 96).and_then(|body| {
+            read_iw5_f32_block::<3>(stream, body).map(|values| Iw5AttachmentAimAssist {
+                auto_aim_range: values[0],
+                aim_assist_range: values[1],
+                aim_assist_range_ads: values[2],
+            })
+        });
+        let ammunition = body_at(sz::ATTACH_AMMUNITION_OFF, 104)
+            .and_then(|body| read_iw5_attachment_ammunition(stream, body));
+        let damage = body_at(60, 112).and_then(|body| read_iw5_attachment_damage(stream, body));
+        let location_damage =
+            body_at(64, 120).and_then(|body| read_iw5_f32_block::<19>(stream, body));
+        let idle_settings = body_at(68, 128).and_then(|body| {
+            read_iw5_f32_block::<6>(stream, body).map(|values| Iw5AttachmentIdleSettings {
+                hip_idle_amount: values[0],
+                hip_idle_speed: values[1],
+                idle_crouch_factor: values[2],
+                idle_prone_factor: values[3],
+                ads_idle_lerp_start_time: values[4],
+                ads_idle_lerp_time: values[5],
+            })
+        });
+        let ads_settings = body_at(sz::ATTACH_ADS_SETTINGS_OFF, 136)
+            .and_then(|body| read_iw5_attachment_ads(stream, body));
+        let ads_settings_main = body_at(sz::ATTACH_ADS_SETTINGS_MAIN_OFF, 144)
+            .and_then(|body| read_iw5_attachment_ads(stream, body));
+        let hip_spread = body_at(80, 152).and_then(|body| {
+            read_iw5_f32_block::<12>(stream, body).map(|values| Iw5AttachmentHipSpread { values })
+        });
+        let gun_kick = body_at(84, 160).and_then(|body| {
+            let read_group = |first: usize| {
+                let mut values = [0.0; 9];
+                for (index, value) in values.iter_mut().enumerate() {
+                    *value = stream.f32_at(body, first + index * 4).ok()?;
+                }
+                Some(values)
+            };
+            Some(Iw5AttachmentGunKick {
+                hip_reduced_kick_bullets: stream.i32_at(body, 0).ok()?,
+                hip: read_group(4)?,
+                ads_reduced_kick_bullets: stream.i32_at(body, 40).ok()?,
+                ads: read_group(44)?,
+            })
+        });
+        let view_kick = body_at(88, 168).and_then(|body| read_iw5_f32_block::<10>(stream, body));
+        let read_scale = |index: usize| {
+            stream
+                .f32_at(
+                    geometry.header,
+                    stream.layout(sz::ATTACH_SCALES_OFF, 208) + index * 4,
+                )
+                .unwrap_or(0.0)
+        };
+        let scales = Iw5AttachmentScales {
+            ammunition: read_scale(0),
+            damage: read_scale(1),
+            damage_min: read_scale(2),
+            state_timers: read_scale(3),
+            fire_timers: read_scale(4),
+            idle_settings: read_scale(5),
+            ads_settings: read_scale(6),
+            ads_settings_main: read_scale(7),
+            hip_spread: read_scale(8),
+            gun_kick: read_scale(9),
+            view_kick: read_scale(10),
+            view_center: read_scale(11),
+        };
+        let flags = stream.layout(sz::ATTACH_FLAGS_OFF, 260);
+        let display_name = match stream.ptr_at(geometry.header, stream.layout(4, 8)) {
+            Ok(fastfile_iw5::ZonePtr::Offset(ptr)) => {
+                leftover_cstr_iw5(stream, stream.resolve_alias(ptr))
+            }
+            _ => None,
+        };
+        self.iw5_attachments.insert(
+            name.clone(),
+            Iw5ScopeRow {
+                scope: Some(name),
+                display_name,
+                attachment_type: stream
+                    .i32_at(geometry.header, stream.layout(8, 16))
+                    .unwrap_or(0),
+                weapon_type: stream
+                    .i32_at(geometry.header, stream.layout(12, 20))
+                    .unwrap_or(0),
+                weapon_class: stream
+                    .i32_at(geometry.header, stream.layout(16, 24))
+                    .unwrap_or(0),
+                load_index: stream
+                    .i32_at(geometry.header, stream.layout(156, 256))
+                    .unwrap_or(0),
+                overlay: geometry.overlay_names[0].and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
+                overlay_lowres: geometry.overlay_names[1]
+                    .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
+                overlay_emp: geometry.overlay_names[2]
+                    .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
+                overlay_emp_lowres: geometry.overlay_names[3]
+                    .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
+                view_model: geometry
+                    .view_model_name
+                    .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
+                world_model: geometry
+                    .world_model_name
+                    .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
+                view_models: geometry
+                    .view_model_names
+                    .map(|ptr| ptr.and_then(|p| leftover_cstr_iw5(stream, p))),
+                world_models: geometry
+                    .world_model_names
+                    .map(|ptr| ptr.and_then(|p| leftover_cstr_iw5(stream, p))),
+                reticle_models: geometry
+                    .reticle_model_names
+                    .map(|ptr| ptr.and_then(|p| leftover_cstr_iw5(stream, p))),
+                thermal: geometry.thermal,
+                width: geometry.overlay_width,
+                height: geometry.overlay_height,
+                ads_zoom_fov: ads_settings.map_or(0.0, |ads| ads.ads_zoom_fov),
+                ads_zoom_in_frac: ads_settings.map_or(0.0, |ads| ads.ads_zoom_in_frac),
+                ads_zoom_out_frac: ads_settings.map_or(0.0, |ads| ads.ads_zoom_out_frac),
+                sight,
+                ammo_general,
+                reload,
+                add_ons,
+                general,
+                aim_assist,
+                ammunition,
+                damage,
+                location_damage,
+                idle_settings,
+                ads_settings,
+                ads_settings_main,
+                hip_spread,
+                gun_kick,
+                view_kick,
+                scales,
+                hide_iron_sights: stream.u8_at(geometry.header, flags).unwrap_or(0) != 0,
+                share_ammo_with_alt: stream.u8_at(geometry.header, flags + 1).unwrap_or(0) != 0,
+                ..Default::default()
+            },
+        );
+    }
+
     pub fn set_strings(&mut self, strings: ScriptStrings) {
         self.strings = strings;
     }
@@ -1112,15 +1538,15 @@ impl WeaponCatalog {
         let sz_xanims = geometry
             .sz_xanims
             .map(|arr| read_sz_xanims(stream, arr))
-            .unwrap_or([const { None }; WEAPON_ANIM_COUNT]);
+            .unwrap_or([const { None }; WEAPON_ANIM_SLOTS]);
         let sz_xanims_right = geometry
             .sz_xanims_right
             .map(|arr| read_sz_xanims(stream, arr))
-            .unwrap_or([const { None }; WEAPON_ANIM_COUNT]);
+            .unwrap_or([const { None }; WEAPON_ANIM_SLOTS]);
         let sz_xanims_left = geometry
             .sz_xanims_left
             .map(|arr| read_sz_xanims(stream, arr))
-            .unwrap_or([const { None }; WEAPON_ANIM_COUNT]);
+            .unwrap_or([const { None }; WEAPON_ANIM_SLOTS]);
         let hide_tags = read_hide_tags(stream, &self.strings, geometry.hide_tags);
         self.entries.push(CatalogWeapon {
             name: name.to_owned(),
@@ -1147,8 +1573,12 @@ impl WeaponCatalog {
             reticle_side_slot: geometry.reticle_side_material_slot,
             overlay_material_slot: geometry.overlay_material_slot,
             scope_name: None,
-            scope_viewmodel: None,
             scope_rows: Default::default(),
+            iw5_attachment_slots: std::array::from_fn(|_| None),
+            iw5_reload_overrides: Vec::new(),
+            iw5_anim_overrides: Vec::new(),
+            iw5_fx_overrides: Vec::new(),
+            iw5_notetrack_overrides: Vec::new(),
             hud_icon: None,
             hud_icon_slot: geometry.hud_icon_slot,
             pickup_icon: None,
@@ -1408,6 +1838,7 @@ impl WeaponCatalog {
                 clip_size: geometry.clip_size,
                 penetrate_type: geometry.penetrate_type,
                 penetrate_multiplier: geometry.penetrate_multiplier,
+                motion_tracker: geometry.motion_tracker,
                 rifle_bullet: geometry.rifle_bullet,
                 inventory_type: geometry.inventory_type,
                 fire_type: geometry.fire_type,
@@ -1424,6 +1855,7 @@ impl WeaponCatalog {
                 reload_start_time_ms: geometry.reload_start_time_ms,
                 reload_start_add_time_ms: geometry.reload_start_add_time_ms,
                 reload_end_time_ms: geometry.reload_end_time_ms,
+                dual_mag: None,
                 kill_icon_ratio: geometry.kill_icon_ratio,
                 flip_kill_icon: geometry.flip_kill_icon,
                 reload_ammo_add: geometry.reload_ammo_add,
@@ -1760,6 +2192,7 @@ impl WeaponCatalog {
         &mut self,
         stream: &fastfile_iw5::ZoneStream<'_>,
         strings: &fastfile_iw5::ScriptStrings,
+        fx_name_at_slot: &dyn Fn(fastfile_iw5::Ptr) -> Option<String>,
     ) {
         let Some(geometry) = stream.weapon() else {
             return;
@@ -1789,44 +2222,23 @@ impl WeaponCatalog {
         let overlay_material = leftover_iw5_overlay_name(stream, &geometry);
         let overlay_image = None;
         let overlay_material_slot = leftover_iw5_weapdef_overlay_slot(stream, geometry.weap_def);
-        let scope_name = geometry
-            .scope0_name
-            .and_then(|ptr| leftover_cstr_iw5(stream, ptr));
-        let scope_rows = geometry.scope_overlays.map(|row| Iw5ScopeRow {
-            scope: row
-                .scope_name
-                .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
-            overlay: row
-                .overlay_name
-                .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
-            overlay_lowres: row
-                .overlay_lowres_name
-                .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
-            overlay_emp: row
-                .overlay_emp_name
-                .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
-            overlay_emp_lowres: row
-                .overlay_emp_lowres_name
-                .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
-            view_model: row
-                .view_model_name
-                .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
-            thermal: row.thermal,
-            width: row.width,
-            height: row.height,
-            ads_zoom_fov: row.ads_zoom_fov,
-            ads_zoom_in_frac: row.ads_zoom_in_frac,
-            ads_zoom_out_frac: row.ads_zoom_out_frac,
+        let scope_name = None;
+        let scope_rows = std::array::from_fn(|index| {
+            geometry.attachments[index]
+                .and_then(|ptr| leftover_cstr_iw5(stream, ptr))
+                .and_then(|name| self.iw5_attachments.get(&name).cloned())
+                .unwrap_or_default()
         });
-
-        let scope_viewmodel = scope_rows
-            .iter()
-            .find(|row| !row.thermal && row.overlay.is_some() && row.view_model.is_some())
-            .and_then(|row| row.view_model.clone());
+        let iw5_attachment_slots = geometry
+            .attachments
+            .map(|name| name.and_then(|ptr| leftover_cstr_iw5(stream, ptr)));
+        let iw5_reload_overrides = read_iw5_reload_overrides(stream, &geometry);
+        let iw5_fx_overrides = read_iw5_fx_overrides(stream, &geometry, fx_name_at_slot);
+        let iw5_notetrack_overrides = read_iw5_notetrack_overrides(stream, strings, &geometry);
         let mut sz_xanims = geometry
             .sz_xanims
             .map(|arr| read_sz_xanims_iw5(stream, arr))
-            .unwrap_or([const { None }; WEAPON_ANIM_COUNT]);
+            .unwrap_or([const { None }; WEAPON_ANIM_SLOTS]);
         let leftover_anim_overrides = leftover_iw5_anim_overrides(stream, &geometry);
         apply_leftover_default_anim_overrides(&mut sz_xanims, &leftover_anim_overrides);
         self.entries.push(CatalogWeapon {
@@ -1855,8 +2267,12 @@ impl WeaponCatalog {
             overlay_image,
             overlay_material_slot,
             scope_name,
-            scope_viewmodel,
             scope_rows,
+            iw5_attachment_slots,
+            iw5_reload_overrides,
+            iw5_anim_overrides: leftover_anim_overrides,
+            iw5_fx_overrides,
+            iw5_notetrack_overrides,
             hud_icon: leftover_iw5_material_name(
                 stream,
                 geometry.weap_def,
@@ -1900,11 +2316,11 @@ impl WeaponCatalog {
             projectile_model: None,
             rocket_model: None,
             sz_xanims,
-            sz_xanims_right: [const { None }; WEAPON_ANIM_COUNT],
-            sz_xanims_left: [const { None }; WEAPON_ANIM_COUNT],
+            sz_xanims_right: [const { None }; WEAPON_ANIM_SLOTS],
+            sz_xanims_left: [const { None }; WEAPON_ANIM_SLOTS],
             hide_tags: read_hide_tags_iw5(stream, strings, geometry.hide_tags),
             sounds: leftover_iw5_sounds(stream, strings, &geometry),
-            combat_fx: WeaponCombatFx::default(),
+            combat_fx: read_iw5_combat_fx(stream, &geometry, fx_name_at_slot),
             combat_slots: CombatFxSlots::default(),
             facts: capture_iw5_body_facts(stream, &geometry),
         });
@@ -1940,7 +2356,7 @@ impl WeaponCatalog {
         let sz_xanims = geometry
             .sz_xanims
             .map(|arr| read_sz_xanims_t5(stream, arr))
-            .unwrap_or([const { None }; WEAPON_ANIM_COUNT]);
+            .unwrap_or([const { None }; WEAPON_ANIM_SLOTS]);
         self.entries.push(CatalogWeapon {
             reticle_center_slot: leftover_t5_asset_slot(
                 stream,
@@ -1965,8 +2381,12 @@ impl WeaponCatalog {
             overlay_image: None,
             overlay_material_slot: leftover_t5_overlay_slot(stream, &geometry),
             scope_name: None,
-            scope_viewmodel: None,
             scope_rows: Default::default(),
+            iw5_attachment_slots: std::array::from_fn(|_| None),
+            iw5_reload_overrides: Vec::new(),
+            iw5_anim_overrides: Vec::new(),
+            iw5_fx_overrides: Vec::new(),
+            iw5_notetrack_overrides: Vec::new(),
             hud_icon: leftover_t5_material_name_opt(
                 stream,
                 geometry.weap_def,
@@ -2019,8 +2439,8 @@ impl WeaponCatalog {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned),
             sz_xanims,
-            sz_xanims_right: [const { None }; WEAPON_ANIM_COUNT],
-            sz_xanims_left: [const { None }; WEAPON_ANIM_COUNT],
+            sz_xanims_right: [const { None }; WEAPON_ANIM_SLOTS],
+            sz_xanims_left: [const { None }; WEAPON_ANIM_SLOTS],
             hide_tags: read_hide_tags_t5(stream, strings, geometry.hide_tags),
             sounds: leftover_t5_sounds(stream, strings, &geometry),
             combat_fx: WeaponCombatFx::default(),
@@ -2079,7 +2499,7 @@ impl WeaponCatalog {
     }
 
     pub fn into_build(self) -> WeaponBuild {
-        WeaponBuild::from_catalog(self.entries)
+        WeaponBuild::from_catalog(self.entries, self.iw5_attachments)
     }
 }
 
@@ -2179,15 +2599,11 @@ fn stamp_combat_fx(
     combat.last_shot_eject_pair_authored = slots.last_shot_pair_authored();
 }
 
-fn fpv_zone_hint_edge(
-    from_zone: bool,
+fn fpv_model_edge(
     hint: Option<&str>,
     ns: crate::AssetNamespace,
     fpv: &crate::FpvMeshCatalog,
 ) -> AssetEdge<FpvMeshSpace> {
-    if !from_zone {
-        return AssetEdge::Absent;
-    }
     let hint = hint.filter(|name| !name.is_empty());
     match hint {
         None => AssetEdge::Absent,
@@ -2198,14 +2614,10 @@ fn fpv_zone_hint_edge(
     }
 }
 
-fn world_zone_hint_edge(
-    from_zone: bool,
+fn world_model_edge(
     hint: Option<&str>,
     catalog: &crate::WorldWeaponCatalog,
 ) -> AssetEdge<WorldWeaponSpace> {
-    if !from_zone {
-        return AssetEdge::Absent;
-    }
     let hint = hint.filter(|name| !name.is_empty());
     match hint {
         None => AssetEdge::Absent,
@@ -2288,7 +2700,7 @@ fn remap_t5_weap_class(raw: i32) -> i32 {
 fn read_sz_xanims_t5(
     stream: &fastfile_t5::ZoneStream<'_>,
     arr: fastfile_t5::Ptr,
-) -> [Option<String>; WEAPON_ANIM_COUNT] {
+) -> [Option<String>; WEAPON_ANIM_SLOTS] {
     let mut t5 = [const { None }; fastfile_t5::size::WEAPON_XANIM_COUNT];
     for (i, slot) in t5.iter_mut().enumerate() {
         let name_ptr = match stream.ptr_at(arr, i * 4) {
@@ -2303,9 +2715,9 @@ fn read_sz_xanims_t5(
     remap_t5_sz_xanims(&t5)
 }
 
-fn remap_t5_sz_xanims(t5: &[Option<String>]) -> [Option<String>; WEAPON_ANIM_COUNT] {
+fn remap_t5_sz_xanims(t5: &[Option<String>]) -> [Option<String>; WEAPON_ANIM_SLOTS] {
     use fastfile_t5::size::weap_anim as t5_anim;
-    const PAIRS: [(usize, usize); 32] = [
+    const PAIRS: [(usize, usize); 34] = [
         (t5_anim::IDLE, weap_anim::IDLE),
         (t5_anim::EMPTY_IDLE, weap_anim::EMPTY_IDLE),
         (t5_anim::FIRE, weap_anim::FIRE),
@@ -2318,6 +2730,11 @@ fn remap_t5_sz_xanims(t5: &[Option<String>]) -> [Option<String>; WEAPON_ANIM_COU
         (t5_anim::RELOAD_EMPTY, weap_anim::RELOAD_EMPTY),
         (t5_anim::RELOAD_START, weap_anim::RELOAD_START),
         (t5_anim::RELOAD_END, weap_anim::RELOAD_END),
+        (t5_anim::RELOAD_QUICK, weap_anim_extra::RELOAD_QUICK),
+        (
+            t5_anim::RELOAD_QUICK_EMPTY,
+            weap_anim_extra::RELOAD_QUICK_EMPTY,
+        ),
         (t5_anim::RAISE, weap_anim::RAISE),
         (t5_anim::FIRST_RAISE, weap_anim::FIRST_RAISE),
         (t5_anim::DROP, weap_anim::DROP),
@@ -2339,7 +2756,7 @@ fn remap_t5_sz_xanims(t5: &[Option<String>]) -> [Option<String>; WEAPON_ANIM_COU
         (t5_anim::ADS_UP, weap_anim::ADS_UP),
         (t5_anim::ADS_DOWN, weap_anim::ADS_DOWN),
     ];
-    let mut out = [const { None }; WEAPON_ANIM_COUNT];
+    let mut out = [const { None }; WEAPON_ANIM_SLOTS];
     for (src, dst) in PAIRS {
         if src < t5.len() {
             out[dst] = t5[src].clone();
@@ -2776,6 +3193,20 @@ fn capture_t5_body_facts(
     facts.reload_start_add_time_ms =
         i32_at_t5(stream, body, sz::WEAPON_DEF_RELOAD_START_ADD_TIME_OFF);
     facts.reload_end_time_ms = i32_at_t5(stream, body, sz::WEAPON_DEF_RELOAD_END_TIME_OFF);
+    if let Some(variant) = geometry.variant
+        && u8_at_t5(stream, variant, sz::WEAPON_VARIANT_DUAL_MAG_OFF) != 0
+    {
+        facts.dual_mag = Some(weapon_iw4::DualMagTimes {
+            reload_ms: i32_at_t5(stream, variant, sz::WEAPON_VARIANT_RELOAD_QUICK_TIME_OFF),
+            reload_empty_ms: i32_at_t5(
+                stream,
+                variant,
+                sz::WEAPON_VARIANT_RELOAD_QUICK_EMPTY_TIME_OFF,
+            ),
+            add_ms: i32_at_t5(stream, body, sz::WEAPON_DEF_RELOAD_QUICK_ADD_TIME_OFF),
+            empty_add_ms: i32_at_t5(stream, body, sz::WEAPON_DEF_RELOAD_QUICK_EMPTY_ADD_TIME_OFF),
+        });
+    }
     facts.reload_ammo_add = i32_at_t5(stream, body, sz::WEAPON_DEF_RELOAD_AMMO_ADD_OFF);
     facts.reload_start_add = i32_at_t5(stream, body, sz::WEAPON_DEF_RELOAD_START_ADD_OFF);
     facts.overlay_reticle = i32_at_t5(stream, body, sz::WEAPON_DEF_ADS_OVERLAY_RETICLE_OFF);
@@ -2955,6 +3386,8 @@ fn capture_iw5_body_facts(
         ads_in_rate: geometry.ads_in_rate,
         ads_out_rate: geometry.ads_out_rate,
         impact_type: geometry.impact_type,
+        penetrate_multiplier: geometry.penetrate_multiplier,
+        motion_tracker: geometry.motion_tracker,
         kick: WeaponKickFacts {
             f_ads_view_kick_center_speed: geometry.ads_view_kick_center_speed,
             f_hip_view_kick_center_speed: geometry.hip_view_kick_center_speed,
@@ -2965,6 +3398,9 @@ fn capture_iw5_body_facts(
     let Some(body) = geometry.weap_def else {
         return facts;
     };
+    facts.ads_aim_pitch = f32_at_iw5(stream, body, 1400, 1816);
+    facts.ads_crosshair_in_frac = f32_at_iw5(stream, body, 1404, 1820);
+    facts.ads_crosshair_out_frac = f32_at_iw5(stream, body, 1408, 1824);
     facts.kick.gun_max_pitch = f32_at_iw5(stream, body, sz::WEAPON_DEF_GUN_MAX_PITCH_OFF, 1496);
     facts.kick.gun_max_yaw = f32_at_iw5(stream, body, sz::WEAPON_DEF_GUN_MAX_YAW_OFF, 1500);
     facts.kick.ads_gun_kick_reduced_kick_bullets = i32_at_iw5(
@@ -3120,9 +3556,6 @@ fn capture_iw5_body_facts(
     facts.reload_empty_time_ms =
         i32_at_iw5(stream, body, sz::WEAPON_DEF_RELOAD_EMPTY_TIME_OFF, 972);
     facts.reload_add_time_ms = i32_at_iw5(stream, body, sz::WEAPON_DEF_RELOAD_ADD_TIME_OFF, 976);
-    if facts.reload_add_time_ms <= 0 && geometry.reload_override_add_time_ms > 0 {
-        facts.reload_add_time_ms = geometry.reload_override_add_time_ms;
-    }
     facts.reload_start_time_ms =
         i32_at_iw5(stream, body, sz::WEAPON_DEF_RELOAD_START_TIME_OFF, 980);
     facts.reload_start_add_time_ms =
@@ -3248,7 +3681,7 @@ fn iw5_ptr_key(p: fastfile_iw5::Ptr) -> (u8, u32) {
 fn read_sz_xanims_iw5(
     stream: &fastfile_iw5::ZoneStream<'_>,
     arr: fastfile_iw5::Ptr,
-) -> [Option<String>; WEAPON_ANIM_COUNT] {
+) -> [Option<String>; WEAPON_ANIM_SLOTS] {
     let mut iw5 = [const { None }; fastfile_iw5::size::WEAPON_ANIM_COUNT];
 
     let step = stream.pointer_bytes();
@@ -3265,8 +3698,8 @@ fn read_sz_xanims_iw5(
     remap_iw5_sz_xanims(&iw5)
 }
 
-fn remap_iw5_sz_xanims(iw5: &[Option<String>]) -> [Option<String>; WEAPON_ANIM_COUNT] {
-    let mut out = [const { None }; WEAPON_ANIM_COUNT];
+fn remap_iw5_sz_xanims(iw5: &[Option<String>]) -> [Option<String>; WEAPON_ANIM_SLOTS] {
+    let mut out = [const { None }; WEAPON_ANIM_SLOTS];
     for (i, name) in iw5.iter().enumerate() {
         let Some(slot) = iw5_anim_tree_type_to_iw4_slot(i as u32) else {
             continue;
@@ -3307,18 +3740,7 @@ fn leftover_iw5_overlay_name(
             return Some(name);
         }
     }
-    let picked = geometry
-        .scope_overlays
-        .iter()
-        .find(|row| row.overlay_name.is_some() && !row.thermal);
-    let att = picked.and_then(|row| leftover_cstr_iw5(stream, row.overlay_name?));
-    let lowres = picked.and_then(|row| leftover_cstr_iw5(stream, row.overlay_lowres_name?));
-    for candidate in [att.clone(), lowres] {
-        if candidate.as_deref().is_some_and(overlay_name_is_hud_iris) {
-            return candidate;
-        }
-    }
-    att
+    None
 }
 
 fn leftover_cstr_iw5(
@@ -3330,6 +3752,123 @@ fn leftover_cstr_iw5(
         .ok()
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+}
+
+fn read_iw5_attachment_sight(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    body: fastfile_iw5::Ptr,
+) -> Option<Iw5AttachmentSight> {
+    let bit = |offset| stream.u8_at(body, offset).ok().map(|value| value != 0);
+    Some(Iw5AttachmentSight {
+        aim_down_sight: bit(0)?,
+        ads_fire: bit(1)?,
+        rechamber_while_ads: bit(2)?,
+        no_ads_when_mag_empty: bit(3)?,
+        can_hold_breath: bit(4)?,
+        can_variable_zoom: bit(5)?,
+        hide_rail: bit(6)?,
+    })
+}
+
+fn read_iw5_attachment_ammo_general(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    body: fastfile_iw5::Ptr,
+) -> Option<Iw5AttachmentAmmoGeneral> {
+    let flags = stream.layout(20, 24);
+    Some(Iw5AttachmentAmmoGeneral {
+        penetrate_type: stream.i32_at(body, 0).ok()?,
+        penetrate_multiplier: stream.f32_at(body, 4).ok()?,
+        impact_type: stream.i32_at(body, 8).ok()?,
+        fire_type: stream.i32_at(body, 12).ok()?,
+        rifle_bullet: stream.u8_at(body, flags).ok()? != 0,
+        armor_piercing: stream.u8_at(body, flags + 1).ok()? != 0,
+    })
+}
+
+fn read_iw5_attachment_addons(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    body: fastfile_iw5::Ptr,
+) -> Option<Iw5AttachmentAddOns> {
+    Some(Iw5AttachmentAddOns {
+        motion_tracker: stream.u8_at(body, 0).ok()? != 0,
+        silenced: stream.u8_at(body, 1).ok()? != 0,
+    })
+}
+
+fn read_iw5_attachment_general(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    body: fastfile_iw5::Ptr,
+) -> Option<Iw5AttachmentGeneral> {
+    Some(Iw5AttachmentGeneral {
+        bolt_action: stream.u8_at(body, 0).ok()? != 0,
+        inherits_perks: stream.u8_at(body, 1).ok()? != 0,
+        enemy_crosshair_range: stream.f32_at(body, 4).ok()?,
+        move_speed_scale: stream.f32_at(body, stream.layout(24, 32)).ok()?,
+        ads_move_speed_scale: stream.f32_at(body, stream.layout(28, 36)).ok()?,
+    })
+}
+
+fn read_iw5_attachment_ammunition(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    body: fastfile_iw5::Ptr,
+) -> Option<Iw5AttachmentAmmunition> {
+    Some(Iw5AttachmentAmmunition {
+        max_ammo: stream.i32_at(body, 0).ok()?,
+        start_ammo: stream.i32_at(body, 4).ok()?,
+        clip_size: stream.i32_at(body, 8).ok()?,
+        shot_count: stream.i32_at(body, 12).ok()?,
+        reload_ammo_add: stream.i32_at(body, 16).ok()?,
+        reload_start_add: stream.i32_at(body, 20).ok()?,
+    })
+}
+
+fn read_iw5_f32_block<const N: usize>(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    body: fastfile_iw5::Ptr,
+) -> Option<[f32; N]> {
+    let mut values = [0.0; N];
+    for (index, value) in values.iter_mut().enumerate() {
+        *value = stream.f32_at(body, index * 4).ok()?;
+    }
+    Some(values)
+}
+
+fn read_iw5_attachment_damage(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    body: fastfile_iw5::Ptr,
+) -> Option<Iw5AttachmentDamage> {
+    Some(Iw5AttachmentDamage {
+        damage: stream.i32_at(body, 0).ok()?,
+        min_damage: stream.i32_at(body, 4).ok()?,
+        melee_damage: stream.i32_at(body, 8).ok()?,
+        max_damage_range: stream.f32_at(body, 12).ok()?,
+        min_damage_range: stream.f32_at(body, 16).ok()?,
+        player_damage: stream.i32_at(body, 20).ok()?,
+        min_player_damage: stream.i32_at(body, 24).ok()?,
+    })
+}
+
+fn read_iw5_attachment_ads(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    body: fastfile_iw5::Ptr,
+) -> Option<Iw5AttachmentAdsSettings> {
+    let f = |offset| stream.f32_at(body, offset).ok();
+    Some(Iw5AttachmentAdsSettings {
+        ads_spread: f(0)?,
+        ads_aim_pitch: f(4)?,
+        ads_trans_in_time: f(8)?,
+        ads_trans_out_time: f(12)?,
+        ads_reload_trans_time_ms: stream.i32_at(body, 16).ok()?,
+        ads_crosshair_in_frac: f(20)?,
+        ads_crosshair_out_frac: f(24)?,
+        ads_zoom_fov: f(28)?,
+        ads_zoom_in_frac: f(32)?,
+        ads_zoom_out_frac: f(36)?,
+        ads_bob_factor: f(40)?,
+        ads_view_bob_mult: f(44)?,
+        ads_view_error_min: f(48)?,
+        ads_view_error_max: f(52)?,
+    })
 }
 
 fn leftover_iw5_weapdef_overlay_slot(
@@ -3638,6 +4177,10 @@ fn leftover_iw5_anim_overrides(
         else {
             break;
         };
+        let Ok(alt_time_ms) = stream.i32_at(row, stream.layout(sz::ANIM_OVERRIDE_ALT_TIME_OFF, 36))
+        else {
+            break;
+        };
         out.push(LeftoverAnimOverride {
             attachment1,
             attachment2,
@@ -3655,6 +4198,7 @@ fn leftover_iw5_anim_overrides(
                 16,
             ),
             anim_time_ms,
+            alt_time_ms,
         });
     }
     out
@@ -3673,7 +4217,7 @@ fn leftover_xstring_at_iw5(
 }
 
 fn apply_leftover_default_anim_overrides(
-    sz: &mut [Option<String>; WEAPON_ANIM_COUNT],
+    sz: &mut [Option<String>; WEAPON_ANIM_SLOTS],
     overrides: &[LeftoverAnimOverride],
 ) {
     for ov in overrides {
@@ -3716,6 +4260,123 @@ fn leftover_iw5_sound_overrides(
             sound_type: sound_type as u32,
             override_sound: leftover_iw5_snd_alias_at(stream, row, 4, 8),
             altmode_sound: leftover_iw5_snd_alias_at(stream, row, 8, 16),
+        });
+    }
+    out
+}
+
+fn read_iw5_reload_overrides(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    geometry: &fastfile_iw5::WeaponGeometry,
+) -> Vec<Iw5ReloadOverride> {
+    let Some(arr) = geometry.reload_overrides else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(geometry.reload_override_count.max(0) as usize);
+    for i in 0..geometry.reload_override_count.max(0) as usize {
+        let row = arr.at(i * fastfile_iw5::size::RELOAD_STATE_TIMER_ENTRY);
+        let (Ok(attachment), Ok(reload_add_time_ms), Ok(reload_start_add_time_ms)) = (
+            stream.u16_at(row, 0),
+            stream.i32_at(row, 4),
+            stream.i32_at(row, 8),
+        ) else {
+            break;
+        };
+        out.push(Iw5ReloadOverride {
+            attachment,
+            reload_add_time_ms,
+            reload_start_add_time_ms,
+        });
+    }
+    out
+}
+
+fn read_iw5_combat_fx(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    geometry: &fastfile_iw5::WeaponGeometry,
+    fx_name_at_slot: &dyn Fn(fastfile_iw5::Ptr) -> Option<String>,
+) -> WeaponCombatFx {
+    use fastfile_iw5::size as sz;
+    let Some(body) = geometry.weap_def else {
+        return WeaponCombatFx::default();
+    };
+    let fx_name = |x86, x64| match stream.ptr_at(body, stream.layout(x86, x64)) {
+        Ok(fastfile_iw5::ZonePtr::Offset(q)) => fx_name_at_slot(stream.resolve_alias(q)),
+        _ => None,
+    };
+    let view_last_shot_eject_hint = fx_name(sz::WEAPON_DEF_VIEW_LAST_SHOT_EJECT_OFF, 544);
+    let world_last_shot_eject_hint = fx_name(sz::WEAPON_DEF_WORLD_LAST_SHOT_EJECT_OFF, 552);
+    WeaponCombatFx {
+        view_flash_hint: fx_name(sz::WEAPON_DEF_VIEW_FLASH_OFF, 112),
+        world_flash_hint: fx_name(sz::WEAPON_DEF_WORLD_FLASH_OFF, 120),
+        view_shell_eject_hint: fx_name(sz::WEAPON_DEF_VIEW_SHELL_EJECT_OFF, 528),
+        world_shell_eject_hint: fx_name(sz::WEAPON_DEF_WORLD_SHELL_EJECT_OFF, 536),
+        last_shot_eject_pair_authored: view_last_shot_eject_hint.is_some()
+            && world_last_shot_eject_hint.is_some(),
+        view_last_shot_eject_hint,
+        world_last_shot_eject_hint,
+        ..WeaponCombatFx::default()
+    }
+}
+
+fn read_iw5_fx_overrides(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    geometry: &fastfile_iw5::WeaponGeometry,
+    fx_name_at_slot: &dyn Fn(fastfile_iw5::Ptr) -> Option<String>,
+) -> Vec<Iw5FxOverride> {
+    let Some(arr) = geometry.fx_overrides else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(geometry.fx_override_count.max(0) as usize);
+    for i in 0..geometry.fx_override_count.max(0) as usize {
+        let row = arr.at(i * stream.layout(fastfile_iw5::size::FX_OVERRIDE_ENTRY, 32));
+        let (Ok(attachment1), Ok(attachment2), Ok(fx_type)) = (
+            stream.u16_at(row, 0),
+            stream.u16_at(row, 2),
+            stream.i32_at(row, stream.layout(12, 24)),
+        ) else {
+            break;
+        };
+        let fx_name = |off| match stream.ptr_at(row, off) {
+            Ok(fastfile_iw5::ZonePtr::Offset(q)) => fx_name_at_slot(stream.resolve_alias(q)),
+            _ => None,
+        };
+        out.push(Iw5FxOverride {
+            attachment1,
+            attachment2,
+            fx_type: fx_type as u32,
+            override_fx: fx_name(stream.layout(4, 8)),
+            altmode_fx: fx_name(stream.layout(8, 16)),
+        });
+    }
+    out
+}
+
+fn read_iw5_notetrack_overrides(
+    stream: &fastfile_iw5::ZoneStream<'_>,
+    strings: &fastfile_iw5::ScriptStrings,
+    geometry: &fastfile_iw5::WeaponGeometry,
+) -> Vec<Iw5NotetrackOverride> {
+    let Some(arr) = geometry.note_track_overrides else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(geometry.note_track_override_count.max(0) as usize);
+    for i in 0..geometry.note_track_override_count.max(0) as usize {
+        let row = arr.at(i * stream.layout(fastfile_iw5::size::NOTE_TRACK_SOUND_ENTRY, 24));
+        let Ok(attachment) = stream.u16_at(row, 0) else {
+            break;
+        };
+        let sound_map = leftover_iw5_script_string_map(
+            stream,
+            strings,
+            row,
+            stream.layout(4, 8),
+            stream.layout(8, 16),
+            24,
+        );
+        out.push(Iw5NotetrackOverride {
+            attachment,
+            sound_map,
         });
     }
     out
@@ -3935,9 +4596,9 @@ fn read_script_string_map(
     out
 }
 
-fn read_sz_xanims(stream: &ZoneStream<'_>, arr: Ptr) -> [Option<String>; WEAPON_ANIM_COUNT] {
-    let mut out = [const { None }; WEAPON_ANIM_COUNT];
-    for (i, slot) in out.iter_mut().enumerate() {
+fn read_sz_xanims(stream: &ZoneStream<'_>, arr: Ptr) -> [Option<String>; WEAPON_ANIM_SLOTS] {
+    let mut out = [const { None }; WEAPON_ANIM_SLOTS];
+    for (i, slot) in out.iter_mut().take(WEAPON_ANIM_COUNT).enumerate() {
         let name_ptr = match stream.ptr_at(arr, i * stream.pointer_bytes()) {
             Ok(ZonePtr::Offset(q)) => Some(stream.resolve_alias(q)),
             _ => None,
@@ -3951,8 +4612,8 @@ fn read_sz_xanims(stream: &ZoneStream<'_>, arr: Ptr) -> [Option<String>; WEAPON_
 }
 
 fn merge_sz_xanims(
-    dst: &mut [Option<String>; WEAPON_ANIM_COUNT],
-    src: [Option<String>; WEAPON_ANIM_COUNT],
+    dst: &mut [Option<String>; WEAPON_ANIM_SLOTS],
+    src: [Option<String>; WEAPON_ANIM_SLOTS],
 ) {
     for (d, s) in dst.iter_mut().zip(src) {
         if d.is_none() {
@@ -3961,7 +4622,7 @@ fn merge_sz_xanims(
     }
 }
 
-fn xanims_idle(names: &[Option<String>; WEAPON_ANIM_COUNT]) -> Option<&str> {
+fn xanims_idle(names: &[Option<String>; WEAPON_ANIM_SLOTS]) -> Option<&str> {
     names
         .get(weap_anim::IDLE)
         .and_then(|s| s.as_deref())
@@ -4036,9 +4697,6 @@ fn merge_sound_aliases(dst: &mut WeaponSoundAliases, src: &WeaponSoundAliases) {
     }
     if dst.notetrack_rumble_map.is_empty() && !src.notetrack_rumble_map.is_empty() {
         dst.notetrack_rumble_map = src.notetrack_rumble_map.clone();
-    }
-    if dst.leftover_sound_overrides.is_empty() && !src.leftover_sound_overrides.is_empty() {
-        dst.leftover_sound_overrides = src.leftover_sound_overrides.clone();
     }
 }
 
@@ -4426,6 +5084,7 @@ fn merge_body_facts(dst: &mut WeaponBodyFacts, src: WeaponBodyFacts) {
     if dst.penetrate_multiplier == 0.0 && src.penetrate_multiplier != 0.0 {
         dst.penetrate_multiplier = src.penetrate_multiplier;
     }
+    // motion_tracker belongs to the complete definition, not the shared body.
     if !dst.rifle_bullet && src.rifle_bullet {
         dst.rifle_bullet = true;
     }
@@ -4503,13 +5162,23 @@ struct WeaponRow {
 
     hand_xmodel_edge: AssetEdge<FpvMeshSpace>,
 
-    gun_xmodel_from_zone: bool,
+    rocket_model_edge: AssetEdge<FpvMeshSpace>,
+
+    attachment_view_model_edges: Vec<AssetEdge<FpvMeshSpace>>,
+
+    fpv_hands: [Option<(asset_model::FpvHands, crate::FpvMeshIndex)>; 2],
+
+    fpv_mount_plan: Option<Result<asset_model::FpvMountPlan, asset_model::FpvMountError>>,
+
+    fpv_assemblies: [Option<Result<crate::FpvSideAssemblies, String>>; 2],
 
     world_model: Option<String>,
 
-    world_model_from_zone: bool,
-
     world_model_edge: AssetEdge<WorldWeaponSpace>,
+
+    attachment_world_model_edges: Vec<AssetEdge<WorldWeaponSpace>>,
+
+    attachment_world_mounts: Vec<Option<String>>,
 
     projectile_model: Option<String>,
 
@@ -4517,17 +5186,33 @@ struct WeaponRow {
 
     rocket_model: Option<String>,
 
-    sz_xanims: [Option<String>; WEAPON_ANIM_COUNT],
+    sz_xanims: [Option<String>; WEAPON_ANIM_SLOTS],
 
-    sz_xanim_edges: [AssetEdge<XAnimSpace>; WEAPON_ANIM_COUNT],
+    sz_xanim_edges: [AssetEdge<XAnimSpace>; WEAPON_ANIM_SLOTS],
 
-    sz_xanims_right: [Option<String>; WEAPON_ANIM_COUNT],
+    sz_xanim_right_edges: [AssetEdge<XAnimSpace>; WEAPON_ANIM_SLOTS],
 
-    sz_xanims_left: [Option<String>; WEAPON_ANIM_COUNT],
+    sz_xanim_left_edges: [AssetEdge<XAnimSpace>; WEAPON_ANIM_SLOTS],
+
+    notetrack_actions: HashMap<String, LinkedNotetrackAction>,
+
+    sz_xanims_right: [Option<String>; WEAPON_ANIM_SLOTS],
+
+    sz_xanims_left: [Option<String>; WEAPON_ANIM_SLOTS],
 
     hide_tags: Vec<String>,
 
-    scope_viewmodel: Option<String>,
+    attachment_view_models: Vec<String>,
+    attachment_world_models: Vec<String>,
+
+    iw5_configuration: Option<(u32, Iw5AttachmentSelection)>,
+    prepared_attachments: Vec<String>,
+
+    iw5_attachment_slots: [Option<String>; fastfile_iw5::size::WEAPON_ATTACHMENT_SLOT_COUNT],
+    iw5_reload_overrides: Vec<Iw5ReloadOverride>,
+    iw5_anim_overrides: Vec<LeftoverAnimOverride>,
+    iw5_fx_overrides: Vec<Iw5FxOverride>,
+    iw5_notetrack_overrides: Vec<Iw5NotetrackOverride>,
 
     sounds: WeaponSoundAliases,
 
@@ -4552,7 +5237,6 @@ struct WeaponRow {
     hud_icon_image: Option<String>,
 
     dpad_icon_image: Option<String>,
-    dpad_icon_atlas: Option<[u8; 2]>,
     dpad_icon_ratio: i32,
     kill_icon: Option<String>,
     kill_icon_from_slot: bool,
@@ -4581,19 +5265,35 @@ impl Default for WeaponRow {
             hand_xmodel: None,
             gun_xmodel_edge: AssetEdge::Absent,
             hand_xmodel_edge: AssetEdge::Absent,
-            gun_xmodel_from_zone: false,
+            rocket_model_edge: AssetEdge::Absent,
+            attachment_view_model_edges: Vec::new(),
+            fpv_hands: [None, None],
+            fpv_mount_plan: None,
+            fpv_assemblies: [None, None],
             world_model: None,
-            world_model_from_zone: false,
             world_model_edge: AssetEdge::Absent,
+            attachment_world_model_edges: Vec::new(),
+            attachment_world_mounts: Vec::new(),
             projectile_model: None,
             projectile_model_edge: AssetEdge::Absent,
             rocket_model: None,
-            sz_xanims: [const { None }; WEAPON_ANIM_COUNT],
-            sz_xanim_edges: [AssetEdge::Absent; WEAPON_ANIM_COUNT],
-            sz_xanims_right: [const { None }; WEAPON_ANIM_COUNT],
-            sz_xanims_left: [const { None }; WEAPON_ANIM_COUNT],
+            sz_xanims: [const { None }; WEAPON_ANIM_SLOTS],
+            sz_xanim_edges: [AssetEdge::Absent; WEAPON_ANIM_SLOTS],
+            sz_xanim_right_edges: [AssetEdge::Absent; WEAPON_ANIM_SLOTS],
+            sz_xanim_left_edges: [AssetEdge::Absent; WEAPON_ANIM_SLOTS],
+            notetrack_actions: HashMap::new(),
+            sz_xanims_right: [const { None }; WEAPON_ANIM_SLOTS],
+            sz_xanims_left: [const { None }; WEAPON_ANIM_SLOTS],
             hide_tags: Vec::new(),
-            scope_viewmodel: None,
+            attachment_view_models: Vec::new(),
+            attachment_world_models: Vec::new(),
+            iw5_configuration: None,
+            prepared_attachments: Vec::new(),
+            iw5_attachment_slots: std::array::from_fn(|_| None),
+            iw5_reload_overrides: Vec::new(),
+            iw5_anim_overrides: Vec::new(),
+            iw5_fx_overrides: Vec::new(),
+            iw5_notetrack_overrides: Vec::new(),
             sounds: WeaponSoundAliases::default(),
             combat_fx: WeaponCombatFx::default(),
             reticle: WeaponReticleAssets::default(),
@@ -4610,7 +5310,6 @@ impl Default for WeaponRow {
             hud_icon_ratio: 0,
             hud_icon_image: None,
             dpad_icon_image: None,
-            dpad_icon_atlas: None,
             dpad_icon_ratio: 0,
             kill_icon: None,
             kill_icon_from_slot: false,
@@ -4631,11 +5330,23 @@ impl Default for WeaponRow {
 pub struct WeaponRegistry {
     rows: Vec<WeaponRow>,
 
+    world_catalog_identity: u64,
+
+    iw5_attachments: HashMap<String, Iw5ScopeRow>,
+
+    iw5_candidates: Vec<Iw5ConfigurationCandidate>,
+
+    configurations: HashMap<crate::WeaponSelection, u32>,
+
     by_name: HashMap<String, u32>,
 
     by_namespaced: HashMap<(crate::AssetNamespace, String), u32>,
 
     item_groups: HashMap<(crate::AssetNamespace, String), String>,
+
+    families: crate::WeaponFamilies,
+
+    fpv_clip_tracks: Arc<crate::FpvClipTracks>,
 
     revision: u64,
 }
@@ -4654,9 +5365,16 @@ impl core::fmt::Display for UnknownWeaponName {
 impl std::error::Error for UnknownWeaponName {}
 
 #[derive(Clone, Debug, Default)]
+pub struct Iw5PreparationCensus {
+    pub prepared: usize,
+    pub refused: Vec<crate::WeaponSelection>,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct WeaponBuild {
     registry: WeaponRegistry,
     combat_slots: Vec<CombatFxSlots>,
+    family_tables: Vec<(crate::AssetNamespace, crate::CapturedStringTable)>,
 }
 
 impl std::ops::Deref for WeaponBuild {
@@ -4669,11 +5387,72 @@ impl std::ops::Deref for WeaponBuild {
 
 impl WeaponBuild {
     pub fn publish(self) -> WeaponRegistry {
-        self.registry
+        let mut registry = self.registry;
+        registry.families = crate::WeaponFamilies::build(&self.family_tables, &registry);
+        registry.build_iw5_candidates();
+        registry
+    }
+
+    pub fn set_family_tables(
+        &mut self,
+        tables: Vec<(crate::AssetNamespace, crate::CapturedStringTable)>,
+    ) {
+        self.family_tables = tables;
+    }
+
+    pub fn prepare_iw5_configurations(&mut self) -> Iw5PreparationCensus {
+        let families = crate::WeaponFamilies::build(&self.family_tables, &self.registry);
+        let mut census = Iw5PreparationCensus::default();
+        let mut prepared = Vec::new();
+        for (base_id, selection) in families.iw5_candidate_selections() {
+            if selection.attachments.is_empty() {
+                continue;
+            }
+            let Some(namespace) = selection.family.as_ref().map(|key| key.namespace) else {
+                continue;
+            };
+            let attachments = families.normalize(namespace, &selection.attachments);
+            let selection = crate::WeaponSelection {
+                attachments,
+                ..selection
+            };
+            let row = self
+                .registry
+                .resolve_iw5_attachment_slots(base_id, &selection.attachments)
+                .ok()
+                .and_then(|native| self.registry.compose_iw5_configuration(base_id, native));
+            match row {
+                Some(row) => prepared.push((base_id, selection, row)),
+                None => census.refused.push(selection),
+            }
+        }
+        census.prepared = prepared.len();
+        for (base_id, selection, mut row) in prepared {
+            row.prepared_attachments = selection.attachments.clone();
+            self.registry
+                .configurations
+                .insert(selection, self.registry.rows.len() as u32);
+            let slots = self
+                .combat_slots
+                .get(base_id as usize)
+                .copied()
+                .unwrap_or_default();
+            self.combat_slots
+                .resize(self.registry.rows.len(), CombatFxSlots::default());
+            self.combat_slots.push(slots);
+            self.registry.rows.push(row);
+        }
+        self.registry.rebuild_name_maps();
+        self.registry.revision = mint_weapon_revision();
+        census
     }
 
     pub fn absorb(&mut self, other: Self) {
         if other.registry.is_empty() {
+            self.registry
+                .iw5_attachments
+                .extend(other.registry.iw5_attachments);
+            self.family_tables.extend(other.family_tables);
             return;
         }
         if self.registry.rows.is_empty() {
@@ -4683,8 +5462,12 @@ impl WeaponBuild {
         self.registry
             .rows
             .extend(other.registry.rows.into_iter().skip(1));
+        self.registry
+            .iw5_attachments
+            .extend(other.registry.iw5_attachments);
         self.combat_slots
             .extend(other.combat_slots.into_iter().skip(1));
+        self.family_tables.extend(other.family_tables);
         self.registry.item_groups.extend(other.registry.item_groups);
         self.registry.rebuild_name_maps();
         self.registry.revision = mint_weapon_revision();
@@ -4712,6 +5495,13 @@ impl WeaponBuild {
 
     pub fn resolve_hud_material_edges(&mut self, materials: &crate::MaterialDefinitions) {
         for row in &mut self.registry.rows {
+            if row.overlay_image.is_none()
+                && let Some(name) = row.overlay_material.as_deref()
+                && let Some(index) = materials.material_index_by_name(name)
+                && let Some(material) = materials.materials.get(index.order())
+            {
+                row.overlay_image = materials.hud_image_name(material).map(str::to_owned);
+            }
             row.reticle.center_edge = material_hint_edge(
                 row.reticle.center_material.as_deref(),
                 row.reticle.center_authored,
@@ -4763,38 +5553,251 @@ impl WeaponBuild {
 
     pub fn resolve_sz_xanim_edges(&mut self, xanims: &crate::XAnimCatalog) {
         for row in &mut self.registry.rows {
-            let mut edges = [AssetEdge::Absent; WEAPON_ANIM_COUNT];
+            let mut edges = [AssetEdge::Absent; WEAPON_ANIM_SLOTS];
             for (edge, hint) in edges.iter_mut().zip(row.sz_xanims.iter()) {
                 *edge = xanim_hint_edge(hint.as_deref(), row.namespace, xanims);
             }
             row.sz_xanim_edges = edges;
+            row.sz_xanim_right_edges = std::array::from_fn(|slot| {
+                xanim_hint_edge(row.sz_xanims_right[slot].as_deref(), row.namespace, xanims)
+            });
+            row.sz_xanim_left_edges = std::array::from_fn(|slot| {
+                xanim_hint_edge(row.sz_xanims_left[slot].as_deref(), row.namespace, xanims)
+            });
         }
+    }
+
+    pub fn resolve_notetrack_actions(&mut self, xanims: &crate::XAnimCatalog) -> (usize, usize) {
+        let mut linked = 0;
+        let mut inline = 0;
+        for row in &mut self.registry.rows {
+            let mut actions: HashMap<String, LinkedNotetrackAction> = HashMap::new();
+            match row.sounds.notetrack_convention {
+                NotetrackConvention::SoundMap => {
+                    for (note, alias) in &row.sounds.notetrack_sound_map {
+                        if !alias.is_empty() {
+                            let action = actions.entry(note.to_ascii_lowercase()).or_default();
+                            if action.sound_alias.is_none() {
+                                action.sound_alias = Some(alias.clone());
+                            }
+                        }
+                    }
+                    for (note, alias) in &row.sounds.notetrack_rumble_map {
+                        if !alias.is_empty() {
+                            let action = actions.entry(note.to_ascii_lowercase()).or_default();
+                            if action.rumble_alias.is_none() {
+                                action.rumble_alias = Some(alias.clone());
+                            }
+                        }
+                    }
+                }
+                NotetrackConvention::InlinePrefix => {
+                    let indices: std::collections::BTreeSet<_> = row
+                        .sz_xanim_edges
+                        .iter()
+                        .chain(&row.sz_xanim_right_edges)
+                        .chain(&row.sz_xanim_left_edges)
+                        .filter_map(|edge| edge.bound_index())
+                        .collect();
+                    for index in indices {
+                        let Some(clip) = xanims.clip_at(index) else {
+                            continue;
+                        };
+                        for notify in &clip.notifies {
+                            let sound = t5_inline_note_alias(&notify.name, T5_NOTE_SOUND_PREFIX);
+                            let rumble = t5_inline_note_alias(&notify.name, T5_NOTE_RUMBLE_PREFIX);
+                            if sound.is_none() && rumble.is_none() {
+                                continue;
+                            }
+                            let action =
+                                actions.entry(notify.name.to_ascii_lowercase()).or_default();
+                            action.sound_alias = sound.map(str::to_owned);
+                            action.rumble_alias = rumble.map(str::to_owned);
+                        }
+                    }
+                }
+            }
+            linked += actions.len();
+            if row.sounds.notetrack_convention == NotetrackConvention::InlinePrefix {
+                inline += actions.len();
+            }
+            row.notetrack_actions = actions;
+        }
+        (linked, inline)
     }
 
     pub fn resolve_fpv_mesh_edges(&mut self, fpv: &crate::FpvMeshCatalog) {
         for row in &mut self.registry.rows {
-            row.gun_xmodel_edge = fpv_zone_hint_edge(
-                row.gun_xmodel_from_zone,
-                row.gun_xmodel.as_deref(),
-                row.namespace,
-                fpv,
-            );
-            row.hand_xmodel_edge = fpv_zone_hint_edge(
-                row.hand_xmodel.is_some(),
-                row.hand_xmodel.as_deref(),
-                row.namespace,
-                fpv,
-            );
+            row.gun_xmodel_edge = fpv_model_edge(row.gun_xmodel.as_deref(), row.namespace, fpv);
+            row.hand_xmodel_edge = fpv_model_edge(row.hand_xmodel.as_deref(), row.namespace, fpv);
+            row.rocket_model_edge = fpv_model_edge(row.rocket_model.as_deref(), row.namespace, fpv);
+            row.attachment_view_model_edges = row
+                .attachment_view_models
+                .iter()
+                .map(|name| fpv_model_edge(Some(name), row.namespace, fpv))
+                .collect();
+            row.fpv_mount_plan = row.gun_xmodel_edge.bound_index().and_then(|gun| {
+                let attachments: Option<Vec<_>> = row
+                    .attachment_view_model_edges
+                    .iter()
+                    .map(|edge| edge.bound_index().map(crate::FpvMeshIndex::from_order))
+                    .collect();
+                let rocket = if row.rocket_model_edge.is_absent() {
+                    Some(None)
+                } else {
+                    row.rocket_model_edge
+                        .bound_index()
+                        .map(|index| Some(crate::FpvMeshIndex::from_order(index)))
+                }?;
+                Some(asset_model::plan_fpv_mounts(
+                    fpv,
+                    crate::FpvMeshIndex::from_order(gun),
+                    &attachments?,
+                    rocket,
+                ))
+            });
         }
     }
 
-    pub fn resolve_world_model_edges(&mut self, catalog: &crate::WorldWeaponCatalog) {
+    pub fn resolve_fpv_hands(
+        &mut self,
+        fpv: &crate::FpvMeshCatalog,
+        bodies: &asset_model::BodyMeshCatalog,
+    ) {
         for row in &mut self.registry.rows {
-            row.world_model_edge = world_zone_hint_edge(
-                row.world_model_from_zone,
-                row.world_model.as_deref(),
-                catalog,
-            );
+            let map_ns = fpv.map_namespace.unwrap_or(row.namespace);
+            let hand_name = row
+                .hand_xmodel_edge
+                .bound_index()
+                .and_then(|index| fpv.get_at(index))
+                .map(|entry| entry.skel.name.as_str());
+            row.fpv_hands = std::array::from_fn(|side| {
+                let kit = bodies.kits().kit(side == 1);
+                let choice =
+                    asset_model::FpvHands::resolve(fpv, map_ns, kit, hand_name, row.namespace);
+                let (ns, name) = choice.key()?;
+                let index = fpv.index_by_name(ns, name)?;
+                let skel = &fpv.get_at(index)?.skel;
+                if skel.pose.is_none() || !skel.bone_names.iter().any(|bone| bone == "tag_weapon") {
+                    return None;
+                }
+                Some((choice, crate::FpvMeshIndex::from_order(index)))
+            });
+        }
+    }
+
+    pub fn resolve_fpv_assemblies(
+        &mut self,
+        fpv: &crate::FpvMeshCatalog,
+        xanims: &crate::XAnimCatalog,
+    ) -> FpvAssemblyCensus {
+        let mut shared: HashMap<crate::FpvAssemblyKey, Result<Arc<crate::FpvAssembly>, String>> =
+            HashMap::new();
+        let mut tracks = crate::FpvClipTracks::default();
+        let mut census = FpvAssemblyCensus::default();
+        let hide_tags: Vec<Vec<String>> = (0..self.registry.rows.len() as u32)
+            .map(|id| crate::effective_hide_tags(&self.registry, id))
+            .collect();
+        for (row, hide_tags) in self.registry.rows.iter_mut().zip(hide_tags) {
+            row.fpv_assemblies = [None, None];
+            let Some(Ok(mounts)) = &row.fpv_mount_plan else {
+                continue;
+            };
+            let clips: std::collections::BTreeSet<usize> = row
+                .sz_xanim_edges
+                .iter()
+                .chain(&row.sz_xanim_right_edges)
+                .chain(&row.sz_xanim_left_edges)
+                .filter_map(|edge| edge.bound_index())
+                .collect();
+            let mut assemble = |hands: crate::FpvMeshIndex, rocket: bool| {
+                let key = crate::FpvAssemblyKey {
+                    hands,
+                    gun: mounts.gun,
+                    attachments: mounts.attachments.iter().map(|mount| mount.model).collect(),
+                    rocket: rocket
+                        .then(|| mounts.rocket.as_ref().map(|mount| mount.model))
+                        .flatten(),
+                    hide_tags: hide_tags.clone(),
+                };
+                shared
+                    .entry(key)
+                    .or_insert_with(|| {
+                        census.built += 1;
+                        crate::FpvAssembly::build(fpv, hands, mounts, rocket, &hide_tags)
+                            .map(Arc::new)
+                            .map_err(|error| error.to_string())
+                    })
+                    .clone()
+            };
+            let sides: [Option<Result<crate::FpvSideAssemblies, String>>; 2] =
+                std::array::from_fn(|side| {
+                    let (_, hands) = row.fpv_hands[side].as_ref()?;
+                    let bare = match assemble(*hands, false) {
+                        Ok(bare) => bare,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    let rocket = match mounts.rocket.is_some().then(|| assemble(*hands, true)) {
+                        None => None,
+                        Some(Ok(rocket)) => Some(rocket),
+                        Some(Err(error)) => return Some(Err(error)),
+                    };
+                    Some(Ok(crate::FpvSideAssemblies { bare, rocket }))
+                });
+            for side in sides.iter().flatten().flatten() {
+                for assembly in std::iter::once(&side.bare).chain(&side.rocket) {
+                    for &clip_index in &clips {
+                        let Some(clip) = xanims.clip_at(clip_index) else {
+                            continue;
+                        };
+                        for part in &assembly.parts {
+                            tracks.bind(fpv, clip_index, &clip, part.model);
+                        }
+                    }
+                }
+            }
+            for side in sides.iter().flatten() {
+                match side {
+                    Ok(_) => census.linked += 1,
+                    Err(_) => census.refused += 1,
+                }
+            }
+            row.fpv_assemblies = sides;
+        }
+        census.clip_tables = tracks.len();
+        self.registry.fpv_clip_tracks = Arc::new(tracks);
+        census
+    }
+
+    pub fn resolve_world_model_edges(&mut self, catalog: &crate::WorldWeaponCatalog) {
+        self.registry.world_catalog_identity = catalog.identity();
+        for row in &mut self.registry.rows {
+            row.world_model_edge = world_model_edge(row.world_model.as_deref(), catalog);
+            row.attachment_world_model_edges = row
+                .attachment_world_models
+                .iter()
+                .map(|name| world_model_edge(Some(name), catalog))
+                .collect();
+            let gun = row
+                .world_model_edge
+                .bound_index()
+                .and_then(|index| catalog.get_at(index));
+            row.attachment_world_mounts = row
+                .attachment_world_model_edges
+                .iter()
+                .map(|edge| {
+                    let root = catalog
+                        .get_at(edge.bound_index()?)?
+                        .skel
+                        .bone_names
+                        .first()?;
+                    gun?.skel
+                        .bone_names
+                        .iter()
+                        .find(|bone| bone.eq_ignore_ascii_case(root))
+                        .cloned()
+                })
+                .collect();
         }
     }
 
@@ -4842,60 +5845,10 @@ impl WeaponBuild {
         }
     }
 
-    pub fn fill_missing_gun_xmodels(&mut self, mut mesh_exists: impl FnMut(&str) -> bool) -> usize {
-        let mut filled = 0usize;
-        for row in self.registry.rows.iter_mut().skip(1) {
-            if row.gun_xmodel.is_some() {
-                continue;
-            }
-            let Some(idle) = row.sz_xanims[weap_anim::IDLE].as_deref() else {
-                continue;
-            };
-            if let Some(gun) = gun_candidates_from_idle(idle)
-                .into_iter()
-                .find(|c| mesh_exists(c))
-            {
-                row.gun_xmodel = Some(gun);
-                row.gun_xmodel_from_zone = false;
-                filled += 1;
-            }
-        }
-        filled
-    }
-
-    pub fn fill_missing_world_models(
-        &mut self,
-        mut mesh_exists: impl FnMut(&str) -> bool,
-    ) -> usize {
-        let mut filled = 0usize;
-        for row in self.registry.rows.iter_mut().skip(1) {
-            if row.world_model.is_some() {
-                continue;
-            }
-            let mut candidates = Vec::new();
-            if let Some(gun) = row.gun_xmodel.as_deref() {
-                candidates.extend(world_candidates_from_viewmodel(gun));
-            }
-            if let Some(idle) = row.sz_xanims[weap_anim::IDLE].as_deref() {
-                for gun in gun_candidates_from_idle(idle) {
-                    candidates.extend(world_candidates_from_viewmodel(&gun));
-                }
-            }
-            if !row.name.is_empty() {
-                candidates.push(format!("weapon_{}", row.name));
-                candidates.push(format!("weapon_{}_mp", row.name));
-                candidates.push(format!("weapon_{}_tactical", row.name));
-            }
-            if let Some(world) = candidates.into_iter().find(|c| mesh_exists(c)) {
-                row.world_model = Some(world);
-                row.world_model_from_zone = false;
-                filled += 1;
-            }
-        }
-        filled
-    }
-
-    fn from_catalog(mut entries: Vec<CatalogWeapon>) -> Self {
+    fn from_catalog(
+        mut entries: Vec<CatalogWeapon>,
+        iw5_attachments: HashMap<String, Iw5ScopeRow>,
+    ) -> Self {
         let mut gun_by_def: HashMap<(u8, u32), String> = HashMap::new();
         let mut hand_by_def: HashMap<(u8, u32), String> = HashMap::new();
         let mut world_by_def: HashMap<(u8, u32), String> = HashMap::new();
@@ -4904,10 +5857,9 @@ impl WeaponBuild {
         let mut sounds_by_def: HashMap<(u8, u32), WeaponSoundAliases> = HashMap::new();
         let mut combat_fx_by_def: HashMap<(u8, u32), WeaponCombatFx> = HashMap::new();
         let mut combat_slots_by_def: HashMap<(u8, u32), CombatFxSlots> = HashMap::new();
-        let mut facts_by_def: HashMap<(u8, u32), WeaponBodyFacts> = HashMap::new();
-        let mut right_by_def: HashMap<(u8, u32), [Option<String>; WEAPON_ANIM_COUNT]> =
+        let mut right_by_def: HashMap<(u8, u32), [Option<String>; WEAPON_ANIM_SLOTS]> =
             HashMap::new();
-        let mut left_by_def: HashMap<(u8, u32), [Option<String>; WEAPON_ANIM_COUNT]> =
+        let mut left_by_def: HashMap<(u8, u32), [Option<String>; WEAPON_ANIM_SLOTS]> =
             HashMap::new();
         for entry in &entries {
             if let (Some(key), Some(gun)) = (entry.weap_def, entry.gun_xmodel.as_ref()) {
@@ -4932,8 +5884,6 @@ impl WeaponBuild {
                     combat_slots_by_def.entry(key).or_default(),
                     &entry.combat_slots,
                 );
-                let slot = facts_by_def.entry(key).or_default();
-                merge_body_facts(slot, entry.facts);
                 if xanims_idle(&entry.sz_xanims_right).is_some() {
                     right_by_def
                         .entry(key)
@@ -4981,9 +5931,6 @@ impl WeaponBuild {
                 }
                 if let Some(&shared) = combat_slots_by_def.get(&key) {
                     merge_combat_slots(&mut entry.combat_slots, &shared);
-                }
-                if let Some(&shared) = facts_by_def.get(&key) {
-                    merge_body_facts(&mut entry.facts, shared);
                 }
                 if xanims_idle(&entry.sz_xanims_right).is_none() {
                     if let Some(shared) = right_by_def.get(&key) {
@@ -5064,10 +6011,32 @@ impl WeaponBuild {
                     if existing.hide_tags.is_empty() && !entry.hide_tags.is_empty() {
                         existing.hide_tags = entry.hide_tags;
                     }
-                    if existing.scope_viewmodel.is_none() {
-                        existing.scope_viewmodel = entry.scope_viewmodel;
+                    for (existing_slot, new_slot) in existing
+                        .iw5_attachment_slots
+                        .iter_mut()
+                        .zip(entry.iw5_attachment_slots)
+                    {
+                        if existing_slot.is_none() {
+                            *existing_slot = new_slot;
+                        }
+                    }
+                    if existing.iw5_reload_overrides.is_empty() {
+                        existing.iw5_reload_overrides = entry.iw5_reload_overrides;
+                    }
+                    if existing.iw5_anim_overrides.is_empty() {
+                        existing.iw5_anim_overrides = entry.iw5_anim_overrides;
+                    }
+                    if existing.iw5_fx_overrides.is_empty() {
+                        existing.iw5_fx_overrides = entry.iw5_fx_overrides;
+                    }
+                    if existing.iw5_notetrack_overrides.is_empty() {
+                        existing.iw5_notetrack_overrides = entry.iw5_notetrack_overrides;
                     }
                     merge_sound_aliases(&mut existing.sounds, &entry.sounds);
+                    if existing.sounds.leftover_sound_overrides.is_empty() {
+                        existing.sounds.leftover_sound_overrides =
+                            entry.sounds.leftover_sound_overrides.clone();
+                    }
                     merge_combat_fx(&mut existing.combat_fx, &entry.combat_fx);
                     merge_combat_slots(&mut existing.combat_slots, &entry.combat_slots);
                     merge_body_facts(&mut existing.facts, entry.facts);
@@ -5092,23 +6061,39 @@ impl WeaponBuild {
                 namespace: crate::AssetNamespace::Iw4,
                 facts: entry.facts,
                 weap_def: entry.weap_def,
-                gun_xmodel_from_zone: entry.gun_xmodel.is_some(),
                 gun_xmodel: entry.gun_xmodel,
                 hand_xmodel: entry.hand_xmodel,
                 gun_xmodel_edge: AssetEdge::Absent,
                 hand_xmodel_edge: AssetEdge::Absent,
-                world_model_from_zone: entry.world_model.is_some(),
+                rocket_model_edge: AssetEdge::Absent,
+                attachment_view_model_edges: Vec::new(),
+                fpv_hands: [None, None],
+                fpv_mount_plan: None,
+                fpv_assemblies: [None, None],
                 world_model: entry.world_model,
                 world_model_edge: AssetEdge::Absent,
+                attachment_world_model_edges: Vec::new(),
+                attachment_world_mounts: Vec::new(),
                 projectile_model: entry.projectile_model,
                 projectile_model_edge: AssetEdge::Absent,
                 rocket_model: entry.rocket_model,
                 sz_xanims: entry.sz_xanims,
-                sz_xanim_edges: [AssetEdge::Absent; WEAPON_ANIM_COUNT],
+                sz_xanim_edges: [AssetEdge::Absent; WEAPON_ANIM_SLOTS],
+                sz_xanim_right_edges: [AssetEdge::Absent; WEAPON_ANIM_SLOTS],
+                sz_xanim_left_edges: [AssetEdge::Absent; WEAPON_ANIM_SLOTS],
+                notetrack_actions: HashMap::new(),
                 sz_xanims_right: entry.sz_xanims_right,
                 sz_xanims_left: entry.sz_xanims_left,
                 hide_tags: entry.hide_tags,
-                scope_viewmodel: entry.scope_viewmodel,
+                attachment_view_models: Vec::new(),
+                attachment_world_models: Vec::new(),
+                iw5_configuration: None,
+                prepared_attachments: Vec::new(),
+                iw5_attachment_slots: entry.iw5_attachment_slots,
+                iw5_reload_overrides: entry.iw5_reload_overrides,
+                iw5_anim_overrides: entry.iw5_anim_overrides,
+                iw5_fx_overrides: entry.iw5_fx_overrides,
+                iw5_notetrack_overrides: entry.iw5_notetrack_overrides,
                 sounds: entry.sounds,
                 combat_fx: entry.combat_fx,
                 reticle: entry.reticle,
@@ -5126,7 +6111,6 @@ impl WeaponBuild {
                 hud_icon_ratio: entry.hud_icon_ratio,
                 kill_icon_from_slot: entry.kill_icon_slot.is_some(),
                 dpad_icon_image: entry.dpad_icon_image,
-                dpad_icon_atlas: entry.dpad_icon_atlas,
                 dpad_icon_ratio: entry.dpad_icon_ratio,
                 kill_icon: entry.kill_icon,
                 kill_icon_image: entry.kill_icon_image,
@@ -5142,24 +6126,464 @@ impl WeaponBuild {
         }
         let mut registry = WeaponRegistry {
             rows,
+            world_catalog_identity: 0,
+            iw5_attachments,
+            iw5_candidates: Vec::new(),
+            configurations: HashMap::new(),
             by_name: index_of,
             by_namespaced: HashMap::new(),
             item_groups: HashMap::new(),
+            families: crate::WeaponFamilies::default(),
+            fpv_clip_tracks: Arc::default(),
             revision: mint_weapon_revision(),
         };
         registry.rebuild_name_maps();
         Self {
             registry,
             combat_slots,
+            family_tables: Vec::new(),
         }
     }
 }
 
 impl WeaponRegistry {
+    pub fn world_catalog_identity(&self) -> u64 {
+        self.world_catalog_identity
+    }
+
+    fn build_iw5_candidates(&mut self) {
+        self.iw5_candidates = self
+            .families
+            .iw5_candidate_selections()
+            .into_iter()
+            .map(|(base_id, selection)| {
+                let native = self.resolve_iw5_attachment_slots(base_id, &selection.attachments);
+                let primary_assets = native
+                    .as_ref()
+                    .ok()
+                    .and_then(|native| self.iw5_primary_attachment_assets(base_id, *native))
+                    .map(|assets| assets.into_iter().filter_map(|a| a.scope.clone()).collect())
+                    .unwrap_or_default();
+                let primary_ads_zoom_fov = native
+                    .as_ref()
+                    .ok()
+                    .and_then(|native| self.iw5_primary_ads_zoom_fov(base_id, *native));
+                let primary_ads_aim_pitch = native
+                    .as_ref()
+                    .ok()
+                    .and_then(|native| self.iw5_primary_ads_aim_pitch(base_id, *native));
+                Iw5ConfigurationCandidate {
+                    selection,
+                    base_id,
+                    native,
+                    primary_assets,
+                    primary_ads_zoom_fov,
+                    primary_ads_aim_pitch,
+                }
+            })
+            .collect();
+    }
+
+    pub fn iw5_configuration_candidates(&self) -> &[Iw5ConfigurationCandidate] {
+        &self.iw5_candidates
+    }
+
+    pub fn iw5_attachment_slots_of(
+        &self,
+        id: u32,
+    ) -> Option<&[Option<String>; fastfile_iw5::size::WEAPON_ATTACHMENT_SLOT_COUNT]> {
+        let row = self.rows.get(id as usize)?;
+        (row.namespace == crate::AssetNamespace::Iw5).then_some(&row.iw5_attachment_slots)
+    }
+
+    pub fn iw5_attachment_asset(&self, native_name: &str) -> Option<&Iw5ScopeRow> {
+        self.iw5_attachments.get(native_name)
+    }
+
+    pub fn iw5_reload_overrides_of(&self, id: u32) -> Option<&[Iw5ReloadOverride]> {
+        let row = self.rows.get(id as usize)?;
+        (row.namespace == crate::AssetNamespace::Iw5).then_some(row.iw5_reload_overrides.as_slice())
+    }
+
+    pub fn iw5_anim_overrides_of(&self, id: u32) -> Option<&[LeftoverAnimOverride]> {
+        let row = self.rows.get(id as usize)?;
+        (row.namespace == crate::AssetNamespace::Iw5).then_some(row.iw5_anim_overrides.as_slice())
+    }
+
+    pub fn iw5_fx_overrides_of(&self, id: u32) -> Option<&[Iw5FxOverride]> {
+        let row = self.rows.get(id as usize)?;
+        (row.namespace == crate::AssetNamespace::Iw5).then_some(row.iw5_fx_overrides.as_slice())
+    }
+
+    pub fn iw5_notetrack_overrides_of(&self, id: u32) -> Option<&[Iw5NotetrackOverride]> {
+        let row = self.rows.get(id as usize)?;
+        (row.namespace == crate::AssetNamespace::Iw5)
+            .then_some(row.iw5_notetrack_overrides.as_slice())
+    }
+
+    pub fn select_iw5_anim_override(
+        &self,
+        id: u32,
+        selection: Iw5AttachmentSelection,
+        anim_tree_type: u32,
+    ) -> Option<&LeftoverAnimOverride> {
+        iw5_best_pair_override(
+            self.iw5_anim_overrides_of(id)?,
+            selection,
+            anim_tree_type,
+            |row| (row.attachment1, row.attachment2, row.anim_tree_type),
+        )
+    }
+
+    pub fn select_iw5_sound_override(
+        &self,
+        id: u32,
+        selection: Iw5AttachmentSelection,
+        sound_type: u32,
+    ) -> Option<&LeftoverSoundOverride> {
+        let row = self.rows.get(id as usize)?;
+        if row.namespace != crate::AssetNamespace::Iw5 {
+            return None;
+        }
+        iw5_best_pair_override(
+            &row.sounds.leftover_sound_overrides,
+            selection,
+            sound_type,
+            |row| (row.attachment1, row.attachment2, row.sound_type),
+        )
+    }
+
+    pub fn select_iw5_fx_override(
+        &self,
+        id: u32,
+        selection: Iw5AttachmentSelection,
+        fx_type: u32,
+    ) -> Option<&Iw5FxOverride> {
+        iw5_best_pair_override(self.iw5_fx_overrides_of(id)?, selection, fx_type, |row| {
+            (row.attachment1, row.attachment2, row.fx_type)
+        })
+    }
+
+    pub fn select_iw5_reload_override(
+        &self,
+        id: u32,
+        selection: Iw5AttachmentSelection,
+    ) -> Option<&Iw5ReloadOverride> {
+        self.iw5_reload_overrides_of(id)?
+            .iter()
+            .find(|row| row.attachment != 0 && selection.contains_condition(row.attachment))
+    }
+
+    pub fn select_iw5_notetrack_override(
+        &self,
+        id: u32,
+        selection: Iw5AttachmentSelection,
+    ) -> Option<&Iw5NotetrackOverride> {
+        self.iw5_notetrack_overrides_of(id)?
+            .iter()
+            .find(|row| row.attachment != 0 && selection.contains_condition(row.attachment))
+    }
+
+    pub fn resolve_iw5_attachment_slots(
+        &self,
+        base_id: u32,
+        names: &[String],
+    ) -> Result<Iw5AttachmentSelection, crate::ConfigurationRefusal> {
+        let slots = self.iw5_attachment_slots_of(base_id).ok_or_else(|| {
+            crate::ConfigurationRefusal::UnknownFamily(self.name_of(base_id).to_owned())
+        })?;
+        let mut selected = Iw5AttachmentSelection::default();
+        for name in names {
+            let mut matches = slots.iter().enumerate().filter(|(_, slot)| {
+                slot.as_deref()
+                    .is_some_and(|native| native.eq_ignore_ascii_case(name))
+            });
+            let direct = matches.next();
+            if matches.next().is_some() {
+                return Err(crate::ConfigurationRefusal::Unsupported(format!(
+                    "`{name}` has more than one native IW5 slot in `{}`",
+                    self.name_of(base_id)
+                )));
+            }
+            let index = if let Some((index, _)) = direct {
+                index
+            } else {
+                let display_key = format!("WEAPON_{}_ATTACHMENT", name.to_ascii_uppercase());
+                let mut by_display = slots.iter().enumerate().filter(|(_, slot)| {
+                    slot.as_deref()
+                        .and_then(|native| self.iw5_attachments.get(native))
+                        .and_then(|asset| asset.display_name.as_deref())
+                        .is_some_and(|key| key.eq_ignore_ascii_case(&display_key))
+                });
+                let Some((index, _)) = by_display.next() else {
+                    return Err(crate::ConfigurationRefusal::NotOffered(name.clone()));
+                };
+                if by_display.next().is_some() {
+                    return Err(crate::ConfigurationRefusal::Unsupported(format!(
+                        "`{name}` has an ambiguous IW5 display key in `{}`",
+                        self.name_of(base_id)
+                    )));
+                }
+                index
+            };
+            let native = slots[index].as_deref().expect("matched native slot");
+            if !self.iw5_attachments.contains_key(native) {
+                return Err(crate::ConfigurationRefusal::MissingContent(
+                    native.to_owned(),
+                ));
+            }
+            match index {
+                0..=5 => {
+                    if selected.scope != 0 && selected.scope != (index + 1) as u8 {
+                        return Err(crate::ConfigurationRefusal::Incompatible {
+                            a: slots[selected.scope as usize - 1]
+                                .clone()
+                                .unwrap_or_default(),
+                            b: name.clone(),
+                        });
+                    }
+                    selected.scope = (index + 1) as u8;
+                }
+                6..=8 => {
+                    if selected.underbarrel != 0 && selected.underbarrel != (index - 5) as u8 {
+                        return Err(crate::ConfigurationRefusal::Incompatible {
+                            a: slots[selected.underbarrel as usize + 5]
+                                .clone()
+                                .unwrap_or_default(),
+                            b: name.clone(),
+                        });
+                    }
+                    selected.underbarrel = (index - 5) as u8;
+                }
+                9..=12 => selected.others |= 1 << (index - 9),
+                _ => unreachable!(),
+            }
+        }
+        Ok(selected)
+    }
+
+    pub fn iw5_primary_attachment_assets(
+        &self,
+        base_id: u32,
+        selection: Iw5AttachmentSelection,
+    ) -> Option<Vec<&Iw5ScopeRow>> {
+        let slots = self.iw5_attachment_slots_of(base_id)?;
+        let slot_asset = |index: usize| {
+            slots
+                .get(index)?
+                .as_deref()
+                .and_then(|name| self.iw5_attachment_asset(name))
+        };
+        let mut assets = Vec::with_capacity(3);
+        let mut push = |asset| {
+            if assets.len() < 3 {
+                assets.push(asset);
+            } else {
+                assets[2] = asset;
+            }
+        };
+        if selection.scope != 0 {
+            push(slot_asset(usize::from(selection.scope - 1))?);
+        }
+        for bit in 0..4 {
+            if selection.others & (1 << bit) != 0 {
+                push(slot_asset(9 + bit)?);
+            }
+        }
+        if selection.underbarrel != 0 {
+            let asset = slot_asset(usize::from(selection.underbarrel) + 5)?;
+            if asset.weapon_class == 0
+                || asset.ads_settings_main.is_some()
+                || (asset.scales.ads_settings_main != 0.0 && asset.scales.ads_settings_main != 1.0)
+            {
+                push(asset);
+            }
+        }
+        Some(assets)
+    }
+
+    pub fn iw5_primary_ads_aim_pitch(
+        &self,
+        base_id: u32,
+        selection: Iw5AttachmentSelection,
+    ) -> Option<f32> {
+        self.iw5_primary_ads_value(
+            base_id,
+            selection,
+            |facts| facts.ads_aim_pitch,
+            |settings| settings.ads_aim_pitch,
+        )
+    }
+
+    pub fn iw5_primary_ads_zoom_fov(
+        &self,
+        base_id: u32,
+        selection: Iw5AttachmentSelection,
+    ) -> Option<f32> {
+        self.iw5_primary_ads_value(
+            base_id,
+            selection,
+            |facts| facts.ads_zoom_fov,
+            |settings| settings.ads_zoom_fov,
+        )
+    }
+
+    fn iw5_primary_ads_value(
+        &self,
+        base_id: u32,
+        selection: Iw5AttachmentSelection,
+        base_value: impl FnOnce(WeaponBodyFacts) -> f32,
+        setting_value: impl Fn(Iw5AttachmentAdsSettings) -> f32,
+    ) -> Option<f32> {
+        let base = base_value(self.facts_of(base_id)?);
+        let assets = self.iw5_primary_attachment_assets(base_id, selection)?;
+        let (settings, scale) = iw5_primary_ads(&assets);
+        Some(settings.map_or(base, setting_value) * scale)
+    }
+
+    fn compose_iw5_configuration(
+        &self,
+        base_id: u32,
+        native: Iw5AttachmentSelection,
+    ) -> Option<WeaponRow> {
+        use fastfile_iw5::size as sz;
+        let base = self.rows.get(base_id as usize)?;
+        let slot_asset = |index: usize| {
+            base.iw5_attachment_slots
+                .get(index)?
+                .as_deref()
+                .and_then(|native| self.iw5_attachments.get(native))
+        };
+        let scope = match native.scope {
+            0 => None,
+            index => Some(slot_asset(usize::from(index) - 1)?),
+        };
+        let underbarrel = match native.underbarrel {
+            0 => None,
+            index => Some(slot_asset(usize::from(index) + 5)?),
+        };
+        let others = (0..4)
+            .filter(|bit| native.others & (1 << bit) != 0)
+            .map(|bit| slot_asset(9 + bit))
+            .collect::<Option<Vec<_>>>()?;
+
+        let mut row = base.clone();
+        row.iw5_configuration = Some((base_id, native));
+
+        let first = |models: &[Option<String>]| models.first().cloned().flatten();
+        let mut view = Vec::new();
+        let mut world = Vec::new();
+        if let Some(scope) = scope {
+            view.extend(first(&scope.view_models));
+            view.extend(first(&scope.reticle_models));
+            world.extend(first(&scope.world_models));
+        }
+        for asset in underbarrel.into_iter().chain(others.iter().copied()) {
+            view.extend(first(&asset.view_models));
+            world.extend(first(&asset.world_models));
+        }
+        row.attachment_view_models = view;
+        row.attachment_world_models = world;
+
+        let assets = self.iw5_primary_attachment_assets(base_id, native)?;
+        apply_iw5_parameter_blocks(&mut row.facts, &assets);
+
+        if let Some(scope) = scope {
+            if let Some(overlay) = scope
+                .overlay
+                .as_deref()
+                .filter(|name| !name.is_empty() && overlay_name_is_hud_iris(name))
+            {
+                row.overlay_material = Some(overlay.to_owned());
+                row.overlay_image = None;
+                row.overlay_material_from_slot = true;
+                row.facts.ads_overlay_width = scope.width;
+                row.facts.ads_overlay_height = scope.height;
+            }
+        }
+
+        let mut anim_types: Vec<u32> = base
+            .iw5_anim_overrides
+            .iter()
+            .map(|row| row.anim_tree_type)
+            .collect();
+        anim_types.sort_unstable();
+        anim_types.dedup();
+        for anim_type in anim_types {
+            let Some(chosen) = self.select_iw5_anim_override(base_id, native, anim_type) else {
+                continue;
+            };
+            let Some(slot) = iw5_anim_tree_type_to_iw4_slot(anim_type) else {
+                continue;
+            };
+            if let Some(anim) = chosen.override_anim.clone() {
+                row.sz_xanims[slot] = Some(anim);
+            }
+            if chosen.anim_time_ms > 0 {
+                if let Some(timer) = iw5_anim_timer(&mut row.facts, slot) {
+                    *timer = chosen.anim_time_ms;
+                }
+            }
+        }
+
+        for (sound_type, target) in [
+            (sz::SND_OVERRIDE_TYPE_FIRE, &mut row.sounds.fire),
+            (
+                sz::SND_OVERRIDE_TYPE_PLAYER_FIRE,
+                &mut row.sounds.fire_player,
+            ),
+            (
+                sz::SND_OVERRIDE_TYPE_PLAYER_AKIMBO,
+                &mut row.sounds.fire_player_akimbo,
+            ),
+            (
+                sz::SND_OVERRIDE_TYPE_PLAYER_LASTSHOT,
+                &mut row.sounds.fire_last_player,
+            ),
+        ] {
+            if let Some(sound) = self
+                .select_iw5_sound_override(base_id, native, sound_type)
+                .and_then(|chosen| chosen.override_sound.clone())
+            {
+                *target = Some(sound);
+            }
+        }
+
+        for (fx_type, hint) in [
+            (1, &mut row.combat_fx.view_flash_hint),
+            (2, &mut row.combat_fx.world_flash_hint),
+            (3, &mut row.combat_fx.view_shell_eject_hint),
+            (4, &mut row.combat_fx.world_shell_eject_hint),
+        ] {
+            if let Some(fx) = self
+                .select_iw5_fx_override(base_id, native, fx_type)
+                .and_then(|chosen| chosen.override_fx.clone())
+            {
+                *hint = Some(fx);
+            }
+        }
+
+        if let Some(reload) = self.select_iw5_reload_override(base_id, native) {
+            row.facts.reload_add_time_ms = reload.reload_add_time_ms;
+            row.facts.reload_start_add_time_ms = reload.reload_start_add_time_ms;
+        }
+        if let Some(notetracks) = self.select_iw5_notetrack_override(base_id, native) {
+            row.sounds.notetrack_sound_map = notetracks.sound_map.clone();
+        }
+        Some(row)
+    }
+
+    pub fn iw5_configuration_of(&self, id: u32) -> Option<(u32, Iw5AttachmentSelection)> {
+        self.rows.get(id as usize)?.iw5_configuration
+    }
+
     fn rebuild_name_maps(&mut self) {
         self.by_name.clear();
         self.by_namespaced.clear();
         for (id, row) in self.rows.iter().enumerate().skip(1) {
+            if row.iw5_configuration.is_some() {
+                continue;
+            }
             self.by_namespaced
                 .insert((row.namespace, row.name.clone()), id as u32);
             self.by_name.entry(row.name.clone()).or_insert(id as u32);
@@ -5187,8 +6611,41 @@ impl WeaponRegistry {
     pub fn sz_xanim_edges_of(
         &self,
         index: u32,
-    ) -> Option<&[AssetEdge<XAnimSpace>; WEAPON_ANIM_COUNT]> {
+    ) -> Option<&[AssetEdge<XAnimSpace>; WEAPON_ANIM_SLOTS]> {
         self.rows.get(index as usize).map(|row| &row.sz_xanim_edges)
+    }
+
+    pub fn notetrack_action_of(&self, index: u32, note: &str) -> Option<&LinkedNotetrackAction> {
+        self.rows
+            .get(index as usize)?
+            .notetrack_actions
+            .get(&note.to_ascii_lowercase())
+    }
+
+    pub fn notetrack_sound_aliases_of(&self, index: u32) -> impl Iterator<Item = &str> {
+        self.rows
+            .get(index as usize)
+            .into_iter()
+            .flat_map(|row| row.notetrack_actions.values())
+            .filter_map(|action| action.sound_alias.as_deref())
+    }
+
+    pub fn sz_xanim_right_edges_of(
+        &self,
+        index: u32,
+    ) -> Option<&[AssetEdge<XAnimSpace>; WEAPON_ANIM_SLOTS]> {
+        self.rows
+            .get(index as usize)
+            .map(|row| &row.sz_xanim_right_edges)
+    }
+
+    pub fn sz_xanim_left_edges_of(
+        &self,
+        index: u32,
+    ) -> Option<&[AssetEdge<XAnimSpace>; WEAPON_ANIM_SLOTS]> {
+        self.rows
+            .get(index as usize)
+            .map(|row| &row.sz_xanim_left_edges)
     }
 
     pub fn sz_xanim_edge_census(&self) -> AssetEdgeCensus {
@@ -5201,6 +6658,23 @@ impl WeaponRegistry {
         census
     }
 
+    pub fn bound_weapon_xanim_indices(&self) -> Vec<usize> {
+        let mut indices = std::collections::BTreeSet::new();
+        for row in self.rows.iter().skip(1) {
+            for edge in row
+                .sz_xanim_edges
+                .iter()
+                .chain(&row.sz_xanim_right_edges)
+                .chain(&row.sz_xanim_left_edges)
+            {
+                if let Some(index) = edge.bound_index() {
+                    indices.insert(index);
+                }
+            }
+        }
+        indices.into_iter().collect()
+    }
+
     pub fn gun_xmodel_edge_of(&self, index: u32) -> Option<AssetEdge<FpvMeshSpace>> {
         self.rows.get(index as usize).map(|row| row.gun_xmodel_edge)
     }
@@ -5209,6 +6683,70 @@ impl WeaponRegistry {
         self.rows
             .get(index as usize)
             .map(|row| row.hand_xmodel_edge)
+    }
+
+    pub fn rocket_model_edge_of(&self, index: u32) -> Option<AssetEdge<FpvMeshSpace>> {
+        self.rows
+            .get(index as usize)
+            .map(|row| row.rocket_model_edge)
+    }
+
+    pub fn attachment_view_model_edges_of(&self, index: u32) -> &[AssetEdge<FpvMeshSpace>] {
+        self.rows
+            .get(index as usize)
+            .map_or(&[], |row| row.attachment_view_model_edges.as_slice())
+    }
+
+    pub fn fpv_hands_of(
+        &self,
+        index: u32,
+        axis: bool,
+    ) -> Option<(&asset_model::FpvHands, crate::FpvMeshIndex)> {
+        self.rows.get(index as usize)?.fpv_hands[usize::from(axis)]
+            .as_ref()
+            .map(|(choice, index)| (choice, *index))
+    }
+
+    pub fn fpv_mount_plan_of(&self, index: u32) -> Option<&asset_model::FpvMountPlan> {
+        self.rows
+            .get(index as usize)?
+            .fpv_mount_plan
+            .as_ref()?
+            .as_ref()
+            .ok()
+    }
+
+    pub fn fpv_assemblies_of(&self, index: u32, axis: bool) -> Option<&crate::FpvSideAssemblies> {
+        self.rows.get(index as usize)?.fpv_assemblies[usize::from(axis)]
+            .as_ref()?
+            .as_ref()
+            .ok()
+    }
+
+    pub fn fpv_assembly_gap_of(&self, index: u32, axis: bool) -> String {
+        let Some(row) = self.rows.get(index as usize) else {
+            return "no such weapon".to_owned();
+        };
+        match (&row.fpv_mount_plan, &row.fpv_assemblies[usize::from(axis)]) {
+            (None, _) => "unlinked selected models".to_owned(),
+            (Some(Err(error)), _) => error.to_string(),
+            (_, None) => "effective kit / weapon hands".to_owned(),
+            (_, Some(Err(error))) => error.clone(),
+            (_, Some(Ok(_))) => "linked".to_owned(),
+        }
+    }
+
+    pub fn fpv_clip_tracks(&self) -> &crate::FpvClipTracks {
+        &self.fpv_clip_tracks
+    }
+
+    pub fn fpv_mount_error_of(&self, index: u32) -> Option<&asset_model::FpvMountError> {
+        self.rows
+            .get(index as usize)?
+            .fpv_mount_plan
+            .as_ref()?
+            .as_ref()
+            .err()
     }
 
     pub fn gun_xmodel_edge_census(&self) -> AssetEdgeCensus {
@@ -5225,6 +6763,18 @@ impl WeaponRegistry {
             .map(|row| row.world_model_edge)
     }
 
+    pub fn attachment_world_model_edges_of(&self, index: u32) -> &[AssetEdge<WorldWeaponSpace>] {
+        self.rows
+            .get(index as usize)
+            .map_or(&[], |row| row.attachment_world_model_edges.as_slice())
+    }
+
+    pub fn attachment_world_mounts_of(&self, index: u32) -> &[Option<String>] {
+        self.rows
+            .get(index as usize)
+            .map_or(&[], |row| row.attachment_world_mounts.as_slice())
+    }
+
     pub fn world_model_edge_census(&self) -> AssetEdgeCensus {
         let mut census = AssetEdgeCensus::default();
         for row in self.rows.iter().skip(1) {
@@ -5233,18 +6783,187 @@ impl WeaponRegistry {
         census
     }
 
+    pub fn dependency_gaps(&self) -> Vec<WeaponDependencyGap> {
+        (1..self.rows.len() as u32)
+            .flat_map(|id| self.dependency_gaps_of(id))
+            .collect()
+    }
+
+    pub fn dependency_gaps_of(&self, id: u32) -> Vec<WeaponDependencyGap> {
+        let Some(row) = self.rows.get(id as usize).filter(|_| id != 0) else {
+            return Vec::new();
+        };
+        let named = [
+            (
+                row.gun_xmodel.is_some() && !row.gun_xmodel_edge.is_bound(),
+                "view model",
+                &row.gun_xmodel,
+            ),
+            (
+                row.hand_xmodel.is_some() && !row.hand_xmodel_edge.is_bound(),
+                "hands",
+                &row.hand_xmodel,
+            ),
+            (
+                row.rocket_model.is_some() && !row.rocket_model_edge.is_bound(),
+                "FPV rocket model",
+                &row.rocket_model,
+            ),
+            (
+                row.world_model_edge.is_unresolved(),
+                "world model",
+                &row.world_model,
+            ),
+        ];
+        let anims = row
+            .sz_xanim_edges
+            .iter()
+            .zip(&row.sz_xanims)
+            .map(|(edge, name)| (edge.is_unresolved(), "anim", name));
+        let dual_anims = !row.facts.no_dual_wield
+            && row.sz_xanims_right[weap_anim::IDLE]
+                .as_deref()
+                .is_some_and(|name| !name.is_empty());
+        let right_anims = row
+            .sz_xanim_right_edges
+            .iter()
+            .zip(&row.sz_xanims_right)
+            .map(|(edge, name)| (dual_anims && edge.is_unresolved(), "right anim", name));
+        let left_anims = row
+            .sz_xanim_left_edges
+            .iter()
+            .zip(&row.sz_xanims_left)
+            .map(|(edge, name)| (dual_anims && edge.is_unresolved(), "left anim", name));
+        let mut gaps: Vec<WeaponDependencyGap> = named
+            .into_iter()
+            .chain(anims)
+            .chain(right_anims)
+            .chain(left_anims)
+            .filter(|(unresolved, ..)| *unresolved)
+            .map(|(_, kind, name)| WeaponDependencyGap {
+                id,
+                kind,
+                name: name.clone().unwrap_or_default(),
+            })
+            .collect();
+        if let Some(Err(error)) = &row.fpv_mount_plan {
+            gaps.push(WeaponDependencyGap {
+                id,
+                kind: "FPV mount",
+                name: error.to_string(),
+            });
+        }
+        for (side, assembly) in row.fpv_assemblies.iter().enumerate() {
+            if let Some(Err(error)) = assembly {
+                gaps.push(WeaponDependencyGap {
+                    id,
+                    kind: "FPV skeleton",
+                    name: format!("{}: {error}", if side == 0 { "allies" } else { "axis" }),
+                });
+            }
+        }
+        if row.gun_xmodel_edge.is_bound() {
+            for (side, hands) in row.fpv_hands.iter().enumerate() {
+                if hands.is_none() {
+                    gaps.push(WeaponDependencyGap {
+                        id,
+                        kind: "FPV hands layout",
+                        name: if side == 0 { "allies" } else { "axis" }.to_owned(),
+                    });
+                }
+            }
+        }
+        for (name, edge) in row
+            .attachment_view_models
+            .iter()
+            .zip(&row.attachment_view_model_edges)
+        {
+            if !edge.is_bound() {
+                gaps.push(WeaponDependencyGap {
+                    id,
+                    kind: "FPV attachment model",
+                    name: name.clone(),
+                });
+            }
+        }
+        for (name, edge) in row
+            .attachment_world_models
+            .iter()
+            .zip(&row.attachment_world_model_edges)
+        {
+            if !edge.is_bound() {
+                gaps.push(WeaponDependencyGap {
+                    id,
+                    kind: "world attachment model",
+                    name: name.clone(),
+                });
+            }
+        }
+        for ((name, edge), mount) in row
+            .attachment_world_models
+            .iter()
+            .zip(&row.attachment_world_model_edges)
+            .zip(&row.attachment_world_mounts)
+        {
+            if edge.is_bound() && mount.is_none() {
+                gaps.push(WeaponDependencyGap {
+                    id,
+                    kind: "world attachment mount",
+                    name: name.clone(),
+                });
+            }
+        }
+        if row.attachment_world_models.len() != row.attachment_world_model_edges.len() {
+            gaps.push(WeaponDependencyGap {
+                id,
+                kind: "world attachment bindings",
+                name: format!(
+                    "{} names, {} links",
+                    row.attachment_world_models.len(),
+                    row.attachment_world_model_edges.len()
+                ),
+            });
+        }
+        if row.attachment_view_models.len() != row.attachment_view_model_edges.len() {
+            gaps.push(WeaponDependencyGap {
+                id,
+                kind: "FPV attachment bindings",
+                name: format!(
+                    "{} names, {} links",
+                    row.attachment_view_models.len(),
+                    row.attachment_view_model_edges.len()
+                ),
+            });
+        }
+        gaps
+    }
+
+    pub fn configuration_admission(&self, id: u32) -> Result<(), crate::ConfigurationRefusal> {
+        if !self.configuration_supported(id) {
+            return Err(crate::ConfigurationRefusal::Unsupported(format!(
+                "`{}` needs a runtime mechanism IW4L lacks",
+                self.name_of(id)
+            )));
+        }
+        match self.dependency_gaps_of(id).first() {
+            Some(gap) => Err(crate::ConfigurationRefusal::MissingDependency {
+                weapon: self.name_of(id).to_owned(),
+                kind: gap.kind,
+                name: gap.name.clone(),
+            }),
+            None => Ok(()),
+        }
+    }
+
     pub fn world_model_entry<'a>(
         &self,
         index: u32,
         catalog: &'a crate::WorldWeaponCatalog,
     ) -> Option<&'a crate::WorldWeaponEntry> {
-        if let Some(order) = self.world_model_edge_of(index)?.bound_index() {
-            if let Some(entry) = catalog.get_at(order) {
-                return Some(entry);
-            }
+        if self.world_catalog_identity != catalog.identity() {
+            return None;
         }
-        self.world_model_of(index)
-            .and_then(|name| catalog.get(name))
+        catalog.get_at(self.world_model_edge_of(index)?.bound_index()?)
     }
 
     pub fn authored_weapon_sound(&self, index: u32, slot: WeaponSoundSlot) -> Option<&str> {
@@ -5323,17 +7042,9 @@ impl WeaponRegistry {
             }
         }
         let norm = normalize_weapon_name(name);
-        if let Some(id) = self.by_name.get(&norm).copied() {
-            return Ok(Some(id));
-        }
-        if let Some(id) = self.unique_suffix_id(&norm) {
-            return Ok(Some(id));
-        }
-        match unique_weapon_stem(&self.rows, &norm) {
+        match self.by_name.get(&norm).copied() {
             Some(id) => Ok(Some(id)),
-            None => Err(UnknownWeaponName {
-                name: norm.to_owned(),
-            }),
+            None => Err(UnknownWeaponName { name: norm }),
         }
     }
 
@@ -5344,41 +7055,12 @@ impl WeaponRegistry {
             });
         }
         let norm = normalize_weapon_name(key.logical_name());
-        if let Some(id) = self
-            .by_namespaced
-            .get(&(key.namespace, norm.clone()))
-            .copied()
-        {
-            return Ok(Some(id));
-        }
-        match self.unique_id_in_namespace(key.namespace, &norm) {
+        match self.by_namespaced.get(&(key.namespace, norm)).copied() {
             Some(id) => Ok(Some(id)),
             None => Err(UnknownWeaponName {
                 name: key.display(),
             }),
         }
-    }
-
-    fn unique_id_in_namespace(&self, ns: crate::AssetNamespace, norm: &str) -> Option<u32> {
-        if norm.is_empty() {
-            return None;
-        }
-        let prefixed = format!("{}_{norm}", ns.as_str());
-        let tail = format!("_{norm}");
-        let mut hit = None;
-        for id in 1..=self.len() as u32 {
-            if self.namespace_of(id) != Some(ns) {
-                continue;
-            }
-            let candidate = normalize_weapon_name(self.name_of(id));
-            if candidate == norm || candidate == prefixed || candidate.ends_with(&tail) {
-                if hit.is_some() {
-                    return None;
-                }
-                hit = Some(id);
-            }
-        }
-        hit
     }
 
     pub fn namespace_of(&self, index: u32) -> Option<crate::AssetNamespace> {
@@ -5445,25 +7127,6 @@ impl WeaponRegistry {
             .unwrap_or("")
     }
 
-    fn unique_suffix_id(&self, stem: &str) -> Option<u32> {
-        if stem.is_empty() {
-            return None;
-        }
-        let prefixed = format!("iw5_{stem}");
-        let tail = format!("_{stem}");
-        let mut hit = None;
-        for id in 1..=self.len() as u32 {
-            let name = self.name_of(id);
-            if name == stem || name == prefixed || name.ends_with(&tail) {
-                if hit.is_some() {
-                    return None;
-                }
-                hit = Some(id);
-            }
-        }
-        hit
-    }
-
     pub fn script_name_of(&self, index: u32) -> String {
         gsc_weapon_script_name(self.name_of(index))
     }
@@ -5484,72 +7147,89 @@ impl WeaponRegistry {
         !dual_hand_model
     }
 
-    pub fn loadout_catalog(&self) -> Vec<LoadoutCatalogRow> {
-        let mut base_by_def: HashMap<(crate::AssetNamespace, (u8, u32)), u32> = HashMap::new();
-        for id in 1..=self.len() as u32 {
-            let Some(key) = self.weap_def_of(id) else {
+    pub fn runnable_table(&self) -> Vec<bool> {
+        (0..self.rows.len() as u32)
+            .map(|id| id != 0 && self.configuration_admission(id).is_ok())
+            .collect()
+    }
+
+    pub fn weapon_families(&self) -> &crate::WeaponFamilies {
+        &self.families
+    }
+
+    pub fn resolve_configuration(
+        &self,
+        selection: &crate::WeaponSelection,
+        rules: crate::LoadoutRules,
+    ) -> Result<crate::ResolvedConfiguration, crate::ConfigurationRefusal> {
+        self.families.resolve(selection, rules, self)
+    }
+
+    pub fn describe_configuration(&self, id: u32) -> Option<&crate::WeaponSelection> {
+        self.families.describe(id)
+    }
+
+    pub fn prepared_attachments_of(&self, id: u32) -> &[String] {
+        self.rows
+            .get(id as usize)
+            .map_or(&[], |row| row.prepared_attachments.as_slice())
+    }
+
+    pub fn configuration_label(&self, id: u32) -> String {
+        match self
+            .describe_configuration(id)
+            .and_then(|selection| Some((selection.family.as_ref()?, &selection.attachments)))
+        {
+            Some((family, attachments)) => {
+                let mut label = family.short();
+                for name in attachments {
+                    label.push_str(" +");
+                    label.push_str(name);
+                }
+                label
+            }
+            None => self.namespaced_key_of(id).unwrap_or_default(),
+        }
+    }
+
+    pub fn configuration_transition_groups(&self) -> Vec<u32> {
+        let mut keys: Vec<_> = self
+            .families
+            .families()
+            .iter()
+            .map(|family| family.key.clone())
+            .collect();
+        keys.sort_by_key(|key| key.asset_key());
+        keys.dedup();
+        let groups: HashMap<_, _> = keys
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| (key, index as u32 + 1))
+            .collect();
+        let mut result = vec![0; self.rows.len()];
+        for id in 1..self.rows.len() as u32 {
+            let Some(selection) = self.describe_configuration(id) else {
                 continue;
             };
-            let namespace = self.namespace_of(id).expect("nonzero weapon row");
-            let entry = base_by_def.entry((namespace, key)).or_insert(id);
-            let candidate = self.name_of(id);
-            let current = self.name_of(*entry);
-            if (self.item_group_of(id).is_none(), candidate.len(), candidate)
-                < (self.item_group_of(*entry).is_none(), current.len(), current)
+            let Some(key) = selection.family.as_ref() else {
+                continue;
+            };
+            if self
+                .resolve_configuration(selection, crate::LoadoutRules::default())
+                .is_ok_and(|resolved| resolved.id == id)
             {
-                *entry = id;
+                result[id as usize] = groups.get(key).copied().unwrap_or(0);
             }
         }
-        (1..=self.len() as u32)
-            .map(|id| {
-                let facts = self.facts_of(id).unwrap_or_default();
-                let category = self
-                    .item_group_of(id)
-                    .and_then(crate::cac_category_from_item_group);
-                let kind = if !self.configuration_supported(id) {
-                    LoadoutCatalogKind::NonPlayer
-                } else if let Some(category) = category {
-                    use crate::CacAuthoredCategory as C;
-                    match category {
-                        C::Pistol | C::MachinePistol | C::Projectile | C::Special => {
-                            LoadoutCatalogKind::Secondary
-                        }
-                        C::Shotgun if self.namespace_of(id) == Some(crate::AssetNamespace::Iw4) => {
-                            LoadoutCatalogKind::Secondary
-                        }
-                        _ => LoadoutCatalogKind::Primary,
-                    }
-                } else if facts.offhand_class != 0 {
-                    LoadoutCatalogKind::Equipment {
-                        offhand_class: facts.offhand_class,
-                    }
-                } else if let Some(base_id) = self
-                    .weap_def_of(id)
-                    .and_then(|key| base_by_def.get(&(self.namespace_of(id)?, key)).copied())
-                    .filter(|base_id| *base_id != id)
-                {
-                    LoadoutCatalogKind::AttachmentVariant { base_id }
-                } else if self.gun_xmodel_of(id).is_none() || facts.fire_time_ms <= 0 {
-                    LoadoutCatalogKind::NonPlayer
-                } else if matches!(facts.weap_class, 4 | 5 | 7) {
-                    LoadoutCatalogKind::Secondary
-                } else if matches!(facts.weap_class, 0..=3) {
-                    LoadoutCatalogKind::Primary
-                } else {
-                    LoadoutCatalogKind::NonPlayer
-                };
-                LoadoutCatalogRow {
-                    id,
-                    key: self
-                        .key_of(id)
-                        .expect("nonzero registry rows have durable weapon keys"),
-                    name: self.name_of(id).to_owned(),
-                    kind,
-                    weap_class: facts.weap_class,
-                    item_group: self.item_group_of(id).map(str::to_owned),
-                }
-            })
-            .collect()
+        result
+    }
+
+    pub fn list_attachment_choices(
+        &self,
+        selection: &crate::WeaponSelection,
+        rules: crate::LoadoutRules,
+    ) -> Result<Vec<crate::AttachmentOption>, crate::ConfigurationRefusal> {
+        self.families.attachment_options(selection, rules, self)
     }
 
     pub fn gun_xmodel_of(&self, index: u32) -> Option<&str> {
@@ -5601,10 +7281,16 @@ impl WeaponRegistry {
             .unwrap_or(&[])
     }
 
-    pub fn scope_viewmodel_of(&self, index: u32) -> Option<&str> {
+    pub fn attachment_view_models_of(&self, index: u32) -> &[String] {
         self.rows
             .get(index as usize)
-            .and_then(|row| row.scope_viewmodel.as_deref())
+            .map_or(&[], |row| row.attachment_view_models.as_slice())
+    }
+
+    pub fn attachment_world_models_of(&self, index: u32) -> &[String] {
+        self.rows
+            .get(index as usize)
+            .map_or(&[], |row| row.attachment_world_models.as_slice())
     }
 
     pub fn sounds_of(&self, index: u32) -> Option<&WeaponSoundAliases> {
@@ -5664,17 +7350,17 @@ impl WeaponRegistry {
         self.rows.get(index as usize).and_then(|row| row.weap_def)
     }
 
-    pub fn sz_xanims_of(&self, index: u32) -> Option<&[Option<String>; WEAPON_ANIM_COUNT]> {
+    pub fn sz_xanims_of(&self, index: u32) -> Option<&[Option<String>; WEAPON_ANIM_SLOTS]> {
         self.rows.get(index as usize).map(|row| &row.sz_xanims)
     }
 
-    pub fn sz_xanims_right_of(&self, index: u32) -> Option<&[Option<String>; WEAPON_ANIM_COUNT]> {
+    pub fn sz_xanims_right_of(&self, index: u32) -> Option<&[Option<String>; WEAPON_ANIM_SLOTS]> {
         self.rows
             .get(index as usize)
             .map(|row| &row.sz_xanims_right)
     }
 
-    pub fn sz_xanims_left_of(&self, index: u32) -> Option<&[Option<String>; WEAPON_ANIM_COUNT]> {
+    pub fn sz_xanims_left_of(&self, index: u32) -> Option<&[Option<String>; WEAPON_ANIM_SLOTS]> {
         self.rows.get(index as usize).map(|row| &row.sz_xanims_left)
     }
 
@@ -5714,6 +7400,11 @@ impl WeaponRegistry {
                 )
             })
             .unwrap_or((0, 0, 0))
+    }
+
+    pub fn quick_reload_timers_of(&self, index: u32) -> Option<(i32, i32)> {
+        let dual_mag = self.facts_of(index)?.dual_mag?;
+        Some((dual_mag.reload_ms, dual_mag.reload_empty_ms))
     }
 
     pub fn reload_timers_of(&self, index: u32) -> (i32, i32, i32, i32) {
@@ -5757,19 +7448,6 @@ impl WeaponRegistry {
             .count()
     }
 
-    pub fn gun_xmodel_zone_count(&self) -> usize {
-        self.rows
-            .iter()
-            .filter(|row| row.gun_xmodel.is_some() && row.gun_xmodel_from_zone)
-            .count()
-    }
-
-    pub fn gun_xmodel_src_of(&self, index: u32) -> Option<&'static str> {
-        let row = self.rows.get(index as usize)?;
-        row.gun_xmodel.as_ref()?;
-        Some(mesh_name_src(row.gun_xmodel_from_zone))
-    }
-
     pub fn overlay_material_of(&self, index: u32) -> Option<&str> {
         self.rows
             .get(index as usize)
@@ -5808,13 +7486,9 @@ impl WeaponRegistry {
             .and_then(|row| row.hud_icon_image.as_deref())
     }
 
-    pub fn dpad_icon_of(&self, index: u32) -> Option<(&str, i32, [u8; 2])> {
+    pub fn dpad_icon_of(&self, index: u32) -> Option<(&str, i32)> {
         let row = self.rows.get(index as usize)?;
-        Some((
-            row.dpad_icon_image.as_deref()?,
-            row.dpad_icon_ratio,
-            row.dpad_icon_atlas?,
-        ))
+        Some((row.dpad_icon_image.as_deref()?, row.dpad_icon_ratio))
     }
 
     pub fn kill_icon_of(&self, index: u32) -> Option<&str> {
@@ -5889,19 +7563,6 @@ impl WeaponRegistry {
             .collect()
     }
 
-    pub fn world_model_zone_count(&self) -> usize {
-        self.rows
-            .iter()
-            .filter(|row| row.world_model.is_some() && row.world_model_from_zone)
-            .count()
-    }
-
-    pub fn world_model_src_of(&self, index: u32) -> Option<&'static str> {
-        let row = self.rows.get(index as usize)?;
-        row.world_model.as_ref()?;
-        Some(mesh_name_src(row.world_model_from_zone))
-    }
-
     pub fn idle_anim_count(&self) -> usize {
         (1..=self.len() as u32)
             .filter(|&id| self.idle_anim_of(id).is_some())
@@ -5917,82 +7578,309 @@ impl WeaponRegistry {
     }
 }
 
-fn mesh_name_src(from_zone: bool) -> &'static str {
-    if from_zone { "zone" } else { "fill" }
+fn iw5_primary_ads(assets: &[&Iw5ScopeRow]) -> (Option<Iw5AttachmentAdsSettings>, f32) {
+    let mut chosen = None;
+    let mut scale_product = 1.0;
+    for asset in assets {
+        let settings = if asset.share_ammo_with_alt {
+            asset.ads_settings_main
+        } else {
+            asset.ads_settings
+        };
+        if chosen.is_none() {
+            chosen = settings;
+        }
+        let scale = if asset.share_ammo_with_alt {
+            (asset.ads_settings_main.is_none()
+                && asset.scales.ads_settings_main != 0.0
+                && asset.scales.ads_settings_main != 1.0)
+                .then_some(asset.scales.ads_settings_main)
+        } else {
+            (asset.scales.ads_settings > 0.0).then_some(asset.scales.ads_settings)
+        };
+        if let Some(scale) = scale {
+            scale_product *= scale;
+        }
+    }
+    (chosen, scale_product)
 }
 
-pub fn gun_candidates_from_idle(idle: &str) -> Vec<String> {
-    let Some(stem) = idle
-        .strip_suffix("_idle")
-        .or_else(|| idle.strip_suffix("_Idle"))
-    else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(3);
-    out.push(stem.to_owned());
-    if let Some(base) = stem.strip_suffix("_tac") {
-        out.push(base.to_owned());
-    }
-    if let Some(base) = stem.strip_suffix("_HB") {
-        out.push(base.to_owned());
-    }
-    if let Some(base) = stem.strip_suffix("_hb") {
-        out.push(base.to_owned());
-    }
-    out
+fn iw5_first_block<T: Copy>(
+    assets: &[&Iw5ScopeRow],
+    block: impl Fn(&Iw5ScopeRow) -> Option<T>,
+) -> Option<T> {
+    assets.iter().find_map(|asset| block(asset))
 }
 
-pub fn world_candidates_from_viewmodel(gun: &str) -> Vec<String> {
-    let Some(stem) = gun.strip_prefix("viewmodel_") else {
-        return Vec::new();
-    };
-    let mut out = Vec::with_capacity(8);
-    out.push(format!("weapon_{stem}"));
-    out.push(format!("weapon_{stem}_mp"));
+fn iw5_scale_product(assets: &[&Iw5ScopeRow], scale: impl Fn(&Iw5AttachmentScales) -> f32) -> f32 {
+    assets
+        .iter()
+        .map(|asset| scale(&asset.scales))
+        .filter(|scale| *scale > 0.0)
+        .product()
+}
 
-    out.push(format!("weapon_{stem}_tactical"));
-    if let Some(base) = stem.strip_suffix("_tac") {
-        out.push(format!("weapon_{base}"));
-        out.push(format!("weapon_{base}_mp"));
-        out.push(format!("weapon_{base}_tactical"));
+fn scale_i32(value: i32, scale: f32) -> i32 {
+    if scale == 1.0 {
+        value
+    } else {
+        (value as f32 * scale) as i32
     }
-    if let Some(base) = stem.strip_suffix("_HB") {
-        out.push(format!("weapon_{base}"));
+}
+
+fn apply_iw5_parameter_blocks(facts: &mut WeaponBodyFacts, assets: &[&Iw5ScopeRow]) {
+    let (ads, ads_scale) = iw5_primary_ads(assets);
+    if let Some(ads) = ads {
+        facts.ads_spread = ads.ads_spread;
+        facts.ads_aim_pitch = ads.ads_aim_pitch;
+        facts.ads_crosshair_in_frac = ads.ads_crosshair_in_frac;
+        facts.ads_crosshair_out_frac = ads.ads_crosshair_out_frac;
+        facts.ads_zoom_fov = ads.ads_zoom_fov;
+        facts.ads_zoom_in_frac = ads.ads_zoom_in_frac;
+        facts.ads_zoom_out_frac = ads.ads_zoom_out_frac;
+        facts.ads_bob_factor_at_0x330 = ads.ads_bob_factor;
+        facts.ads_view_bob_mult_at_0x334 = ads.ads_view_bob_mult;
+        if ads.ads_trans_in_time > 0.0 {
+            facts.ads_in_rate = 1.0 / ads.ads_trans_in_time;
+        }
+        if ads.ads_trans_out_time > 0.0 {
+            facts.ads_out_rate = 1.0 / ads.ads_trans_out_time;
+        }
     }
-    if let Some(base) = stem.strip_suffix("_hb") {
-        out.push(format!("weapon_{base}"));
+    if ads_scale != 1.0 {
+        facts.ads_spread *= ads_scale;
+        facts.ads_aim_pitch *= ads_scale;
+        facts.ads_zoom_fov *= ads_scale;
+        facts.ads_in_rate /= ads_scale;
+        facts.ads_out_rate /= ads_scale;
     }
-    out
+
+    if let Some(sight) = iw5_first_block(assets, |a| a.sight) {
+        facts.aim_down_sight = sight.aim_down_sight;
+        facts.ads_fire_only = sight.ads_fire;
+        facts.rechamber_while_ads = sight.rechamber_while_ads;
+        facts.no_ads_when_mag_empty = sight.no_ads_when_mag_empty;
+    }
+    if let Some(general) = iw5_first_block(assets, |a| a.ammo_general) {
+        facts.penetrate_type = general.penetrate_type;
+        facts.penetrate_multiplier = general.penetrate_multiplier;
+        facts.impact_type = general.impact_type;
+        facts.fire_type = general.fire_type;
+        facts.rifle_bullet = general.rifle_bullet;
+    }
+    if let Some(reload) = iw5_first_block(assets, |a| a.reload) {
+        facts.no_partial_reload = reload.no_partial_reload;
+        facts.segmented_reload = reload.segmented_reload;
+    }
+    if let Some(add_ons) = iw5_first_block(assets, |a| a.add_ons) {
+        facts.motion_tracker = add_ons.motion_tracker;
+    }
+    if let Some(general) = iw5_first_block(assets, |a| a.general) {
+        facts.bolt_action = general.bolt_action;
+        facts.inherits_perks = general.inherits_perks;
+        facts.move_speed_scale = general.move_speed_scale;
+        facts.ads_move_speed_scale = general.ads_move_speed_scale;
+    }
+
+    if let Some(ammo) = iw5_first_block(assets, |a| a.ammunition) {
+        facts.max_ammo = ammo.max_ammo;
+        facts.start_ammo = ammo.start_ammo;
+        facts.clip_size = ammo.clip_size;
+        facts.shots_per_fire = ammo.shot_count;
+        facts.reload_ammo_add = ammo.reload_ammo_add;
+        facts.reload_start_add = ammo.reload_start_add;
+    }
+    let ammo_scale = iw5_scale_product(assets, |s| s.ammunition);
+    facts.max_ammo = scale_i32(facts.max_ammo, ammo_scale);
+    facts.start_ammo = scale_i32(facts.start_ammo, ammo_scale);
+    facts.clip_size = scale_i32(facts.clip_size, ammo_scale);
+
+    if let Some(damage) = iw5_first_block(assets, |a| a.damage) {
+        facts.damage = damage.damage;
+        facts.min_damage = damage.min_damage;
+        facts.melee_damage = damage.melee_damage;
+        facts.max_damage_range = damage.max_damage_range;
+        facts.min_damage_range = damage.min_damage_range;
+        facts.min_player_damage = damage.min_player_damage;
+    }
+    facts.damage = scale_i32(facts.damage, iw5_scale_product(assets, |s| s.damage));
+    let damage_min = iw5_scale_product(assets, |s| s.damage_min);
+    facts.min_damage = scale_i32(facts.min_damage, damage_min);
+    facts.min_player_damage = scale_i32(facts.min_player_damage, damage_min);
+
+    if let Some(location) = iw5_first_block(assets, |a| a.location_damage) {
+        let mut mult = facts.location_damage_mult.unwrap_or([1.0; 20]);
+        mult[..19].copy_from_slice(&location);
+        facts.location_damage_mult = Some(mult);
+    }
+
+    if let Some(idle) = iw5_first_block(assets, |a| a.idle_settings) {
+        facts.idle.hip_idle_amount_at_0x370 = idle.hip_idle_amount;
+        facts.idle.hip_idle_speed_at_0x378 = idle.hip_idle_speed;
+        facts.idle.idle_crouch_factor_at_0x37c = idle.idle_crouch_factor;
+        facts.idle.idle_prone_factor_at_0x380 = idle.idle_prone_factor;
+    }
+    let idle_scale = iw5_scale_product(assets, |s| s.idle_settings);
+    facts.idle.hip_idle_amount_at_0x370 *= idle_scale;
+    facts.idle.ads_idle_amount_at_0x36c *= idle_scale;
+
+    if let Some(spread) = iw5_first_block(assets, |a| a.hip_spread) {
+        let v = spread.values;
+        apply_leftover_hip_spread(
+            facts,
+            [
+                v[0], v[1], v[2], v[3], v[4], v[5], v[9], v[6], v[7], v[8], v[10], v[11],
+            ],
+        );
+    }
+    let spread_scale = iw5_scale_product(assets, |s| s.hip_spread);
+    if spread_scale != 1.0 {
+        for value in [
+            &mut facts.hip_spread_stand_min,
+            &mut facts.hip_spread_ducked_min,
+            &mut facts.hip_spread_prone_min,
+            &mut facts.hip_spread_stand_max,
+            &mut facts.hip_spread_ducked_max,
+            &mut facts.hip_spread_prone_max,
+        ] {
+            *value *= spread_scale;
+        }
+    }
+
+    let kick = &mut facts.kick;
+    if let Some(gun) = iw5_first_block(assets, |a| a.gun_kick) {
+        kick.hip_gun_kick_reduced_kick_bullets = gun.hip_reduced_kick_bullets;
+        [
+            kick.hip_gun_kick_reduced_kick_percent,
+            kick.hip_gun_kick_pitch_min,
+            kick.hip_gun_kick_pitch_max,
+            kick.hip_gun_kick_yaw_min,
+            kick.hip_gun_kick_yaw_max,
+            kick.hip_gun_kick_accel,
+            kick.hip_gun_kick_speed_max,
+            kick.hip_gun_kick_speed_decay,
+            kick.hip_gun_kick_static_decay,
+        ] = gun.hip;
+        kick.ads_gun_kick_reduced_kick_bullets = gun.ads_reduced_kick_bullets;
+        [
+            kick.ads_gun_kick_reduced_kick_percent,
+            kick.ads_gun_kick_pitch_min,
+            kick.ads_gun_kick_pitch_max,
+            kick.ads_gun_kick_yaw_min,
+            kick.ads_gun_kick_yaw_max,
+            kick.ads_gun_kick_accel,
+            kick.ads_gun_kick_speed_max,
+            kick.ads_gun_kick_speed_decay,
+            kick.ads_gun_kick_static_decay,
+        ] = gun.ads;
+    }
+    let gun_scale = iw5_scale_product(assets, |s| s.gun_kick);
+    if gun_scale != 1.0 {
+        for value in [
+            &mut kick.hip_gun_kick_pitch_min,
+            &mut kick.hip_gun_kick_pitch_max,
+            &mut kick.hip_gun_kick_yaw_min,
+            &mut kick.hip_gun_kick_yaw_max,
+            &mut kick.ads_gun_kick_pitch_min,
+            &mut kick.ads_gun_kick_pitch_max,
+            &mut kick.ads_gun_kick_yaw_min,
+            &mut kick.ads_gun_kick_yaw_max,
+        ] {
+            *value *= gun_scale;
+        }
+    }
+    if let Some(view) = iw5_first_block(assets, |a| a.view_kick) {
+        [
+            kick.hip_view_kick_pitch_min,
+            kick.hip_view_kick_pitch_max,
+            kick.hip_view_kick_yaw_min,
+            kick.hip_view_kick_yaw_max,
+            kick.f_hip_view_kick_center_speed,
+            kick.ads_view_kick_pitch_min,
+            kick.ads_view_kick_pitch_max,
+            kick.ads_view_kick_yaw_min,
+            kick.ads_view_kick_yaw_max,
+            kick.f_ads_view_kick_center_speed,
+        ] = view;
+    }
+    let view_scale = iw5_scale_product(assets, |s| s.view_kick);
+    if view_scale != 1.0 {
+        for value in [
+            &mut kick.hip_view_kick_pitch_min,
+            &mut kick.hip_view_kick_pitch_max,
+            &mut kick.hip_view_kick_yaw_min,
+            &mut kick.hip_view_kick_yaw_max,
+            &mut kick.ads_view_kick_pitch_min,
+            &mut kick.ads_view_kick_pitch_max,
+            &mut kick.ads_view_kick_yaw_min,
+            &mut kick.ads_view_kick_yaw_max,
+        ] {
+            *value *= view_scale;
+        }
+    }
+    let center_scale = iw5_scale_product(assets, |s| s.view_center);
+    kick.f_hip_view_kick_center_speed *= center_scale;
+    kick.f_ads_view_kick_center_speed *= center_scale;
+
+    facts.fire_time_ms = scale_i32(
+        facts.fire_time_ms,
+        iw5_scale_product(assets, |s| s.fire_timers),
+    );
+    let state = iw5_scale_product(assets, |s| s.state_timers);
+    if state != 1.0 {
+        for value in [
+            &mut facts.fire_delay_ms,
+            &mut facts.melee_delay_ms,
+            &mut facts.melee_charge_delay_ms,
+            &mut facts.rechamber_time_ms,
+            &mut facts.rechamber_bolt_time_ms,
+            &mut facts.hold_fire_time_ms,
+            &mut facts.melee_time_ms,
+            &mut facts.melee_charge_time_ms,
+            &mut facts.reload_time_ms,
+            &mut facts.reload_show_rocket_time_ms,
+            &mut facts.reload_empty_time_ms,
+            &mut facts.reload_add_time_ms,
+            &mut facts.reload_start_time_ms,
+            &mut facts.reload_start_add_time_ms,
+            &mut facts.reload_end_time_ms,
+            &mut facts.drop_time_ms,
+            &mut facts.raise_time_ms,
+            &mut facts.quick_drop_time_ms,
+            &mut facts.quick_raise_time_ms,
+            &mut facts.sprint_raise_time_ms,
+            &mut facts.sprint_loop_time_ms,
+            &mut facts.sprint_drop_time_ms,
+        ] {
+            *value = scale_i32(*value, state);
+        }
+    }
+}
+
+fn iw5_anim_timer(facts: &mut WeaponBodyFacts, slot: usize) -> Option<&mut i32> {
+    Some(match slot {
+        weap_anim::FIRE => &mut facts.fire_time_ms,
+        weap_anim::RECHAMBER => &mut facts.rechamber_time_ms,
+        weap_anim::MELEE => &mut facts.melee_time_ms,
+        weap_anim::MELEE_CHARGE => &mut facts.melee_charge_time_ms,
+        weap_anim::RELOAD => &mut facts.reload_time_ms,
+        weap_anim::RELOAD_EMPTY => &mut facts.reload_empty_time_ms,
+        weap_anim::RELOAD_START => &mut facts.reload_start_time_ms,
+        weap_anim::RELOAD_END => &mut facts.reload_end_time_ms,
+        weap_anim::RAISE => &mut facts.raise_time_ms,
+        weap_anim::DROP => &mut facts.drop_time_ms,
+        weap_anim::QUICK_RAISE => &mut facts.quick_raise_time_ms,
+        weap_anim::QUICK_DROP => &mut facts.quick_drop_time_ms,
+        weap_anim::SPRINT_IN => &mut facts.sprint_raise_time_ms,
+        weap_anim::SPRINT_LOOP => &mut facts.sprint_loop_time_ms,
+        weap_anim::SPRINT_OUT => &mut facts.sprint_drop_time_ms,
+        _ => return None,
+    })
 }
 
 fn normalize_weapon_name(name: &str) -> String {
     let lower = name.to_ascii_lowercase();
     lower.strip_suffix("_mp").unwrap_or(&lower).to_owned()
-}
-
-fn unique_weapon_stem(rows: &[WeaponRow], query: &str) -> Option<u32> {
-    if query.is_empty() {
-        return None;
-    }
-    let mut hits: Vec<(u32, &str)> = rows
-        .iter()
-        .enumerate()
-        .skip(1)
-        .filter(|(_, row)| row.name == query || row.name.starts_with(query))
-        .map(|(i, row)| (i as u32, row.name.as_str()))
-        .collect();
-    if hits.is_empty() {
-        return None;
-    }
-    if hits.len() == 1 {
-        return Some(hits[0].0);
-    }
-    hits.sort_by_key(|(_, n)| (n.len(), *n));
-    let (id, base) = hits[0];
-    let all_are_base_or_attachment = hits.iter().all(|(_, n)| {
-        *n == base || (n.starts_with(base) && n.as_bytes().get(base.len()) == Some(&b'_'))
-    });
-    all_are_base_or_attachment.then_some(id)
 }
 
 pub fn gsc_weapon_script_name(catalog_bare: &str) -> String {
@@ -6004,4 +7892,60 @@ pub fn gsc_weapon_script_name(catalog_bare: &str) -> String {
     } else {
         format!("{catalog_bare}_mp")
     }
+}
+
+impl crate::weapon_families::FamilyContent for WeaponRegistry {
+    fn iw5_bind(
+        &self,
+        base_id: u32,
+        attachments: &[String],
+    ) -> Result<(), crate::ConfigurationRefusal> {
+        let selection = self.resolve_iw5_attachment_slots(base_id, attachments)?;
+        self.iw5_primary_attachment_assets(base_id, selection)
+            .ok_or_else(|| {
+                crate::ConfigurationRefusal::MissingContent(self.name_of(base_id).into())
+            })?;
+        Ok(())
+    }
+
+    fn lookup(&self, namespace: crate::AssetNamespace, name: &str) -> Option<u32> {
+        self.by_namespaced
+            .get(&(namespace, normalize_weapon_name(name)))
+            .copied()
+    }
+
+    fn offhand_class(&self, id: u32) -> i32 {
+        self.facts_of(id).map_or(0, |facts| facts.offhand_class)
+    }
+
+    fn admission(&self, id: u32) -> Result<(), crate::ConfigurationRefusal> {
+        self.configuration_admission(id)
+    }
+
+    fn prepared(&self, selection: &crate::WeaponSelection) -> Option<u32> {
+        self.configurations.get(selection).copied()
+    }
+
+    fn prepared_all(&self) -> Vec<(u32, crate::WeaponSelection)> {
+        self.configurations
+            .iter()
+            .map(|(selection, &id)| (id, selection.clone()))
+            .collect()
+    }
+
+    fn names_in(&self, namespace: crate::AssetNamespace) -> Vec<(u32, String)> {
+        (1..=self.len() as u32)
+            .filter(|&id| self.namespace_of(id) == Some(namespace))
+            .filter(|&id| self.iw5_configuration_of(id).is_none())
+            .map(|id| (id, normalize_weapon_name(self.name_of(id))))
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FpvAssemblyCensus {
+    pub built: usize,
+    pub linked: usize,
+    pub refused: usize,
+    pub clip_tables: usize,
 }

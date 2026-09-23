@@ -362,6 +362,23 @@ pub fn announce_log_stdout(path: &Path, latest: Option<&Path>) {
     announce_stdout(&line);
 }
 
+pub fn process_elapsed_ns() -> u128 {
+    START
+        .get()
+        .map(|start| start.elapsed().as_nanos())
+        .unwrap_or(0)
+}
+
+pub fn lifecycle_boundary(name: &str, detail: &str) {
+    let line = format!(
+        "lifecycle: {name} pid={} ns={}{detail}",
+        std::process::id(),
+        process_elapsed_ns()
+    );
+    write_event(Channel::Launch, Level::Info, &line, None, None);
+    announce_stdout(&line);
+}
+
 pub fn announce_stdout(line: &str) {
     let _ = writeln!(std::io::stdout(), "{line}");
     let _ = std::io::stdout().flush();

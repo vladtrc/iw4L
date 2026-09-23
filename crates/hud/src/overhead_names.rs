@@ -358,6 +358,7 @@ fn update_overhead_names(
                     loc_key: String::new(),
                     style: 3,
                     fx: None,
+                    glow: None,
                 },
                 provenance: Draw2dProvenance::CgDraw {
                     site: "CG_DrawOverheadNames",

@@ -6,6 +6,7 @@ mod sound_load;
 mod sound_load_iw5;
 mod sound_load_t5;
 mod sound_wma_t5;
+mod zone_sound;
 
 pub use asset_core::*;
 pub use asset_transport::*;
@@ -17,6 +18,7 @@ pub use sound_load::*;
 pub use sound_load_iw5::*;
 pub use sound_load_t5::*;
 pub use sound_wma_t5::*;
+pub use zone_sound::*;
 
 pub mod asset_graph {
     pub use asset_core::*;

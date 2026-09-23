@@ -7,7 +7,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use frame::{
     CacWeaponOffer, ClassSelectHandoff, HasWorld, HostClassLoadouts, LaunchIdentity, LaunchReport,
-    MatchInstalled, WorldGeneration,
+    MatchInstalled, WorldGeneration, WorldProducts,
 };
 use net::{AuthorityInputGate, AuthorityLoadHold, AuthorityWorld, ClientSet};
 
@@ -33,42 +33,85 @@ pub struct AuthoritativeClassProjection {
     pub lock_reason: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClassRow {
+    pub weapons: [String; 4],
+    pub attachments: [Vec<String>; 2],
+    pub perks: [String; 3],
+    pub deathstreak: String,
+}
+
+pub fn resolve_class_weapon(
+    weapons: &WeaponRegistry,
+    name: &str,
+    attachments: &[String],
+    rules: assets::LoadoutRules,
+) -> Result<u32, String> {
+    if name.is_empty() {
+        return if attachments.is_empty() {
+            Ok(0)
+        } else {
+            Err("weapon.unknown_family".to_owned())
+        };
+    }
+    let resolve = |selection: assets::WeaponSelection| {
+        weapons
+            .resolve_configuration(&selection, rules)
+            .map(|resolved| resolved.id)
+            .map_err(|refusal| format!("{name}:{}", refusal.code()))
+    };
+    if let Some(family) = assets::FamilyKey::parse(name)
+        && weapons.weapon_families().family(&family).is_some()
+    {
+        return resolve(assets::WeaponSelection::with(family, attachments));
+    }
+    let id = match weapons.resolve_index(name) {
+        Ok(Some(id)) => id,
+        Ok(None) | Err(_) => return Err(format!("{name}:catalog.unknown")),
+    };
+    match weapons.describe_configuration(id) {
+        Some(described) if described.family.is_some() => {
+            let mut selection = described.clone();
+            for extra in attachments {
+                if !selection.attachments.contains(extra) {
+                    selection.attachments.push(extra.clone());
+                }
+            }
+            resolve(selection)
+        }
+        _ if attachments.is_empty() => weapons
+            .configuration_admission(id)
+            .map(|()| id)
+            .map_err(|refusal| format!("{name}:{}", refusal.code())),
+        _ => Err(format!("{name}:weapon.unknown_family")),
+    }
+}
+
 pub fn authoritative_class_lock_reason(
     names: [&str; 4],
-    weapons: &WeaponRegistry,
+    ids: [u32; 4],
     combat: &[sim::WeaponCombatFacts],
     equipment: &[sim::EquipmentRuntimeFacts],
 ) -> Option<String> {
     let mut reason = None;
-    for name in &names[..2] {
-        let id = match weapons.resolve_index(name) {
-            Ok(None) => continue,
-            Ok(Some(id)) => id,
-            Err(_) => {
-                append_lock_reason(&mut reason, format!("{name}:catalog.unknown"));
-                continue;
-            }
-        };
+    for (name, id) in names[..2].iter().zip(&ids[..2]) {
+        if *id == 0 {
+            continue;
+        }
         if !combat
-            .get(id as usize)
+            .get(*id as usize)
             .copied()
             .is_some_and(sim::WeaponCombatFacts::is_usable)
         {
             append_lock_reason(&mut reason, format!("{name}:validated.missing_profile"));
         }
     }
-
-    for name in &names[2..] {
-        let id = match weapons.resolve_index(name) {
-            Ok(None) => continue,
-            Ok(Some(id)) => id,
-            Err(_) => {
-                append_lock_reason(&mut reason, format!("{name}:catalog.unknown"));
-                continue;
-            }
-        };
+    for (name, id) in names[2..].iter().zip(&ids[2..]) {
+        if *id == 0 {
+            continue;
+        }
         if !equipment
-            .get(id as usize)
+            .get(*id as usize)
             .copied()
             .is_some_and(sim::EquipmentRuntimeFacts::is_offhand)
         {
@@ -206,30 +249,40 @@ pub fn deathstreak_lock_reason(name: &str) -> Option<String> {
 
 pub fn project_class(
     class_id: u32,
-    names: [&str; 4],
-    perks: [&str; 3],
-    deathstreak: &str,
+    row: &ClassRow,
     weapons: &WeaponRegistry,
     combat: &[sim::WeaponCombatFacts],
     equipment: &[sim::EquipmentRuntimeFacts],
 ) -> AuthoritativeClassProjection {
-    let resolve = |name: &str| -> (u32, bool) {
-        match weapons.resolve_index(name) {
-            Ok(None) => (0, false),
-            Ok(Some(id)) => (id, false),
-            Err(_) => (0, true),
+    let rules = assets::LoadoutRules::for_class(&row.perks[0]);
+    let mut lock_reason = None;
+    let no_attachments = Vec::new();
+    let mut ids = [0u32; 4];
+    for (slot, id) in ids.iter_mut().enumerate() {
+        let attachments = row.attachments.get(slot).unwrap_or(&no_attachments);
+        match resolve_class_weapon(weapons, &row.weapons[slot], attachments, rules) {
+            Ok(resolved) => *id = resolved,
+            Err(reason) => append_lock_reason(&mut lock_reason, reason),
         }
-    };
-    let resolved = names.map(resolve);
-    let mut def =
-        sim::ClassDef::primary_secondary(sim::ClassId(class_id), 1, resolved[0].0, resolved[1].0);
-    def.lethal = resolved[2].0;
-    def.tactical = resolved[3].0;
-    let mut lock_reason = authoritative_class_lock_reason(names, weapons, combat, equipment);
-
-    if resolved.into_iter().any(|(_, bad)| bad) {
-        append_lock_reason(&mut lock_reason, "catalog.unknown".to_owned());
     }
+    let names = [
+        row.weapons[0].as_str(),
+        row.weapons[1].as_str(),
+        row.weapons[2].as_str(),
+        row.weapons[3].as_str(),
+    ];
+    let mut def = sim::ClassDef::primary_secondary(sim::ClassId(class_id), 1, ids[0], ids[1]);
+    def.lethal = ids[2];
+    def.tactical = ids[3];
+    if let Some(reason) = authoritative_class_lock_reason(names, ids, combat, equipment) {
+        append_lock_reason(&mut lock_reason, reason);
+    }
+    let perks = [
+        row.perks[0].as_str(),
+        row.perks[1].as_str(),
+        row.perks[2].as_str(),
+    ];
+    let deathstreak = row.deathstreak.as_str();
     for (slot, perk) in def.perks.iter_mut().zip(perks) {
         if perk.is_empty() || perk == "specialty_null" {
             continue;
@@ -532,6 +585,8 @@ pub fn apply_prepared_match(
         content.set_weapon_def_scales(weapons.0.scales_table());
         let combat = combat_table::from_registry(&weapons.0, lochit_table);
         content.set_weapon_combat_table(combat.clone());
+        content.set_weapon_runnable_table(weapons.0.runnable_table());
+        content.set_weapon_transition_groups(weapons.0.configuration_transition_groups());
         content.set_bullet_pen_facts(combat_table::pen_from_registry(&weapons.0));
         content.set_penetration_table(pen_table);
         content.set_pen_table_loaded(pen_table_loaded);
@@ -563,53 +618,26 @@ pub fn apply_prepared_match(
         let mut lethal = Vec::new();
         let mut tactical = Vec::new();
         let mut excluded = Vec::new();
-        let loadout_rows = weapons.0.loadout_catalog();
-        let mut attachment_variants = std::collections::HashMap::<u32, Vec<String>>::new();
-        for row in &loadout_rows {
-            if let assets::LoadoutCatalogKind::AttachmentVariant { base_id } = row.kind {
-                attachment_variants
-                    .entry(base_id)
-                    .or_default()
-                    .push(row.key.to_string());
-            }
-        }
-        for variants in attachment_variants.values_mut() {
-            variants.sort();
-            variants.dedup();
-        }
-        for row in loadout_rows {
+        let families = weapons.0.weapon_families();
+        for family in families.offered() {
             let offer = CacWeaponOffer {
-                key: row.key.to_string(),
-                item_group: row.item_group.clone(),
-                attachment_variants: attachment_variants.remove(&row.id).unwrap_or_default(),
+                key: family.key.asset_key(),
+                item_group: Some(family.item_group.clone()),
+                attachments: family
+                    .attachments
+                    .iter()
+                    .map(|choice| choice.name.clone())
+                    .collect(),
             };
-            let key = offer.key.clone();
-            match row.kind {
-                assets::LoadoutCatalogKind::Primary => primary.push(offer),
-                assets::LoadoutCatalogKind::Secondary => secondary.push(offer),
-                assets::LoadoutCatalogKind::Equipment { offhand_class } => {
-                    match assets::cac_offhand_bucket(offhand_class) {
-                        Some(assets::CacOffhandBucket::Lethal) => lethal.push(offer),
-                        Some(assets::CacOffhandBucket::Tactical) => tactical.push(offer),
-                        None => excluded.push((
-                            key,
-                            format!("unsupported retail offhandClass {offhand_class}"),
-                        )),
-                    }
-                }
-                assets::LoadoutCatalogKind::AttachmentVariant { base_id } => excluded.push((
-                    key,
-                    format!(
-                        "attachment variant of {} (available through typed CAC attachment picker)",
-                        weapons.0.name_of(base_id)
-                    ),
-                )),
-                assets::LoadoutCatalogKind::NonPlayer => excluded.push((
-                    key,
-                    "not structurally player/create-a-class eligible".to_owned(),
-                )),
+            match family.slot {
+                assets::FamilySlot::Primary => primary.push(offer),
+                assets::FamilySlot::Secondary => secondary.push(offer),
+                assets::FamilySlot::Lethal => lethal.push(offer),
+                assets::FamilySlot::Tactical => tactical.push(offer),
+                assets::FamilySlot::Other => {}
             }
         }
+        excluded.extend(families.excluded().iter().cloned());
         stage_resource(&mut install, fpv_meshes);
         stage_resource(&mut install, bodies);
         stage_resource(&mut install, world_weapons);
@@ -820,6 +848,7 @@ pub fn apply_prepared_match(
             ));
         }
         sim_cam.freeze_fly = true;
+        stage_resource(&mut install, WorldProducts::from_walk(scene.products_id));
         stage_resource(&mut install, scene);
         stage_resource(&mut install, sim_cam);
         stage_resource(&mut install, input_gate);
@@ -1841,17 +1870,7 @@ fn install_clip_and_player(
     let projected: Vec<AuthoritativeClassProjection> = rows
         .iter()
         .enumerate()
-        .map(|(index, (names, perks, deathstreak))| {
-            project_class(
-                index as u32,
-                [&names[0], &names[1], &names[2], &names[3]],
-                [&perks[0], &perks[1], &perks[2]],
-                deathstreak,
-                weapons,
-                combat,
-                equipment,
-            )
-        })
+        .map(|(index, row)| project_class(index as u32, row, weapons, combat, equipment))
         .collect();
     let lock_reasons: Vec<Option<String>> = projected
         .iter()
@@ -1956,24 +1975,24 @@ fn install_clip_and_player(
     Ok((gap, lock_reasons, bot_class_ids))
 }
 
-pub(crate) fn bootstrap_class_rows(
-    host: Option<&HostClassLoadouts>,
-) -> Vec<([String; 4], [String; 3], String)> {
+pub(crate) fn bootstrap_class_rows(host: Option<&HostClassLoadouts>) -> Vec<ClassRow> {
     let fallback = HostClassLoadouts::default();
     let host = host.filter(|h| !h.slots.is_empty()).unwrap_or(&fallback);
     host.slots
         .iter()
-        .map(|slot| {
-            (
-                [
-                    slot.primary.clone(),
-                    slot.secondary.clone(),
-                    slot.lethal.clone(),
-                    slot.tactical.clone(),
-                ],
-                slot.perks.clone(),
-                slot.deathstreak.clone(),
-            )
+        .map(|slot| ClassRow {
+            weapons: [
+                slot.primary.clone(),
+                slot.secondary.clone(),
+                slot.lethal.clone(),
+                slot.tactical.clone(),
+            ],
+            attachments: [
+                slot.primary_attachments.clone(),
+                slot.secondary_attachments.clone(),
+            ],
+            perks: slot.perks.clone(),
+            deathstreak: slot.deathstreak.clone(),
         })
         .collect()
 }

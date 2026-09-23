@@ -69,3 +69,8 @@ A diagnostic build with `--features bevy-trace` writes Bevy's own `tracing`
 spans — the ones inside the render graph, `queue_submit` among them — as a
 Chrome trace. It costs the frame it measures, so it is never a timed run;
 `scheduling.bevy_tracing` in the manifest says whether a run was one.
+
+Render-world handoff spans are `receive_render_world`, `extract_body`, and
+`dispatch_render_world`. Receiving can execute worker/main-thread tasks as well
+as wait; it is not CPU idle time. Older reports' `extract_wait` included all
+three phases and cannot be compared directly with the receive span.

@@ -1098,6 +1098,8 @@ pub struct WeaponGeometry {
     pub dpad_icon_name: Option<Ptr>,
     pub dpad_icon_ratio: i32,
 
+    pub motion_tracker: bool,
+
     pub proj_trail_slot: Option<Ptr>,
 
     pub proj_beacon_slot: Option<Ptr>,

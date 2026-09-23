@@ -44,7 +44,9 @@ impl ledger::Gap for RenderGap {
 pub enum RenderGapCause {
     PlayerAnimSourcesNotPrepared,
 
-    PlayerAnimSourceDecodeFailed { first: String },
+    PlayerAnimSourceDecodeFailed {
+        first: String,
+    },
 
     MultiplayerAtrAbsent,
 
@@ -52,31 +54,52 @@ pub enum RenderGapCause {
 
     AnimtreeCompilerMissing,
 
-    AnimtreeCompileFailed { reason: String },
+    AnimtreeCompileFailed {
+        reason: String,
+    },
 
     AnimScriptEvaluatorMissing,
 
-    AnimScriptParseFailed { reason: String },
+    AnimScriptParseFailed {
+        reason: String,
+    },
 
     XAnimLeafBindMissing,
 
     XAnimCalcMissing,
 
-    XAnimCalcFailed { reason: String },
+    XAnimCalcFailed {
+        reason: String,
+    },
 
     RemoteBodySubmitMissing,
 
     RemoteBodyLightingAllocFailed,
 
-    RemoteBodyMaterialMissing { name: String },
+    RemoteBodyMaterialMissing {
+        name: String,
+    },
 
-    RemoteBodyWorldGunMissing { weapon: u32, world_model: String },
+    RemoteBodyWorldGunMissing {
+        weapon: u32,
+        world_model: String,
+    },
 
     FpvCatalogMissing,
 
-    FpvGunXModelUnresolved { weapon_id: u32 },
+    FpvGunXModelUnresolved {
+        weapon_id: u32,
+    },
 
-    FpvEyePoseFailed { gun_xmodel: String },
+    FpvDependencyUnresolved {
+        weapon_id: u32,
+        role: &'static str,
+        name: String,
+    },
+
+    FpvEyePoseFailed {
+        gun_xmodel: String,
+    },
 
     FpvNoCamera,
 
@@ -107,6 +130,7 @@ impl ledger::GapCause for RenderGapCause {
             RenderGapCause::RemoteBodyWorldGunMissing { .. } => RenderGap::RemoteBodyWorldGun,
             RenderGapCause::FpvCatalogMissing
             | RenderGapCause::FpvGunXModelUnresolved { .. }
+            | RenderGapCause::FpvDependencyUnresolved { .. }
             | RenderGapCause::FpvEyePoseFailed { .. }
             | RenderGapCause::FpvNoCamera
             | RenderGapCause::FpvNoLightingAtlas
@@ -137,6 +161,7 @@ impl RenderGapCause {
             RenderGapCause::RemoteBodyWorldGunMissing { .. } => "remote body world gun missing",
             RenderGapCause::FpvCatalogMissing => "FPV catalog missing",
             RenderGapCause::FpvGunXModelUnresolved { .. } => "gunXModel[0] unresolved",
+            RenderGapCause::FpvDependencyUnresolved { .. } => "FPV dependency unresolved",
             RenderGapCause::FpvEyePoseFailed { .. } => "FPV eye-pose failed",
             RenderGapCause::FpvNoCamera => "FPV waiting for camera",
             RenderGapCause::FpvNoLightingAtlas => "FPV hidden: ModelLightingCache atlas missing",
@@ -174,6 +199,17 @@ impl fmt::Display for RenderGapCause {
             }
             RenderGapCause::FpvGunXModelUnresolved { weapon_id } => {
                 write!(f, "{} for weapon {weapon_id}", self.label())
+            }
+            RenderGapCause::FpvDependencyUnresolved {
+                weapon_id,
+                role,
+                name,
+            } => {
+                write!(
+                    f,
+                    "{} for weapon {weapon_id}: {role} `{name}`",
+                    self.label()
+                )
             }
             RenderGapCause::FpvEyePoseFailed { gun_xmodel } => {
                 write!(

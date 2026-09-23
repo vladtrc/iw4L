@@ -29,10 +29,10 @@ pub use local_arm::{
     sync_prediction_metrics_to_probe,
 };
 pub use match_apply::{
-    AuthoritativeClassProjection, PendingConsoleLines, PerkRuntimeContract, StartupCommands,
-    apply_prepared_match, authoritative_class_lock_reason, deathstreak_lock_reason,
-    deathstreak_runtime_contract, install_script_model_id, perk_catalog_id, perk_runtime_contract,
-    project_class,
+    AuthoritativeClassProjection, ClassRow, PendingConsoleLines, PerkRuntimeContract,
+    StartupCommands, apply_prepared_match, authoritative_class_lock_reason,
+    deathstreak_lock_reason, deathstreak_runtime_contract, install_script_model_id,
+    perk_catalog_id, perk_runtime_contract, project_class, resolve_class_weapon,
 };
 pub use plugin::SessionPlugin;
 

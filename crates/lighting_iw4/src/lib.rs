@@ -60,7 +60,6 @@ pub use dlight::{
     R_DLIGHT_BACKEND_MAX, R_DLIGHT_LIMIT_DEFAULT, R_DLIGHT_LIMIT_MAX, SceneDlight,
     append_scene_dlights_to_backend, cull_point_and_radius_from_planes, dlight_copies_to_backend,
     dlight_hits_aabb, dlight_partition_prefers, dlight_select_visible, dlight_visible,
-    spot_dlight0_frustum_culls, spot_dlight0_special_copy_allows,
 };
 pub use entry::GfxLightGridEntry;
 pub use expand::{
@@ -116,7 +115,8 @@ pub use lit_tech::{
     LIT_TECH_INSTANCED_ROW_DFOG, LIT_TECH_INSTANCED_SURF_TYPES, LIT_TECH_NO_SHADOW_DIR_SLOTS,
     LIT_TECH_NO_SHADOW_LOCAL_SLOTS, LIT_TECH_SHADOW_COLUMN_BIAS, LIT_TECH_SHADOW_DIR_SLOTS,
     LIT_TECH_SHADOW_SPOT_SLOTS, LIT_TECH_STANDARD_ROW, LIT_TECH_STANDARD_ROW_DFOG,
-    LIT_TECH_SURF_ROWS, TECHNIQUE_NONE, is_lit_remap_slot, lit_tech_column, lit_tech_type,
+    LIT_TECH_SURF_ROWS, TECHNIQUE_LIGHT_OMNI, TECHNIQUE_LIGHT_SPOT, TECHNIQUE_LIGHT_SPOT_SHADOW,
+    TECHNIQUE_NONE, additional_light_tech_type, is_lit_remap_slot, lit_tech_column, lit_tech_type,
 };
 pub use lookup::{
     LightGridLookupColorAccum, LightGridLookupCorner, LightGridLookupWeights,

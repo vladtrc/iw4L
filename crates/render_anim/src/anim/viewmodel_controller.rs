@@ -2,12 +2,16 @@ use std::sync::Arc;
 
 use assets::{
     ACTION_GOAL_TIME_SECS, ACTIVE_GOAL_WEIGHT, ActiveAnim, AdsOverlayConvention, ClipScheduler,
-    IDLE_INTERRUPT_GOAL_TIME_SECS, INACTIVE_GOAL_WEIGHT, WEAPON_ANIM_COUNT, WeaponAnimSlot,
-    WeaponAnimations, playback_rate, slot_uses_native_rate,
+    IDLE_INTERRUPT_GOAL_TIME_SECS, INACTIVE_GOAL_WEIGHT, WEAPON_ANIM_COUNT, WEAPON_ANIM_SLOTS,
+    WeaponAnimSlot, WeaponAnimations, playback_rate, slot_uses_native_rate,
 };
 
 const DISPATCH_SLOT_START: usize = 1;
 const DISPATCH_SLOT_END: usize = 0x22;
+
+fn dispatch_slots() -> impl Iterator<Item = usize> {
+    (DISPATCH_SLOT_START..=DISPATCH_SLOT_END).chain(WEAPON_ANIM_COUNT..WEAPON_ANIM_SLOTS)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewmodelEvent {
@@ -67,7 +71,7 @@ pub struct ViewmodelController {
 
 impl ViewmodelController {
     pub fn new(weapon: WeaponAnimations) -> Self {
-        let mut tree = ClipScheduler::new(WEAPON_ANIM_COUNT);
+        let mut tree = ClipScheduler::new(WEAPON_ANIM_SLOTS);
         weapon
             .install_clips(&mut tree)
             .expect("weapon animation index is within tree");
@@ -281,6 +285,14 @@ impl ViewmodelController {
             WeaponAnimSlot::ReloadEmpty => (
                 WeaponState::Reloading { empty: true },
                 positive_ms(self.weapon.reload_empty_time_ms),
+            ),
+            WeaponAnimSlot::ReloadQuick => (
+                WeaponState::Reloading { empty: false },
+                positive_ms(self.weapon.reload_quick_time_ms),
+            ),
+            WeaponAnimSlot::ReloadQuickEmpty => (
+                WeaponState::Reloading { empty: true },
+                positive_ms(self.weapon.reload_quick_empty_time_ms),
             ),
             WeaponAnimSlot::ReloadStart => (
                 WeaponState::ReloadStarting,
@@ -534,7 +546,7 @@ impl ViewmodelController {
     }
 
     fn dispatch_range_unfinished(&self) -> bool {
-        for node in DISPATCH_SLOT_START..=DISPATCH_SLOT_END {
+        for node in dispatch_slots() {
             let weight = self.tree.weight(node).unwrap_or(0.0);
             if weight <= 0.0 {
                 continue;
@@ -554,7 +566,7 @@ impl ViewmodelController {
     }
 
     fn zero_dispatch_slots(&mut self, goal_time: f32) {
-        for node in DISPATCH_SLOT_START..=DISPATCH_SLOT_END {
+        for node in dispatch_slots() {
             self.tree
                 .set_goal_weight(node, INACTIVE_GOAL_WEIGHT, goal_time)
                 .expect("action index is within tree");

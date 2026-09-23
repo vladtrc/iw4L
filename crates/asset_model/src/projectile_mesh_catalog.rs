@@ -13,7 +13,7 @@ use asset_material::{MaterialCatalog, MaterialDefinitions};
 
 #[derive(Clone, Debug)]
 pub struct ProjectileMeshEntry {
-    pub skel: ModelSkel,
+    pub skel: std::sync::Arc<ModelSkel>,
     pub material_names: Vec<Option<String>>,
     pub material_edges: Vec<AssetEdge<crate::MaterialSpace>>,
 }
@@ -23,7 +23,7 @@ impl ProjectileMeshEntry {
         let (material_names, material_edges) =
             capture_xmodel_material_slots(&skel.surface_materials, materials.map(|c| &**c));
         Self {
-            skel,
+            skel: std::sync::Arc::new(skel),
             material_names,
             material_edges,
         }

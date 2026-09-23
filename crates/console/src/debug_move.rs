@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use net::{
     ClientActionInbox, LocalPresentClient, LookState, PresentedSnapshot, look_angles_from_degrees,
 };
-use sim::{ClientAction, ClientLifecycle, MatchPhase};
+use sim::{ClientAction, ClientLifecycle, MatchPhase, SpawnPick};
 use ui::UiLayer;
 
 use crate::feature_dispatch::DebugPosOverlay;
@@ -58,6 +58,11 @@ pub(crate) fn register_debug_move_commands(registry: &mut ConsoleRegistry) {
             .register(crate::CommandSpec::new("kill").usage(
                 "kill — ForceDeath the local player (needs cheats; invented, not COMMANDS)",
             ));
+    }
+    if registry.resolve("force_spawn").is_none() {
+        registry.register(crate::CommandSpec::new("force_spawn").usage(
+            "force_spawn [random <seed> | at <x> <y> <z> [yaw]] — respawn from any state through spawn resolution (needs cheats)",
+        ));
     }
     if registry.resolve("damage").is_none() {
         registry.register(
@@ -284,6 +289,52 @@ pub(crate) fn route_debug_move_commands(
                 }
                 echo(
                     format!("kill: queued ForceDeath request_id={request_id}"),
+                    &mut console,
+                    &mut line,
+                );
+            }
+            "force_spawn" => {
+                let pick = match parse_force_spawn(&cmd.args) {
+                    Ok(pick) => pick,
+                    Err(error) => {
+                        echo(format!("force_spawn: {error}"), &mut console, &mut line);
+                        continue;
+                    }
+                };
+                if authority.as_ref().is_some_and(|a| !a.0.cheats_enabled()) {
+                    echo(
+                        "force_spawn: cheats are off".into(),
+                        &mut console,
+                        &mut line,
+                    );
+                    continue;
+                }
+                let Some(inbox) = inbox.as_deref_mut() else {
+                    echo(
+                        "force_spawn: no action inbox (not a listen host)".into(),
+                        &mut console,
+                        &mut line,
+                    );
+                    continue;
+                };
+                let request_id = seq.allocate();
+                if let Err(error) =
+                    inbox.push(local.0, ClientAction::ForceSpawn { request_id, pick })
+                {
+                    echo(format!("force_spawn: {error}"), &mut console, &mut line);
+                    continue;
+                }
+                if !cmd.background {
+                    let life = authority
+                        .as_ref()
+                        .and_then(|a| a.0.client_meta(local.0))
+                        .map(|m| m.life_sequence)
+                        .unwrap_or_default();
+                    dispatch.wait_alive = Some((local.0, life));
+                    dispatch.wait_alive_elapsed = 0.0;
+                }
+                echo(
+                    format!("force_spawn: queued {pick:?} request_id={request_id}"),
                     &mut console,
                     &mut line,
                 );
@@ -715,4 +766,28 @@ fn angle_abs_delta(a: f32, b: f32) -> f32 {
         d += 360.0;
     }
     d.abs()
+}
+
+fn parse_force_spawn(args: &[String]) -> Result<SpawnPick, String> {
+    const USAGE: &str = "usage: force_spawn [random <seed> | at <x> <y> <z> [yaw]]";
+    let num = |raw: &String| {
+        raw.parse::<f32>()
+            .map_err(|_| format!("{USAGE} (got `{raw}`)"))
+    };
+    match args.first().map(String::as_str) {
+        None => Ok(SpawnPick::Seeded(0)),
+        Some("random") => {
+            let [_, seed] = args else {
+                return Err(USAGE.into());
+            };
+            seed.parse::<u64>()
+                .map(SpawnPick::Seeded)
+                .map_err(|_| format!("{USAGE} (got `{seed}`)"))
+        }
+        Some("at") if matches!(args.len(), 4 | 5) => Ok(SpawnPick::At {
+            origin: [num(&args[1])?, num(&args[2])?, num(&args[3])?],
+            yaw: args.get(4).map(num).transpose()?.unwrap_or(0.0),
+        }),
+        Some(_) => Err(USAGE.into()),
+    }
 }

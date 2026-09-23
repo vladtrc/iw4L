@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use frame::{ClientSet, MatchTornDown, SessionSwapApplied};
+use frame::{ClientSet, MatchTornDown, ReturnedToMenu, SessionSwapApplied};
 
 use crate::{
     AssetRefDumpCensus, MapXModelSceneCatalog, MatchType10SoundHints, PlayerAnimSources,
@@ -11,32 +11,40 @@ use crate::{
 
 pub(crate) fn drop_match_catalogs_on_teardown(
     mut torn: MessageReader<MatchTornDown>,
+    mut returned: MessageReader<ReturnedToMenu>,
     mut commands: Commands,
 ) {
-    if torn.read().count() == 0 {
+    if torn.read().count() == 0 && returned.read().count() == 0 {
         return;
     }
-    commands.remove_resource::<PreparedWeapons>();
-    commands.remove_resource::<MatchType10SoundHints>();
-    commands.remove_resource::<PreparedFpvMeshes>();
-    commands.remove_resource::<PreparedBodies>();
-    commands.remove_resource::<PreparedWorldWeapons>();
-    commands.remove_resource::<PreparedProjectileMeshes>();
-    commands.remove_resource::<PreparedXModelWalkCensus>();
-    commands.remove_resource::<PreparedXAnims>();
-    commands.remove_resource::<PlayerAnimSources>();
-    commands.remove_resource::<SessionCompass>();
-    commands.remove_resource::<SessionMapScriptSound>();
-    commands.remove_resource::<SessionTeamSettings>();
-    commands.remove_resource::<PreparedLocalizedStrings>();
-    commands.remove_resource::<PreparedDestructibleDeath>();
-    commands.remove_resource::<PreparedBodyClips>();
-    commands.remove_resource::<MapXModelSceneCatalog>();
-    commands.remove_resource::<AssetRefDumpCensus>();
+    commands.queue(retire_match_catalogs);
+}
+
+fn retire_match_catalogs(world: &mut World) {
+    frame::retire::retire_resources(world, |batch| {
+        batch
+            .resource::<PreparedWeapons>()
+            .resource::<MatchType10SoundHints>()
+            .resource::<PreparedFpvMeshes>()
+            .resource::<PreparedBodies>()
+            .resource::<PreparedWorldWeapons>()
+            .resource::<PreparedProjectileMeshes>()
+            .resource::<PreparedXModelWalkCensus>()
+            .resource::<PreparedXAnims>()
+            .resource::<PlayerAnimSources>()
+            .resource::<SessionCompass>()
+            .resource::<SessionMapScriptSound>()
+            .resource::<SessionTeamSettings>()
+            .resource::<PreparedLocalizedStrings>()
+            .resource::<PreparedDestructibleDeath>()
+            .resource::<PreparedBodyClips>()
+            .resource::<MapXModelSceneCatalog>()
+            .resource::<AssetRefDumpCensus>();
+    });
 }
 
 pub(crate) fn register_match_teardown(app: &mut App) {
-    app.add_systems(
+    app.add_message::<ReturnedToMenu>().add_systems(
         Update,
         drop_match_catalogs_on_teardown
             .after(SessionSwapApplied)

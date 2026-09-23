@@ -1,3 +1,4 @@
+pub mod retire;
 pub mod schedule;
 pub mod script_entity_notify;
 pub mod script_notify;
@@ -5,6 +6,7 @@ pub mod session;
 pub mod settings;
 pub mod ui_sound;
 
+pub use retire::Retiring;
 pub use schedule::{
     AUTHORITY_TOC, AuthorityBookkeeping, AuthorityEdge, AuthoritySet, CLIENT_TOC,
     ClassEquipResolved, ClientEdge, ClientSet, FxSoundPublished, LifeFrontPublished,
@@ -23,8 +25,8 @@ pub use session::{
     AdmissionKey, AppScreen, BotNavigationReady, CacWeaponOffer, ClassSelectHandoff, HasWorld,
     HostClassLoadouts, HostClassSlot, HudInputView, LaunchIdentity, LaunchReport, LifeEndCause,
     LifeEnded, LifeStartReason, LifeStarted, LocalLoadKey, MapLoadApproved, MapLoadFailed,
-    MatchInstalled, MatchKey, MatchTornDown, RuntimeRole, TeardownReason, UiDraw, ViewSubject,
-    WorldGeneration,
+    MatchInstalled, MatchKey, MatchTornDown, ReturnedToMenu, RuntimeRole, TeardownReason, UiDraw,
+    ViewSubject, WorldGeneration, WorldProducts,
 };
 pub use settings::{DisplayResolution, GameSettings};
 pub use ui_sound::{UiPlayMusic, UiPlaySound, UiStopMusic, register_ui_sound};

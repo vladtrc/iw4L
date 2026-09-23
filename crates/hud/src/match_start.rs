@@ -4,9 +4,9 @@ use assets::{MenuCatalog, PreparedLocalizedStrings};
 use bevy::prelude::*;
 use frame::UiPlaySound;
 use hud_iw4::{
-    ALIGN_CENTER, ALIGN_VIEWABLE, HE_TYPE_PLAYERNAME, HE_TYPE_TEXT, HE_TYPE_VALUE, HudElem,
-    bg_lerp_hud_colors, copy_in_use_prefix, hudelem_font_ui_enum, hudelem_text_scale,
-    ui_get_font_handle,
+    HE_TYPE_PLAYERNAME, HE_TYPE_TEXT, HE_TYPE_VALUE, HudElem, bg_lerp_hud_colors,
+    copy_in_use_prefix, hud_elem_glow_color, hud_elem_placement, hud_elem_screen_align,
+    hudelem_font_ui_enum, hudelem_text_scale, ui_get_font_handle,
 };
 use net::{CgFrameClock, LocalPresentClient, PresentedSnapshot};
 
@@ -36,15 +36,7 @@ fn sprintf_g(value: f32) -> String {
 }
 
 fn is_score_popup(elem: &HudElem) -> bool {
-    elem.elem_type == HE_TYPE_VALUE && (elem.y - gamemode_iw4::SCORE_POPUP_Y).abs() < 1.0
-}
-
-fn vert_align(elem: &HudElem) -> i32 {
-    if elem.align_screen == hud_iw4::OUTCOME_ALIGN_SCREEN {
-        ALIGN_VIEWABLE
-    } else {
-        ALIGN_CENTER
-    }
+    elem.elem_type == HE_TYPE_VALUE && elem.sort == gamemode_iw4::SCORE_POPUP_SORT
 }
 
 fn player_name(presented: &PresentedSnapshot, value: f32) -> String {
@@ -183,15 +175,16 @@ pub(crate) fn update_match_start(
             });
         }
         let nscale = hud_iw4::r_normalized_text_scale(font.pixel_height, text_scale);
-        let measured = r_text_width(font, &text) as f32 * nscale;
-        let applied = surface.apply_rect(
-            elem.x - measured / 2.0,
-            elem.y,
-            nscale,
-            nscale,
-            ALIGN_CENTER,
-            vert_align(elem),
+        let (horz_align, vert_align) = hud_elem_screen_align(elem.align_screen);
+        let glyph = surface.apply_rect(0.0, 0.0, nscale, nscale, horz_align, vert_align);
+        let text_width = r_text_width(font, &text) as f32 * glyph.w;
+        let font_height = hud_iw4::hudelem_em_px(
+            elem.font,
+            hud_iw4::hud_elem_lerp_font_scale(elem, cg_time),
+            surface.scale_virtual_to_real()[1],
         );
+        let placed =
+            hud_elem_placement(surface.placement(), elem, cg_time, text_width, font_height);
         let alpha = color[3] as f32 / 255.0;
         let face = [
             color[0] as f32 / 255.0,
@@ -201,10 +194,10 @@ pub(crate) fn update_match_start(
         ];
         cmds.push(Draw2dCmd {
             material_namespace: crate::images::HUD_CHROME_NAMESPACE,
-            x: (applied.x + 0.5).floor(),
-            y: (applied.y + 0.5).floor(),
-            w: applied.w,
-            h: applied.h,
+            x: (placed.x + 0.5).floor(),
+            y: (placed.y + 0.5).floor(),
+            w: glyph.w,
+            h: glyph.h,
             s0: 0.0,
             t0: 0.0,
             s1: 1.0,
@@ -219,6 +212,8 @@ pub(crate) fn update_match_start(
 
                 style: crate::draw2d::TEXT_STYLE_HUDELEM,
                 fx: crate::hudelem::hudelem_text_fx(elem, cg_time),
+                glow: hud_elem_glow_color(elem, color)
+                    .and_then(|glow| crate::chrome::text_run_glow(font, glow)),
             },
             provenance: Draw2dProvenance::HudElem {
                 index: index as i32,

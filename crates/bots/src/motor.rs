@@ -23,7 +23,7 @@ pub struct Motor {
     err_pitch: f32,
     acquire_yaw: f32,
     last_look: Option<[f32; 3]>,
-    armed: bool,
+    armed: Option<sim::LifeSequence>,
 }
 
 impl Motor {
@@ -41,7 +41,7 @@ impl Motor {
             err_pitch,
             acquire_yaw: 0.0,
             last_look: None,
-            armed: false,
+            armed: None,
         }
     }
 
@@ -79,10 +79,10 @@ impl Motor {
     }
 
     pub fn drive(&mut self, obs: &BotObservation, intent: &BotIntent, dt_ms: i32) -> UserCmd {
-        if !self.armed {
+        if self.armed != Some(obs.self_state.life_sequence) {
             self.yaw = obs.self_state.viewangles[1];
             self.pitch = angle_subtract(obs.self_state.viewangles[0], 0.0);
-            self.armed = true;
+            self.armed = Some(obs.self_state.life_sequence);
         }
         let dt = dt_ms.max(1) as f32;
         if let Some(at) = intent.look_at {
@@ -130,11 +130,12 @@ impl Motor {
         // settles a dropping hand back to ready when the command asks for the
         // weapon it is already lowering.
         let weapon = intent.weapon.unwrap_or(obs.self_state.weapon);
+        let delta = obs.self_state.delta_angles;
         let mut cmd = UserCmd {
             server_time: obs.time_ms,
             angles: [
-                (self.pitch * ANGLE2SHORT) as i32,
-                (self.yaw * ANGLE2SHORT) as i32,
+                ((self.pitch - delta[0]) * ANGLE2SHORT) as i32,
+                ((self.yaw - delta[1]) * ANGLE2SHORT) as i32,
                 0,
             ],
             forwardmove,

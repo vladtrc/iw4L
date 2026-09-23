@@ -54,6 +54,10 @@ impl Hud2dSurface {
     pub fn scale_virtual_to_real(&self) -> [f32; 2] {
         self.place.scale_virtual_to_real
     }
+
+    pub fn placement(&self) -> &ScreenPlacement {
+        &self.place
+    }
 }
 
 pub(crate) fn update_hud_surface(

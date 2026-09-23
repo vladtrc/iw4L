@@ -153,7 +153,10 @@ pub struct WorldScene {
 
     pub runtime_material_catalog: std::sync::Arc<crate::assemble::drawsurf::RuntimeMaterialCatalog>,
 
-    pub exact_material_images: Vec<Option<Image>>,
+    pub exact_material_images: Vec<Option<std::sync::Arc<Image>>>,
+    pub common_profile_id: u64,
+    pub products_id: u64,
+    pub exact_material_common: Vec<bool>,
 
     /// Which prepared variant each of those images is, where it came from a
     /// decode plan. Two slots carrying the same variant hold byte-identical
@@ -257,6 +260,8 @@ pub struct WorldScene {
 
     pub primary_light_attenuation: Vec<LightAttenuationBind>,
 
+    pub dynamic_light: Option<crate::assemble::drawsurf::DynamicLightBind>,
+
     pub primary_light_def_names: Vec<Option<String>>,
 
     pub primary_light_t5_falloff: Vec<T5LightFalloffPack>,
@@ -290,11 +295,7 @@ pub struct WorldScene {
     pub asset_ref: assets::AssetRefDumpCensus,
 }
 
-impl WorldScene {
-    pub fn shutdown_world(&mut self) {
-        *self = Self::default();
-    }
-}
+impl WorldScene {}
 
 #[derive(Debug)]
 pub struct WorldLightmap {
@@ -672,6 +673,9 @@ impl WorldScene {
                 crate::assemble::drawsurf::RuntimeMaterialCatalog::default(),
             ),
             exact_material_images: Vec::new(),
+            common_profile_id: 0,
+            products_id: 0,
+            exact_material_common: Vec::new(),
             exact_material_variants: Vec::new(),
             exact_material_names: Vec::new(),
             lightmaps: Vec::new(),
@@ -726,6 +730,7 @@ impl WorldScene {
             primary_light_cull: Vec::new(),
             primary_light_pack: Vec::new(),
             primary_light_attenuation: Vec::new(),
+            dynamic_light: None,
             primary_light_def_names: Vec::new(),
             primary_light_t5_falloff: Vec::new(),
             sun_primary_light_count: 0,
@@ -761,6 +766,9 @@ impl WorldScene {
                 crate::assemble::drawsurf::RuntimeMaterialCatalog::default(),
             ),
             exact_material_images: Vec::new(),
+            common_profile_id: 0,
+            products_id: 0,
+            exact_material_common: Vec::new(),
             exact_material_variants: Vec::new(),
             exact_material_names: Vec::new(),
             lightmaps: draw.lightmaps,
@@ -813,6 +821,7 @@ impl WorldScene {
             primary_light_cull: Vec::new(),
             primary_light_pack: Vec::new(),
             primary_light_attenuation: Vec::new(),
+            dynamic_light: None,
             primary_light_def_names: Vec::new(),
             primary_light_t5_falloff: Vec::new(),
             sun_primary_light_count: 0,
@@ -1021,6 +1030,7 @@ pub fn world_scene_from_draw(
     materials: assets::MatchMaterials,
     installed_owners: &[(assets::ScriptModelId, sim::AuthorityModelOwner)],
 ) -> Result<WorldScene, asset_world::SurfaceMaterialStampError> {
+    let dynamic_light = world.dynamic_light;
     let fx_glass = world.fx_glass;
     let world_bounds = world.world_bounds;
     let script_brush_models = world.script_brush_models.clone();
@@ -1046,9 +1056,13 @@ pub fn world_scene_from_draw(
     let assets::MatchMaterials {
         population: mut global_materials,
         map_ids,
+        common_profile_id,
+        products_id,
     } = materials;
     let Some(mut draw) = world.draw else {
         let mut empty = WorldScene::default();
+        empty.common_profile_id = common_profile_id;
+        empty.products_id = products_id;
         empty.fx_glass = fx_glass;
         empty.script_brush_gameobjects = script_brush_gameobjects;
         empty.script_brush_exploders = script_brush_exploders;
@@ -1078,6 +1092,11 @@ pub fn world_scene_from_draw(
         .images
         .iter_mut()
         .map(|image| image.decoded.take())
+        .collect::<Vec<_>>();
+    let exact_material_common = global_materials
+        .images
+        .iter()
+        .map(|image| image.common_owned)
         .collect::<Vec<_>>();
     let exact_material_variants = global_materials
         .images
@@ -1508,6 +1527,9 @@ pub fn world_scene_from_draw(
         WorldScene::stamp_surface_materials(cull, &scene.runtime_material_catalog)?;
     }
     scene.exact_material_images = exact_material_images;
+    scene.common_profile_id = common_profile_id;
+    scene.products_id = products_id;
+    scene.exact_material_common = exact_material_common;
     scene.exact_material_variants = exact_material_variants;
     scene.exact_material_names = exact_material_names;
     diag::info!(
@@ -1563,6 +1585,16 @@ pub fn world_scene_from_draw(
             sampler: light.attenuation_sampler,
         })
         .collect();
+    scene.dynamic_light = dynamic_light.map(|light| crate::assemble::drawsurf::DynamicLightBind {
+        attenuation: LightAttenuationBind {
+            image: light
+                .attenuation_image
+                .and_then(|index| u32::try_from(index).ok()),
+            sampler: light.attenuation_sampler,
+        },
+        falloff_image_width: light.falloff_image_width,
+        lmap_lookup_start: light.lmap_lookup_start,
+    });
     scene.primary_light_def_names = draw
         .primary_lights
         .iter()

@@ -85,7 +85,7 @@ pub struct CacWeaponOffer {
     pub key: String,
     pub item_group: Option<String>,
 
-    pub attachment_variants: Vec<String>,
+    pub attachments: Vec<String>,
 }
 
 impl From<String> for CacWeaponOffer {
@@ -93,7 +93,7 @@ impl From<String> for CacWeaponOffer {
         Self {
             key,
             item_group: None,
-            attachment_variants: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 }
@@ -103,7 +103,7 @@ impl From<&str> for CacWeaponOffer {
         Self {
             key: key.to_owned(),
             item_group: None,
-            attachment_variants: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 }
@@ -125,6 +125,19 @@ pub struct WorldGeneration(pub Option<u64>);
 impl WorldGeneration {
     pub fn from_install(request_id: u64) -> Self {
         Self(Some(request_id))
+    }
+}
+
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct WorldProducts(pub Option<u64>);
+
+impl WorldProducts {
+    pub fn from_walk(products_id: u64) -> Self {
+        Self((products_id != 0).then_some(products_id))
+    }
+
+    pub fn same_as(self, other: Self) -> bool {
+        self.0.is_some() && self == other
     }
 }
 
@@ -207,6 +220,13 @@ pub struct MatchTornDown {
     pub match_epoch: u32,
 }
 
+#[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReturnedToMenu {
+    pub swap_id: u64,
+
+    pub had_world: bool,
+}
+
 #[derive(Message, Clone, Debug, PartialEq, Eq)]
 pub struct MapLoadApproved {
     pub request_id: u64,
@@ -227,6 +247,22 @@ pub enum TeardownReason {
     Disconnect,
 
     Replaced,
+
+    MatchEnded,
+}
+
+impl TeardownReason {
+    pub fn keeps_session(self) -> bool {
+        matches!(self, TeardownReason::Replaced | TeardownReason::MatchEnded)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TeardownReason::Disconnect => "Disconnect",
+            TeardownReason::Replaced => "Replaced",
+            TeardownReason::MatchEnded => "MatchEnded",
+        }
+    }
 }
 
 #[derive(Message, Clone, Copy, Debug, PartialEq, Eq)]
@@ -285,7 +321,9 @@ pub struct HostClassLoadouts {
 pub struct HostClassSlot {
     pub name: String,
     pub primary: String,
+    pub primary_attachments: Vec<String>,
     pub secondary: String,
+    pub secondary_attachments: Vec<String>,
     pub lethal: String,
     pub tactical: String,
     pub perks: [String; 3],
@@ -300,7 +338,9 @@ impl Default for HostClassLoadouts {
                 HostClassSlot {
                     name: "assault".into(),
                     primary: "iw4:weapon/ak47_mp".into(),
+                    primary_attachments: Vec::new(),
                     secondary: "iw4:weapon/usp_mp".into(),
+                    secondary_attachments: Vec::new(),
                     lethal: "iw4:weapon/semtex_mp".into(),
                     tactical: "iw4:weapon/flash_grenade_mp".into(),
                     perks: [
@@ -313,7 +353,9 @@ impl Default for HostClassLoadouts {
                 HostClassSlot {
                     name: "specops".into(),
                     primary: "iw4:weapon/ump45_mp".into(),
+                    primary_attachments: Vec::new(),
                     secondary: "iw4:weapon/usp_mp".into(),
+                    secondary_attachments: Vec::new(),
                     lethal: "iw4:weapon/throwingknife_mp".into(),
                     tactical: "iw4:weapon/smoke_grenade_mp".into(),
 
@@ -327,7 +369,9 @@ impl Default for HostClassLoadouts {
                 HostClassSlot {
                     name: "demolitions".into(),
                     primary: "iw4:weapon/spas12_mp".into(),
+                    primary_attachments: Vec::new(),
                     secondary: "iw4:weapon/deserteagle_mp".into(),
+                    secondary_attachments: Vec::new(),
                     lethal: "iw4:weapon/semtex_mp".into(),
                     tactical: "iw4:weapon/flash_grenade_mp".into(),
 
@@ -341,7 +385,9 @@ impl Default for HostClassLoadouts {
                 HostClassSlot {
                     name: "sniper".into(),
                     primary: "iw4:weapon/cheytac_mp".into(),
+                    primary_attachments: Vec::new(),
                     secondary: "iw4:weapon/usp_mp".into(),
+                    secondary_attachments: Vec::new(),
                     lethal: "iw4:weapon/throwingknife_mp".into(),
 
                     tactical: "iw4:weapon/smoke_grenade_mp".into(),
@@ -355,7 +401,9 @@ impl Default for HostClassLoadouts {
                 HostClassSlot {
                     name: "famas_burst".into(),
                     primary: "iw4:weapon/famas_mp".into(),
+                    primary_attachments: Vec::new(),
                     secondary: "iw4:weapon/beretta_mp".into(),
+                    secondary_attachments: Vec::new(),
                     lethal: "iw4:weapon/semtex_mp".into(),
                     tactical: "iw4:weapon/concussion_grenade_mp".into(),
 

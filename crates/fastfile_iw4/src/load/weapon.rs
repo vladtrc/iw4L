@@ -360,6 +360,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         kill_icon_name,
         dpad_icon_name,
         dpad_icon_ratio: s.i32_at(p, s.layout(0x2c, 64))?,
+        motion_tracker: s.u8_at(p, s.layout(112, 152))? != 0,
         proj_trail_slot: authored_material_slot(s, weap_def, s.layout(0x44c, 1488))?,
         proj_beacon_slot: authored_material_slot(s, weap_def, s.layout(0x450, 1496))?,
         proj_ignition_slot: authored_material_slot(s, weap_def, s.layout(0x46c, 1528))?,

@@ -1,6 +1,6 @@
 use std::sync::{Arc, RwLock};
 
-use assets::{LoadoutCatalogKind, PreparedWeapons};
+use assets::{FamilySlot, LoadoutRules, PreparedWeapons, WeaponSelection};
 use bevy::prelude::*;
 use frame::MatchTornDown;
 use net::{ClientActionInbox, LocalPresentClient, PresentedSnapshot};
@@ -59,14 +59,14 @@ pub(crate) fn register_weapon_commands(
     if registry.resolve("give").is_none() {
         registry.register(
             crate::CommandSpec::new("give")
-                .usage("give <weapon> — equip a catalog weapon on the active slot")
+                .usage("give <game:weapon> [attachment...] — equip a weapon on the active slot (e.g. give iw5:acr acog)")
                 .arg(LiveListCompleter(Arc::clone(&completions.give))),
         );
     }
     if registry.resolve("attach").is_none() {
         registry.register(
             crate::CommandSpec::new("attach")
-                .usage("attach [name] — cycle attachment variants, or toggle a named one")
+                .usage("attach [name] — show the current set and choices, or toggle a named attachment")
                 .arg(LiveListCompleter(Arc::clone(&completions.attach))),
         );
     }
@@ -127,7 +127,9 @@ pub(crate) fn route_weapon_commands(
             "give" => {
                 let Some(arg) = cmd.args.first() else {
                     echo(
-                        "usage: give <weapon> — equip a catalog weapon on the active slot".into(),
+                        "usage: give <weapon> [attachment...] — equip a catalog weapon on the \
+                         active slot"
+                            .into(),
                         &mut console,
                         &mut line,
                     );
@@ -149,7 +151,7 @@ pub(crate) fn route_weapon_commands(
                     );
                     continue;
                 }
-                match resolve_give_id(&weapons.0, arg) {
+                match resolve_give_id(&weapons.0, arg, &cmd.args[1..]) {
                     Ok(weapon) => {
                         let request_id = seq.allocate();
                         if let Err(error) =
@@ -162,10 +164,7 @@ pub(crate) fn route_weapon_commands(
                         echo(
                             format!(
                                 "give: queued {} id={weapon} request_id={request_id}",
-                                weapons
-                                    .0
-                                    .namespaced_key_of(weapon)
-                                    .unwrap_or_else(|| weapons.0.name_of(weapon).to_owned())
+                                weapons.0.configuration_label(weapon)
                             ),
                             &mut console,
                             &mut line,
@@ -196,46 +195,27 @@ pub(crate) fn route_weapon_commands(
                     echo("attach: no weapon in hands".into(), &mut console, &mut line);
                     continue;
                 }
-                let variants = attachment_variants_for(&weapons.0, current);
-
-                if variants.len() < 2 {
-                    echo(
-                        format!(
-                            "attach: `{}` has no pre-linked attachment variants — unsupported \
-                             (IW5 WeaponAttachment assembly is not implemented)",
-                            weapons.0.name_of(current)
-                        ),
-                        &mut console,
-                        &mut line,
-                    );
+                let Some(name) = cmd.args.first() else {
+                    match attachment_hints(&weapons.0, current) {
+                        Ok(hints) => echo(format!("attach: {hints}"), &mut console, &mut line),
+                        Err(reason) => echo(format!("attach: {reason}"), &mut console, &mut line),
+                    }
                     continue;
-                }
-                let next = match cmd.args.first() {
-                    None => cycle_attachment(current, &variants),
-                    Some(name) => {
-                        match toggle_named_attachment(&weapons.0, current, name, &variants) {
-                            Ok(id) => id,
-                            Err(msg) => {
-                                echo(format!("attach: {msg}"), &mut console, &mut line);
-                                continue;
-                            }
-                        }
+                };
+                let next = toggle_named_attachment(&weapons.0, current, name);
+                let next = match next {
+                    Ok(id) => id,
+                    Err(msg) => {
+                        echo(format!("attach: {msg}"), &mut console, &mut line);
+                        continue;
                     }
                 };
-                if !weapons.0.configuration_supported(next) {
-                    echo(
-                        "attach: unsupported T5 dual-hand animation configuration".to_owned(),
-                        &mut console,
-                        &mut line,
-                    );
-                    continue;
-                }
                 if next == current {
                     echo(
                         format!(
                             "attach: `{}` is already the selected configuration — refused \
                              (an unchanged id is not a successful attach)",
-                            weapons.0.name_of(current)
+                            weapons.0.configuration_label(current)
                         ),
                         &mut console,
                         &mut line,
@@ -245,9 +225,10 @@ pub(crate) fn route_weapon_commands(
                 let request_id = seq.allocate();
                 if let Err(error) = inbox.push(
                     local.0,
-                    ClientAction::GiveWeapon {
+                    ClientAction::ChangeWeaponConfiguration {
                         request_id,
-                        weapon: next,
+                        from: current,
+                        to: next,
                     },
                 ) {
                     echo(format!("attach: {error}"), &mut console, &mut line);
@@ -256,7 +237,7 @@ pub(crate) fn route_weapon_commands(
                 echo(
                     format!(
                         "attach: queued {} id={next} request_id={request_id}",
-                        weapons.0.name_of(next)
+                        weapons.0.configuration_label(next)
                     ),
                     &mut console,
                     &mut line,
@@ -289,12 +270,8 @@ pub(crate) fn echo_give_results(
     *echoed = Some((request_id, accepted));
     let key = weapons
         .as_ref()
-        .and_then(|w| {
-            w.0.namespaced_key_of(weapon).or_else(|| {
-                let n = w.0.name_of(weapon);
-                (!n.is_empty()).then(|| n.to_owned())
-            })
-        })
+        .map(|w| w.0.configuration_label(weapon))
+        .filter(|label| !label.is_empty())
         .unwrap_or_else(|| format!("#{weapon}"));
     let capacity = settings.log_capacity;
     let msg = if accepted == 1 {
@@ -310,6 +287,44 @@ pub(crate) fn echo_give_results(
     console.echo(msg, capacity);
 }
 
+pub(crate) fn echo_configuration_change_results(
+    changes: Option<Res<net::DumpConfigurationChangeLog>>,
+    weapons: Option<Res<PreparedWeapons>>,
+    mut console: ResMut<ConsoleState>,
+    settings: Res<ConsoleSettings>,
+    mut line: ResMut<ConsoleLine>,
+    mut echoed: Local<Option<u32>>,
+) {
+    let Some(changes) = changes.as_ref() else {
+        return;
+    };
+    let (Some(request_id), Some(to), Some(accepted)) =
+        (changes.request_id, changes.to, changes.accepted)
+    else {
+        return;
+    };
+    if *echoed == Some(request_id) {
+        return;
+    }
+    *echoed = Some(request_id);
+    let key = weapons
+        .as_ref()
+        .map(|w| w.0.configuration_label(to))
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| format!("#{to}"));
+    let msg = if accepted {
+        format!("attach: ok {key} id={to} request_id={request_id}")
+    } else {
+        format!(
+            "attach: rejected {key} id={to} request_id={request_id} ({})",
+            changes.reject_reason.unwrap_or("unknown")
+        )
+    };
+    diag::info!(Console, "{msg}");
+    line.0 = msg.clone();
+    console.echo(msg, settings.log_capacity);
+}
+
 fn alive(presented: &PresentedSnapshot, id: sim::ClientId) -> bool {
     presented
         .snapshot()
@@ -317,10 +332,25 @@ fn alive(presented: &PresentedSnapshot, id: sim::ClientId) -> bool {
         .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive)
 }
 
-pub(crate) fn resolve_give_id(registry: &assets::WeaponRegistry, raw: &str) -> Result<u32, String> {
-    match registry.resolve_index(raw) {
-        Ok(Some(id)) => Ok(id),
-        Ok(None) => Err("empty weapon name".into()),
+pub(crate) fn resolve_give_id(
+    registry: &assets::WeaponRegistry,
+    raw: &str,
+    attachments: &[String],
+) -> Result<u32, String> {
+    let resolve = |selection: WeaponSelection| {
+        registry
+            .resolve_configuration(&selection, LoadoutRules::default())
+            .map(|resolved| resolved.id)
+            .map_err(|refusal| format!("`{raw}`: {refusal} ({})", refusal.code()))
+    };
+    if let Some(key) = assets::FamilyKey::parse(raw)
+        && let Some(family) = registry.weapon_families().find(&key)
+    {
+        return resolve(WeaponSelection::with(family.key.clone(), attachments));
+    }
+    let id = match registry.resolve_index(raw) {
+        Ok(Some(id)) => id,
+        Ok(None) => return Err("empty weapon name".into()),
         Err(_) => {
             let with_mp = if raw.ends_with("_mp") {
                 raw.to_owned()
@@ -328,106 +358,117 @@ pub(crate) fn resolve_give_id(registry: &assets::WeaponRegistry, raw: &str) -> R
                 format!("{raw}_mp")
             };
             match registry.resolve_index(&with_mp) {
-                Ok(Some(id)) => Ok(id),
-                Ok(None) | Err(_) => Err(format!("unknown weapon `{raw}`")),
+                Ok(Some(id)) => id,
+                Ok(None) | Err(_) => return Err(format!("unknown weapon `{raw}`")),
             }
         }
+    };
+    if attachments.is_empty() {
+        return registry
+            .configuration_admission(id)
+            .map(|()| id)
+            .map_err(|refusal| format!("`{raw}`: {refusal} ({})", refusal.code()));
     }
+    let Some(described) = registry.describe_configuration(id) else {
+        return Err(format!("`{raw}` belongs to no weapon family"));
+    };
+    let mut selection = described.clone();
+    selection.attachments.extend(attachments.iter().cloned());
+    resolve(selection)
 }
 
-fn attachment_variants_for(registry: &assets::WeaponRegistry, weapon: u32) -> Vec<u32> {
-    let catalog = registry.loadout_catalog();
-    let base = catalog
-        .iter()
-        .find(|row| row.id == weapon)
-        .map(|row| match row.kind {
-            LoadoutCatalogKind::AttachmentVariant { base_id } => base_id,
-            _ => weapon,
-        })
-        .unwrap_or(weapon);
-    let mut ids = vec![base];
-    for row in &catalog {
-        if let LoadoutCatalogKind::AttachmentVariant { base_id } = row.kind
-            && base_id == base
-            && !ids.contains(&row.id)
-        {
-            ids.push(row.id);
-        }
-    }
-    ids
+fn family_of(registry: &assets::WeaponRegistry, weapon: u32) -> Result<WeaponSelection, String> {
+    registry
+        .describe_configuration(weapon)
+        .filter(|selection| selection.family.is_some())
+        .cloned()
+        .ok_or_else(|| format!("`{}` belongs to no weapon family", registry.name_of(weapon)))
 }
 
-fn cycle_attachment(current: u32, variants: &[u32]) -> u32 {
-    let idx = variants.iter().position(|&id| id == current).unwrap_or(0);
-    variants[(idx + 1) % variants.len()]
+fn attachment_hints(registry: &assets::WeaponRegistry, current: u32) -> Result<String, String> {
+    let selection = family_of(registry, current)?;
+    let options = registry
+        .list_attachment_choices(&selection, LoadoutRules::default())
+        .map_err(|refusal| format!("{refusal} ({})", refusal.code()))?;
+    let selected = if selection.attachments.is_empty() {
+        "none".to_owned()
+    } else {
+        selection.attachments.join(", ")
+    };
+    let actions = if options.is_empty() {
+        "no authored attachment choices".to_owned()
+    } else {
+        options
+            .iter()
+            .map(|option| {
+                let action = if option.selected { "remove" } else { "add" };
+                match &option.toggle {
+                    Ok(_) => format!("{} ({action})", option.choice.name),
+                    Err(reason) => format!(
+                        "{} ({action} unavailable: {reason}; {})",
+                        option.choice.name,
+                        reason.code()
+                    ),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Ok(format!(
+        "{}; selected: {selected}; choices: {actions}",
+        registry.configuration_label(current)
+    ))
 }
 
 fn toggle_named_attachment(
     registry: &assets::WeaponRegistry,
     current: u32,
     name: &str,
-    variants: &[u32],
 ) -> Result<u32, String> {
+    let selection = family_of(registry, current)?;
     let needle = name.to_ascii_lowercase();
-    let Some(&target) = variants.iter().find(|&&id| {
-        let n = registry.name_of(id).to_ascii_lowercase();
-        n == needle
-            || n.trim_end_matches("_mp") == needle.trim_end_matches("_mp")
-            || attachment_token(&n).is_some_and(|t| t == needle)
-    }) else {
-        return Err(format!(
-            "attachment `{name}` is not available on this weapon"
-        ));
+    let options = registry
+        .list_attachment_choices(&selection, LoadoutRules::default())
+        .map_err(|refusal| format!("{refusal} ({})", refusal.code()))?;
+    let Some(option) = options.iter().find(|option| option.choice.name == needle) else {
+        return Err(format!("attachment `{name}` is not offered on this weapon"));
     };
-    let base = variants[0];
-    if current == target {
-        Ok(base)
-    } else {
-        Ok(target)
-    }
-}
-
-fn attachment_token(name: &str) -> Option<&str> {
-    let stem = name.trim_end_matches("_mp");
-    stem.rsplit_once('_').map(|(_, token)| token)
+    option
+        .toggle
+        .clone()
+        .map_err(|refusal| format!("{refusal} ({})", refusal.code()))
 }
 
 pub fn weapon_completions(weapons: &PreparedWeapons) -> Vec<String> {
     let mut names: Vec<String> = weapons
         .0
-        .loadout_catalog()
-        .into_iter()
-        .filter(|row| {
-            matches!(
-                row.kind,
-                LoadoutCatalogKind::Primary | LoadoutCatalogKind::Secondary
-            )
+        .weapon_families()
+        .offered()
+        .filter(|family| matches!(family.slot, FamilySlot::Primary | FamilySlot::Secondary))
+        .filter(|family| {
+            family
+                .base
+                .is_some_and(|id| weapons.0.gun_xmodel_of(id).is_some())
         })
-        .filter(|row| weapons.0.gun_xmodel_of(row.id).is_some())
-        .map(|row| suggest_key(&row.key))
+        .map(|family| family.key.short())
         .collect();
     names.sort();
     names.dedup();
     names
 }
 
-fn suggest_key(key: &assets::AssetKey) -> String {
-    let name = key.logical_name();
-    let stem = name.strip_suffix("_mp").unwrap_or(name);
-    let prefix = format!("{}_", key.namespace.as_str());
-    let stem = stem.strip_prefix(prefix.as_str()).unwrap_or(stem);
-    format!("{}:weapon/{stem}", key.namespace.as_str())
-}
-
 pub fn attach_completions(weapons: &PreparedWeapons, current_weapon: u32) -> Vec<String> {
-    attachment_variants_for(&weapons.0, current_weapon)
-        .into_iter()
-        .skip(1)
-        .map(|id| {
-            let name = weapons.0.name_of(id);
-            attachment_token(name)
-                .unwrap_or(name.trim_end_matches("_mp"))
-                .to_owned()
+    let Ok(selection) = family_of(&weapons.0, current_weapon) else {
+        return Vec::new();
+    };
+    weapons
+        .0
+        .list_attachment_choices(&selection, LoadoutRules::default())
+        .map(|options| {
+            options
+                .into_iter()
+                .map(|option| option.choice.name)
+                .collect()
         })
-        .collect()
+        .unwrap_or_default()
 }

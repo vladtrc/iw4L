@@ -48,7 +48,8 @@ pub use blood::{
     SPLATTER_GRID_WIDTH, SPLATTER_HEALTH_INTENSITY_SCALE, cg_blood_overlay_lerp,
     cg_get_health_fraction, cg_pain_vision_lerp_intensity, cg_pain_vision_must_clear,
     cg_pain_vision_wants_armed, cg_should_draw_blood_overlay, cg_splatter_envelope,
-    splatter_alt_scale, splatter_alt_texel, splatter_alt_texel_straight,
+    splatter_alt_sample_linear, splatter_alt_scale, splatter_alt_texel,
+    splatter_alt_texel_straight,
 };
 pub use centerprint::{
     CENTERPRINT_STRIDE, CG_CENTERPRINT_FADE_TAIL_MS, CG_CENTERTIME_DEFAULT_MS,
@@ -90,7 +91,8 @@ pub use expr::{
     ExprError, ExprHost, OP_GETSPLASHDESCRIPTION, OP_GETSPLASHMATERIAL, OP_GETSPLASHTEXT,
     OP_INKILLCAM, OP_MENUISOPEN, OP_MILLISECONDS, OP_SCOREBOARD_VISIBLE, OP_SECONDSASCOUNTDOWN,
     OP_SPLASHHASICON, OP_SPLASHROWNUM, OP_TEAMFIELD, OP_UIACTIVE, Operand, Statement,
-    evaluate as evaluate_expression, evaluate_float, evaluate_string, is_expression_true,
+    WeaponLockView, evaluate as evaluate_expression, evaluate_float, evaluate_string,
+    is_expression_true,
 };
 pub use flashbang::{
     CONCUSSION_LOOK_PARMS, CONCUSSION_SOUND_PARMS, FLASHBANG_LOOK_PARMS, FLASHBANG_SHOT_FADE_MS,
@@ -122,20 +124,24 @@ pub use gamemsg::{
     HITLOC_HELMET, HITLOC_NONE, ITEM_TYPE_GAME_MESSAGE_WINDOW, KILLICON_BASE_SIZE, KILLICON_CRUSH,
     KILLICON_DIED, KILLICON_FALLING, KILLICON_HEADSHOT, KILLICON_IMPACT, KILLICON_MELEE,
     KILLICON_SHORT_SIZE, KILLICON_SUICIDE, KILLICON_WIDE_SIZE, MOD_HEAD_SHOT, MOD_MELEE,
-    MOD_SUICIDE, MP_CONNECTED, OBITUARY_WEAPON_INDEX_LIMIT, decode_hud_icon_size,
-    embed_hud_icon_size_byte, game_msg_win0_char_height, game_msg_win0_line_y, gamenotify_line,
-    killicon_em_size, killicon_stretch_uv, killicon_virtual_size, obituary_is_headshot,
-    obituary_mod, obituary_mod_killicon, pack_obituary_event_parm,
+    MOD_SUICIDE, MP_CONNECTED, decode_hud_icon_size, embed_hud_icon_size_byte,
+    game_msg_win0_char_height, game_msg_win0_line_y, gamenotify_line, killicon_em_size,
+    killicon_stretch_uv, killicon_virtual_size, obituary_is_headshot, obituary_mod,
+    obituary_mod_killicon, pack_obituary_event_parm,
 };
 pub use hudelem::{
     ALIGN_SCREEN_HORZ_SHIFT, DAMAGE_FEEDBACK_ALIGN_SCREEN, GAME_HUDELEM_ARCHIVED,
     GAME_HUDELEM_CAPACITY, GAME_HUDELEM_STRIDE, GameHudElem, HE_TYPE_FREE, HE_TYPE_MATERIAL,
     HE_TYPE_PLAYERNAME, HE_TYPE_TEXT, HE_TYPE_VALUE, HORZ_ALIGN_CENTER,
     HUDELEM_ARCHIVAL_REMAPPED_TIMES, HUDELEM_BANK_CAPACITY, HUDELEM_STRIDE, HUDELEM_TYPE_NAMES,
-    HudElem, MATCH_START_ALIGN_SCREEN, OUTCOME_ALIGN_SCREEN, PLAYERSTATE_HUD_ARCHIVAL,
-    PLAYERSTATE_HUD_BANKS_END, PLAYERSTATE_HUD_CURRENT, SCORE_POPUP_ALIGN_SCREEN,
-    VERT_ALIGN_MIDDLE, align_screen, bg_lerp_hud_colors, color_rgba, copy_in_use_prefix, flags,
-    hud_elem_lerp_font_scale, rebase_archival_times, unpack_rgba,
+    HudElem, HudElemPlacement, MATCH_START_ALIGN_SCREEN, OBJECTIVE_FLASH_DIM,
+    OBJECTIVE_FLASH_HALF_MS, OBJECTIVE_MARKER_ALPHA, ORG_LEADING, ORG_MIDDLE, ORG_TRAILING,
+    OUTCOME_ALIGN_SCREEN, PLAYERSTATE_HUD_ARCHIVAL, PLAYERSTATE_HUD_BANKS_END,
+    PLAYERSTATE_HUD_CURRENT, SCORE_POPUP_ALIGN_SCREEN, TEXT_CENTERED_ALIGN_ORG, VERT_ALIGN_MIDDLE,
+    align_org, align_screen, bg_lerp_hud_colors, color_rgba, copy_in_use_prefix, flags,
+    hud_elem_glow_color, hud_elem_lerp_font_scale, hud_elem_material_size, hud_elem_movement_frac,
+    hud_elem_origin, hud_elem_placement, hud_elem_position, hud_elem_scale_frac,
+    hud_elem_screen_align, objective_flash_elem, rebase_archival_times, unpack_rgba,
 };
 pub use iris::{
     ADS_IRIS_ZOOM_ACTIVE_MIN, ADS_OVERLAY_FOUR_QUAD_LETTERBOX_SCALE, ADS_OVERLAY_ONE_QUAD_HALF,
@@ -152,7 +158,7 @@ pub use mantle_hint::{
     cg_draw_mantle_hint_layout, cg_draw_mantle_hint_visible, mantle_hint_replace_bind,
 };
 pub use menu_transition::{
-    MENU_TRANSITION_LERP, MENU_TRANSITION_STRIDE, MenuLerpFromScript, MenuTransition,
+    MENU_TRANSITION_LERP, MENU_TRANSITION_STRIDE, MenuAnim, MenuLerpFromScript, MenuTransition,
     item_run_script_lerp, item_text_paint_scale, window_paint_scale_rect,
 };
 pub use overhead_names::{
@@ -234,9 +240,8 @@ pub use stretch_pic_cmd::{
     GFX_CMD_STRETCHPIC_T0, GFX_CMD_STRETCHPIC_T1, GFX_CMD_STRETCHPIC_W, GFX_CMD_STRETCHPIC_X,
     GFX_CMD_STRETCHPIC_Y, GFX_RENDER_CMD_BUF_SIZE, GFX_RENDER_CMD_TAIL_RESERVE,
     GFX_TESS_2D_PACKED_NORMAL, GFX_TESS_VERTEX_STRIDE, GfxCmdStretchPic, GfxCmdStretchPicArgs,
-    GfxTessVertex2d, R_ATLAS_ANIM_FPS_DEFAULT, RB_DRAW_STRETCHPIC_INDICES,
-    TESS_STRETCHPIC_FLUSH_INDEX_PLUS_SIX, TESS_STRETCHPIC_FLUSH_VERT_PLUS_FOUR,
-    parse_gfx_cmd_stretch_pic, r_add_cmd_draw_stretch_pic, r_adjust_atlas_tex_coords,
+    GfxTessVertex2d, RB_DRAW_STRETCHPIC_INDICES, TESS_STRETCHPIC_FLUSH_INDEX_PLUS_SIX,
+    TESS_STRETCHPIC_FLUSH_VERT_PLUS_FOUR, parse_gfx_cmd_stretch_pic, r_add_cmd_draw_stretch_pic,
     r_convert_color_to_bytes, rb_draw_stretch_pic_corners, rb_draw_stretch_pic_pack,
     rb_set_vertex_2d, tess_stretchpic_must_flush, unpack_color_bgra,
 };

@@ -279,6 +279,15 @@ pub struct MapPrimaryLights {
     pub attenuation: Vec<LightAttenuationBind>,
 
     pub t5_falloff: Vec<T5LightFalloffPack>,
+
+    pub dynamic: Option<DynamicLightBind>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DynamicLightBind {
+    pub attenuation: LightAttenuationBind,
+    pub falloff_image_width: Option<u16>,
+    pub lmap_lookup_start: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,14 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use assets::{
-    AssetNamespace, MapLoadProcess, MatchType10SoundHints, PreparedWeapons, PreparedXAnims,
-    SoundCatalog, WeaponRegistry,
+    AssetNamespace, MapLoadProcess, MatchType10SoundHints, PreparedWeapons, SoundCatalog,
+    WeaponRegistry,
 };
 use bevy::prelude::*;
-use frame::{ClientSet, LaunchIdentity, MatchTornDown};
+use frame::{ClientSet, LaunchIdentity, MatchTornDown, ReturnedToMenu};
 
 use crate::aliases::movement_prepare_names;
-use crate::ambient::{SoundBankLoadAttempted, SoundBankNamespace, SoundBankWalk};
+use crate::ambient::{SoundBankCompose, SoundBankLoadAttempted, SoundBankNamespace};
 use crate::clip_store::{ClipKey, ClipStore, clip_keys_for_alias};
 use crate::map_doors::RADIATION_DOOR_ALIASES;
 use crate::playback::SoundBank;
@@ -16,9 +16,30 @@ use crate::playback::SoundBank;
 #[derive(Resource, Default)]
 pub struct AudioReady(pub bool);
 
+#[derive(Resource)]
+pub struct AudioSilent;
+
+impl AudioSilent {
+    pub fn active() -> bool {
+        static SILENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SILENT.get_or_init(|| {
+            std::env::var("IW4L_SOUND").is_ok_and(|value| matches!(value.as_str(), "off" | "0"))
+        })
+    }
+}
+
 const MATCH_HUD_PULSE: &[&str] = &["ui_pulse_text_type", "ui_pulse_text_delete"];
 
+const MENU_CODE: [&str; 2] = ["mouse_over", "mouse_click"];
+
 const MATCH_CLOCK: &[&str] = &[gamemode_iw4::match_clock::COUNTDOWN_TICK_ALIAS];
+
+#[derive(Default)]
+struct MatchRequests {
+    required: HashSet<ClipKey>,
+    missing: BTreeSet<String>,
+    resolved_aliases: usize,
+}
 
 #[derive(Resource, Default)]
 struct MatchClipPrep {
@@ -44,6 +65,10 @@ fn prepared_sample_bytes() -> u64 {
 }
 
 pub(crate) fn register(app: &mut App) {
+    if AudioSilent::active() {
+        diag::info!(Audio, "audio: Silent (IW4L_SOUND=off)");
+        app.insert_resource(AudioSilent);
+    }
     app.init_resource::<AudioReady>()
         .init_resource::<MatchClipPrep>()
         .add_systems(
@@ -51,18 +76,19 @@ pub(crate) fn register(app: &mut App) {
             (
                 queue_match_clips.after(crate::ambient::install_sound_bank),
                 poll_match_audio_ready.after(queue_match_clips),
-                reset_match_audio_on_torn_down,
+                reset_match_audio_on_match_end,
             )
                 .in_set(ClientSet::Load),
         );
 }
 
-fn reset_match_audio_on_torn_down(
+fn reset_match_audio_on_match_end(
     mut torn: MessageReader<MatchTornDown>,
+    mut returned: MessageReader<ReturnedToMenu>,
     mut ready: ResMut<AudioReady>,
     mut prep: ResMut<MatchClipPrep>,
 ) {
-    if torn.read().count() == 0 {
+    if torn.read().count() == 0 && returned.read().count() == 0 {
         return;
     }
     *ready = AudioReady(false);
@@ -74,10 +100,9 @@ fn reset_match_audio_on_torn_down(
 
 fn queue_match_clips(
     attempted: Res<SoundBankLoadAttempted>,
-    walk: Option<Res<SoundBankWalk>>,
+    walk: Option<Res<SoundBankCompose>>,
     mut clips: Option<ResMut<ClipStore>>,
     weapons: Option<Res<PreparedWeapons>>,
-    xanims: Option<Res<PreparedXAnims>>,
     type10: Option<Res<MatchType10SoundHints>>,
     bank: Option<Res<SoundBank>>,
     identity: Option<Res<LaunchIdentity>>,
@@ -87,8 +112,17 @@ fn queue_match_clips(
     loading: Option<Res<MapLoadProcess>>,
     mut prep: ResMut<MatchClipPrep>,
     mut ready: ResMut<AudioReady>,
+    silent: Option<Res<AudioSilent>>,
 ) {
     if ready.0 || prep.submitted {
+        return;
+    }
+    if silent.is_some() {
+        ready.0 = true;
+        if let Some(loading) = loading.as_ref() {
+            loading.progress.record_skipped(assets::StageId::Audio);
+        }
+        diag::info!(Audio, "audio: AudioReady — Silent, no clips prepared");
         return;
     }
     if !attempted.0 {
@@ -123,21 +157,14 @@ fn queue_match_clips(
     let Some(script_sound) = script_sound else {
         return;
     };
-    let mut required = HashSet::new();
+    let mut set = MatchRequests::default();
     let mut aliases = 0usize;
     for weapon in 1..=weapons.0.len() as u32 {
-        aliases += request_weapon_aliases(
-            clips,
-            &bank.0,
-            &weapons.0,
-            xanims.as_deref(),
-            weapon,
-            &mut required,
-        );
+        aliases += request_weapon_aliases(clips, &bank.0, &weapons.0, weapon, &mut set);
     }
     for alias in movement_prepare_names() {
         aliases += 1;
-        request_named(clips, &bank.0, AssetNamespace::Iw4, alias, &mut required);
+        request_named(clips, &bank.0, AssetNamespace::Iw4, alias, &mut set);
     }
     if let Some(identity) = identity.as_deref() {
         let ns = namespace.namespace;
@@ -147,7 +174,7 @@ fn queue_match_clips(
         }
         for emitter in bank.0.createfx_loop_sounds(ns, zone) {
             aliases += 1;
-            request_named(clips, &bank.0, ns, &emitter.soundalias, &mut required);
+            request_named(clips, &bank.0, ns, &emitter.soundalias, &mut set);
         }
     }
     let mut destructible_loops: Vec<&str> = Vec::new();
@@ -157,12 +184,15 @@ fn queue_match_clips(
         }
         destructible_loops.push(alias);
         aliases += 1;
-        request_named(clips, &bank.0, namespace.namespace, alias, &mut required);
+        request_named(clips, &bank.0, namespace.namespace, alias, &mut set);
     }
     for alias in RADIATION_DOOR_ALIASES {
         aliases += 1;
-        request_named(clips, &bank.0, AssetNamespace::T5, alias, &mut required);
-        request_named(clips, &bank.0, AssetNamespace::Iw4, alias, &mut required);
+        let ns = match bank.0.index_in(AssetNamespace::T5, alias) {
+            Some(_) => AssetNamespace::T5,
+            None => AssetNamespace::Iw4,
+        };
+        request_named(clips, &bank.0, ns, alias, &mut set);
     }
     if let Some(identity) = identity.as_deref() {
         let (allies, axis) = crate::policy::music::voice_prefixes_for_zone(
@@ -174,18 +204,24 @@ fn queue_match_clips(
             crate::policy::music::match_script_alias_names(allies.as_deref(), axis.as_deref())
         {
             aliases += 1;
-            request_named(clips, &bank.0, AssetNamespace::Iw4, &alias, &mut required);
+            request_named(clips, &bank.0, AssetNamespace::Iw4, &alias, &mut set);
         }
         for alias in
             crate::policy::music::match_voice_alias_names(allies.as_deref(), axis.as_deref())
         {
             aliases += 1;
-            request_named(clips, &bank.0, AssetNamespace::Iw4, &alias, &mut required);
+            request_named(clips, &bank.0, AssetNamespace::Iw4, &alias, &mut set);
         }
     }
     if let Some(alias) = script_sound.0.ambient_alias.as_deref() {
         aliases += 1;
-        request_named(clips, &bank.0, namespace.namespace, alias, &mut required);
+        request_named(clips, &bank.0, namespace.namespace, alias, &mut set);
+    }
+    if let Some(catalog) = catalog.as_deref() {
+        for alias in catalog.played_sound_aliases().into_iter().chain(MENU_CODE) {
+            aliases += 1;
+            request_named(clips, &bank.0, AssetNamespace::Iw4, alias, &mut set);
+        }
     }
     for alias in MATCH_HUD_PULSE
         .iter()
@@ -193,30 +229,47 @@ fn queue_match_clips(
         .chain(crate::objectives::EFFECTS)
     {
         aliases += 1;
-        request_named(clips, &bank.0, AssetNamespace::Iw4, alias, &mut required);
+        request_named(clips, &bank.0, AssetNamespace::Iw4, alias, &mut set);
     }
     for alias in &type10.0 {
         aliases += 1;
-        request_fx_type10(clips, &bank.0, alias, &mut required);
+        request_fx_type10(clips, &bank.0, alias, &mut set);
     }
-    prep.total = required.len();
-    prep.required = required;
+    if !set.missing.is_empty() {
+        let names: Vec<&str> = set.missing.iter().map(String::as_str).collect();
+        diag::warn!(
+            Audio,
+            "audio: match-set gap: {} aliases name no loaded sound: {}",
+            names.len(),
+            names.join(" ")
+        );
+    }
+    prep.total = set.required.len();
+    prep.required = set.required;
     prep.submitted = true;
     if let Some(loading) = loading {
         prep.sample_bytes_at_queue = prepared_sample_bytes();
-        prep.stage = Some(
+        if prep.total == 0 && set.resolved_aliases > 0 {
             loading
                 .progress
-                .begin(assets::StageId::Audio, Some(prep.total as u64)),
-        );
+                .record_reused_scoped(assets::StageId::Audio, "clips");
+        } else {
+            prep.stage = Some(
+                loading
+                    .progress
+                    .begin(assets::StageId::Audio, Some(prep.total as u64)),
+            );
+        }
     }
     diag::info!(
         Audio,
-        "audio: match-set queued {} aliases ({} type-10), {} clips still converting ({} workers)",
+        "audio: match-set queued {} aliases ({} type-10), {} clips still converting ({} workers); resident reused={} clips/{}B",
         aliases,
         type10.0.len(),
         prep.total,
-        clips.workers()
+        clips.workers(),
+        clips.reused_resident().0,
+        clips.reused_resident().1,
     );
     if prep.total == 0 {
         mark_ready(&mut ready, &mut prep, Some(&mut **clips));
@@ -266,12 +319,18 @@ fn request_named(
     bank: &SoundCatalog,
     ns: AssetNamespace,
     alias: &str,
-    required: &mut HashSet<ClipKey>,
+    set: &mut MatchRequests,
 ) {
-    for key in clip_keys_for_alias(bank, ns, alias) {
+    let keys = clip_keys_for_alias(bank, ns, alias);
+    if keys.is_empty() {
+        set.missing.insert(alias.to_owned());
+    } else {
+        set.resolved_aliases += 1;
+    }
+    for key in keys {
         clips.request(key.clone());
         if clips.ready(&key).is_none() {
-            required.insert(key);
+            set.required.insert(key);
         }
     }
 }
@@ -280,23 +339,22 @@ fn request_fx_type10(
     clips: &mut ClipStore,
     bank: &SoundCatalog,
     alias: &str,
-    required: &mut HashSet<ClipKey>,
+    set: &mut MatchRequests,
 ) {
     let ns = bank
         .index_in(AssetNamespace::Iw4, alias)
         .or_else(|| bank.index_unique(alias))
         .map(|index| bank.namespace_of_alias(index))
         .unwrap_or(AssetNamespace::Iw4);
-    request_named(clips, bank, ns, alias, required);
+    request_named(clips, bank, ns, alias, set);
 }
 
 fn request_weapon_aliases(
     clips: &mut ClipStore,
     bank: &SoundCatalog,
     registry: &WeaponRegistry,
-    xanims: Option<&PreparedXAnims>,
     weapon: u32,
-    required: &mut HashSet<ClipKey>,
+    set: &mut MatchRequests,
 ) -> usize {
     let sounds = registry.sounds_of(weapon);
     let ns = registry.namespace_of(weapon).unwrap_or(AssetNamespace::Iw4);
@@ -304,77 +362,15 @@ fn request_weapon_aliases(
     if let Some(aliases) = sounds {
         for alias in aliases.reachable_aliases() {
             n += 1;
-            request_named(clips, bank, ns, alias, required);
+            request_named(clips, bank, ns, alias, set);
         }
     }
-    if let Some(xanims) = xanims {
-        let notes = weapon_anim_notes(registry, &xanims.0, weapon);
-        for alias in note_aliases_to_prepare(notes.iter().map(String::as_str), sounds) {
+    let mut seen = HashSet::new();
+    for alias in registry.notetrack_sound_aliases_of(weapon) {
+        if seen.insert(alias) {
             n += 1;
-            request_named(clips, bank, ns, &alias, required);
+            request_named(clips, bank, ns, alias, set);
         }
     }
     n
-}
-
-fn weapon_anim_notes(
-    registry: &WeaponRegistry,
-    xanims: &assets::XAnimCatalog,
-    weapon: u32,
-) -> Vec<String> {
-    let ns = registry.namespace_of(weapon).unwrap_or(AssetNamespace::Iw4);
-    let mut seen_anim = HashSet::new();
-    let mut seen_note = HashSet::new();
-    let mut out = Vec::new();
-    let mut take_clip = |clip: &assets::AnimClip| {
-        if !seen_anim.insert(clip.name.clone()) {
-            return;
-        }
-        for note in &clip.notifies {
-            if seen_note.insert(note.name.clone()) {
-                out.push(note.name.clone());
-            }
-        }
-    };
-    if let Some(row) = registry.sz_xanim_edges_of(weapon) {
-        for edge in row {
-            let Some(order) = edge.bound_index() else {
-                continue;
-            };
-            if let Some(clip) = xanims.clip_at(order) {
-                take_clip(&clip);
-            }
-        }
-    }
-    for leftover in [
-        registry.sz_xanims_right_of(weapon),
-        registry.sz_xanims_left_of(weapon),
-    ]
-    .into_iter()
-    .flatten()
-    .flatten()
-    .flatten()
-    {
-        if let Some(clip) = xanims.clip(ns, leftover) {
-            take_clip(&clip);
-        }
-    }
-    out
-}
-
-fn note_aliases_to_prepare<'a>(
-    notes: impl Iterator<Item = &'a str>,
-    sounds: Option<&assets::WeaponSoundAliases>,
-) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for note in notes {
-        let (_, sound) = crate::entity_events::notetrack_rumble_and_sound(note, sounds);
-        if let Some(alias) = sound
-            && seen.insert(alias.clone())
-        {
-            out.push(alias);
-        }
-    }
-    out
 }

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use fastfile_iw4::{
     AssetLinkSink, AssetSink, AssetType, Ptr, ScriptStrings, ZoneStream, load_asset_at_observed,
@@ -8,6 +9,7 @@ use fastfile_iw4::{
 use crate::discover::{GamesRoot, find_runtime_zone, find_zone_file, find_zone_file_version};
 use crate::sound_catalog::SoundCatalog;
 use crate::zone::{ZoneMemory, open_zone_shared};
+use crate::zone_sound::{ZoneSoundOrigin, ensure_zone_sound};
 use crate::{AssetNamespace, ZoneGame};
 
 pub fn namespace_for_zone(games: &GamesRoot, zone: &str) -> AssetNamespace {
@@ -148,95 +150,206 @@ fn namespace_of_game(game: ZoneGame) -> AssetNamespace {
     AssetNamespace::from_zone_game(game)
 }
 
-fn load_sound_catalog_in_lane(path: &Path) -> Result<(AssetNamespace, SoundCatalog), String> {
+pub(crate) fn walk_zone_sound(path: &Path) -> Result<SoundCatalog, String> {
     let game = crate::zone_game_for_path(path)
         .ok_or_else(|| format!("{} is not a readable IWff envelope", path.display()))?;
-    let catalog = match game {
-        ZoneGame::Iw4 => load_sound_catalog(path)?,
-        ZoneGame::Iw5 => crate::sound_load_iw5::load_sound_catalog_iw5(path)?,
-        ZoneGame::T5 => crate::sound_load_t5::load_sound_catalog_t5(path)?,
-    };
-    Ok((namespace_of_game(game), catalog))
+    match game {
+        ZoneGame::Iw4 => load_sound_catalog(path),
+        ZoneGame::Iw5 => crate::sound_load_iw5::load_sound_catalog_iw5(path),
+        ZoneGame::T5 => crate::sound_load_t5::load_sound_catalog_t5(path),
+    }
 }
 
-pub fn load_mp_sound_bank(games: &GamesRoot, zone: &str) -> Result<LoadedSoundBank, String> {
-    let zone_ff = find_zone_file(games, zone)?;
-    let mut bank = LoadedSoundBank::default();
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Merge {
+    Override,
+    Missing,
+}
 
-    const STARTUP: [&str; 3] = ["code_post_gfx_mp", "localized_code_post_gfx_mp", "patch_mp"];
-    for name in STARTUP {
-        match find_runtime_zone(games, &zone_ff.path, name) {
-            Ok(found) => match load_sound_catalog(&found.path) {
-                Ok(extra) => {
-                    diag::info!(
-                        Zone,
-                        "sound bank: {name} — {} curves {} rawfiles {} aliases",
-                        extra.curves.len(),
-                        extra.rawfiles.len(),
-                        extra.sounds.len()
-                    );
-                    bank.catalog.absorb_unresolved(extra);
-                }
-                Err(e) => bank.gap(AssetNamespace::Iw4, name, e),
-            },
-            Err(e) => diag::info!(Zone, "sound bank: startup {name} missing ({e})"),
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Absent {
+    Skip,
+    Gap,
+}
+
+struct SoundSource {
+    namespace: AssetNamespace,
+    name: &'static str,
+    found: Result<std::path::PathBuf, String>,
+    merge: Merge,
+    absent: Absent,
+}
+
+fn sound_sources(games: &GamesRoot, map: &Path) -> (Vec<SoundSource>, Vec<SoundSource>) {
+    let runtime = |name: &'static str, merge, absent| SoundSource {
+        namespace: AssetNamespace::Iw4,
+        name,
+        found: find_runtime_zone(games, map, name).map(|zone| zone.path),
+        merge,
+        absent,
+    };
+    let donor = |namespace, name: &'static str, version| SoundSource {
+        namespace,
+        name,
+        found: find_zone_file_version(games, name, version).map(|zone| zone.path),
+        merge: Merge::Missing,
+        absent: Absent::Skip,
+    };
+    let before_map = vec![
+        runtime("code_post_gfx_mp", Merge::Override, Absent::Skip),
+        runtime("localized_code_post_gfx_mp", Merge::Override, Absent::Skip),
+        runtime("patch_mp", Merge::Override, Absent::Skip),
+        runtime("common_mp", Merge::Override, Absent::Gap),
+        runtime("localized_common_mp", Merge::Override, Absent::Gap),
+    ];
+    let after_map = vec![
+        donor(
+            AssetNamespace::Iw5,
+            "common_mp",
+            fastfile_iw5::ZONE_VERSION_PC,
+        ),
+        donor(
+            AssetNamespace::Iw5,
+            "localized_common_mp",
+            fastfile_iw5::ZONE_VERSION_PC,
+        ),
+        donor(
+            AssetNamespace::T5,
+            "code_post_gfx_mp",
+            fastfile_t5::ZONE_VERSION_PC,
+        ),
+        donor(
+            AssetNamespace::T5,
+            "common_mp",
+            fastfile_t5::ZONE_VERSION_PC,
+        ),
+        donor(
+            AssetNamespace::T5,
+            "localized_common_mp",
+            fastfile_t5::ZONE_VERSION_PC,
+        ),
+    ];
+    (before_map, after_map)
+}
+
+pub struct SoundSources {
+    before_map: SoundCatalog,
+    after_map: Vec<(SoundSource, Arc<SoundCatalog>)>,
+    gaps: Vec<SoundZoneGap>,
+}
+
+fn origin_label(origin: ZoneSoundOrigin) -> String {
+    match origin {
+        ZoneSoundOrigin::Shared(walk) => format!("{walk} walk"),
+        ZoneSoundOrigin::AudioOnly => "audio-only walk".to_owned(),
+    }
+}
+
+pub fn gather_sound_sources(games: &GamesRoot, map: &Path) -> SoundSources {
+    let (before, after) = sound_sources(games, map);
+    let mut sources = SoundSources {
+        before_map: SoundCatalog::default(),
+        after_map: Vec::new(),
+        gaps: Vec::new(),
+    };
+    for source in before {
+        if let Some(catalog) = sources.take(&source) {
+            sources.before_map.absorb_unresolved((*catalog).clone());
         }
     }
+    for source in after {
+        if let Some(catalog) = sources.take(&source) {
+            sources.after_map.push((source, catalog));
+        }
+    }
+    sources
+}
 
-    match find_runtime_zone(games, &zone_ff.path, "common_mp") {
-        Ok(found) => match load_sound_catalog(&found.path) {
-            Ok(extra) => {
+impl SoundSources {
+    fn take(&mut self, source: &SoundSource) -> Option<Arc<SoundCatalog>> {
+        let path = match &source.found {
+            Ok(path) => path,
+            Err(error) => {
+                match source.absent {
+                    Absent::Skip => diag::info!(
+                        Zone,
+                        "sound bank: {} {} missing ({error})",
+                        source.namespace.as_str(),
+                        source.name
+                    ),
+                    Absent::Gap => self.gap(source.namespace, source.name, error.clone()),
+                }
+                return None;
+            }
+        };
+        let (catalog, origin) = ensure_zone_sound(path);
+        match catalog {
+            Ok(catalog) => {
                 diag::info!(
                     Zone,
-                    "sound bank: runtime common_mp — {} aliases {} loaded",
-                    extra.sounds.len(),
-                    extra.loaded.len()
+                    "sound bank: {} {} from the {} — {} aliases {} loaded",
+                    source.namespace.as_str(),
+                    source.name,
+                    origin_label(origin),
+                    catalog.sounds.len(),
+                    catalog.loaded.len()
                 );
-                bank.catalog.absorb_unresolved(extra);
+                Some(catalog)
             }
-            Err(e) => bank.gap(AssetNamespace::Iw4, "common_mp", e),
-        },
-        Err(e) => bank.gap(AssetNamespace::Iw4, "common_mp", e),
-    }
-    match find_runtime_zone(games, &zone_ff.path, "localized_common_mp") {
-        Ok(found) => match load_sound_catalog(&found.path) {
-            Ok(extra) => bank.catalog.absorb_unresolved(extra),
-            Err(e) => bank.gap(AssetNamespace::Iw4, "localized_common_mp", e),
-        },
-        Err(e) => {
-            bank.gap(AssetNamespace::Iw4, "localized_common_mp", e);
-            diag::warn!(
-                Zone,
-                "sound bank: localized_common_mp missing — player SFX will gap"
-            );
+            Err(error) => {
+                self.gap(source.namespace, source.name, error);
+                None
+            }
         }
     }
 
-    match load_sound_catalog_in_lane(&zone_ff.path) {
-        Ok((ns, map_cat)) => {
+    fn gap(&mut self, namespace: AssetNamespace, zone: &str, reason: String) {
+        self.gaps.push(SoundZoneGap {
+            namespace,
+            zone: zone.to_owned(),
+            reason,
+        });
+    }
+}
+
+pub fn compose_sound_bank(
+    sources: SoundSources,
+    zone: &str,
+    namespace: AssetNamespace,
+    map: Result<SoundCatalog, String>,
+) -> LoadedSoundBank {
+    let SoundSources {
+        before_map,
+        after_map,
+        gaps,
+    } = sources;
+    let mut bank = LoadedSoundBank {
+        catalog: before_map,
+        gaps,
+    };
+    match map {
+        Ok(map) => {
             diag::info!(
                 Zone,
                 "sound bank: map zone {zone} ({}) — {} rawfiles, {} aliases",
-                ns.as_str(),
-                map_cat.rawfiles.len(),
-                map_cat.sounds.len()
+                namespace.as_str(),
+                map.rawfiles.len(),
+                map.sounds.len()
             );
-            match ns {
-                AssetNamespace::Iw4 => bank.catalog.absorb_unresolved(map_cat),
-
-                _ => bank.catalog.absorb_missing_aliases_unresolved(map_cat),
+            match namespace {
+                AssetNamespace::Iw4 => bank.catalog.absorb_unresolved(map),
+                _ => bank.catalog.absorb_missing_aliases_unresolved(map),
             }
         }
-        Err(e) => {
-            let ns = crate::zone_game_for_path(&zone_ff.path)
-                .map_or(AssetNamespace::Iw4, namespace_of_game);
-            bank.gap(ns, zone, e);
+        Err(error) => bank.gap(namespace, zone, error),
+    }
+    for (source, catalog) in after_map {
+        let catalog = (*catalog).clone();
+        match source.merge {
+            Merge::Override => bank.catalog.absorb_unresolved(catalog),
+            Merge::Missing => bank.catalog.absorb_missing_aliases_unresolved(catalog),
         }
     }
-
-    absorb_leftover_iw5_sounds(games, &mut bank);
-    absorb_leftover_t5_sounds(games, &mut bank);
-
     bank.catalog.finalize();
     for gap in &bank.gaps {
         diag::warn!(
@@ -247,7 +360,17 @@ pub fn load_mp_sound_bank(games: &GamesRoot, zone: &str) -> Result<LoadedSoundBa
             gap.reason
         );
     }
-    Ok(bank)
+    bank
+}
+
+pub fn load_mp_sound_bank(games: &GamesRoot, zone: &str) -> Result<LoadedSoundBank, String> {
+    let zone_ff = find_zone_file(games, zone)?;
+    let sources = gather_sound_sources(games, &zone_ff.path);
+    let namespace =
+        crate::zone_game_for_path(&zone_ff.path).map_or(AssetNamespace::Iw4, namespace_of_game);
+    let (map, _) = ensure_zone_sound(&zone_ff.path);
+    let map = map.map(|catalog| (*catalog).clone());
+    Ok(compose_sound_bank(sources, zone, namespace, map))
 }
 
 impl LoadedSoundBank {
@@ -271,60 +394,5 @@ impl LoadedSoundBank {
                 )
             })
             .collect()
-    }
-}
-
-fn absorb_leftover_iw5_sounds(games: &GamesRoot, bank: &mut LoadedSoundBank) {
-    absorb_leftover_donor(
-        games,
-        bank,
-        AssetNamespace::Iw5,
-        fastfile_iw5::ZONE_VERSION_PC,
-        crate::sound_load_iw5::load_sound_catalog_iw5,
-    );
-}
-
-fn absorb_leftover_t5_sounds(games: &GamesRoot, bank: &mut LoadedSoundBank) {
-    if let Ok(zone) =
-        find_zone_file_version(games, "code_post_gfx_mp", fastfile_t5::ZONE_VERSION_PC)
-    {
-        match crate::sound_load_t5::load_sound_catalog_t5(&zone.path) {
-            Ok(globals) => bank.catalog.absorb_missing_aliases_unresolved(globals),
-            Err(error) => bank.gap(AssetNamespace::T5, "code_post_gfx_mp", error),
-        }
-    }
-    absorb_leftover_donor(
-        games,
-        bank,
-        AssetNamespace::T5,
-        fastfile_t5::ZONE_VERSION_PC,
-        crate::sound_load_t5::load_sound_catalog_t5,
-    );
-}
-
-fn absorb_leftover_donor(
-    games: &GamesRoot,
-    bank: &mut LoadedSoundBank,
-    namespace: AssetNamespace,
-    version: u32,
-    walk: fn(&Path) -> Result<SoundCatalog, String>,
-) {
-    for stem in ["common_mp", "localized_common_mp"] {
-        let Ok(donor) = find_zone_file_version(games, stem, version) else {
-            continue;
-        };
-        match walk(&donor.path) {
-            Ok(extra) => {
-                diag::info!(
-                    Zone,
-                    "sound bank: leftover {} {stem} — {} aliases {} loaded",
-                    namespace.as_str(),
-                    extra.sounds.len(),
-                    extra.loaded.len()
-                );
-                bank.catalog.absorb_missing_aliases_unresolved(extra);
-            }
-            Err(e) => bank.gap(namespace, stem, e),
-        }
     }
 }

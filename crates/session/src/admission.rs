@@ -13,6 +13,7 @@ pub fn update_admission(
     hold: Option<Res<AuthorityLoadHold>>,
     has_world: Option<Res<HasWorld>>,
     scene: Option<Res<WorldScene>>,
+    audio: Option<Res<audio::AudioReady>>,
     mut live: Option<ResMut<LiveWorldIdentity>>,
 ) {
     if let (Some(live), Some(installed)) = (live.as_mut(), admission.core.installed())
@@ -21,7 +22,8 @@ pub fn update_admission(
     {
         live.load_key = installed;
     }
-    let presentation_ready = scene.is_some_and(|scene| scene.spawned);
+    let audio_ready = audio.is_none_or(|ready| ready.0);
+    let presentation_ready = scene.is_some_and(|scene| scene.spawned) && audio_ready;
     if presentation_ready && let Some(live) = live.as_ref() {
         admission.core.apply_presentation(live.load_key);
     }
@@ -39,7 +41,7 @@ pub fn update_admission(
         signon.admitted = admitted;
         diag::info!(
             Sim,
-            "admission admitted={admitted} role={role:?} phase={:?} presentation={presentation_ready}",
+            "admission admitted={admitted} role={role:?} phase={:?} presentation={presentation_ready} audio={audio_ready}",
             signon.phase
         );
     }

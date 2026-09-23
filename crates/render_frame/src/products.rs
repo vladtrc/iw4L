@@ -9,6 +9,8 @@ pub struct SourceRevisions {
 
     pub vertices: u64,
 
+    pub materials: u64,
+
     pub draws: u64,
 
     pub admission: u64,
@@ -27,6 +29,15 @@ impl SourceRevisions {
         self.vertices = self.vertices.wrapping_add(1);
     }
 
+    pub fn bump_materials(&mut self) {
+        self.materials = self.materials.wrapping_add(1);
+    }
+
+    pub fn bump_surfaces(&mut self) {
+        self.bump_vertices();
+        self.bump_materials();
+    }
+
     pub fn bump_draws(&mut self) {
         self.draws = self.draws.wrapping_add(1);
     }
@@ -36,7 +47,7 @@ impl SourceRevisions {
     }
 
     pub fn bump_packed_write(&mut self, revision: &mut u64) {
-        self.bump_vertices();
+        self.bump_surfaces();
         self.bump_draws();
         *revision = revision.wrapping_add(1);
     }

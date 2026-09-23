@@ -5,8 +5,6 @@ use super::spawn::{WorldSpawnJob, WorldSpawnPhase};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::assemble::drawsurf::{FpvDrawPlan, MaterialGeneration};
-
 pub(crate) const GPU_QUIET_FRAMES: u32 = 2;
 
 pub(crate) fn overlay_is_quiet(ready: bool, quiet: u32) -> bool {
@@ -103,12 +101,11 @@ pub struct GpuSubmitDemand {
 }
 
 /// Producer of the working pipeline demand set. Spawn snapshots are adopted by
-/// pointer identity; live FPV ids are inserted only when the set actually grows.
+/// pointer identity.
 #[derive(Resource, Clone, Debug, Default)]
 pub struct PipelineDemandTracker {
     spawn_world: Arc<HashSet<u16>>,
     spawn_smodel: Arc<HashSet<u16>>,
-    working_world: Arc<HashSet<u16>>,
     revision: u64,
 }
 
@@ -117,38 +114,14 @@ impl PipelineDemandTracker {
         if Arc::ptr_eq(&self.spawn_world, &world) && Arc::ptr_eq(&self.spawn_smodel, &smodel) {
             return;
         }
-        self.spawn_world = world.clone();
+        self.spawn_world = world;
         self.spawn_smodel = smodel;
-        self.working_world = world;
-        self.revision = self.revision.wrapping_add(1);
-    }
-
-    pub fn absorb_fpv(&mut self, fpv: &FpvDrawPlan, runtime: &MaterialGeneration) {
-        let mut extra = Vec::new();
-        for material in fpv.materials() {
-            let Some(ordinal) = material.material_sorted_index else {
-                continue;
-            };
-            let Some(row) = runtime.catalog.material_for_sorted_ordinal(ordinal) else {
-                continue;
-            };
-            let id = row.asset_id.0;
-            if !self.working_world.contains(&id) {
-                extra.push(id);
-            }
-        }
-        if extra.is_empty() {
-            return;
-        }
-        let mut set = (*self.working_world).clone();
-        set.extend(extra);
-        self.working_world = Arc::new(set);
         self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn snapshot(&self) -> (Arc<HashSet<u16>>, Arc<HashSet<u16>>, u64) {
         (
-            self.working_world.clone(),
+            self.spawn_world.clone(),
             self.spawn_smodel.clone(),
             self.revision,
         )

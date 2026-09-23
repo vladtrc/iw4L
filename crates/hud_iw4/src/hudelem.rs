@@ -231,3 +231,250 @@ pub fn rebase_archival_times(elem: &mut HudElem, rebase_ms: i32) {
         elem.font_scale_start_time = elem.font_scale_start_time.saturating_add(rebase_ms);
     }
 }
+
+const HUD_ELEM_ORG_ANCHOR: [f32; 4] = [0.0, 0.5, 1.0, 0.0];
+
+const ALIGN_ORG_HORZ_SHIFT: i32 = 2;
+
+const ALIGN_ORG_FIELD: i32 = 3;
+
+pub const ORG_LEADING: i32 = 0;
+
+pub const ORG_MIDDLE: i32 = 1;
+
+pub const ORG_TRAILING: i32 = 2;
+
+#[must_use]
+pub const fn align_org(horz: i32, vert: i32) -> i32 {
+    (horz << ALIGN_ORG_HORZ_SHIFT) | vert
+}
+
+pub const TEXT_CENTERED_ALIGN_ORG: i32 = align_org(ORG_MIDDLE, ORG_LEADING);
+
+const ALIGN_SCREEN_FIELD: i32 = 7;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HudElemPlacement {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+#[must_use]
+pub const fn hud_elem_screen_align(align_screen: i32) -> (i32, i32) {
+    (
+        (align_screen >> ALIGN_SCREEN_HORZ_SHIFT) & ALIGN_SCREEN_FIELD,
+        align_screen & ALIGN_SCREEN_FIELD,
+    )
+}
+
+#[must_use]
+pub fn hud_elem_movement_frac(elem: &HudElem, time: i32) -> f32 {
+    if elem.move_time <= 0 {
+        return 1.0;
+    }
+    let elapsed = time.wrapping_sub(elem.move_start_time);
+    if elapsed <= 0 {
+        return 0.0;
+    }
+    if elapsed >= elem.move_time {
+        return 1.0;
+    }
+    elapsed as f32 / elem.move_time as f32
+}
+
+#[must_use]
+pub fn hud_elem_scale_frac(elem: &HudElem, time: i32) -> Option<f32> {
+    if elem.scale_time <= 0 {
+        return None;
+    }
+    let elapsed = time.wrapping_sub(elem.scale_start_time);
+    if elapsed >= elem.scale_time {
+        return None;
+    }
+    Some(if elapsed <= 0 {
+        0.0
+    } else {
+        elapsed as f32 / elem.scale_time as f32
+    })
+}
+
+fn align_hud_elem_axis(align_org: i32, position: f32, extent: f32, horizontal: bool) -> f32 {
+    let field = if horizontal {
+        (align_org >> ALIGN_ORG_HORZ_SHIFT) & ALIGN_ORG_FIELD
+    } else {
+        align_org & ALIGN_ORG_FIELD
+    };
+    position - extent * HUD_ELEM_ORG_ANCHOR[field as usize]
+}
+
+#[must_use]
+pub fn hud_elem_origin(
+    place: &crate::ScreenPlacement,
+    align_org: i32,
+    align_screen: i32,
+    x_virtual: f32,
+    y_virtual: f32,
+    width: f32,
+    height: f32,
+) -> (f32, f32) {
+    let (horz, vert) = hud_elem_screen_align(align_screen);
+    let applied = place.apply_rect(x_virtual, y_virtual, 0.0, 0.0, horz, vert);
+    (
+        align_hud_elem_axis(align_org, applied.x, width, true),
+        align_hud_elem_axis(align_org, applied.y, height, false),
+    )
+}
+
+fn material_extent(
+    scale_to_real: f32,
+    scale_to_full: f32,
+    align_is_fullscreen: bool,
+    size_virtual: i32,
+    font_height: f32,
+) -> f32 {
+    if size_virtual == 0 {
+        return font_height;
+    }
+    let scale = if align_is_fullscreen {
+        scale_to_full
+    } else {
+        scale_to_real
+    };
+    scale * size_virtual as f32
+}
+
+#[must_use]
+pub fn hud_elem_material_size(
+    place: &crate::ScreenPlacement,
+    elem: &HudElem,
+    time: i32,
+    font_height: f32,
+) -> (f32, f32) {
+    let extents = |align_screen: i32, width: i32, height: i32| {
+        let (horz, vert) = hud_elem_screen_align(align_screen);
+        (
+            material_extent(
+                place.scale_virtual_to_real[0],
+                place.scale_virtual_to_full[0],
+                horz == crate::ALIGN_FULLSCREEN,
+                width,
+                font_height,
+            ),
+            material_extent(
+                place.scale_virtual_to_real[1],
+                place.scale_virtual_to_full[1],
+                vert == crate::ALIGN_FULLSCREEN,
+                height,
+                font_height,
+            ),
+        )
+    };
+    let (w, h) = extents(elem.align_screen, elem.width, elem.height);
+    let (w, h) = match hud_elem_scale_frac(elem, time) {
+        None => (w, h),
+        Some(lerp) => {
+            let (from_w, from_h) =
+                extents(elem.from_align_screen, elem.from_width, elem.from_height);
+            (from_w + (w - from_w) * lerp, from_h + (h - from_h) * lerp)
+        }
+    };
+    (w, h.max(font_height))
+}
+
+#[must_use]
+pub fn hud_elem_position(
+    place: &crate::ScreenPlacement,
+    elem: &HudElem,
+    time: i32,
+    width: f32,
+    height: f32,
+) -> (f32, f32) {
+    let to = hud_elem_origin(
+        place,
+        elem.align_org,
+        elem.align_screen,
+        elem.x,
+        elem.y,
+        width,
+        height,
+    );
+    let lerp = hud_elem_movement_frac(elem, time);
+    if lerp >= 1.0 {
+        return (libm::floorf(to.0 + 0.5), libm::floorf(to.1 + 0.5));
+    }
+    let from = hud_elem_origin(
+        place,
+        elem.from_align_org,
+        elem.from_align_screen,
+        elem.from_x,
+        elem.from_y,
+        width,
+        height,
+    );
+    (
+        from.0 + (to.0 - from.0) * lerp,
+        from.1 + (to.1 - from.1) * lerp,
+    )
+}
+
+#[must_use]
+pub fn hud_elem_placement(
+    place: &crate::ScreenPlacement,
+    elem: &HudElem,
+    time: i32,
+    text_width: f32,
+    font_height: f32,
+) -> HudElemPlacement {
+    let (w, h) = if elem.elem_type == HE_TYPE_MATERIAL {
+        hud_elem_material_size(place, elem, time, font_height)
+    } else {
+        (text_width, font_height)
+    };
+    let (x, y) = hud_elem_position(place, elem, time, w, h);
+    HudElemPlacement { x, y, w, h }
+}
+
+#[must_use]
+pub fn hud_elem_glow_color(elem: &HudElem, faded: [u8; 4]) -> Option<[f32; 4]> {
+    let glow = unpack_rgba(elem.glow_color_rgba);
+    if glow[3] == 0 {
+        return None;
+    }
+    Some([
+        glow[0] as f32 / 255.0,
+        glow[1] as f32 / 255.0,
+        glow[2] as f32 / 255.0,
+        glow[3] as f32 / 255.0 * (faded[3] as f32 / 255.0),
+    ])
+}
+
+pub const OBJECTIVE_MARKER_ALPHA: f32 = 0.5;
+
+pub const OBJECTIVE_FLASH_DIM: f32 = 0.35;
+
+pub const OBJECTIVE_FLASH_HALF_MS: i32 = 750;
+
+#[must_use]
+pub fn objective_flash_elem(rgb: [u8; 3], base_alpha: f32, start_ms: i32, time: i32) -> HudElem {
+    let period = OBJECTIVE_FLASH_HALF_MS.saturating_mul(2);
+    let elapsed = time.wrapping_sub(start_ms).max(0);
+    let leg = elapsed / OBJECTIVE_FLASH_HALF_MS;
+    let leg_start = start_ms.wrapping_add(leg.saturating_mul(OBJECTIVE_FLASH_HALF_MS));
+    let bright = (base_alpha.clamp(0.0, 1.0) * 255.0) as u8;
+    let dim = (base_alpha.clamp(0.0, 1.0) * OBJECTIVE_FLASH_DIM * 255.0) as u8;
+    let falling = elapsed.rem_euclid(period) < OBJECTIVE_FLASH_HALF_MS;
+    let (from, to) = if falling {
+        (bright, dim)
+    } else {
+        (dim, bright)
+    };
+    HudElem {
+        from_color_rgba: color_rgba(rgb[0], rgb[1], rgb[2], from),
+        color_rgba: color_rgba(rgb[0], rgb[1], rgb[2], to),
+        fade_start_time: leg_start,
+        fade_time: OBJECTIVE_FLASH_HALF_MS,
+        ..HudElem::default()
+    }
+}

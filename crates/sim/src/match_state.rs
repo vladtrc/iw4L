@@ -56,6 +56,8 @@ pub enum GiveRejectReason {
 
     UnknownWeaponId,
 
+    UnsupportedWeapon,
+
     EmptyCombatProfile,
 }
 
@@ -65,7 +67,35 @@ impl GiveRejectReason {
             Self::NotAlive => "not_alive",
             Self::InvalidWeapon => "invalid_weapon",
             Self::UnknownWeaponId => "unknown_weapon_id",
+            Self::UnsupportedWeapon => "unsupported_weapon",
             Self::EmptyCombatProfile => "empty_combat_profile",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigurationChangeRejectReason {
+    NotAlive,
+    StaleSource,
+    InvalidTarget,
+    DifferentFamily,
+    Busy,
+    NoInventorySlot,
+    AmmoTableFull,
+    SharedAmmoConflict,
+}
+
+impl ConfigurationChangeRejectReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAlive => "not_alive",
+            Self::StaleSource => "stale_source",
+            Self::InvalidTarget => "invalid_target",
+            Self::DifferentFamily => "different_family",
+            Self::Busy => "busy",
+            Self::NoInventorySlot => "no_inventory_slot",
+            Self::AmmoTableFull => "ammo_table_full",
+            Self::SharedAmmoConflict => "shared_ammo_conflict",
         }
     }
 }
@@ -129,6 +159,9 @@ pub struct EntityEventPayload {
     pub weapon: u32,
 
     pub correlation: u32,
+
+    pub pellet: u16,
+    pub hand: u8,
     pub origin: [f32; 3],
     pub origin2: [f32; 3],
     pub direction: [f32; 3],
@@ -155,6 +188,8 @@ pub struct PelletFxRecord {
     pub correlation: u32,
 
     pub pellet: u16,
+
+    pub hand: u8,
 
     pub start: [f32; 3],
 
@@ -191,6 +226,19 @@ pub enum SimEvent {
         request_id: ActionRequestId,
         weapon: u32,
         reason: GiveRejectReason,
+    },
+
+    ConfigurationChangeAccepted {
+        request_id: ActionRequestId,
+        from: u32,
+        to: u32,
+    },
+
+    ConfigurationChangeRejected {
+        request_id: ActionRequestId,
+        from: u32,
+        to: u32,
+        reason: ConfigurationChangeRejectReason,
     },
 
     Spawned {
@@ -260,6 +308,16 @@ pub const SIM_EVENT_ROSTER: &[SimEventRow] = &[
         control_fact: "the refusal and its reason, so the console prints why rather than nothing",
     },
     SimEventRow {
+        variant: "ConfigurationChangeAccepted",
+        reliable: true,
+        control_fact: "authority accepted the held weapon's configuration transition",
+    },
+    SimEventRow {
+        variant: "ConfigurationChangeRejected",
+        reliable: true,
+        control_fact: "authority refused a stale or invalid configuration transition",
+    },
+    SimEventRow {
         variant: "Spawned",
         reliable: true,
         control_fact: "which authored spawn authority picked and the life sequence it opened; \
@@ -299,6 +357,8 @@ pub fn sim_event_is_reliable(event: &SimEvent) -> bool {
         SimEvent::ClassRejected { .. } => "ClassRejected",
         SimEvent::GiveAccepted { .. } => "GiveAccepted",
         SimEvent::GiveRejected { .. } => "GiveRejected",
+        SimEvent::ConfigurationChangeAccepted { .. } => "ConfigurationChangeAccepted",
+        SimEvent::ConfigurationChangeRejected { .. } => "ConfigurationChangeRejected",
         SimEvent::Spawned { .. } => "Spawned",
         SimEvent::Died { .. } => "Died",
         SimEvent::ScoreChanged { .. } => "ScoreChanged",
@@ -343,6 +403,8 @@ pub struct ClientSnapshotMeta {
     pub deaths: i32,
 
     pub ammo_by_weapon: Vec<(u32, i32, i32)>,
+
+    pub taped_mag_spent: Vec<u32>,
 
     pub weapon_shot_count: u8,
     pub burst_latch: bool,
@@ -492,6 +554,8 @@ pub struct ClientMatchState {
 
     pub(crate) ammo_by_weapon: Vec<(u32, i32, i32)>,
 
+    pub(crate) taped_mag_spent: Vec<u32>,
+
     pub(crate) weapon_shot_count: u8,
     pub(crate) burst_latch: bool,
 
@@ -502,6 +566,8 @@ pub struct ClientMatchState {
     pub(crate) last_named_sound: gamemode_iw4::HealthRegenSound,
 
     pub(crate) dead_since_tick: Option<u32>,
+
+    pub(crate) forced_spawn: Option<crate::SpawnPick>,
 
     pub(crate) look_at_killer_yaw: i32,
 
@@ -561,8 +627,20 @@ impl ClientMatchState {
         self.ammo_by_weapon.push((weapon, clip, stock));
     }
 
+    pub(crate) fn quick_reload_ready(&self, weapon: u32) -> bool {
+        !self.taped_mag_spent.contains(&weapon)
+    }
+
+    pub(crate) fn set_quick_reload_ready(&mut self, weapon: u32, ready: bool) {
+        self.taped_mag_spent.retain(|&w| w != weapon);
+        if !ready && weapon != 0 {
+            self.taped_mag_spent.push(weapon);
+        }
+    }
+
     pub(crate) fn clear_ammo_inventory(&mut self) {
         self.ammo_by_weapon.clear();
+        self.taped_mag_spent.clear();
         self.ammo_clip = 0;
         self.ammo_stock = 0;
     }
@@ -606,6 +684,7 @@ impl ClientMatchState {
             kills: self.kills,
             deaths: self.deaths,
             ammo_by_weapon: self.ammo_by_weapon.clone(),
+            taped_mag_spent: self.taped_mag_spent.clone(),
             weapon_shot_count: self.weapon_shot_count,
             burst_latch: self.burst_latch,
             rechamber_pending: self.rechamber_pending,
@@ -636,6 +715,7 @@ impl ClientMatchState {
         self.kills = meta.kills;
         self.deaths = meta.deaths;
         self.ammo_by_weapon = meta.ammo_by_weapon.clone();
+        self.taped_mag_spent = meta.taped_mag_spent.clone();
         self.weapon_shot_count = meta.weapon_shot_count;
         self.burst_latch = meta.burst_latch;
         self.rechamber_pending = meta.rechamber_pending;

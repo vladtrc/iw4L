@@ -561,8 +561,7 @@ pub fn drive_match_boundary(
         }
         reset = true;
         torn_key = fact.match_key;
-        end_match = matches!(fact.reason, frame::TeardownReason::Replaced)
-            || matches!(fact.reason, frame::TeardownReason::Disconnect);
+        end_match = fact.reason.keeps_session();
     }
     let in_match = bridge
         .as_ref()

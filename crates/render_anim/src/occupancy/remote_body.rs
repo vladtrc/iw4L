@@ -38,6 +38,7 @@ use render_scene::{
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 #[derive(Component, Debug, Clone, Copy)]
 #[require(RemoteFxBolts)]
@@ -369,6 +370,7 @@ struct PendingBodySkin<'a> {
     skin_entries: &'a [dpvs_iw4::SceneEntSkinEntry],
     head_model: Option<u16>,
     gun_model: Option<u16>,
+    attachments: Vec<(PendingGunSkin<'a>, u16, Option<u8>)>,
 
     dest: CpuBodyGeom,
 }
@@ -776,6 +778,7 @@ impl<'a> RemotePoseFrame<'a> {
             let pose_same = pose_hashes.remember_pose_hash(persist_key, hash);
 
             let skin_models = bind_remote_skin_models(dobj, &model_set)?;
+            let lods_reusable = pose_hashes.has_lods(persist_key, lods.tuple());
             let action = remote_skin_action(
                 persist_key,
                 transform,
@@ -783,11 +786,7 @@ impl<'a> RemotePoseFrame<'a> {
                 skin_entries,
                 lods,
                 skin_models,
-                skin_after_pose(
-                    scene_ent_surface_count == Some(0),
-                    pose_same,
-                    pose_hashes.has_lods(persist_key, lods.tuple()),
-                ),
+                skin_after_pose(scene_ent_surface_count == Some(0), pose_same, lods_reusable),
             );
             match action {
                 RemoteSkinAction::Culled => {}
@@ -836,6 +835,12 @@ fn remote_skin_action<'a>(
             skin_entries,
             head_model: models.head_model,
             gun_model: models.gun_model,
+            attachments: models
+                .attachments
+                .into_iter()
+                .zip(lods.attachments)
+                .map(|((skin, model), lod)| (skin, model, lod))
+                .collect(),
             dest: CpuBodyGeom::default(),
         }),
     }
@@ -1095,6 +1100,23 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
             )?;
         }
     }
+    for (attachment, model, lod) in &job.attachments {
+        let Some(lod) = *lod else {
+            continue;
+        };
+        skin_slot_into(
+            &attachment.entry.skel,
+            &job.matrices,
+            attachment.base,
+            lod,
+            *model,
+            job.skin_entries,
+            &attachment.entry.material_names,
+            &attachment.entry.material_edges,
+            &mut geom,
+            true,
+        )?;
+    }
     let (radii, radius_parents) = dobj_radii(
         job.body,
         job.head.map(|(head, _)| head),
@@ -1143,6 +1165,7 @@ fn submit_remote_bodies(
     resolved: Res<ResolvedModelLightingTable>,
     atlas: Option<Res<WorldModelLightingAtlas>>,
     tess: Option<Res<render_scene::TessMaterials>>,
+    mut last_catalog: Local<Option<Arc<render_material::RuntimeMaterialCatalog>>>,
 ) {
     let items = submit.take();
     let binds = std::mem::take(&mut binds.by_client);
@@ -1150,18 +1173,28 @@ fn submit_remote_bodies(
         if plan.decoded_n != 0 || plan.last_packed_id.is_some() {
             plan.clear_geometry();
         }
+        *last_catalog = None;
         return;
     }
     let Some(atlas) = atlas else {
         plan.clear_geometry();
+        *last_catalog = None;
         gaps.raise(RenderGapCause::RemoteBodyLightingAllocFailed);
         return;
     };
     let Some(tess) = tess else {
         plan.clear_geometry();
+        *last_catalog = None;
         gaps.raise(RenderGapCause::RemoteBodyLightingAllocFailed);
         return;
     };
+    if !last_catalog
+        .as_ref()
+        .is_some_and(|old| Arc::ptr_eq(old, &tess.catalog))
+    {
+        plan.clear_geometry();
+        *last_catalog = Some(Arc::clone(&tess.catalog));
+    }
 
     let mut last_cause = None;
     let mut seated = Vec::with_capacity(items.len());
@@ -1189,6 +1222,7 @@ fn submit_remote_bodies(
         if plan.decoded_n != 0 || plan.last_packed_id.is_some() {
             plan.clear_geometry();
         }
+        *last_catalog = None;
         gaps.raise(last_cause.unwrap_or(RenderGapCause::RemoteBodySubmitMissing));
         return;
     }
@@ -1274,7 +1308,7 @@ fn submit_remote_bodies(
     }
     install_body_packed_session(&mut plan, session);
     if submitted_verts > 0 && !any_missing_material {
-        plan.revisions.bump_vertices();
+        plan.revisions.bump_surfaces();
         plan.revisions.bump_draws();
         let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.decoded_n);
         if plan.revisions.topology != topology {

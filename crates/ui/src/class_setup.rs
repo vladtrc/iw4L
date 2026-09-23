@@ -99,6 +99,7 @@ pub struct ClassLoadoutCatalog {
     pub deathstreak: Vec<String>,
     pub excluded: Vec<(String, String)>,
     pub previews: std::collections::BTreeMap<String, assets::CacWeaponPreview>,
+    pub resolver: CatalogResolver,
 }
 
 impl Default for ClassLoadoutCatalog {
@@ -109,7 +110,7 @@ impl Default for ClassLoadoutCatalog {
                 .map(|value| frame::CacWeaponOffer {
                     key: format!("iw4:weapon/{value}"),
                     item_group: assets::iw4_fallback_item_group(value).map(str::to_owned),
-                    attachment_variants: Vec::new(),
+                    attachments: Vec::new(),
                 })
                 .collect()
         };
@@ -133,14 +134,15 @@ impl Default for ClassLoadoutCatalog {
             deathstreak: collect(ClassEditRow::Deathstreak),
             excluded: Vec::new(),
             previews: std::collections::BTreeMap::new(),
+            resolver: CatalogResolver::default(),
         }
     }
 }
 
 impl ClassLoadoutCatalog {
-    pub fn from_weapon_registry(registry: &assets::WeaponRegistry) -> Self {
-        let rows = registry.loadout_catalog();
-        if rows.is_empty() {
+    pub fn from_weapon_registry(registry: std::sync::Arc<assets::WeaponRegistry>) -> Self {
+        let families = registry.weapon_families();
+        if families.families().is_empty() {
             return Self::default();
         }
         let mut catalog = Self::default();
@@ -148,61 +150,48 @@ impl ClassLoadoutCatalog {
         catalog.secondary.clear();
         catalog.lethal.clear();
         catalog.tactical.clear();
-        for row in &rows {
+        for family in families.offered() {
+            let key = family.key.asset_key();
             catalog.previews.insert(
-                row.key.to_string(),
+                key.clone(),
                 assets::CacWeaponPreview {
-                    reference: row.name.clone(),
-                    name_key: registry
-                        .display_name_key_of(row.id)
-                        .map(|key| format!("@{}", key.trim_start_matches('@')))
-                        .unwrap_or_default(),
-                    image: registry.hud_icon_of(row.id).unwrap_or("").to_owned(),
+                    reference: family.key.base.clone(),
+                    name_key: format!("@{}", family.display_key.trim_start_matches('@')),
+                    image: family.image.clone(),
                     ..Default::default()
                 },
             );
-        }
-
-        for row in rows {
-            if row.item_group.is_none() {
-                catalog.excluded.push((
-                    row.key.to_string(),
-                    "no authored CAC table row (variant or non-CAC weapon)".into(),
-                ));
-                continue;
+            for choice in &family.attachments {
+                catalog.previews.insert(
+                    attachment_preview_key(&key, &choice.name),
+                    assets::CacWeaponPreview {
+                        reference: choice.name.clone(),
+                        name_key: format!("@{}", choice.caption_key),
+                        image: choice.icon.clone(),
+                        desc_key: format!("@{}", choice.desc_key),
+                        bars: Vec::new(),
+                    },
+                );
             }
             let offer = frame::CacWeaponOffer {
-                key: row.key.to_string(),
-                item_group: row.item_group,
-                attachment_variants: Vec::new(),
+                key,
+                item_group: Some(family.item_group.clone()),
+                attachments: family
+                    .attachments
+                    .iter()
+                    .map(|choice| choice.name.clone())
+                    .collect(),
             };
-            let key = offer.key.clone();
-            match row.kind {
-                assets::LoadoutCatalogKind::Primary => merge_offer(&mut catalog.primary, offer),
-                assets::LoadoutCatalogKind::Secondary => merge_offer(&mut catalog.secondary, offer),
-                assets::LoadoutCatalogKind::Equipment { offhand_class } => {
-                    match assets::cac_offhand_bucket(offhand_class) {
-                        Some(assets::CacOffhandBucket::Lethal) => {
-                            merge_offer(&mut catalog.lethal, offer)
-                        }
-                        Some(assets::CacOffhandBucket::Tactical) => {
-                            merge_offer(&mut catalog.tactical, offer)
-                        }
-                        None => catalog.excluded.push((
-                            key,
-                            format!("unsupported retail offhandClass {offhand_class}"),
-                        )),
-                    }
-                }
-                assets::LoadoutCatalogKind::AttachmentVariant { base_id } => catalog
-                    .excluded
-                    .push((key, format!("attachment variant of catalog id {base_id}"))),
-                assets::LoadoutCatalogKind::NonPlayer => catalog.excluded.push((
-                    key,
-                    "not structurally player/create-a-class eligible".to_owned(),
-                )),
+            match family.slot {
+                assets::FamilySlot::Primary => catalog.primary.push(offer),
+                assets::FamilySlot::Secondary => catalog.secondary.push(offer),
+                assets::FamilySlot::Lethal => catalog.lethal.push(offer),
+                assets::FamilySlot::Tactical => catalog.tactical.push(offer),
+                assets::FamilySlot::Other => {}
             }
         }
+        catalog.excluded = families.excluded().to_vec();
+        catalog.resolver = CatalogResolver(Some(registry));
         catalog
     }
 
@@ -211,57 +200,14 @@ impl ClassLoadoutCatalog {
         tables: &[(assets::AssetNamespace, assets::CapturedStringTable)],
     ) -> Self {
         for (namespace, table) in tables {
-            if assets::is_stats_table_name(&table.name) {
-                for (key, preview) in &mut self.previews {
-                    if assets::AssetKey::parse(key).is_ok_and(|key| key.namespace == *namespace)
-                        && let Some(authored) = assets::weapon_preview(table, key)
-                    {
-                        *preview = authored;
-                    }
-                }
-            } else if table.name.eq_ignore_ascii_case("mp/attachmentTable.csv") {
-                let loaded: Vec<String> = self.previews.keys().cloned().collect();
-                for offer in self.primary.iter_mut().chain(&mut self.secondary) {
-                    let Ok(base) = assets::AssetKey::parse(&offer.key) else {
-                        continue;
-                    };
-                    if base.namespace != *namespace {
-                        continue;
-                    }
-                    let prefix =
-                        format!("{}_", base.name.strip_suffix("_mp").unwrap_or(&base.name));
-                    offer.attachment_variants.clear();
-                    for variant in &loaded {
-                        let Ok(key) = assets::AssetKey::parse(variant) else {
-                            continue;
-                        };
-                        if key.namespace != *namespace {
-                            continue;
-                        }
-                        let Some(suffix) = key
-                            .name
-                            .strip_prefix(&prefix)
-                            .and_then(|s| s.strip_suffix("_mp"))
-                        else {
-                            continue;
-                        };
-
-                        let caption = table.lookup(4, suffix, 3);
-                        if caption.is_empty() {
-                            continue;
-                        }
-                        offer.attachment_variants.push(variant.clone());
-                        self.previews.insert(
-                            variant.clone(),
-                            assets::CacWeaponPreview {
-                                reference: suffix.to_owned(),
-                                name_key: format!("@{caption}"),
-                                image: table.lookup(4, suffix, 6).to_owned(),
-                                desc_key: format!("@{}", table.lookup(4, suffix, 7)),
-                                bars: Vec::new(),
-                            },
-                        );
-                    }
+            if !assets::is_stats_table_name(&table.name) {
+                continue;
+            }
+            for (key, preview) in &mut self.previews {
+                if assets::AssetKey::parse(key).is_ok_and(|key| key.namespace == *namespace)
+                    && let Some(authored) = assets::weapon_preview(table, key)
+                {
+                    *preview = authored;
                 }
             }
         }
@@ -366,28 +312,68 @@ impl ClassLoadoutCatalog {
         row.perk_slot().is_none()
     }
 
-    pub fn attachment_variants(&self, row: ClassEditRow, weapon: &str) -> &[String] {
+    pub fn attachments(&self, row: ClassEditRow, weapon: &str) -> &[String] {
         self.offers(row)
             .iter()
             .find(|offer| offer.key == weapon)
-            .map(|offer| offer.attachment_variants.as_slice())
+            .map(|offer| offer.attachments.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub fn check_attachments(
+        &self,
+        row: ClassEditRow,
+        weapon: &str,
+        attachments: &[String],
+        rules: assets::LoadoutRules,
+    ) -> Result<(), assets::ConfigurationRefusal> {
+        if let Some(registry) = self.resolver.0.as_deref() {
+            let family = assets::FamilyKey::parse(weapon)
+                .ok_or_else(|| assets::ConfigurationRefusal::UnknownFamily(weapon.to_owned()))?;
+            return registry
+                .resolve_configuration(&assets::WeaponSelection::with(family, attachments), rules)
+                .map(|_| ());
+        }
+        let offered = self.attachments(row, weapon);
+        if let Some(name) = attachments.iter().find(|name| !offered.contains(name)) {
+            return Err(assets::ConfigurationRefusal::NotOffered(name.clone()));
+        }
+        if attachments.len() > rules.max_attachments {
+            return Err(assets::ConfigurationRefusal::RuleRestricted(format!(
+                "at most {} attachments",
+                rules.max_attachments
+            )));
+        }
+        Ok(())
     }
 }
 
-fn merge_offer(into: &mut Vec<frame::CacWeaponOffer>, mut offer: frame::CacWeaponOffer) {
-    let Some(existing) = into.iter_mut().find(|existing| existing.key == offer.key) else {
-        into.push(offer);
-        return;
-    };
-    if offer.item_group.is_some() {
-        existing.item_group = offer.item_group.take();
+pub fn attachment_preview_key(weapon: &str, attachment: &str) -> String {
+    format!("{weapon}+{attachment}")
+}
+
+#[derive(Clone, Default)]
+pub struct CatalogResolver(pub Option<std::sync::Arc<assets::WeaponRegistry>>);
+
+impl PartialEq for CatalogResolver {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        }
     }
-    existing
-        .attachment_variants
-        .append(&mut offer.attachment_variants);
-    existing.attachment_variants.sort();
-    existing.attachment_variants.dedup();
+}
+
+impl Eq for CatalogResolver {}
+
+impl std::fmt::Debug for CatalogResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self.0 {
+            Some(_) => "CatalogResolver(registry)",
+            None => "CatalogResolver(none)",
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -453,15 +439,23 @@ impl ClassSlotState {
         }
     }
 
+    pub fn loadout_rules(&self) -> assets::LoadoutRules {
+        assets::LoadoutRules::for_class(&self.perk1)
+    }
+
     pub fn set_row(&mut self, row: ClassEditRow, value: String) {
         match row {
             ClassEditRow::Primary => {
-                self.primary = value;
-                self.primary_attachments.clear();
+                if self.primary != value {
+                    self.primary = value;
+                    self.primary_attachments.clear();
+                }
             }
             ClassEditRow::Secondary => {
-                self.secondary = value;
-                self.secondary_attachments.clear();
+                if self.secondary != value {
+                    self.secondary = value;
+                    self.secondary_attachments.clear();
+                }
             }
             ClassEditRow::Lethal => self.lethal = value,
             ClassEditRow::Tactical => self.tactical = value,
@@ -622,16 +616,31 @@ impl ClassSetupScratch {
             return false;
         };
         let weapon = slot.row_value(row).to_owned();
-        if let Some(value) = value.as_ref()
-            && !catalog.attachment_variants(row, &weapon).contains(value)
+        let rules = slot.loadout_rules();
+        let mut chosen = match row {
+            ClassEditRow::Primary => slot.primary_attachments.clone(),
+            ClassEditRow::Secondary => slot.secondary_attachments.clone(),
+            _ => return false,
+        };
+        match value {
+            None => chosen.clear(),
+            Some(value) => {
+                if let Some(at) = chosen.iter().position(|name| *name == value) {
+                    chosen.remove(at);
+                } else {
+                    chosen.push(value);
+                }
+            }
+        }
+        if catalog
+            .check_attachments(row, &weapon, &chosen, rules)
+            .is_err()
         {
             return false;
         }
-        let rendered: Vec<String> = value.into_iter().collect();
         match row {
-            ClassEditRow::Primary => slot.primary_attachments = rendered,
-            ClassEditRow::Secondary => slot.secondary_attachments = rendered,
-            _ => return false,
+            ClassEditRow::Primary => slot.primary_attachments = chosen,
+            _ => slot.secondary_attachments = chosen,
         }
         self.editing_attachment = None;
         self.picker_category = None;
@@ -869,7 +878,7 @@ pub fn apply_cac_intent(
         UiIntent::CacPage(delta) => {
             let count = if let Some(row) = scratch.editing_attachment {
                 catalog
-                    .attachment_variants(row, scratch.slots[scratch.selected].row_value(row))
+                    .attachments(row, scratch.slots[scratch.selected].row_value(row))
                     .len()
                     + 1
             } else if let Some(row) = scratch.editing {

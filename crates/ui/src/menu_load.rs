@@ -1,9 +1,10 @@
 use bevy::prelude::*;
+use bevy::tasks::{AsyncComputeTaskPool, Task, futures_lite::future};
 use frame::ClientSet;
 
 use assets::{
-    LoadProgress, LoadingPreviewSource, MatchLoadRequest, find_runtime_common_mp, find_zone_file,
-    list_mp_maps,
+    GamesRoot, LoadProgress, LoadingPreviewSource, LocalizeCatalog, MatchLoadRequest,
+    find_runtime_common_mp, find_zone_file, list_mp_maps, load_mp_localized_strings,
 };
 
 use crate::class_select::ClassSelectOverlayOpen;
@@ -12,9 +13,7 @@ use crate::loading::{
     LoadingCamera, LoadingRoot, LoadingScreen, OverlayUiCamera, dismiss_loading_overlay,
 };
 use crate::menu::{MenuEnabled, MenuMapList, PendingMenuMap};
-use frame::{
-    AppScreen, LaunchIdentity, LaunchReport, MapLoadApproved, MatchTornDown, TeardownReason,
-};
+use frame::{AppScreen, LaunchIdentity, LaunchReport, MapLoadApproved, ReturnedToMenu};
 
 fn launch_report(
     zone: String,
@@ -169,9 +168,9 @@ pub(crate) fn begin_load_from_session(
     );
 }
 
-pub(crate) fn restore_menu_on_disconnect(
+pub(crate) fn restore_menu_on_return(
     mut commands: Commands,
-    mut torn: MessageReader<MatchTornDown>,
+    mut returned: MessageReader<ReturnedToMenu>,
     mut menu_enabled: ResMut<MenuEnabled>,
     mut class_overlay: ResMut<ClassSelectOverlayOpen>,
     mut maps: ResMut<MenuMapList>,
@@ -181,10 +180,7 @@ pub(crate) fn restore_menu_on_disconnect(
     overlay_cams: Query<Entity, With<OverlayUiCamera>>,
     mut stack: ResMut<crate::RetailMenuStack>,
 ) {
-    if !torn
-        .read()
-        .any(|fact| fact.reason == TeardownReason::Disconnect)
-    {
+    if returned.read().count() == 0 {
         return;
     }
     class_overlay.0 = false;
@@ -200,11 +196,70 @@ pub(crate) fn restore_menu_on_disconnect(
             maps.0 = list_mp_maps(&assets::GamesRoot(identity.games_root.clone()));
         }
     }
-    diag::info!(Ui, "session: main menu enabled after disconnect");
+    diag::info!(Ui, "session: main menu enabled");
+    diag::lifecycle_boundary("menu_interactive", "");
+}
+
+#[derive(Resource)]
+struct MenuStringsPrepare(Task<Option<LocalizeCatalog>>);
+
+fn start_menu_strings_prepare(
+    loc: Res<LocalizeCatalog>,
+    running: Option<Res<MenuStringsPrepare>>,
+    root: Option<Res<crate::UiAssetRoot>>,
+    loading: (
+        Option<Res<assets::MatchLoadBusy>>,
+        Option<Res<MatchLoadRequest>>,
+        Option<Res<assets::MatchLoadAccepted>>,
+        Option<Res<assets::PreparedMatchReady>>,
+    ),
+    mut commands: Commands,
+) {
+    if !loc.is_empty() || running.is_some() {
+        return;
+    }
+    let (busy, request, accepted, ready) = loading;
+    if busy.is_some_and(|busy| busy.0) || request.is_some() || accepted.is_some() || ready.is_some()
+    {
+        return;
+    }
+    let Some(root) = root.as_ref().and_then(|root| root.0.clone()) else {
+        return;
+    };
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        match load_mp_localized_strings(&GamesRoot(root), "iw4:code_post_gfx_mp") {
+            Ok(catalog) => Some(catalog),
+            Err(error) => {
+                diag::warn!(Ui, "menu: localize: {error}");
+                None
+            }
+        }
+    });
+    commands.insert_resource(MenuStringsPrepare(task));
+}
+
+fn install_menu_strings_prepare(
+    mut prepare: Option<ResMut<MenuStringsPrepare>>,
+    mut loc: ResMut<LocalizeCatalog>,
+    mut commands: Commands,
+) {
+    let Some(prepare) = prepare.as_deref_mut() else {
+        return;
+    };
+    let Some(built) = future::block_on(future::poll_once(&mut prepare.0)) else {
+        return;
+    };
+    commands.remove_resource::<MenuStringsPrepare>();
+    let Some(built) = built else {
+        return;
+    };
+    diag::info!(Ui, "menu: {} localize keys resident", built.len());
+    *loc = built;
 }
 
 pub(crate) fn register_menu_load_systems(app: &mut App) {
-    app.add_systems(Update, begin_map_from_menu.in_set(ClientSet::Ui))
+    app.add_message::<ReturnedToMenu>()
+        .add_systems(Update, begin_map_from_menu.in_set(ClientSet::Ui))
         .add_systems(
             Update,
             crate::retail_menu::sync_frontend_music
@@ -215,7 +270,9 @@ pub(crate) fn register_menu_load_systems(app: &mut App) {
             Update,
             (
                 begin_load_from_session,
-                restore_menu_on_disconnect.after(begin_load_from_session),
+                restore_menu_on_return.after(begin_load_from_session),
+                start_menu_strings_prepare,
+                install_menu_strings_prepare.after(start_menu_strings_prepare),
             )
                 .after(assets::MapLoadApproval)
                 .before(assets::MatchLoadDispatch)

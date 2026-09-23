@@ -82,7 +82,7 @@ impl RemoteBodyDrawPlan {
         self.last_draw_id = None;
         if had_rows {
             self.revisions.set_topology_from(&[], &[], 0);
-            self.revisions.bump_vertices();
+            self.revisions.bump_surfaces();
             self.revisions.bump_draws();
             self.revisions.bump_admission();
             self.revision = self.revision.wrapping_add(1);
@@ -545,8 +545,12 @@ impl MissileDrawPlan {
         let mut geometry = render_frame::publish_rows(&mut self.indices, &mut staged.indices);
         geometry |=
             render_frame::publish_rows(&mut self.surface_ranges, &mut staged.surface_ranges);
-        geometry |= render_frame::publish_rows(&mut self.materials, &mut staged.materials);
+        let materials = render_frame::publish_rows(&mut self.materials, &mut staged.materials);
+        geometry |= materials;
         geometry |= self.vertices.len() != staged.vertices.len();
+        if materials {
+            self.revisions.bump_materials();
+        }
         if geometry {
             std::mem::swap(&mut self.vertices, &mut staged.vertices);
             self.packed_vertices = std::mem::replace(

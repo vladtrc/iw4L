@@ -4,8 +4,6 @@ use std::sync::Mutex;
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
 
-use audio::AudioReady;
-
 use crate::adapters::anim::dyn_ent::DynEntCellBits;
 use crate::prepare::scene::camera::FlyCamera;
 use crate::prepare::scene::cull::{DynEntModelEntity, ScriptModelEntity, StaticModelEntity};
@@ -174,6 +172,7 @@ pub(crate) fn spawn_world(
     load: Option<Res<assets::MapLoadProcess>>,
     mut scene: ResMut<WorldScene>,
     mut images: ResMut<Assets<Image>>,
+    mut common_images: ResMut<super::world_images::ResidentGpuImages>,
     shaders: Res<Assets<bevy::shader::Shader>>,
     mut job: ResMut<WorldSpawnJob>,
     mut tess: ResMut<render_scene::TessMaterials>,
@@ -183,7 +182,6 @@ pub(crate) fn spawn_world(
     fx_catalog: Option<Res<PreparedFxCatalog>>,
     report: Option<Res<LaunchReport>>,
     present_ack: Res<WorldPresentAck>,
-    audio_ready: Option<Res<AudioReady>>,
 ) {
     // Pacing belongs to the load that is still running, not to the screen that
     // happens to be drawing it: a run without an overlay must spawn the world
@@ -202,9 +200,6 @@ pub(crate) fn spawn_world(
         let spawn = job.spawn;
         let gpu_ready = gpu.as_deref();
         if super::world_gpu::poll(&mut job.gpu_wait, spawn, gpu_ready, gap_ms) {
-            if !audio_ready.as_ref().is_none_or(|ready| ready.0) {
-                return;
-            }
             let quiet = job.gpu_wait.quiet();
             let elapsed_ms = job.gpu_wait.elapsed().as_secs_f32() * 1000.0;
             finish_world_spawn(&mut scene, &mut job, &mut commands);
@@ -270,26 +265,40 @@ pub(crate) fn spawn_world(
         job.images.arm(&mut scene, progress.as_ref());
     }
     let images_finished = if job.images.unfinished() {
+        let gap_ms = job.slice_gap_ms(frame_started);
         let max_this_frame = if paced {
             super::world_images::IMAGES_PER_OVERLAY_FRAME
         } else {
             u32::MAX
         };
+        let byte_budget = (super::world_images::IMAGE_BYTES_PER_OVERLAY_FRAME as f32
+            * (gap_ms.max(16.7) / 16.7))
+            .round() as u64;
+        let byte_budget = byte_budget.min(super::world_images::MAX_IMAGE_BYTES_PER_SLICE);
         let bytes_before = job.images.handed_bytes;
-        let finished = job.images.until(&mut images, deadline, max_this_frame);
+        let finished = job.images.until(
+            &mut images,
+            &mut common_images,
+            deadline,
+            max_this_frame,
+            byte_budget,
+        );
         job.last_work_ms = frame_started.elapsed().as_secs_f32() * 1000.0;
-        let gap_ms = job.slice_gap_ms(std::time::Instant::now());
         diag::info!(
             World,
-            "world spawn slice: phase=images done={}/{} skipped={} reused_handles={}/{}B {:.1}ms gap={gap_ms:.1}ms handed_bytes={} total_handed={} largest_step={:.1}ms/{}B (budget 40ms; bytes are handed to Assets<Image>, not copied to the GPU; a reused handle is a slot whose variant was already an asset)",
+            "world spawn slice: phase=images done={}/{} resident={} skipped={} reused_handles={}/{}B common_reused={}/{}B {:.1}ms gap={gap_ms:.1}ms handed_bytes={} total_handed={} byte_budget={} largest_step={:.1}ms/{}B (budget 40ms; bytes are handed to Assets<Image>, not copied to the GPU; a reused handle is a slot whose variant was already an asset)",
             job.images.done,
             job.images.total,
+            job.images.resident,
             job.images.skipped,
             job.images.reused_handles,
             job.images.reused_handle_bytes,
+            job.images.reused_common_handles,
+            job.images.reused_common_bytes,
             job.last_work_ms,
             job.images.handed_bytes - bytes_before,
             job.images.handed_bytes,
+            byte_budget,
             job.images.largest_step_ns as f64 / 1.0e6,
             job.images.largest_step_bytes,
         );
@@ -506,6 +515,7 @@ pub(crate) fn spawn_world(
             lights: scene.primary_light_pack.clone(),
             attenuation: scene.primary_light_attenuation.clone(),
             t5_falloff: scene.primary_light_t5_falloff.clone(),
+            dynamic: scene.dynamic_light,
         });
         {
             let n = scene.primary_light_pack.len();
@@ -791,83 +801,6 @@ fn finish_world_spawn(scene: &mut WorldScene, job: &mut WorldSpawnJob, commands:
     perf::world_ready(1);
 }
 
-pub(crate) fn release_world_images_on_teardown(
-    mut torn: MessageReader<MatchTornDown>,
-    scene: Option<Res<WorldScene>>,
-    job: Res<WorldSpawnJob>,
-    image_resources: (
-        Option<ResMut<crate::assemble::drawsurf::RuntimeImageHandles>>,
-        ResMut<Assets<Image>>,
-    ),
-) {
-    if torn.read().count() == 0 {
-        return;
-    }
-    let (mut image_handles, mut images) = image_resources;
-    let mut image_ids = std::collections::HashSet::new();
-    image_ids.extend(job.images.exact_handles().iter().flatten().map(Handle::id));
-    image_ids.extend(job.images.probe_handles().iter().flatten().map(Handle::id));
-    for lightmap in job.images.lightmap_handles().iter().flatten() {
-        image_ids.extend(
-            [
-                lightmap.primary.as_ref(),
-                lightmap.secondary.as_ref(),
-                lightmap.secondary_b.as_ref(),
-                Some(&lightmap.ambient_diagnostic),
-                Some(&lightmap.directional_diagnostic),
-                Some(&lightmap.sun_mask_diagnostic),
-            ]
-            .into_iter()
-            .flatten()
-            .map(Handle::id),
-        );
-    }
-    if let Some(scene) = scene.as_ref() {
-        image_ids.extend(scene.model_lighting_image.iter().map(Handle::id));
-    }
-    if let Some(handles) = image_handles.as_ref() {
-        image_ids.extend(handles.material_images.iter().flatten().map(Handle::id));
-        image_ids.extend(handles.reflection_probes.iter().flatten().map(Handle::id));
-        for lightmap in handles.lightmaps.iter().flatten() {
-            image_ids.extend(
-                [
-                    lightmap.primary.as_ref(),
-                    lightmap.secondary.as_ref(),
-                    lightmap.secondary_b.as_ref(),
-                    Some(&lightmap.ambient_diagnostic),
-                    Some(&lightmap.directional_diagnostic),
-                    Some(&lightmap.sun_mask_diagnostic),
-                ]
-                .into_iter()
-                .flatten()
-                .map(Handle::id),
-            );
-        }
-        image_ids.extend(handles.model_lighting.iter().map(Handle::id));
-    }
-    let mut removed_n = 0u32;
-    let mut removed_bytes = 0u64;
-    for id in image_ids {
-        if let Some(image) = images.remove(id) {
-            removed_n = removed_n.saturating_add(1);
-            removed_bytes = removed_bytes.saturating_add(
-                image
-                    .data
-                    .as_ref()
-                    .map(|bytes| bytes.len() as u64)
-                    .unwrap_or(0),
-            );
-        }
-    }
-    if let Some(handles) = image_handles.as_mut() {
-        **handles = crate::assemble::drawsurf::RuntimeImageHandles::default();
-    }
-    diag::info!(
-        World,
-        "world: released render images count={removed_n} cpu_bytes={removed_bytes}"
-    );
-}
-
 pub(crate) fn despawn_world_entities_on_teardown(
     mut torn: MessageReader<MatchTornDown>,
     smodels: Query<Entity, With<StaticModelEntity>>,
@@ -888,29 +821,44 @@ pub(crate) fn reset_world_spawn_on_teardown(
     mut job: ResMut<WorldSpawnJob>,
     mut gpu: ResMut<WorldGpuReady>,
     mut demand: ResMut<super::world_gpu::PipelineDemandTracker>,
+    mut image_handles: Option<ResMut<crate::assemble::drawsurf::RuntimeImageHandles>>,
+    mut retiring: ResMut<frame::Retiring>,
+    images: Res<Assets<Image>>,
     mut commands: Commands,
 ) {
     if torn.read().count() == 0 {
         return;
     }
-    *job = WorldSpawnJob::default();
+    let live_before = images.len();
+    retiring.hand_over(std::mem::take(&mut *job));
     *gpu = WorldGpuReady::default();
     *demand = super::world_gpu::PipelineDemandTracker::default();
-    commands.remove_resource::<crate::assemble::drawsurf::WorldDrawGpuPlan>();
-    commands.remove_resource::<crate::assemble::drawsurf::SmodelGpuPlan>();
-    commands.remove_resource::<crate::assemble::drawsurf::tess::sky::SkyModelDrawPlan>();
+    if let Some(handles) = image_handles.as_mut() {
+        **handles = crate::assemble::drawsurf::RuntimeImageHandles::default();
+    }
+    diag::info!(
+        World,
+        "world: render side let go of its images ({live_before} live in Assets<Image> at the \
+         moment of release; what survives is what another owner still holds)"
+    );
     commands.insert_resource(crate::assemble::drawsurf::MapSunEffects::default());
-
-    commands.remove_resource::<crate::prepare::scene::smodel_lighting::WorldSmodelLighting>();
-    commands.remove_resource::<crate::prepare::scene::smodel_geom_cache::WorldStaticModelCache>();
-    commands
-        .remove_resource::<crate::prepare::scene::model_lighting_atlas::WorldModelLightingAtlas>();
-    commands
-        .remove_resource::<crate::prepare::scene::model_lighting_cache::WorldModelLightingCache>();
+    commands.queue(|world: &mut World| {
+        frame::retire::retire_resources(world, |batch| {
+            batch
+                .resource::<crate::assemble::drawsurf::WorldDrawGpuPlan>()
+                .resource::<crate::assemble::drawsurf::SmodelGpuPlan>()
+                .resource::<crate::assemble::drawsurf::tess::sky::SkyModelDrawPlan>()
+                .resource::<crate::prepare::scene::smodel_lighting::WorldSmodelLighting>()
+                .resource::<crate::prepare::scene::smodel_geom_cache::WorldStaticModelCache>()
+                .resource::<crate::prepare::scene::model_lighting_atlas::WorldModelLightingAtlas>()
+                .resource::<crate::prepare::scene::model_lighting_cache::WorldModelLightingCache>();
+        });
+    });
 }
 
 pub(crate) fn shutdown_world_on_teardown(
     mut torn: MessageReader<MatchTornDown>,
+    mut retiring: ResMut<frame::Retiring>,
     mut scene: Option<ResMut<WorldScene>>,
     mut membership: Option<ResMut<DynEntCellBits>>,
     mut present: ResMut<render_scene::WorldPresentFacts>,
@@ -922,7 +870,7 @@ pub(crate) fn shutdown_world_on_teardown(
         return;
     }
     if let Some(scene) = scene.as_mut() {
-        scene.shutdown_world();
+        retiring.hand_over(std::mem::take(&mut **scene));
     }
     if let Some(membership) = membership.as_mut() {
         **membership = DynEntCellBits::default();
@@ -973,6 +921,7 @@ pub(crate) fn arm_world_spawn_on_install(
 
 pub(crate) fn register_world_gpu_ready(app: &mut App) {
     super::world_gpu::register_resources(app);
+    app.init_resource::<super::world_images::ResidentGpuImages>();
     app.add_systems(Update, supply_requested_shaders.before(spawn_world));
     let present_ack = WorldPresentAck::default();
     app.insert_resource(present_ack.clone());

@@ -113,6 +113,41 @@ fn flags(bits: u32) -> String {
     names.join("|")
 }
 
+pub(crate) fn write_framebuffers(
+    path: &Path,
+    passes: &[gpu_probe::FramebufferPass],
+) -> Result<(), String> {
+    let mut out = String::from("pass,key,width,height,attachments,creations\n");
+    for pass in passes {
+        for row in &pass.keys {
+            let _ = writeln!(
+                out,
+                "{},{:016x},{},{},{},{}",
+                pass.label, row.key, row.extent.0, row.extent.1, row.attachments, row.creations,
+            );
+        }
+        if pass.overflow_keys > 0 {
+            let _ = writeln!(
+                out,
+                "{},overflow:{},,,,{}",
+                pass.label, pass.overflow_keys, pass.overflow_creations,
+            );
+        }
+    }
+    std::fs::write(path, out).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+pub(crate) fn write_encoders(
+    path: &Path,
+    shapes: &[gpu_probe::EncoderShape],
+) -> Result<(), String> {
+    let mut out = String::from("retires,passes\n");
+    for shape in shapes {
+        let _ = writeln!(out, "{},{}", shape.retires, shape.signature);
+    }
+    std::fs::write(path, out).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
 /// `load_jobs.csv`, one row per load job.
 ///
 /// Times are milliseconds from `origin` — the same zero the load waterfall in

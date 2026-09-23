@@ -326,6 +326,8 @@ fn fpv_cues_from_events(
             | SimEvent::ClassRejected { .. }
             | SimEvent::GiveAccepted { .. }
             | SimEvent::GiveRejected { .. }
+            | SimEvent::ConfigurationChangeAccepted { .. }
+            | SimEvent::ConfigurationChangeRejected { .. }
             | SimEvent::ScoreChanged { .. }
             | SimEvent::MatchEnded { .. } => {}
         }

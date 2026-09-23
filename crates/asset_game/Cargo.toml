@@ -19,6 +19,7 @@ fastfile_iw5.workspace = true
 fastfile_t5.workspace = true
 weapon_iw4.workspace = true
 anim_iw4.workspace = true
+xmodel_runtime.workspace = true
 fx_iw4.workspace = true
 diag.workspace = true
 bevy.workspace = true

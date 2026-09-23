@@ -29,6 +29,10 @@ pub const OP_STATICDVARBOOL: i32 = 0x18;
 pub const OP_STATICDVARSTRING: i32 = 0x1A;
 pub const OP_INT: i32 = 0x1B;
 
+pub const OP_SIN: i32 = 0x1E;
+
+pub const OP_COS: i32 = 0x1F;
+
 pub const OP_MIN: i32 = 0x20;
 
 pub const OP_MAX: i32 = 0x21;
@@ -65,6 +69,22 @@ pub const OP_TEAMFIELD: i32 = 0x35;
 pub const OP_OTHERTEAMFIELD: i32 = 0x36;
 
 pub const OP_ADSJAVELIN: i32 = 0x40;
+
+pub const OP_WEAPLOCKBLINK: i32 = 0x41;
+
+pub const OP_WEAPATTACKTOP: i32 = 0x42;
+
+pub const OP_WEAPATTACKDIRECT: i32 = 0x43;
+
+pub const OP_WEAPLOCKING: i32 = 0x44;
+
+pub const OP_WEAPLOCKED: i32 = 0x45;
+
+pub const OP_WEAPLOCKTOOCLOSE: i32 = 0x46;
+
+pub const OP_WEAPLOCKSCREENPOSX: i32 = 0x47;
+
+pub const OP_WEAPLOCKSCREENPOSY: i32 = 0x48;
 
 pub const OP_TABLELOOKUP: i32 = 0x4A;
 
@@ -123,6 +143,25 @@ pub enum ExprError {
     StrayOperands,
     EmptyResult,
     Host(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WeaponLockView {
+    pub ads_javelin: bool,
+
+    pub blink: bool,
+
+    pub attack_top: bool,
+
+    pub attack_direct: bool,
+
+    pub locking: bool,
+
+    pub locked: bool,
+
+    pub too_close: bool,
+
+    pub screen_pos: [f32; 2],
 }
 
 pub trait ExprHost {
@@ -248,9 +287,7 @@ pub trait ExprHost {
         Ok(0)
     }
 
-    fn adsjavelin(&self) -> Result<i32, ExprError> {
-        Ok(0)
-    }
+    fn weapon_lock(&self) -> Result<WeaponLockView, ExprError>;
 
     fn spectating_client(&self) -> Result<i32, ExprError> {
         Ok(0)
@@ -588,8 +625,34 @@ fn run_op(
             data.push(Operand::Int(host.selecting_location()?));
             Ok(())
         }
-        OP_ADSJAVELIN => {
-            data.push(Operand::Int(host.adsjavelin()?));
+        OP_ADSJAVELIN | OP_WEAPLOCKBLINK | OP_WEAPATTACKTOP | OP_WEAPATTACKDIRECT
+        | OP_WEAPLOCKING | OP_WEAPLOCKED | OP_WEAPLOCKTOOCLOSE => {
+            let lock = host.weapon_lock()?;
+            let flag = match op {
+                OP_ADSJAVELIN => lock.ads_javelin,
+                OP_WEAPLOCKBLINK => lock.blink,
+                OP_WEAPATTACKTOP => lock.attack_top,
+                OP_WEAPATTACKDIRECT => lock.attack_direct,
+                OP_WEAPLOCKING => lock.locking,
+                OP_WEAPLOCKED => lock.locked,
+                _ => lock.too_close,
+            };
+            data.push(Operand::Int(i32::from(flag)));
+            Ok(())
+        }
+        OP_WEAPLOCKSCREENPOSX | OP_WEAPLOCKSCREENPOSY => {
+            let lock = host.weapon_lock()?;
+            let axis = usize::from(op == OP_WEAPLOCKSCREENPOSY);
+            data.push(Operand::Float(lock.screen_pos[axis]));
+            Ok(())
+        }
+        OP_SIN | OP_COS => {
+            let v = source_float(&pop_data(data)?);
+            data.push(Operand::Float(if op == OP_SIN {
+                libm::sinf(v)
+            } else {
+                libm::cosf(v)
+            }));
             Ok(())
         }
         OP_SPECTATINGCLIENT => {

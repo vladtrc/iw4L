@@ -12,7 +12,8 @@ use bots::{
 use frame::{HasWorld, LaunchIdentity, RuntimeRole};
 use hud::{PendingHitmarker, PendingSplash};
 use net::{
-    AuthorityClock, AuthorityInputGate, AuthorityWorld, ClientActionInbox, PresentedSnapshot,
+    AuthorityClock, AuthorityInputGate, AuthorityWorld, ClientActionInbox, MasterBridge,
+    MasterBridgeState, PresentedSnapshot,
 };
 use render::diag::capture::{CaptureQueue, CaptureRequest};
 use render_frontend::adapters::anim::view_kick::PendingViewHurt;
@@ -50,10 +51,37 @@ pub(crate) fn route_session_commands(
     mut transition: ResMut<session::SessionSwapRequest>,
     has_world: Res<HasWorld>,
     playback: Option<Res<replay::ReplayPlayback>>,
+    bridge: Option<Res<net::MasterBridge>>,
+    identity: Option<Res<LaunchIdentity>>,
     mut dispatch: ResMut<ConsoleDispatch>,
 ) {
     for cmd in events.read() {
         match cmd.name.as_str() {
+            "map_restart" => {
+                let zone = identity
+                    .as_ref()
+                    .map(|identity| identity.zone.clone())
+                    .filter(|zone| has_world.0 && !zone.is_empty());
+                match (cmd.args.is_empty(), zone) {
+                    (false, _) => {
+                        dispatch.release();
+                        echo.write("usage: map_restart");
+                    }
+                    (true, None) => {
+                        dispatch.release();
+                        echo.write("map_restart: no map to restart");
+                    }
+                    (true, Some(zone)) => match transition.request_zone(zone.clone()) {
+                        Ok(id) => {
+                            echo.write(format!("map_restart: requested `{zone}` (swap #{id})"))
+                        }
+                        Err(error) => {
+                            dispatch.release();
+                            echo.write(format!("map_restart: {error}"));
+                        }
+                    },
+                }
+            }
             "map" => match cmd.args.as_slice() {
                 [zone] => match transition.request_zone(zone.clone()) {
                     Ok(id) => echo.write(format!("map: requested `{zone}` (swap #{id})")),
@@ -68,17 +96,27 @@ pub(crate) fn route_session_commands(
                 }
             },
             "disconnect" => {
+                let in_session = has_world.0
+                    || playback.is_some()
+                    || transition.dump_id().is_some()
+                    || bridge.is_some();
                 if !cmd.args.is_empty() {
                     dispatch.release();
                     echo.write("usage: disconnect");
-                } else if !has_world.0 && playback.is_none() && transition.dump_id().is_none() {
+                } else if !in_session {
                     dispatch.release();
-                    echo.write("disconnect: no match is installed");
+                    echo.write("disconnect: no session to leave");
                 } else {
-                    match transition.request_menu() {
-                        Ok(id) => echo.write(format!(
-                            "disconnect: waiting for session teardown (swap #{id})"
-                        )),
+                    match transition.request_leave() {
+                        Ok(id) => {
+                            diag::lifecycle_boundary(
+                                "disconnect_requested",
+                                &format!(" swap={id}"),
+                            );
+                            echo.write(format!(
+                                "disconnect: waiting for session teardown (swap #{id})"
+                            ))
+                        }
                         Err(error) => {
                             dispatch.release();
                             echo.write(format!("disconnect: {error}"));
@@ -86,10 +124,6 @@ pub(crate) fn route_session_commands(
                     }
                 }
             }
-            "map_restart" => echo.write(format!(
-                "map_restart {:?}: stub — restart/reload is not wired; current zone remains active",
-                cmd.args
-            )),
             _ => {}
         }
     }
@@ -485,11 +519,7 @@ pub(crate) fn route_capture_commands(
     ),
     identity: Option<Res<LaunchIdentity>>,
     mut capture: Option<ResMut<CaptureQueue>>,
-    (playback, mut exit, mut process_exit): (
-        Option<Res<replay::ReplayPlayback>>,
-        MessageWriter<AppExit>,
-        ResMut<ReplayProcessExit>,
-    ),
+    mut exit: MessageWriter<AppExit>,
 ) {
     let (console, settings, line) = &mut output;
     let capacity = settings.log_capacity;
@@ -560,17 +590,37 @@ pub(crate) fn route_capture_commands(
             }
 
             "exit" | "quit" => {
+                let (queued, writing) = capture
+                    .as_deref()
+                    .map(CaptureQueue::owed_at_exit)
+                    .unwrap_or((0, 0));
+                render::diag::capture::exit_is_user_quit();
+                diag::lifecycle_boundary("quit_requested", "");
+                if queued + writing > 0 {
+                    echo(
+                        format!(
+                            "quit: leaving {queued} queued and {writing} unfinished screenshot(s) behind"
+                        ),
+                        console,
+                        line,
+                    );
+                }
+                exit.write(AppExit::Success);
+            }
+
+            "finish_run" => {
+                diag::lifecycle_boundary("quit_requested", " via=finish_run");
                 let owed_shots = capture
                     .as_deref_mut()
                     .is_some_and(CaptureQueue::exit_after_drained);
                 if owed_shots {
-                    echo("quit: waiting for queued screenshots".into(), console, line);
+                    echo(
+                        "finish_run: waiting for queued screenshots".into(),
+                        console,
+                        line,
+                    );
                 } else {
                     exit.write(AppExit::Success);
-
-                    if playback.as_ref().is_some_and(|p| p.quit_on_end) {
-                        process_exit.0 = true;
-                    }
                 }
             }
             _ => {}
@@ -578,16 +628,46 @@ pub(crate) fn route_capture_commands(
     }
 }
 
-#[derive(Resource, Debug, Default)]
-pub(crate) struct ReplayProcessExit(bool);
+const LEAVE_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
 
-pub(crate) fn exit_replay_process(process_exit: Res<ReplayProcessExit>) {
-    if !process_exit.0 {
+pub(crate) fn exit_process(mut exit: MessageReader<AppExit>, bridge: Option<Res<MasterBridge>>) {
+    let Some(code) = exit.read().last().map(|exit| match exit {
+        AppExit::Success => 0,
+        AppExit::Error(code) => i32::from(code.get()),
+    }) else {
+        return;
+    };
+    if let Some(bridge) = bridge {
+        leave_master(&bridge);
+    }
+    diag::lifecycle_boundary("process_exit", &format!(" code={code}"));
+    diag::flush();
+    let _ = std::io::stdout().flush();
+    std::process::exit(code);
+}
+
+fn leave_master(bridge: &MasterBridge) {
+    if !matches!(
+        bridge.state(),
+        MasterBridgeState::Hosting { .. }
+            | MasterBridgeState::Joining { .. }
+            | MasterBridgeState::Joined { .. }
+    ) {
         return;
     }
-    diag::info!(Console, "play: quit, process exit");
-    let _ = std::io::stdout().flush();
-    std::process::exit(0);
+    bridge.leave();
+    let until = std::time::Instant::now() + LEAVE_BUDGET;
+    while std::time::Instant::now() < until {
+        if bridge.state().is_terminal() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    diag::warn!(
+        Console,
+        "quit: master had not confirmed the leave after {}ms",
+        LEAVE_BUDGET.as_millis()
+    );
 }
 
 pub(crate) fn route_state_dump_commands(
@@ -635,6 +715,96 @@ pub(crate) fn route_state_dump_commands(
             Err(error) => echo.write(format!("dump: {error}")),
         }
     }
+}
+
+pub(crate) fn route_hitvol_commands(
+    mut events: MessageReader<ConsoleCommand>,
+    mut echo: ConsoleEcho,
+    authority: Option<Res<AuthorityWorld>>,
+) {
+    for cmd in events.read() {
+        if cmd.name != "hitvol" {
+            continue;
+        }
+        let Some(authority) = authority.as_deref() else {
+            echo.write("hitvol: no authority world on this client");
+            continue;
+        };
+        for line in hitvol_report(&authority.0) {
+            echo.write(line);
+        }
+    }
+}
+
+fn hitvol_report(world: &sim::SimWorld) -> Vec<String> {
+    let census = world.collision_census();
+    let w = &census.world;
+    let p = &census.players;
+    let e = &census.entities;
+    let mut out = vec![
+        format!(
+            "hitvol world: brushes {} leaves {} leafbrushes {} meshtris {} cmodels {} smodels {} (with tris {}) pen_table {}",
+            w.brushes,
+            w.bsp_leaves,
+            w.leafbrushes,
+            w.mesh_tris,
+            w.cmodels,
+            w.static_models,
+            w.static_models_with_tris,
+            w.pen_table_loaded
+        ),
+        format!(
+            "hitvol players: poses {} bones {} aabb-only {} bone-count {}..{} with-head-bone {}",
+            p.poses, p.with_bones, p.aabb_only, p.min_bones, p.max_bones, p.with_head_bone
+        ),
+        format!(
+            "hitvol entities: rows {} colltris {} boxes {} brush {} authored-no-collision {} not-bullet-solid {} no-dobj {} no-capability {} materialize-failed {} linked-brushes {}",
+            e.rows,
+            e.colltris,
+            e.boxes_only,
+            e.brush_only,
+            e.no_collision_authored,
+            e.not_bullet_solid,
+            e.no_dobj,
+            e.no_capability,
+            e.materialize_failed,
+            e.linked_brushes
+        ),
+    ];
+    if !e.no_clip_sample.is_empty() {
+        out.push(format!(
+            "hitvol entities with no model clip: {}",
+            e.no_clip_sample.join(", ")
+        ));
+    }
+    if let Some(error) = &p.materialize_error {
+        out.push(format!("hitvol players: materialize error {error}"));
+    }
+    for kit in &census.kits {
+        out.push(format!(
+            "hitvol kit `{}`: {} bones {} boxes {} collsurfs {} colltris {} lod {}",
+            kit.key,
+            kit.clip(),
+            kit.bones,
+            kit.bone_boxes,
+            kit.coll_surfs,
+            kit.coll_tris,
+            kit.coll_lod
+        ));
+    }
+    for row in world.hitvol_dump() {
+        out.push(format!(
+            "hitvol client {:?}: geom {} bones {} pose {} body `{}` head `{}` controller {}",
+            row.client.map(|c| c.0),
+            row.geom,
+            row.bone_count,
+            row.pose_kind,
+            row.body_key,
+            row.head_key,
+            row.controller
+        ));
+    }
+    out
 }
 
 pub(crate) fn route_debug_feature_commands(
@@ -694,7 +864,11 @@ pub(crate) fn route_debug_feature_commands(
                     bot_fire.push(target);
                     echo("bot: queued fire".into(), console, line);
                 }
-                Ok(BotVerb::Give { id, weapon }) => {
+                Ok(BotVerb::Give {
+                    id,
+                    weapon,
+                    attachments,
+                }) => {
                     let Some(weapons) = weapons.as_ref() else {
                         echo("bot give: weapon catalog not loaded".into(), console, line);
                         continue;
@@ -707,7 +881,7 @@ pub(crate) fn route_debug_feature_commands(
                         echo(format!("bot give: {id:?} is not a bot"), console, line);
                         continue;
                     }
-                    match crate::weapon_dispatch::resolve_give_id(&weapons.0, &weapon) {
+                    match crate::weapon_dispatch::resolve_give_id(&weapons.0, &weapon, &attachments) {
                         Ok(weapon_id) => {
                             let request_id = give_seq.allocate();
                             if let Err(error) = inbox.push(
@@ -723,7 +897,7 @@ pub(crate) fn route_debug_feature_commands(
                             echo(
                                 format!(
                                     "bot give: queued {} id={weapon_id} on {} request_id={request_id}",
-                                    weapons.0.name_of(weapon_id),
+                                    weapons.0.configuration_label(weapon_id),
                                     id.0
                                 ),
                                 console,
@@ -779,9 +953,16 @@ pub(crate) fn route_debug_feature_commands(
 pub(crate) fn resume_lifecycle_commands(
     mut dispatch: ResMut<ConsoleDispatch>,
     mut transition: ResMut<session::SessionSwapRequest>,
+    mut echo: ConsoleEcho,
 ) {
-    if transition.take_completed().is_some() {
-        dispatch.paused = false;
+    if let Some(completed) = transition.take_completed() {
+        match completed.result {
+            session::SessionSwapResult::Failed { zone, error } => {
+                dispatch.release();
+                echo.write(format!("map: `{zone}` failed: {error}"));
+            }
+            _ => dispatch.paused = false,
+        }
     }
 }
 
@@ -1017,6 +1198,21 @@ fn state_dump_body(
         });
     let audio =
         audio.unwrap_or("[audio]\nUnavailable { reason: \"not captured with this dump\" }\n");
+    let hitvol = match authority {
+        Some(world) => {
+            let mut out = String::from("[hitvol]\n");
+            for line in hitvol_report(&world.0) {
+                out.push_str(&line);
+                out.push('\n');
+            }
+            out.push_str("rows =\n");
+            for row in world.0.hitvol_dump() {
+                out.push_str(&format!("  {row:?}\n"));
+            }
+            out
+        }
+        None => "[hitvol]\nUnavailable { reason: \"AuthorityWorld resource absent\" }\n".to_owned(),
+    };
     format!(
         "format = \"iw4l-state-dump-1\"\n\
          captured_unix_ns = {captured_unix_ns}\n\
@@ -1025,7 +1221,7 @@ fn state_dump_body(
          authority_clock = {authority_clock:#?}\n\
          \n[authority_snapshot]\n{authority_snapshot}\n\
          \n[presented_snapshot]\n{presented_snapshot}\n\
-         \n{audio}",
+         \n{hitvol}\n{audio}",
         identity.role_label, identity.zone,
     )
 }
@@ -1105,8 +1301,14 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
             "clip",
             "clip — save last ≤45s available to this client as iw4l-artifacts/clips/<ULID>/{clip.iw4ldemo, dump.txt} (ours; always-on ring; not a retail command)",
         ),
-        ("map_restart", "map_restart — stub; reload is not wired"),
-        ("disconnect", "disconnect — tear down to the main menu"),
+        (
+            "map_restart",
+            "map_restart — a new match on the current map, on what the last one prepared",
+        ),
+        (
+            "disconnect",
+            "disconnect — leave the session: tear the world down, leave the room, back to the main menu",
+        ),
         (
             "demo",
             "demo <name> — tear down the current occupancy, then play iw4l-artifacts/demos/<name>.iw4ldemo or clips/<name>/clip.iw4ldemo",
@@ -1115,16 +1317,30 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
             "play",
             "play <name> — launcher alias of demo (not a retail command string)",
         ),
-        ("exit", "exit — quit the process"),
-        ("quit", "quit — quit the process"),
+        (
+            "exit",
+            "exit — quit the process, abandoning unfinished screenshots",
+        ),
+        (
+            "quit",
+            "quit — quit the process, abandoning unfinished screenshots",
+        ),
+        (
+            "finish_run",
+            "finish_run — finish the run's screenshots, then quit (not a retail command string)",
+        ),
         ("ui", "ui [0|1] — hide/show game UI; console Overlay stays"),
         (
             "dump",
             "dump [name] - atomically write the current authority + presented state to iw4l-artifacts/dumps/<timestamp>-<name>.txt (one shot; no history or timing)",
         ),
         (
+            "hitvol",
+            "hitvol — what the authority holds for a bullet to clip against: world tables, live player volumes, script-model clips, kit models",
+        ),
+        (
             "bot",
-            "bot add [N] | hold [on|off] | give <id> <weapon> | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z>",
+            "bot add [N] | hold [on|off] | give <id> <weapon> [att...] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z>",
         ),
         (
             "menu",
@@ -1144,7 +1360,7 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         ),
         (
             "wait",
-            "wait [seconds|world|spawn|torn|ambient] — pause the console FIFO; world = scene.spawned; spawn = AppScreen::InGame; torn = HasWorld false and scene.spawned false (hold after MatchTornDown); ambient = MapAmbientBooted (overlay finished, CreateFX loops spawned)",
+            "wait [seconds|<n>t|world|spawn|torn|ambient] — pause the console FIFO; <n>t = n authority ticks; world = scene.spawned; spawn = AppScreen::InGame; torn = HasWorld false and scene.spawned false (hold after MatchTornDown); ambient = MapAmbientBooted (overlay finished, CreateFX loops spawned)",
         ),
     ] {
         if registry.resolve(name).is_none() {
@@ -1153,13 +1369,17 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
     }
 }
 
-const BOT_USAGE: &str = "usage: bot add [N] | hold [on|off] | give <id> <weapon> | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
+const BOT_USAGE: &str = "usage: bot add [N] | hold [on|off] | give <id> <weapon> [att...] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum BotVerb {
     Add(u32),
     Hold(bool),
-    Give { id: ClientId, weapon: String },
+    Give {
+        id: ClientId,
+        weapon: String,
+        attachments: Vec<String>,
+    },
     Fire(BotTpTarget),
     Tp(BotTpRequest),
 }
@@ -1181,21 +1401,17 @@ pub(crate) fn parse_bot_args(args: &[String]) -> Result<BotVerb, String> {
             Some(other) => Err(format!("usage: bot hold [on|off] (got `{other}`)")),
         },
         "give" => {
+            let usage = || "usage: bot give <id> <weapon> [attachment...]".to_owned();
             let id = args
                 .get(1)
-                .ok_or_else(|| "usage: bot give <id> <weapon>".to_owned())?
+                .ok_or_else(usage)?
                 .parse::<u32>()
-                .map_err(|_| "usage: bot give <id> <weapon>".to_owned())?;
-            let weapon = args
-                .get(2)
-                .cloned()
-                .ok_or_else(|| "usage: bot give <id> <weapon>".to_owned())?;
-            if args.len() != 3 {
-                return Err("usage: bot give <id> <weapon>".into());
-            }
+                .map_err(|_| usage())?;
+            let weapon = args.get(2).cloned().ok_or_else(usage)?;
             Ok(BotVerb::Give {
                 id: ClientId(id),
                 weapon,
+                attachments: args[3..].to_vec(),
             })
         }
         "fire" => match args.get(1).map(String::as_str) {

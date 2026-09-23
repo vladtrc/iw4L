@@ -1,4 +1,4 @@
-use lighting_iw4::{SmodelSurfPath, dlight_hits_aabb};
+use lighting_iw4::dlight_hits_aabb;
 use render_frame::{RetainedDrawItem, RetainedDrawKind};
 use render_scene::{GfxScene, SCENE_VIEWMODEL_ENTNUM};
 
@@ -28,20 +28,33 @@ pub(crate) fn dlight_receiver_keep(
     radius: f32,
     scene: Option<&WorldScene>,
     gfx: Option<&GfxScene>,
+    world_run_surfs: &[u16],
 ) -> bool {
     match draw.kind {
-        RetainedDrawKind::World { surf, .. } => {
+        RetainedDrawKind::World {
+            surf, run, run_off, ..
+        } => {
             let Some(cull) = scene.and_then(|scene| scene.cull.as_ref()) else {
                 return false;
             };
-            cull.dpvs
-                .surface_bounds
-                .get(usize::from(surf))
-                .is_some_and(|bounds| dlight_hits_aabb(origin, radius, bounds.mid(), bounds.half()))
+            (0..run.max(1)).any(|offset| {
+                let member = if run <= 1 {
+                    Some(surf)
+                } else {
+                    world_run_surfs
+                        .get(run_off as usize + usize::from(offset))
+                        .copied()
+                };
+                member
+                    .and_then(|member| cull.dpvs.surface_bounds.get(usize::from(member)))
+                    .is_some_and(|bounds| {
+                        dlight_hits_aabb(origin, radius, bounds.mid(), bounds.half())
+                    })
+            })
         }
         RetainedDrawKind::Smodel {
             placement,
-            stream: Some(SmodelSurfPath::Rigid),
+            stream: Some(_),
             ..
         } => {
             let Some(cull) = scene.and_then(|scene| scene.cull.as_ref()) else {

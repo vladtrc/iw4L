@@ -487,8 +487,6 @@ enum MasterBridgeCommand {
         match_key: frame::MatchKey,
     },
     AuthorityProgress,
-    LeaveSession,
-    CloseHostedSession,
     AdmitEnter {
         member_id: MemberId,
         epoch: u32,
@@ -549,6 +547,9 @@ pub enum MasterBridgeState {
         identity: SessionIdentity,
         reason: SessionCloseReason,
     },
+    Left {
+        identity: SessionIdentity,
+    },
     Failed {
         identity: SessionIdentity,
         error: TransportFault,
@@ -563,6 +564,7 @@ impl MasterBridgeState {
             | Self::Joining { identity }
             | Self::Joined { identity, .. }
             | Self::Closed { identity, .. }
+            | Self::Left { identity }
             | Self::Failed { identity, .. } => identity,
         }
     }
@@ -602,8 +604,11 @@ impl MasterBridgeState {
         }
     }
 
-    fn is_terminal(&self) -> bool {
-        matches!(self, Self::Failed { .. } | Self::Closed { .. })
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Failed { .. } | Self::Closed { .. } | Self::Left { .. }
+        )
     }
 }
 
@@ -614,7 +619,7 @@ pub struct MasterBridge {
     installed_load: Arc<Mutex<Option<frame::LocalLoadKey>>>,
     mailbox: RelayMailbox,
     bootstrap: Arc<BootstrapLane>,
-    cancel: CancellationToken,
+    close: CancellationToken,
     facts: Arc<Mutex<Vec<MasterLifecycleFact>>>,
     incarnation: u64,
     worker: Option<JoinHandle<()>>,
@@ -631,7 +636,12 @@ impl MasterBridge {
             self.state().identity(),
             TransportFault::new("gameplay", "local", reason),
         );
-        self.cancel.cancel();
+        self.request_close();
+    }
+
+    fn request_close(&self) {
+        self.send(MasterBridgeCommand::Shutdown);
+        self.close.cancel();
     }
 
     pub fn mailbox(&self) -> RelayMailbox {
@@ -685,12 +695,8 @@ impl MasterBridge {
         self.send(MasterBridgeCommand::StartMatch { map, mode });
     }
 
-    pub fn leave_session(&self) {
-        self.send(MasterBridgeCommand::LeaveSession);
-    }
-
-    pub fn close_hosted_session(&self) {
-        self.send(MasterBridgeCommand::CloseHostedSession);
+    pub fn leave(&self) {
+        self.request_close();
     }
 
     pub fn admit_enter(
@@ -721,10 +727,10 @@ impl MasterBridge {
 
 impl Drop for MasterBridge {
     fn drop(&mut self) {
-        self.cancel.cancel();
         if let Ok(mut queue) = self.commands.lock() {
             queue.push(MasterBridgeCommand::Shutdown);
         }
+        self.close.cancel();
         let _ = self.worker.take();
     }
 }
@@ -908,11 +914,7 @@ fn apply_master_menu_action(
         }
         MasterMenuAction::LeaveLobby => {
             if let Some(bridge) = bridge {
-                if matches!(bridge.state(), MasterBridgeState::Hosting { .. }) {
-                    bridge.close_hosted_session();
-                } else {
-                    bridge.leave_session();
-                }
+                bridge.leave();
                 commands.remove_resource::<MasterBridge>();
             }
             commands.remove_resource::<UdpAuthorityHub>();
@@ -1120,6 +1122,7 @@ struct WorkerCtx {
     mailbox: RelayMailbox,
     bootstrap: Arc<BootstrapLane>,
     cancel: CancellationToken,
+    close: CancellationToken,
     facts: Arc<Mutex<Vec<MasterLifecycleFact>>>,
     identity: SessionIdentity,
     role: &'static str,
@@ -1153,6 +1156,7 @@ fn spawn_worker(role: &'static str, kind: SessionKind, player_name: String) -> M
     let bootstrap = BootstrapLane::new();
     let mailbox = RelayMailbox::new(HOST_DATA_CAP);
     let cancel = CancellationToken::new();
+    let close = CancellationToken::new();
     let facts = Arc::new(Mutex::new(Vec::new()));
     let incarnation = BRIDGE_INCARNATION.fetch_add(1, Ordering::Relaxed);
     let ctx = WorkerCtx {
@@ -1163,6 +1167,7 @@ fn spawn_worker(role: &'static str, kind: SessionKind, player_name: String) -> M
         mailbox: mailbox.clone(),
         bootstrap: Arc::clone(&bootstrap),
         cancel: cancel.clone(),
+        close: close.clone(),
         facts: Arc::clone(&facts),
         identity,
         role,
@@ -1184,7 +1189,7 @@ fn spawn_worker(role: &'static str, kind: SessionKind, player_name: String) -> M
         installed_load,
         mailbox,
         bootstrap,
-        cancel,
+        close,
         facts,
         incarnation,
         worker: Some(worker),
@@ -1530,10 +1535,19 @@ async fn session_main(
         mailbox,
         bootstrap,
         cancel,
+        close,
         facts,
         mut identity,
         role,
     } = ctx;
+    let early_close = tokio::spawn({
+        let close = close.clone();
+        let cancel = cancel.clone();
+        async move {
+            close.cancelled().await;
+            cancel.cancel();
+        }
+    });
     let (is_host, target, create, join) = match kind {
         SessionKind::Host(config) => (true, config.target.clone(), Some(config), None),
         SessionKind::Join(config) => (false, config.target.clone(), None, Some(config)),
@@ -1663,6 +1677,10 @@ async fn session_main(
             },
         }
     };
+    early_close.abort();
+    if cancel.is_cancelled() {
+        return Ok(());
+    }
     enqueue_control(&control_tx, ControlFrame::Request(first), role)?;
 
     let mut session = SessionCore::for_connection(identity.room_id.0, identity.attempt_id);
@@ -1745,6 +1763,11 @@ async fn session_main(
             ) {
                 Ok(CommandEffect::Continue) => {}
                 Ok(CommandEffect::BeginClose { request_id }) => {
+                    diag::info!(
+                        Net,
+                        "master {role} closing: {} request={request_id}",
+                        if is_host { "CloseRoom" } else { "LeaveRoom" }
+                    );
                     closing = true;
                     leave_request = Some(request_id);
                     leave_at = Some(tokio::time::Instant::now() + LEAVE_DRAIN);
@@ -1760,12 +1783,20 @@ async fn session_main(
         }
         tokio::select! {
             _ = cancel.cancelled() => break Ok(()),
+            _ = close.cancelled(), if !closing => {}
             _ = async {
                 match leave_at {
                     Some(at) => tokio::time::sleep_until(at).await,
                     None => std::future::pending().await,
                 }
-            } => break Ok(()),
+            } => {
+                diag::warn!(
+                    Net,
+                    "master {role} closed: relay did not confirm within {}ms",
+                    LEAVE_DRAIN.as_millis()
+                );
+                break Ok(());
+            }
             prepared = prepared_rx.recv() => {
                 let Some(event) = prepared else {
                     break Err(TransportFault::new(
@@ -1843,6 +1874,7 @@ async fn session_main(
                             break Err(error);
                         }
                         if close_now {
+                            diag::info!(Net, "master {role} closed: relay confirmed");
                             break Ok(());
                         }
                     }
@@ -1879,6 +1911,9 @@ async fn session_main(
         while children.join_next().await.is_some() {}
     })
     .await;
+    if outcome.is_ok() && closing {
+        publish_left(&state, identity);
+    }
     outcome
 }
 
@@ -1957,6 +1992,14 @@ fn publish_closed(
         .filter(|id| id.attempt_id != 0)
         .unwrap_or(identity);
     *current = MasterBridgeState::Closed { identity, reason };
+}
+
+fn publish_left(state: &Mutex<MasterBridgeState>, identity: SessionIdentity) {
+    let mut current = state.lock().expect("master state poisoned");
+    if current.is_terminal() {
+        return;
+    }
+    *current = MasterBridgeState::Left { identity };
 }
 
 fn publish_room_view(
@@ -2058,14 +2101,7 @@ fn handle_command(
     is_host: bool,
     closing: bool,
 ) -> std::result::Result<CommandEffect, TransportFault> {
-    if closing
-        && !matches!(
-            command,
-            MasterBridgeCommand::LeaveSession
-                | MasterBridgeCommand::CloseHostedSession
-                | MasterBridgeCommand::Shutdown
-        )
-    {
+    if closing {
         return Ok(CommandEffect::Continue);
     }
     match command {
@@ -2273,37 +2309,23 @@ fn handle_command(
                 role,
             )?;
         }
-        MasterBridgeCommand::LeaveSession => {
-            if closing {
-                return Ok(CommandEffect::Continue);
-            }
+        MasterBridgeCommand::Shutdown => {
             let id = take_id(request_id);
+            let body = if is_host {
+                RequestBody::CloseRoom
+            } else {
+                RequestBody::LeaveRoom
+            };
             enqueue_control(
                 control_tx,
                 ControlFrame::Request(ControlRequest {
                     request_id: id,
-                    body: RequestBody::LeaveRoom,
+                    body,
                 }),
                 role,
             )?;
             return Ok(CommandEffect::BeginClose { request_id: id });
         }
-        MasterBridgeCommand::CloseHostedSession => {
-            if closing {
-                return Ok(CommandEffect::Continue);
-            }
-            let id = take_id(request_id);
-            enqueue_control(
-                control_tx,
-                ControlFrame::Request(ControlRequest {
-                    request_id: id,
-                    body: RequestBody::CloseRoom,
-                }),
-                role,
-            )?;
-            return Ok(CommandEffect::BeginClose { request_id: id });
-        }
-        MasterBridgeCommand::Shutdown => return Ok(CommandEffect::Continue),
     }
     Ok(CommandEffect::Continue)
 }

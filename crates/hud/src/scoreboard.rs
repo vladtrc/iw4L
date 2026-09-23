@@ -183,6 +183,7 @@ impl BoardDraw<'_> {
                 loc_key: String::new(),
                 style: 3,
                 fx: None,
+                glow: None,
             },
             provenance: Draw2dProvenance::CgDraw { site: "scoreboard" },
             layer: 2,

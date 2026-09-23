@@ -116,7 +116,16 @@ impl ZoneLane for Iw4Lane {
         sink.map_xmodels.shared_surfaces = shared_surfaces;
         sink.set_capture_zone(crate::ZoneOwner::from_zone_path(path));
         sink.set_capture_ns(crate::AssetNamespace::Iw4);
+        sink.sound = Some(asset_audio::ZoneSoundCapture::for_map(
+            path,
+            asset_audio::ZoneGame::Iw4,
+            "map",
+        ));
         let walked = load_zone(&mut stream, &mut sink);
+        let map_sound = sink
+            .sound
+            .take()
+            .map(|sound| sound.finish(walked.as_ref().map(|_| ()).map_err(|e| e.to_string())));
         match &walked {
             Ok(_) => report.push(format!("zone walk: complete, {} assets", sink.walked)),
             Err(e) => report.push(format!(
@@ -396,6 +405,7 @@ impl ZoneLane for Iw4Lane {
                 arena_bytes as f64 / (1024.0 * 1024.0),
             ));
             return LoadedWorld {
+                sound: map_sound,
                 materials,
                 world: PreparedWorld {
                     fx: std::mem::take(&mut fx),
@@ -745,9 +755,11 @@ impl ZoneLane for Iw4Lane {
                 let world_bounds = draw.stats.bounds;
                 handoff.done();
                 LoadedWorld {
+                    sound: map_sound,
                     materials: map_materials,
                     world: PreparedWorld {
                         draw: Some(draw),
+                        dynamic_light: None,
                         static_model_meshes,
                         static_model_instances,
                         map_xmodel_scene_assets,
@@ -799,6 +811,7 @@ impl ZoneLane for Iw4Lane {
                 let arena_bytes = memory.total_bytes();
                 drop(memory);
                 LoadedWorld {
+                    sound: map_sound,
                     materials: crate::MaterialCatalog::default(),
                     world: PreparedWorld {
                         fx,
@@ -880,7 +893,15 @@ impl ZoneLane for Iw4Lane {
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::intern(&zone_name));
         sink.set_capture_ns(crate::AssetNamespace::Iw4);
+        sink.sound = asset_audio::ZoneSoundCapture::claim_common(
+            path,
+            asset_audio::ZoneGame::Iw4,
+            "common census",
+        );
         let walk = load_zone(&mut stream, &mut sink);
+        if let Some(sound) = sink.sound.take() {
+            sound.deposit(walk.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+        }
         if let Some(stage) = sink.stage.take() {
             stage.finish_from(&walk);
         }
@@ -940,18 +961,12 @@ impl ZoneLane for Iw4Lane {
             crate::ZoneOwner::intern(&zone_name),
         );
         weapons.resolve_sz_xanim_edges(&sink.xanims);
-        let filled = weapons.fill_missing_gun_xmodels(|name| {
-            sink.fpv_meshes.contains(crate::AssetNamespace::Iw4, name)
-        });
         weapons.resolve_fpv_mesh_edges(&sink.fpv_meshes);
-        let world_filled =
-            weapons.fill_missing_world_models(|name| sink.world_weapons.contains(name));
         weapons.resolve_world_model_edges(&sink.world_weapons);
         let gun_named = weapons.gun_xmodel_count();
         report.push(format!(
-        "common_mp weapons: {captured} captures → {} unique catalog ids (sorted; not retail bg_weaponIndex); {gun_named} with gunXModel[0] ({} zone-walk, {filled} filled from IDLE+FPV); {} with szXAnims[IDLE]; {} with any szXAnims slot",
+        "common_mp weapons: {captured} captures → {} unique catalog ids (sorted; not retail bg_weaponIndex); {gun_named} with gunXModel[0]; {} with szXAnims[IDLE]; {} with any szXAnims slot",
         weapons.len(),
-        weapons.gun_xmodel_zone_count(),
         weapons.idle_anim_count(),
         weapons.sz_xanims_count()
     ));
@@ -961,10 +976,8 @@ impl ZoneLane for Iw4Lane {
         sink.fpv_meshes.tag_view_count()
     ));
         report.push(format!(
-            "common_mp weapons worldModel[0]: {} ({} zone-walk, {} filled from gunXModel/IDLE+catalog)",
+            "common_mp weapons worldModel[0]: {}",
             weapons.world_model_count(),
-            weapons.world_model_zone_count(),
-            world_filled
         ));
         report.push(format!(
             "common_mp projectileModel @+0x420: slot={} bound={} unresolved_hint={} (pending unclassified XModels {}, retained {})",
@@ -1295,7 +1308,15 @@ impl ZoneLane for Iw4Lane {
         sink.seed_materials(material_seed);
         sink.set_capture_zone(crate::ZoneOwner::intern(&zone_name));
         sink.set_capture_ns(crate::AssetNamespace::Iw4);
+        sink.sound = asset_audio::ZoneSoundCapture::claim_common(
+            path,
+            asset_audio::ZoneGame::Iw4,
+            "material population",
+        );
         let walk = load_zone(&mut stream, &mut sink);
+        if let Some(sound) = sink.sound.take() {
+            sound.deposit(walk.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+        }
         if let Some(stage) = sink.stage.take() {
             stage.finish_from(&walk);
         }
@@ -1316,8 +1337,10 @@ impl ZoneLane for Iw4Lane {
         ));
         MaterialPopulation {
             walked: sink.walked,
+            light_defs: crate::capture_light_defs(&stream, &sink.materials),
             materials: sink.materials,
             report,
+            cac_tables: sink.stats_tables.into_values().collect(),
         }
     }
 }

@@ -926,6 +926,15 @@ impl MaterialExecution {
         self.shell.passes.len()
     }
 
+    pub fn release_code_rows(&mut self) {
+        for constants in &mut self.code_constants {
+            constants.lanes.clear();
+        }
+        for samplers in &mut self.code_samplers {
+            samplers.lanes.clear();
+        }
+    }
+
     pub fn shell_arc(&self) -> &Arc<StableMaterialShell> {
         &self.shell
     }

@@ -13,16 +13,44 @@ use fastfile_iw5::{
     load_asset_at_observed, load_zone,
 };
 
-struct Iw5SoundSink {
+#[derive(Default)]
+pub struct Iw5SoundCapture {
     catalog: SoundCatalog,
-    walked: usize,
-    stopped_at: Option<(usize, &'static str)>,
     last_loaded_name: Option<String>,
     last_curve_name: Option<String>,
     file_to_loaded: HashMap<(u8, u32), String>,
     file_to_streamed: HashMap<(u8, u32), (String, String)>,
     loaded_by_insert: HashMap<(u8, u32), String>,
     curve_by_ptr: HashMap<(u8, u32), String>,
+}
+
+impl Iw5SoundCapture {
+    pub fn for_zone(path: &Path) -> Self {
+        let mut capture = Self::default();
+        capture
+            .catalog
+            .set_capture_zone(ZoneOwner::from_zone_path(path));
+        capture.catalog.set_capture_game(ZoneGame::Iw5);
+        capture
+    }
+
+    pub(crate) fn catalog_mut(&mut self) -> &mut SoundCatalog {
+        &mut self.catalog
+    }
+
+    pub fn finish(mut self) -> SoundCatalog {
+        self.catalog.resolve_loaded_edges();
+        self.catalog.resolve_curve_knots();
+        self.catalog.resolve_ent_channels();
+        self.catalog.publish();
+        self.catalog
+    }
+}
+
+struct Iw5SoundSink {
+    capture: Iw5SoundCapture,
+    walked: usize,
+    stopped_at: Option<(usize, &'static str)>,
 }
 
 impl AssetSink for Iw5SoundSink {
@@ -36,14 +64,14 @@ impl AssetSink for Iw5SoundSink {
         slot: Ptr,
     ) -> fastfile_iw5::Result<()> {
         self.stopped_at = Some((index, ty.name()));
-        load_asset_at_observed(s, ty, slot, self)?;
+        load_asset_at_observed(s, ty, slot, &mut self.capture)?;
         self.walked += 1;
         self.stopped_at = None;
         Ok(())
     }
 }
 
-impl AssetLinkSink for Iw5SoundSink {
+impl AssetLinkSink for Iw5SoundCapture {
     fn loaded(
         &mut self,
         _s: &ZoneStream<'_>,
@@ -144,7 +172,7 @@ impl AssetLinkSink for Iw5SoundSink {
             channels,
             samples,
             block_size,
-            pcm: pcm_bytes,
+            pcm: pcm_bytes.into(),
             zone: self.catalog.capture_zone_for_ingest(),
             ..Default::default()
         });
@@ -226,7 +254,7 @@ impl AssetLinkSink for Iw5SoundSink {
     }
 }
 
-impl Iw5SoundSink {
+impl Iw5SoundCapture {
     fn capture_alias_row(&self, s: &ZoneStream<'_>, row: Ptr) -> CapturedAlias {
         let alias_name =
             name_at(s, row, s.layout(sz::SND_ALIAS_ALIAS_NAME_OFF, 0)).unwrap_or_default();
@@ -588,19 +616,10 @@ pub fn load_sound_catalog_iw5(path: &Path) -> Result<SoundCatalog, String> {
     let mut memory = Iw5ZoneMemory::for_header(&header);
     let mut stream = memory.stream(&image.bytes).map_err(|e| e.to_string())?;
     let mut sink = Iw5SoundSink {
-        catalog: SoundCatalog::default(),
+        capture: Iw5SoundCapture::for_zone(path),
         walked: 0,
         stopped_at: None,
-        last_loaded_name: None,
-        last_curve_name: None,
-        file_to_loaded: HashMap::new(),
-        file_to_streamed: HashMap::new(),
-        loaded_by_insert: HashMap::new(),
-        curve_by_ptr: HashMap::new(),
     };
-    sink.catalog
-        .set_capture_zone(ZoneOwner::from_zone_path(path));
-    sink.catalog.set_capture_game(ZoneGame::Iw5);
     if let Err(e) = load_zone(&mut stream, &mut sink) {
         if let Some((idx, name)) = sink.stopped_at {
             diag::info!(
@@ -610,9 +629,5 @@ pub fn load_sound_catalog_iw5(path: &Path) -> Result<SoundCatalog, String> {
             );
         }
     }
-    sink.catalog.resolve_loaded_edges();
-    sink.catalog.resolve_curve_knots();
-    sink.catalog.resolve_ent_channels();
-    sink.catalog.publish();
-    Ok(sink.catalog)
+    Ok(sink.capture.finish())
 }

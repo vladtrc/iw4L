@@ -4,7 +4,7 @@ use crate::gpu_list::{HudTessPass, TessJob};
 use crate::images::HudImages;
 use assets::{MenuCatalog, PreparedWeapons};
 use bevy::prelude::*;
-use net::{LocalPresentClient, PresentedSnapshot};
+use net::{CgFrameClock, LocalPresentClient, PresentedSnapshot};
 use std::collections::HashMap;
 
 #[derive(Component)]
@@ -26,6 +26,7 @@ pub(crate) fn update(
     strings: Option<Res<assets::PreparedLocalizedStrings>>,
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
+    cg_clock: Res<CgFrameClock>,
     input: Res<frame::HudInputView>,
     mut pass: ResMut<HudTessPass>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
@@ -47,12 +48,17 @@ pub(crate) fn update(
         return;
     };
     if let Some(catalog) = catalog.as_deref() {
+        let previous = presented
+            .interpolation_pair()
+            .map(|(before, _, phase)| (before, phase));
         let quads = crate::objectives::draw(
             &surface,
             catalog,
             strings.as_ref().map(|s| &s.0),
             snapshot,
+            previous,
             local.0,
+            cg_clock.time(),
             cameras.iter().find(|(c, _)| c.is_active),
         );
         if !quads.is_empty() {
@@ -281,6 +287,7 @@ pub(crate) fn update(
             loc_key: key.clone(),
             style: item.text_style,
             fx: None,
+            glow: None,
         },
         provenance: Draw2dProvenance::CgDraw { site: "use_hint" },
         layer: 1,

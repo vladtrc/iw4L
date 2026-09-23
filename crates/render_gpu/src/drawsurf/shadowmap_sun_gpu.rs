@@ -24,53 +24,11 @@ struct ShadowmapSunGpuTarget {
 #[derive(Resource, Default)]
 pub(super) struct ShadowmapSunGpu {
     target: Option<ShadowmapSunGpuTarget>,
-
-    smodel_generation: [Option<u64>; 2],
-    smodel_spans: [Vec<Option<SmodelShadowSpan>>; 2],
-    smodel_index_epochs: [Vec<Buffer>; 2],
-    smodel_index_epoch_bytes: [Vec<u64>; 2],
-    xmodel_index_epochs: [Vec<Buffer>; 2],
-    xmodel_index_epoch_bytes: [Vec<u64>; 2],
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct SmodelShadowSpan {
-    pub draw_start: u32,
-    pub draw_count: u32,
-    pub ring_epoch: u32,
-    pub entry_start: u32,
-    pub entry_count: u32,
 }
 
 impl ShadowmapSunGpu {
     pub(super) fn depth_view(&self) -> Option<&TextureView> {
         self.target.as_ref().map(|target| &target.depth_view)
-    }
-
-    pub(super) fn smodel_generation(&self, partition: usize) -> Option<u64> {
-        self.smodel_generation[partition.min(1)]
-    }
-
-    pub(super) fn smodel_spans(&self, partition: usize) -> &[Option<SmodelShadowSpan>] {
-        &self.smodel_spans[partition.min(1)]
-    }
-
-    pub(super) fn stage_smodel_spans(
-        &mut self,
-        partition: usize,
-        spans: Vec<Option<SmodelShadowSpan>>,
-    ) {
-        let i = partition.min(1);
-        self.smodel_generation[i] = None;
-        self.smodel_spans[i] = spans;
-    }
-
-    pub(super) fn commit_smodel_partition(&mut self, generation: u64, partition: usize) {
-        self.smodel_generation[partition.min(1)] = Some(generation);
-    }
-
-    pub(super) fn invalidate_smodel_partition(&mut self, partition: usize) {
-        self.smodel_generation[partition.min(1)] = None;
     }
 }
 
@@ -138,15 +96,6 @@ pub(super) fn ensure_shadowmap_sun_target(
     (Some(color_view), true)
 }
 
-pub(super) fn smodel_shadow_geometry_reusable(
-    retained_generation: Option<u64>,
-    generation: u64,
-    retained_span_n: usize,
-    smodel_entry_n: usize,
-) -> bool {
-    retained_generation == Some(generation) && retained_span_n == smodel_entry_n
-}
-
 pub(super) fn upload_shadow_index_epochs(
     buffers: &mut Vec<Buffer>,
     capacities: &mut Vec<u64>,
@@ -182,49 +131,6 @@ pub(super) fn upload_shadow_index_epochs(
         uploaded.push(buf.clone());
     }
     uploaded
-}
-
-pub(super) fn upload_smodel_index_epochs(
-    gpu: &mut ShadowmapSunGpu,
-    partition: usize,
-    device: &RenderDevice,
-    queue: &RenderQueue,
-    epochs: &[Vec<u32>],
-) -> Vec<Buffer> {
-    let i = partition.min(1);
-    upload_shadow_index_epochs(
-        &mut gpu.smodel_index_epochs[i],
-        &mut gpu.smodel_index_epoch_bytes[i],
-        device,
-        queue,
-        epochs,
-        "iw4_shadowmap_sun_smodel_index_epoch",
-    )
-}
-
-pub(super) fn upload_xmodel_index_epochs(
-    gpu: &mut ShadowmapSunGpu,
-    partition: usize,
-    device: &RenderDevice,
-    queue: &RenderQueue,
-    epochs: &[Vec<u32>],
-) -> Vec<Buffer> {
-    let i = partition.min(1);
-    upload_shadow_index_epochs(
-        &mut gpu.xmodel_index_epochs[i],
-        &mut gpu.xmodel_index_epoch_bytes[i],
-        device,
-        queue,
-        epochs,
-        "iw4_shadowmap_sun_xmodel_index_epoch",
-    )
-}
-
-pub(super) fn bind_resident_smodel_index_epochs(
-    gpu: &ShadowmapSunGpu,
-    partition: usize,
-) -> Vec<Buffer> {
-    gpu.smodel_index_epochs[partition.min(1)].clone()
 }
 
 pub fn scissor_xywh(scissor: D3dScissorRect) -> (u32, u32, u32, u32) {

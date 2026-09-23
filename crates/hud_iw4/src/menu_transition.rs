@@ -70,6 +70,43 @@ pub struct MenuLerpFromScript {
     pub leftover: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MenuAnim {
+    pub scale: f32,
+
+    pub alpha: f32,
+
+    pub offset: [f32; 2],
+}
+
+impl MenuAnim {
+    pub const IDENTITY: Self = Self {
+        scale: 1.0,
+        alpha: 1.0,
+        offset: [0.0, 0.0],
+    };
+}
+
+impl Default for MenuAnim {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl MenuLerpFromScript {
+    #[must_use]
+    pub fn anim(&self, now_ms: i32) -> MenuAnim {
+        MenuAnim {
+            scale: self.scale.current_or(now_ms, MenuAnim::IDENTITY.scale),
+            alpha: self.alpha.current_or(now_ms, MenuAnim::IDENTITY.alpha),
+            offset: [
+                self.x.current_or(now_ms, 0.0),
+                self.y.current_or(now_ms, 0.0),
+            ],
+        }
+    }
+}
+
 #[must_use]
 pub fn item_run_script_lerp(scripts: &[String], start_ms: i32) -> MenuLerpFromScript {
     let mut out = MenuLerpFromScript::default();

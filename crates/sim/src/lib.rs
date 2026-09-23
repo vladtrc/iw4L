@@ -4,6 +4,7 @@ pub mod barrel_policy;
 pub mod bullet;
 pub mod bullet_collision;
 mod carrier;
+pub mod collision_census;
 pub mod combat;
 pub mod content;
 mod corpse;
@@ -62,8 +63,11 @@ pub use carrier::{SimWorld, StepReason, step};
 pub use clipmap_iw4::{
     ClipCmodel, ClipLeaf, ClipNode, ClipStaticModel, XModelColl, XModelCollSurf, XModelCollTri,
 };
+pub use collision_census::{
+    CollisionCensus, EntityClipCensus, ModelCollisionCensus, PlayerClipCensus, WorldClipCensus,
+};
 pub use combat::{
-    AcceptedShot, Emission, PlayerCollisionRepresentation, ShotCollisionGeometry,
+    AcceptedShot, Emission, EntityClipKind, PlayerCollisionRepresentation, ShotCollisionGeometry,
     ShotCollisionVerdict, TracePhaseOutput, spread_direction_on_plane, spread_pellet_direction,
 };
 pub use content::{
@@ -104,18 +108,19 @@ pub use identities::{
     ActionSequence, DamageSource, EventSequence, LifeSequence, MatchPhase, MatchRng, PelletId,
     ProjectileId, RNG_DOMAIN_SCHEME, RngDomain, ScriptModelId, ShotId,
 };
-pub use input::{ActionRequestId, ClassId, ClientAction, TickInput, action_request_id};
+pub use input::{ActionRequestId, ClassId, ClientAction, SpawnPick, TickInput, action_request_id};
 pub use mantle_xanim::MantleXAnimBind;
 pub use match_state::{
     CLASS_CATALOG_BLING, CLASS_CATALOG_COLD_BLOODED, CLASS_CATALOG_DANGER_CLOSE,
     CLASS_CATALOG_LIGHTWEIGHT, CLASS_CATALOG_MARATHON, CLASS_CATALOG_NINJA,
     CLASS_CATALOG_SCAVENGER, CLASS_CATALOG_SCRAMBLER, CLASS_CATALOG_SLEIGHT_OF_HAND,
     CLASS_CATALOG_STEADY_AIM, CLASS_CATALOG_STOPPING_POWER, ClassDef, ClassRejectReason,
-    ClientLifecycle, ClientSnapshotMeta, DroppedItemAmmo, EntityEventPayload, EntityEventRecord,
-    EventAudience, EventRecord, GiveRejectReason, HealthRegenCensus, ItemPickupRecord, KillcamHud,
-    LoadoutSpec, MatchEndReason, PelletFxRecord, RngDebugMeta, SIM_EVENT_ROSTER, SimEvent,
-    SimEventRow, SnapshotMeta, UNRELIABLE_SIM_EVENT_COUNT, class_catalog_has,
-    class_catalog_radar_jam_e_flags, perk_bits_from_class_catalog, sim_event_is_reliable,
+    ClientLifecycle, ClientSnapshotMeta, ConfigurationChangeRejectReason, DroppedItemAmmo,
+    EntityEventPayload, EntityEventRecord, EventAudience, EventRecord, GiveRejectReason,
+    HealthRegenCensus, ItemPickupRecord, KillcamHud, LoadoutSpec, MatchEndReason, PelletFxRecord,
+    RngDebugMeta, SIM_EVENT_ROSTER, SimEvent, SimEventRow, SnapshotMeta,
+    UNRELIABLE_SIM_EVENT_COUNT, class_catalog_has, class_catalog_radar_jam_e_flags,
+    perk_bits_from_class_catalog, sim_event_is_reliable,
 };
 pub use player_anim_script::{
     AnimConditions, AnimScriptCommand, AnimScriptCondition, AnimScriptItem, PlayerAnimScript,
@@ -186,6 +191,6 @@ pub use map_lights::RadiationLights;
 pub use map_moving_diggers::RadiationMovingDigger;
 
 mod objectives;
-pub use objectives::{BombSite, ObjectiveHull, ObjectiveMatch, ObjectiveView};
+pub use objectives::{BombSite, ObjectiveFlash, ObjectiveHull, ObjectiveMatch, ObjectiveView};
 
 pub use world::{SimContent, SimContentBuilder};

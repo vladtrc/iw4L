@@ -61,6 +61,7 @@ pub(crate) fn validated_facts(
         reload_start_add_time_ms: f.reload_start_add_time_ms,
         reload_start_add: f.reload_start_add,
         no_partial_reload: f.no_partial_reload,
+        dual_mag: f.dual_mag,
         inherits_perks: f.inherits_perks,
         sprint_raise_time_ms: f.sprint_raise_time_ms,
         sprint_drop_time_ms: f.sprint_drop_time_ms,

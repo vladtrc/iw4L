@@ -29,7 +29,9 @@ const ENVELOPES: &[&str] = &[
     "Predict",
     "Effects",
     "Diag",
-    "extract_wait",
+    "receive_render_world",
+    "extract_body",
+    "dispatch_render_world",
     "render_thread",
     "render_render",
     "post_execute",
@@ -38,6 +40,8 @@ const ENVELOPES: &[&str] = &[
     "skin_model",
     "fx_update",
     "fx_present",
+    "static_sun_fx",
+    "static_sun",
     "cull",
 ];
 

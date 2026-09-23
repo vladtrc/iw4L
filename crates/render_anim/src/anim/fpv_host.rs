@@ -8,8 +8,8 @@ use crate::anim::fpv::{
     EquippedFpv, FpvAuthoritySample, FpvPresentState, tick_equipped_fpv_with_predicted_fire,
 };
 use crate::anim::fpv_pose::{FpvBoltFrame, PosedClip};
-use crate::anim::fpv_rig::{FpvHandPose, FpvRigInputs, FpvRigKey, PreparedFpvRig};
-use assets::FpvMeshCatalog;
+use crate::anim::fpv_rig::{FpvHandPose, FpvRigInputs, PreparedFpvRig};
+use assets::{FpvClipTracks, FpvMeshCatalog, FpvMeshIndex, FpvSideAssemblies};
 
 #[derive(Resource, Default)]
 pub struct FpvPresentCursor(pub FpvPresentState);
@@ -19,10 +19,9 @@ pub struct PendingFpvSpawn(pub Option<PendingFpvSpawnRequest>);
 
 #[derive(Clone, Debug)]
 pub struct PendingFpvSpawnRequest {
-    pub gun_xmodel: String,
+    pub gun_index: FpvMeshIndex,
+    pub catalog_id: u64,
     pub weapon_id: u32,
-    pub idle_anim: Option<String>,
-    pub from_gun_xmodel: bool,
 }
 
 #[derive(Resource, Default)]
@@ -64,7 +63,14 @@ impl FpvBoltTargets {
 pub enum FpvPoseRefuse {
     CatalogMissing,
     NoActiveClips,
-    EyePoseFailed { gun_xmodel: String },
+    EyePoseFailed {
+        gun_xmodel: String,
+    },
+    DependencyUnresolved {
+        weapon_id: u32,
+        role: &'static str,
+        name: String,
+    },
 }
 
 pub enum FpvPoseKind {
@@ -98,14 +104,15 @@ pub struct FpvPoseProduct {
 pub struct FpvGenerateArgs<'a> {
     pub dt: f32,
     pub equipped: &'a mut EquippedFpv,
-    pub rig: &'a mut Option<PreparedFpvRig>,
+    pub rigs: &'a mut Vec<PreparedFpvRig>,
+    pub active: &'a mut Option<usize>,
     pub cursor: &'a mut FpvPresentState,
     pub catalog: &'a FpvMeshCatalog,
     pub materials: &'a [SmodelPassMaterial],
     pub material_by_authored: &'a HashMap<usize, u32>,
-    pub hide_tags: &'a [String],
-    pub scope_name: Option<&'a str>,
-    pub rocket_name: Option<&'a str>,
+    pub assemblies: &'a FpvSideAssemblies,
+    pub clip_tracks: &'a FpvClipTracks,
+    pub rocket: bool,
     pub sample: Option<FpvAuthoritySample>,
     pub predicted_fire: bool,
     pub dual: bool,
@@ -116,14 +123,15 @@ pub fn generate_fpv_pose(args: FpvGenerateArgs<'_>) -> FpvPoseKind {
     let FpvGenerateArgs {
         dt,
         equipped,
-        rig,
+        rigs,
+        active,
         cursor,
         catalog,
         materials,
         material_by_authored,
-        hide_tags,
-        scope_name,
-        rocket_name,
+        assemblies,
+        clip_tracks,
+        rocket,
         sample,
         predicted_fire,
         dual,
@@ -159,61 +167,60 @@ pub fn generate_fpv_pose(args: FpvGenerateArgs<'_>) -> FpvPoseKind {
     };
     let dual_drawn = !left.is_empty();
 
-    let composed = rig.as_ref().is_some_and(|rig| {
-        rig.matches(
-            equipped.namespace,
-            &equipped.gun_xmodel,
-            &equipped.hands,
-            scope_name,
-            rocket_name,
-            hide_tags,
-            dual_drawn,
-        )
-    });
-    if !composed {
-        let key = FpvRigKey {
-            namespace: equipped.namespace,
-            gun: equipped.gun_xmodel.clone(),
-            hands: equipped.hands.clone(),
-            scope: scope_name.map(str::to_owned),
-            rocket: rocket_name.map(str::to_owned),
-            hide_tags: hide_tags.to_vec(),
-            dual: dual_drawn,
-        };
+    let rocket = rocket && assemblies.rocket.is_some();
+    let assembly = assemblies.pick(rocket);
+    let left_orders: &[Option<usize>] = match (dual_drawn, equipped.left.as_ref()) {
+        (true, Some(left)) => left.weapon().clip_orders(),
+        _ => &[],
+    };
+    let orders = [
+        equipped.controller.weapon().clip_orders().as_slice(),
+        left_orders,
+    ];
+    *active = rigs
+        .iter()
+        .position(|rig| rig.matches(assembly, dual_drawn, orders));
+    if active.is_none() {
+        let rig_started = std::time::Instant::now();
         match PreparedFpvRig::build(
-            key,
+            std::sync::Arc::clone(assembly),
+            dual_drawn,
             FpvRigInputs {
                 catalog,
                 materials,
                 material_by_authored,
+                clip_tracks,
+                clip_orders: orders,
             },
         ) {
             Ok(prepared) => {
                 diag::info!(
                     Fpv,
-                    "fpv: prepared rig `{}` — {} draws, {} vertices, {} surfaces skipped{}",
+                    "fpv: laid out `{}` in {:.2}ms — {} draws, {} vertices, {} surfaces skipped{}{}",
                     equipped.gun_xmodel,
+                    rig_started.elapsed().as_secs_f64() * 1000.0,
                     prepared.geometry.plan_draw_n,
                     prepared.geometry.dest_n,
                     prepared.geometry.plan_skip_n,
-                    if dual_drawn { ", dual" } else { "" }
+                    if dual_drawn { ", dual" } else { "" },
+                    if rocket { ", rocket" } else { "" }
                 );
-                *rig = Some(prepared);
+                rigs.push(prepared);
+                *active = Some(rigs.len() - 1);
             }
             Err(error) => {
                 diag::info!(
                     Fpv,
-                    "fpv: cannot prepare `{}` — {error}",
+                    "fpv: cannot lay out `{}` — {error}",
                     equipped.gun_xmodel
                 );
-                *rig = None;
                 return FpvPoseKind::Refuse(FpvPoseRefuse::EyePoseFailed {
                     gun_xmodel: equipped.gun_xmodel.clone(),
                 });
             }
         }
     }
-    let Some(prepared) = rig.as_mut() else {
+    let Some(prepared) = active.and_then(|index| rigs.get_mut(index)) else {
         return FpvPoseKind::Refuse(FpvPoseRefuse::EyePoseFailed {
             gun_xmodel: equipped.gun_xmodel.clone(),
         });

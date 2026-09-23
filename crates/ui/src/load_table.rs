@@ -11,6 +11,7 @@ use bevy::prelude::Color;
 pub(crate) enum RowState {
     Running,
     Done,
+    Reused,
     Skipped,
     Cancelled,
     Abandoned,
@@ -21,6 +22,7 @@ impl RowState {
     fn suffix(self) -> &'static str {
         match self {
             Self::Running | Self::Done => "",
+            Self::Reused => " (reused)",
             Self::Skipped => " (skipped)",
             Self::Cancelled => " (canceled)",
             Self::Abandoned => " (interrupted)",
@@ -32,7 +34,7 @@ impl RowState {
         match self {
             Self::Running => RUNNING,
             Self::Done => DONE,
-            Self::Skipped => SKIPPED,
+            Self::Reused | Self::Skipped => SKIPPED,
             Self::Cancelled | Self::Abandoned => CANCELLED,
             Self::Failed => FAILED,
         }
@@ -45,12 +47,25 @@ const SKIPPED: Color = Color::srgb(0.52, 0.56, 0.62);
 const CANCELLED: Color = Color::srgb(0.86, 0.72, 0.42);
 const FAILED: Color = Color::srgb(1.0, 0.35, 0.25);
 
+pub(crate) struct Metric {
+    pub number: String,
+    pub unit: String,
+}
+
+impl Metric {
+    fn new(number: impl Into<String>, unit: impl Into<String>) -> Self {
+        Self {
+            number: number.into(),
+            unit: unit.into(),
+        }
+    }
+}
+
 pub(crate) struct LoadRow {
     pub id: StageId,
     pub name: String,
     /// Bytes where the stage can weigh itself, its own units where it cannot.
-    pub value: String,
-    pub time: String,
+    pub value: Metric,
     pub state: RowState,
 }
 
@@ -59,6 +74,15 @@ pub(crate) struct LoadRow {
 pub(crate) struct LoadTable {
     pub running: Vec<LoadRow>,
     pub ended: Vec<LoadRow>,
+}
+
+impl LoadTable {
+    pub fn row(&self, id: StageId) -> Option<&LoadRow> {
+        self.running
+            .iter()
+            .chain(self.ended.iter())
+            .find(|row| row.id == id)
+    }
 }
 
 /// The name a person reads. The only place that turns a [`StageId`] into
@@ -87,21 +111,24 @@ fn stage_name(id: StageId) -> &'static str {
 /// What a stage counts, where the number alone would not say.
 fn count_unit(id: StageId) -> &'static str {
     match id {
-        StageId::Navigation => " edges",
-        StageId::RenderFrames => " frames",
+        StageId::Navigation => "edges",
+        StageId::RenderFrames => "frames",
+        StageId::Images | StageId::WorldImages | StageId::GpuTextures => "images",
+        StageId::Pipelines => "pipelines",
+        StageId::Shaders | StageId::Programs | StageId::ProgramMerge => "programs",
         _ => "",
     }
 }
 
-pub(crate) fn format_elapsed(value: std::time::Duration) -> String {
+pub(crate) fn format_elapsed(value: std::time::Duration) -> Metric {
     if value < std::time::Duration::from_secs(1) {
-        format!("{} ms", value.as_millis())
+        Metric::new(value.as_millis().to_string(), "ms")
     } else {
-        format!("{:.1} s", value.as_secs_f64())
+        Metric::new(format!("{:.1}", value.as_secs_f64()), "s")
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
+fn format_bytes(bytes: u64) -> Metric {
     const STEP: f64 = 1024.0;
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
@@ -111,17 +138,17 @@ fn format_bytes(bytes: u64) -> String {
         unit += 1;
     }
     if unit == 0 {
-        format!("{bytes} B")
+        Metric::new(bytes.to_string(), "B")
     } else if value < 10.0 {
-        format!("{value:.1} {}", UNITS[unit])
+        Metric::new(format!("{value:.1}"), UNITS[unit])
     } else {
-        format!("{value:.0} {}", UNITS[unit])
+        Metric::new(format!("{value:.0}"), UNITS[unit])
     }
 }
 
 fn format_count(count: u64) -> String {
     const STEP: f64 = 1000.0;
-    const UNITS: [&str; 4] = ["", " k", " M", " G"];
+    const UNITS: [&str; 4] = ["", "k", "M", "G"];
     let mut value = count as f64;
     let mut unit = 0;
     while value >= STEP && unit + 1 < UNITS.len() {
@@ -137,9 +164,7 @@ fn format_count(count: u64) -> String {
     }
 }
 
-/// Bytes where the stage weighs itself, its own units otherwise. A stage with
-/// neither has nothing to say here and [`project`] leaves it out.
-fn fold_value(id: StageId, slots: &[&StageSnapshot]) -> Option<String> {
+fn fold_value(id: StageId, slots: &[&StageSnapshot]) -> Option<Metric> {
     let weighed: Vec<u64> = slots.iter().filter_map(|slot| slot.bytes).collect();
     if !weighed.is_empty() {
         return Some(format_bytes(weighed.iter().sum()));
@@ -151,7 +176,7 @@ fn fold_value(id: StageId, slots: &[&StageSnapshot]) -> Option<String> {
         return None;
     }
     let completed: u64 = counted.iter().map(|count| count.completed).sum();
-    Some(format!("{}{}", format_count(completed), count_unit(id)))
+    Some(Metric::new(format_count(completed), count_unit(id)))
 }
 
 fn fold_state(slots: &[&StageSnapshot]) -> RowState {
@@ -170,6 +195,11 @@ fn fold_state(slots: &[&StageSnapshot]) -> RowState {
         .all(|outcome| *outcome == StageOutcome::Skipped)
     {
         RowState::Skipped
+    } else if outcomes
+        .iter()
+        .all(|outcome| matches!(outcome, StageOutcome::Reused | StageOutcome::Skipped))
+    {
+        RowState::Reused
     } else {
         RowState::Done
     }
@@ -178,7 +208,16 @@ fn fold_state(slots: &[&StageSnapshot]) -> RowState {
 /// From the first start to the last end. Parallel stages overlap, so this is
 /// never the sum of their spans.
 fn fold_elapsed(slots: &[&StageSnapshot], now: std::time::Instant) -> Option<std::time::Duration> {
-    let started = slots.iter().filter_map(|slot| slot.started_at).min()?;
+    let started = slots
+        .iter()
+        .filter_map(|slot| slot.started_at)
+        .min()
+        .or_else(|| {
+            slots
+                .iter()
+                .filter_map(|slot| slot.end.map(|end| end.at))
+                .min()
+        })?;
     let running = slots.iter().any(|slot| slot.running());
     let ended = slots
         .iter()
@@ -209,18 +248,21 @@ pub(crate) fn project(snapshot: &LoadSnapshot) -> LoadTable {
             .iter()
             .filter(|slot| slot.key.id == id)
             .collect();
-        let Some(value) = fold_value(id, &slots) else {
-            continue;
-        };
         let Some(elapsed) = fold_elapsed(&slots, snapshot.now) else {
             continue;
         };
         let state = fold_state(&slots);
+        let mut value = fold_value(id, &slots).unwrap_or_else(|| Metric::new("", ""));
+        let time = format_elapsed(elapsed);
+        if !value.unit.is_empty() {
+            value.unit.push_str(" · ");
+        }
+        value.unit.push_str(&time.number);
+        value.unit.push_str(&time.unit);
         let row = LoadRow {
             id,
             name: format!("{}{}", stage_name(id), state.suffix()),
             value,
-            time: format_elapsed(elapsed),
             state,
         };
         if matches!(state, RowState::Running) {
@@ -244,15 +286,6 @@ pub(crate) fn project(snapshot: &LoadSnapshot) -> LoadTable {
     LoadTable {
         running: running.into_iter().map(|(_, row)| row).collect(),
         ended: ended.into_iter().map(|(_, row)| row).collect(),
-    }
-}
-
-pub(crate) fn activity_line(snapshot: &LoadSnapshot) -> String {
-    let active = snapshot.stages.iter().filter(|slot| slot.running()).count();
-    match active {
-        0 => "Loading".to_owned(),
-        1 => "Loading · 1 active stage".to_owned(),
-        n => format!("Loading · {n} active stages"),
     }
 }
 

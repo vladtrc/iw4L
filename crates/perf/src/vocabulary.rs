@@ -58,9 +58,16 @@ impl Span {
             Self::HostPostExecuteMs => "span.post_execute",
             Self::HostPostRebuildMs => "span.post_rebuild",
             Self::HostSkinModelMs => "span.skin_model",
+            Self::HostStaticSunFxMs => "span.static_sun_fx",
+            Self::HostStaticSunMs => "span.static_sun",
+            Self::RenderColourPrepareMs => "span.colour_prepare",
             Self::RenderColourSubmitMs => "span.colour_submit",
             Self::RenderCullCpuMs => "span.cull",
-            Self::RenderRenderExtractWaitMs => "span.extract_wait",
+            Self::RenderPrepareCameraMs => "span.prepare_camera",
+            Self::RenderPrepareShadowMs => "span.prepare_shadow",
+            Self::RenderReceiveWorldMs => "span.receive_render_world",
+            Self::RenderExtractBodyMs => "span.extract_body",
+            Self::RenderDispatchWorldMs => "span.dispatch_render_world",
             Self::RenderRenderRenderMs => "span.render_render",
             Self::RenderRenderThreadMs => "span.render_thread",
             Self::TocInput => "span.Input",
@@ -104,9 +111,16 @@ impl Span {
             Self::HostPostExecuteMs => begin!("iw4l.render", "post_execute"),
             Self::HostPostRebuildMs => begin!("iw4l.render", "post_rebuild"),
             Self::HostSkinModelMs => begin!("iw4l.render", "skin_model"),
+            Self::HostStaticSunFxMs => begin!("iw4l.render", "static_sun_fx"),
+            Self::HostStaticSunMs => begin!("iw4l.render", "static_sun"),
+            Self::RenderColourPrepareMs => begin!("iw4l.render", "colour_prepare"),
             Self::RenderColourSubmitMs => begin!("iw4l.render", "colour_submit"),
             Self::RenderCullCpuMs => begin!("iw4l.render", "cull"),
-            Self::RenderRenderExtractWaitMs => begin!("iw4l.render", "extract_wait"),
+            Self::RenderPrepareCameraMs => begin!("iw4l.render", "prepare_camera"),
+            Self::RenderPrepareShadowMs => begin!("iw4l.render", "prepare_shadow"),
+            Self::RenderReceiveWorldMs => begin!("iw4l.render", "receive_render_world"),
+            Self::RenderExtractBodyMs => begin!("iw4l.render", "extract_body"),
+            Self::RenderDispatchWorldMs => begin!("iw4l.render", "dispatch_render_world"),
             Self::RenderRenderRenderMs => begin!("iw4l.render", "render_render"),
             Self::RenderRenderThreadMs => begin!("iw4l.render", "render_thread"),
             Self::TocInput => begin!("iw4l.sim", "Input"),
@@ -154,9 +168,16 @@ impl Span {
             Self::HostPostExecuteMs
             | Self::HostPostRebuildMs
             | Self::HostSkinModelMs
+            | Self::HostStaticSunFxMs
+            | Self::HostStaticSunMs
+            | Self::RenderColourPrepareMs
             | Self::RenderColourSubmitMs
             | Self::RenderCullCpuMs
-            | Self::RenderRenderExtractWaitMs
+            | Self::RenderPrepareCameraMs
+            | Self::RenderPrepareShadowMs
+            | Self::RenderReceiveWorldMs
+            | Self::RenderExtractBodyMs
+            | Self::RenderDispatchWorldMs
             | Self::RenderRenderRenderMs
             | Self::RenderRenderThreadMs => end!("iw4l.render"),
         }

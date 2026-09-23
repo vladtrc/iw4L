@@ -233,6 +233,10 @@ pub enum GapCause {
         miss: ImageMiss,
     },
 
+    BloodOverlayMaterialUnsupported {
+        detail: String,
+    },
+
     FlashWhiteoutImageMissing {
         name: String,
         miss: ImageMiss,
@@ -264,6 +268,17 @@ pub enum GapCause {
         menu: String,
         item: usize,
         err: String,
+    },
+
+    MenuExpression {
+        menu: String,
+        item: usize,
+        err: String,
+    },
+
+    MenuScriptUnsupported {
+        menu: String,
+        command: String,
     },
 
     NoFontCatalog,
@@ -433,7 +448,8 @@ impl ledger::GapCause for GapCause {
                 HudGap::WeaponDisplayName
             }
             GapCause::NoStringTable | GapCause::LocalizedRowMissing { .. } => HudGap::LocalizedText,
-            GapCause::BloodOverlayImageMissing { .. } => HudGap::BloodOverlay,
+            GapCause::BloodOverlayImageMissing { .. }
+            | GapCause::BloodOverlayMaterialUnsupported { .. } => HudGap::BloodOverlay,
             GapCause::FlashWhiteoutImageMissing { .. } => HudGap::FlashWhiteout,
             GapCause::HitmarkerImageMissing { .. } | GapCause::HudElemMaterialUnbound { .. } => {
                 HudGap::Hitmarker
@@ -441,7 +457,10 @@ impl ledger::GapCause for GapCause {
             GapCause::AdsOverlayNamesNoImage { .. }
             | GapCause::AdsOverlayImageMissing { .. }
             | GapCause::AdsOverlayNoSize => HudGap::AdsOverlay,
-            GapCause::ScorebarNoCatalog | GapCause::VisExpUneval { .. } => HudGap::MenuVisExp,
+            GapCause::ScorebarNoCatalog
+            | GapCause::VisExpUneval { .. }
+            | GapCause::MenuExpression { .. }
+            | GapCause::MenuScriptUnsupported { .. } => HudGap::MenuVisExp,
             GapCause::NoFontCatalog
             | GapCause::FontMissing { .. }
             | GapCause::FontAtlasMissing { .. } => HudGap::RetailFont,
@@ -538,6 +557,7 @@ impl fmt::Display for GapCause {
             GapCause::BloodOverlayImageMissing { name, miss } => {
                 write!(f, "overlay image `{name}` is {miss}")
             }
+            GapCause::BloodOverlayMaterialUnsupported { detail } => f.write_str(detail),
             GapCause::FlashWhiteoutImageMissing { name, miss } => {
                 write!(f, "flash white image `{name}` is {miss}")
             }
@@ -563,6 +583,12 @@ impl fmt::Display for GapCause {
             }
             GapCause::VisExpUneval { menu, item, err } => {
                 write!(f, "{menu}[{item}] visExp: {err}")
+            }
+            GapCause::MenuExpression { menu, item, err } => {
+                write!(f, "{menu}[{item}] expression: {err}")
+            }
+            GapCause::MenuScriptUnsupported { menu, command } => {
+                write!(f, "{menu}: menu script `{command}` is not executed")
             }
             GapCause::NoFontCatalog => {
                 f.write_str("MenuCatalog is not loaded; Font_s cannot be walked")

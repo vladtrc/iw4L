@@ -123,6 +123,44 @@ pub(crate) fn collect(
     let _ = FACTS.set(facts);
 }
 
+pub(crate) fn announce(
+    mut done: Local<bool>,
+    adapter: Option<Res<RenderAdapterInfo>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    cameras: Query<&Camera>,
+) {
+    if *done {
+        return;
+    }
+    let Some(target) = cameras
+        .iter()
+        .filter_map(|camera| camera.physical_target_size())
+        .max_by_key(|size| u64::from(size.x) * u64::from(size.y))
+    else {
+        return;
+    };
+    *done = true;
+    let window = windows.single().ok();
+    diag::announce_stdout(&format!(
+        "runtime: backend={} adapter={:?} window={} target={}x{} present={}",
+        adapter
+            .as_ref()
+            .map_or_else(|| "unknown".to_owned(), |a| format!("{:?}", a.0.backend)),
+        adapter.as_ref().map_or("unknown", |a| a.0.name.as_str()),
+        window.map_or_else(
+            || "unknown".to_owned(),
+            |w| format!(
+                "{}x{}",
+                w.resolution.physical_width(),
+                w.resolution.physical_height()
+            )
+        ),
+        target.x,
+        target.y,
+        window.map_or_else(|| "unknown".to_owned(), |w| format!("{:?}", w.present_mode)),
+    ));
+}
+
 /// Threads in each Bevy pool. The pools are global and already built by the
 /// time a frame runs, so this reads them rather than constructing anything.
 fn pools() -> Vec<(String, usize)> {

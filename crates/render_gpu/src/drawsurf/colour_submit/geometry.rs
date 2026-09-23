@@ -31,22 +31,28 @@ pub(super) fn upload_exact_geometry(
                 .clone_from(source.world.static_geometry.world_surface_ranges.as_ref());
         }
     }
+    let empty_source = source.world.static_geometry.world_vertices.is_empty()
+        && source.world.static_geometry.smodel_vertices.is_empty();
+    if empty_source && geometry.world_products.0.is_some() {
+        return;
+    }
     let static_matches = colour_world_smodel_static(
-        geometry.world_generation,
+        (geometry.world_generation, geometry.world_products),
         geometry.world_vertex_count,
         geometry.world_index_count,
         geometry.world_layer_count,
         geometry.smodel_vertex_count,
         geometry.smodel_index_count,
-        source.world.world_generation,
+        (source.world.world_generation, source.world.world_products),
         source.world.static_geometry.world_vertices.len(),
         source.world.static_geometry.world_indices.len(),
         source.world.static_geometry.world_layer.len(),
         source.world.static_geometry.smodel_vertices.len(),
         source.world.static_geometry.smodel_indices.len(),
     );
+    geometry.world_generation = source.world.world_generation;
     if !static_matches {
-        geometry.world_generation = source.world.world_generation;
+        geometry.world_products = source.world.world_products;
         geometry.world_vertex = None;
         geometry.world_layer = None;
         geometry.world_index = None;
@@ -67,6 +73,14 @@ pub(super) fn upload_exact_geometry(
         if !source.world.static_geometry.world_vertices.is_empty()
             && !source.world.static_geometry.world_indices.is_empty()
         {
+            diag::info!(
+                World,
+                "exact geometry: upload static buffers for install {:?} — world {} + smodel {} vertices, products {:?}",
+                source.world.world_generation.0,
+                source.world.static_geometry.world_vertices.len(),
+                source.world.static_geometry.smodel_vertices.len(),
+                source.world.world_products.0,
+            );
             geometry.world_vertex = Some(device.create_buffer_with_data(&BufferInitDescriptor {
                 label: Some("iw4_exact_colour_world_vb"),
                 contents: bytemuck::cast_slice(
