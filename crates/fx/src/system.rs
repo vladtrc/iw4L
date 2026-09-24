@@ -619,6 +619,24 @@ impl FxSystemHost {
             .filter(|e| e.ring_resident && e.has_refs())
     }
 
+    pub fn stop_bolted(&mut self, def_name: &str, dobj: u32, bone: u16) {
+        let slots: Vec<_> = self
+            .effects
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, effect)| {
+                (effect.ring_resident
+                    && effect.def_name == def_name
+                    && fx_iw4::fx_bolt_dobj(effect.bolt_packed) == dobj
+                    && fx_iw4::fx_bolt_bone(effect.bolt_packed) == u32::from(bone))
+                .then_some(slot)
+            })
+            .collect();
+        for slot in slots {
+            crate::spawn::stop_effect_non_recursive(self, slot);
+        }
+    }
+
     pub fn refresh_bolt_poses(
         &mut self,
         mut resolve: impl FnMut(u32, u16) -> Option<FxResolvedBoltPose>,

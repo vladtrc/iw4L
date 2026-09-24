@@ -676,6 +676,8 @@ pub struct ClipMapGeometry {
 
     pub tri_indices: Option<Ptr>,
 
+    pub tri_edge_is_walkable: Option<Ptr>,
+
     pub collision_partitions: Option<Ptr>,
     pub partition_count: usize,
 
@@ -915,6 +917,9 @@ pub struct WeaponIdleCapture {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WeaponGeometry {
     pub name: Option<Ptr>,
+    pub alternate_weapon_name: Option<Ptr>,
+    pub alternate_raise_time_ms: i32,
+    pub alternate_drop_time_ms: i32,
 
     pub weap_def: Option<Ptr>,
 

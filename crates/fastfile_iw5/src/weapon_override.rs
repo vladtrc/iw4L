@@ -92,7 +92,7 @@ impl WeaponGeometry {
                     .i32_at(row, s.layout(sz::ANIM_OVERRIDE_ANIM_TIME_OFF, 28))
                     .ok()?,
                 alt_time_ms: s
-                    .i32_at(row, s.layout(sz::ANIM_OVERRIDE_ALT_TIME_OFF, 36))
+                    .i32_at(row, s.layout(sz::ANIM_OVERRIDE_ALT_TIME_OFF, 32))
                     .ok()?,
             })
         })

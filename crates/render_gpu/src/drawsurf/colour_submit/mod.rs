@@ -1,9 +1,10 @@
+use crate::drawsurf::scene_depth::{SCENE_DEPTH_FORMAT, SceneDepthTexture};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Instant;
 
-use bevy::core_pipeline::core_3d::{CORE_3D_DEPTH_FORMAT, main_opaque_pass_3d};
+use bevy::core_pipeline::core_3d::main_opaque_pass_3d;
 use bevy::core_pipeline::upscaling::ViewUpscalingPipeline;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::mesh::VertexBufferLayout;
@@ -25,7 +26,7 @@ use bevy::render::render_resource::{
     VertexStepMode,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
-use bevy::render::view::{ExtractedView, Msaa, ViewDepthTexture, ViewTarget};
+use bevy::render::view::{ExtractedView, Msaa, ViewTarget};
 use bevy::render::{Render, RenderSystems};
 
 use super::ExtractedRenderFrameProducts;
@@ -587,7 +588,7 @@ fn exact_pipeline_plan(
             format: key.depth_format,
             depth_write_enabled: Some(key.state1.depth_write),
             depth_compare,
-            stencil: Default::default(),
+            stencil: super::scene_depth::stencil_state(key.state1.stencil),
             bias: if key.forward_z {
                 polygon_offset_bias_forward_z(key.state1.polyoffset_level)
             } else {
@@ -3202,7 +3203,7 @@ fn submit_exact_draws<'a>(
     encoder: &mut CommandEncoder,
     device: &RenderDevice,
     target: &ViewTarget,
-    depth: &ViewDepthTexture,
+    depth: &SceneDepthTexture,
     extracted_view: &ExtractedView,
     geometry: &ExactColourGeometry,
     smodel_cache_gpu: &SmodelCacheGpu,
@@ -3309,7 +3310,7 @@ fn submit_exact_draw_run<'a>(
     encoder: &mut CommandEncoder,
     device: &RenderDevice,
     attachment: RenderPassColorAttachment<'_>,
-    depth: &ViewDepthTexture,
+    depth: &SceneDepthTexture,
     extracted_view: &ExtractedView,
     geometry: &ExactColourGeometry,
     smodel_cache_gpu: &SmodelCacheGpu,
@@ -4329,7 +4330,14 @@ fn record_shadowmap_draws<'a>(
                     },
                     store: StoreOp::Store,
                 }),
-                stencil_ops: None,
+                stencil_ops: Some(Operations {
+                    load: if cleared {
+                        LoadOp::Clear(0)
+                    } else {
+                        LoadOp::Load
+                    },
+                    store: StoreOp::Store,
+                }),
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
@@ -4460,7 +4468,10 @@ fn clear_empty_shadowmap_sun_partition_zero(
                 load: LoadOp::Clear(super::backend::SHADOWMAP_CLEAR_Z),
                 store: StoreOp::Store,
             }),
-            stencil_ops: None,
+            stencil_ops: Some(Operations {
+                load: LoadOp::Clear(0),
+                store: StoreOp::Store,
+            }),
         }),
         timestamp_writes: None,
         occlusion_query_set: None,
@@ -6870,6 +6881,7 @@ pub(super) fn register(app: &mut App) {
                 prepare_camera::install_shared_colour_pass
                     .in_set(RenderSystems::Prepare)
                     .after(geometry::upload_exact_geometry)
+                    .after(super::scene_depth::prepare_scene_depth)
                     .after(pipeline::kick_extracted_colour_pipelines)
                     .after(super::gpu_resources::prepare_uploaded_image_registry),
                 prepare_camera::prepare_colour_lanes

@@ -63,7 +63,16 @@ selection cannot move a replayed scene.
   `iw4l-artifacts/logs/latest.log` and `iw4l-artifacts/runs/<id>/` perf run.
 
 Assertions are liveness only: the map loaded, the players exist, simulation
-advanced, input moved the player or the player died, the lifecycle
-boundaries happened in order, and `quit` ended the process on its own. There
+advanced, the authority applied the scene's movement commands to the local
+player, the player covered a path of at least 32 units or died, the lifecycle
+boundaries happened in order, and `quit` ended the process on its own.
+
+Movement is three facts, not one. `mark` reports the local player's input
+receipt — commands the authority applied, how many of them carried a move, and
+the summed length of every applied move — so a scene that turns while it walks
+is judged by the path it walked, not by where it ended up. Each scene records an
+`outcome`: `moved`, `died`, `died_before_input`, `held_in_place` (commands
+applied, alive, no path: collision or a frozen player) or `input_not_applied`
+(the break the scenario exists to catch). There
 is no frame-time assertion. A run the controller had to kill is a failure,
 never a quit.

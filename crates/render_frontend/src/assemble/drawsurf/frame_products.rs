@@ -483,8 +483,11 @@ fn logical_input_key(draw: &RetainedDrawItem, tech: TechType) -> LogicalInputKey
             surface, object_id, ..
         } => (2, surface, u32::from(object_id)),
         RetainedDrawKind::CodeMesh {
-            draw, arg_count, ..
-        } => (3, draw, u32::from(arg_count)),
+            draw,
+            arg_count,
+            viewmodel,
+            ..
+        } => (3, draw, u32::from(arg_count) | (u32::from(viewmodel) << 8)),
         RetainedDrawKind::ParticleCloud { draw, .. } => (4, draw, 0),
         RetainedDrawKind::MarkMesh { draw, .. } => (5, draw, 0),
         RetainedDrawKind::Glass {

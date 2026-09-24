@@ -340,6 +340,7 @@ ps_netfields! {
     offhand_primary: i32 = "offhandPrimary", 0x2ac, Replication::Replicated, Validation::Exact;
     offhand_secondary: i32 = "offhandSecondary", 0x2b0, Replication::Replicated, Validation::Exact;
     weapon: u32 = "weapon", 0x2b4, Replication::Replicated, Validation::Exact;
+    weapon_primary: u32 = "weaponPrimary", 0x2b8, Replication::Replicated, Validation::Exact;
     weap_flags: u32 = "weapFlags", 0x2bc, Replication::Replicated, Validation::Exact;
     f_weapon_pos_frac: f32 = "fWeaponPosFrac", 0x2c0, Replication::Replicated, Validation::Exact;
     aim_spread_scale: f32 = "aimSpreadScale", 0x2c4, Replication::Replicated, Validation::Exact;

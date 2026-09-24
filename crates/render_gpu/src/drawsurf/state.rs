@@ -182,6 +182,7 @@ impl ChangeState0Host {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ChangeState1Host {
+    pub stencil: u32,
     pub depth_write: bool,
     pub depth_test_enable: bool,
 
@@ -303,13 +304,14 @@ impl GfxPassState {
                     || !colour.dst.is_known()
                     || (alpha_blend_op != 0 && (!alpha.src.is_known() || !alpha.dst.is_known()))),
             unknown_blend_operation: blend_op > 5 || (blend_op != 0 && alpha_blend_op > 5),
-            stencil: self.word1 & 0xc0 != 0,
+            stencil: false,
         };
         fields.any().then_some(fields)
     }
 
     pub fn apply_change_state_1_host(self) -> ChangeState1Host {
         ChangeState1Host {
+            stencil: self.word1 & 0xffff_ffc0,
             depth_write: assets::depth_write_enable(self.word1),
             depth_test_enable: assets::depth_test_enable(self.word1),
             depth_func: ((self.word1 >> 2) & 3) as u8,

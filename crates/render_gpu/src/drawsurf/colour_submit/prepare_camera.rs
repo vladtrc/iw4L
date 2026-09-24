@@ -15,7 +15,7 @@ pub(super) fn prepare_colour_lanes(
     views: Query<
         (
             &ViewTarget,
-            &ViewDepthTexture,
+            &SceneDepthTexture,
             &ExtractedView,
             Option<&Msaa>,
         ),
@@ -408,7 +408,7 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
     let prepare_target = ExactPrepareTarget {
         color: target.main_texture_format(),
         samples,
-        depth: CORE_3D_DEPTH_FORMAT,
+        depth: SCENE_DEPTH_FORMAT,
         forward_z: false,
         use_world_pretess: true,
     };
@@ -902,7 +902,7 @@ pub(super) fn install_shared_colour_pass(
     views: Query<
         (
             &ViewTarget,
-            &ViewDepthTexture,
+            &SceneDepthTexture,
             &ExtractedView,
             Option<&Msaa>,
         ),
@@ -1010,7 +1010,7 @@ pub(super) fn install_shared_colour_pass(
 
 type CameraTargetView<'a> = (
     &'a ViewTarget,
-    &'a ViewDepthTexture,
+    &'a SceneDepthTexture,
     &'a ExtractedView,
     Option<&'a Msaa>,
 );

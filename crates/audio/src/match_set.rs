@@ -225,6 +225,9 @@ fn queue_match_clips(
     }
     for alias in MATCH_HUD_PULSE
         .iter()
+        .chain([&"motiontracker_ping", &"motiontracker_pong"])
+        .chain(crate::weapon_lock::ALIASES.iter())
+        .chain([&gamemode_iw4::damage_feedback::HIT_ALERT_ALIAS])
         .chain(MATCH_CLOCK)
         .chain(crate::objectives::EFFECTS)
     {

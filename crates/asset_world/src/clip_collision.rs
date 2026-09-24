@@ -409,6 +409,16 @@ fn extract_mesh_tables(
             mesh.tri_indices.push(id);
         }
     }
+    if let Some(walk_ptr) = g.tri_edge_is_walkable {
+        let n = g.tri_count.saturating_mul(3).div_ceil(32) * 4;
+        mesh.tri_edge_is_walkable.reserve(n);
+        for i in 0..n {
+            let b = s
+                .u8_at(walk_ptr, i)
+                .map_err(|_| ClipCollisionError::Truncated)?;
+            mesh.tri_edge_is_walkable.push(b);
+        }
+    }
     extract_mesh_materials(s, g, out)?;
     extract_aabb_forest(s, g, out)?;
     Ok(())
@@ -1293,6 +1303,16 @@ fn extract_iw5_mesh_tables(
             mesh.tri_indices.push(id);
         }
     }
+    if let Some(walk_ptr) = g.tri_edge_is_walkable {
+        let n = g.tri_count.saturating_mul(3).div_ceil(32) * 4;
+        mesh.tri_edge_is_walkable.reserve(n);
+        for i in 0..n {
+            let b = s
+                .u8_at(walk_ptr, i)
+                .map_err(|_| ClipCollisionError::Truncated)?;
+            mesh.tri_edge_is_walkable.push(b);
+        }
+    }
     extract_iw5_mesh_materials(s, g, out)?;
     extract_iw5_aabb_forest(s, g, out)?;
     Ok(())
@@ -1774,6 +1794,16 @@ fn extract_t5_mesh_tables(
                 .u16_at(idx_ptr, i * 2)
                 .map_err(|_| ClipCollisionError::Truncated)?;
             mesh.tri_indices.push(id);
+        }
+    }
+    if let Some(walk_ptr) = g.tri_edge_is_walkable {
+        let n = g.tri_count.saturating_mul(3).div_ceil(32) * 4;
+        mesh.tri_edge_is_walkable.reserve(n);
+        for i in 0..n {
+            let b = s
+                .u8_at(walk_ptr, i)
+                .map_err(|_| ClipCollisionError::Truncated)?;
+            mesh.tri_edge_is_walkable.push(b);
         }
     }
     use fastfile_t5::size as t5;

@@ -7,7 +7,7 @@ use crate::anim::xmodel_pose::PosedModelSurface;
 use crate::occupancy::script_model::pose_script_dobj_with_materials;
 use crate::{
     MissileDrawPlan, MissileOwnerDraw, XMODEL_OBJECT_ID_MISSILE_BASE, append_missile_surfaces,
-    authored_lit_xmodel_pass_material, dobj_lighting_box_half,
+    dobj_lighting_box_half,
 };
 use anim_iw4::DOBJ_RADIUS_PARENT_ROOT;
 use render_scene::{
@@ -187,7 +187,7 @@ fn occupy_missile_scene_ents(
             entnum,
             quat: Some(scene_quat_from_angles(angles)),
             occupy_model_n: 1,
-            models: vec![scene_skels.model(name, &entry.skel, 0)],
+            models: vec![scene_skels.shared(name, &entry.skel, 0)],
             hide_part_bits: [0; 6],
             store_skin: true,
         });
@@ -213,29 +213,19 @@ fn occupy_missile_scene_ents(
 
 fn publish_missile_dobj_poses(
     occupancy: Res<MissileOccupancy>,
-    projectile_meshes: Option<Res<assets::PreparedProjectileMeshes>>,
+    prepared: Res<crate::anim::model_materials::PreparedModelMaterials>,
     mut dobj_poses: ResMut<crate::anim::dobj_pose::HostDObjPoseFrame>,
 ) {
-    let catalog = missile_pose_catalog(projectile_meshes.as_deref());
-    let Some(catalog) = catalog else {
-        return;
-    };
     for row in &occupancy.rows {
         let Some(id) = row.id else {
             continue;
         };
-        let Some(entry) = catalog.get(&row.name) else {
-            continue;
-        };
-        let Some(pose) = entry.skel.pose.as_ref() else {
-            continue;
-        };
-        let Ok(dobj) = assets::DObj::build(&[(pose, None)]) else {
+        let Some(dobj) = prepared.projectile_dobj(&row.name) else {
             continue;
         };
         let entity_world = missile_world_from_local(row.origin, row.angles);
         let Ok(local) = assets::dobj::pose_dobj_with_controller(
-            &dobj,
+            dobj,
             &assets::dobj::DObjPoseRequest::bind_pose(),
             Mat4::IDENTITY,
             |_, _, _| {},
@@ -251,6 +241,7 @@ fn pose_missiles(
     occupancy: Res<MissileOccupancy>,
     projectile_meshes: Option<Res<assets::PreparedProjectileMeshes>>,
     gfx: Res<HostGfxScene>,
+    prepared: Res<crate::anim::model_materials::PreparedModelMaterials>,
     mut product: ResMut<MissilePoseProduct>,
 ) {
     product.rows.clear();
@@ -267,10 +258,7 @@ fn pose_missiles(
         let Some(entry) = catalog.get(&row.name) else {
             continue;
         };
-        let Some(pose) = entry.skel.pose.as_ref() else {
-            continue;
-        };
-        let Some(dobj) = assets::DObj::build(&[(pose, None)]).ok() else {
+        let Some(dobj) = prepared.projectile_dobj(&row.name) else {
             continue;
         };
         let dobj_state = assets::dobj::DObjSemanticState::bind_pose(row.name.clone(), 1, 1);
@@ -280,7 +268,7 @@ fn pose_missiles(
         let Some((surfaces, _)) = pose_script_dobj_with_materials(
             None,
             &[&entry.skel],
-            &dobj,
+            dobj,
             &request,
             None,
             slot.skin_entries,
@@ -309,6 +297,7 @@ fn append_missile_draws(
     facts: Res<WorldPresentFacts>,
     mut plan: ResMut<MissileDrawPlan>,
     mut lighting_requests: ResMut<ModelLightingRequests>,
+    prepared: Res<crate::anim::model_materials::PreparedModelMaterials>,
     mut staged: Local<MissileDrawPlan>,
     mut draws: Local<Vec<XModelSurfaceDraw>>,
     mut owners: Local<Vec<MissileOwnerDraw>>,
@@ -326,10 +315,9 @@ fn append_missile_draws(
         plan.publish_rebuild(staging, &mut draws, &mut owners);
         return;
     }
-    let (Some(catalog), Some(atlas), Some(tess)) = (catalog, atlas_ref, tess.as_deref()) else {
+    let (Some(catalog), Some(_), Some(tess)) = (catalog, atlas_ref, tess.as_deref()) else {
         unreachable!("required missile draw resources checked above");
     };
-    let mut material_cache: HashMap<assets::MaterialIndex, SmodelPassMaterial> = HashMap::new();
     for row in &product.rows {
         let entnum = row.id.unwrap_or(0);
         let Some(entry) = catalog.get(&row.name) else {
@@ -340,17 +328,9 @@ fn append_missile_draws(
             .iter()
             .map(|surface| {
                 let authored = entry.material_index(surface.surface_index)?;
-                if let Some(material) = material_cache.get(&authored) {
-                    return Some(material.clone());
-                }
-                let material = authored_lit_xmodel_pass_material(
-                    atlas,
-                    &tess.catalog,
-                    tess.material_images.as_ref(),
-                    authored,
-                )?;
-                material_cache.insert(authored, material.clone());
-                Some(material)
+                prepared
+                    .projectile_material(&tess.catalog, authored)
+                    .cloned()
             })
             .collect();
         if materials.iter().all(Option::is_none) {

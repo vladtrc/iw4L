@@ -1,4 +1,4 @@
-use crate::quat::{Quat, Vec3, lerp_vec3, slerp};
+use crate::quat::{Quat, Vec3, lerp_quat, lerp_vec3};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameKind {
@@ -52,7 +52,7 @@ pub fn sample_quat(kind: FrameKind, frames: &[u16], values: &[Quat], frame: f32)
         return crate::quat::QUAT_IDENTITY;
     }
     let (a, b, t) = span(kind, frames, values.len(), frame);
-    slerp(values[a], values[b], t)
+    lerp_quat(values[a], values[b], t)
 }
 
 pub fn sample_vec3(kind: FrameKind, frames: &[u16], values: &[Vec3], frame: f32) -> Vec3 {

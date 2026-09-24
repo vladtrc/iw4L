@@ -239,6 +239,7 @@ pub struct ClientInput {
     pub stance_latch: i32,
 
     pub weapon_cycles: Vec<bool>,
+    pub action_slots: Vec<usize>,
 
     pub offhand_hold_cancel: bool,
 }
@@ -251,6 +252,7 @@ impl Default for ClientInput {
             using_ads: false,
             stance_latch: 0,
             weapon_cycles: Vec::new(),
+            action_slots: Vec::new(),
             offhand_hold_cancel: false,
         }
     }
@@ -290,7 +292,11 @@ pub fn cl_input_cmd(
             apply_pair(&mut client.kb.speed, cmd_id, key, now_msec, frame_msec);
             apply_pair(&mut client.kb.throw_btn, cmd_id, key, now_msec, frame_msec);
         }
-        15..=22 => panic!("+actionslot N not this slice"),
+        15..=22 => {
+            if pair_down(cmd_id) {
+                client.action_slots.push(((cmd_id - 15) / 2) as usize);
+            }
+        }
         23 | 24 => panic!("+stance writes the stance latch; not a movedown alias"),
         25 | 26 => {
             apply_pair(&mut client.kb.gostand, cmd_id, key, now_msec, frame_msec);

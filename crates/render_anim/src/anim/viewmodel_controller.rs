@@ -264,7 +264,14 @@ impl ViewmodelController {
                 positive_ms(self.weapon.quick_raise_time_ms),
             ),
 
-            WeaponAnimSlot::EmptyRaise | WeaponAnimSlot::AltRaise => (
+            WeaponAnimSlot::AltRaise => (
+                WeaponState::Raising {
+                    first: false,
+                    quick: false,
+                },
+                positive_ms(self.weapon.alternate_raise_time_ms),
+            ),
+            WeaponAnimSlot::EmptyRaise => (
                 WeaponState::Raising {
                     first: false,
                     quick: false,
@@ -311,7 +318,11 @@ impl ViewmodelController {
                 positive_ms(self.weapon.quick_drop_time_ms),
             ),
 
-            WeaponAnimSlot::EmptyDrop | WeaponAnimSlot::AltDrop => (WeaponState::Dropping, None),
+            WeaponAnimSlot::AltDrop => (
+                WeaponState::Dropping,
+                positive_ms(self.weapon.alternate_drop_time_ms),
+            ),
+            WeaponAnimSlot::EmptyDrop => (WeaponState::Dropping, None),
             WeaponAnimSlot::SprintIn => (
                 WeaponState::SprintIn,
                 positive_ms(self.weapon.sprint_raise_time_ms),
@@ -360,8 +371,9 @@ impl ViewmodelController {
         true
     }
 
-    pub fn apply_empty_idle_weap_anim(&mut self) {
-        self.start_idle_family(true, true);
+    pub fn apply_force_idle_weap_anim(&mut self, empty_mag: bool) {
+        let interrupt = self.dispatch_range_unfinished();
+        self.start_idle_family(empty_mag, interrupt);
     }
 
     pub fn settle_fire_to_idle(&mut self) {

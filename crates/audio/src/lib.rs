@@ -11,6 +11,7 @@ mod pcm;
 mod playback;
 mod plugin;
 pub mod policy;
+mod rumble;
 mod shellshock;
 mod space;
 mod start;
@@ -30,8 +31,8 @@ pub use emit::{BobCycleTracker, emit_footstep_on_bob_wrap, emit_weapon_fire};
 pub use frontend::FrontendAudio;
 pub use match_set::{AudioReady, AudioSilent};
 pub use messages::{
-    AliasCommand, Footstep, LandSound, PlayAlias, SND_ENT_LOCAL, ViewmodelNotetracks, WeaponSound,
-    snd_ent_from_number,
+    AliasCommand, BoundWeaponSound, Footstep, LandSound, PlayAlias, SND_ENT_LOCAL,
+    ViewmodelNotetracks, WeaponSound, snd_ent_from_number,
 };
 pub use pcm::{LivePan, LoopingPcmAudio, PcmAudio, decode_audio_bytes};
 pub use playback::{
@@ -49,3 +50,5 @@ pub use voice::VoiceOccupancy;
 mod destructible_loops;
 mod map_doors;
 mod match_set;
+
+mod weapon_lock;

@@ -25,7 +25,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
 
     follow_name(s, p, 0xc)?;
 
-    follow_name(s, p, 0x14)?;
+    let alternate_weapon_name = s.follow_string(p, 0x14)?;
 
     let sz_xanims = follow_string_array(s, p, 0x10, sz::WEAPON_XANIM_COUNT)?;
 
@@ -57,6 +57,12 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         _ => None,
     };
     s.record_weapon(WeaponGeometry {
+        alternate_weapon_name,
+        alternate_raise_time_ms: s.i32_at(p, 0x3c)?,
+        alternate_drop_time_ms: weap_def
+            .map(|body| s.i32_at(body, 0x400))
+            .transpose()?
+            .unwrap_or_default(),
         name,
         display_name,
         weap_def,

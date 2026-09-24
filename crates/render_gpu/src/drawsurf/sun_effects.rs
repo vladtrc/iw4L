@@ -1,3 +1,4 @@
+use crate::drawsurf::scene_depth::SceneDepthTexture;
 use bevy::core_pipeline::tonemapping::tonemapping;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::prelude::*;
@@ -16,7 +17,7 @@ use bevy::render::render_resource::{
     TextureView, TextureViewDescriptor, VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
-use bevy::render::view::{ExtractedView, ViewDepthTexture, ViewTarget};
+use bevy::render::view::{ExtractedView, ViewTarget};
 use bevy::render::{Render, RenderApp, RenderSystems};
 use bevy::shader::Shader;
 use render_frame::SunEffectsFrame;
@@ -371,7 +372,7 @@ fn bind_sun<'a>(
 }
 
 fn draw_sun_effects(
-    view: ViewQuery<(&ViewTarget, &ExtractedView, &ViewDepthTexture)>,
+    view: ViewQuery<(&ViewTarget, &ExtractedView, &SceneDepthTexture)>,
     frame: Res<super::PublishedRenderFrame>,
     gpu: Option<ResMut<SunEffectsGpu>>,
     cache: Res<PipelineCache>,

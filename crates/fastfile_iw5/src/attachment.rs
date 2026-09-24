@@ -16,6 +16,7 @@ pub struct AttachmentFacts {
     pub aim_assist: Option<AttachmentAimAssist>,
     pub ammunition: Option<AttachmentAmmunition>,
     pub damage: Option<AttachmentDamage>,
+    pub projectile: Option<AttachmentProjectile>,
     pub location_damage: Option<[f32; 19]>,
     pub idle_settings: Option<AttachmentIdleSettings>,
     pub ads_settings: Option<AttachmentAdsSettings>,
@@ -63,6 +64,7 @@ pub struct AttachmentAddOns {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AttachmentGeneral {
+    pub body: Option<Ptr>,
     pub bolt_action: bool,
     pub inherits_perks: bool,
     pub enemy_crosshair_range: f32,
@@ -96,6 +98,20 @@ pub struct AttachmentDamage {
     pub min_damage_range: f32,
     pub player_damage: i32,
     pub min_player_damage: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AttachmentProjectile {
+    pub body: Ptr,
+    pub explosion_radius: i32,
+    pub explosion_inner_damage: i32,
+    pub explosion_outer_damage: i32,
+    pub speed: i32,
+    pub speed_up: i32,
+    pub activate_distance: i32,
+    pub explosion_type: i32,
+    pub impact_explode: bool,
+    pub model: Option<Ptr>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -171,6 +187,23 @@ pub(crate) fn read_attachment_facts(s: &ZoneStream<'_>, header: Ptr) -> Attachme
         weapon_type: i32_at(12, 20),
         weapon_class: i32_at(16, 24),
         load_index: i32_at(156, 256),
+        projectile: body_at(104, 200).and_then(|body| {
+            Some(AttachmentProjectile {
+                body,
+                explosion_radius: s.i32_at(body, 0).ok()?,
+                explosion_inner_damage: s.i32_at(body, 4).ok()?,
+                explosion_outer_damage: s.i32_at(body, 8).ok()?,
+                speed: s.i32_at(body, 16).ok()?,
+                speed_up: s.i32_at(body, 20).ok()?,
+                activate_distance: s.i32_at(body, 24).ok()?,
+                explosion_type: s.i32_at(body, s.layout(36, 40)).ok()?,
+                impact_explode: s.u8_at(body, s.layout(60, 88)).ok()? != 0,
+                model: match s.ptr_at(body, 32).ok()? {
+                    ZonePtr::Offset(p) => Some(s.resolve_alias(p)),
+                    _ => None,
+                },
+            })
+        }),
         sight: body_at(sz::ATTACH_SIGHT_OFF, 64).and_then(|body| read_sight(s, body)),
         ammo_general: body_at(32, 56).and_then(|body| read_ammo_general(s, body)),
         reload: body_at(40, 72).and_then(|body| {
@@ -275,6 +308,7 @@ fn read_ammo_general(s: &ZoneStream<'_>, body: Ptr) -> Option<AttachmentAmmoGene
 
 fn read_general(s: &ZoneStream<'_>, body: Ptr) -> Option<AttachmentGeneral> {
     Some(AttachmentGeneral {
+        body: Some(body),
         bolt_action: s.u8_at(body, 0).ok()? != 0,
         inherits_perks: s.u8_at(body, 1).ok()? != 0,
         enemy_crosshair_range: s.f32_at(body, 4).ok()?,

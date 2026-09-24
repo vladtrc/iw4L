@@ -1,9 +1,5 @@
 //! The prepared first-person rig.
 //!
-//! The rig owns the whole first-person plan. Both hands of a dual-wield
-//! composition are slots in one layout, so the left gun is a second destination
-//! range over the same prepared model rather than a second pass over the same
-//! decisions.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,60 +13,79 @@ use crate::anim::fpv_pose::{
 use crate::anim::xmodel_pose::{FpvSurfOwner, SkinLayout, build_skin_layout, skin_packed_into};
 use crate::draw::FpvSurfaceDraw;
 use anim_iw4::dobj_surface_hidden;
-use assets::{
-    AnimInstance, FpvAssembly, FpvClipTracks, FpvMeshCatalog, FpvPartRole, FpvSkel, PartBits,
-};
+use assets::{AnimInstance, FpvAssembly, FpvClipTracks, FpvMeshCatalog, FpvPartRole, PartBits};
 
-/// One model inside the combined skeleton: where its bones start, and how its
-/// surfaces map onto a contiguous run of destination vertices.
-struct PreparedModel {
-    catalog_entry: usize,
-    owner: FpvSurfOwner,
-    bone_base: usize,
-    posed_surface_n: usize,
-    layout: SkinLayout,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FpvSurfaceVerdict {
+    Admitted(u32),
+    Inapplicable(&'static str),
+    Refused {
+        material: String,
+        cause: &'static str,
+    },
 }
 
-/// One model drawn for one hand. The same prepared model appears twice in a
-/// dual-wield rig — once per hand — with a destination range of its own.
-struct PlanSlot {
-    hand: usize,
-    model: usize,
-    dest_base: usize,
-}
-
-/// The rows the plan publishes for as long as the composition holds.
-pub struct PreparedFpvGeometry {
-    pub indices: Vec<u32>,
-    pub surface_ranges: Vec<(u32, u32)>,
+#[derive(Default)]
+pub struct FpvMaterialAdmission {
     pub materials: Vec<SmodelPassMaterial>,
-    pub draws: Vec<FpvSurfaceDraw>,
-    pub dest_n: usize,
-    pub packed_ok: bool,
-
-    pub hands_plan_n: u32,
-    pub gun_plan_n: u32,
-    pub scope_plan_n: u32,
-    pub scope_house_plan_n: u32,
-    pub scope_lens_plan_n: u32,
-    pub plan_draw_n: u32,
-    pub plan_skip_n: u32,
+    pub by_authored: HashMap<usize, u32>,
+    verdicts: HashMap<usize, Vec<(usize, FpvSurfaceVerdict)>>,
 }
 
-pub struct FpvHandPose {
-    skin: Vec<Mat4>,
-    eye_from_world: Mat4,
-    offset: Vec3,
-    pub lens: Mat4,
-    pub bolt: FpvBoltFrame,
+impl FpvMaterialAdmission {
+    pub fn record(&mut self, catalog_entry: usize, verdicts: Vec<(usize, FpvSurfaceVerdict)>) {
+        self.verdicts.insert(catalog_entry, verdicts);
+    }
+
+    pub fn verdict(&self, catalog_entry: usize, surface: usize) -> Option<&FpvSurfaceVerdict> {
+        self.verdicts
+            .get(&catalog_entry)?
+            .iter()
+            .find(|(index, _)| *index == surface)
+            .map(|(_, verdict)| verdict)
+    }
+
+    pub fn verdicts_of(&self, catalog_entry: usize) -> &[(usize, FpvSurfaceVerdict)] {
+        self.verdicts
+            .get(&catalog_entry)
+            .map_or(&[], |verdicts| verdicts.as_slice())
+    }
 }
 
-pub struct FpvRigInputs<'a> {
-    pub catalog: &'a FpvMeshCatalog,
-    pub materials: &'a [SmodelPassMaterial],
-    pub material_by_authored: &'a HashMap<usize, u32>,
-    pub clip_tracks: &'a FpvClipTracks,
-    pub clip_orders: [&'a [Option<usize>]; 2],
+#[derive(Clone, Copy, Debug)]
+struct PreparedFpvSurface {
+    index_start: u32,
+    index_count: u32,
+    material: u32,
+    authored: usize,
+    lens_named: bool,
+}
+
+pub struct PreparedFpvModel {
+    catalog_entry: usize,
+    posed_surface_n: usize,
+    packed_ok: bool,
+    layout: SkinLayout,
+    surfaces: Vec<PreparedFpvSurface>,
+    refusal: Option<FpvMandatoryRefusal>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FpvMandatoryRefusal {
+    pub model: String,
+    pub surface: usize,
+    pub material: String,
+    pub cause: &'static str,
+}
+
+impl core::fmt::Display for FpvMandatoryRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{} surface {} `{}`: {}",
+            self.model, self.surface, self.material, self.cause
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -88,47 +103,112 @@ impl core::fmt::Display for FpvRigError {
     }
 }
 
-pub struct PreparedFpvRig {
-    assembly: Arc<FpvAssembly>,
-    dual: bool,
-    generation: u64,
-    parts: PartBits,
-    tags: FpvBoltTags,
-    models: Vec<PreparedModel>,
-    slots: Vec<PlanSlot>,
-    orders: [Vec<Option<usize>>; 2],
-    tracks: [Vec<Option<Vec<Option<usize>>>>; 2],
-    pub geometry: PreparedFpvGeometry,
-}
-
 pub fn leftover_scope_surf_is_lens(name: &str) -> bool {
     name.contains("lens")
 }
 
-/// Which surfaces of one model reach the plan: not hidden by this weapon's hide
-/// tags, and carrying an authored material the session admitted.
-fn surface_admitted(
-    skel: &FpvSkel,
-    words: Option<&[u32; 6]>,
-    admitted_materials: &HashMap<usize, u32>,
-    surface_index: usize,
-) -> bool {
-    if let Some(words) = words
-        && let Some(bits) = skel.surface_part_bits.get(surface_index)
-        && dobj_surface_hidden(bits, words, 0)
-    {
-        return false;
+impl PreparedFpvModel {
+    pub fn build(
+        catalog: &FpvMeshCatalog,
+        catalog_entry: usize,
+        hide: Option<&[u32; 6]>,
+        admission: &FpvMaterialAdmission,
+    ) -> Result<Self, FpvRigError> {
+        let entry = catalog
+            .get_at(catalog_entry)
+            .ok_or(FpvRigError::Catalog("model"))?;
+        let skel = &entry.skel;
+        let lod_range = skel.surfaces_for_lod(0);
+        let first_surface = lod_range.start;
+        let hidden = |surface: usize| {
+            hide.is_some_and(|words| {
+                skel.surface_part_bits
+                    .get(surface)
+                    .is_some_and(|bits| dobj_surface_hidden(bits, words, 0))
+            })
+        };
+        let admitted = |surface: usize| match admission.verdict(catalog_entry, surface) {
+            Some(FpvSurfaceVerdict::Admitted(row)) => Some(*row),
+            _ => None,
+        };
+        let layout = build_skin_layout(skel, 0, |lod_local| {
+            let surface = first_surface + lod_local;
+            !hidden(surface) && admitted(surface).is_some()
+        })
+        .ok_or(FpvRigError::Layout("skin layout refused the model"))?;
+
+        let mut refusal = None;
+        for surface in lod_range.clone() {
+            if hidden(surface) {
+                continue;
+            }
+            if let Some(FpvSurfaceVerdict::Refused { material, cause }) =
+                admission.verdict(catalog_entry, surface)
+            {
+                refusal = Some(FpvMandatoryRefusal {
+                    model: skel.name.clone(),
+                    surface,
+                    material: material.clone(),
+                    cause: *cause,
+                });
+                break;
+            }
+        }
+
+        let mut surfaces = Vec::new();
+        for surface in &layout.surfaces {
+            if !surface.visible || surface.index_count == 0 {
+                continue;
+            }
+            let Some(authored) = skel
+                .surface_materials
+                .get(surface.surface_index)
+                .copied()
+                .flatten()
+                .map(|index| index.get())
+            else {
+                continue;
+            };
+            let Some(material) = admitted(surface.surface_index) else {
+                continue;
+            };
+            surfaces.push(PreparedFpvSurface {
+                index_start: surface.index_start,
+                index_count: surface.index_count,
+                material,
+                authored,
+                lens_named: entry
+                    .material_names
+                    .get(surface.surface_index)
+                    .and_then(|name| name.as_deref())
+                    .is_some_and(leftover_scope_surf_is_lens),
+            });
+        }
+        Ok(Self {
+            catalog_entry,
+            posed_surface_n: lod_range.len(),
+            packed_ok: skel.packed_vertices.len() == skel.positions.len(),
+            layout,
+            surfaces,
+            refusal,
+        })
     }
-    let Some(authored) = skel
-        .surface_materials
-        .get(surface_index)
-        .copied()
-        .flatten()
-        .map(|index| index.get())
-    else {
-        return false;
-    };
-    admitted_materials.contains_key(&authored)
+
+    pub fn refusal(&self) -> Option<&FpvMandatoryRefusal> {
+        self.refusal.as_ref()
+    }
+}
+
+struct ComposedPart {
+    model: Arc<PreparedFpvModel>,
+    owner: FpvSurfOwner,
+    bone_base: usize,
+}
+
+pub struct PreparedFpvComposition {
+    assembly: Arc<FpvAssembly>,
+    parts: Vec<ComposedPart>,
+    refusal: Option<FpvMandatoryRefusal>,
 }
 
 fn surf_owner(role: FpvPartRole) -> FpvSurfOwner {
@@ -140,6 +220,112 @@ fn surf_owner(role: FpvPartRole) -> FpvSurfOwner {
     }
 }
 
+impl PreparedFpvComposition {
+    pub fn compose(
+        assembly: Arc<FpvAssembly>,
+        mut model_of: impl FnMut(usize, Option<[u32; 6]>) -> Result<Arc<PreparedFpvModel>, String>,
+    ) -> Result<Self, String> {
+        let mut parts = Vec::with_capacity(assembly.parts.len());
+        let mut refusal = None;
+        for part in &assembly.parts {
+            let model = model_of(part.model.order(), part.hide)?;
+            if refusal.is_none() {
+                refusal = model.refusal().cloned();
+            }
+            parts.push(ComposedPart {
+                model,
+                owner: surf_owner(part.role),
+                bone_base: part.bone_base,
+            });
+        }
+        Ok(Self {
+            assembly,
+            parts,
+            refusal,
+        })
+    }
+
+    pub fn assembly(&self) -> &Arc<FpvAssembly> {
+        &self.assembly
+    }
+
+    pub fn refusal(&self) -> Option<&FpvMandatoryRefusal> {
+        self.refusal.as_ref()
+    }
+}
+
+pub fn compose_clip_tracks(
+    assembly: &FpvAssembly,
+    clip: usize,
+    tracks: &FpvClipTracks,
+) -> Option<Arc<[u16]>> {
+    let composed = assembly.compose_tracks(clip, tracks)?;
+    Some(
+        composed
+            .into_iter()
+            .map(|bone| {
+                bone.and_then(|bone| u16::try_from(bone).ok())
+                    .unwrap_or(FpvClipTracks::NONE)
+            })
+            .collect(),
+    )
+}
+
+/// One model drawn for one hand. The same prepared model appears twice in a
+/// dual-wield rig — once per hand — with a destination range of its own.
+struct PlanSlot {
+    hand: usize,
+    part: usize,
+    dest_base: usize,
+}
+
+pub struct PreparedFpvGeometry {
+    segments: Vec<(Arc<PreparedFpvModel>, u32)>,
+    pub index_n: usize,
+    pub surface_ranges: Vec<(u32, u32)>,
+    pub materials: Vec<SmodelPassMaterial>,
+    pub draws: Vec<FpvSurfaceDraw>,
+    pub dest_n: usize,
+    pub packed_ok: bool,
+
+    pub hands_plan_n: u32,
+    pub gun_plan_n: u32,
+    pub scope_plan_n: u32,
+    pub scope_house_plan_n: u32,
+    pub scope_lens_plan_n: u32,
+    pub plan_draw_n: u32,
+    pub plan_skip_n: u32,
+}
+
+impl PreparedFpvGeometry {
+    pub fn write_indices(&self, out: &mut Vec<u32>) {
+        out.clear();
+        out.reserve(self.index_n);
+        for (model, rebase) in &self.segments {
+            out.extend(model.layout.indices.iter().map(|index| index + rebase));
+        }
+    }
+}
+
+pub struct FpvHandPose {
+    skin: Vec<Mat4>,
+    eye_from_world: Mat4,
+    offset: Vec3,
+    pub lens: Mat4,
+    pub bolt: FpvBoltFrame,
+}
+
+pub struct PreparedFpvRig {
+    composition: Arc<PreparedFpvComposition>,
+    dual: bool,
+    generation: u64,
+    parts: PartBits,
+    tags: FpvBoltTags,
+    slots: Vec<PlanSlot>,
+    tracks: [Vec<Option<Arc<[u16]>>>; 2],
+    pub geometry: PreparedFpvGeometry,
+}
+
 impl PreparedFpvRig {
     /// A plan holding this generation is a plan whose indices, ranges,
     /// materials and draws are this rig's.
@@ -147,53 +333,17 @@ impl PreparedFpvRig {
         self.generation
     }
 
-    pub fn matches(
-        &self,
-        assembly: &Arc<FpvAssembly>,
-        dual: bool,
-        orders: [&[Option<usize>]; 2],
-    ) -> bool {
-        Arc::ptr_eq(&self.assembly, assembly)
-            && self.dual == dual
-            && self.orders[0] == orders[0]
-            && self.orders[1] == orders[1]
+    pub fn is_dual(&self) -> bool {
+        self.dual
     }
 
     pub fn build(
-        assembly: Arc<FpvAssembly>,
+        composition: Arc<PreparedFpvComposition>,
         dual: bool,
-        inputs: FpvRigInputs<'_>,
-    ) -> Result<Self, FpvRigError> {
-        let catalog = inputs.catalog;
-        let skel_of = |index: usize| catalog.get_at(index).map(|entry| &entry.skel);
-
-        let mut models: Vec<PreparedModel> = Vec::with_capacity(assembly.parts.len());
-        let mut packed_ok = true;
-        for part in &assembly.parts {
-            let index = part.model.order();
-            let skel = skel_of(index).ok_or(FpvRigError::Catalog("model"))?;
-            let lod_range = skel.surfaces_for_lod(0);
-            let first_surface = lod_range.start;
-            let layout = build_skin_layout(skel, 0, |lod_local| {
-                surface_admitted(
-                    skel,
-                    part.hide.as_ref(),
-                    inputs.material_by_authored,
-                    first_surface + lod_local,
-                )
-            })
-            .ok_or(FpvRigError::Layout("skin layout refused the model"))?;
-            if skel.packed_vertices.len() != skel.positions.len() {
-                packed_ok = false;
-            }
-            models.push(PreparedModel {
-                catalog_entry: index,
-                owner: surf_owner(part.role),
-                bone_base: part.bone_base,
-                posed_surface_n: lod_range.len(),
-                layout,
-            });
-        }
+        admission: &FpvMaterialAdmission,
+        tracks: [Vec<Option<Arc<[u16]>>>; 2],
+    ) -> Self {
+        let parts_n = composition.parts.len();
 
         // Every hand's view hands first, then every hand's gun and whatever
         // hangs off it.
@@ -203,22 +353,23 @@ impl PreparedFpvRig {
             order.push((hand, 0));
         }
         for hand in 0..hand_n {
-            for model in 1..models.len() {
+            for part in 1..parts_n {
                 // The scope and the rocket hang off the right gun only.
-                if hand == 1 && model != 1 {
+                if hand == 1 && part != 1 {
                     continue;
                 }
-                order.push((hand, model));
+                order.push((hand, part));
             }
         }
 
         let mut geometry = PreparedFpvGeometry {
-            indices: Vec::new(),
+            segments: Vec::with_capacity(order.len()),
+            index_n: 0,
             surface_ranges: Vec::new(),
             materials: Vec::new(),
             draws: Vec::new(),
             dest_n: 0,
-            packed_ok,
+            packed_ok: true,
             hands_plan_n: 0,
             gun_plan_n: 0,
             scope_plan_n: 0,
@@ -227,60 +378,29 @@ impl PreparedFpvRig {
             plan_draw_n: 0,
             plan_skip_n: 0,
         };
-        let mut slots: Vec<PlanSlot> = Vec::new();
+        let mut slots: Vec<PlanSlot> = Vec::with_capacity(order.len());
         let mut material_key: HashMap<usize, u32> = HashMap::new();
         let mut dest_base = 0usize;
         let mut posed_surface_n = 0usize;
-        for (hand, model_index) in order {
-            let model = &models[model_index];
-            let skel = skel_of(model.catalog_entry).ok_or(FpvRigError::Catalog("model"))?;
-            let entry = catalog
-                .get_at(model.catalog_entry)
-                .ok_or(FpvRigError::Catalog("model"))?;
+        for (hand, part_index) in order {
+            let part = &composition.parts[part_index];
+            let model = &part.model;
             posed_surface_n += model.posed_surface_n;
-            for surface in &model.layout.surfaces {
-                if !surface.visible || surface.index_count == 0 {
-                    continue;
-                }
-                let Some(authored) = skel
-                    .surface_materials
-                    .get(surface.surface_index)
-                    .copied()
-                    .flatten()
-                    .map(|index| index.get())
-                else {
+            geometry.packed_ok &= model.packed_ok;
+            let index_base = geometry.index_n as u32;
+            for surface in &model.surfaces {
+                let Some(material) = admission.materials.get(surface.material as usize) else {
                     continue;
                 };
-                let Some(&session_index) = inputs.material_by_authored.get(&authored) else {
-                    continue;
-                };
-                let Some(material) = inputs.materials.get(session_index as usize).cloned() else {
-                    continue;
-                };
-                let is_scope = model.owner == FpvSurfOwner::Scope;
-                let is_lens = is_scope
-                    && entry
-                        .material_names
-                        .get(surface.surface_index)
-                        .and_then(|name| name.as_deref())
-                        .is_some_and(leftover_scope_surf_is_lens);
-
-                let index_start = geometry.indices.len() as u32;
-                let src = surface.index_start as usize;
-                let end = src.saturating_add(surface.index_count as usize);
-                let rebase = dest_base as u32;
-                geometry.indices.extend(
-                    model.layout.indices[src..end]
-                        .iter()
-                        .map(|index| index + rebase),
-                );
+                let is_scope = part.owner == FpvSurfOwner::Scope;
+                let is_lens = is_scope && surface.lens_named;
                 let range_index = geometry.surface_ranges.len() as u32;
                 geometry
                     .surface_ranges
-                    .push((index_start, surface.index_count));
-                let material_index = *material_key.entry(authored).or_insert_with(|| {
+                    .push((index_base + surface.index_start, surface.index_count));
+                let material_index = *material_key.entry(surface.authored).or_insert_with(|| {
                     let index = geometry.materials.len() as u32;
-                    geometry.materials.push(material);
+                    geometry.materials.push(material.clone());
                     index
                 });
                 geometry.draws.push(FpvSurfaceDraw {
@@ -289,7 +409,7 @@ impl PreparedFpvRig {
                     is_scope: is_scope && !is_lens,
                 });
                 if hand == 0 {
-                    match model.owner {
+                    match part.owner {
                         FpvSurfOwner::Hands => geometry.hands_plan_n += 1,
                         _ => geometry.gun_plan_n += 1,
                     }
@@ -303,9 +423,13 @@ impl PreparedFpvRig {
                     }
                 }
             }
+            geometry
+                .segments
+                .push((Arc::clone(model), dest_base as u32));
+            geometry.index_n += model.layout.indices.len();
             slots.push(PlanSlot {
                 hand,
-                model: model_index,
+                part: part_index,
                 dest_base,
             });
             dest_base += model.layout.dest_vertex_n;
@@ -314,40 +438,34 @@ impl PreparedFpvRig {
         geometry.plan_draw_n = geometry.draws.len() as u32;
         geometry.plan_skip_n = posed_surface_n.saturating_sub(geometry.draws.len()) as u32;
 
-        let orders = inputs.clip_orders.map(<[Option<usize>]>::to_vec);
-        let tracks = [0, 1].map(|hand| {
-            orders[hand]
-                .iter()
-                .map(|order| assembly.compose_tracks((*order)?, inputs.clip_tracks))
-                .collect()
-        });
+        let assembly = &composition.assembly;
         let tags = FpvBoltTags {
             flash: assembly.tags.flash,
             flash_silenced: assembly.tags.flash_silenced,
             brass: assembly.tags.brass,
             knife: assembly.tags.knife,
             laser: assembly.tags.laser,
+            tracker_screen: assembly.tags.tracker_screen,
+            tracker_light: assembly.tags.tracker_light,
         };
+        let parts = assembly.dobj.all_parts();
 
         static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        let parts = assembly.dobj.all_parts();
-        Ok(Self {
-            assembly,
+        Self {
+            composition,
             dual,
             generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             parts,
             tags,
-            models,
             slots,
-            orders,
             tracks,
             geometry,
-        })
+        }
     }
 
     /// One hand's bones for this frame. No skeleton is built here.
     pub fn pose_hand(
-        &mut self,
+        &self,
         hand: usize,
         anims: &[PosedClip<'_>],
         offset: Vec3,
@@ -355,40 +473,45 @@ impl PreparedFpvRig {
         if anims.is_empty() {
             return None;
         }
-        let instances: Vec<AnimInstance<'_>> = anims
+        let bound: Vec<(&PosedClip<'_>, Vec<Option<usize>>)> = anims
             .iter()
             .filter_map(|anim| {
                 let tracks = self.tracks[hand].get(anim.node)?.as_ref()?;
-                Some(AnimInstance {
-                    clip: anim.clip,
-                    tracks,
-                    time: anim.time,
-                    weight: anim.weight,
-                    parts: None,
-                })
+                let bones = tracks
+                    .iter()
+                    .map(|&bone| (bone != FpvClipTracks::NONE).then_some(usize::from(bone)))
+                    .collect();
+                Some((anim, bones))
             })
             .collect();
-        if !instances
+        if !bound
             .iter()
-            .any(|instance| instance.tracks.iter().any(Option::is_some))
+            .any(|(_, bones)| bones.iter().any(Option::is_some))
         {
             return None;
         }
-        let world = self
-            .assembly
-            .dobj
-            .pose(&instances, &self.parts, Mat4::IDENTITY);
-        let skin = self.assembly.dobj.skin_matrices(&world);
-        let eye_from_world = tag_view_to_bevy_camera() * world[self.assembly.view_bone].inverse();
-        let lens = self
-            .assembly
+        let instances: Vec<AnimInstance<'_>> = bound
+            .iter()
+            .map(|(anim, bones)| AnimInstance {
+                clip: anim.clip,
+                tracks: bones,
+                time: anim.time,
+                weight: anim.weight,
+                parts: None,
+            })
+            .collect();
+        let assembly = &self.composition.assembly;
+        let world = assembly.dobj.pose(&instances, &self.parts, Mat4::IDENTITY);
+        let skin = assembly.dobj.skin_matrices(&world);
+        let eye_from_world = tag_view_to_bevy_camera() * world[assembly.view_bone].inverse();
+        let lens = assembly
             .camera_bone
-            .map(|camera| tag_camera_lens_local(world[self.assembly.view_bone], world[camera]))
+            .map(|camera| tag_camera_lens_local(world[assembly.view_bone], world[camera]))
             .unwrap_or(Mat4::IDENTITY);
         let published = if hand == 0 {
             world.len()
         } else {
-            self.assembly.paired_bones.min(world.len())
+            assembly.paired_bones.min(world.len())
         };
         let shift = (offset != Vec3::ZERO).then(|| Mat4::from_translation(offset));
         let bones = world[..published]
@@ -425,7 +548,8 @@ impl PreparedFpvRig {
             let Some(pose) = poses[slot.hand].as_ref() else {
                 continue;
             };
-            let model = &self.models[slot.model];
+            let part = &self.composition.parts[slot.part];
+            let model = &part.model;
             let Some(skel) = catalog.get_at(model.catalog_entry).map(|entry| &entry.skel) else {
                 continue;
             };
@@ -436,7 +560,7 @@ impl PreparedFpvRig {
             let rows = &mut dest[slot.dest_base..end];
             skin_packed_into(
                 skel,
-                |bone| pose.eye_from_world * pose.skin[model.bone_base + bone],
+                |bone| pose.eye_from_world * pose.skin[part.bone_base + bone],
                 |_| false,
                 0,
                 &model.layout,

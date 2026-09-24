@@ -296,7 +296,7 @@ fn draw_effect_sprites(
         return;
     }
 
-    for class in [0usize, 2] {
+    for class in 0..3 {
         let mut handle = effect.first_elem_handle[class];
         while handle != FX_ELEM_HANDLE_NONE {
             let next = elem_slot_for_handle(handle)

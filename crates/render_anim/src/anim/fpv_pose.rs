@@ -48,6 +48,8 @@ pub struct FpvBoltTags {
     pub knife: Option<u16>,
 
     pub laser: Option<u16>,
+    pub tracker_screen: [Option<u16>; 3],
+    pub tracker_light: Option<u16>,
 }
 
 #[derive(Clone, Debug, Default)]

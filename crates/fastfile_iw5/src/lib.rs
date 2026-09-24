@@ -15,8 +15,8 @@ pub use asset_type::AssetType;
 pub use attachment::{
     AttachmentAddOns, AttachmentAdsSettings, AttachmentAimAssist, AttachmentAmmoGeneral,
     AttachmentAmmunition, AttachmentDamage, AttachmentFacts, AttachmentGeneral, AttachmentGunKick,
-    AttachmentHipSpread, AttachmentIdleSettings, AttachmentReload, AttachmentScales,
-    AttachmentSight,
+    AttachmentHipSpread, AttachmentIdleSettings, AttachmentProjectile, AttachmentReload,
+    AttachmentScales, AttachmentSight,
 };
 pub use content::{
     AssetSink, AssetTable, ScriptStrings, XASSET_ENTRY_LEN, XASSET_LIST_LEN, load_zone,

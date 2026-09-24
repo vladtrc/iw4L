@@ -1,11 +1,7 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anim_iw4::{DOBJ_RADIUS_PARENT_ROOT, dobj_compute_bounds_radius};
-use assets::{
-    AssetEdge, AssetNamespace, FpvMeshIndex, MaterialSpace, PreparedFpvMeshes, PreparedWeapons,
-    PreparedXAnims, TS_COLOR_MAP, WeaponAnimations, WeaponRegistry,
-};
+use assets::PreparedFpvMeshes;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use frame::{LifeFrontPublished, PresentedPublished, ViewSubject, WorkerCmdSet};
@@ -18,6 +14,7 @@ use crate::anim::fpv::{
     local_shot_identity,
 };
 use crate::anim::fpv_host::{FpvGenerateArgs, FpvPoseKind, FpvPoseRefuse, generate_fpv_pose};
+use crate::anim::fpv_prepared::{FpvWeaponSlot, FpvWeaponTable, FpvWeaponView, PreparedFpv};
 use crate::anim::fpv_rig::PreparedFpvRig;
 use crate::anim::scene_submission::{AnimDObjSceneSubmission, AnimSceneSubmit};
 use crate::anim::viewmodel_controller::ViewmodelController;
@@ -36,7 +33,7 @@ use hud_iw4::{
 };
 use math_iw4::angle_vectors;
 use playerstate_iw4::PlayerState;
-use render_material::{RuntimeMaterialCatalog, RuntimeSortedMaterialTable};
+use render_material::RuntimeMaterialCatalog;
 use render_scene::WorldScriptModelInstance;
 use render_scene::{FlyCamera, FpvLens};
 use render_scene::{HostGfxScene, scene_quat_from_viewmodel_axes};
@@ -75,33 +72,22 @@ pub struct SessionViewmodel(pub Option<SessionFpvMeshesHandles>);
 
 pub struct SessionFpvMeshesHandles {
     pub weapon_id: u32,
+    pub parent_weapon: u32,
     pub catalog_id: u64,
-    pub assemblies: assets::FpvSideAssemblies,
     pub axis: bool,
+    pub view: Arc<FpvWeaponView>,
     pub fpv: EquippedFpv,
-    pub(crate) active_rig: Option<usize>,
-    pub(crate) materials: Vec<render_scene::SmodelPassMaterial>,
-    pub(crate) material_by_authored: HashMap<usize, u32>,
+    pub(crate) active_rig: Option<Arc<PreparedFpvRig>>,
     pub(crate) material_catalog: Arc<RuntimeMaterialCatalog>,
 }
 
-#[derive(Resource, Default)]
-pub struct FpvRigShelf {
-    owner: Option<(Arc<RuntimeMaterialCatalog>, u64)>,
-    rigs: Vec<PreparedFpvRig>,
-}
-
-impl FpvRigShelf {
-    fn hold(&mut self, materials: &Arc<RuntimeMaterialCatalog>, catalog_id: u64) {
-        let owned = self
-            .owner
-            .as_ref()
-            .is_some_and(|(owner, id)| Arc::ptr_eq(owner, materials) && *id == catalog_id);
-        if !owned {
-            self.rigs.clear();
-            self.owner = Some((Arc::clone(materials), catalog_id));
+fn same_compositions(a: &assets::FpvSideAssemblies, b: &assets::FpvSideAssemblies) -> bool {
+    Arc::ptr_eq(&a.bare, &b.bare)
+        && match (&a.rocket, &b.rocket) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
         }
-    }
 }
 
 fn same_material_catalog(
@@ -165,20 +151,8 @@ impl core::fmt::Display for FpvState {
     }
 }
 
-pub fn resolve_fpv_gun(
-    weapons: &assets::WeaponRegistry,
-    fpv: &assets::FpvMeshCatalog,
-    weapon_id: u32,
-) -> Option<FpvMeshIndex> {
-    let order = weapons
-        .gun_xmodel_edge_of(weapon_id)
-        .and_then(|edge| edge.bound_index())?;
-    fpv.get_at(order)?;
-    Some(FpvMeshIndex::from_order(order))
-}
-
 fn fpv_rocket_should_attach(
-    weapons: &WeaponRegistry,
+    weapons: &FpvWeaponTable,
     weapon_id: u32,
     ps: Option<&PlayerState>,
 ) -> bool {
@@ -202,10 +176,7 @@ fn fpv_rocket_should_attach(
 
 #[derive(SystemParam)]
 pub struct SpawnPendingFpvInputs<'w> {
-    weapons: Option<Res<'w, PreparedWeapons>>,
-    fpv_meshes: Option<Res<'w, PreparedFpvMeshes>>,
-    xanims: Option<Res<'w, PreparedXAnims>>,
-    lighting: Option<Res<'w, render_scene::WorldModelLightingAtlas>>,
+    prepared: Res<'w, PreparedFpv>,
     tess: Res<'w, render_scene::TessMaterials>,
     presented: Res<'w, PresentedSnapshot>,
     local: Res<'w, LocalPresentClient>,
@@ -224,15 +195,19 @@ pub fn spawn_pending_fpv(
     gaps: Res<RenderPresentationGaps>,
 ) {
     let SpawnPendingFpvInputs {
-        weapons,
-        fpv_meshes,
-        xanims,
-        lighting,
+        prepared,
         tess,
         presented,
         local,
     } = inputs;
     let Some(request) = pending.0.take() else {
+        return;
+    };
+    let Some(table) = prepared
+        .table()
+        .filter(|table| same_material_catalog(table.material_catalog(), Some(&*tess)))
+    else {
+        pending.0 = Some(request);
         return;
     };
     let instance_started = std::time::Instant::now();
@@ -242,65 +217,38 @@ pub fn spawn_pending_fpv(
     }
     session_vm.0 = None;
 
-    let idle_clip = weapons
-        .as_ref()
-        .zip(xanims.as_ref())
-        .and_then(|(reg, cat)| {
-            let row = reg.0.sz_xanim_edges_of(request.weapon_id)?;
-            let order = row[assets::weap_anim::IDLE].bound_index()?;
-            cat.0.clip_at(order)
-        });
-    let idle_from_table = idle_clip.is_some();
-    let idle_name = idle_clip.as_ref().map(|clip| clip.name.clone());
-    let idle_ns = weapons
-        .as_ref()
-        .and_then(|reg| reg.0.namespace_of(request.weapon_id))
-        .unwrap_or(AssetNamespace::Iw4);
-    let Some(fpv_cat) = fpv_meshes.as_ref() else {
-        gaps.raise(RenderGapCause::FpvCatalogMissing);
-        status.0 = Some(FpvState::Blocked(RenderGapCause::FpvCatalogMissing));
-        return;
-    };
-    if fpv_cat.0.identity() != request.catalog_id
-        || weapons
-            .as_ref()
-            .and_then(|reg| resolve_fpv_gun(&reg.0, &fpv_cat.0, request.weapon_id))
-            != Some(request.gun_index)
+    if table.catalog_id() != request.catalog_id
+        || table.gun_index(request.weapon_id) != Some(request.gun_index)
     {
-        gaps.raise(RenderGapCause::FpvGunXModelUnresolved {
+        let cause = RenderGapCause::FpvGunXModelUnresolved {
             weapon_id: request.weapon_id,
-        });
-        status.0 = Some(FpvState::Blocked(RenderGapCause::FpvGunXModelUnresolved {
-            weapon_id: request.weapon_id,
-        }));
+        };
+        gaps.raise(cause.clone());
+        status.0 = Some(FpvState::Blocked(cause));
         return;
     }
-    let Some(gun_entry) = fpv_cat.0.get_at(request.gun_index.order()) else {
-        return;
-    };
-    let gun_name = gun_entry.skel.name.clone();
-    let reg = &weapons.as_ref().expect("validated weapon catalog").0;
     let meta = presented
         .snapshot()
         .and_then(|snap| snap.meta.for_client(local.0));
     let ffa_team = meta.and_then(|m| m.ffa_team);
     let client_state_team = meta.map(|m| m.client_state_team).unwrap_or(0);
     let axis = assets::kit_assignment_is_axis(client_state_team, ffa_team);
-    let (Some((hands, hands_index)), Some(assemblies)) = (
-        reg.fpv_hands_of(request.weapon_id, axis),
-        reg.fpv_assemblies_of(request.weapon_id, axis),
-    ) else {
-        let cause = RenderGapCause::FpvDependencyUnresolved {
-            weapon_id: request.weapon_id,
-            role: "FPV skeleton",
-            name: reg.fpv_assembly_gap_of(request.weapon_id, axis),
-        };
-        gaps.raise(cause.clone());
-        status.0 = Some(FpvState::Blocked(cause));
-        return;
+    let view = match table.slot(request.weapon_id, request.parent_weapon, axis) {
+        FpvWeaponSlot::Ready(view) => Arc::clone(view),
+        FpvWeaponSlot::Refused(cause) => {
+            gaps.raise(cause.clone());
+            status.0 = Some(FpvState::Blocked(cause.clone()));
+            return;
+        }
+        FpvWeaponSlot::Absent => {
+            let cause = RenderGapCause::FpvGunXModelUnresolved {
+                weapon_id: request.weapon_id,
+            };
+            gaps.raise(cause.clone());
+            status.0 = Some(FpvState::Blocked(cause));
+            return;
+        }
     };
-    let assemblies = assemblies.clone();
-    let hands = hands.clone();
     let Ok(host) = cameras.single() else {
         diag::info!(
             Fpv,
@@ -312,107 +260,6 @@ pub fn spawn_pending_fpv(
         return;
     };
 
-    let Some(lighting) = lighting.as_ref() else {
-        diag::info!(
-            Fpv,
-            "fpv: no WorldSmodelLighting atlas — refuse Bevy-unlit glow (ModelLightingCache gap)"
-        );
-        gaps.raise(RenderGapCause::FpvNoLightingAtlas);
-        status.0 = Some(FpvState::Blocked(RenderGapCause::FpvNoLightingAtlas));
-        return;
-    };
-
-    if !matches!(
-        tess.catalog.sorted_materials,
-        RuntimeSortedMaterialTable::Ready { .. }
-    ) {
-        diag::info!(
-            Fpv,
-            "fpv: global sorted material table not READY — re-queue (clone-index is not an ordinal)"
-        );
-        pending.0 = Some(request);
-        return;
-    }
-
-    let mut image_cache: HashMap<u32, Handle<Image>> = HashMap::new();
-    let mut materials: Vec<render_scene::SmodelPassMaterial> = Vec::new();
-    let mut material_by_authored: HashMap<usize, u32> = HashMap::new();
-    let mut ordinal_admitted = 0u32;
-    let mut ordinal_refused: Vec<String> = Vec::new();
-    let mut gun_skip = FpvGunSkipCensus::default();
-    let hands_entry = fpv_cat.0.get_at(hands_index.order());
-    let gun_entry = Some(gun_entry);
-    let mut plan_mat_hints: Vec<String> = Vec::new();
-
-    // Which materials this composition needs, walked off the models rather than
-    // off a pose: the rig the first frame prepares needs this table to decide
-    // the layout.
-    let mut admit_model = |label: &str, entry: Option<&assets::FpvMeshEntry>| {
-        let Some(entry) = entry else {
-            return;
-        };
-        for surface_index in entry.skel.surfaces_for_lod(0) {
-            let edge = entry
-                .material_edges
-                .get(surface_index)
-                .copied()
-                .unwrap_or(AssetEdge::Absent);
-            let present_name = entry.material_present_name(surface_index);
-            let leftover_hint = entry
-                .material_names
-                .get(surface_index)
-                .and_then(|name| name.as_deref());
-            let authored = entry
-                .skel
-                .surface_materials
-                .get(surface_index)
-                .copied()
-                .flatten()
-                .map(|index| index.get());
-            let admitted = fpv_pass_material(
-                &tess.catalog,
-                tess.material_images.as_ref(),
-                authored,
-                edge,
-                present_name,
-                leftover_hint,
-                &mut image_cache,
-                &mut material_by_authored,
-                &mut materials,
-                lighting,
-                label,
-                surface_index,
-                &mut ordinal_admitted,
-                &mut ordinal_refused,
-                &mut gun_skip,
-            );
-            if admitted.is_none() {
-                continue;
-            }
-            if let Some(hint) = leftover_hint.or(present_name)
-                && plan_mat_hints.len() < 12
-                && !plan_mat_hints.iter().any(|seen| seen == hint)
-            {
-                plan_mat_hints.push(hint.to_owned());
-            }
-        }
-    };
-    let mut admitted_models: Vec<FpvMeshIndex> = Vec::new();
-    for assembly in std::iter::once(&assemblies.bare).chain(&assemblies.rocket) {
-        for part in &assembly.parts {
-            if admitted_models.contains(&part.model) {
-                continue;
-            }
-            admitted_models.push(part.model);
-            let label = match part.role {
-                assets::FpvPartRole::Hands => "fpv hands",
-                _ => "fpv gun",
-            };
-            admit_model(label, fpv_cat.0.get_at(part.model.order()));
-        }
-    }
-    drop(admit_model);
-
     commands.entity(host).with_children(|parent| {
         parent.spawn((
             FpvViewmodel,
@@ -422,328 +269,66 @@ pub fn spawn_pending_fpv(
         ));
     });
 
-    // The plan belongs to the rig, and the rig is prepared by the first pose
-    // this composition takes. Until then the plan has nothing to publish.
     crate::clear_fpv_draw_plan(&mut fpv_plan, 0);
-    fpv_plan.gun_colormap_skip_n = Some(gun_skip.colormap_n);
-    fpv_plan.gun_ordinal_skip_n = Some(gun_skip.ordinal_n);
-    fpv_plan.gun_colormap_skip_names =
-        (!gun_skip.colormap_names.is_empty()).then(|| gun_skip.colormap_names.join(","));
-    fpv_plan.plan_mat_hints = (!plan_mat_hints.is_empty()).then(|| plan_mat_hints.join(","));
+    let census = &view.census;
+    fpv_plan.gun_colormap_skip_n = Some(census.gun_colormap_skip_n);
+    fpv_plan.gun_ordinal_skip_n = Some(0);
+    fpv_plan.gun_colormap_skip_names = (!census.gun_colormap_skip_names.is_empty())
+        .then(|| census.gun_colormap_skip_names.join(","));
+    fpv_plan.plan_mat_hints = (!census.mat_hints.is_empty()).then(|| census.mat_hints.join(","));
 
-    let (controller, left) = match (weapons.as_ref(), xanims.as_ref()) {
-        (Some(reg), Some(cat)) => {
-            let right_idle_bound = reg
-                .0
-                .sz_xanim_right_edges_of(request.weapon_id)
-                .is_some_and(|edges| edges[assets::weap_anim::IDLE].is_bound());
-            let no_dual = reg
-                .0
-                .facts_of(request.weapon_id)
-                .map(|f| u8::from(f.no_dual_wield))
-                .unwrap_or(1);
-            let create_lr = no_dual == 0 && right_idle_bound;
-            let animations = if create_lr {
-                WeaponAnimations::from_registry_edges(
-                    &reg.0,
-                    request.weapon_id,
-                    reg.0.sz_xanim_right_edges_of(request.weapon_id),
-                    &cat.0,
-                )
-            } else {
-                WeaponAnimations::from_registry(&reg.0, request.weapon_id, &cat.0)
-            };
-            let resolved = animations.resolved_count();
-            let (fire_ms, raise_ms) = (animations.fire_time_ms, animations.raise_time_ms);
-            let switch_ms = format!(
-                "dropTime={}ms quickDropTime={}ms quickRaiseTime={}ms",
-                animations.drop_time_ms,
-                animations.quick_drop_time_ms,
-                animations.quick_raise_time_ms
-            );
-            let idle_meta = animations
-                .clip(assets::WeaponAnimSlot::Idle)
-                .map(|clip| {
-                    format!(
-                        "idle=`{}` frames={} loop={} dur={:.2}s",
-                        clip.name,
-                        clip.numframes,
-                        clip.looping,
-                        clip.duration()
-                    )
-                })
-                .unwrap_or_else(|| "idle=missing".into());
-            let left_idle_bound = reg
-                .0
-                .sz_xanim_left_edges_of(request.weapon_id)
-                .is_some_and(|edges| edges[assets::weap_anim::IDLE].is_bound());
-            let left = if create_lr && left_idle_bound {
-                let left_anims = WeaponAnimations::from_registry_edges(
-                    &reg.0,
-                    request.weapon_id,
-                    reg.0.sz_xanim_left_edges_of(request.weapon_id),
-                    &cat.0,
-                );
-                let left_n = left_anims.resolved_count();
-                diag::info!(
-                    Fpv,
-                    "fpv: viewmodel controller `{}` — {resolved} clips R, {left_n} clips L, fireTime={fire_ms}ms raiseTime={raise_ms}ms {switch_ms} {idle_meta} (dual DObj; action from weapAnim)",
-                    animations.name
-                );
-                Some(ViewmodelController::new(left_anims))
-            } else {
-                diag::info!(
-                    Fpv,
-                    "fpv: viewmodel controller `{}` — {resolved} clips, fireTime={fire_ms}ms raiseTime={raise_ms}ms {switch_ms} {idle_meta} (action from weapAnim; Fire predicted)",
-                    animations.name
-                );
-                None
-            };
-            (ViewmodelController::new(animations), left)
-        }
-        _ => {
-            diag::warn!(
-                Fpv,
-                "fpv: weapon/xanim catalog missing — static idle pose only"
-            );
-            (ViewmodelController::new(WeaponAnimations::empty("")), None)
-        }
+    let controller = ViewmodelController::new(view.right.clone());
+    let left = view.left.clone().map(ViewmodelController::new);
+    diag::info!(
+        Fpv,
+        "fpv: viewmodel controller `{}` — {} clips{}, fireTime={}ms raiseTime={}ms (action from weapAnim)",
+        view.right.name,
+        view.right.resolved_count(),
+        view.left
+            .as_ref()
+            .map(|left| format!(" R, {} clips L (dual DObj)", left.resolved_count()))
+            .unwrap_or_else(String::new),
+        view.right.fire_time_ms,
+        view.right.raise_time_ms,
+    );
+    let idle_kind = match view.idle_name.as_deref() {
+        Some(name) => format!("idle `{name}` (szXAnims[IDLE])"),
+        None => "no szXAnims[IDLE] — guess forbidden".to_owned(),
     };
+    let idle_sampled = view.idle_name.is_some();
+    diag::info!(
+        Fpv,
+        "fpv: equipped `{}` ({}; prepared before Ready) — instance {:.2}ms",
+        view.gun_name,
+        idle_kind,
+        instance_started.elapsed().as_secs_f64() * 1000.0,
+    );
     session_vm.0 = Some(SessionFpvMeshesHandles {
         weapon_id: request.weapon_id,
+        parent_weapon: request.parent_weapon,
         catalog_id: request.catalog_id,
-        assemblies,
         axis,
         fpv: EquippedFpv::new(
-            gun_name.clone(),
-            request.gun_index,
-            hands_index,
-            idle_ns,
-            hands,
+            view.gun_name.clone(),
+            view.gun_index,
+            view.hands_index,
+            view.namespace,
+            view.hands.clone(),
             controller,
             left,
         ),
+        view,
         active_rig: None,
-        materials,
-        material_by_authored,
-        material_catalog: Arc::clone(&tess.catalog),
+        material_catalog: Arc::clone(table.material_catalog()),
     });
-
-    let idle_kind = if idle_from_table {
-        let name = idle_name.as_deref().unwrap_or("?");
-        format!("idle `{name}` (szXAnims[IDLE])")
-    } else {
-        "no szXAnims[IDLE] — guess forbidden".to_owned()
-    };
-    let refused_names = if ordinal_refused.is_empty() {
-        "none".to_owned()
-    } else {
-        ordinal_refused
-            .iter()
-            .take(8)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    diag::info!(
-        Fpv,
-        "fpv: ordinal admission admitted={ordinal_admitted} refused={} names=[{refused_names}] (whole model incl. hideTags-hidden surfaces; global catalog, clone-index unused)",
-        ordinal_refused.len(),
-    );
-    let vert_census = |entry: Option<&assets::FpvMeshEntry>| match entry {
-        Some(entry) => format!("{}/{}", entry.skel.rigid_verts, entry.skel.blend_verts),
-        None => "-".to_owned(),
-    };
-    diag::info!(
-        Fpv,
-        "fpv: equipped `{}` ({}; {}; hands rigid/blend={} gun rigid/blend={}; skeleton prepared before Ready) — instance {:.2}ms on shared templates",
-        gun_name,
-        "linked gunXModel",
-        idle_kind,
-        vert_census(hands_entry),
-        vert_census(gun_entry),
-        instance_started.elapsed().as_secs_f64() * 1000.0,
-    );
 
     gaps.clear(RenderGap::FpvViewmodel);
-    status.0 = Some(FpvState::Drawn {
-        idle_sampled: idle_from_table,
-    });
-}
-
-#[derive(Default)]
-struct FpvGunSkipCensus {
-    colormap_n: u32,
-    ordinal_n: u32,
-    colormap_names: Vec<String>,
-}
-
-impl FpvGunSkipCensus {
-    fn note_colormap(&mut self, is_gun: bool, name: Option<&str>) {
-        if !is_gun {
-            return;
-        }
-        self.colormap_n = self.colormap_n.saturating_add(1);
-        let Some(name) = name else {
-            return;
-        };
-        if self.colormap_names.len() < 8 && !self.colormap_names.iter().any(|seen| seen == name) {
-            self.colormap_names.push(name.to_owned());
-        }
-    }
-
-    fn note_ordinal(&mut self, is_gun: bool) {
-        if is_gun {
-            self.ordinal_n = self.ordinal_n.saturating_add(1);
-        }
-    }
-}
-
-fn fpv_pass_material(
-    global: &RuntimeMaterialCatalog,
-    images: &[Option<Handle<Image>>],
-    material_index: Option<usize>,
-    edge: AssetEdge<MaterialSpace>,
-    present_name: Option<&str>,
-    leftover_hint: Option<&str>,
-    image_cache: &mut HashMap<u32, Handle<Image>>,
-    material_by_authored: &mut HashMap<usize, u32>,
-    materials: &mut Vec<render_scene::SmodelPassMaterial>,
-    lighting: &render_scene::WorldModelLightingAtlas,
-    label: &str,
-    surface_index: usize,
-    ordinal_admitted: &mut u32,
-    ordinal_refused: &mut Vec<String>,
-    gun_skip: &mut FpvGunSkipCensus,
-) -> Option<render_scene::SmodelPassMaterial> {
-    use lighting_iw4::{
-        MODEL_LIGHTING_INV_ATLAS_WIDTH, MODEL_LIGHTING_VOLUME_W, model_lighting_inv_image_height,
-        model_lighting_lookup_scale,
-    };
-    use render_scene::SmodelPassMaterial;
-
-    let is_gun = label == "fpv gun";
-    if !edge.is_bound() {
-        diag::info!(
-            Fpv,
-            "{label} surface {surface_index}: materialHandles {} leftover=`{}` — skip (leftover name is not identity)",
-            edge.edge_kind(),
-            leftover_hint.unwrap_or("-")
-        );
-        return None;
-    }
-    let Some(present_name) = present_name else {
-        diag::info!(
-            Fpv,
-            "{label} surface {surface_index}: Bound materialHandles has no present name — skip"
-        );
-        return None;
-    };
-
-    let mat_i = material_index?;
-    if let Some(&idx) = material_by_authored.get(&mat_i) {
-        return materials.get(idx as usize).cloned();
-    }
-    let bound = edge.bound_index()?;
-    let authored = global.materials.get(bound)?;
-    let Some(ordinal) = global.ordinal_for_material_name(present_name) else {
-        diag::info!(
-            Fpv,
-            "{label} surface {surface_index}: Bound `{present_name}` global-index={bound} has no sorted ordinal — skip (not packed as 0)"
-        );
-        if !ordinal_refused.iter().any(|name| name == present_name) {
-            ordinal_refused.push(present_name.to_owned());
-        }
-        gun_skip.note_ordinal(is_gun);
-        return None;
-    };
-    *ordinal_admitted = ordinal_admitted.saturating_add(1);
-    let color_texture = {
-        let image_index = authored
-            .textures
-            .iter()
-            .find_map(|(_, texture)| texture.filter(|binding| binding.semantic == TS_COLOR_MAP))?
-            .image
-            .0;
-        if let Some(cached) = image_cache.get(&image_index) {
-            Some(cached.clone())
-        } else {
-            let Some(handle) = images.get(image_index as usize).cloned().flatten() else {
-                diag::info!(
-                    Fpv,
-                    "{label} surface {surface_index}: no uploaded color map — skip (no unlit stand-in)"
-                );
-                gun_skip.note_colormap(is_gun, Some(present_name).or(leftover_hint));
-                return None;
-            };
-            image_cache.insert(image_index, handle.clone());
-            Some(handle)
-        }
-    };
-    let specular_texture = authored
-        .textures
-        .iter()
-        .find_map(|(_, texture)| {
-            texture.filter(|binding| binding.semantic == assets::TS_SPECULAR_MAP)
-        })
-        .and_then(|binding| {
-            let image_index = binding.image.0;
-            if let Some(cached) = image_cache.get(&image_index) {
-                return Some(cached.clone());
-            }
-            let handle = images.get(image_index as usize).cloned().flatten()?;
-            image_cache.insert(image_index, handle.clone());
-            Some(handle)
-        });
-
-    const ENV_MAP_PARMS: u32 = 1_033_475_292;
-    let env_map_parms = authored
-        .constants
-        .iter()
-        .find(|(hash, _)| *hash == ENV_MAP_PARMS)
-        .map(|(_, words)| words.map(f32::from_bits))
-        .unwrap_or([0.0; 4]);
-    let alpha_mode = AlphaMode::Opaque;
-    let inv_h = model_lighting_inv_image_height(lighting.dims.image_height)?;
-    let scale = model_lighting_lookup_scale(inv_h);
-    let cull_mode =
-        authored
-            .state_bits_table
-            .first()
-            .and_then(|bits| match assets::cull_face_from_state_bits(*bits) {
-                assets::MaterialCullFace::Back => Some(bevy::render::render_resource::Face::Back),
-                assets::MaterialCullFace::Front => Some(bevy::render::render_resource::Face::Front),
-                assets::MaterialCullFace::None => None,
-            });
-    let mat = SmodelPassMaterial {
-        model_lighting_required: true,
-        color: color_texture,
-        specular: specular_texture,
-        probe: None,
-        atlas: Some(lighting.image.clone()),
-        alpha_mode,
-        draw_mode: None,
-        cull_mode,
-        env_map_parms,
-        lighting_lookup_scale: [scale.u, scale.v, scale.w, scale.q],
-        atlas_lookup: [
-            MODEL_LIGHTING_INV_ATLAS_WIDTH as f32,
-            inv_h,
-            MODEL_LIGHTING_VOLUME_W,
-            0.0,
-        ],
-        sort_key: authored.sort_key,
-        material_sorted_index: Some(ordinal.get()),
-    };
-    let idx = materials.len() as u32;
-    materials.push(mat.clone());
-    material_by_authored.insert(mat_i, idx);
-    Some(mat)
+    status.0 = Some(FpvState::Drawn { idle_sampled });
 }
 
 fn viewweapon_drawgun_admit(
     ps: &PlayerState,
-    weapons: Option<&WeaponRegistry>,
+    weapons: Option<&FpvWeaponTable>,
     b_position_to_ads: bool,
 ) -> Option<(bool, Option<&'static str>)> {
     let reg = weapons?;
@@ -755,15 +340,7 @@ fn viewweapon_drawgun_admit(
         ads_zoom_in_frac: facts.ads_zoom_in_frac,
         ads_zoom_out_frac: facts.ads_zoom_out_frac,
         overlay_material: u32::from(hud_iris),
-        overlay_reticle: if hud_iris {
-            if facts.overlay_reticle != 0 {
-                facts.overlay_reticle
-            } else {
-                1
-            }
-        } else {
-            0
-        },
+        overlay_reticle: facts.overlay_reticle,
         ads_overlay_width: facts.ads_overlay_width,
         ads_overlay_height: facts.ads_overlay_height,
         ..WeaponAdsOverlayFacts::default()
@@ -777,7 +354,7 @@ fn viewweapon_drawgun_admit(
 
 fn viewweapon_drawgun_value(
     ps: &PlayerState,
-    weapons: Option<&WeaponRegistry>,
+    weapons: Option<&FpvWeaponTable>,
     b_position_to_ads: bool,
 ) -> Option<i32> {
     let (admit, _skip) = viewweapon_drawgun_admit(ps, weapons, b_position_to_ads)?;
@@ -810,7 +387,7 @@ pub fn occupy_fpv_scene(
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
     view: Res<ViewSubject>,
-    weapons: Option<Res<PreparedWeapons>>,
+    prepared: Res<PreparedFpv>,
     kick: Option<Res<SessionViewKick>>,
     session_vm: Option<Res<SessionViewmodel>>,
     tess: Option<Res<render_scene::TessMaterials>>,
@@ -824,7 +401,7 @@ pub fn occupy_fpv_scene(
     };
     let admit = viewweapon_drawgun_admit(
         ps,
-        weapons.as_ref().map(|w| &*w.0),
+        prepared.table().map(|table| &**table),
         kick.as_ref().map(|k| k.b_position_to_ads).unwrap_or(true),
     );
     if !admit.is_some_and(|(ok, _)| ok) {
@@ -899,7 +476,7 @@ pub fn tick_fpv_viewmodel(
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
     mut cursor: ResMut<FpvPresentCursor>,
-    weapons: Option<Res<PreparedWeapons>>,
+    prepared: Res<PreparedFpv>,
     fpv_meshes: Option<Res<PreparedFpvMeshes>>,
     mut session_vm: ResMut<SessionViewmodel>,
     tess: Option<Res<render_scene::TessMaterials>>,
@@ -910,8 +487,8 @@ pub fn tick_fpv_viewmodel(
     mut bolts: ResMut<FpvBoltTargets>,
     kick: Option<Res<SessionViewKick>>,
     view: Res<ViewSubject>,
-    mut shelf: ResMut<FpvRigShelf>,
 ) {
+    let table = prepared.table().map(|table| &**table);
     pending_notes.weapon = 0;
     pending_notes.names.clear();
     bolts.clear();
@@ -920,7 +497,7 @@ pub fn tick_fpv_viewmodel(
         if !presented_is_third_person(&presented, local.0, view.in_killcam()) {
             product.drawgun = viewweapon_drawgun_value(
                 ps,
-                weapons.as_ref().map(|w| &*w.0),
+                table,
                 kick.as_ref().map(|k| k.b_position_to_ads).unwrap_or(true),
             );
         }
@@ -961,26 +538,27 @@ pub fn tick_fpv_viewmodel(
 
     if let Some(ps) = presented.viewweapon_player(local.0) {
         let weapon = bg_get_viewmodel_weapon_index(ps);
-        if weapon != 0 && weapon != session.weapon_id {
-            if let Some(reg) = weapons.as_ref() {
-                match resolve_fpv_gun(&reg.0, &fpv.0, weapon) {
+        if weapon != 0
+            && (weapon != session.weapon_id || ps.weapon_primary != session.parent_weapon)
+        {
+            if let Some(table) = table {
+                match table.gun_index(weapon) {
                     Some(gun_index) if gun_index == session.fpv.gun_index => {
-                        let axis = session.axis;
-                        let same = reg.0.fpv_assemblies_of(weapon, axis).is_some_and(|next| {
-                            Arc::ptr_eq(&next.bare, &session.assemblies.bare)
-                                && match (&next.rocket, &session.assemblies.rocket) {
-                                    (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-                                    (None, None) => true,
-                                    _ => false,
-                                }
-                        });
+                        let same = match table.slot(weapon, ps.weapon_primary, session.axis) {
+                            FpvWeaponSlot::Ready(next) => {
+                                same_compositions(&next.assemblies, &session.view.assemblies)
+                            }
+                            _ => false,
+                        };
                         if same {
                             session.weapon_id = weapon;
+                            session.parent_weapon = ps.weapon_primary;
                         } else {
                             pending.0 = Some(PendingFpvSpawnRequest {
                                 gun_index,
                                 catalog_id: fpv.0.identity(),
                                 weapon_id: weapon,
+                                parent_weapon: ps.weapon_primary,
                             });
                             product.kind = FpvPoseKind::Hide;
                             return;
@@ -991,6 +569,7 @@ pub fn tick_fpv_viewmodel(
                             gun_index,
                             catalog_id: fpv.0.identity(),
                             weapon_id: weapon,
+                            parent_weapon: ps.weapon_primary,
                         });
                         diag::info!(
                             Fpv,
@@ -1022,12 +601,12 @@ pub fn tick_fpv_viewmodel(
                 .unwrap_or(false);
             let ads_frac = ps.map(|p| p.f_weapon_pos_frac).unwrap_or(0.0);
             let weap_anim = ps.map(|p| p.weap_anim).unwrap_or(0);
-            let clip_ammo = match (ps, weapons.as_ref()) {
-                (Some(ps), Some(reg)) => {
+            let clip_ammo = |hand| match (ps, table) {
+                (Some(ps), Some(table)) => {
                     let viewmodel = bg_get_viewmodel_weapon_index(ps);
-                    reg.0.facts_of(viewmodel).map(|facts| {
+                    table.facts_of(viewmodel).map(|facts| {
                         let key = bg_clip_table_key(facts.clip_index, viewmodel);
-                        bg_get_clip_for_hand(&ps.ammoclip, key, 0)
+                        bg_get_clip_for_hand(&ps.ammoclip, key, hand)
                     })
                 }
                 _ => None,
@@ -1061,24 +640,23 @@ pub fn tick_fpv_viewmodel(
                     weap_anim_secondary: ps.map(|p| p.weap_anim_secondary).unwrap_or(0),
                     last_weapon_hand: ps.map(|p| p.last_weapon_hand).unwrap_or(0),
                     perks0: ps.map(|p| p.perks[0]).unwrap_or(0),
-                    clip_ammo,
+                    clip_ammo: clip_ammo(0),
+                    left_clip_ammo: clip_ammo(1),
                 }),
                 predicted_fire,
             )
         }
         None => (None, false),
     };
-    let rocket_visible = weapons.as_ref().is_some_and(|reg| {
-        fpv_rocket_should_attach(&reg.0, session.weapon_id, presented.player(local.0))
+    let rocket_visible = table.is_some_and(|table| {
+        fpv_rocket_should_attach(table, session.weapon_id, presented.player(local.0))
     });
     let dual = presented
         .viewweapon_player(local.0)
         .is_some_and(|ps| ps.last_weapon_hand == 1);
     let dual_offset = if dual {
         presented.viewweapon_player(local.0).and_then(|ps| {
-            weapons
-                .as_ref()?
-                .0
+            table?
                 .facts_of(bg_get_viewmodel_weapon_index(ps))
                 .map(|f| f.dual_wield_view_model_offset)
         })
@@ -1086,30 +664,18 @@ pub fn tick_fpv_viewmodel(
         None
     };
     let weapon_id = session.weapon_id;
-    shelf.hold(&session.material_catalog, session.catalog_id);
     let SessionFpvMeshesHandles {
         fpv: equipped,
         active_rig,
-        materials,
-        material_by_authored,
-        assemblies,
+        view: equipped_view,
         ..
     } = session;
-    let Some(reg) = weapons.as_ref() else {
-        product.kind = FpvPoseKind::Refuse(FpvPoseRefuse::CatalogMissing);
-        return;
-    };
     let mut kind = generate_fpv_pose(FpvGenerateArgs {
         dt,
         equipped,
-        rigs: &mut shelf.rigs,
+        rigs: &equipped_view.rigs,
         active: active_rig,
         cursor: &mut cursor.0,
-        catalog: &fpv.0,
-        materials,
-        material_by_authored,
-        assemblies,
-        clip_tracks: reg.0.fpv_clip_tracks(),
         rocket: rocket_visible,
         sample,
         predicted_fire,
@@ -1136,7 +702,6 @@ pub fn tick_fpv_viewmodel(
 fn skin_fpv_geometry(
     product: Res<FpvPoseProduct>,
     session_vm: Option<Res<SessionViewmodel>>,
-    shelf: Res<FpvRigShelf>,
     tess: Option<Res<render_scene::TessMaterials>>,
     fpv_meshes: Option<Res<PreparedFpvMeshes>>,
     mut fpv_plan: ResMut<crate::FpvDrawPlan>,
@@ -1169,9 +734,7 @@ fn skin_fpv_geometry(
                 crate::clear_fpv_draw_plan(&mut fpv_plan, handle);
                 return;
             }
-            let rig = session
-                .and_then(|session| session.active_rig)
-                .and_then(|index| shelf.rigs.get(index));
+            let rig = session.and_then(|session| session.active_rig.as_ref());
             let (Some(rig), Some(catalog)) = (rig, fpv_meshes.as_ref()) else {
                 crate::clear_fpv_draw_plan(&mut fpv_plan, handle);
                 return;
@@ -1229,6 +792,8 @@ pub fn publish_fpv_dobj_pose(
         bolts.clear();
         return;
     }
+    bolts.tracker_screen = None;
+    bolts.tracker_light = None;
     for hand in 0..2usize {
         let Some(frame) = bolts.pose[hand].take() else {
             continue;
@@ -1252,6 +817,18 @@ pub fn publish_fpv_dobj_pose(
             })
         };
 
+        if hand == 0 && fpv_plan.placement_ok {
+            bolts.tracker_light = target(frame.tags.tracker_light);
+            bolts.tracker_screen = (|| {
+                let mut points = [Vec3::ZERO; 3];
+                for (point, bone) in points.iter_mut().zip(frame.tags.tracker_screen) {
+                    *point = fpv_plan
+                        .world_from_local
+                        .transform_point3(frame.bones.get(usize::from(bone?))?.w_axis.truncate());
+                }
+                Some(points)
+            })();
+        }
         bolts.flash[hand] = target(frame.tags.flash);
         bolts.brass[hand] = target(frame.tags.brass);
         bolts.knife[hand] = target(frame.tags.knife);
@@ -1264,7 +841,7 @@ pub fn apply_fpv_placement(
     clock: Res<CgFrameClock>,
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
-    weapons: Option<Res<PreparedWeapons>>,
+    prepared: Res<PreparedFpv>,
     mut kick: ResMut<SessionViewKick>,
     cg_gun: Res<CgGunOffset>,
     mut aim: ResMut<CgViewweaponAim>,
@@ -1290,11 +867,11 @@ pub fn apply_fpv_placement(
     if presented_is_third_person(&presented, local.0, view.in_killcam()) {
         return;
     }
-    let Some(reg) = weapons.as_ref() else {
+    let Some(table) = prepared.table() else {
         return;
     };
     let viewmodel = bg_get_viewmodel_weapon_index(ps);
-    let Some(facts) = reg.0.facts_of(viewmodel) else {
+    let Some(facts) = table.facts_of(viewmodel) else {
         return;
     };
 
@@ -1319,7 +896,7 @@ pub fn apply_fpv_placement(
 
     let overlay_reticle = if facts.overlay_reticle != 0 {
         facts.overlay_reticle
-    } else if reg.0.overlay_is_hud_iris(viewmodel) {
+    } else if table.overlay_is_hud_iris(viewmodel) {
         1
     } else {
         0
@@ -1486,13 +1063,25 @@ fn flush_fpv_spawn(world: &mut World) {
 }
 
 fn publish_fpv_notetracks(
+    generation: Res<frame::WorldGeneration>,
+    presented: Res<PresentedSnapshot>,
+    local: Res<LocalPresentClient>,
     pending: Res<PendingFpvNotetracks>,
     mut notes: MessageWriter<audio::ViewmodelNotetracks>,
 ) {
     if pending.weapon == 0 || pending.names.is_empty() {
         return;
     }
+    let Some(meta) = presented
+        .snapshot()
+        .and_then(|snapshot| snapshot.meta.for_client(local.0))
+    else {
+        return;
+    };
     notes.write(audio::ViewmodelNotetracks {
+        generation: *generation,
+        client: local.0,
+        life: meta.life_sequence,
         weapon: pending.weapon,
         names: pending.names.clone(),
     });
@@ -1501,7 +1090,8 @@ fn publish_fpv_notetracks(
 pub fn register_fpv_present_systems(app: &mut App) {
     app.init_resource::<LocalSpawnArmed>()
         .init_resource::<SessionViewmodel>()
-        .init_resource::<FpvRigShelf>()
+        .init_resource::<PreparedFpv>()
+        .init_resource::<crate::anim::model_materials::PreparedModelMaterials>()
         .init_resource::<SessionViewKick>()
         .init_resource::<CgGunOffset>()
         .init_resource::<CgViewweaponAim>()

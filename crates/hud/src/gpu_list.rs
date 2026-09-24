@@ -32,6 +32,8 @@ pub enum HudTessTechnique {
     Modulate,
 
     SplatterAlt,
+
+    SavedScreen,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +60,8 @@ pub struct HudTessGpuFrame {
     pub surface_w: f32,
     pub surface_h: f32,
     pub visible: bool,
+
+    pub saved_screen_sequence: u64,
 }
 
 impl HudTessGpuFrame {
@@ -458,6 +462,14 @@ pub(crate) fn pack_splatter_alt(
         first_vertex: 0,
         vertex_count: 4,
     });
+    packed
+}
+
+pub(crate) fn pack_saved_screen(quad: &Draw2dQuad, stand_in: Handle<Image>) -> PackedList {
+    let mut packed = pack_modulate(quad, stand_in);
+    for batch in &mut packed.batches {
+        batch.technique = HudTessTechnique::SavedScreen;
+    }
     packed
 }
 

@@ -6,6 +6,8 @@ use crate::TraceExtents;
 
 const SURFACE_CLIP_EPSILON: f32 = 0.125;
 
+const EQUAL_EPSILON: f32 = 0.001;
+
 pub const VERTS_PER_SEGMENT: usize = 1024;
 const WALKABLE_NORMAL_Z: f32 = 0.7;
 const CONTENTS_SOLID: u32 = 1;
@@ -47,6 +49,8 @@ pub struct ClipMeshTables {
 
     pub tri_indices: Vec<u16>,
 
+    pub tri_edge_is_walkable: Vec<u8>,
+
     pub tri_surface_flags: Vec<u32>,
 
     pub tri_content_flags: Vec<u32>,
@@ -62,6 +66,7 @@ impl ClipMeshTables {
         ClipMeshRef {
             verts: &self.verts,
             tri_indices: &self.tri_indices,
+            tri_edge_is_walkable: &self.tri_edge_is_walkable,
             tri_surface_flags: &self.tri_surface_flags,
             tri_content_flags: &self.tri_content_flags,
             aabb_trees: &self.aabb_trees,
@@ -80,6 +85,10 @@ pub struct ClipMeshRef<'a> {
     pub verts: &'a [[f32; 3]],
 
     pub tri_indices: &'a [u16],
+
+    /// One bit per triangle edge, `3 * tri + k`, where k = 0 is v1-v2, 1 is
+    /// v0-v2 and 2 is v0-v1.
+    pub tri_edge_is_walkable: &'a [u8],
 
     pub tri_surface_flags: &'a [u32],
 
@@ -100,6 +109,7 @@ impl<'a> ClipMeshRef<'a> {
         Self {
             verts,
             tri_indices,
+            tri_edge_is_walkable: &[],
             tri_surface_flags,
             tri_content_flags: &[],
             aabb_trees: &[],
@@ -245,7 +255,7 @@ pub fn trace_through_mesh_into(
             start[1] + delta[1] * best.fraction - cap.offset[1],
             start[2] + delta[2] * best.fraction - cap.offset[2],
         ];
-        if best.walkable == 0 {
+        if best.walkable == 0 && best.startsolid == 0 {
             best.walkable = u8::from(best.normal[2] >= WALKABLE_NORMAL_Z);
         }
     } else {
@@ -380,6 +390,12 @@ fn test_tri(
         cflags
     };
     census.tris_tested = census.tris_tested.saturating_add(1);
+    let edge_walkable = [0, 1, 2].map(|k| {
+        let bit = ti * 3 + k;
+        mesh.tri_edge_is_walkable
+            .get(bit >> 3)
+            .is_some_and(|b| b & (1 << (bit & 7)) != 0)
+    });
     capsule_through_triangle(
         cap,
         start,
@@ -387,6 +403,7 @@ fn test_tri(
         v0,
         v1,
         v2,
+        edge_walkable,
         mesh.tri_surface_flags.get(ti).copied().unwrap_or(0),
         contents,
         best,
@@ -425,6 +442,7 @@ fn capsule_through_triangle(
     v0: [f32; 3],
     v1: [f32; 3],
     v2: [f32; 3],
+    edge_walkable: [bool; 3],
     surface_flags: u32,
     contents: u32,
     trace: &mut Trace,
@@ -484,6 +502,7 @@ fn capsule_through_triangle(
     let trace_plane = cross(delta, plane_pt);
     let mut missed_edge = false;
     let mut vert_to_check: Option<[f32; 3]> = None;
+    let mut vert_walkable = true;
 
     let neg_v = dot(trace_plane, v0_v1);
     if neg_v < 0.0 {
@@ -498,9 +517,18 @@ fn capsule_through_triangle(
             contents,
             trace,
         ) {
-            EdgeHit::Hits => return,
-            EdgeHit::MayV0 => vert_to_check = Some(v0),
-            EdgeHit::MayV1 => vert_to_check = Some(v1),
+            EdgeHit::Hits => {
+                trace.walkable = u8::from(edge_walkable[2]);
+                return;
+            }
+            EdgeHit::MayV0 => {
+                vert_to_check = Some(v0);
+                vert_walkable &= edge_walkable[2];
+            }
+            EdgeHit::MayV1 => {
+                vert_to_check = Some(v1);
+                vert_walkable &= edge_walkable[2];
+            }
             EdgeHit::Miss => {}
         }
     }
@@ -517,9 +545,18 @@ fn capsule_through_triangle(
             contents,
             trace,
         ) {
-            EdgeHit::Hits => return,
-            EdgeHit::MayV0 => vert_to_check = Some(v0),
-            EdgeHit::MayV1 => vert_to_check = Some(v2),
+            EdgeHit::Hits => {
+                trace.walkable = u8::from(edge_walkable[1]);
+                return;
+            }
+            EdgeHit::MayV0 => {
+                vert_to_check = Some(v0);
+                vert_walkable &= edge_walkable[1];
+            }
+            EdgeHit::MayV1 => {
+                vert_to_check = Some(v2);
+                vert_walkable &= edge_walkable[1];
+            }
             EdgeHit::Miss => {}
         }
     }
@@ -536,9 +573,18 @@ fn capsule_through_triangle(
             contents,
             trace,
         ) {
-            EdgeHit::Hits => return,
-            EdgeHit::MayV0 => vert_to_check = Some(v1),
-            EdgeHit::MayV1 => vert_to_check = Some(v2),
+            EdgeHit::Hits => {
+                trace.walkable = u8::from(edge_walkable[0]);
+                return;
+            }
+            EdgeHit::MayV0 => {
+                vert_to_check = Some(v1);
+                vert_walkable &= edge_walkable[0];
+            }
+            EdgeHit::MayV1 => {
+                vert_to_check = Some(v2);
+                vert_walkable &= edge_walkable[0];
+            }
             EdgeHit::Miss => {}
         }
     }
@@ -550,6 +596,7 @@ fn capsule_through_triangle(
                 sphere_start,
                 delta,
                 vert,
+                vert_walkable,
                 surface_flags,
                 contents,
                 trace,
@@ -569,7 +616,7 @@ fn capsule_through_triangle(
     trace.surface_flags = surface_flags;
     trace.hit_type = HITTYPE_ENTITY;
     trace.hit_id = ENTITYNUM_WORLD;
-    trace.walkable = u8::from(normal[2] >= WALKABLE_NORMAL_Z);
+    trace.walkable = 0;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -620,7 +667,32 @@ fn sphere_through_edge(
         return EdgeHit::Miss;
     }
     if frac_enter < 0.0 {
-        return EdgeHit::Miss;
+        let scaled_proj = -dot(start_delta, v0_v1);
+        if scaled_proj <= 0.0 {
+            return EdgeHit::MayV0;
+        }
+        if scaled_proj >= edge_len_sq {
+            return EdgeHit::MayV1;
+        }
+        let along = scaled_proj / edge_len_sq;
+        let mut normal = [
+            along * v0_v1[0] + start_delta[0],
+            along * v0_v1[1] + start_delta[1],
+            along * v0_v1[2] + start_delta[2],
+        ];
+        if dot(normal, delta) >= 0.0 {
+            return EdgeHit::Miss;
+        }
+        normalize_to(&mut normal);
+        let inner_disc = radius * radius * perp_len_sq - scaled_dist * scaled_dist;
+        trace.fraction = 0.0;
+        trace.normal = normal;
+        trace.startsolid = u8::from(edge_len_sq * inner_disc > t_scaled * t_scaled);
+        trace.contents = contents;
+        trace.surface_flags = surface_flags;
+        trace.hit_type = HITTYPE_ENTITY;
+        trace.hit_id = ENTITYNUM_WORLD;
+        return EdgeHit::Hits;
     }
     let hit_delta = [
         frac_enter * delta[0] + start_delta[0],
@@ -650,7 +722,6 @@ fn sphere_through_edge(
     trace.surface_flags = surface_flags;
     trace.hit_type = HITTYPE_ENTITY;
     trace.hit_id = ENTITYNUM_WORLD;
-    trace.walkable = u8::from(trace.normal[2] >= WALKABLE_NORMAL_Z);
     EdgeHit::Hits
 }
 
@@ -659,6 +730,7 @@ fn sphere_through_vertex(
     sphere_start: [f32; 3],
     delta: [f32; 3],
     vert: [f32; 3],
+    is_walkable: bool,
     surface_flags: u32,
     contents: u32,
     trace: &mut Trace,
@@ -668,34 +740,48 @@ fn sphere_through_vertex(
         sphere_start[1] - vert[1],
         sphere_start[2] - vert[2],
     ];
-    let a = len_sq(delta);
-    if a <= 0.0 {
+    let b = dot(delta, start_delta);
+    if b >= 0.0 {
         return;
     }
-    let b = 2.0 * dot(start_delta, delta);
+    let start_len_sq = len_sq(start_delta);
     let r = radius + SURFACE_CLIP_EPSILON;
-    let c = len_sq(start_delta) - r * r;
-    let disc = b * b - 4.0 * a * c;
-    if disc < 0.0 {
-        return;
-    }
-    let frac = (-b - sqrtf(disc)) / (2.0 * a);
-    if frac < 0.0 || frac >= trace.fraction {
-        return;
-    }
-    let hit = [
-        start_delta[0] + frac * delta[0],
-        start_delta[1] + frac * delta[1],
-        start_delta[2] + frac * delta[2],
-    ];
-    let inv_r = 1.0 / r;
+    let c = start_len_sq - r * r;
+    let (frac, normal) = if c > 0.0 {
+        let a = len_sq(delta);
+        let b_sq = b * b;
+        let disc = b_sq - a * c;
+        if disc < b_sq * EQUAL_EPSILON {
+            return;
+        }
+        let frac = (-sqrtf(disc) - b) / a;
+        if frac >= trace.fraction {
+            return;
+        }
+        let inv_r = 1.0 / r;
+        let mut normal = [
+            (start_delta[0] + frac * delta[0]) * inv_r,
+            (start_delta[1] + frac * delta[1]) * inv_r,
+            (start_delta[2] + frac * delta[2]) * inv_r,
+        ];
+        let approx_recip_len = (3.0 - len_sq(normal)) * 0.5;
+        normal = normal.map(|c| c * approx_recip_len);
+        (frac, normal)
+    } else {
+        let mut normal = start_delta;
+        normalize_to(&mut normal);
+        if start_len_sq < radius * radius {
+            trace.startsolid = 1;
+        }
+        (0.0, normal)
+    };
     trace.fraction = frac;
-    trace.normal = [hit[0] * inv_r, hit[1] * inv_r, hit[2] * inv_r];
+    trace.normal = normal;
     trace.contents = contents;
     trace.surface_flags = surface_flags;
     trace.hit_type = HITTYPE_ENTITY;
     trace.hit_id = ENTITYNUM_WORLD;
-    trace.walkable = u8::from(trace.normal[2] >= WALKABLE_NORMAL_Z);
+    trace.walkable = u8::from(is_walkable);
 }
 
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {

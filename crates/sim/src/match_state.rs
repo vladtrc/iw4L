@@ -388,6 +388,7 @@ pub struct KillcamHud {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClientSnapshotMeta {
+    pub weapon_lock: crate::WeaponLock,
     pub killcam_hud: Option<KillcamHud>,
     pub lifecycle: ClientLifecycle,
     pub loadout: Option<LoadoutSpec>,
@@ -541,9 +542,32 @@ pub struct HealthRegenCensus {
     pub named_sound: Option<&'static str>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct InputReceipt {
+    pub applied_cmds: u32,
+    pub moving_cmds: u32,
+    pub path_units: f32,
+}
+
+impl InputReceipt {
+    pub(crate) fn record(&mut self, moving: bool, from: [f32; 3], to: [f32; 3]) {
+        self.applied_cmds = self.applied_cmds.wrapping_add(1);
+        if moving {
+            self.moving_cmds = self.moving_cmds.wrapping_add(1);
+        }
+        let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+        let step = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if step.is_finite() {
+            self.path_units += step;
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClientMatchState {
+    pub weapon_lock: crate::WeaponLock,
     pub lifecycle: ClientLifecycle,
+    pub input_receipt: InputReceipt,
     pub loadout: Option<LoadoutSpec>,
     pub life_sequence: LifeSequence,
 
@@ -678,6 +702,7 @@ impl ClientMatchState {
 
     pub(crate) fn to_snapshot_meta(&self) -> ClientSnapshotMeta {
         ClientSnapshotMeta {
+            weapon_lock: self.weapon_lock,
             killcam_hud: None,
             lifecycle: self.lifecycle,
             loadout: self.loadout.clone(),
@@ -710,6 +735,7 @@ impl ClientMatchState {
     }
 
     pub(crate) fn adopt_snapshot_meta(&mut self, meta: &ClientSnapshotMeta) {
+        self.weapon_lock = meta.weapon_lock;
         self.lifecycle = meta.lifecycle;
         self.loadout = meta.loadout.clone();
         self.life_sequence = meta.life_sequence;

@@ -135,6 +135,7 @@ impl ShellInternKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ExecutionShareExtra {
     Identity,
+    ViewmodelCodeMesh,
     LightingHandle(u32),
 
     Instance { depth_hack: bool },
@@ -151,6 +152,7 @@ struct OverlayKeepKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum OverlayKeepExtra {
     World,
+    ViewmodelCodeMesh,
     Lighting {
         handle: u32,
         packed: Option<[u8; 4]>,
@@ -188,6 +190,9 @@ fn execution_share_extra(draw: &RetainedDrawItem) -> ExecutionShareExtra {
         RetainedDrawKind::CodeMesh {
             draw, arg_count, ..
         } if arg_count != 0 => ExecutionShareExtra::Unique(draw),
+        RetainedDrawKind::CodeMesh {
+            viewmodel: true, ..
+        } => ExecutionShareExtra::ViewmodelCodeMesh,
         RetainedDrawKind::CodeMesh { .. } => ExecutionShareExtra::Identity,
     }
 }
@@ -244,6 +249,9 @@ fn smodel_code_world_from_local(kind: &RetainedDrawKind) -> Mat4 {
 fn overlay_keep_key(draw: &RetainedDrawItem) -> OverlayKeepKey {
     let scene_light = dpvs_iw4::GfxDrawSurf { packed: draw.key }.scene_light_index();
     let extra = match draw.kind {
+        RetainedDrawKind::CodeMesh {
+            viewmodel: true, ..
+        } => OverlayKeepExtra::ViewmodelCodeMesh,
         RetainedDrawKind::World { .. } | RetainedDrawKind::CodeMesh { .. } => {
             OverlayKeepExtra::World
         }
@@ -371,9 +379,22 @@ fn overlay_draw_material(
             );
         }
         RetainedDrawKind::CodeMesh {
-            args, arg_count, ..
-        } if arg_count != 0 => {
-            overlay_code_mesh_tess_code_constants(scratch, &args[..usize::from(arg_count)]);
+            args,
+            arg_count,
+            viewmodel,
+            ..
+        } => {
+            if arg_count != 0 {
+                overlay_code_mesh_tess_code_constants(scratch, &args[..usize::from(arg_count)]);
+            }
+            if viewmodel && let Some(clip) = runtime.frame.viewmodel_clip_from_world {
+                overlay_viewmodel_depth_hack(
+                    scratch,
+                    clip,
+                    runtime.frame.view_origin,
+                    Mat4::IDENTITY,
+                );
+            }
         }
         RetainedDrawKind::Glass {
             lighting_handle, ..
@@ -458,9 +479,22 @@ fn overlay_draw_obj_only(
             );
         }
         RetainedDrawKind::CodeMesh {
-            args, arg_count, ..
-        } if arg_count != 0 => {
-            overlay_code_mesh_tess_code_constants(scratch, &args[..usize::from(arg_count)]);
+            args,
+            arg_count,
+            viewmodel,
+            ..
+        } => {
+            if arg_count != 0 {
+                overlay_code_mesh_tess_code_constants(scratch, &args[..usize::from(arg_count)]);
+            }
+            if viewmodel && let Some(clip) = runtime.frame.viewmodel_clip_from_world {
+                overlay_viewmodel_depth_hack(
+                    scratch,
+                    clip,
+                    runtime.frame.view_origin,
+                    Mat4::IDENTITY,
+                );
+            }
         }
         _ => {}
     }

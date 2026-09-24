@@ -83,6 +83,9 @@ fn kill_fx_on_match_torn_down(
     *entity_marks = EntityMarks::default();
     commands.remove_resource::<PreparedFxCatalog>();
     commands.remove_resource::<PreparedFxModels>();
+    commands.remove_resource::<crate::PreparedFxModelGeometry>();
+    commands.insert_resource(crate::FxModelDrawPlan::default());
+    commands.insert_resource(crate::FxModelStaging::default());
     commands.remove_resource::<PreparedImpactFx>();
     commands.remove_resource::<PreparedTracers>();
 }

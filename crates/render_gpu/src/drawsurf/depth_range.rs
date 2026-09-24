@@ -25,6 +25,9 @@ pub fn depth_range_type_for_draw(kind: &RetainedDrawKind, key: u64) -> i32 {
                 GFX_DEPTH_RANGE_SCENE
             }
         }
+        RetainedDrawKind::CodeMesh {
+            viewmodel: true, ..
+        } => GFX_DEPTH_RANGE_VIEWMODEL,
         _ => GFX_DEPTH_RANGE_SCENE,
     }
 }

@@ -90,6 +90,7 @@ bevy = { version = "0.19", default-features = false, features = [
     "bevy_sprite_render",
     "bevy_asset",
     "bevy_audio",
+    "bevy_gilrs",
     "multi_threaded",
     "x11",
     "wayland",

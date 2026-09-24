@@ -22,6 +22,10 @@ pub(crate) fn register_drawsurf_render(app: &mut App) {
             super::gpu_resources::prepare_uploaded_image_registry
                 .in_set(RenderSystems::PrepareResources),
         );
+    render_app.add_systems(
+        Render,
+        super::scene_depth::prepare_scene_depth.in_set(RenderSystems::PrepareResources),
+    );
     super::colour_submit::register(app);
     super::sun_effects::register(app);
     super::postfx::register(app);

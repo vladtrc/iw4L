@@ -508,7 +508,17 @@ impl fastfile_iw5::AssetLinkSink for CommonWalkSink {
         stream: &fastfile_iw5::ZoneStream<'_>,
         geometry: &fastfile_iw5::AttachmentGeometry,
     ) -> fastfile_iw5::Result<()> {
-        self.weapons.capture_iw5_attachment(stream, geometry);
+        let fx_name_at_slot = |mut slot| {
+            for _ in 0..8 {
+                if let Some(name) = self.fx_names_iw5.get(&slot) {
+                    return Some(name.clone());
+                }
+                slot = *self.fx_aliases_iw5.get(&slot)?;
+            }
+            None
+        };
+        self.weapons
+            .capture_iw5_attachment(stream, geometry, &fx_name_at_slot);
         Ok(())
     }
 

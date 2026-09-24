@@ -10,10 +10,11 @@ use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_
 use bevy::render::render_resource::{
     BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent,
     BlendFactor, BlendOperation, BlendState, Buffer, BufferDescriptor, BufferUsages,
-    ColorTargetState, ColorWrites, FragmentState, FrontFace, IndexFormat, PipelineCache,
-    PrimitiveState, RenderPipelineDescriptor, SamplerBindingType, ShaderStages,
-    SpecializedRenderPipeline, SpecializedRenderPipelines, TextureFormat, TextureSampleType,
-    VertexAttribute, VertexFormat, VertexState, VertexStepMode,
+    ColorTargetState, ColorWrites, Extent3d, FragmentState, FrontFace, IndexFormat, PipelineCache,
+    PrimitiveState, RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
+    ShaderStages, SpecializedRenderPipeline, SpecializedRenderPipelines, Texture,
+    TextureDescriptor, TextureDimension, TextureFormat, TextureSampleType, TextureUsages,
+    TextureView, TextureViewDescriptor, VertexAttribute, VertexFormat, VertexState, VertexStepMode,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue, ViewQuery};
 use bevy::render::texture::GpuImage;
@@ -94,10 +95,26 @@ struct ExtractedTessFrame {
     surface_w: f32,
     surface_h: f32,
     visible: bool,
+    saved_screen_sequence: u64,
 }
 
 #[derive(Resource, Default)]
 struct ExtractedIwTess(ExtractedTessFrame);
+
+struct SavedScreenCopy {
+    texture: Texture,
+    view: TextureView,
+    sampler: Sampler,
+    format: TextureFormat,
+    size: Extent3d,
+}
+
+#[derive(Resource, Default)]
+struct SavedScreenGpu {
+    copy: Option<SavedScreenCopy>,
+    sequence: u64,
+    captured: bool,
+}
 
 #[derive(Resource)]
 struct IwTessPipeline {
@@ -250,6 +267,7 @@ fn extract_iw_tess(mut extracted: ResMut<ExtractedIwTess>, frame: Extract<Res<Hu
         surface_w: frame.surface_w,
         surface_h: frame.surface_h,
         visible: frame.visible,
+        saved_screen_sequence: frame.saved_screen_sequence,
     };
 }
 
@@ -422,14 +440,31 @@ fn draw_iw_tess(
     cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
     images: Res<RenderAssets<GpuImage>>,
-    postfx: Res<super::postfx::ExtractedPostFx>,
-    queue: Res<RenderQueue>,
     mut texture_table: ResMut<super::texture_table::ExactTextureTable>,
-    mut blood_port: Local<Option<super::hud_blood::BloodPortGpu>>,
-    mut blood_refusal: Local<Option<super::hud_blood::BloodGpuRefusal>>,
+    mut blood: ResMut<HudBloodGpu>,
+    mut saved: ResMut<SavedScreenGpu>,
     mut context: RenderContext,
     stages: Option<Res<SharedRenderStagesSlot>>,
 ) {
+    let (target, _extracted_view) = view.into_inner();
+    let format = target.main_texture_format();
+    let scene_size = target.main_texture().size();
+    if extracted.0.saved_screen_sequence != saved.sequence {
+        saved.captured = false;
+        if let Some(copy) = saved
+            .copy
+            .as_ref()
+            .filter(|copy| copy.format == format && copy.size == scene_size)
+        {
+            context.command_encoder().copy_texture_to_texture(
+                target.main_texture().as_image_copy(),
+                copy.texture.as_image_copy(),
+                scene_size,
+            );
+            saved.sequence = extracted.0.saved_screen_sequence;
+            saved.captured = true;
+        }
+    }
     if !extracted.0.visible {
         return;
     }
@@ -442,40 +477,12 @@ fn draw_iw_tess(
         }
         return;
     }
-    let (target, _extracted_view) = view.into_inner();
-
     let samples = 1;
-    let format = target.main_texture_format();
-    let has_blood = meta.draws.iter().any(|geom| {
-        extracted
-            .0
-            .batches
-            .get(geom.batch_i)
-            .is_some_and(|batch| batch.technique == HudTessTechnique::SplatterAlt)
-    });
-    let blood_ready = has_blood
-        && match prepare_blood(
-            &mut blood_port,
-            postfx.blood.as_ref(),
-            format,
-            &device,
-            &cache,
-            &queue,
-            extracted.0.surface_w,
-            extracted.0.surface_h,
-        ) {
-            Ok(ready) => {
-                *blood_refusal = None;
-                ready
-            }
-            Err(cause) => {
-                if blood_refusal.as_ref() != Some(&cause) {
-                    diag::warn!(World, "hud blood port: RED cause={cause:?}");
-                    *blood_refusal = Some(cause);
-                }
-                false
-            }
-        };
+    let saved_copy = saved
+        .copy
+        .as_ref()
+        .filter(|copy| saved.captured && copy.format == format && copy.size == scene_size);
+    let blood_ready = blood.uploaded;
     let mut prepared = Vec::with_capacity(meta.draws.len());
     for geom in &meta.draws {
         let Some(batch) = extracted.0.batches.get(geom.batch_i) else {
@@ -507,11 +514,36 @@ fn draw_iw_tess(
                 );
                 (id, bind, None)
             }
+            HudTessTechnique::SavedScreen => {
+                let Some(copy) = saved_copy else {
+                    continue;
+                };
+                let id = specialized.specialize(
+                    &cache,
+                    &pipeline,
+                    IwTessPipelineKey {
+                        target: format,
+                        samples,
+                        state_bits: batch.state_bits,
+                    },
+                );
+                let layout = cache.get_bind_group_layout(&pipeline.modulate_layout);
+                let bind = device.create_bind_group(
+                    "iw_tess_saved_screen",
+                    &layout,
+                    &BindGroupEntries::sequential((
+                        pipeline.params.as_entire_buffer_binding(),
+                        &copy.view,
+                        &copy.sampler,
+                    )),
+                );
+                (id, bind, None)
+            }
             HudTessTechnique::SplatterAlt => {
                 let Some(gpu_mask) = batch.mask.as_ref().and_then(|mask| images.get(mask)) else {
                     continue;
                 };
-                let Some(port) = blood_port.as_mut().filter(|_| blood_ready) else {
+                let Some(port) = blood.port.as_mut().filter(|_| blood_ready) else {
                     continue;
                 };
                 let textures =
@@ -581,31 +613,126 @@ fn draw_iw_tess(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn prepare_blood(
-    port: &mut Option<super::hud_blood::BloodPortGpu>,
-    blood: Option<&super::postfx::ExtractedBlood>,
-    format: TextureFormat,
-    device: &RenderDevice,
-    cache: &PipelineCache,
-    queue: &RenderQueue,
-    surface_w: f32,
-    surface_h: f32,
-) -> Result<bool, super::hud_blood::BloodGpuRefusal> {
-    let Some(blood) = blood else {
-        *port = None;
-        return Ok(false);
-    };
-    if port.as_ref().is_none_or(|port| !port.matches(blood, format)) {
-        *port = None;
-        *port = Some(super::hud_blood::BloodPortGpu::create(
-            blood, format, device, cache,
-        )?);
+#[derive(Resource, Default)]
+pub(super) struct HudBloodGpu {
+    port: Option<super::hud_blood::BloodPortGpu>,
+    refusal: Option<super::hud_blood::BloodGpuRefusal>,
+    uploaded: bool,
+}
+
+impl HudBloodGpu {
+    fn refuse(&mut self, cause: super::hud_blood::BloodGpuRefusal) {
+        if self.refusal.as_ref() != Some(&cause) {
+            diag::warn!(World, "hud blood port: RED cause={cause:?}");
+            self.refusal = Some(cause);
+        }
     }
-    port.as_ref()
-        .expect("built above")
-        .upload(queue, surface_w, surface_h)?;
-    Ok(true)
+}
+
+fn prepare_saved_screen(
+    views: Query<&ViewTarget, With<Camera3d>>,
+    device: Res<RenderDevice>,
+    cache: Res<PipelineCache>,
+    pipeline: Res<IwTessPipeline>,
+    mut specialized: ResMut<SpecializedRenderPipelines<IwTessPipeline>>,
+    mut saved: ResMut<SavedScreenGpu>,
+) {
+    let Some(target) = views.iter().next() else {
+        return;
+    };
+    let format = target.main_texture_format();
+    let size = target.main_texture().size();
+    specialized.specialize(
+        &cache,
+        &pipeline,
+        IwTessPipelineKey {
+            target: format,
+            samples: 1,
+            state_bits: None,
+        },
+    );
+    if saved
+        .copy
+        .as_ref()
+        .is_some_and(|copy| copy.format == format && copy.size == size)
+    {
+        return;
+    }
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("iw_tess_saved_screen"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&SamplerDescriptor::default());
+    // Resizing invalidates the frozen image; only a new flash may capture again.
+    saved.captured = false;
+    saved.copy = Some(SavedScreenCopy {
+        texture,
+        view,
+        sampler,
+        format,
+        size,
+    });
+}
+
+fn prepare_hud_blood(
+    postfx: Res<super::postfx::ExtractedPostFx>,
+    extracted: Res<ExtractedIwTess>,
+    views: Query<&ViewTarget, With<Camera3d>>,
+    device: Res<RenderDevice>,
+    cache: Res<PipelineCache>,
+    queue: Res<RenderQueue>,
+    mut gpu: ResMut<HudBloodGpu>,
+) {
+    gpu.uploaded = false;
+    let Some(blood) = postfx.blood.as_ref() else {
+        gpu.port = None;
+        return;
+    };
+    let Some(format) = views.iter().next().map(ViewTarget::main_texture_format) else {
+        return;
+    };
+    if gpu
+        .port
+        .as_ref()
+        .is_none_or(|port| !port.matches(blood, format))
+    {
+        gpu.port = None;
+        match super::hud_blood::BloodPortGpu::create(blood, format, &device, &cache) {
+            Ok(port) => {
+                gpu.port = Some(port);
+                gpu.refusal = None;
+            }
+            Err(cause) => {
+                gpu.refuse(cause);
+                return;
+            }
+        }
+    }
+    let drawn = extracted.0.visible
+        && extracted
+            .0
+            .batches
+            .iter()
+            .any(|batch| batch.technique == HudTessTechnique::SplatterAlt);
+    if !drawn {
+        return;
+    }
+    let uploaded = gpu
+        .port
+        .as_ref()
+        .map(|port| port.upload(&queue, extracted.0.surface_w, extracted.0.surface_h));
+    match uploaded {
+        Some(Ok(())) => gpu.uploaded = true,
+        Some(Err(cause)) => gpu.refuse(cause),
+        None => {}
+    }
 }
 
 pub(super) fn register(app: &mut App) {
@@ -615,12 +742,18 @@ pub(super) fn register(app: &mut App) {
     };
     render_app
         .init_resource::<ExtractedIwTess>()
+        .init_resource::<HudBloodGpu>()
+        .init_resource::<SavedScreenGpu>()
         .init_resource::<SpecializedRenderPipelines<IwTessPipeline>>()
         .add_systems(RenderStartup, init_pipeline)
         .add_systems(ExtractSchedule, extract_iw_tess)
         .add_systems(
             Render,
-            prepare_iw_tess.in_set(RenderSystems::PrepareResources),
+            (
+                prepare_iw_tess.in_set(RenderSystems::PrepareResources),
+                prepare_hud_blood.in_set(RenderSystems::PrepareResources),
+                prepare_saved_screen.in_set(RenderSystems::PrepareResources),
+            ),
         )
         .add_systems(
             Core3d,

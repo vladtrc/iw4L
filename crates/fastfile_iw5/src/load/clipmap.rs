@@ -60,7 +60,8 @@ pub(super) fn load_clipmap(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink
     let verts = s.plain_array(p, s.layout(0x68, 208), 4, 12, vert_count)?;
     let index_count = 3 * tri_count;
     let tri_indices = s.plain_array(p, s.layout(0x70, 224), 2, 2, index_count)?;
-    s.plain_array(p, s.layout(0x74, 232), 1, 1, index_count.div_ceil(32) * 4)?;
+    let tri_edge_is_walkable =
+        s.plain_array(p, s.layout(0x74, 232), 1, 1, index_count.div_ceil(32) * 4)?;
     let border_count = s.i32_at(p, s.layout(0x78, 240))?.max(0) as usize;
     s.plain_array(
         p,
@@ -167,6 +168,7 @@ pub(super) fn load_clipmap(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink
         leafbrush_nodes: info.leafbrush_nodes,
         verts,
         tri_indices,
+        tri_edge_is_walkable,
         collision_partitions,
         collision_aabb_trees,
         cmodels,

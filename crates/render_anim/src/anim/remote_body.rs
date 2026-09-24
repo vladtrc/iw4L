@@ -14,7 +14,7 @@ use crate::anim::xmodel_pose::PosedSmodelSurface;
 #[derive(Clone, Debug)]
 pub struct PersistentRemoteTree {
     pub runtime: assets::dobj::XAnimTreeRuntime,
-    pub dobj: Option<assets::DObj>,
+    pub dobj: Option<std::sync::Arc<assets::DObj>>,
     pub reuse_key: Option<assets::dobj::DObjReuseKey>,
     pub legs: u16,
     pub torso: u16,
@@ -557,10 +557,166 @@ pub fn kit_dobj_radius(radii: impl IntoIterator<Item = f32>) -> Option<f32> {
         .fold(None::<f32>, |acc, r| Some(acc.map_or(r, |a| a.max(r))))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KitSource<'a> {
+    Body(&'a str),
+    World(usize),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PreparedKitSource {
+    Body(String),
+    World(usize),
+}
+
+pub struct PreparedRemoteKit {
+    sources: Vec<PreparedKitSource>,
+    pub radius: Option<f32>,
+    pub hide_part_bits: [u32; 6],
+    pub dobj: Option<std::sync::Arc<assets::DObj>>,
+    pub bolt_bones: [Option<u16>; 4],
+    pub head_bone: Option<usize>,
+}
+
+impl PreparedRemoteKit {
+    pub fn models<'a>(
+        &'a self,
+        bodies: &'a assets::PreparedBodies,
+        world: &'a assets::PreparedWorldWeapons,
+    ) -> Option<Vec<KitModel<'a>>> {
+        self.sources
+            .iter()
+            .map(|source| match source {
+                PreparedKitSource::Body(key) => {
+                    let entry = bodies.0.get(key)?;
+                    Some(KitModel {
+                        name: entry.skel.name.as_str(),
+                        skel: &entry.skel,
+                        hide_tags: Vec::new(),
+                        source: KitSource::Body(key.as_str()),
+                    })
+                }
+                PreparedKitSource::World(index) => {
+                    let entry = world.0.get_at(*index)?;
+                    Some(KitModel {
+                        name: entry.skel.name.as_str(),
+                        skel: &entry.skel,
+                        hide_tags: Vec::new(),
+                        source: KitSource::World(*index),
+                    })
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(bevy::prelude::Resource, Default)]
+pub struct PreparedRemoteKits {
+    owner: Option<(
+        std::sync::Arc<assets::BodyMeshCatalog>,
+        std::sync::Arc<assets::WeaponRegistry>,
+        u64,
+    )>,
+    kits: std::collections::HashMap<(bool, u32), PreparedRemoteKit>,
+}
+
+impl PreparedRemoteKits {
+    pub fn owned_by(
+        &self,
+        bodies: &assets::PreparedBodies,
+        weapons: &assets::PreparedWeapons,
+        world_weapons: &assets::PreparedWorldWeapons,
+    ) -> bool {
+        self.owner.as_ref().is_some_and(|(b, w, catalog)| {
+            std::sync::Arc::ptr_eq(b, &bodies.0)
+                && std::sync::Arc::ptr_eq(w, &weapons.0)
+                && *catalog == world_weapons.0.identity()
+        })
+    }
+
+    pub fn get(&self, axis: bool, weapon: u32) -> Option<&PreparedRemoteKit> {
+        self.kits.get(&(axis, weapon))
+    }
+
+    pub fn prepare(
+        bodies: &assets::PreparedBodies,
+        weapons: &assets::PreparedWeapons,
+        world_weapons: &assets::PreparedWorldWeapons,
+    ) -> Self {
+        let mut kits = std::collections::HashMap::new();
+        for axis in [false, true] {
+            for weapon in 0..=weapons.0.len() as u32 {
+                let Some((models, radius)) = occupy_remote_kit_dobj(
+                    bodies,
+                    Some(weapons),
+                    Some(world_weapons),
+                    axis,
+                    weapon,
+                    true,
+                ) else {
+                    continue;
+                };
+                let sources = models
+                    .iter()
+                    .map(|model| match model.source {
+                        KitSource::Body(key) => PreparedKitSource::Body(key.to_owned()),
+                        KitSource::World(index) => PreparedKitSource::World(index),
+                    })
+                    .collect();
+                let dobj =
+                    select_remote_models(bodies, Some(weapons), Some(world_weapons), axis, weapon)
+                        .ok()
+                        .and_then(|set| assets::DObj::build(&set.dobj_models).ok())
+                        .map(std::sync::Arc::new);
+                kits.insert(
+                    (axis, weapon),
+                    PreparedRemoteKit {
+                        sources,
+                        radius,
+                        hide_part_bits: kit_hide_part_bits(&models),
+                        bolt_bones: [
+                            "tag_flash",
+                            "tag_brass",
+                            "tag_knife_fx",
+                            fx_iw4::FX_LASER_TAG,
+                        ]
+                        .map(|tag| {
+                            dobj.as_ref()
+                                .and_then(|dobj| dobj.find(tag))
+                                .and_then(|bone| u16::try_from(bone).ok())
+                        }),
+                        head_bone: dobj.as_ref().and_then(|dobj| dobj.find("j_head")),
+                        dobj,
+                    },
+                );
+            }
+        }
+        Self {
+            owner: Some((
+                std::sync::Arc::clone(&bodies.0),
+                std::sync::Arc::clone(&weapons.0),
+                world_weapons.0.identity(),
+            )),
+            kits,
+        }
+    }
+}
+
+pub fn kit_hide_part_bits(models: &[KitModel<'_>]) -> [u32; 6] {
+    let mut bits = [0u32; 6];
+    let mut base = 0usize;
+    for model in models {
+        render_scene::hide_part_bits_from_tags(&mut bits, model.skel, base, &model.hide_tags);
+        base += model.skel.bones.len();
+    }
+    bits
+}
+
 pub struct KitModel<'a> {
     pub name: &'a str,
     pub skel: &'a assets::ModelSkel,
     pub hide_tags: Vec<String>,
+    pub source: KitSource<'a>,
 }
 
 pub fn occupy_remote_kit_dobj<'a>(
@@ -569,6 +725,7 @@ pub fn occupy_remote_kit_dobj<'a>(
     world_weapons: Option<&'a assets::PreparedWorldWeapons>,
     axis: bool,
     weapon: u32,
+    with_hide_tags: bool,
 ) -> Option<(Vec<KitModel<'a>>, Option<f32>)> {
     let kits = bodies.0.kits();
     let kit = kits.kit(axis)?;
@@ -581,6 +738,7 @@ pub fn occupy_remote_kit_dobj<'a>(
         name: body.skel.name.as_str(),
         skel: &body.skel,
         hide_tags: Vec::new(),
+        source: KitSource::Body(kit.body.as_str()),
     }];
     if let Some(name) = kit.head.as_deref() {
         if let Some(entry) = bodies.0.get(name) {
@@ -592,13 +750,20 @@ pub fn occupy_remote_kit_dobj<'a>(
                     name: entry.skel.name.as_str(),
                     skel: &entry.skel,
                     hide_tags: Vec::new(),
+                    source: KitSource::Body(name),
                 });
             }
         }
     }
     if weapon != 0 {
         if let (Some(registry), Some(catalog)) = (weapons, world_weapons) {
-            if let Some(entry) = registry.0.world_model_entry(weapon, &catalog.0) {
+            let gun_index = registry
+                .0
+                .world_model_edge_of(weapon)
+                .and_then(|edge| edge.bound_index());
+            if let (Some(entry), Some(gun_index)) =
+                (registry.0.world_model_entry(weapon, &catalog.0), gun_index)
+            {
                 if let (Some(_gun_pose), Some(_tag)) = (
                     entry.skel.pose.as_ref(),
                     assets::tp_weapon_attach_tag(&body.skel.bone_names),
@@ -607,14 +772,17 @@ pub fn occupy_remote_kit_dobj<'a>(
                         name: entry.skel.name.as_str(),
                         skel: &entry.skel,
                         hide_tags: weapons
+                            .filter(|_| with_hide_tags)
                             .map(|registry| assets::effective_hide_tags(&registry.0, weapon))
-                            .unwrap_or_default(),
+                            .unwrap_or_else(Vec::new),
+                        source: KitSource::World(gun_index),
                     });
                     for attachment in world_attachments(&registry.0, &catalog.0, weapon) {
                         skels.push(KitModel {
                             name: attachment.entry.skel.name.as_str(),
                             skel: &attachment.entry.skel,
                             hide_tags: Vec::new(),
+                            source: KitSource::World(attachment.index.order()),
                         });
                     }
                 }
@@ -871,6 +1039,7 @@ pub fn ensure_remote_dobj(
     e_type: i32,
     persist_key: u32,
     trees: &mut RemoteBodyTrees,
+    prepared: Option<&std::sync::Arc<assets::DObj>>,
 ) -> Result<(), String> {
     let gun_name = models
         .gun
@@ -890,8 +1059,12 @@ pub fn ensure_remote_dobj(
     );
     let slot = trees.get_mut(persist_key).expect("tree slot inserted");
     if !remote_dobj_reuses(slot.dobj.is_some(), slot.reuse_key, reuse_key) {
-        slot.dobj =
-            Some(assets::DObj::build(&models.dobj_models).map_err(|error| error.to_string())?);
+        slot.dobj = Some(std::sync::Arc::clone(prepared.ok_or_else(|| {
+            format!(
+                "remote representation not prepared: body={} head={} weapon={gun_name}",
+                models.body_name, models.head_name
+            )
+        })?));
         slot.reuse_key = Some(reuse_key);
     }
     Ok(())

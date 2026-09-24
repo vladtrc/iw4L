@@ -123,6 +123,18 @@ pub(crate) fn fx_world_color_images(
         }
     }
 
+    for (asset_id, material) in scene.runtime_material_catalog.materials.iter().enumerate() {
+        if crate::adapters::motion_tracker::MATERIALS.contains(&material.name.as_str()) {
+            stitch_fx_color_by_asset(
+                &mut colors_by_asset,
+                &mut keys_by_asset,
+                exact_material_handles,
+                scene,
+                asset_id,
+            );
+        }
+    }
+
     for (asset_id, handle) in colors_by_asset.iter().chain(mark_colors_by_asset.iter()) {
         let Some(material) = scene
             .runtime_material_catalog
@@ -189,7 +201,23 @@ pub(crate) fn fx_world_color_images(
             );
         }
     }
+    let motion_tracker = crate::adapters::motion_tracker::MATERIALS.map(|name| {
+        let catalog = &scene.runtime_material_catalog;
+        let ordinal = catalog.ordinal_for_material_name(name)?;
+        let material = catalog
+            .materials
+            .iter()
+            .find(|material| material.name == name)?;
+        Some(render_fx::drawsurf::tess::fx::FxPassMaterial {
+            color: fx_color_by_name.get(name).cloned(),
+            sort_key: material
+                .baked_draw_surf
+                .map(|key| dpvs_iw4::GfxDrawSurf { packed: key }.primary_sort_key())?,
+            material_sorted_index: Some(ordinal.get()),
+        })
+    });
     FxWorldColorImages {
+        motion_tracker,
         colors: fx_color_by_name,
         keys: fx_keys,
         colors_by_asset,
@@ -197,6 +225,98 @@ pub(crate) fn fx_world_color_images(
         mark_colors_by_asset,
         mark_keys_by_asset,
     }
+}
+
+pub(crate) fn prepare_fx_model_geometry(
+    scene: &WorldScene,
+    models: Option<&render_fx::PreparedFxModels>,
+) -> render_fx::PreparedFxModelGeometry {
+    let mut plan = render_fx::FxModelDrawPlan::default();
+    plan.generation = scene.runtime_material_catalog.generation_id.0;
+    let Some(models) = models else {
+        return render_fx::PreparedFxModelGeometry(plan);
+    };
+    let Some((image, dims)) = scene
+        .model_lighting_image
+        .clone()
+        .zip(scene.model_lighting_dims)
+    else {
+        return render_fx::PreparedFxModelGeometry(plan);
+    };
+    let atlas = super::model_lighting_atlas::WorldModelLightingAtlas { image, dims };
+    let models = &models.0;
+    for index in 0..models.len() {
+        let Some(entry) = models.get_at(index) else {
+            continue;
+        };
+        let name = models.name_at(index).unwrap_or_default();
+        let binding = (|| {
+            let pose = entry.skel.pose.as_ref()?;
+            let dobj = assets::DObj::build(&[(pose, None)]).ok()?;
+            let state = assets::dobj::DObjSemanticState::bind_pose(name.to_owned(), 1, 1);
+            let request = state.resolve_request(|_| None).ok()?;
+            let world = assets::dobj::pose_dobj(&dobj, &request, Mat4::IDENTITY).ok()?;
+            let skin = dobj.skin_matrices(&world);
+            Some((dobj, request, skin))
+        })();
+        let Some((dobj, request, skin)) = binding else {
+            diag::warn!(World, "FX model `{name}` refused: bind pose unavailable");
+            continue;
+        };
+        for lod in 0..entry
+            .skel
+            .lod
+            .map_or(1, |selector| selector.num_lods().clamp(0, 4) as u8)
+        {
+            let Some(lod_surfaces) = render_anim::anim::xmodel_pose::skin_model_filtered(
+                &entry.skel,
+                |bone| skin[bone],
+                &[],
+                |surface| {
+                    dobj.surface_visible(
+                        0,
+                        &entry.skel.surface_part_bits[surface],
+                        &request.hide_part_bits,
+                    )
+                },
+                |surface| {
+                    render_anim::anim::xmodel_pose::stream_lod_surface_rigid(
+                        &entry.skel,
+                        lod,
+                        &[],
+                        0,
+                        surface,
+                    )
+                },
+                lod,
+            ) else {
+                diag::warn!(
+                    World,
+                    "FX model `{name}` LOD {lod} refused: geometry unavailable"
+                );
+                continue;
+            };
+            let materials: Vec<_> = lod_surfaces
+                .iter()
+                .map(|surface| {
+                    crate::assemble::drawsurf::tess::xmodel::bound_lit_xmodel_pass_material(
+                        &atlas,
+                        &scene.runtime_material_catalog,
+                        entry.material_index(surface.surface_index)?,
+                    )
+                })
+                .collect();
+            if materials.iter().any(Option::is_none) {
+                diag::warn!(
+                    World,
+                    "FX model `{name}` LOD {lod} refused: material binding unavailable"
+                );
+                continue;
+            }
+            render_fx::append_fx_model_asset(&mut plan, index, lod, &lod_surfaces, &materials);
+        }
+    }
+    render_fx::PreparedFxModelGeometry(plan)
 }
 
 pub fn install(

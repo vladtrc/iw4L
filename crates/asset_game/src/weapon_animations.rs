@@ -122,6 +122,8 @@ pub struct WeaponAnimations {
     pub melee_charge_time_ms: i32,
 
     pub raise_time_ms: i32,
+    pub alternate_raise_time_ms: i32,
+    pub alternate_drop_time_ms: i32,
 
     pub drop_time_ms: i32,
 
@@ -175,6 +177,8 @@ impl WeaponAnimations {
             melee_time_ms: 0,
             melee_charge_time_ms: 0,
             raise_time_ms: 0,
+            alternate_raise_time_ms: 0,
+            alternate_drop_time_ms: 0,
             drop_time_ms: 0,
             quick_drop_time_ms: 0,
             quick_raise_time_ms: 0,
@@ -269,6 +273,8 @@ impl WeaponAnimations {
             melee_time_ms: 0,
             melee_charge_time_ms: 0,
             raise_time_ms: 0,
+            alternate_raise_time_ms: 0,
+            alternate_drop_time_ms: 0,
             drop_time_ms: 0,
             quick_drop_time_ms: 0,
             quick_raise_time_ms: 0,
@@ -291,6 +297,8 @@ impl WeaponAnimations {
 
     fn with_registry_facts(mut self, registry: &WeaponRegistry, index: u32) -> Self {
         if let Some(facts) = registry.facts_of(index) {
+            self.alternate_raise_time_ms = facts.alternate_raise_time_ms;
+            self.alternate_drop_time_ms = facts.alternate_drop_time_ms;
             self.melee_time_ms = facts.melee_time_ms;
             self.melee_charge_time_ms = facts.melee_charge_time_ms;
         }

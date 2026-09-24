@@ -489,6 +489,7 @@ pub fn apply_prepared_match(
     ) {
         Ok(plan) => plan,
         Err(refusal) => {
+            diag::warn!(World, "match install refused: {}", refusal.error);
             if let Some(probe) = probe.as_deref_mut() {
                 if let Some(gap) = refusal.sim_gap {
                     probe.sim_gap = gap;
@@ -891,6 +892,7 @@ pub fn apply_prepared_match(
             }
         }
         Err(refusal) => {
+            diag::warn!(World, "match install refused: {}", refusal.error);
             if let Some(stage) = install_stage {
                 stage.fail();
             }

@@ -91,6 +91,7 @@ pub struct MaterialConstant {
 
 #[derive(Clone, Debug)]
 pub struct AuthoredShader {
+    pub namespace: crate::AssetNamespace,
     pub name: AssetRef,
     pub kind: AssetType,
 
@@ -646,11 +647,11 @@ impl MaterialCatalog {
     }
 
     fn link_shader(&mut self, incoming: AuthoredShader) -> usize {
-        if let Some(index) = self
-            .shaders
-            .iter()
-            .position(|owned| owned.kind == incoming.kind && owned.name.same_name(&incoming.name))
-        {
+        if let Some(index) = self.shaders.iter().position(|owned| {
+            owned.namespace == incoming.namespace
+                && owned.kind == incoming.kind
+                && owned.name.same_name(&incoming.name)
+        }) {
             let take_body = AssetRef::incoming_owns_slot(&self.shaders[index].name, &incoming.name)
                 && !(incoming.program.is_empty() && !self.shaders[index].program.is_empty());
             if take_body {
@@ -1003,7 +1004,9 @@ impl MaterialCatalog {
         let shader_ids = shaders
             .into_iter()
             .map(|shader| {
-                if let Some(index) = self.real_shader_index(&shader.name, shader.kind) {
+                if let Some(index) =
+                    self.real_shader_index(shader.namespace, &shader.name, shader.kind)
+                {
                     return index;
                 }
                 self.link_shader(shader)
@@ -1063,9 +1066,17 @@ impl MaterialCatalog {
             .position(|owned| owned.name.is_real() && owned.name.same_name(name))
     }
 
-    fn real_shader_index(&self, name: &AssetRef, kind: AssetType) -> Option<usize> {
+    fn real_shader_index(
+        &self,
+        namespace: crate::AssetNamespace,
+        name: &AssetRef,
+        kind: AssetType,
+    ) -> Option<usize> {
         self.shaders.iter().position(|owned| {
-            owned.kind == kind && owned.name.is_real() && owned.name.same_name(name)
+            owned.namespace == namespace
+                && owned.kind == kind
+                && owned.name.is_real()
+                && owned.name.same_name(name)
         })
     }
 
@@ -1674,6 +1685,7 @@ impl MaterialCatalog {
             }
         }
         Some(self.take_shader_slot(AuthoredShader {
+            namespace: self.capture_ns,
             name,
             kind,
             program: bytes,
@@ -2613,6 +2625,7 @@ impl MaterialCatalog {
             }
         }
         Some(self.take_shader_slot(AuthoredShader {
+            namespace: self.capture_ns,
             name,
             kind,
             program: bytes,
@@ -2934,6 +2947,7 @@ impl MaterialCatalog {
             _ => return None,
         };
         Some(self.take_shader_slot(AuthoredShader {
+            namespace: self.capture_ns,
             name,
             kind,
             program: bytes,

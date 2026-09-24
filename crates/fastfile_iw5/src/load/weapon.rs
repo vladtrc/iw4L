@@ -132,7 +132,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         }
     }
 
-    follow_name(s, p, s.layout(116, 192))?;
+    let alternate_weapon_name = s.follow_string(p, s.layout(116, 192))?;
     // The complete def lives in TEMP and is overwritten by the next asset: keep a slot that outlives it.
     let kill_icon_cell = p.at(s.layout(sz::WEAPON_COMPLETE_KILL_ICON_OFF, 216));
     let referenced = match s.ptr_at(kill_icon_cell, 0)? {
@@ -199,6 +199,12 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         _ => None,
     };
     s.record_weapon(WeaponGeometry {
+        alternate_weapon_name,
+        alternate_raise_time_ms: s.i32_at(p, s.layout(124, 208))?,
+        alternate_drop_time_ms: weap_def
+            .map(|body| s.i32_at(body, s.layout(0x298, 1000)))
+            .transpose()?
+            .unwrap_or_default(),
         name,
         kill_icon_slot,
         kill_icon,

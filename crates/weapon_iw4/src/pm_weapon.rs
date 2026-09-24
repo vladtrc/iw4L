@@ -34,6 +34,9 @@ pub struct CapturedCombatInput {
     pub fire_delay_ms: i32,
     pub raise_time_ms: i32,
     pub drop_time_ms: i32,
+    pub alternate_weapon: u32,
+    pub alternate_raise_time_ms: i32,
+    pub alternate_drop_time_ms: i32,
     pub reload_time_ms: i32,
     pub reload_empty_time_ms: i32,
     pub clip_size: i32,
@@ -145,6 +148,9 @@ pub struct WeaponCombatFacts {
     pub fire_delay_ms: i32,
     pub raise_time_ms: i32,
     pub drop_time_ms: i32,
+    pub alternate_weapon: u32,
+    pub alternate_raise_time_ms: i32,
+    pub alternate_drop_time_ms: i32,
     pub reload_time_ms: i32,
     pub reload_empty_time_ms: i32,
     pub clip_size: i32,
@@ -275,6 +281,9 @@ impl WeaponCombatFacts {
             fire_delay_ms: 0,
             raise_time_ms: 0,
             drop_time_ms: 0,
+            alternate_weapon: 0,
+            alternate_raise_time_ms: 0,
+            alternate_drop_time_ms: 0,
             reload_time_ms: 0,
             reload_empty_time_ms: 0,
             clip_size: 0,
@@ -385,6 +394,9 @@ impl WeaponCombatFacts {
             fire_delay_ms: input.fire_delay_ms,
             raise_time_ms: input.raise_time_ms,
             drop_time_ms: input.drop_time_ms,
+            alternate_weapon: input.alternate_weapon,
+            alternate_raise_time_ms: input.alternate_raise_time_ms,
+            alternate_drop_time_ms: input.alternate_drop_time_ms,
             reload_time_ms: input.reload_time_ms,
             reload_empty_time_ms: input.reload_empty_time_ms,
             clip_size: input.clip_size,
@@ -623,6 +635,8 @@ pub struct WeaponCmd {
     pub cmd_weapon_pistol_quick: bool,
 
     pub switch_raise_time_ms: i32,
+    pub switch_alternate_raise_time_ms: i32,
+    pub alternate_switch: bool,
 
     pub switch_quick_raise_time_ms: i32,
 
@@ -656,6 +670,8 @@ impl Default for WeaponCmd {
             cmd_weapon_owned: false,
             cmd_weapon_pistol_quick: false,
             switch_raise_time_ms: 0,
+            switch_alternate_raise_time_ms: 0,
+            alternate_switch: false,
             switch_quick_raise_time_ms: 0,
             offhand: crate::offhand::OffhandCmd::default(),
             perks0: 0,
@@ -731,6 +747,7 @@ pub enum WeaponTickEvent {
     DropFinished,
 
     PutawayStarted,
+    AlternateStarted,
 
     RaiseStarted,
 
@@ -879,11 +896,13 @@ pub fn pm_weapon_ordinary(
                     event = Some(WeaponTickEvent::DropFinished);
                 } else {
                     crate::weapon_change::finish_putaway_to_cmd(hand, cmd);
-                    event = if hand.weapon != 0 {
-                        Some(WeaponTickEvent::RaiseStarted)
-                    } else {
-                        Some(WeaponTickEvent::DropFinished)
-                    };
+                    if event != Some(WeaponTickEvent::AlternateStarted) {
+                        event = if hand.weapon != 0 {
+                            Some(WeaponTickEvent::RaiseStarted)
+                        } else {
+                            Some(WeaponTickEvent::DropFinished)
+                        };
+                    }
                 }
             }
         }

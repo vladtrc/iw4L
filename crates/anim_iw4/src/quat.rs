@@ -32,32 +32,12 @@ pub fn quat_add_weighted(acc: Quat, q: Quat, weight: f32) -> Quat {
     ]
 }
 
-pub fn slerp(a: Quat, b: Quat, t: f32) -> Quat {
-    let mut b = b;
-    let mut dot = quat_dot(a, b);
-    if dot < 0.0 {
-        b = quat_neg(b);
-        dot = -dot;
-    }
-    if dot > 0.9995 {
-        return normalize([
-            a[0] + t * (b[0] - a[0]),
-            a[1] + t * (b[1] - a[1]),
-            a[2] + t * (b[2] - a[2]),
-            a[3] + t * (b[3] - a[3]),
-        ]);
-    }
-    let theta_0 = libm::acosf(dot.clamp(-1.0, 1.0));
-    let theta = theta_0 * t;
-    let sin_theta = libm::sinf(theta);
-    let sin_theta_0 = libm::sinf(theta_0);
-    let s0 = libm::cosf(theta) - dot * sin_theta / sin_theta_0;
-    let s1 = sin_theta / sin_theta_0;
+pub fn lerp_quat(a: Quat, b: Quat, t: f32) -> Quat {
     [
-        s0 * a[0] + s1 * b[0],
-        s0 * a[1] + s1 * b[1],
-        s0 * a[2] + s1 * b[2],
-        s0 * a[3] + s1 * b[3],
+        a[0] + t * (b[0] - a[0]),
+        a[1] + t * (b[1] - a[1]),
+        a[2] + t * (b[2] - a[2]),
+        a[3] + t * (b[3] - a[3]),
     ]
 }
 

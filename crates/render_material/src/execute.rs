@@ -43,7 +43,7 @@ impl GfxPassStateBits {
                     || !colour_dst.is_known()
                     || (alpha_blend_op != 0 && (!alpha_src.is_known() || !alpha_dst.is_known()))),
             unknown_blend_operation: blend_op > 5 || (blend_op != 0 && alpha_blend_op > 5),
-            stencil: self.word1 & 0xc0 != 0,
+            stencil: false,
         };
         fields.any().then_some(fields)
     }

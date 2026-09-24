@@ -40,6 +40,9 @@ pub fn depth_range_type_for_draw(kind: &RetainedDrawKind, key: u64) -> i32 {
             let object_id = dpvs_iw4::GfxDrawSurf { packed: key }.object_id();
             depth_range_type_from_hack_flags(host_viewmodel_render_fx_flags(object_id))
         }
+        RetainedDrawKind::CodeMesh {
+            viewmodel: true, ..
+        } => GFX_DEPTH_RANGE_VIEWMODEL,
         _ => GFX_DEPTH_RANGE_SCENE,
     }
 }

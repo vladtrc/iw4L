@@ -411,8 +411,16 @@ pub(crate) fn mix_draw_membership(id: &mut u64, item: &RetainedDrawItem) {
             surface, object_id, ..
         } => (2, u64::from(surface), u64::from(object_id), 0),
         RetainedDrawKind::CodeMesh {
-            draw, arg_count, ..
-        } => (3, u64::from(draw), u64::from(arg_count), 0),
+            draw,
+            arg_count,
+            viewmodel,
+            ..
+        } => (
+            3,
+            u64::from(draw),
+            u64::from(arg_count),
+            u64::from(viewmodel),
+        ),
         RetainedDrawKind::ParticleCloud { draw, .. } => (4, u64::from(draw), 0, 0),
         RetainedDrawKind::MarkMesh { draw, .. } => (5, u64::from(draw), 0, 0),
         RetainedDrawKind::Glass {
@@ -477,6 +485,7 @@ fn fx_lane_layout_hash(
             }
             super::list::mix_content_id(&mut id, i as u64);
             super::list::mix_content_id(&mut id, u64::from(draw.material));
+            super::list::mix_content_id(&mut id, u64::from(draw.viewmodel));
             let mat = plan.materials.get(draw.material as usize);
             super::list::mix_content_id(&mut id, u64::from(mat.map(|m| m.sort_key).unwrap_or(0)));
             super::list::mix_content_id(
@@ -1969,6 +1978,7 @@ pub(crate) fn rebuild_fx_draw_lane(
                 key,
                 material_sorted_index,
                 RetainedDrawKind::CodeMesh {
+                    viewmodel: draw.viewmodel,
                     draw: i as u32,
                     material: draw.material,
                     arg_count: n as u8,

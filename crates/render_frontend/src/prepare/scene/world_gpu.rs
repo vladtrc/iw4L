@@ -15,6 +15,7 @@ pub(crate) fn overlay_is_quiet(ready: bool, quiet: u32) -> bool {
 pub struct WorldGpuWait {
     started: Option<std::time::Instant>,
     quiet: u32,
+    pipelines_at_arm: Option<u32>,
     stage: Option<assets::StageHandle>,
     images_stage: Option<assets::StageHandle>,
     pipelines_stage: Option<assets::StageHandle>,
@@ -24,6 +25,7 @@ impl WorldGpuWait {
     pub fn arm(&mut self, progress: Option<&assets::LoadProgress>) {
         self.started = Some(std::time::Instant::now());
         self.quiet = 0;
+        self.pipelines_at_arm = None;
         // A wait that never reached its gate before the world changed under it
         // was interrupted; it did not quietly succeed.
         for stage in [
@@ -48,6 +50,10 @@ impl WorldGpuWait {
 
     pub(crate) fn quiet(&self) -> u32 {
         self.quiet
+    }
+
+    pub(crate) fn pipelines_added(&self, now: u32) -> Option<u32> {
+        self.pipelines_at_arm.map(|at| now.saturating_sub(at))
     }
 
     pub(crate) fn elapsed(&self) -> std::time::Duration {
@@ -215,6 +221,9 @@ pub(crate) fn poll(
     gap_ms: f32,
 ) -> bool {
     if let Some(gpu) = gpu {
+        if wait.pipelines_at_arm.is_none() {
+            wait.pipelines_at_arm = Some(gpu.pipeline_n);
+        }
         // Residency and warmth are gauges: what is on the GPU right now. They
         // may fall between frames, and it is the existing gate — `gpu.images`,
         // `gpu.pipelines` — that says the wait is over, never count equality.

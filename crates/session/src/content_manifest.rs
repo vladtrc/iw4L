@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use assets::{AssetKey, AssetKind, WeaponRegistry};
 use bevy::prelude::Resource;
 
-pub const SESSION_MANIFEST_SCHEME: u32 = 1;
+pub const SESSION_MANIFEST_SCHEME: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeRuleset {
@@ -41,6 +41,7 @@ pub struct SessionWeaponManifestRow {
     pub id: SessionWeaponId,
     pub key: AssetKey,
     pub attachments: Vec<String>,
+    pub alternate: bool,
     pub authority: ManifestFact<AuthorityWeaponProfile>,
 
     pub presentation: ManifestFact<u64>,
@@ -62,17 +63,17 @@ pub struct SessionContentManifest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionManifestError {
     MissingWeaponKey(SessionWeaponId),
-    DuplicateWeaponKey(AssetKey, Vec<String>),
+    DuplicateWeaponKey(AssetKey, Vec<String>, bool),
 }
 
 impl core::fmt::Display for SessionManifestError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::MissingWeaponKey(id) => write!(f, "session weapon {} has no durable key", id.0),
-            Self::DuplicateWeaponKey(key, attachments) => {
+            Self::DuplicateWeaponKey(key, attachments, alternate) => {
                 write!(
                     f,
-                    "duplicate durable session weapon key `{key}` [{}]",
+                    "duplicate durable session weapon key `{key}` [{}] alternate={alternate}",
                     attachments.join(" ")
                 )
             }
@@ -106,8 +107,15 @@ impl SessionContentManifest {
                 .key_of(raw_id)
                 .ok_or(SessionManifestError::MissingWeaponKey(id))?;
             let attachments = registry.prepared_attachments_of(raw_id).to_vec();
-            if !keys.insert((key.clone(), attachments.clone())) {
-                return Err(SessionManifestError::DuplicateWeaponKey(key, attachments));
+            let alternate = registry
+                .facts_of(raw_id)
+                .is_some_and(|facts| facts.inventory_type == 3);
+            if !keys.insert((key.clone(), attachments.clone(), alternate)) {
+                return Err(SessionManifestError::DuplicateWeaponKey(
+                    key,
+                    attachments,
+                    alternate,
+                ));
             }
             let authority = if combat
                 .get(raw_id as usize)
@@ -128,6 +136,7 @@ impl SessionContentManifest {
                 id,
                 key,
                 attachments,
+                alternate,
                 authority,
                 presentation: ManifestFact::Unavailable(
                     ManifestGap::AtomicWeaponPresentationBundleNotInstalled,
@@ -178,6 +187,7 @@ impl SessionContentManifest {
             for name in &row.attachments {
                 digest.bytes(name.as_bytes());
             }
+            digest.byte(u8::from(row.alternate));
             digest.authority_fact(&row.authority);
             digest.u64_fact(&row.presentation);
         }

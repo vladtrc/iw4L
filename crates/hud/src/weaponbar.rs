@@ -72,6 +72,7 @@ fn hide(pass: &mut HudTessPass) {
 }
 
 struct WeaponbarExprHost<'a> {
+    weapons: Option<&'a PreparedWeapons>,
     ps: Option<&'a PlayerState>,
     input: Option<&'a frame::HudInputView>,
     ms: i32,
@@ -110,15 +111,13 @@ impl ExprHost for WeaponbarExprHost<'_> {
                     .ok()
                     .and_then(|i| ps.action_slot_type.get(i))
             })
-            .is_some_and(|kind| !matches!(kind, 0 | 1))
+            .is_some_and(|kind| !matches!(kind, 0 | 1 | 2))
         {
-            return Err(ExprError::Host(
-                "alternate/nightvision action slot not hosted",
-            ));
+            return Err(ExprError::Host("nightvision action slot not hosted"));
         }
         Ok(i32::from(
             self.ps
-                .and_then(|ps| action_slot_weapon(ps, slot - 1))
+                .and_then(|ps| action_slot_weapon(ps, slot - 1, self.weapons))
                 .is_some(),
         ))
     }
@@ -182,12 +181,18 @@ impl ExprHost for WeaponbarExprHost<'_> {
     fn weapon_lock(&self) -> Result<hud_iw4::WeaponLockView, ExprError> {
         self.lock.ok_or(ExprError::Host("weapon lock"))
     }
+    fn emp_jammed(&self) -> Result<i32, ExprError> {
+        Ok(i32::from(
+            self.ps.is_some_and(|ps| ps.other_flags & 0x400 != 0),
+        ))
+    }
     fn dvar_int(&self, name: &str) -> Result<i32, ExprError> {
         if name.eq_ignore_ascii_case("scr_gameended") {
             Ok(i32::from(self.game_ended))
         } else if name.eq_ignore_ascii_case("g_hardcore")
             || name.eq_ignore_ascii_case("onlinegame")
             || name.eq_ignore_ascii_case("xblive_privatematch")
+            || name.eq_ignore_ascii_case("cg_thirdPersonSpectator")
         {
             Ok(0)
         } else if name.eq_ignore_ascii_case("scr_showperksonspawn") {
@@ -480,7 +485,14 @@ fn background_stem(background: &str) -> Option<String> {
 
 const WEAPOVERLAYINTERFACE_JAVELIN: i32 = 1;
 
-fn weapon_lock_view(ps: &PlayerState, weapons: &PreparedWeapons) -> hud_iw4::WeaponLockView {
+fn weapon_lock_view(
+    ps: &PlayerState,
+    weapons: &PreparedWeapons,
+    meta: Option<&sim::ClientSnapshotMeta>,
+    time_ms: i32,
+    projection: Option<&Projection>,
+    surface: &crate::surface::Hud2dSurface,
+) -> hud_iw4::WeaponLockView {
     let viewmodel = bg_get_viewmodel_weapon_index(ps);
     let ads_javelin = viewmodel > 0
         && ps.f_weapon_pos_frac == 1.0
@@ -488,9 +500,35 @@ fn weapon_lock_view(ps: &PlayerState, weapons: &PreparedWeapons) -> hud_iw4::Wea
             .0
             .facts_of(viewmodel)
             .is_some_and(|facts| facts.overlay_interface == WEAPOVERLAYINTERFACE_JAVELIN);
+    let lock = meta
+        .map(|m| m.weapon_lock)
+        .filter(|lock| lock.weapon == ps.weapon && ps.health > 0)
+        .unwrap_or_default();
+    let mut screen_pos = [0.0; 2];
+    if lock.flags & 3 != 0 {
+        if let Some(Projection::Perspective(projection)) = projection {
+            let eye = Vec3::from_array(ps.origin) + Vec3::Z * ps.view_height_current;
+            let delta = Vec3::from_array(lock.target) - eye;
+            let (forward, right, up) = math_iw4::angle_vectors(ps.viewangles);
+            let depth = delta.dot(Vec3::from_array(forward));
+            if depth > 0.0 {
+                let scale = surface.height() * 0.5 / ((projection.fov * 0.5).tan() * depth);
+                screen_pos = [
+                    surface.width() * 0.5 + delta.dot(Vec3::from_array(right)) * scale,
+                    surface.height() * 0.5 - delta.dot(Vec3::from_array(up)) * scale,
+                ];
+            }
+        }
+    }
     hud_iw4::WeaponLockView {
         ads_javelin,
-        ..Default::default()
+        time_ms,
+        attack_top: lock.flags & 4 != 0,
+        attack_direct: lock.flags & 8 != 0,
+        locking: lock.locking(),
+        locked: lock.locked(),
+        too_close: lock.too_close(),
+        screen_pos,
     }
 }
 
@@ -499,9 +537,10 @@ fn ammo_hud_hidden(ps: &PlayerState) -> bool {
 }
 
 #[derive(bevy::ecs::system::SystemParam)]
-pub(crate) struct WeaponbarInput<'w> {
+pub(crate) struct WeaponbarInput<'w, 's> {
     select: Res<'w, CgWeaponSelect>,
     input: Option<Res<'w, frame::HudInputView>>,
+    cameras: Query<'w, 's, &'static Projection, With<Camera3d>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -566,6 +605,7 @@ pub(crate) fn update_weaponbar(
         .map(|w| offhand_ammo(ps, w, ps.offhand_secondary))
         .unwrap_or(0);
     let mut host = WeaponbarExprHost {
+        weapons: weapons.as_deref(),
         ps: Some(ps),
         input: client_input.input.as_deref(),
         ms: sys_milliseconds() as i32,
@@ -586,7 +626,16 @@ pub(crate) fn update_weaponbar(
         lock: Some(
             weapons
                 .as_deref()
-                .map(|weapons| weapon_lock_view(ps, weapons))
+                .map(|weapons| {
+                    weapon_lock_view(
+                        ps,
+                        weapons,
+                        meta,
+                        cg_clock.time(),
+                        client_input.cameras.iter().next(),
+                        &surface,
+                    )
+                })
                 .unwrap_or_default(),
         ),
         frag_ammo,
@@ -648,7 +697,10 @@ pub(crate) fn update_weaponbar(
         });
     }
 
-    if let Some(menu) = catalog.get("dpad_hd") {
+    for name in ["dpad_hd", "javelin_overlay_hd"] {
+        let Some(menu) = catalog.get(name) else {
+            continue;
+        };
         host.menu = Some(menu);
         let mut hook = |args: OwnerDrawArgs<'_>, frame: &mut ChromeFrame| {
             paint_owner(&owner_state, args, frame)
@@ -787,9 +839,25 @@ pub(crate) fn update_weaponbar(
     pass.weaponbar = TessJob::Quads(quads);
 }
 
-fn action_slot_weapon(ps: &PlayerState, slot: i32) -> Option<u32> {
+fn action_slot_weapon(
+    ps: &PlayerState,
+    slot: i32,
+    weapons: Option<&PreparedWeapons>,
+) -> Option<u32> {
     let slot = usize::try_from(slot).ok()?;
-    if ps.action_slot_type.get(slot) != Some(&1) || ps.weap_flags & 2 != 0 {
+    if ps.weap_flags & 2 != 0 {
+        return None;
+    }
+    if ps.action_slot_type.get(slot) == Some(&2) {
+        let weapons = &weapons?.0;
+        let weapon = if weapons.facts_of(ps.weapon)?.inventory_type == 3 {
+            ps.weapon_primary
+        } else {
+            weapons.alternate_of(ps.weapon)
+        };
+        return (weapon != 0).then_some(weapon);
+    }
+    if ps.action_slot_type.get(slot) != Some(&1) {
         return None;
     }
     let weapon = *ps.action_slot_param.get(slot)?;
@@ -805,11 +873,12 @@ fn paint_action_slot(
         .ps
         .action_slot_type
         .get((args.item.owner_draw - 171) as usize)
-        .is_some_and(|kind| !matches!(kind, 0 | 1))
+        .is_some_and(|kind| !matches!(kind, 0 | 1 | 2))
     {
         return OwnerDrawPaint::Gap(ChromeGapKind::OwnerDraw);
     }
-    let Some(weapon) = action_slot_weapon(state.ps, args.item.owner_draw - 171) else {
+    let Some(weapon) = action_slot_weapon(state.ps, args.item.owner_draw - 171, state.weapons)
+    else {
         return OwnerDrawPaint::Painted;
     };
     let Some(weapons) = state.weapons else {

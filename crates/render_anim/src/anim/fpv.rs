@@ -175,6 +175,8 @@ pub struct FpvAuthoritySample {
     pub perks0: u32,
 
     pub clip_ammo: Option<i32>,
+
+    pub left_clip_ammo: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -238,7 +240,7 @@ pub enum WeapAnimEdge {
 
     Idle,
 
-    EmptyIdle,
+    ForceIdle,
 
     Dispatch(usize),
 }
@@ -382,20 +384,14 @@ pub fn tick_equipped_fpv_with_extra_events(
                     present.last_weap_anim = None;
                 }
             }
-            WeapAnimEdge::EmptyIdle => {
-                equipped.controller.apply_empty_idle_weap_anim();
+            WeapAnimEdge::ForceIdle => {
+                equipped
+                    .controller
+                    .apply_force_idle_weap_anim(sample.clip_ammo == Some(0));
             }
             WeapAnimEdge::Dispatch(slot) => {
                 report_dispatch_slot(slot, equipped.controller.dispatch_sz_xanim_index(slot));
             }
-        }
-    }
-    if let Some(sample) = sample {
-        reconcile_sprint_latch(&mut equipped.controller, sample.sprinting);
-        if let Some(left) = equipped.left.as_mut()
-            && sample.last_weapon_hand == 1
-        {
-            reconcile_sprint_latch(left, sample.sprinting);
         }
     }
     let crate::AdvanceResult { notifies } = equipped.controller.advance(dt_secs);
@@ -410,12 +406,12 @@ pub fn tick_equipped_fpv_with_extra_events(
             match present.observe_weap_anim_secondary_edge(sample.weap_anim_secondary) {
                 WeapAnimEdge::Unchanged => {}
                 WeapAnimEdge::Idle => {
-                    if !left.apply_idle_weap_anim(false) {
+                    if !left.apply_idle_weap_anim(sample.left_clip_ammo == Some(0)) {
                         present.last_weap_anim_secondary = None;
                     }
                 }
-                WeapAnimEdge::EmptyIdle => {
-                    left.apply_empty_idle_weap_anim();
+                WeapAnimEdge::ForceIdle => {
+                    left.apply_force_idle_weap_anim(sample.left_clip_ammo == Some(0));
                 }
                 WeapAnimEdge::Dispatch(slot) => {
                     report_dispatch_slot(slot, left.dispatch_sz_xanim_index(slot));
@@ -429,21 +425,6 @@ pub fn tick_equipped_fpv_with_extra_events(
     (sample_pose(&equipped.controller), notifies)
 }
 
-fn reconcile_sprint_latch(controller: &mut ViewmodelController, sprinting: bool) {
-    if sprinting {
-        return;
-    }
-    if matches!(
-        controller.state(),
-        WeaponState::SprintIn | WeaponState::SprintLoop
-    ) {
-        report_fpv_event_result(
-            PresentFpvEvent::SprintOut,
-            controller.handle(ViewmodelEvent::SprintOut),
-        );
-    }
-}
-
 fn observe_weap_anim_edge_on(previous: &mut Option<i32>, raw: i32) -> WeapAnimEdge {
     let last = previous.replace(raw);
     if last == Some(raw) {
@@ -452,7 +433,7 @@ fn observe_weap_anim_edge_on(previous: &mut Option<i32>, raw: i32) -> WeapAnimEd
     let masked = raw as u32 & weapon_iw4::WEAP_ANIM_EVENT_MASK;
     match masked {
         0 => WeapAnimEdge::Idle,
-        1 => WeapAnimEdge::EmptyIdle,
+        1 => WeapAnimEdge::ForceIdle,
         _ => match weapon_iw4::slot_for_weap_anim_event(masked) {
             Some(slot) => WeapAnimEdge::Dispatch(slot),
             None => WeapAnimEdge::Idle,

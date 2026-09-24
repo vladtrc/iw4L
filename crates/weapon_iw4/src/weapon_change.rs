@@ -91,7 +91,17 @@ pub fn pm_weapon_check_for_change(
         }
         if cmd_w == 0 || cmd.cmd_weapon_owned {
             let quick = cmd.mantle_quick_raise || cmd.cmd_weapon_pistol_quick;
-            return pm_begin_weapon_change(hand, facts, cmd_w, quick, cmd.pm_flags);
+            let event = pm_begin_weapon_change(hand, facts, cmd_w, quick, cmd.pm_flags);
+            if cmd.alternate_switch
+                && event.is_some()
+                && cmd.pm_flags & crate::sprint::PMF_SPRINTING == 0
+            {
+                hand.weaponstate = WeaponState::DroppingAltswitch as i32;
+                hand.weapon_time = facts.alternate_drop_time_ms;
+                crate::weap_anim::pm_start_weapon_anim(&mut hand.weap_anim, 0x11);
+                return Some(WeaponTickEvent::AlternateStarted);
+            }
+            return event;
         }
         return None;
     }
@@ -180,16 +190,27 @@ pub fn finish_putaway_to_cmd(hand: &mut WeaponHandState, cmd: &WeaponCmd) {
     }
 
     let quick = hand.weaponstate == WeaponState::DroppingQuick as i32;
+    let alternate = hand.weaponstate == WeaponState::DroppingAltswitch as i32;
     hand.weapon = new_weapon;
     hand.weapon_delay = 0;
     hand.shot_count = 0;
     hand.burst_latch = false;
     hand.rechamber_pending = false;
-    hand.weaponstate = WeaponState::Raising as i32;
-    hand.weapon_time = raise_time_for_cmd(cmd, quick);
+    hand.weaponstate = if alternate {
+        WeaponState::RaisingAltswitch
+    } else {
+        WeaponState::Raising
+    } as i32;
+    hand.weapon_time = if alternate {
+        cmd.switch_alternate_raise_time_ms
+    } else {
+        raise_time_for_cmd(cmd, quick)
+    };
     crate::weap_anim::pm_start_weapon_anim(
         &mut hand.weap_anim,
-        if quick {
+        if alternate {
+            0x12
+        } else if quick {
             crate::weap_anim::weap_anim_event::QUICK_RAISE
         } else {
             crate::weap_anim::weap_anim_event::RAISE

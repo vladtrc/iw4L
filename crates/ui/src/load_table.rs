@@ -102,6 +102,7 @@ fn stage_name(id: StageId) -> &'static str {
         StageId::GpuTextures => "GPU textures",
         StageId::Pipelines => "Pipelines",
         StageId::RenderFrames => "Render frames",
+        StageId::FirstPerson => "First person",
         StageId::Audio => "Audio",
         StageId::Navigation => "Navigation",
         StageId::Admission => "Admission",
@@ -113,6 +114,7 @@ fn count_unit(id: StageId) -> &'static str {
     match id {
         StageId::Navigation => "edges",
         StageId::RenderFrames => "frames",
+        StageId::FirstPerson => "models",
         StageId::Images | StageId::WorldImages | StageId::GpuTextures => "images",
         StageId::Pipelines => "pipelines",
         StageId::Shaders | StageId::Programs | StageId::ProgramMerge => "programs",

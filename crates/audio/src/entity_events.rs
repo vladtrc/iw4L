@@ -1,4 +1,7 @@
-use assets::{LinkedNotetrackAction, PreparedWeapons, WeaponSoundSlot};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use assets::{PreparedWeapons, WeaponSoundSlot};
 use bevy::prelude::*;
 use net::{CEntity, EntityEventKind, LocalPresentClient, PresentedSnapshot};
 
@@ -290,62 +293,223 @@ pub(crate) fn register_entity_event_audio(app: &mut App) {
         .add_observer(cg_grenade_contact);
 }
 
+#[derive(Clone, Debug)]
+enum NotetrackSound {
+    Bound(usize),
+    Unbound(String),
+}
+
+#[derive(Clone, Debug)]
+struct BoundNotetrack {
+    sound: Option<NotetrackSound>,
+    rumble: Option<Result<Arc<crate::rumble::Rumble>, String>>,
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct NotetrackSoundTable {
+    owner: Option<(Arc<assets::SoundCatalog>, Arc<assets::WeaponRegistry>)>,
+    actions: HashMap<(u32, String), BoundNotetrack>,
+    reported: HashSet<(u32, String)>,
+}
+
+impl NotetrackSoundTable {
+    fn owns(
+        &self,
+        bank: &Arc<assets::SoundCatalog>,
+        weapons: &Arc<assets::WeaponRegistry>,
+    ) -> bool {
+        self.owner
+            .as_ref()
+            .is_some_and(|(b, w)| Arc::ptr_eq(b, bank) && Arc::ptr_eq(w, weapons))
+    }
+
+    fn bind(bank: &Arc<assets::SoundCatalog>, weapons: &Arc<assets::WeaponRegistry>) -> Self {
+        let mut actions = HashMap::new();
+        let mut unbound = 0usize;
+        let mut rumbles = HashMap::new();
+        for weapon in 1..=weapons.len() as u32 {
+            let namespace = weapons
+                .namespace_of(weapon)
+                .unwrap_or(assets::AssetNamespace::Iw4);
+            for (note, action) in weapons.notetrack_actions_of(weapon) {
+                let sound = action.sound_alias.as_deref().map(|alias| {
+                    match bank.index_in(namespace, alias) {
+                        Some(index) => NotetrackSound::Bound(index),
+                        None => {
+                            unbound += 1;
+                            NotetrackSound::Unbound(alias.to_owned())
+                        }
+                    }
+                });
+                actions.insert(
+                    (weapon, note.to_owned()),
+                    BoundNotetrack {
+                        sound,
+                        rumble: action.rumble_alias.as_ref().map(|alias| {
+                            rumbles
+                                .entry((namespace, alias.clone()))
+                                .or_insert_with(|| {
+                                    crate::rumble::Rumble::prepare(bank, namespace, alias)
+                                })
+                                .clone()
+                        }),
+                    },
+                );
+            }
+        }
+        for ((namespace, alias), rumble) in &rumbles {
+            if let Err(error) = rumble {
+                diag::warn!(
+                    Audio,
+                    "audio: {namespace:?} rumble `{alias}` refused during binding: {error}"
+                );
+            }
+        }
+        diag::info!(
+            Audio,
+            "audio: viewmodel notetracks bound to the sound bank: actions={} unbound_sounds={unbound} rumbles={} refused_rumbles={}",
+            actions.len(),
+            rumbles.len(),
+            rumbles.values().filter(|value| value.is_err()).count()
+        );
+        Self {
+            owner: Some((Arc::clone(bank), Arc::clone(weapons))),
+            actions,
+            reported: HashSet::new(),
+        }
+    }
+
+    fn report_once(&mut self, weapon: u32, note: &str, message: impl FnOnce() -> String) {
+        if self.reported.insert((weapon, note.to_owned())) {
+            diag::warn!(Audio, "{}", message());
+        }
+    }
+}
+
+pub(crate) fn bind_notetrack_sounds(
+    bank: Option<Res<SoundBank>>,
+    weapons: Option<Res<PreparedWeapons>>,
+    mut table: ResMut<NotetrackSoundTable>,
+) {
+    let (Some(bank), Some(weapons)) = (bank, weapons) else {
+        if table.owner.is_some() {
+            *table = NotetrackSoundTable::default();
+        }
+        return;
+    };
+    if table.owns(&bank.0, &weapons.0) {
+        return;
+    }
+    *table = NotetrackSoundTable::bind(&bank.0, &weapons.0);
+}
+
 pub(crate) fn play_viewmodel_notetrack_messages(
     mut notes: MessageReader<crate::ViewmodelNotetracks>,
+    generation: Res<frame::WorldGeneration>,
+    presented: Res<net::PresentedSnapshot>,
+    local: Res<net::LocalPresentClient>,
     weapons: Option<Res<PreparedWeapons>>,
-    mut output: MessageWriter<WeaponSound>,
+    bank: Option<Res<SoundBank>>,
+    mut table: ResMut<NotetrackSoundTable>,
+    mut output: MessageWriter<crate::BoundWeaponSound>,
+    mut rumbles: MessageWriter<crate::rumble::PlayRumble>,
 ) {
+    let bound_bank = bank
+        .as_deref()
+        .zip(weapons.as_deref())
+        .filter(|(bank, weapons)| table.owns(&bank.0, &weapons.0))
+        .map(|(bank, _)| Arc::clone(&bank.0));
     for batch in notes.read() {
-        let namespace = weapons
-            .as_deref()
-            .and_then(|weapons| weapons.0.namespace_of(batch.weapon))
-            .unwrap_or(assets::AssetNamespace::Iw4);
+        if batch.generation != *generation
+            || batch.client != local.0
+            || !presented
+                .snapshot()
+                .and_then(|snapshot| snapshot.meta.for_client(local.0))
+                .is_some_and(|meta| {
+                    meta.life_sequence == batch.life
+                        && meta.lifecycle == sim::ClientLifecycle::Alive
+                })
+        {
+            continue;
+        }
         for name in &batch.names {
-            let action = weapons
-                .as_deref()
-                .and_then(|weapons| weapons.0.notetrack_action_of(batch.weapon, name));
-            apply_viewmodel_notetrack(name, action, namespace, &mut output);
+            apply_viewmodel_notetrack(
+                batch.weapon,
+                name,
+                bound_bank.as_deref(),
+                &mut table,
+                &mut output,
+                &mut rumbles,
+            );
         }
     }
 }
 
 fn apply_viewmodel_notetrack(
+    weapon: u32,
     note: &str,
-    action: Option<&LinkedNotetrackAction>,
-    namespace: assets::AssetNamespace,
-    output: &mut MessageWriter<WeaponSound>,
+    bank: Option<&assets::SoundCatalog>,
+    table: &mut NotetrackSoundTable,
+    output: &mut MessageWriter<crate::BoundWeaponSound>,
+    rumbles: &mut MessageWriter<crate::rumble::PlayRumble>,
 ) {
     if note.eq_ignore_ascii_case("end") {
         return;
     }
     if note.eq_ignore_ascii_case("NVG_on_powerup") || note.eq_ignore_ascii_case("NVG_off_powerdown")
     {
-        diag::warn!(
-            Audio,
-            "audio: NVG notetrack `{note}` has no cgMedia alias (typed gap)"
-        );
+        table.report_once(weapon, note, || {
+            format!("audio: NVG notetrack `{note}` has no cgMedia alias (typed gap)")
+        });
     }
-    let rumble = action.and_then(|action| action.rumble_alias.as_deref());
-    if let Some(rumble) = rumble {
-        diag::warn!(
-            Audio,
-            "audio: notetrack rumble `{rumble}` is not ported (typed gap)"
-        );
-    }
-    if let Some(alias) = action.and_then(|action| action.sound_alias.as_deref()) {
-        output.write(WeaponSound {
-            namespace,
-            alias: alias.to_owned(),
-            origin_inches: None,
-            snd_ent: Some(crate::SND_ENT_LOCAL),
+    let Some(bank) = bank else {
+        table.report_once(weapon, note, || {
+            format!("audio: notetrack `{note}` dropped — notetracks are not bound to the installed sound bank")
         });
         return;
+    };
+    let key = (weapon, note.to_ascii_lowercase());
+    let Some(action) = table.actions.get(&key).cloned() else {
+        table.report_once(weapon, note, || {
+            format!("audio: notetrack `{note}` has no sound or rumble mapping")
+        });
+        return;
+    };
+    if let Some(rumble) = &action.rumble {
+        match rumble {
+            Ok(rumble) => {
+                rumbles.write(crate::rumble::PlayRumble {
+                    bank_revision: bank.revision(),
+                    rumble: Arc::clone(rumble),
+                });
+            }
+            Err(error) => table.report_once(weapon, note, || {
+                format!("audio: notetrack `{note}` rumble refused: {error}")
+            }),
+        }
     }
-    if rumble.is_none() {
-        diag::warn!(
-            Audio,
-            "audio: notetrack `{note}` has no sound or rumble mapping"
-        );
+    match action.sound {
+        Some(NotetrackSound::Bound(index)) => {
+            output.write(crate::BoundWeaponSound {
+                bank_revision: bank.revision(),
+                index,
+                origin_inches: None,
+                snd_ent: Some(crate::SND_ENT_LOCAL),
+            });
+        }
+        Some(NotetrackSound::Unbound(alias)) => {
+            table.report_once(weapon, note, || {
+                format!(
+                    "audio: notetrack `{note}` sound `{alias}` is not in the sound bank (refused when bound)"
+                )
+            });
+        }
+        None if action.rumble.is_none() => {
+            table.report_once(weapon, note, || {
+                format!("audio: notetrack `{note}` has no sound or rumble mapping")
+            });
+        }
+        None => {}
     }
 }
 

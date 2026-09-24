@@ -210,6 +210,7 @@ pub struct CgWeaponSelect {
     pub held_index: u32,
 
     pub last_primary: u32,
+    pub mapped_index: u32,
 }
 
 pub fn cg_follow_held_weapon_select(
@@ -226,6 +227,7 @@ pub fn cg_follow_held_weapon_select(
         || (select.index == select.held_index && ps_weapon != select.held_index)
     {
         select.index = ps_weapon;
+        select.mapped_index = ps_weapon;
         select.last_primary = 0;
         select.life_sequence = life_sequence;
         select.time = cg_time;
@@ -270,6 +272,7 @@ pub fn cg_cycle_weapon_select(
     let Some(target) = cycle_weapon(
         &ps.weapons,
         select.index,
+        select.mapped_index,
         select.last_primary,
         next,
         |weapon| facts(weapon).inventory_type,
@@ -292,6 +295,7 @@ pub fn cg_cycle_weapon_select(
             select.last_primary = select.index;
         }
         select.index = target;
+        select.mapped_index = target;
         input_iw4::cl_set_ads(input, false);
     }
 }
@@ -722,6 +726,7 @@ pub fn sample_client_input(
     push_phase(trace, "Input");
     if !gate.local_cmds_enabled {
         actions.client.weapon_cycles.clear();
+        actions.client.action_slots.clear();
         return;
     }
     actions.frame_msec = key_frame_msec(time.delta_secs());
@@ -780,6 +785,60 @@ pub fn sample_client_input(
         .map(|meta| meta.life_sequence.0)
         .unwrap_or(0);
     cg_follow_held_weapon_select(&mut select, ps_weapon, life_sequence, clock.time());
+    if let Some(ps) = ps {
+        if select.index == ps.weapon {
+            select.mapped_index = if prediction
+                .0
+                .world()
+                .weapon_combat_row(ps.weapon)
+                .is_some_and(|facts| facts.inventory_type == 3)
+            {
+                ps.weapon_primary
+            } else {
+                ps.weapon
+            };
+        }
+    }
+    let slots = std::mem::take(&mut actions.client.action_slots);
+    if let Some(ps) = ps.filter(|_| !frozen) {
+        for slot in slots {
+            if !input_iw4::weapon_select::weapon_cycle_allowed(ps, clock.time(), select.time, 0, 0)
+            {
+                continue;
+            }
+            let target = match ps.action_slot_type.get(slot).copied() {
+                Some(1) => ps.action_slot_param[slot].max(0) as u32,
+                Some(2) => match prediction.0.world().weapon_combat_row(select.index) {
+                    Some(facts) if facts.inventory_type == 3 => select.mapped_index,
+                    Some(facts) => facts.alternate_weapon,
+                    None => 0,
+                },
+                _ => 0,
+            };
+            if target == 0 {
+                continue;
+            }
+            let parent = if ps.weapons.contains(&(target as i32)) {
+                target
+            } else {
+                select.mapped_index
+            };
+            let owned = ps.weapons.contains(&(parent as i32))
+                && (parent == target
+                    || prediction
+                        .0
+                        .world()
+                        .weapon_combat_row(parent)
+                        .is_some_and(|f| f.alternate_weapon == target));
+            if !owned {
+                continue;
+            }
+            select.index = target;
+            select.mapped_index = parent;
+            select.time = clock.time();
+            input_iw4::cl_set_ads(&mut actions.client, false);
+        }
+    }
     let cycles = std::mem::take(&mut actions.client.weapon_cycles);
     let in_killcam = view.is_some_and(|v| v.in_killcam());
     if let Some(ps) = ps {
@@ -808,7 +867,7 @@ pub fn sample_client_input(
     look.angles = cmd.angles;
 
     cmd.weapon = select.index as u16;
-    cmd.weapon_mapped = select.index as u16;
+    cmd.weapon_mapped = select.mapped_index as u16;
     if let Some(loadout) = presented
         .snapshot()
         .and_then(|snapshot| snapshot.meta.for_client(local.0))

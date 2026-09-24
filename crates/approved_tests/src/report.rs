@@ -375,7 +375,13 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
             .next()
             .and_then(|n| n.parse::<usize>().ok())
             .map_or(0, |n| n.saturating_sub(1));
-        let ticks = SCENARIO.scenes.get(index).map_or(0, |s| s.ticks);
+        let declared = SCENARIO.scenes.get(index);
+        let ticks = declared.map_or(0, |s| s.ticks);
+        let commands_move = declared.is_some_and(|s| {
+            s.hold
+                .iter()
+                .any(|h| matches!(*h, "+forward" | "+back" | "+moveleft" | "+moveright"))
+        });
         let phase_log = log.get(&phase);
         let spawn = phase_log
             .and_then(|l| l.forced_spawn.as_deref())
@@ -405,6 +411,25 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
                 .and_then(|s| s.num("local_deaths"))
                 .zip(done.and_then(|d| d.num("local_deaths")))
                 .is_some_and(|(a, b)| b > a);
+        let receipt = |key: &str| {
+            spawned
+                .and_then(|s| s.num(key))
+                .zip(done.and_then(|d| d.num(key)))
+                .map(|(a, b)| b - a)
+        };
+        let applied_cmds = receipt("local_cmds");
+        let moving_cmds = receipt("local_moving_cmds");
+        let path = receipt("local_path");
+        let input_applied = applied_cmds.is_some_and(|n| n >= 1.0)
+            && (!commands_move || moving_cmds.is_some_and(|n| n >= 1.0));
+        let moved = path.is_some_and(|p| p >= 32.0);
+        let outcome = match (input_applied, moved, died) {
+            (false, _, true) => "died_before_input",
+            (false, _, false) => "input_not_applied",
+            (true, true, _) => "moved",
+            (true, false, true) => "died",
+            (true, false, false) => "held_in_place",
+        };
         let lives = spawned
             .and_then(|s| s.num("local_life"))
             .zip(done.and_then(|d| d.num("local_life")))
@@ -433,9 +458,24 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
             json!({ "alive_at_end": done.and_then(|d| d.num("alive")) }),
         );
         asserts.check(
-            &format!("{phase}.input_moved_or_died"),
-            travel.is_some_and(|t| t >= 32.0) || died,
-            json!({ "travel_units": travel, "died": died }),
+            &format!("{phase}.input_applied"),
+            input_applied,
+            json!({
+                "applied_cmds": applied_cmds,
+                "moving_cmds": moving_cmds,
+                "scene_commands_move": commands_move,
+                "died": died,
+            }),
+        );
+        asserts.check(
+            &format!("{phase}.movement_observed"),
+            moved || died,
+            json!({
+                "outcome": outcome,
+                "path_units": path,
+                "net_displacement_units": travel,
+                "died": died,
+            }),
         );
 
         scene["observed"] = json!({
@@ -445,6 +485,10 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
             "at_inputs_done": done.map(facts),
             "ticks": tick_delta,
             "travel_units": travel,
+            "path_units": path,
+            "applied_cmds": applied_cmds,
+            "moving_cmds": moving_cmds,
+            "outcome": outcome,
             "died": died,
             "lives": lives,
             "kills_deaths_in_match": kills_deaths,

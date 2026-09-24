@@ -194,6 +194,7 @@ pub fn trace_leaf_mesh_into(
     let staged = ClipMeshRef {
         verts: mesh.verts,
         tri_indices: mesh.tri_indices,
+        tri_edge_is_walkable: mesh.tri_edge_is_walkable,
         tri_surface_flags: mesh.tri_surface_flags,
         tri_content_flags: mesh.tri_content_flags,
         aabb_trees: mesh.aabb_trees,

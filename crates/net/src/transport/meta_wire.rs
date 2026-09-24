@@ -1203,6 +1203,18 @@ fn encode_client_meta(out: &mut WireWriter, meta: &ClientSnapshotMeta) {
     out.put_u32(meta.player_card_icon);
     out.put_u32(meta.player_card_title);
     out.put_u32(meta.player_card_nameplate);
+    let lock = meta.weapon_lock;
+    out.put_u32(lock.weapon);
+    out.put_u32(lock.life);
+    out.put_u8(lock.flags);
+    for value in lock.target.into_iter().chain(lock.point_sum) {
+        out.put_f32(value);
+    }
+    out.put_u8(lock.point_count);
+    out.put_u8(lock.misses);
+    out.put_i32(lock.sampled_at);
+    out.put_i32(lock.out_of_ads_at);
+    out.put_i32(lock.acquire_started_at);
 }
 
 fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, WireError> {
@@ -1266,7 +1278,20 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
     let player_card_icon = input.get_u32()?;
     let player_card_title = input.get_u32()?;
     let player_card_nameplate = input.get_u32()?;
+    let weapon_lock = sim::WeaponLock {
+        weapon: input.get_u32()?,
+        life: input.get_u32()?,
+        flags: input.get_u8()?,
+        target: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+        point_sum: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+        point_count: input.get_u8()?,
+        misses: input.get_u8()?,
+        sampled_at: input.get_i32()?,
+        out_of_ads_at: input.get_i32()?,
+        acquire_started_at: input.get_i32()?,
+    };
     Ok(ClientSnapshotMeta {
+        weapon_lock,
         killcam_hud,
         lifecycle,
         loadout,

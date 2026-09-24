@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn draw_exact_colour(
     view: ViewQuery<(
         &ViewTarget,
-        &ViewDepthTexture,
+        &SceneDepthTexture,
         &ExtractedView,
         Option<&Msaa>,
     )>,

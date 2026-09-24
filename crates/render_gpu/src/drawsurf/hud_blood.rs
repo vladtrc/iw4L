@@ -173,7 +173,11 @@ impl BloodPortGpu {
         mask: &GpuImage,
     ) -> BindGroup {
         let key = (color.texture_view.id(), mask.texture_view.id());
-        if self.textures.as_ref().is_none_or(|(cached, _)| *cached != key) {
+        if self
+            .textures
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != key)
+        {
             let group = table.views_bind_group(
                 device,
                 &cache.get_bind_group_layout(&self.textures_layout),

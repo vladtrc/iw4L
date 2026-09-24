@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use render_frame::{SmodelVertex, SourceRevisions};
 use render_scene::{SmodelPassMaterial, XModelSurfaceDraw};
+use std::sync::Arc;
 
 pub const XMODEL_OBJECT_ID_FX_BASE: u16 = 0x700;
 
@@ -11,13 +12,25 @@ pub struct FxModelAssetDraw {
     pub surfaces: Vec<(u32, u32)>,
 }
 
-#[derive(Resource, Clone, Debug, Default)]
-pub struct FxModelDrawPlan {
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FxModelGeometry {
     pub(crate) vertices: Vec<SmodelVertex>,
     pub(crate) indices: Vec<u32>,
     pub(crate) surface_ranges: Vec<(u32, u32)>,
     pub(crate) materials: Vec<SmodelPassMaterial>,
     pub(crate) assets: Vec<FxModelAssetDraw>,
+    pub(crate) packed_vertices: assets::RetailPackedVertexPayload,
+}
+
+#[derive(Resource, Default)]
+pub struct FxModelStaging(pub FxModelDrawPlan);
+
+#[derive(Resource, Clone, Debug, Default)]
+pub struct PreparedFxModelGeometry(pub FxModelDrawPlan);
+
+#[derive(Resource, Clone, Debug, Default)]
+pub struct FxModelDrawPlan {
+    pub(crate) geometry: Arc<FxModelGeometry>,
     pub(crate) draws: Vec<XModelSurfaceDraw>,
     pub generated: u32,
     pub skipped_no_catalog: u32,
@@ -30,7 +43,6 @@ pub struct FxModelDrawPlan {
     pub revision: u64,
     pub generation: u64,
     pub revisions: SourceRevisions,
-    pub(crate) packed_vertices: assets::RetailPackedVertexPayload,
 }
 
 impl FxModelDrawPlan {
@@ -38,42 +50,31 @@ impl FxModelDrawPlan {
         &self.draws
     }
 
-    /// Adds one row to a rebuild in progress. The revision does not move here:
-    /// it moves once, in `publish_rebuild`, and only if the finished rebuild
-    /// differs from what this plan already published.
     pub fn push_draw(&mut self, draw: XModelSurfaceDraw) {
         self.draws.push(draw);
     }
 
     pub fn materials(&self) -> &[SmodelPassMaterial] {
-        &self.materials
+        &self.geometry.materials
     }
 
     pub fn vertices(&self) -> &[SmodelVertex] {
-        &self.vertices
+        &self.geometry.vertices
     }
 
     pub fn indices(&self) -> &[u32] {
-        &self.indices
+        &self.geometry.indices
     }
 
     pub fn surface_ranges(&self) -> &[(u32, u32)] {
-        &self.surface_ranges
+        &self.geometry.surface_ranges
     }
 
     pub fn packed_vertices(&self) -> &assets::RetailPackedVertexPayload {
-        &self.packed_vertices
+        &self.geometry.packed_vertices
     }
 
-    /// Empties a staging plan for this frame's rebuild, keeping its allocations
-    /// and its revisions. This is not a publication: the revision moves when the
-    /// rebuild that follows changes something, never because a frame passed.
     pub fn clear(&mut self) {
-        self.vertices.clear();
-        self.indices.clear();
-        self.surface_ranges.clear();
-        self.materials.clear();
-        self.assets.clear();
         self.draws.clear();
         self.generated = 0;
         self.skipped_no_catalog = 0;
@@ -83,35 +84,25 @@ impl FxModelDrawPlan {
         self.skipped_no_material = 0;
         self.skipped_no_lighting = 0;
         self.skipped_render_fx_flags = 0;
-        match &mut self.packed_vertices {
-            assets::RetailPackedVertexPayload::Iw4(rows) => rows.clear(),
-            unavailable @ assets::RetailPackedVertexPayload::Unavailable { .. } => {
-                *unavailable = assets::RetailPackedVertexPayload::default();
-            }
-        }
     }
 
-    /// Takes this frame's rebuild and reports what actually moved. Counters are
-    /// this frame's either way; the revisions move only when the rows do.
+    pub fn use_prepared(&mut self, prepared: &Self) {
+        self.geometry = Arc::clone(&prepared.geometry);
+        self.generation = prepared.generation;
+    }
+
     pub fn publish_rebuild(&mut self, staged: &mut Self) {
-        let mut geometry = render_frame::publish_rows(&mut self.indices, &mut staged.indices);
-        geometry |=
-            render_frame::publish_rows(&mut self.surface_ranges, &mut staged.surface_ranges);
-        geometry |= render_frame::publish_rows(&mut self.materials, &mut staged.materials);
-        geometry |= render_frame::publish_rows(&mut self.assets, &mut staged.assets);
-        geometry |= self.vertices.len() != staged.vertices.len();
+        self.generation = staged.generation;
+        let geometry = !Arc::ptr_eq(&self.geometry, &staged.geometry);
         if geometry {
-            std::mem::swap(&mut self.vertices, &mut staged.vertices);
-            self.packed_vertices =
-                std::mem::replace(&mut staged.packed_vertices, Default::default());
+            self.geometry = Arc::clone(&staged.geometry);
             self.revisions.set_topology_from(
-                &self.indices,
-                &self.surface_ranges,
-                self.vertices.len(),
+                &self.geometry.indices,
+                &self.geometry.surface_ranges,
+                self.geometry.vertices.len(),
             );
             self.revisions.bump_packed_write(&mut self.revision);
         }
-        staged.vertices.clear();
         if render_frame::publish_rows(&mut self.draws, &mut staged.draws) || geometry {
             self.revisions.bump_draws();
         }
@@ -126,7 +117,8 @@ impl FxModelDrawPlan {
     }
 
     pub fn asset(&self, model_index: usize, lod: u8) -> Option<&FxModelAssetDraw> {
-        self.assets
+        self.geometry
+            .assets
             .iter()
             .find(|asset| asset.model_index == model_index && asset.lod == lod)
     }

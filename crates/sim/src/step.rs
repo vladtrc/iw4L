@@ -660,6 +660,7 @@ fn run_players_system(ecs: &mut World) {
                 crate::damage::shellshock_dump_affects_movement(ps.shellshock_index),
             );
             let mut cmd = *cmd;
+            let commanded_move = cmd.forwardmove != 0 || cmd.rightmove != 0;
             let linked_brushes: Vec<LinkedBrushCollisionBrush> = world
                 .entity_collision_capabilities()
                 .iter()
@@ -681,7 +682,7 @@ fn run_players_system(ecs: &mut World) {
             let script = world.player_anim_script();
             let mantle = world.mantle_xanims();
             let applied_mt = Cell::new(None);
-            let (walking, linked_bounds, anim_movetype, view_w, primary) = {
+            let (walking, linked_bounds, anim_movetype, view_w, primary, moved_from, moved_to) = {
                 let ps = world
                     .player_mut(*id)
                     .expect("Alive client has a player row");
@@ -689,6 +690,7 @@ fn run_players_system(ecs: &mut World) {
                 if ps.shellshock_time.wrapping_add(ps.shellshock_duration) < level_time {
                     ps.pm_flags &= !playerstate_iw4::pm_flags::SHELLSHOCKED;
                 }
+                let moved_from = ps.origin;
                 let result = pm_move(
                     ps,
                     &mut cmd,
@@ -705,14 +707,21 @@ fn run_players_system(ecs: &mut World) {
                     pml.almost_ground_plane != 0,
                 );
                 let (view_w, primary) = crate::pmove_anim_weapon_ids(ps);
+                let moved_to = ps.origin;
                 (
                     pml.walking as i32,
                     result.bounds,
                     anim_movetype,
                     view_w,
                     primary,
+                    moved_from,
+                    moved_to,
                 )
             };
+            world
+                .client_meta_mut(*id)
+                .input_receipt
+                .record(commanded_move, moved_from, moved_to);
             if let Some(movetype) = anim_movetype {
                 let view_facts = world.combat_facts_for(view_w);
                 let primary_facts = world.combat_facts_for(primary);
@@ -737,6 +746,7 @@ fn run_players_system(ecs: &mut World) {
             world.set_pmove_walking(*id, walking);
             world.link_player_area(*id, linked_bounds);
 
+            crate::weapon_lock::update(&mut world, *id, level_time);
             let shots = advance_weapon_command(&mut world, tick, *id, cmd, delta.min(200));
             for shot in shots {
                 crate::missile::fire_accepted_shot(&mut world, tick, &shot);
@@ -1559,6 +1569,7 @@ fn apply_configuration_change(
     next.weapon_data[slot * 5..slot * 5 + 5].fill(0);
     weapon_iw4::bg_latch_weapon_dual_wield(&next.weapons, &mut next.weapon_data, to, akimbo);
     next.weapon = to;
+    next.weapon_primary = to;
     next.last_weapon_hand = weapon_iw4::pm_num_hands_for_held(&next.weapons, &next.weapon_data, to);
     if old_ammo_key != new_ammo_key {
         for row in next.ammo.chunks_exact_mut(8) {
@@ -1581,6 +1592,84 @@ fn apply_configuration_change(
         reject(world, Reason::AmmoTableFull);
         return;
     }
+    let alternate_ammo = match (
+        world.combat_facts_for(old.alternate_weapon),
+        world.combat_facts_for(new.alternate_weapon),
+    ) {
+        (Some(old_alt), Some(new_alt))
+            if old.alternate_weapon != 0
+                && new.alternate_weapon != 0
+                && old_alt.weap_type == new_alt.weap_type
+                && old_alt.weap_class == new_alt.weap_class =>
+        {
+            let old_key = weapon_iw4::bg_ammo_table_key(old_alt.ammo_index, old.alternate_weapon);
+            let old_clip = weapon_iw4::bg_clip_table_key(old_alt.clip_index, old.alternate_weapon);
+            let new_key = weapon_iw4::bg_ammo_table_key(new_alt.ammo_index, new.alternate_weapon);
+            let new_clip = weapon_iw4::bg_clip_table_key(new_alt.clip_index, new.alternate_weapon);
+            if old_key != old_ammo_key
+                && old_clip != old_clip_key
+                && new_key != new_ammo_key
+                && new_clip != new_clip_key
+                && weapon_iw4::bg_ammo_row_present(&ps.ammo, old_key)
+                && weapon_iw4::bg_clip_row_present(&ps.ammoclip, old_clip)
+            {
+                let shared = ps
+                    .weapons
+                    .iter()
+                    .filter(|&&w| w > 0 && w != from as i32)
+                    .any(|&w| {
+                        let alt = world
+                            .combat_facts_for(w as u32)
+                            .map_or(0, |f| f.alternate_weapon);
+                        [w as u32, alt].into_iter().filter(|&w| w != 0).any(|w| {
+                            world.combat_facts_for(w).is_some_and(|f| {
+                                let ammo = weapon_iw4::bg_ammo_table_key(f.ammo_index, w);
+                                let clip = weapon_iw4::bg_clip_table_key(f.clip_index, w);
+                                (old_key != new_key && (ammo == old_key || ammo == new_key))
+                                    || (old_clip != new_clip
+                                        && (clip == old_clip || clip == new_clip))
+                            })
+                        })
+                    });
+                if shared {
+                    reject(world, Reason::SharedAmmoConflict);
+                    return;
+                }
+                let (clip, _, stock) = configuration_change_ammo(
+                    weapon_iw4::bg_get_clip_for_hand(&ps.ammoclip, old_clip, 0),
+                    0,
+                    weapon_iw4::bg_get_ammo_not_in_clip(&ps.ammo, old_key),
+                    new_alt.clip_size,
+                    new_alt.max_ammo,
+                    false,
+                );
+                if old_key != new_key {
+                    for row in next.ammo.chunks_exact_mut(8) {
+                        if row[..4] == old_key.to_le_bytes() {
+                            row.fill(0);
+                        }
+                    }
+                }
+                if old_clip != new_clip {
+                    for row in next.ammoclip.chunks_exact_mut(12) {
+                        if row[..4] == old_clip.to_le_bytes() {
+                            row.fill(0);
+                        }
+                    }
+                }
+                if !weapon_iw4::bg_set_ammo_not_in_clip(&mut next.ammo, new_key, stock)
+                    || !weapon_iw4::bg_set_clip_for_hand(&mut next.ammoclip, new_clip, 0, clip)
+                {
+                    reject(world, Reason::AmmoTableFull);
+                    return;
+                }
+                Some((new.alternate_weapon, clip, stock))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
     let hand = weapon_iw4::spawn_weapon_hand(to, &new);
     next.weaponstate_primary = hand.weaponstate;
     next.weapon_time = hand.weapon_time;
@@ -1597,6 +1686,11 @@ fn apply_configuration_change(
         | playerstate_iw4::weap_flags::RECOIL_SCALE);
     *world.player_mut(id).expect("validated alive player") = next;
     let meta = world.client_meta_mut(id);
+    if let Some((alternate, clip, stock)) = alternate_ammo {
+        meta.ammo_by_weapon
+            .retain(|row| row.0 != old.alternate_weapon);
+        meta.set_ammo(alternate, clip, stock);
+    }
     let quick_reload_ready = meta.quick_reload_ready(from);
     meta.ammo_by_weapon.retain(|row| row.0 != from);
     meta.set_ammo(to, next_clip0, next_stock);
@@ -1700,7 +1794,15 @@ fn apply_give_weapon(
         return;
     };
 
-    let outgoing = next.weapon;
+    let outgoing = if world
+        .combat_facts_for(next.weapon)
+        .is_some_and(|facts| facts.inventory_type == 3)
+        && next.weapons.contains(&(next.weapon_primary as i32))
+    {
+        next.weapon_primary
+    } else {
+        next.weapon
+    };
     let mut replaced = false;
     if !next.weapons.contains(&(weapon as i32)) {
         if let Some(slot) = next
@@ -2253,6 +2355,7 @@ fn resolve_pending_spawns(world: &mut FrameWorld, tick: Tick) {
         let class_id = loadout.class_id;
 
         let mut ps = spawn_player_state(decision.traced_origin, decision.raw_angles);
+        ps.action_slot_type[1] = 2;
         if let Some(cmd) = world.old_cmd_angles(id) {
             ps.delta_angles = std::array::from_fn(|axis| {
                 decision.raw_angles[axis] - cmd[axis] as f32 * SHORT2ANGLE
@@ -2646,6 +2749,7 @@ fn arm_held_weapon(
     weapon: u32,
     facts: &weapon_iw4::WeaponCombatFacts,
 ) -> (i32, i32) {
+    ps.weapon_primary = weapon;
     let last_hand = weapon_iw4::pm_num_hands_for_held(&ps.weapons, &ps.weapon_data, weapon);
     ps.last_weapon_hand = last_hand;
     let (clip0, clip1, stock) = weapon_iw4::spawn_clip_stock(facts, last_hand);

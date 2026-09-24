@@ -214,11 +214,13 @@ fn flush_flash_tess(
     mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
 ) {
     let _body = gpu_list::TessBody::open();
+    frame.saved_screen_sequence = latch.save_sequence;
     match *job {
         FlashGpuJob::Write => {
             if latch.packed.is_empty() {
                 return;
             }
+            frame.append_packed(&latch.saved);
             frame.append_packed(&latch.packed);
         }
         FlashGpuJob::Hide | FlashGpuJob::Idle => {}

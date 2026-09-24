@@ -861,6 +861,25 @@ fn handle_input_commands(
     settings: Res<ConsoleSettings>,
 ) {
     for command in events.read() {
+        let mut command = command.clone();
+        if matches!(command.name.as_str(), "hold" | "press" | "release")
+            && command
+                .args
+                .first()
+                .is_some_and(|arg| matches!(arg.as_str(), "+actionslot" | "-actionslot"))
+            && command.args.len() >= 2
+        {
+            let slot = command.args.remove(1);
+            command.args[0].push(' ');
+            command.args[0].push_str(&slot);
+        } else if matches!(command.name.as_str(), "+actionslot" | "-actionslot")
+            && command.args.len() == 1
+        {
+            command.name.push(' ');
+            command.name.push_str(&command.args[0]);
+            command.args.clear();
+        }
+
         match command.name.as_str() {
             name if name.starts_with('+') && is_console_input(name) => {
                 inputs.hold(name);
@@ -2167,8 +2186,12 @@ fn mark_match_facts(
         out.push_str(&format!(" local={life}"));
         if let Some(meta) = meta {
             out.push_str(&format!(
-                " local_life={} local_deaths={}",
-                meta.life_sequence.0, meta.deaths
+                " local_life={} local_deaths={} local_cmds={} local_moving_cmds={} local_path={:.1}",
+                meta.life_sequence.0,
+                meta.deaths,
+                meta.input_receipt.applied_cmds,
+                meta.input_receipt.moving_cmds,
+                meta.input_receipt.path_units
             ));
         }
         if let Some(ps) = presented.and_then(|p| p.alive_player(local.0)) {

@@ -105,8 +105,9 @@ fn take_player_weapon(ps: &mut PlayerState, weapon: u32) {
             *slot = 0;
         }
     }
-    if ps.weapon == weapon {
+    if ps.weapon == weapon || ps.weapon_primary == weapon {
         ps.weapon = 0;
+        ps.weapon_primary = 0;
     }
 }
 
@@ -173,7 +174,14 @@ fn add_ammo_on_ps(
 }
 
 fn current_primary_weapon(world: &FrameWorld, ps: &PlayerState) -> u32 {
-    let weapon = ps.weapon;
+    let weapon = if world
+        .combat_facts_for(ps.weapon)
+        .is_some_and(|f| f.inventory_type == 3)
+    {
+        ps.weapon_primary
+    } else {
+        ps.weapon
+    };
     if weapon == 0 {
         return 0;
     }
@@ -812,7 +820,9 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
         if primary_count(world, ps) >= 2 && current_primary_weapon(world, ps) == 0 {
             continue;
         }
-        let delta: [f32; 3] = core::array::from_fn(|i| item.origin[i] + 0.5 - eye[i]);
+        let center: [f32; 3] =
+            core::array::from_fn(|i| item.origin[i] + (ITEM_MINS[i] + ITEM_MAXS[i]) * 0.5);
+        let delta: [f32; 3] = core::array::from_fn(|i| center[i] - eye[i]);
         let distance = delta.iter().map(|v| v * v).sum::<f32>().sqrt();
         if distance > 128.0 {
             continue;
@@ -823,7 +833,7 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
             0.0
         };
         if world
-            .trace_world(eye, item.origin, [0.0; 3], [0.0; 3], 0x11)
+            .trace_world(eye, center, [0.0; 3], [0.0; 3], 0x11)
             .fraction
             < 1.0
         {

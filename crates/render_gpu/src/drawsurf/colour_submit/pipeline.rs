@@ -256,7 +256,7 @@ fn schedule_admitted_pipelines(
                         depth_format: if shadow {
                             SHADOWMAP_SUN_DEPTH_FORMAT
                         } else {
-                            CORE_3D_DEPTH_FORMAT
+                            SCENE_DEPTH_FORMAT
                         },
                         samples: if shadow { 1 } else { samples },
                         state0,

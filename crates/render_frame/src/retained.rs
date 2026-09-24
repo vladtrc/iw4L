@@ -59,6 +59,7 @@ pub enum RetainedDrawKind {
     },
 
     CodeMesh {
+        viewmodel: bool,
         draw: u32,
         material: u32,
         arg_count: u8,

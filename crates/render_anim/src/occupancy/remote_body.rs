@@ -1,21 +1,21 @@
 use crate::anim::remote_body::{
-    AdvancedRemoteTree, CpuBodyGeom, CpuSurfMeta, PendingGunSkin, RemoteBodySkinnedItem,
-    RemoteBodySkinnedQueue, RemoteBodyTrees, RemoteModelLods, RemoteSkinModels,
-    RemoteSkinPoseHashes, SkinAfterPose, WorldGunGap, advance_remote_tree, bind_remote_skin_models,
-    clone_corpse_tree_from_victim, commit_assembled_body, dobj_radii, ensure_remote_dobj,
-    hash_skin_matrices, occupy_lod_byte, occupy_remote_kit_dobj, packed_anim, pose_remote_dobj,
-    push_cached_surfaces, remote_player_controller, select_remote_lods, select_remote_models,
-    skin_after_pose, skin_slot_need, skip_frozen_corpse_dobj, take_unique_geom,
-    validate_remote_tracks, zero_anim,
+    AdvancedRemoteTree, CpuBodyGeom, CpuSurfMeta, PendingGunSkin, PreparedRemoteKits,
+    RemoteBodySkinnedItem, RemoteBodySkinnedQueue, RemoteBodyTrees, RemoteModelLods,
+    RemoteSkinModels, RemoteSkinPoseHashes, SkinAfterPose, WorldGunGap, advance_remote_tree,
+    bind_remote_skin_models, clone_corpse_tree_from_victim, commit_assembled_body, dobj_radii,
+    ensure_remote_dobj, hash_skin_matrices, occupy_lod_byte, occupy_remote_kit_dobj, packed_anim,
+    pose_remote_dobj, push_cached_surfaces, remote_player_controller, select_remote_lods,
+    select_remote_models, skin_after_pose, skin_slot_need, skip_frozen_corpse_dobj,
+    take_unique_geom, validate_remote_tracks, zero_anim,
 };
 use crate::anim::scene_submission::{AnimDObjSceneSkels, AnimDObjSceneSubmission, AnimSceneSubmit};
 use crate::anim::xmodel_pose::{build_skin_layout, skin_packed_into, stream_lod_surface_rigid};
 use crate::dobj_lighting_box_half;
 use crate::gaps::{RenderGap, RenderGapCause, RenderPresentationGaps};
 use crate::{
-    RemoteBodyDrawPlan, append_remote_body_cpu_blob, body_lit_pass_material,
-    finish_remote_body_draw_plan, install_body_packed_session, push_remote_body_cpu_draw,
-    take_body_packed_session, topology_fingerprint,
+    RemoteBodyDrawPlan, append_remote_body_cpu_blob, finish_remote_body_draw_plan,
+    install_body_packed_session, push_remote_body_cpu_draw, take_body_packed_session,
+    topology_fingerprint,
 };
 use anim_iw4::{PLAYER_ANIM_RAW_MASK, PlayerAnimValue};
 use assets::{ModelSkel, PreparedBodies, PreparedWeapons, PreparedWorldWeapons};
@@ -71,6 +71,8 @@ pub fn register_remote_body_systems(app: &mut App) {
         .init_resource::<RemoteSkinPoseHashes>()
         .init_resource::<RemoteBodySkinnedQueue>()
         .init_resource::<RemoteBodyLightingBinds>()
+        .init_resource::<PreparedRemoteKits>()
+        .add_systems(Update, prepare_remote_kits.in_set(ClientSet::Load))
         .init_resource::<crate::anim::dobj_pose::HostDObjPoseFrame>()
         .init_resource::<crate::anim::dobj_pose::PosedPlayerFrame>()
         .add_systems(
@@ -131,6 +133,28 @@ pub fn register_remote_body_systems(app: &mut App) {
         );
 }
 
+fn prepare_remote_kits(
+    bodies: Option<Res<PreparedBodies>>,
+    weapons: Option<Res<PreparedWeapons>>,
+    world_weapons: Option<Res<PreparedWorldWeapons>>,
+    mut kits: ResMut<PreparedRemoteKits>,
+) {
+    let (Some(bodies), Some(weapons), Some(world)) = (bodies, weapons, world_weapons) else {
+        return;
+    };
+    if kits.owned_by(&bodies, &weapons, &world) {
+        return;
+    }
+    let started = std::time::Instant::now();
+    *kits = PreparedRemoteKits::prepare(&bodies, &weapons, &world);
+    diag::info!(
+        World,
+        "remote kits: prepared for {} weapons in {:.1}ms",
+        weapons.0.len(),
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
 fn finish_body_draw_plan(mut plan: ResMut<RemoteBodyDrawPlan>) {
     finish_remote_body_draw_plan(&mut plan);
 }
@@ -148,6 +172,7 @@ fn occupy_remote_scene_ents(
     bodies: Option<Res<PreparedBodies>>,
     weapons: Option<Res<PreparedWeapons>>,
     world_weapons: Option<Res<PreparedWorldWeapons>>,
+    prepared_kits: Res<PreparedRemoteKits>,
     remotes: Query<
         (&CEntity, &CEntityRuntime, &Transform),
         (
@@ -159,6 +184,15 @@ fn occupy_remote_scene_ents(
 ) {
     let Some(bodies) = bodies.as_deref() else {
         return;
+    };
+    if let Some(world) = world_weapons.as_deref() {
+        scene_skels.seed(bodies, world);
+    }
+    let live_kits = match (weapons.as_deref(), world_weapons.as_deref()) {
+        (Some(weapons), Some(world)) if prepared_kits.owned_by(bodies, weapons, world) => {
+            Some((&*prepared_kits, world))
+        }
+        _ => None,
     };
     let kits = bodies.0.kits();
     if kits.allies.is_none() && kits.axis.is_none() {
@@ -195,14 +229,31 @@ fn occupy_remote_scene_ents(
         let ffa_team = meta.and_then(|m| m.ffa_team);
         let client_state_team = meta.map(|m| m.client_state_team).unwrap_or(0);
         let axis = assets::kit_assignment_is_axis(client_state_team, ffa_team);
-        let Some((kit_models, radius)) = occupy_remote_kit_dobj(
-            bodies,
-            weapons.as_deref(),
-            world_weapons.as_deref(),
-            axis,
-            remote_pose_sample(runtime).weapon,
-        ) else {
-            continue;
+        let held = remote_pose_sample(runtime).weapon;
+        let (kit_models, radius, hide_part_bits) = match live_kits {
+            Some((kits, world)) => {
+                let Some(kit) = kits.get(axis, held) else {
+                    continue;
+                };
+                let Some(models) = kit.models(bodies, world) else {
+                    continue;
+                };
+                (models, kit.radius, kit.hide_part_bits)
+            }
+            None => {
+                let Some((models, radius)) = occupy_remote_kit_dobj(
+                    bodies,
+                    weapons.as_deref(),
+                    world_weapons.as_deref(),
+                    axis,
+                    held,
+                    true,
+                ) else {
+                    continue;
+                };
+                let bits = crate::anim::remote_body::kit_hide_part_bits(&models);
+                (models, radius, bits)
+            }
         };
         let origin = transform.translation.to_array();
         let quat = [
@@ -218,19 +269,10 @@ fn occupy_remote_scene_ents(
             .iter()
             .map(|model| occupy_lod_byte(skel_camera_lod(model.skel, origin, eye, ramp)))
             .collect();
-        let mut hide_part_bits = [0u32; 6];
-        let mut base = 0usize;
         let models: Vec<_> = kit_models
             .iter()
             .enumerate()
             .map(|(i, model)| {
-                render_scene::hide_part_bits_from_tags(
-                    &mut hide_part_bits,
-                    model.skel,
-                    base,
-                    &model.hide_tags,
-                );
-                base += model.skel.bones.len();
                 scene_skels.model(
                     model.name,
                     model.skel,
@@ -388,6 +430,7 @@ struct RemotePoseFrame<'a> {
     bodies: &'a PreparedBodies,
     weapons: Option<&'a PreparedWeapons>,
     world_weapons: Option<&'a PreparedWorldWeapons>,
+    kits: Option<&'a PreparedRemoteKits>,
     dt: f32,
     eye: Option<Vec3>,
     ramp: LodRampArgs,
@@ -436,6 +479,7 @@ fn pose_remote_bodies(
     bodies: Option<Res<PreparedBodies>>,
     weapons: Option<Res<PreparedWeapons>>,
     world_weapons: Option<Res<PreparedWorldWeapons>>,
+    prepared_kits: Res<PreparedRemoteKits>,
     mut trees: ResMut<RemoteBodyTrees>,
     mut pose_hashes: ResMut<RemoteSkinPoseHashes>,
     mut submit: ResMut<RemoteBodySkinnedQueue>,
@@ -555,6 +599,12 @@ fn pose_remote_bodies(
         bodies,
         weapons: weapons.as_deref(),
         world_weapons: world_weapons.as_deref(),
+        kits: match (weapons.as_deref(), world_weapons.as_deref()) {
+            (Some(weapons), Some(world)) if prepared_kits.owned_by(bodies, weapons, world) => {
+                Some(&*prepared_kits)
+            }
+            _ => None,
+        },
         dt: cg_clock
             .as_ref()
             .map(|clock| clock.frametime_secs())
@@ -687,6 +737,7 @@ impl<'a> RemotePoseFrame<'a> {
         let bodies = self.bodies;
         let weapons = self.weapons;
         let world_weapons = self.world_weapons;
+        let kits = self.kits;
         let weapon = sample.weapon;
         let view_pitch_deg = sample.view_pitch_deg;
         let prone = sample.prone;
@@ -750,10 +801,14 @@ impl<'a> RemotePoseFrame<'a> {
                 push_cached_surfaces(persist_key, transform, pose_hashes, submit);
                 return Ok(PoseOneOutcome::Posed);
             }
-            ensure_remote_dobj(&model_set, e_type, persist_key, trees)?;
+            let kit = kits
+                .and_then(|kits| kits.get(axis, weapon))
+                .ok_or_else(|| format!("remote kit not prepared: axis={axis} weapon={weapon}"))?;
+            let prepared_dobj = kit.dobj.as_ref();
+            ensure_remote_dobj(&model_set, e_type, persist_key, trees, prepared_dobj)?;
             let dobj = trees
                 .get(persist_key)
-                .and_then(|slot| slot.dobj.as_ref())
+                .and_then(|slot| slot.dobj.as_deref())
                 .expect("composed");
             validate_remote_tracks(dobj, clips.as_ref(), body, &model_set.body_name)?;
 
@@ -764,6 +819,7 @@ impl<'a> RemotePoseFrame<'a> {
             )?;
             let skin = publish_remote_dobj(
                 dobj,
+                kit.bolt_bones,
                 &world,
                 persist_key,
                 runtime,
@@ -772,7 +828,13 @@ impl<'a> RemotePoseFrame<'a> {
                 dobj_poses,
             )?;
             if !is_corpse {
-                publish_posed_player_head(dobj, &world, identity, transform, posed_players)?;
+                publish_posed_player_head(
+                    kit.head_bone,
+                    &world,
+                    identity,
+                    transform,
+                    posed_players,
+                )?;
             }
             let hash = hash_skin_matrices(&skin);
             let pose_same = pose_hashes.remember_pose_hash(persist_key, hash);
@@ -848,6 +910,7 @@ fn remote_skin_action<'a>(
 
 fn publish_remote_dobj(
     dobj: &assets::DObj,
+    bolt_bones: [Option<u16>; 4],
     world: &[Mat4],
     persist_key: u32,
     runtime: &CEntityRuntime,
@@ -864,8 +927,8 @@ fn publish_remote_dobj(
             world,
         )
         .map_err(|error| format!("DObj bone publication failed: {error:?}"))?;
-    let target = |tag: &str| -> Option<fx::FxBoltTarget> {
-        let bone = u16::try_from(dobj.find(tag)?).ok()?;
+    let target = |bone: Option<u16>| -> Option<fx::FxBoltTarget> {
+        let bone = bone?;
         let orientation = dobj_poses.resolve(persist_key, i32::from(bone)).ok()?;
         Some(fx::FxBoltTarget {
             dobj: persist_key,
@@ -877,21 +940,21 @@ fn publish_remote_dobj(
             orientation,
         })
     };
-    bolts.flash = target("tag_flash");
-    bolts.brass = target("tag_brass");
-    bolts.knife = target("tag_knife_fx");
-    bolts.laser = target(fx_iw4::FX_LASER_TAG);
+    bolts.flash = target(bolt_bones[0]);
+    bolts.brass = target(bolt_bones[1]);
+    bolts.knife = target(bolt_bones[2]);
+    bolts.laser = target(bolt_bones[3]);
     Ok(dobj.skin_matrices(world))
 }
 
 fn publish_posed_player_head(
-    dobj: &assets::DObj,
+    head_bone: Option<usize>,
     world: &[Mat4],
     identity: &CEntity,
     transform: &Transform,
     frame: &mut crate::anim::dobj_pose::PosedPlayerFrame,
 ) -> Result<(), String> {
-    let head = match dobj.find("j_head") {
+    let head = match head_bone {
         None => crate::anim::dobj_pose::PosedPlayerHead::NoDObjOrHead,
         Some(index) => {
             let bone = world.get(index).ok_or_else(|| {
@@ -1165,6 +1228,7 @@ fn submit_remote_bodies(
     resolved: Res<ResolvedModelLightingTable>,
     atlas: Option<Res<WorldModelLightingAtlas>>,
     tess: Option<Res<render_scene::TessMaterials>>,
+    model_materials: Res<crate::anim::model_materials::PreparedModelMaterials>,
     mut last_catalog: Local<Option<Arc<render_material::RuntimeMaterialCatalog>>>,
 ) {
     let items = submit.take();
@@ -1176,12 +1240,12 @@ fn submit_remote_bodies(
         *last_catalog = None;
         return;
     }
-    let Some(atlas) = atlas else {
+    if atlas.is_none() {
         plan.clear_geometry();
         *last_catalog = None;
         gaps.raise(RenderGapCause::RemoteBodyLightingAllocFailed);
         return;
-    };
+    }
     let Some(tess) = tess else {
         plan.clear_geometry();
         *last_catalog = None;
@@ -1276,7 +1340,7 @@ fn submit_remote_bodies(
             let mat_idx = if let Some(&idx) = mat_by_name.get(name) {
                 idx
             } else {
-                let Some(material) = body_lit_pass_material(&atlas, &tess.catalog, name) else {
+                let Some(material) = model_materials.material(&tess.catalog, name).cloned() else {
                     any_missing_material = true;
                     last_cause = Some(RenderGapCause::RemoteBodyMaterialMissing {
                         name: name.to_owned(),

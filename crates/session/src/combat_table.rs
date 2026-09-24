@@ -30,6 +30,9 @@ pub(crate) fn validated_facts(
         fire_delay_ms: f.fire_delay_ms,
         raise_time_ms: f.raise_time_ms,
         drop_time_ms: f.drop_time_ms,
+        alternate_weapon: 0,
+        alternate_raise_time_ms: f.alternate_raise_time_ms,
+        alternate_drop_time_ms: f.alternate_drop_time_ms,
         reload_time_ms: f.reload_time_ms,
         reload_empty_time_ms: f.reload_empty_time_ms,
         clip_size: f.clip_size,
@@ -136,8 +139,10 @@ pub fn from_registry(
                 .and_then(|t| t.get(8))
                 .and_then(|s| s.as_ref())
                 .is_some_and(|s| !s.is_empty());
-            validated_facts(f, charge_anim, global_location)
-                .unwrap_or_else(|_| WeaponCombatFacts::none())
+            let mut facts = validated_facts(f, charge_anim, global_location)
+                .unwrap_or_else(|_| WeaponCombatFacts::none());
+            facts.alternate_weapon = weapons.alternate_of(i as u32);
+            facts
         })
         .collect()
 }

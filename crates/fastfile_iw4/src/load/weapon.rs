@@ -87,7 +87,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
     let display_name_at_0x8 = s.follow_string(p, s.layout(8, 16))?;
     let hide_tags = s.plain_array(p, s.layout(12, 24), 2, 2, 32)?;
     let sz_xanims = follow_string_array(s, p, s.layout(16, 32), sz::WEAPON_ANIM_COUNT)?;
-    follow_name(s, p, s.layout(60, 80))?;
+    let alternate_weapon_name = s.follow_string(p, s.layout(60, 80))?;
 
     let kill_icon_fresh =
         asset_ptr_at_linked(s, links, AssetType::Material, p.at(s.layout(72, 96)))?;
@@ -327,6 +327,12 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         },
     };
     s.record_weapon(WeaponGeometry {
+        alternate_weapon_name,
+        alternate_raise_time_ms: s.i32_at(p, s.layout(68, 92))?,
+        alternate_drop_time_ms: weap_def
+            .map(|body| s.i32_at(body, s.layout(0x290, 984)))
+            .transpose()?
+            .unwrap_or_default(),
         view_flash_slot: authored_material_slot(s, weap_def, s.layout(0x48, 112))?,
         world_flash_slot: authored_material_slot(s, weap_def, s.layout(0x4c, 120))?,
         view_shell_eject_slot: authored_material_slot(s, weap_def, s.layout(0x110, 512))?,

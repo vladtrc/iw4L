@@ -98,6 +98,7 @@ impl FxSceneAccess<'_> {
 
 pub(crate) fn register_combat_fx_systems(app: &mut App) {
     app.add_message::<BulletHitFx>()
+        .init_resource::<render_fx::FxModelStaging>()
         .init_resource::<crate::assemble::drawsurf::GfxGlassMeshPlan>()
         .init_resource::<crate::assemble::drawsurf::CgGlassTable>()
         .add_systems(Update, latch_authority_load_hold.in_set(ClientSet::Load))
@@ -120,11 +121,15 @@ pub(crate) fn register_combat_fx_systems(app: &mut App) {
         )
         .add_systems(
             crate::assemble::StaticSunAndFx,
-            generate_fx_transaction.pipe(commit_fx_transaction),
+            (
+                generate_fx_transaction.pipe(commit_fx_transaction),
+                super::super::motion_tracker::draw_motion_tracker,
+            )
+                .chain(),
         )
         .add_systems(
             Update,
-            (drain_bullet_hit_fx, drain_pellet_fx)
+            (drain_bullet_hit_fx, drain_pellet_fx, present_tracker_light)
                 .chain()
                 .after(render_anim::occupancy::fpv_present::publish_fpv_dobj_pose)
                 .after(frame::WorkerCmdSet::SkinModel)
@@ -141,6 +146,78 @@ pub(crate) fn register_combat_fx_systems(app: &mut App) {
         .add_observer(cg_play_fx)
         .add_observer(cg_play_fx_bullet_hit)
         .add_observer(cg_melee_blood);
+}
+
+#[derive(Default)]
+struct TrackerLight {
+    owner: Option<(
+        frame::WorldGeneration,
+        sim::ClientId,
+        sim::LifeSequence,
+        u32,
+    )>,
+    bolt: Option<(u32, u16)>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn present_tracker_light(
+    presented: Res<PresentedSnapshot>,
+    local: Res<LocalPresentClient>,
+    generation: Res<frame::WorldGeneration>,
+    prepared: Res<render_anim::PreparedFpv>,
+    bolts: Res<render_anim::FpvBoltTargets>,
+    catalog: Option<Res<PreparedFxCatalog>>,
+    mut elem_infos: ResMut<PreparedFxElemInfos>,
+    mut host: ResMut<HostFxSystem>,
+    fx_world: FxSceneAccess,
+    mut light: Local<TrackerLight>,
+) {
+    const EFFECT: &str = "misc/light_motion_tracker";
+    let owner = presented.snapshot().and_then(|snapshot| {
+        let meta = snapshot.meta.for_client(local.0)?;
+        let ps = presented.player(local.0)?;
+        let weapon = weapon_iw4::bg_get_viewmodel_weapon_index(ps);
+        (meta.lifecycle == sim::ClientLifecycle::Alive
+            && ps.other_flags & 0x400 == 0
+            && prepared.table()?.facts_of(weapon).is_some_and(|facts| {
+                facts.motion_tracker
+                    || (facts.inventory_type == 3
+                        && prepared
+                            .table()
+                            .and_then(|t| t.facts_of(ps.weapon_primary))
+                            .is_some_and(|parent| parent.motion_tracker))
+            }))
+        .then_some((*generation, local.0, meta.life_sequence, weapon))
+    });
+    if owner != light.owner {
+        if light.owner.is_some_and(|old| old.0 == *generation) {
+            if let Some((dobj, bone)) = light.bolt {
+                host.0.stop_bolted(EFFECT, dobj, bone);
+            }
+        }
+        light.owner = owner;
+        light.bolt = None;
+    }
+    if owner.is_none() || light.bolt.is_some() {
+        return;
+    }
+    let (Some(target), Some(catalog)) = (bolts.tracker_light, catalog) else {
+        return;
+    };
+    elem_infos.0.sync(&catalog.0);
+    if render_fx::present::play_named_bolted_in_world(
+        &mut host.0,
+        &catalog.0,
+        &elem_infos.0,
+        EFFECT,
+        target,
+        fx_world.view().as_ref().map(|scene| scene as &dyn FxScene),
+    )
+    .and_then(PlayResult::handle)
+    .is_some()
+    {
+        light.bolt = Some((target.dobj, target.bone));
+    }
 }
 
 fn queue_tag_lasers(
@@ -418,16 +495,16 @@ fn tick_fx_remaining_update(
 }
 
 #[derive(SystemParam)]
-struct FxPresentEnv<'w, 's> {
+struct FxPresentEnv<'w> {
     outdoor: Option<Res<'w, MapOutdoor>>,
     dlights: ResMut<'w, HostFxDlights>,
     post_lights: ResMut<'w, HostFxPostLights>,
     models: Option<Res<'w, PreparedFxModels>>,
+    model_geometry: Option<Res<'w, render_fx::PreparedFxModelGeometry>>,
     atlas: Option<Res<'w, WorldModelLightingAtlas>>,
     atpoint: Res<'w, render_scene::DynAtPointLookup>,
     lod_skinned: Res<'w, LodRampSkinnedDvar>,
-    /// This frame's fx model rebuild, before the plan publishes it.
-    staged_models: Local<'s, FxModelDrawPlan>,
+    staged_models: ResMut<'w, render_fx::FxModelStaging>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -553,9 +630,12 @@ fn commit_fx_transaction(
         _present_span,
     } = transaction;
     clear_fx_owned_plans(&mut plan, &mut spark_plan, &mut mark_plan);
-    // The fx model rows are rebuilt from nothing every frame, so the rebuild
-    // goes to staging and `model_plan` only moves when the rows differ.
-    env.staged_models.clear();
+    env.staged_models.0.clear();
+    if let Some(prepared) = &env.model_geometry {
+        env.staged_models.0.use_prepared(&prepared.0);
+    } else {
+        env.staged_models.0 = FxModelDrawPlan::default();
+    }
     env.dlights.scene.clear();
     env.dlights.cap_full = 0;
     env.post_lights.queued.clear();
@@ -604,12 +684,11 @@ fn commit_fx_transaction(
         cam_tf.translation,
         planes,
         env.lod_skinned.args(),
-        &runtime,
         lighting_cache.as_deref(),
         &mut lighting_requests,
-        &mut env.staged_models,
+        &mut env.staged_models.0,
     );
-    model_plan.publish_rebuild(&mut env.staged_models);
+    model_plan.publish_rebuild(&mut env.staged_models.0);
     let spot_cone = lighting_iw4::SpotLightConeDvars::register_defaults();
     for light in &out.spot_lights {
         match lighting_iw4::r_add_omni_light_to_scene_allows(
@@ -1086,7 +1165,6 @@ fn fill_fx_model_plan(
     camera_origin: Vec3,
     frustum_planes: &[[f32; 4]],
     lod_ramp: crate::assemble::drawsurf::tess::smodel::LodRampArgs,
-    runtime: &MaterialGeneration,
     cache: Option<&WorldModelLightingCache>,
     lighting_requests: &mut ModelLightingRequests,
     plan: &mut FxModelDrawPlan,
@@ -1105,7 +1183,7 @@ fn fill_fx_model_plan(
             dims: world.model_lighting_dims?,
         })
     });
-    let Some(atlas) = atlas.or(scene_atlas.as_ref()) else {
+    let Some(_) = atlas.or(scene_atlas.as_ref()) else {
         plan.skipped_no_lighting = plan.generated;
         return;
     };
@@ -1147,71 +1225,11 @@ fn fill_fx_model_plan(
             plan.skipped_culled = plan.skipped_culled.saturating_add(1);
             continue;
         }
-        let asset_surfaces = if let Some(asset) = plan.asset(instance.model_index, lod) {
-            asset.surfaces.clone()
-        } else {
-            let Some(pose) = entry.skel.pose.as_ref() else {
-                plan.skipped_no_pose = plan.skipped_no_pose.saturating_add(1);
-                continue;
-            };
-            let Ok(dobj) = assets::DObj::build(&[(pose, None)]) else {
-                plan.skipped_no_pose = plan.skipped_no_pose.saturating_add(1);
-                continue;
-            };
-            let state = assets::dobj::DObjSemanticState::bind_pose(
-                models
-                    .name_at(instance.model_index)
-                    .unwrap_or(instance.def_name.as_str())
-                    .to_owned(),
-                1,
-                1,
-            );
-            let Ok(request) = state.resolve_request(|_| None) else {
-                plan.skipped_no_pose = plan.skipped_no_pose.saturating_add(1);
-                continue;
-            };
-            let Some((surfaces, _)) =
-                crate::adapters::anim::script_model::pose_script_dobj_with_materials(
-                    None,
-                    &[entry.skel.as_ref()],
-                    &dobj,
-                    &request,
-                    None,
-                    &[],
-                )
-            else {
-                plan.skipped_no_pose = plan.skipped_no_pose.saturating_add(1);
-                continue;
-            };
-            let lod_surfaces = entry.skel.surfaces_for_lod(lod);
-            let surfaces: Vec<_> = surfaces
-                .into_iter()
-                .filter(|surface| lod_surfaces.contains(&surface.surface_index))
-                .collect();
-            let materials: Vec<_> = surfaces
-                .iter()
-                .map(|surface| {
-                    let material = entry.material_index(surface.surface_index)?;
-                    crate::assemble::drawsurf::tess::xmodel::bound_lit_xmodel_pass_material(
-                        atlas,
-                        &runtime.catalog,
-                        material,
-                    )
-                })
-                .collect();
-            let appended = crate::assemble::drawsurf::tess::xmodel::append_fx_model_asset(
-                plan,
-                instance.model_index,
-                lod,
-                &surfaces,
-                &materials,
-            );
-            if appended.is_empty() {
-                plan.skipped_no_material = plan.skipped_no_material.saturating_add(1);
-                continue;
-            }
-            appended
+        let Some(asset) = plan.asset(instance.model_index, lod) else {
+            plan.skipped_no_material = plan.skipped_no_material.saturating_add(1);
+            continue;
         };
+        let asset_surfaces = asset.surfaces.clone();
 
         let box_half = entry.skel.radius.and_then(|radius| {
             crate::prepare::scene::model_lighting_cache::dobj_lighting_box_half(

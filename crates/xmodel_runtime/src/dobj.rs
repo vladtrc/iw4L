@@ -1,7 +1,6 @@
 use anim_iw4::{
     Local, PartBits, QUAT_IDENTITY, VEC3_ZERO, compose_translation, dobj_surface_hidden,
-    hide_part_bit, normalize, quat_add_weighted, quat_dot, quat_neg, quat16, set_hide_part_bit,
-    xmodel_no_scale_bit,
+    hide_part_bit, normalize, quat_add_weighted, quat16, set_hide_part_bit, xmodel_no_scale_bit,
 };
 use glam::{Mat4, Quat, Vec3};
 
@@ -346,11 +345,6 @@ impl DObj {
                 trans_weight[bone] += anim.weight;
 
                 let q = sample.rotation.unwrap_or(QUAT_IDENTITY);
-                let q = if quat_dot(rotation[bone], q) < 0.0 {
-                    quat_neg(q)
-                } else {
-                    q
-                };
                 rotation[bone] = quat_add_weighted(rotation[bone], q, anim.weight);
 
                 if let Some(t) = sample.translation {

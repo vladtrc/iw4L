@@ -29,7 +29,7 @@ struct ScriptModelDobjs {
 }
 
 struct PersistentScriptDobj {
-    dobj: assets::DObj,
+    dobj: std::sync::Arc<assets::DObj>,
     reuse_key: assets::dobj::DObjReuseKey,
 }
 
@@ -74,12 +74,11 @@ struct ScriptModelPoseLocals<'w, 's> {
 struct ScriptModelTessLocals<'w, 's> {
     last_material_generation: Local<'s, Option<render_material::MaterialGenerationId>>,
     last_unbound_materials: Local<'s, usize>,
-    material_cache: Local<'s, HashMap<assets::MaterialIndex, SmodelPassMaterial>>,
+    model_materials: Res<'w, crate::anim::model_materials::PreparedModelMaterials>,
     live_plan: Local<'s, Vec<usize>>,
     product_to_plan: Local<'s, Vec<usize>>,
     keep: Local<'s, Vec<bool>>,
     remap: Local<'s, Vec<Option<usize>>>,
-    _marker: std::marker::PhantomData<&'w ()>,
 }
 
 struct ScriptOwnerRow {
@@ -508,6 +507,7 @@ fn pose_script_models(
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<FpvLens>>,
     owners: Query<(Entity, &WorldScriptModelInstance, &Transform, &Visibility)>,
     mut persist: ResMut<ScriptModelDobjs>,
+    prepared: Res<crate::anim::model_materials::PreparedModelMaterials>,
     mut product: ResMut<ScriptModelPoseProduct>,
     select: Res<RenderFocusSelect>,
     mut focus: ResMut<RenderFocus>,
@@ -599,7 +599,8 @@ fn pose_script_models(
             .collect();
 
         let asset_index = if let Some(id) = owner_id {
-            if compose_or_reuse_script_dobj(&mut persist, id, &assets, &owner.dobj_state).is_none()
+            if compose_or_reuse_script_dobj(&mut persist, id, &assets, &owner.dobj_state, &prepared)
+                .is_none()
             {
                 persist.by_id.remove(&id);
                 continue;
@@ -732,12 +733,11 @@ fn commit_script_model_draw_plan(
     let ScriptModelTessLocals {
         mut last_material_generation,
         mut last_unbound_materials,
-        mut material_cache,
+        model_materials,
         mut live_plan,
         mut product_to_plan,
         mut keep,
         mut remap,
-        _marker: _,
     } = locals;
     if product.producer_unavailable {
         plan.publish_no_rows();
@@ -764,7 +764,6 @@ fn commit_script_model_draw_plan(
         plan.revision = revision;
         plan.generation = generation;
         plan.revisions = revisions;
-        material_cache.clear();
         *last_material_generation = Some(material_generation);
     }
     draws.clear();
@@ -783,45 +782,7 @@ fn commit_script_model_draw_plan(
                 .iter()
                 .zip(posed.authored.iter().copied())
                 .map(|(_surface, authored)| {
-                    let authored = authored?;
-                    if let Some(material) = material_cache.get(&authored) {
-                        return Some(material.clone());
-                    }
-                    let world_material = tess.catalog.derived(authored)?;
-                    let ordinal = tess
-                        .catalog
-                        .sorted_materials
-                        .ordinal_for_asset_id(authored.order())?;
-                    let maps = render_scene::runtime_maps(
-                        Some(authored),
-                        &tess.catalog,
-                        tess.material_images.as_ref(),
-                    );
-                    let inv_h =
-                        lighting_iw4::model_lighting_inv_image_height(atlas.dims.image_height)?;
-                    let scale = lighting_iw4::model_lighting_lookup_scale(inv_h);
-                    let material = SmodelPassMaterial {
-                        model_lighting_required: true,
-                        color: maps.color,
-                        specular: maps.specular,
-                        probe: None,
-                        atlas: Some(atlas.image.clone()),
-                        alpha_mode: maps.alpha_mode,
-                        draw_mode: maps.draw_mode,
-                        cull_mode: maps.cull_mode,
-                        env_map_parms: maps.env_map_parms,
-                        lighting_lookup_scale: [scale.u, scale.v, scale.w, scale.q],
-                        atlas_lookup: [
-                            lighting_iw4::MODEL_LIGHTING_INV_ATLAS_WIDTH as f32,
-                            inv_h,
-                            lighting_iw4::MODEL_LIGHTING_VOLUME_W,
-                            0.0,
-                        ],
-                        sort_key: world_material.sort_key,
-                        material_sorted_index: Some(ordinal.get()),
-                    };
-                    material_cache.insert(authored, material.clone());
-                    Some(material)
+                    model_materials.authored(&tess.catalog, authored?).cloned()
                 })
                 .collect::<Vec<_>>();
             append_or_overwrite_script_model(
@@ -1108,6 +1069,7 @@ fn compose_or_reuse_script_dobj(
     id: u32,
     catalog: &assets::MapXModelSceneCatalog,
     state: &assets::dobj::DObjSemanticState,
+    prepared: &crate::anim::model_materials::PreparedModelMaterials,
 ) -> Option<()> {
     let key = script_dobj_reuse_key(state);
     let reuse = persist
@@ -1118,7 +1080,14 @@ fn compose_or_reuse_script_dobj(
         return Some(());
     }
     let (specs, _) = collect_presented_models(catalog, state)?;
-    let dobj = assets::DObj::build(&specs).ok()?;
+    let single = match state.composition.models.as_slice() {
+        [only] => prepared.scene_dobj(&only.model).cloned(),
+        _ => None,
+    };
+    let dobj = match single {
+        Some(dobj) => dobj,
+        None => std::sync::Arc::new(assets::DObj::build(&specs).ok()?),
+    };
     persist.by_id.insert(
         id,
         PersistentScriptDobj {

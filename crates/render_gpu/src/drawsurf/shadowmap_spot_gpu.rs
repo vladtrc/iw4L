@@ -10,7 +10,7 @@ use super::shadowmap_sun_gpu::upload_shadow_index_epochs;
 
 pub const SHADOWMAP_SPOT_COLOR_FORMAT: TextureFormat = TextureFormat::R32Float;
 
-pub const SHADOWMAP_SPOT_DEPTH_FORMAT: TextureFormat = TextureFormat::Depth24Plus;
+pub const SHADOWMAP_SPOT_DEPTH_FORMAT: TextureFormat = TextureFormat::Depth24PlusStencil8;
 
 pub const SHADOWMAP_SPOT_RT10_LABEL: &str = "iw4_shadowmap_spot_rt10";
 pub const SHADOWMAP_SPOT_RT11_LABEL: &str = "iw4_shadowmap_spot_rt11";

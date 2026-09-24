@@ -20,18 +20,21 @@ pub fn weapon_cycle_allowed(
 pub fn cycle_weapon(
     weapons: &[i32; 15],
     selected: u32,
+    mapped: u32,
     last_primary: u32,
     next: bool,
     mut inventory_type: impl FnMut(u32) -> i32,
 ) -> Option<u32> {
+    let selected = if selected != 0 && inventory_type(selected) == 3 {
+        mapped
+    } else {
+        selected
+    };
     let current_type = if selected == 0 {
         0
     } else {
         inventory_type(selected)
     };
-    if current_type == 3 {
-        panic!("alternate-mode parent selection and remembered alt mode");
-    }
     if current_type != 0
         && current_type != 4
         && last_primary != 0

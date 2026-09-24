@@ -30,6 +30,8 @@ pub struct FpvAssemblyTags {
     pub brass: Option<u16>,
     pub knife: Option<u16>,
     pub laser: Option<u16>,
+    pub tracker_screen: [Option<u16>; 3],
+    pub tracker_light: Option<u16>,
 }
 
 #[derive(Debug)]
@@ -166,6 +168,12 @@ impl FpvAssembly {
             brass: tag("tag_brass"),
             knife: tag("tag_knife_fx"),
             laser: tag(fx_iw4::FX_LASER_TAG),
+            tracker_screen: [
+                tag("tag_screen_tl"),
+                tag("tag_screen_bl"),
+                tag("tag_screen_br"),
+            ],
+            tracker_light: tag("tag_motion_tracker_fx"),
         };
         let paired_bones = specs[0].0.num_bones + specs[1].0.num_bones;
         let parts = parts

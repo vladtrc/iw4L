@@ -491,6 +491,11 @@ impl MaterialProgramCompile {
         techs.extend(lighting_iw4::LIT_TECH_NO_SHADOW_LOCAL_SLOTS);
         techs.extend(lighting_iw4::LIT_TECH_SHADOW_DIR_SLOTS);
         techs.extend(lighting_iw4::LIT_TECH_SHADOW_SPOT_SLOTS);
+        techs.extend([
+            lighting_iw4::TECHNIQUE_LIGHT_SPOT,
+            lighting_iw4::TECHNIQUE_LIGHT_OMNI,
+            lighting_iw4::TECHNIQUE_LIGHT_SPOT_SHADOW,
+        ]);
         techs.push(SUN_SHADOW_CASTER_TECH);
         techs.push(EMISSIVE_TECH_TYPE);
         let reachable: HashSet<usize> = catalog

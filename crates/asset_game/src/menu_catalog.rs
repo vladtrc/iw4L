@@ -416,6 +416,7 @@ pub const HUD_CHROME_MENUS: &[&str] = &[
     "weaponbar_sd",
     "hud_fullscreen",
     "dpad_hd",
+    "javelin_overlay_hd",
     "dpad_sd",
     "splash",
     "challenge",

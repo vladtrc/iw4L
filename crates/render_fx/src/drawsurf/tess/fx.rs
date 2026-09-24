@@ -25,6 +25,7 @@ pub struct FxPassMaterial {
 
 #[derive(Clone, Copy, Debug)]
 pub struct FxSurfaceDraw {
+    pub viewmodel: bool,
     pub material: u32,
     pub index_start: u32,
     pub index_count: u32,
@@ -220,6 +221,7 @@ impl FxCodeMeshPlan {
         });
         let index_start = self.indices.len() as u32;
         self.draws.push(FxSurfaceDraw {
+            viewmodel: false,
             material,
             index_start,
             index_count: 0,

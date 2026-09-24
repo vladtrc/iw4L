@@ -3874,6 +3874,7 @@ pub(crate) fn clip_trace(
     let mesh_ref = clipmap_iw4::ClipMeshRef {
         verts: &mesh.tables.verts,
         tri_indices: &mesh.tables.tri_indices,
+        tri_edge_is_walkable: &mesh.tables.tri_edge_is_walkable,
         tri_surface_flags: &mesh.tables.tri_surface_flags,
         tri_content_flags: &mesh.tables.tri_content_flags,
         aabb_trees: &mesh.tables.aabb_trees,
@@ -3962,6 +3963,7 @@ pub(crate) fn gsc_give_weapon_is_akimbo(script_name: &str) -> bool {
 pub(crate) fn give_weapon_to_ps_akimbo(ps: &mut PlayerState, weapon: u32, akimbo: bool) {
     if weapon == 0 {
         ps.weapon = 0;
+        ps.weapon_primary = 0;
         ps.last_weapon_hand = 0;
         return;
     }
@@ -3978,6 +3980,7 @@ pub(crate) fn give_weapon_to_ps_akimbo(ps: &mut PlayerState, weapon: u32, akimbo
         }
     }
     ps.weapon = weapon;
+    ps.weapon_primary = weapon;
     ps.last_weapon_hand = weapon_iw4::pm_num_hands_for_held(&ps.weapons, &ps.weapon_data, weapon);
 }
 

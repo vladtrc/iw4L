@@ -149,7 +149,7 @@ pub enum ExprError {
 pub struct WeaponLockView {
     pub ads_javelin: bool,
 
-    pub blink: bool,
+    pub time_ms: i32,
 
     pub attack_top: bool,
 
@@ -638,12 +638,21 @@ fn run_op(
             data.push(Operand::Int(host.selecting_location()?));
             Ok(())
         }
-        OP_ADSJAVELIN | OP_WEAPLOCKBLINK | OP_WEAPATTACKTOP | OP_WEAPATTACKDIRECT
-        | OP_WEAPLOCKING | OP_WEAPLOCKED | OP_WEAPLOCKTOOCLOSE => {
+        OP_WEAPLOCKBLINK => {
+            let rate = source_float(&pop_data(data)?);
+            let lock = host.weapon_lock()?;
+            let period = (1000.0 / rate) as i32;
+            let visible = lock.locked
+                || (lock.locking
+                    && (rate <= 0.0 || period <= 0 || (lock.time_ms / period) % 2 != 0));
+            data.push(Operand::Int(i32::from(visible)));
+            Ok(())
+        }
+        OP_ADSJAVELIN | OP_WEAPATTACKTOP | OP_WEAPATTACKDIRECT | OP_WEAPLOCKING | OP_WEAPLOCKED
+        | OP_WEAPLOCKTOOCLOSE => {
             let lock = host.weapon_lock()?;
             let flag = match op {
                 OP_ADSJAVELIN => lock.ads_javelin,
-                OP_WEAPLOCKBLINK => lock.blink,
                 OP_WEAPATTACKTOP => lock.attack_top,
                 OP_WEAPATTACKDIRECT => lock.attack_direct,
                 OP_WEAPLOCKING => lock.locking,

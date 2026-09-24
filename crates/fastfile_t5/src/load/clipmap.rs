@@ -96,7 +96,7 @@ pub(super) fn load_clip_map(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSin
     always_array(s, p.at(0x5c), 4, 12 * num_brush_verts)?;
     always_array(s, p.at(0x64), 2, 2 * nuinds)?;
     let tri_indices = always_array(s, p.at(0x6c), 2, 2 * (3 * tri_count))?;
-    always_array(s, p.at(0x70), 1, 4 * ((3 * tri_count + 31) >> 5))?;
+    let tri_edge_is_walkable = always_array(s, p.at(0x70), 1, 4 * ((3 * tri_count + 31) >> 5))?;
     always_array(s, p.at(0x78), 4, sz::COLLISION_BORDER * border_count)?;
 
     let collision_partitions =
@@ -184,6 +184,7 @@ pub(super) fn load_clip_map(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSin
         brushes,
         verts,
         tri_indices,
+        tri_edge_is_walkable,
         materials,
         material_count: num_materials,
         collision_partitions,

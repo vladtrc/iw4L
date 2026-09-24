@@ -10,7 +10,7 @@ use render_frame::SUN_SHADOW_FORCED_PROFILE;
 
 pub const SHADOWMAP_SUN_COLOR_FORMAT: TextureFormat = TextureFormat::R32Float;
 
-pub const SHADOWMAP_SUN_DEPTH_FORMAT: TextureFormat = TextureFormat::Depth24Plus;
+pub const SHADOWMAP_SUN_DEPTH_FORMAT: TextureFormat = TextureFormat::Depth24PlusStencil8;
 
 struct ShadowmapSunGpuTarget {
     _color: Texture,

@@ -53,7 +53,7 @@ pub use player_anim::{
 };
 pub use quat::{
     QUAT_IDENTITY, Quat, VEC3_ZERO, Vec3, normalize, quat_add_weighted, quat_dot, quat_mul,
-    quat_neg, slerp, vec3_add_scaled, xanim_apply_additive,
+    quat_neg, vec3_add_scaled, xanim_apply_additive,
 };
 pub use sample::{FrameKind, sample_quat, sample_vec3, span, time_to_frame};
 pub use skel::{DuplicatePart, Skel};

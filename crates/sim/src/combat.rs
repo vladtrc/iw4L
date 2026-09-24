@@ -154,6 +154,35 @@ pub(crate) fn advance_weapon_command(
         {
             return accepted;
         }
+        if let Some(mut ps) = world.player(*id).copied() {
+            let parent = u32::from(cmd.weapon_mapped);
+            let target = u32::from(cmd.weapon);
+            if target != 0
+                && parent != target
+                && ps.weapons.contains(&(parent as i32))
+                && world
+                    .combat_facts_for(parent)
+                    .is_some_and(|f| f.alternate_weapon == target)
+            {
+                if let Some(facts) = world.combat_facts_for(target) {
+                    let ammo = weapon_iw4::bg_ammo_table_key(facts.ammo_index, target);
+                    let clip = weapon_iw4::bg_clip_table_key(facts.clip_index, target);
+                    let (initial_clip, _, initial_stock) = weapon_iw4::spawn_clip_stock(&facts, 0);
+                    if !bg_ammo_row_present(&ps.ammo, ammo) {
+                        bg_set_ammo_not_in_clip(&mut ps.ammo, ammo, initial_stock);
+                    }
+                    if !bg_clip_row_present(&ps.ammoclip, clip) {
+                        bg_set_clip_for_hand(&mut ps.ammoclip, clip, 0, initial_clip);
+                    }
+                    world.client_meta_mut(*id).set_ammo(
+                        target,
+                        bg_get_clip_for_hand(&ps.ammoclip, clip, 0),
+                        bg_get_ammo_not_in_clip(&ps.ammo, ammo),
+                    );
+                    *world.player_mut(*id).expect("present player") = ps;
+                }
+            }
+        }
         let old_buttons = world
             .old_buttons_mut()
             .iter()
@@ -331,12 +360,23 @@ pub(crate) fn advance_weapon_command(
                 } else {
                     ps.weapon
                 };
-                w == 0 || ps.weapons.iter().any(|&slot| slot == w as i32)
+                w == 0
+                    || ps.weapons.contains(&(w as i32))
+                    || (ps.weapons.contains(&(i32::from(cmd.weapon_mapped)))
+                        && world
+                            .combat_facts_for(u32::from(cmd.weapon_mapped))
+                            .is_some_and(|f| f.alternate_weapon == w))
             },
 
             cmd_weapon_pistol_quick: world
                 .combat_facts_for(u32::from(cmd.weapon))
                 .is_some_and(|f| f.weap_class == 5),
+            alternate_switch: cmd.weapon != 0
+                && (facts.alternate_weapon == u32::from(cmd.weapon)
+                    || (facts.inventory_type == 3 && ps.weapon_primary == u32::from(cmd.weapon))),
+            switch_alternate_raise_time_ms: world
+                .combat_facts_for(u32::from(cmd.weapon))
+                .map_or(0, |f| f.alternate_raise_time_ms),
             switch_raise_time_ms: {
                 let w = if cmd.weapon != 0 {
                     u32::from(cmd.weapon)
@@ -408,6 +448,16 @@ pub(crate) fn advance_weapon_command(
 
         if let Some(ps_mut) = world.player_mut(*id) {
             ps_mut.weapon = hand0.weapon;
+            if hand0.weapon != started_weapon {
+                if hand0.weaponstate == weapon_iw4::WeaponState::RaisingAltswitch as i32 {
+                    ps_mut.aim_spread_scale = ps_mut.aim_spread_scale.max(128.0);
+                }
+                ps_mut.weapon_primary = if hand0.weapon == u32::from(cmd.weapon) {
+                    u32::from(cmd.weapon_mapped)
+                } else {
+                    0
+                };
+            }
             ps_mut.weaponstate_primary = hand0.weaponstate;
             ps_mut.weapon_time = hand0.weapon_time;
             ps_mut.weapon_delay = hand0.weapon_delay;
@@ -703,6 +753,15 @@ pub(crate) fn advance_weapon_command(
                             ps,
                             entity_iw4::EntityEventKind::NOAMMO.0,
                             0,
+                        );
+                    }
+                }
+                WeaponTickEvent::AlternateStarted => {
+                    if let Some(ps) = world.player_mut(*id) {
+                        movement_iw4::add_predictable_event(
+                            ps,
+                            entity_iw4::EntityEventKind::WEAPON_ALT.0,
+                            i32::from(cmd.weapon),
                         );
                     }
                 }

@@ -21,6 +21,7 @@ pub struct PreparedImpactFx(pub Option<assets::OwnedFxImpactTable>);
 
 #[derive(Resource, Default)]
 pub struct FxWorldColorImages {
+    pub motion_tracker: [Option<crate::drawsurf::tess::fx::FxPassMaterial>; 4],
     pub colors: HashMap<String, Handle<Image>>,
     pub keys: HashMap<String, (u8, u16)>,
     pub colors_by_asset: HashMap<usize, Handle<Image>>,

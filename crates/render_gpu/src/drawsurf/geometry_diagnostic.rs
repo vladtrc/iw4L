@@ -1,8 +1,9 @@
+use crate::drawsurf::scene_depth::{SCENE_DEPTH_FORMAT, SceneDepthTexture};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use bevy::core_pipeline::core_3d::{CORE_3D_DEPTH_FORMAT, main_opaque_pass_3d};
+use bevy::core_pipeline::core_3d::main_opaque_pass_3d;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::mesh::VertexBufferLayout;
 use bevy::prelude::*;
@@ -18,7 +19,7 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, ViewQuery};
 use bevy::render::view::{
-    ExtractedView, Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
+    ExtractedView, Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
 use bevy::render::{Render, RenderSystems};
 use bevy::shader::Shader;
@@ -199,7 +200,7 @@ impl SpecializedRenderPipeline for DiagnosticPipeline {
                 ..Default::default()
             },
             depth_stencil: Some(DepthStencilState {
-                format: CORE_3D_DEPTH_FORMAT,
+                format: SCENE_DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
                 depth_compare: Some(CompareFunction::GreaterEqual),
                 stencil: Default::default(),
@@ -472,7 +473,7 @@ fn prepare_views(
 fn draw_geometry_diagnostic(
     view: ViewQuery<(
         &ViewTarget,
-        &ViewDepthTexture,
+        &SceneDepthTexture,
         &ExtractedView,
         &ViewUniformOffset,
         &DiagnosticViewBindGroup,

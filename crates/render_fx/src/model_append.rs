@@ -102,15 +102,16 @@ pub fn append_fx_model_asset(
     surfaces: &[render_anim::fpv_pose::PosedModelSurface],
     materials: &[Option<SmodelPassMaterial>],
 ) -> Vec<(u32, u32)> {
+    let geometry = std::sync::Arc::make_mut(&mut plan.geometry);
     let mut asset_surfaces = Vec::new();
-    let vertices_empty = plan.vertices.is_empty();
+    let vertices_empty = geometry.vertices.is_empty();
     let mut packed_ok = vertices_empty
         || matches!(
-            plan.packed_vertices,
+            geometry.packed_vertices,
             assets::RetailPackedVertexPayload::Iw4(_)
         );
     let mut packed = match std::mem::replace(
-        &mut plan.packed_vertices,
+        &mut geometry.packed_vertices,
         assets::RetailPackedVertexPayload::Unavailable {
             source_layout: XMODEL_PACKED_UNAVAILABLE,
         },
@@ -120,40 +121,44 @@ pub fn append_fx_model_asset(
     };
     for (surface, material) in surfaces.iter().zip(materials) {
         let Some(material) = material else { continue };
-        let before = plan.vertices.len();
+        let before = geometry.vertices.len();
         let Some((start, count)) =
-            append_mesh(&surface.mesh, &mut plan.vertices, &mut plan.indices)
+            append_mesh(&surface.mesh, &mut geometry.vertices, &mut geometry.indices)
         else {
             continue;
         };
-        let decoded = plan.vertices.len() - before;
+        let decoded = geometry.vertices.len() - before;
         if packed_ok && surface.packed_vertices.len() == decoded {
             packed.extend_from_slice(&surface.packed_vertices);
         } else {
             packed_ok = false;
             packed.clear();
         }
-        let surface_index = plan.surface_ranges.len() as u32;
-        plan.surface_ranges.push((start, count));
-        let material_index = plan.materials.len() as u32;
-        plan.materials.push(material.clone());
+        let surface_index = geometry.surface_ranges.len() as u32;
+        geometry.surface_ranges.push((start, count));
+        let material_index = geometry.materials.len() as u32;
+        geometry.materials.push(material.clone());
         asset_surfaces.push((surface_index, material_index));
     }
-    plan.packed_vertices = install_retained_packed(
+    geometry.packed_vertices = install_retained_packed(
         packed_ok,
         packed,
-        plan.vertices.len(),
+        geometry.vertices.len(),
         XMODEL_PACKED_EMPTY_PLAN,
         XMODEL_PACKED_UNAVAILABLE,
     );
-    plan.assets.push(FxModelAssetDraw {
+    geometry.assets.push(FxModelAssetDraw {
         model_index,
         lod,
         surfaces: asset_surfaces.clone(),
     });
     let topology = {
         let mut revisions = render_frame::SourceRevisions::default();
-        revisions.set_topology_from(&plan.indices, &plan.surface_ranges, plan.vertices.len());
+        revisions.set_topology_from(
+            &geometry.indices,
+            &geometry.surface_ranges,
+            geometry.vertices.len(),
+        );
         revisions.topology
     };
     let mut rev = plan.revision;

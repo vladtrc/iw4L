@@ -381,6 +381,9 @@ pub struct FxEffectDefGeometry {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WeaponGeometry {
     pub name: Option<Ptr>,
+    pub alternate_weapon_name: Option<Ptr>,
+    pub alternate_raise_time_ms: i32,
+    pub alternate_drop_time_ms: i32,
 
     pub display_name: Option<Ptr>,
 
@@ -582,6 +585,8 @@ pub struct ClipMapGeometry {
     pub verts: Option<Ptr>,
 
     pub tri_indices: Option<Ptr>,
+
+    pub tri_edge_is_walkable: Option<Ptr>,
 
     pub materials: Option<Ptr>,
     pub material_count: usize,
