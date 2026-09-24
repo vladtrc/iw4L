@@ -165,8 +165,9 @@ fn drain_bot_add_queue(
     if let Some(world) = world.as_ref() {
         taken.extend(world.0.clients_scoreboard().into_iter().map(|(id, _)| id));
     }
-    for count in requests {
-        let added = roster.add_bots(count, &taken);
+    for request in requests {
+        let count = request.count;
+        let added = roster.add_bots(count, &taken, request.dummy);
         if added.len() < count as usize {
             diag::warn!(
                 Sim,
@@ -176,7 +177,8 @@ fn drain_bot_add_queue(
         }
         diag::info!(
             Sim,
-            "bots: add {count} → clients {:?}",
+            "bots: add {count} (dummy={}) → clients {:?}",
+            request.dummy,
             added.iter().map(|id| id.0).collect::<Vec<_>>()
         );
     }
@@ -234,7 +236,11 @@ fn boot_bots(
                 bot.id,
                 ClientAction::SetName {
                     request_id: name_request,
-                    name: entity_iw4::pack_client_state_name("bot"),
+                    name: entity_iw4::pack_client_state_name(if bot.brain.is_none() {
+                        "dummy"
+                    } else {
+                        "bot"
+                    }),
                 },
             ),
         ];
@@ -379,29 +385,37 @@ fn think_bots(mut p: ThinkBots) {
     let mut controller_us = 0u64;
     for offset in 0..count {
         let bot = &mut p.roster.bots[(start + offset) % count];
-        let mut queried = Budgeted::new(&mut p.world.0, &mut budget);
-        let focus = bot.brain.focus_target();
-        let Some(obs) = sensor::observe_focused(&snapshot, bot.id, &mut queried, focus) else {
+        let Some(meta) = snapshot.meta.for_client(bot.id) else {
             continue;
         };
-        if obs.self_state.lifecycle != ClientLifecycle::Alive {
-            bot.brain.cancel_navigation();
+        if meta.lifecycle != ClientLifecycle::Alive {
+            if let Some(brain) = bot.brain.as_mut() {
+                brain.cancel_navigation();
+            }
             continue;
         }
-        let mut cmd = if p.hold.0 {
-            let mut cmd = playerstate_iw4::UserCmd {
-                server_time: p.clock.time_ms,
-                ..playerstate_iw4::UserCmd::default()
+        let mut cmd = if p.hold.0 || bot.brain.is_none() {
+            let Some((_, ps)) = snapshot.players.iter().find(|(id, _)| *id == bot.id) else {
+                continue;
             };
-            let (view, delta) = (obs.self_state.viewangles, obs.self_state.delta_angles);
-            cmd.angles =
-                look_angles_from_degrees(std::array::from_fn(|axis| view[axis] - delta[axis]));
-            cmd.weapon = obs.self_state.weapon;
-            cmd.weapon_mapped = obs.self_state.weapon;
-            cmd
-        } else {
+            playerstate_iw4::UserCmd {
+                server_time: p.clock.time_ms,
+                angles: look_angles_from_degrees(std::array::from_fn(|axis| {
+                    ps.viewangles[axis] - ps.delta_angles[axis]
+                })),
+                weapon: ps.weapon as u16,
+                weapon_mapped: ps.weapon as u16,
+                ..playerstate_iw4::UserCmd::default()
+            }
+        } else if let Some(brain) = bot.brain.as_mut() {
+            let mut queried = Budgeted::new(&mut p.world.0, &mut budget);
+            let Some(obs) =
+                sensor::observe_focused(&snapshot, bot.id, &mut queried, brain.focus_target())
+            else {
+                continue;
+            };
             let started = std::time::Instant::now();
-            let mut cmd = bot.brain.drive_nav(
+            let mut cmd = brain.drive_nav(
                 &obs,
                 &mut queried,
                 Some(&p.nav.graph),
@@ -411,6 +425,8 @@ fn think_bots(mut p: ThinkBots) {
             controller_us += started.elapsed().as_micros() as u64;
             cmd.server_time = p.clock.time_ms;
             cmd
+        } else {
+            continue;
         };
         if fires.iter().any(|target| match target {
             BotTpTarget::All => true,
@@ -431,19 +447,22 @@ fn think_bots(mut p: ThinkBots) {
     let mut live = 0;
     let (mut age, mut starved) = (0, 0);
     for bot in &p.roster.bots {
-        let stats = bot.brain.route_stats();
+        let Some(brain) = bot.brain.as_ref() else {
+            continue;
+        };
+        let stats = brain.route_stats();
         routes.completed += stats.completed;
         routes.terminal += stats.terminal;
         routes.cancelled += stats.cancelled;
         routes.discarded_attachments += stats.discarded_attachments;
         routes.denied_slices += stats.denied_slices;
-        let (bot_age, bot_starved) = bot.brain.route_age();
+        let (bot_age, bot_starved) = brain.route_age();
         if bot_age != 0 {
             live += 1;
         }
         age = age.max(bot_age);
         starved = starved.max(bot_starved);
-        stuck += usize::from(bot.brain.stuck(tick));
+        stuck += usize::from(brain.stuck(tick));
     }
     let meter = &mut p.meter;
     meter.queries.merge(&budget.counters);

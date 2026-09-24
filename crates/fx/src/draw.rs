@@ -107,6 +107,7 @@ pub struct FxSpriteInstance {
     pub color_rgba: [u8; 4],
     pub elem_type: u8,
     pub def_name: std::sync::Arc<str>,
+    pub catalog_index: u16,
     pub def_index: u8,
     pub material_name: std::sync::Arc<str>,
 
@@ -181,6 +182,7 @@ pub struct FxGenerateVertsOut {
 #[derive(Clone, Debug)]
 pub struct FxCloudInstance {
     pub def_name: String,
+    pub catalog_index: u16,
     pub def_index: u8,
     pub cloud: fx_iw4::GfxParticleCloud,
 }
@@ -188,6 +190,7 @@ pub struct FxCloudInstance {
 #[derive(Clone, Debug)]
 pub struct FxFountainInstance {
     pub def_name: String,
+    pub catalog_index: u16,
     pub def_index: u8,
     pub cloud: fx_iw4::GfxParticleCloud,
     pub cells: Vec<[fx_iw4::GfxPosTexVertex; 8]>,
@@ -437,6 +440,7 @@ fn draw_one_elem(
                     host,
                     elem.spark_cloud_handle,
                     effect.def_name.as_str(),
+                    effect.catalog_index,
                     elem.def_index,
                     host.msec_now,
                     size1,
@@ -510,6 +514,7 @@ fn draw_one_elem(
                         } else {
                             out.fountains.push(FxFountainInstance {
                                 def_name: inst.def_name,
+                                catalog_index: inst.catalog_index,
                                 def_index: inst.def_index,
                                 cloud: inst.cloud,
                                 cells,

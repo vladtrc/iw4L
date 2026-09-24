@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use bevy::prelude::Resource;
 use playerstate_iw4::PlayerState;
-use sim::{Snapshot, Tick};
+use sim::{ClientId, ClientLifecycle, Snapshot, Tick};
 
 use crate::authority::inbox::AUTHORITY_MS;
 
@@ -24,11 +24,18 @@ pub const fn archive_attainable_ticks(_clients: usize) -> usize {
 pub struct ArchivedFrame {
     pub tick: Tick,
     pub snapshot: Snapshot,
+
+    pub no_player_state: Vec<ClientId>,
 }
 
 impl ArchivedFrame {
     pub fn records(&self) -> usize {
         self.snapshot.players.len()
+    }
+
+    pub fn player_state_exists(&self, client: ClientId) -> bool {
+        !self.no_player_state.contains(&client)
+            && self.snapshot.players.iter().any(|(id, _)| *id == client)
     }
 
     pub fn bytes(&self) -> usize {
@@ -107,10 +114,26 @@ impl FrameArchive {
         true
     }
 
-    pub fn push_snapshot(&mut self, snapshot: &Snapshot) -> bool {
+    pub fn push_snapshot(&mut self, snapshot: &Snapshot, spectators: &[ClientId]) -> bool {
+        let no_player_state = snapshot
+            .meta
+            .clients
+            .iter()
+            .filter(|(id, meta)| {
+                spectators.contains(id)
+                    || !matches!(
+                        meta.lifecycle,
+                        ClientLifecycle::Alive
+                            | ClientLifecycle::Dead
+                            | ClientLifecycle::RespawnPending
+                    )
+            })
+            .map(|(id, _)| *id)
+            .collect();
         self.push(ArchivedFrame {
             tick: snapshot.tick,
             snapshot: snapshot.clone(),
+            no_player_state,
         })
     }
 

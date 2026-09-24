@@ -11,7 +11,7 @@ mod usercmd;
 pub use archive::{REMAPPED_PS_TIMERS, RemappedTimer, remapped_timer};
 pub use chrome::{
     KILLCAM_DEFAULT_LERP_MS, KILLCAM_ENTER_STEPS, KILLCAM_EXIT_STEPS, KILLCAM_TURRET_LERP_MS,
-    KillCamMode, KillcamEnterStep, KillcamExitStep, killcam_lerp_deadline_ms, mode_camera,
+    KillCamMode, KillcamEnterStep, KillcamExitStep, killcam_lerp_deadline_ms,
     mode0_from_kill_cam_entity, third_person_in_killcam,
 };
 pub use playerstate::{

@@ -48,18 +48,25 @@ impl FxModelEntry {
     }
 }
 
+type FxModelKey = (crate::AssetNamespace, String);
+
 #[derive(Clone, Debug, Default)]
 pub struct FxModelCatalog {
-    entries: HashMap<String, FxModelEntry>,
-    order: Vec<String>,
+    entries: HashMap<FxModelKey, FxModelEntry>,
+    order: Vec<FxModelKey>,
     zones: Vec<ZoneOwner>,
     capture_zone: ZoneOwner,
+    capture_ns: crate::AssetNamespace,
     strings: ScriptStrings,
 }
 
 impl FxModelCatalog {
     pub fn set_capture_zone(&mut self, zone: ZoneOwner) {
         self.capture_zone = zone;
+    }
+
+    pub fn set_capture_ns(&mut self, ns: crate::AssetNamespace) {
+        self.capture_ns = ns;
     }
 
     pub fn set_strings(&mut self, strings: ScriptStrings) {
@@ -74,44 +81,44 @@ impl FxModelCatalog {
         else {
             return;
         };
-        let name = skel.name.clone();
-        if !self.entries.contains_key(&name) {
-            self.order.push(name.clone());
+        let key = (self.capture_ns, skel.name.clone());
+        if !self.entries.contains_key(&key) {
+            self.order.push(key.clone());
             self.zones.push(self.capture_zone);
         }
         self.entries
-            .entry(name)
+            .entry(key)
             .or_insert_with(|| FxModelEntry::capture(skel, materials));
     }
 
     pub fn absorb(&mut self, other: Self) -> usize {
         let before = self.entries.len();
-        for (index, name) in other.order.into_iter().enumerate() {
-            let Some(entry) = other.entries.get(&name).cloned() else {
+        for (index, key) in other.order.into_iter().enumerate() {
+            let Some(entry) = other.entries.get(&key).cloned() else {
                 continue;
             };
-            if self.entries.contains_key(&name) {
+            if self.entries.contains_key(&key) {
                 continue;
             }
-            self.order.push(name.clone());
+            self.order.push(key.clone());
             self.zones
                 .push(other.zones.get(index).copied().unwrap_or_default());
-            self.entries.insert(name, entry);
+            self.entries.insert(key, entry);
         }
         self.entries.len().saturating_sub(before)
     }
 
-    pub fn keep_referenced(&mut self, hints: &HashSet<String>) {
+    pub fn keep_referenced(&mut self, hints: &HashSet<FxModelKey>) {
         let old_order = std::mem::take(&mut self.order);
         let old_zones = std::mem::take(&mut self.zones);
-        for (index, name) in old_order.into_iter().enumerate() {
-            if hints.contains(&name) {
-                self.order.push(name);
+        for (index, key) in old_order.into_iter().enumerate() {
+            if hints.contains(&key) {
+                self.order.push(key);
                 self.zones
                     .push(old_zones.get(index).copied().unwrap_or_default());
             }
         }
-        self.entries.retain(|name, _| hints.contains(name));
+        self.entries.retain(|key, _| hints.contains(key));
     }
 
     pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) -> AssetEdgeCensus {
@@ -125,8 +132,10 @@ impl FxModelCatalog {
         census
     }
 
-    pub fn index_by_name(&self, name: &str) -> Option<usize> {
-        self.order.iter().position(|candidate| candidate == name)
+    pub fn index_in(&self, ns: crate::AssetNamespace, name: &str) -> Option<usize> {
+        self.order
+            .iter()
+            .position(|(key_ns, key_name)| *key_ns == ns && key_name == name)
     }
 
     pub fn get_at(&self, index: usize) -> Option<&FxModelEntry> {
@@ -134,7 +143,7 @@ impl FxModelCatalog {
     }
 
     pub fn name_at(&self, index: usize) -> Option<&str> {
-        self.order.get(index).map(String::as_str)
+        self.order.get(index).map(|(_, name)| name.as_str())
     }
 
     pub fn zone_of(&self, index: usize) -> ZoneOwner {

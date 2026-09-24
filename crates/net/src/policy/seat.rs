@@ -23,6 +23,18 @@ pub struct KillcamSession {
     pub kc_timer_ends_at_ms: i32,
 
     pub final_kill: bool,
+
+    pub started_at_ms: i32,
+
+    pub killcamoffset_ms: i32,
+
+    pub predelay_ms: i32,
+
+    pub postdelay_ms: i32,
+
+    pub recalc_pending: bool,
+
+    pub entity_focus: Option<killcam_iw4::focus::Entity>,
 }
 
 #[derive(Resource, Clone, Debug, Default)]
@@ -90,6 +102,9 @@ pub fn sample_killcam_seat(
     }
     let tick = lookup.tick?;
     let frame = archive.frame(tick)?;
+    if !frame.player_state_exists(session.focus_client) {
+        return None;
+    }
     let archived = frame
         .snapshot
         .players
@@ -165,7 +180,7 @@ pub fn snapshot_and_sample_for_viewer(
     }
     let lookup = archive.lookup(session.archivetime_ms);
     let mut out = match lookup.tick.and_then(|tick| archive.frame(tick)) {
-        Some(frame) => overlay_archived_world(live, &frame.snapshot, viewer),
+        Some(frame) => overlay_archived_world(live, &frame.snapshot, viewer, session.focus_client),
         None => live.clone(),
     };
     let sample = apply_seat_to_snapshot(archive, &mut out, viewer, session, now_ms);
@@ -182,8 +197,19 @@ pub fn snapshot_and_sample_for_viewer(
     (out, sample)
 }
 
-fn overlay_archived_world(live: &Snapshot, archived: &Snapshot, viewer: ClientId) -> Snapshot {
+fn overlay_archived_world(
+    live: &Snapshot,
+    archived: &Snapshot,
+    viewer: ClientId,
+    focus: ClientId,
+) -> Snapshot {
     let mut out = archived.clone();
+    out.meta
+        .entity_events
+        .retain(|record| record.audience.projects_to(focus));
+    for record in &mut out.meta.entity_events {
+        record.audience = sim::EventAudience::Client(viewer);
+    }
     out.tick = live.tick;
     out.meta.phase = live.meta.phase;
     out.meta.match_elapsed_ms = live.meta.match_elapsed_ms;
@@ -220,7 +246,44 @@ fn overlay_archived_world(live: &Snapshot, archived: &Snapshot, viewer: ClientId
     if let Some(row) = viewer_meta {
         out.meta.clients.push(row);
     }
+    let delta_ms = sim::level_time_ms(live.tick).wrapping_sub(sim::level_time_ms(archived.tick));
+    rebase_archived_world(&mut out, viewer, delta_ms);
     out
+}
+
+fn rebase_archived_world(out: &mut Snapshot, viewer: ClientId, delta_ms: i32) {
+    for es in &mut out.meta.entities {
+        if es.tr_time != 0 {
+            es.tr_time = es.tr_time.wrapping_add(delta_ms);
+        }
+        if es.apos_tr_time != 0 {
+            es.apos_tr_time = es.apos_tr_time.wrapping_add(delta_ms);
+        }
+        if es.time2 != 0 {
+            es.time2 = es.time2.wrapping_add(delta_ms);
+        }
+        // General's data[0] and missile launchTime share one union slot.
+        if es.e_type == entity_iw4::ET_GENERAL || es.e_type == entity_iw4::ET_MISSILE {
+            es.set_launch_time(es.launch_time().wrapping_add(delta_ms));
+        }
+    }
+    for p in &mut out.projectiles {
+        if p.pos.tr_time != 0 {
+            p.pos.tr_time = p.pos.tr_time.wrapping_add(delta_ms);
+        }
+        if p.apos.tr_time != 0 {
+            p.apos.tr_time = p.apos.tr_time.wrapping_add(delta_ms);
+        }
+        p.launch_time = p.launch_time.wrapping_add(delta_ms);
+        p.spawn_time_ms = p.spawn_time_ms.wrapping_add(delta_ms);
+        p.detonate_at_ms = p.detonate_at_ms.map(|t| t.wrapping_add(delta_ms));
+        p.cleanup_at_ms = p.cleanup_at_ms.wrapping_add(delta_ms);
+    }
+    for (id, ps) in &mut out.players {
+        if *id != viewer {
+            rebase_archived_timers(ps, delta_ms);
+        }
+    }
 }
 
 fn overlay_killcam_hud(

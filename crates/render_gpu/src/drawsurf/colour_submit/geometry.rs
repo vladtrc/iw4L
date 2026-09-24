@@ -134,26 +134,7 @@ pub(super) fn upload_exact_geometry(
     geometry.generation = source.world.generation;
 
     upload_xmodel_streams(geometry, source, &device, &queue);
-    if geometry.particle_cloud_vertex.is_none()
-        && !source.frame.particle_cloud_vertices.is_empty()
-        && !source.frame.particle_cloud_indices.is_empty()
-    {
-        geometry.particle_cloud_vertex =
-            Some(device.create_buffer_with_data(&BufferInitDescriptor {
-                label: Some("iw4_exact_colour_sparkcloud_vb"),
-                contents: bytemuck::cast_slice(source.frame.particle_cloud_vertices.as_slice()),
-                usage: BufferUsages::VERTEX,
-            }));
-        geometry.particle_cloud_index =
-            Some(device.create_buffer_with_data(&BufferInitDescriptor {
-                label: Some("iw4_exact_colour_sparkcloud_ib"),
-                contents: bytemuck::cast_slice(source.frame.particle_cloud_indices.as_slice()),
-                usage: BufferUsages::INDEX,
-            }));
-    }
-    geometry
-        .particle_cloud_surface_ranges
-        .clone_from(&*source.frame.particle_cloud_surface_ranges);
+    upload_particle_cloud(geometry, source, &device, &queue);
 
     upload_retained_mesh(
         &mut geometry.mark_mesh,
@@ -252,6 +233,93 @@ pub(super) fn upload_exact_geometry(
             }
         }
     }
+}
+
+// Only the custom tail changes frame to frame; the template ahead of it is
+// written again only when a stream is reallocated.
+fn upload_particle_cloud(
+    geometry: &mut ExactColourGeometry,
+    source: ExtractedColourRefs<'_>,
+    device: &RenderDevice,
+    queue: &RenderQueue,
+) {
+    let frame = source.frame;
+    let vertex_count = frame.particle_cloud_vertices.len();
+    let index_count = frame.particle_cloud_indices.len();
+    let mesh = &mut geometry.particle_cloud;
+    if vertex_count == 0 || index_count == 0 {
+        mesh.vertex.set_len(0);
+        mesh.index.set_len(0);
+        geometry.particle_cloud_surface_ranges.clear();
+        return;
+    }
+    let resident = mesh.uploaded_vertices == frame.particle_cloud_revision
+        && mesh.vertex.len() == vertex_count
+        && mesh.index.len() == index_count
+        && mesh.drawable();
+    if resident {
+        return;
+    }
+    let vertex_stride = fx_iw4::GFX_POS_TEX_VERTEX_STRIDE;
+    let index_stride = size_of::<u32>();
+    mesh.vertex.reserve(
+        device,
+        "iw4_exact_colour_sparkcloud_vb",
+        BufferUsages::VERTEX,
+        vertex_count,
+        vertex_stride,
+    );
+    mesh.index.reserve(
+        device,
+        "iw4_exact_colour_sparkcloud_ib",
+        BufferUsages::INDEX,
+        index_count,
+        index_stride,
+    );
+    let template = frame.particle_cloud_template;
+    let key = (mesh.vertex.allocation(), mesh.index.allocation(), template);
+    let (vertex_from, index_from) = if geometry.particle_cloud_template_resident == Some(key) {
+        (template.0 * vertex_stride, template.1 * index_stride)
+    } else {
+        (0, 0)
+    };
+    let vertices: &[u8] = bytemuck::cast_slice(frame.particle_cloud_vertices.as_slice());
+    let indices: &[u8] = bytemuck::cast_slice(frame.particle_cloud_indices.as_slice());
+    let written = write_stream_tail(&mesh.vertex, queue, vertices, vertex_from)
+        && write_stream_tail(&mesh.index, queue, indices, index_from);
+    if !written {
+        diag::error!(
+            World,
+            "drawsurf geometry: sparkcloud upload skipped — revision {} is not resident",
+            frame.particle_cloud_revision,
+        );
+        mesh.vertex.set_len(0);
+        mesh.index.set_len(0);
+        geometry.particle_cloud_template_resident = None;
+        geometry.particle_cloud_surface_ranges.clear();
+        return;
+    }
+    mesh.vertex.set_len(vertex_count);
+    mesh.index.set_len(index_count);
+    mesh.uploaded_vertices = frame.particle_cloud_revision;
+    mesh.uploaded_topology = frame.particle_cloud_revision;
+    geometry.particle_cloud_template_resident = Some(key);
+    geometry
+        .particle_cloud_surface_ranges
+        .clone_from(&*frame.particle_cloud_surface_ranges);
+}
+
+#[must_use]
+fn write_stream_tail(
+    stream: &residency::GpuStream,
+    queue: &RenderQueue,
+    bytes: &[u8],
+    from: usize,
+) -> bool {
+    let Some((start, end)) = residency::aligned_stream_span(from, bytes.len(), bytes.len()) else {
+        return true;
+    };
+    stream.write_at(queue, start as u64, &bytes[start..end])
 }
 
 struct RetainedMeshSource<'a> {

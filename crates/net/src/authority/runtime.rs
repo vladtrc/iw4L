@@ -25,10 +25,10 @@ use sim::{ClientAction, ClientId, ClientLifecycle, DamageSource, SimEvent};
 
 use crate::policy::killcam::{
     ActiveKillcamSkips, PendingDeathTimelines, ScriptKillcamEmitStats,
-    abort_killcam_on_use_copycat, emit_spawned_player, expire_with_notify,
-    spawned_clients_from_journal, start_round_end_wait_from_journal, start_timelines_from_deaths,
-    tick_death_timelines, tick_final_killcam, tick_phase_b_skips, tick_round_end_wait,
-    watch_nothing_to_show,
+    abort_killcam_on_use_copycat, emit_spawned_player, end_ordinary_killcams_on_game_ended,
+    expire_with_notify, spawned_clients_from_journal, start_round_end_wait_from_journal,
+    start_timelines_from_deaths, tick_death_timelines, tick_final_killcam, tick_phase_b_skips,
+    tick_round_end_wait, watch_nothing_to_show,
 };
 
 #[derive(Resource)]
@@ -927,6 +927,8 @@ fn fanout_loopback(
         &mut pending_deaths,
         clock.time_ms,
         &tick.snapshot.meta.journal,
+        &tick.snapshot,
+        &archive,
         tus,
         &tick.weapon_script_names,
         tick.pending_final_kill,
@@ -951,6 +953,14 @@ fn fanout_loopback(
         &mut kc_stats,
         &mut begin_notifies,
         &tick.snapshot,
+    );
+
+    end_ordinary_killcams_on_game_ended(
+        &mut seats,
+        &mut skips,
+        &level,
+        &mut kc_stats,
+        &mut ended_notifies,
     );
 
     let viewers: Vec<ClientId> = tick.snapshot.players.iter().map(|(id, _)| *id).collect();
@@ -1023,6 +1033,7 @@ fn fanout_loopback(
         &tick.input.cmds,
         &mut kc_stats,
         &mut abort_notifies,
+        &mut ended_notifies,
     );
     abort_killcam_on_use_copycat(
         &mut seats,
@@ -1030,14 +1041,17 @@ fn fanout_loopback(
         &tick.input.actions,
         &mut kc_stats,
         &mut abort_notifies,
+        &mut ended_notifies,
     );
 
     watch_nothing_to_show(
         &mut seats,
         &mut skips,
         &archive,
+        clock.time_ms,
         &mut kc_stats,
         &mut abort_notifies,
+        &mut ended_notifies,
     );
     expire_with_notify(
         &mut seats,
@@ -1413,6 +1427,7 @@ fn team_winner(winner: Option<gamemode_iw4::Team>) -> GameWinner {
 pub fn authority_bookkeeping(
     server_tick: Res<ServerTick>,
     mut archive: ResMut<FrameArchive>,
+    seats: Res<ActiveKillcams>,
     mut world: ResMut<AuthorityWorld>,
     mut soon: MessageWriter<MatchEndingSoon>,
     mut very_soon: MessageWriter<MatchEndingVerySoon>,
@@ -1429,7 +1444,7 @@ pub fn authority_bookkeeping(
     push_phase(trace, "Bookkeeping");
 
     if let Some(tick) = server_tick.0.as_ref() {
-        archive.push_snapshot(&tick.snapshot);
+        archive.push_snapshot(&tick.snapshot, &seats.viewers());
         if tick
             .snapshot
             .meta

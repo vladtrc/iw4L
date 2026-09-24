@@ -136,6 +136,7 @@ pub struct FxGlassReset {
 
     pub defs: Vec<[u8; FX_GLASS_DEF]>,
 
+    pub namespace: asset_material::AssetNamespace,
     pub def_materials: Vec<(String, String)>,
 
     pub def_material_edges: Vec<(
@@ -172,13 +173,14 @@ impl FxGlassReset {
     }
 
     pub fn resolve_material_edges(&mut self, materials: &MaterialDefinitions) {
+        let ns = self.namespace;
         self.def_material_edges = self
             .def_materials
             .iter()
             .map(|(intact, shattered)| {
                 (
-                    glass_material_edge(intact, materials),
-                    glass_material_edge(shattered, materials),
+                    glass_material_edge(ns, intact, materials),
+                    glass_material_edge(ns, shattered, materials),
                 )
             })
             .collect();
@@ -252,6 +254,7 @@ pub fn build_fx_glass_reset(stream: &ZoneStream<'_>) -> Option<FxGlassReset> {
         piece_states,
         geo_data,
         defs,
+        namespace: asset_material::AssetNamespace::Iw4,
         def_materials: Vec::new(),
         def_material_edges: Vec::new(),
         half_thickness,
@@ -264,13 +267,14 @@ pub fn build_fx_glass_reset(stream: &ZoneStream<'_>) -> Option<FxGlassReset> {
 }
 
 fn glass_material_edge(
+    namespace: asset_material::AssetNamespace,
     hint: &str,
     materials: &MaterialDefinitions,
 ) -> crate::AssetEdge<crate::MaterialSpace> {
     if hint.is_empty() {
         return crate::AssetEdge::Absent;
     }
-    match materials.material_index_by_name(hint) {
+    match materials.material_index_by_ns(namespace, hint) {
         Some(index) => crate::AssetEdge::bind(index, materials.zone_of(index.order())),
         None => crate::AssetEdge::Unresolved(crate::AssetEdgeReason::CatalogMiss),
     }

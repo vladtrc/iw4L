@@ -262,11 +262,7 @@ impl ZoneLane for Iw4Lane {
             .flat_map(|(intact, shattered)| [intact.clone(), shattered.clone()])
             .filter(|n| !n.is_empty())
             .collect();
-        let fx_name_hints: Vec<String> = fx
-            .unique_material_name_hints()
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        let fx_material_keys = fx.unique_material_keys();
         let leftover = std::mem::take(&mut sink.fx_glass_def_materials);
         let image_stage = progress.begin_scoped(StageId::Images, "map", None);
         let clip_stage = progress.begin_scoped(StageId::MapAssets, "collision", None);
@@ -282,7 +278,7 @@ impl ZoneLane for Iw4Lane {
                     path,
                     materials_side,
                     image_stage,
-                    fx_name_hints,
+                    fx_material_keys,
                     glass_names,
                 )
             });
@@ -927,14 +923,14 @@ impl ZoneLane for Iw4Lane {
         let captured = sink.weapons.len();
 
         sink.weapons.resolve_reticles(&sink.materials);
-        let projectile_hints = sink.weapons.projectile_model_hints();
+        let projectile_keys = sink.weapons.projectile_model_hints();
         let pending_unclassified = sink.projectile_meshes.len();
-        sink.projectile_meshes.keep_referenced(&projectile_hints);
-        for hint in &projectile_hints {
-            if sink.projectile_meshes.contains(hint) {
+        sink.projectile_meshes.keep_referenced(&projectile_keys);
+        for key in &projectile_keys {
+            if sink.projectile_meshes.contains(key.namespace, &key.name) {
                 continue;
             }
-            if let Some(gun) = sink.world_weapons.get(hint) {
+            if let Some(gun) = sink.world_weapons.get(key.namespace, &key.name) {
                 sink.projectile_meshes.absorb_world_weapon(gun);
             }
         }
@@ -1032,15 +1028,8 @@ impl ZoneLane for Iw4Lane {
         report.push(format!(
             "common_mp TracerDef materials: {}",
             sink.tracers
-                .names()
-                .map(|n| {
-                    let mat = sink
-                        .tracers
-                        .get(n)
-                        .map(|t| t.material_report())
-                        .unwrap_or("absent");
-                    format!("{n}={mat}")
-                })
+                .defs()
+                .map(|t| format!("{:?}/{}={}", t.namespace, t.name, t.material_report()))
                 .collect::<Vec<_>>()
                 .join(" ")
         ));
@@ -1119,26 +1108,20 @@ impl ZoneLane for Iw4Lane {
                 inline.missing,
                 inline.unsupported
             ));
-            let tracer_inline = crate::material_images::plan_color_or_2d_for_names(
+            let tracer_inline = crate::material_images::plan_color_or_2d_for_keys(
                 &mut plan,
                 &mut material_population,
-                sink.tracers.named_materials(),
+                sink.tracers.material_keys(),
                 &stage,
                 crate::session_load::load_pool(),
             );
             report.push(format!(
                 "common_mp tracer beam images: {tracer_inline} in-zone TS_COLOR_MAP/TS_2D decoded, rest claimed"
             ));
-            let fx_2d_names: Vec<String> = sink
-                .fx
-                .unique_material_name_hints()
-                .into_iter()
-                .map(str::to_owned)
-                .collect();
-            let fx_inline = crate::material_images::plan_color_or_2d_for_names(
+            let fx_inline = crate::material_images::plan_color_or_2d_for_keys(
                 &mut plan,
                 &mut material_population,
-                fx_2d_names,
+                sink.fx.unique_material_keys(),
                 &stage,
                 crate::session_load::load_pool(),
             );
@@ -1356,7 +1339,7 @@ fn decode_map_material_images(
     path: &Path,
     catalog: &mut crate::MaterialCatalog,
     stage: crate::progress::StageHandle,
-    fx_name_hints: Vec<String>,
+    fx_material_keys: Vec<crate::MaterialKey>,
     glass_names: Vec<String>,
 ) -> Vec<String> {
     let mut report = Vec::new();
@@ -1375,12 +1358,15 @@ fn decode_map_material_images(
         }
         Err(error) => report.push(format!("IWD material-map gap: {error}")),
     }
-    let mut names = fx_name_hints;
-    names.extend(glass_names.iter().cloned());
-    match crate::material_images::decode_color_or_2d_for_names(
+    let mut keys = fx_material_keys;
+    keys.extend(glass_names.iter().map(|name| crate::MaterialKey {
+        namespace: crate::AssetNamespace::Iw4,
+        name: name.clone(),
+    }));
+    match crate::material_images::decode_color_or_2d_for_keys(
         path,
         catalog,
-        names,
+        keys,
         &stage,
         crate::session_load::load_pool(),
     ) {

@@ -49,6 +49,8 @@ pub struct PresentedSnapshot {
     inner: Option<Arc<Snapshot>>,
     previous_inner: Option<Arc<Snapshot>>,
     frame_interpolation: f32,
+    trajectory_time_ms: Option<i32>,
+    trajectory_next: Option<Arc<Snapshot>>,
 
     pose: HashMap<ClientId, PlayerState>,
     view_offset: [f32; 3],
@@ -62,6 +64,8 @@ impl PresentedSnapshot {
         self.inner = None;
         self.previous_inner = None;
         self.frame_interpolation = 0.0;
+        self.trajectory_time_ms = None;
+        self.trajectory_next = None;
         self.pose.clear();
         self.view_offset = [0.0; 3];
         self.remote_provenance.clear();
@@ -69,6 +73,8 @@ impl PresentedSnapshot {
     }
 
     pub fn publish_decoded(&mut self, snapshot: Snapshot) {
+        self.trajectory_time_ms = None;
+        self.trajectory_next = None;
         self.presented_projectiles = authoritative_projectiles(&snapshot);
         self.pose.clear();
         self.inner = Some(Arc::new(snapshot));
@@ -141,6 +147,8 @@ impl PresentedSnapshot {
         mut remote_poses: HashMap<ClientId, PlayerState>,
         remote_provenance: HashMap<ClientId, PresentationSampleProvenance>,
     ) {
+        self.trajectory_time_ms = None;
+        self.trajectory_next = None;
         self.presented_projectiles = authoritative_projectiles(&snapshot);
         self.pose.clear();
         self.pose.insert(local, predicted_ps);
@@ -157,6 +165,56 @@ impl PresentedSnapshot {
             self.inner.as_deref()?,
             self.frame_interpolation,
         ))
+    }
+
+    pub fn trajectory_time_ms(&self, render_time_ms: i32) -> i32 {
+        self.trajectory_time_ms.unwrap_or(render_time_ms)
+    }
+
+    pub(crate) fn set_trajectory_sample(
+        &mut self,
+        time_ms: Option<i32>,
+        next: Option<Arc<Snapshot>>,
+    ) {
+        self.trajectory_time_ms = time_ms;
+        self.trajectory_next = next;
+    }
+
+    pub fn projectile_origin_at(
+        &self,
+        projectile: &sim::ProjectileState,
+        render_time_ms: i32,
+    ) -> [f32; 3] {
+        let Some(time_ms) = self.trajectory_time_ms else {
+            return projectile.origin_at(render_time_ms);
+        };
+        let Some(current) = self.snapshot() else {
+            return projectile.origin_at(time_ms);
+        };
+        let current_time = sim::level_time_ms(current.tick);
+        let Some(next) = self.trajectory_next.as_deref() else {
+            return projectile.origin_at(time_ms.min(current_time));
+        };
+        let next_time = sim::level_time_ms(next.tick);
+        let next_projectile = next.projectiles.iter().find(|p| {
+            p.id == projectile.id
+                && p.entnum == projectile.entnum
+                && p.owner_life == projectile.owner_life
+        });
+        if let Some(next_projectile) = next_projectile
+            && next_time > current_time
+            && next_projectile.pos != projectile.pos
+        {
+            // A buffered impact/bounce ends the old trajectory; extrapolating it
+            // through that transition sends the camera past the victim.
+            let fraction = ((time_ms - current_time) as f32 / (next_time - current_time) as f32)
+                .clamp(0.0, 1.0);
+            return std::array::from_fn(|axis| {
+                projectile.origin[axis]
+                    + (next_projectile.origin[axis] - projectile.origin[axis]) * fraction
+            });
+        }
+        projectile.origin_at(time_ms)
     }
 
     pub(crate) fn set_snapshot_interpolation(

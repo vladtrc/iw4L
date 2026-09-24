@@ -173,7 +173,7 @@ pub fn update(
     mut motion: impl FnMut(FxElemMotionQuery<'_>) -> Option<FxElemMotionResult>,
     mut on_emit: impl FnMut(FxEmitQuery<'_>) -> Option<fx_iw4::FxEmitSchedule>,
     mut on_child: impl FnMut(&mut FxSystemHost, FxChildSpawnRequest<'_>) -> bool,
-    mut on_trail_def: impl FnMut(&str, u8) -> Option<crate::def::FxElemDefInfo>,
+    mut on_trail_def: impl FnMut(u16, u8) -> Option<crate::def::FxElemDefInfo>,
     mut on_trail_trace: impl FnMut(
         [f32; 3],
         [f32; 3],
@@ -182,7 +182,7 @@ pub fn update(
         u32,
     ) -> Option<crate::trail::FxTrailCollideHit>,
     mut on_trail_vel_graphs: impl FnMut(
-        &str,
+        u16,
         u8,
     )
         -> (Vec<fx_iw4::FxElemVec3Range>, Vec<fx_iw4::FxElemVec3Range>),
@@ -433,7 +433,7 @@ pub(crate) fn apply_update_effect_partial_trails(
     slot: usize,
     prev_msec: i32,
     msec_now: i32,
-    on_trail_def: &mut impl FnMut(&str, u8) -> Option<crate::def::FxElemDefInfo>,
+    on_trail_def: &mut impl FnMut(u16, u8) -> Option<crate::def::FxElemDefInfo>,
     on_trail_trace: &mut impl FnMut(
         [f32; 3],
         [f32; 3],
@@ -442,7 +442,7 @@ pub(crate) fn apply_update_effect_partial_trails(
         u32,
     ) -> Option<crate::trail::FxTrailCollideHit>,
     on_trail_vel_graphs: &mut impl FnMut(
-        &str,
+        u16,
         u8,
     )
         -> (Vec<fx_iw4::FxElemVec3Range>, Vec<fx_iw4::FxElemVec3Range>),
@@ -478,7 +478,7 @@ fn apply_effect_partial(
     collide_cache: &HashMap<u16, Option<FxElemMotionResult>>,
     on_emit: &mut impl FnMut(FxEmitQuery<'_>) -> Option<fx_iw4::FxEmitSchedule>,
     on_child: &mut impl FnMut(&mut FxSystemHost, FxChildSpawnRequest<'_>) -> bool,
-    on_trail_def: &mut impl FnMut(&str, u8) -> Option<crate::def::FxElemDefInfo>,
+    on_trail_def: &mut impl FnMut(u16, u8) -> Option<crate::def::FxElemDefInfo>,
     on_trail_trace: &mut impl FnMut(
         [f32; 3],
         [f32; 3],
@@ -487,7 +487,7 @@ fn apply_effect_partial(
         u32,
     ) -> Option<crate::trail::FxTrailCollideHit>,
     on_trail_vel_graphs: &mut impl FnMut(
-        &str,
+        u16,
         u8,
     )
         -> (Vec<fx_iw4::FxElemVec3Range>, Vec<fx_iw4::FxElemVec3Range>),

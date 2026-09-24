@@ -435,6 +435,8 @@ pub fn seal_render_frame(
         particle_cloud_vertices,
         particle_cloud_indices,
         particle_cloud_surface_ranges,
+        particle_cloud_template,
+        particle_cloud_revision,
         _particle_r_arc,
     ) = match particle_cloud.as_ref() {
         Some(plan) => {
@@ -443,6 +445,8 @@ pub fn seal_render_frame(
                 Arc::clone(&plan.vertices),
                 Arc::clone(&plan.indices),
                 ranges,
+                plan.template_counts(),
+                plan.revision,
                 r_arc,
             )
         }
@@ -450,6 +454,8 @@ pub fn seal_render_frame(
             Arc::new(Vec::new()),
             Arc::new(Vec::new()),
             Arc::new(Vec::new()),
+            (0, 0),
+            0,
             1u32,
         ),
     };
@@ -606,6 +612,8 @@ pub fn seal_render_frame(
         particle_cloud_vertices,
         particle_cloud_indices,
         particle_cloud_surface_ranges,
+        particle_cloud_template,
+        particle_cloud_revision,
         mark_mesh_vertices,
         mark_mesh_indices,
         mark_mesh_surface_ranges,

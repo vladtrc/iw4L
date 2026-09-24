@@ -3,10 +3,16 @@ pub enum Killstreak {
     Uav,
     Airdrop,
     HelicopterFlares,
+    PredatorMissile,
 }
 
 impl Killstreak {
-    pub const ALL: [Self; 3] = [Self::Uav, Self::Airdrop, Self::HelicopterFlares];
+    pub const ALL: [Self; 4] = [
+        Self::Uav,
+        Self::Airdrop,
+        Self::PredatorMissile,
+        Self::HelicopterFlares,
+    ];
 
     #[must_use]
     pub const fn kills(self) -> i32 {
@@ -14,6 +20,7 @@ impl Killstreak {
             Self::Uav => 3,
             Self::Airdrop => 4,
             Self::HelicopterFlares => 9,
+            Self::PredatorMissile => 5,
         }
     }
 
@@ -23,6 +30,7 @@ impl Killstreak {
             Self::Uav => "killstreak_uav_mp",
             Self::Airdrop => AIRDROP_MARKER_WEAPON,
             Self::HelicopterFlares => "killstreak_helicopter_flares_mp",
+            Self::PredatorMissile => "killstreak_predator_missile_mp",
         }
     }
 
@@ -32,6 +40,7 @@ impl Killstreak {
             Self::Uav => "uav_pickup",
             Self::Airdrop => "airdrop_pickup",
             Self::HelicopterFlares => "helicopter_flares_pickup",
+            Self::PredatorMissile => "predator_missile_pickup",
         }
     }
 
@@ -41,6 +50,7 @@ impl Killstreak {
             Self::Uav => 0,
             Self::Airdrop => 1,
             Self::HelicopterFlares => 2,
+            Self::PredatorMissile => 3,
         }
     }
 
@@ -50,12 +60,13 @@ impl Killstreak {
             0 => Some(Self::Uav),
             1 => Some(Self::Airdrop),
             2 => Some(Self::HelicopterFlares),
+            3 => Some(Self::PredatorMissile),
             _ => None,
         }
     }
 }
 
-pub const DEFAULT_LOADOUT: [Killstreak; 3] = Killstreak::ALL;
+pub const DEFAULT_LOADOUT: [Killstreak; 4] = Killstreak::ALL;
 
 #[must_use]
 pub const fn streak_modifier(hardline: bool) -> i32 {
@@ -69,7 +80,7 @@ pub fn earned(
     modifier: i32,
 ) -> impl Iterator<Item = (Killstreak, i32)> + '_ {
     let floor = last_earned.map_or(i32::MIN, Killstreak::kills);
-    let mut sorted = [None; 3];
+    let mut sorted = [None; Killstreak::ALL.len()];
     for (slot, streak) in sorted.iter_mut().zip(loadout) {
         *slot = Some(*streak);
     }
@@ -150,9 +161,10 @@ impl CrateContents {
     }
 }
 
-pub const CRATE_WEIGHTS: [(CrateContents, u32); 3] = [
+pub const CRATE_WEIGHTS: [(CrateContents, u32); 4] = [
     (CrateContents::Ammo, 17),
     (CrateContents::Streak(Killstreak::Uav), 17),
+    (CrateContents::Streak(Killstreak::PredatorMissile), 12),
     (CrateContents::Streak(Killstreak::HelicopterFlares), 5),
 ];
 
@@ -188,3 +200,27 @@ pub const PAVELOW_RANGE: f32 = 3_500.0;
 pub const PAVELOW_SPAWN_PROTECTION_MS: i32 = 5_000;
 
 pub const MPH_TO_UNITS: f32 = 17.6;
+
+pub const PREDATOR_PROJECTILE: &str = "remotemissile_projectile_mp";
+
+pub const PREDATOR_LAUNCH_HEIGHT: f32 = 14_000.0;
+
+pub const PREDATOR_LAUNCH_BACK: f32 = 7_000.0;
+
+pub const PREDATOR_TARGET_AHEAD: f32 = 1_500.0;
+
+pub const PREDATOR_PITCH_RANGE: [f32; 2] = [1.0, 87.0];
+
+pub const PREDATOR_PITCH_RATE: f32 = 15.0;
+
+pub const PREDATOR_YAW_RATE: f32 = 20.0;
+
+pub const PREDATOR_SPEED_RANGE: [f32; 2] = [3_000.0, 6_000.0];
+
+pub const PREDATOR_SPEED_UP: f32 = 2_000.0;
+
+pub const PREDATOR_SPEED_DOWN: f32 = 500.0;
+
+pub const PREDATOR_FOV: f32 = 15.0;
+
+pub const PREDATOR_STATIC_MS: i32 = 500;

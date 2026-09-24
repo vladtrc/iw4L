@@ -697,17 +697,14 @@ impl ZoneLane for T5Lane {
             .resolve_combat_fx(&sink.fx, &crate::TracerCatalog::default());
         let leftover_fx = sink.fx.len();
         let leftover_fx_gaps = sink.fx.capture_gaps;
-        for name in sink.weapons.rocket_model_hints() {
-            if let Some(entry) = sink.projectile_meshes.get(&name) {
-                sink.fpv_meshes.insert_in(
-                    crate::AssetNamespace::T5,
-                    entry.skel.clone(),
-                    Some(&sink.materials),
-                );
+        for key in sink.weapons.rocket_model_hints() {
+            if let Some(entry) = sink.projectile_meshes.get(key.namespace, &key.name) {
+                sink.fpv_meshes
+                    .insert_in(key.namespace, entry.skel.clone(), Some(&sink.materials));
             }
         }
-        sink.projectile_meshes
-            .keep_referenced(&sink.weapons.projectile_model_hints());
+        let projectile_keys = sink.weapons.projectile_model_hints();
+        sink.projectile_meshes.keep_referenced(&projectile_keys);
         let mut weapons = sink.weapons.into_build();
         weapons.stamp_namespace(crate::AssetNamespace::T5);
         weapons.apply_stats_tables(sink.stats_tables.values());

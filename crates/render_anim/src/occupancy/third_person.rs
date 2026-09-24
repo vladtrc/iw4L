@@ -19,6 +19,12 @@ pub fn presented_is_third_person(
     let Some(ps) = presented.player(local) else {
         return false;
     };
+    if in_killcam && ps.kill_cam_entity != playerstate_iw4::ENTITYNUM_NONE {
+        return true;
+    }
+    if remote_missile_camera(presented, local, 0).is_some() {
+        return true;
+    }
     cg_is_third_person_view(CgIsThirdPersonViewInputs {
         pm_type: ps.pm_type,
         other_flags: ps.other_flags,
@@ -26,6 +32,27 @@ pub fn presented_is_third_person(
         cg_third_person: false,
         in_killcam,
         killcam_mode: KillCamMode::Mode0,
+    })
+}
+
+pub fn remote_missile_camera(
+    presented: &PresentedSnapshot,
+    local: ClientId,
+    at_time: i32,
+) -> Option<WorldCameraPose> {
+    let link = presented
+        .snapshot()?
+        .meta
+        .for_client(local)?
+        .remote_missile
+        .filter(|link| link.unlink_at_ms.is_none())?;
+    let missile = presented
+        .presented_projectiles()
+        .iter()
+        .find(|p| p.authoritative_id() == Some(link.projectile))?;
+    Some(WorldCameraPose {
+        origin: missile.origin_at(at_time),
+        angles: link.angles,
     })
 }
 

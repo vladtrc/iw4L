@@ -400,7 +400,7 @@ fn kill_dyn_ent(
         &mut host.0,
         &fx.0,
         &cache,
-        name,
+        fx.0.map_fx_name(name),
         transform.translation.to_array(),
         axis_from_rotation(transform.rotation),
         FrontendFxScene::wrap(scene, marks)

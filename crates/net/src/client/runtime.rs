@@ -15,7 +15,7 @@ use crate::client::cls_frame::ClsRealtime;
 use crate::client::entities::CEntityBirthCensus;
 use crate::client::input::{
     ClientActionInput, LookState, accumulate_look, build_usercmd, com_frame_time_msec,
-    key_frame_msec,
+    key_frame_msec, remote_control_axes,
 };
 use crate::client::predict::{ClientPrediction, CmdSeq};
 use crate::client::presented::{
@@ -32,20 +32,35 @@ use sim::Snapshot;
 pub struct ClientPredictionState(pub ClientPrediction);
 
 #[derive(Resource, Default)]
-pub struct PendingPresentedEntityEvents(pub Vec<sim::EntityEventRecord>);
+pub struct PendingPresentedEntityEvents {
+    pub live: Vec<sim::EntityEventRecord>,
+
+    pub archived: Vec<sim::EntityEventRecord>,
+
+    pub in_killcam: bool,
+}
 
 #[derive(Resource, Default)]
 pub struct PendingPelletFx(pub Vec<sim::PelletFxRecord>);
 
 fn collect_received_entity_events(
     last_tick: Option<sim::Tick>,
+    local: sim::ClientId,
     snapshot: &mut Snapshot,
-    pending: &mut Vec<sim::EntityEventRecord>,
+    pending: &mut PendingPresentedEntityEvents,
 ) -> bool {
     if crate::classify_snapshot(last_tick, snapshot.tick) != crate::SnapshotOrder::New {
         return false;
     }
-    pending.append(&mut snapshot.meta.entity_events);
+    pending.in_killcam = snapshot
+        .meta
+        .for_client(local)
+        .is_some_and(|m| m.killcam_hud.is_some());
+    if pending.in_killcam {
+        pending.archived.append(&mut snapshot.meta.entity_events);
+    } else {
+        pending.live.append(&mut snapshot.meta.entity_events);
+    }
     true
 }
 
@@ -530,8 +545,9 @@ pub fn reconcile_prediction(
     while let Some(mut tick) = received.0.pop_front() {
         if !collect_received_entity_events(
             last_adopted.next().map(|last| last.tick),
+            local.0,
             &mut tick.snapshot,
-            &mut entity_events.0,
+            &mut entity_events,
         ) {
             continue;
         }
@@ -745,6 +761,17 @@ pub fn sample_client_input(
         actions.mouse_x = 0.0;
         actions.mouse_y = 0.0;
     }
+    let remote_mouse = presented
+        .snapshot()
+        .and_then(|snapshot| snapshot.meta.for_client(local.0))
+        .and_then(|meta| meta.remote_missile)
+        .filter(|link| link.unlink_at_ms.is_none())
+        .map(|_| {
+            let mouse = (actions.mouse_x, actions.mouse_y);
+            actions.mouse_x = 0.0;
+            actions.mouse_y = 0.0;
+            mouse
+        });
     let look_state = ps
         .map(|ps| {
             hud_iw4::update_shellshock_look_control(
@@ -865,6 +892,10 @@ pub fn sample_client_input(
     }
     let mut cmd = build_usercmd(&mut actions, &look, 0);
     look.angles = cmd.angles;
+    if let Some((mouse_x, mouse_y)) = remote_mouse {
+        cmd.remote_control = remote_control_axes(&actions, mouse_x, mouse_y);
+        cmd.buttons |= playerstate_iw4::buttons::REMOTE_CONTROL;
+    }
 
     cmd.weapon = select.index as u16;
     cmd.weapon_mapped = select.mapped_index as u16;
@@ -1388,6 +1419,12 @@ pub fn publish_presented(
     presented.set_presented_projectiles(merged_projectiles);
     presented.set_view_offset(view_offset);
     presented.set_snapshot_interpolation(interpolation_previous, frame_interpolation);
+    presented.set_trajectory_sample(
+        archived.then_some(body_time_ms),
+        archived
+            .then(|| proxy.0.snapshot_after(cg_clock.time()))
+            .flatten(),
+    );
 }
 
 pub fn reset_cgame_on_match_torn_down(
@@ -1442,7 +1479,7 @@ pub fn reset_cgame_on_match_torn_down(
     *present_census = PresentLocalCensus::default();
     *select = CgWeaponSelect::default();
 
-    entity_events.0.clear();
+    *entity_events = PendingPresentedEntityEvents::default();
     pellet_fx.0.clear();
     *entity_event_cursor = crate::EntityEventCursor::default();
 

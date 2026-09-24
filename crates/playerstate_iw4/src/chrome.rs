@@ -105,10 +105,3 @@ pub fn killcam_lerp_deadline_ms(
 pub fn third_person_in_killcam(in_killcam: bool, mode: KillCamMode) -> bool {
     in_killcam && mode != KillCamMode::Mode0
 }
-
-pub fn mode_camera(mode: KillCamMode) {
-    if mode == KillCamMode::Mode0 {
-        return;
-    }
-    panic!("CG_KillCamModeCamera: modes 1-8 need archived entity bank on the wire");
-}

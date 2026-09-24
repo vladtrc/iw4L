@@ -173,6 +173,7 @@ pub enum SpawnFail {
 pub struct PendingRunnerSpawn {
     pub mark_entity: Option<u16>,
     pub parent_name: String,
+    pub catalog_index: u16,
     pub def_index: u8,
     pub msec_begin: i32,
     pub random_seed: u32,
@@ -185,6 +186,7 @@ pub struct PendingRunnerSpawn {
 #[derive(Clone, Debug)]
 pub struct PendingSoundSpawn {
     pub parent_name: String,
+    pub catalog_index: u16,
     pub def_index: u8,
     pub msec_begin: i32,
     pub random_seed: u32,
@@ -194,6 +196,7 @@ pub struct PendingSoundSpawn {
 #[derive(Clone, Debug)]
 pub struct PendingDecalSpawn {
     pub parent_name: String,
+    pub catalog_index: u16,
     pub def_index: u8,
     pub msec_begin: i32,
     pub random_seed: u32,
@@ -635,6 +638,34 @@ impl FxSystemHost {
         for slot in slots {
             crate::spawn::stop_effect_non_recursive(self, slot);
         }
+    }
+
+    pub fn kill_def_newer_than(&mut self, def_name: &str, msec_begin: i32) {
+        let slots: Vec<_> = self
+            .effects
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, effect)| {
+                (effect.ring_resident
+                    && effect.has_refs()
+                    && effect.def_name == def_name
+                    && effect.msec_begin >= msec_begin)
+                    .then_some(slot)
+            })
+            .collect();
+        if slots.is_empty() {
+            return;
+        }
+        for slot in slots {
+            crate::spawn::free_all_elems_for_effect(self, slot);
+            crate::spawn::free_all_trails_for_effect(self, slot);
+            if let Some(effect) = self.effect_at_mut(slot) {
+                effect.status &=
+                    !(FX_STATUS_REF_COUNT_MASK_IW4 | fx_iw4::FX_STATUS_HAS_PENDING_LOOP_ELEMS);
+            }
+        }
+        self.needs_garbage_collection = true;
+        self.run_garbage_collection();
     }
 
     pub fn refresh_bolt_poses(

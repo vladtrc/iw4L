@@ -46,6 +46,7 @@ pub struct FxSparkFillVisual {
 #[derive(Clone, Debug)]
 pub struct FxSparkCloudInstance {
     pub def_name: String,
+    pub catalog_index: u16,
     pub def_index: u8,
     pub origin: [f32; 3],
     pub write_idx: u32,
@@ -197,6 +198,7 @@ pub fn build_spark_cloud_instance(
     host: &FxSystemHost,
     spark_handle: u16,
     def_name: &str,
+    catalog_index: u16,
     def_index: u8,
     msec_now: i32,
     vis_size1: f32,
@@ -220,6 +222,7 @@ pub fn build_spark_cloud_instance(
     );
     Some(FxSparkCloudInstance {
         def_name: def_name.to_owned(),
+        catalog_index,
         def_index,
         origin: latest.pos,
         write_idx: slot.write_idx,

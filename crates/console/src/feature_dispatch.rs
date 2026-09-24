@@ -848,6 +848,10 @@ pub(crate) fn route_debug_feature_commands(
                     bot_add.push(n);
                     echo(format!("bot: queued add {n}"), console, line);
                 }
+                Ok(BotVerb::Dummy(n)) => {
+                    bot_add.push_dummy(n);
+                    echo(format!("bot: queued dummy {n}"), console, line);
+                }
                 Ok(BotVerb::Hold(on)) => {
                     bot_hold.0 = on;
                     echo(
@@ -1340,7 +1344,7 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         ),
         (
             "bot",
-            "bot add [N] | hold [on|off] | give <id> <weapon> [att...] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z>",
+            "bot add [N] | dummy [N] | hold [on|off] | give <id> <weapon> [att...] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z>",
         ),
         (
             "menu",
@@ -1369,11 +1373,12 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
     }
 }
 
-const BOT_USAGE: &str = "usage: bot add [N] | hold [on|off] | give <id> <weapon> [att...] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
+const BOT_USAGE: &str = "usage: bot add [N] | dummy [N] | hold [on|off] | give <id> <weapon> [att...] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum BotVerb {
     Add(u32),
+    Dummy(u32),
     Hold(bool),
     Give {
         id: ClientId,
@@ -1394,6 +1399,21 @@ pub(crate) fn parse_bot_args(args: &[String]) -> Result<BotVerb, String> {
                 .unwrap_or(1)
                 .clamp(1, 16);
             Ok(BotVerb::Add(n))
+        }
+        "dummy" => {
+            if args.len() > 2 {
+                return Err("usage: bot dummy [N]".into());
+            }
+            let n = args
+                .get(1)
+                .map(|s| s.parse::<u32>())
+                .transpose()
+                .map_err(|_| "usage: bot dummy [N]".to_owned())?
+                .unwrap_or(1);
+            if !(1..=16).contains(&n) {
+                return Err("bot dummy: count must be 1..16".into());
+            }
+            Ok(BotVerb::Dummy(n))
         }
         "hold" => match args.get(1).map(String::as_str) {
             None | Some("on") | Some("1") => Ok(BotVerb::Hold(true)),

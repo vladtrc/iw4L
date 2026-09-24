@@ -1,5 +1,5 @@
 use crate::frame::FrameWorld;
-use crate::match_state::{CarePackage, ClientLifecycle, PaveLow, Uav};
+use crate::match_state::{CarePackage, ClientLifecycle, PaveLow, RemoteMissile, Uav};
 use crate::world::{ClientId, Tick, inventory_add_weapon};
 use gamemode_iw4::killstreaks::{self, Killstreak};
 
@@ -191,6 +191,11 @@ pub(crate) fn use_selected(world: &mut FrameWorld, tick: Tick, id: ClientId) {
             let _ = world.spawn_script_mover(model_id(UAV_MODEL_KIND, id_value), origin, [0.0; 3]);
         }
         Killstreak::Airdrop => return,
+        Killstreak::PredatorMissile => {
+            if world.publishes_snapshot() && !launch_predator(world, tick, id) {
+                return;
+            }
+        }
         Killstreak::HelicopterFlares => {
             if world.pave_lows.len() >= 1 {
                 return;
@@ -686,5 +691,176 @@ pub(crate) fn blast_pave_lows(
 fn damage_pave_low(world: &mut FrameWorld, id: u32, damage: i32) {
     if let Some(heli) = world.pave_lows.iter_mut().find(|h| h.id == id) {
         heli.health = heli.health.saturating_sub(damage.max(0));
+    }
+}
+
+fn launch_predator(world: &mut FrameWorld, tick: Tick, id: ClientId) -> bool {
+    let Some(weapon) = world.weapon_index_by_script_name(killstreaks::PREDATOR_PROJECTILE) else {
+        return false;
+    };
+    let Some(ps) = world.player(id).copied() else {
+        return false;
+    };
+    let (forward, _, _) = math_iw4::angle_vectors([0.0, ps.viewangles[1], 0.0]);
+    let start = [
+        ps.origin[0] - forward[0] * killstreaks::PREDATOR_LAUNCH_BACK,
+        ps.origin[1] - forward[1] * killstreaks::PREDATOR_LAUNCH_BACK,
+        ps.origin[2] + killstreaks::PREDATOR_LAUNCH_HEIGHT,
+    ];
+    let target = [
+        ps.origin[0] + forward[0] * killstreaks::PREDATOR_TARGET_AHEAD,
+        ps.origin[1] + forward[1] * killstreaks::PREDATOR_TARGET_AHEAD,
+        ps.origin[2],
+    ];
+    let delta = [
+        target[0] - start[0],
+        target[1] - start[1],
+        target[2] - start[2],
+    ];
+    let length = math_iw4::vec3_length(delta);
+    let dir = [delta[0] / length, delta[1] / length, delta[2] / length];
+    let speed = world
+        .missile_launch_facts(weapon)
+        .map_or(killstreaks::PREDATOR_SPEED_RANGE[0], |f| {
+            f.projectile_speed as f32
+        });
+    let Ok(slot) = world.allocate_dynamic_entity(crate::gentity::EntityRunKind::Missile) else {
+        return false;
+    };
+    let entnum = slot.number();
+    let projectile = world.allocate_projectile_id();
+    let now = crate::level_time_ms(tick);
+    let velocity = entity_iw4::truncated_tr_delta([dir[0] * speed, dir[1] * speed, dir[2] * speed]);
+    let owner_life = world.client_meta(id).map_or_default(|m| m.life_sequence);
+    world.push_projectile(crate::equipment::ProjectileState {
+        id: projectile,
+        owner: id,
+        owner_life,
+        weapon,
+        origin: start,
+        velocity,
+        pos: entity_iw4::Trajectory {
+            tr_time: now,
+            tr_type: entity_iw4::TR_LINEAR,
+            tr_duration: 0,
+            tr_delta: velocity,
+            tr_base: start,
+        },
+        apos: entity_iw4::g_fire_missile_apos(dir),
+        entnum,
+        launch_time: now,
+        spawn_time_ms: now,
+        detonate_at_ms: None,
+        cleanup_at_ms: now.saturating_add(crate::equipment::ROCKET_CLEANUP_MS),
+        travel_distance: 0.0,
+        live: true,
+        stuck_pane: None,
+    });
+    world.client_meta_mut(id).remote_missile = Some(RemoteMissile {
+        projectile,
+        entnum,
+        angles: math_iw4::vect_to_angles(dir),
+        ..RemoteMissile::default()
+    });
+    true
+}
+
+pub(crate) fn steer_remote_missile(
+    world: &mut FrameWorld,
+    id: ClientId,
+    cmd: &playerstate_iw4::UserCmd,
+    msec: i32,
+) {
+    if !world.publishes_snapshot() {
+        return;
+    }
+    let Some(mut link) = world
+        .client_meta(id)
+        .and_then(|m| m.remote_missile)
+        .filter(|link| link.unlink_at_ms.is_none())
+    else {
+        return;
+    };
+    let seconds = msec as f32 * 0.001;
+    let delta = math_iw4::angles_to_axis([
+        f32::from(cmd.remote_control[0] as i8) / 127.0 * seconds * killstreaks::PREDATOR_PITCH_RATE,
+        f32::from(cmd.remote_control[1] as i8) / 127.0 * seconds * killstreaks::PREDATOR_YAW_RATE,
+        0.0,
+    ]);
+    let transposed = core::array::from_fn(|row| core::array::from_fn(|col| delta[col][row]));
+    let mut angles = math_iw4::axis_to_angles(math_iw4::matrix_multiply(
+        transposed,
+        math_iw4::angles_to_axis(link.angles),
+    ));
+    angles[0] = (angles[0] / 360.0 - (angles[0] / 360.0 + 0.5).floor()) * 360.0;
+    angles[0] = angles[0].clamp(
+        killstreaks::PREDATOR_PITCH_RANGE[0],
+        killstreaks::PREDATOR_PITCH_RANGE[1],
+    );
+    link.angles = angles;
+    let held = cmd.buttons & playerstate_iw4::buttons::REMOTE_CONTROL != 0;
+    link.attack = held && cmd.buttons & playerstate_iw4::buttons::ATTACK != 0;
+    link.armed |= held && !link.attack;
+    world.client_meta_mut(id).remote_missile = Some(link);
+}
+
+pub(crate) fn advance_remote_missiles(world: &mut FrameWorld, tick: Tick) {
+    if !world.publishes_snapshot() {
+        return;
+    }
+    let now = crate::level_time_ms(tick);
+    for id in world.client_ids_sorted() {
+        let Some(mut link) = world.client_meta(id).and_then(|m| m.remote_missile) else {
+            continue;
+        };
+        let alive = world
+            .client_meta(id)
+            .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive);
+        if !alive || link.unlink_at_ms.is_some_and(|at| now >= at) {
+            world.client_meta_mut(id).remote_missile = None;
+            continue;
+        }
+        if link.unlink_at_ms.is_some() {
+            continue;
+        }
+        let Some(projectile) = world
+            .projectile_mut_by_number(link.entnum)
+            .filter(|p| p.id == link.projectile && p.live)
+        else {
+            link.unlink_at_ms = Some(now.saturating_add(killstreaks::PREDATOR_STATIC_MS));
+            world.client_meta_mut(id).remote_missile = Some(link);
+            continue;
+        };
+        let (dir, _, _) = math_iw4::angle_vectors(link.angles);
+        let seconds = crate::MATCH_TICK_MS as f32 * 0.001;
+        let mut speed = projectile
+            .velocity
+            .iter()
+            .zip(dir)
+            .map(|(v, d)| v * d)
+            .sum::<f32>();
+        if link.armed && !link.boosted && link.attack {
+            speed = killstreaks::PREDATOR_SPEED_RANGE[1];
+            link.boosted = true;
+        } else {
+            let target = killstreaks::PREDATOR_SPEED_RANGE[0];
+            speed = if speed < target {
+                (speed + killstreaks::PREDATOR_SPEED_UP * seconds).min(target)
+            } else {
+                (speed - killstreaks::PREDATOR_SPEED_DOWN * seconds).max(target)
+            };
+        }
+        let velocity =
+            entity_iw4::truncated_tr_delta([dir[0] * speed, dir[1] * speed, dir[2] * speed]);
+        projectile.velocity = velocity;
+        projectile.pos = entity_iw4::Trajectory {
+            tr_time: now.saturating_sub(crate::MATCH_TICK_MS as i32),
+            tr_type: entity_iw4::TR_LINEAR,
+            tr_duration: 0,
+            tr_delta: velocity,
+            tr_base: projectile.origin,
+        };
+        projectile.apos = entity_iw4::g_fire_missile_apos(dir);
+        world.client_meta_mut(id).remote_missile = Some(link);
     }
 }

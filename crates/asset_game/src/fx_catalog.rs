@@ -114,6 +114,7 @@ pub enum OwnedFxVisual {
     Material {
         material: FxElemMaterial,
         hint: Option<String>,
+        material_namespace: crate::AssetNamespace,
         /// Whether the zone authored this visual at all, and whether it reached
         /// it through an alias. The zone pointers themselves stop at the walk:
         /// nothing downstream ever dereferenced them, only asked whether they
@@ -124,6 +125,7 @@ pub enum OwnedFxVisual {
     Mark {
         materials: [FxElemMaterial; 2],
         hints: [Option<String>; 2],
+        material_namespaces: [crate::AssetNamespace; 2],
         authored: [AuthoredRef; 2],
     },
     Model {
@@ -153,16 +155,27 @@ impl OwnedFxVisual {
         }
     }
 
-    pub fn decode_hints(&self) -> Vec<&str> {
-        match self {
-            Self::Material { hint, .. } => hint
-                .as_deref()
+    pub fn decode_keys(&self) -> Vec<asset_core::MaterialKey> {
+        let key = |namespace: crate::AssetNamespace, hint: &Option<String>| {
+            hint.as_deref()
                 .filter(|name| !name.is_empty())
-                .into_iter()
-                .collect(),
-            Self::Mark { hints, .. } => hints
-                .iter()
-                .filter_map(|h| h.as_deref().filter(|name| !name.is_empty()))
+                .map(|name| asset_core::MaterialKey {
+                    namespace,
+                    name: name.to_owned(),
+                })
+        };
+        match self {
+            Self::Material {
+                hint,
+                material_namespace,
+                ..
+            } => key(*material_namespace, hint).into_iter().collect(),
+            Self::Mark {
+                hints,
+                material_namespaces,
+                ..
+            } => (0..2)
+                .filter_map(|i| key(material_namespaces[i], &hints[i]))
                 .collect(),
             _ => Vec::new(),
         }
@@ -342,6 +355,7 @@ impl OwnedFxElemDef {
 
 #[derive(Clone, Debug)]
 pub struct OwnedFxEffectDef {
+    pub namespace: crate::AssetNamespace,
     pub name: String,
     pub view: FxEffectDefView,
     pub header_raw: Vec<u8>,
@@ -353,13 +367,13 @@ pub struct OwnedFxEffectDef {
 /// answers, and a consumer holding this cannot resolve one more pointer.
 #[derive(Clone, Debug, Default)]
 pub struct FxDefinitions {
-    by_name: HashMap<String, usize>,
+    by_key: HashMap<(crate::AssetNamespace, String), usize>,
 
     defs: Vec<OwnedFxEffectDef>,
 
-    order: Vec<String>,
     zones: Vec<ZoneOwner>,
     capture_zone: ZoneOwner,
+    map_namespace: crate::AssetNamespace,
     pub capture_gaps: usize,
 }
 
@@ -371,6 +385,7 @@ pub struct FxCatalog {
 
     links: HashMap<fastfile_iw4::Ptr, FxLink>,
     last_captured: Option<String>,
+    capture_ns: crate::AssetNamespace,
 }
 
 impl std::ops::Deref for FxCatalog {
@@ -408,12 +423,15 @@ impl FxCatalog {
         self.links.insert(slot, FxLink::Alias(target));
     }
 
+    pub fn set_capture_ns(&mut self, ns: crate::AssetNamespace) {
+        self.capture_ns = ns;
+    }
+
     pub fn absorb(&mut self, other: FxCatalog) {
         let FxCatalog {
             published:
                 FxDefinitions {
                     defs,
-                    order,
                     zones,
                     capture_gaps,
                     ..
@@ -424,10 +442,10 @@ impl FxCatalog {
         self.capture_gaps += capture_gaps;
 
         self.links.extend(links);
-        for ((key, effect), zone) in order.into_iter().zip(defs).zip(zones) {
+        for (effect, zone) in defs.into_iter().zip(zones) {
             let saved = self.capture_zone;
             self.capture_zone = zone;
-            self.insert_def(key, effect);
+            self.insert_owned(effect);
             self.capture_zone = saved;
         }
     }
@@ -437,7 +455,6 @@ impl FxCatalog {
             published:
                 FxDefinitions {
                     defs,
-                    order,
                     zones,
                     capture_gaps,
                     ..
@@ -445,13 +462,13 @@ impl FxCatalog {
             ..
         } = other;
         self.capture_gaps += capture_gaps;
-        for ((key, effect), zone) in order.into_iter().zip(defs).zip(zones) {
-            if self.by_name.contains_key(&key) {
+        for (effect, zone) in defs.into_iter().zip(zones) {
+            if self.index_in(effect.namespace, &effect.name).is_some() {
                 continue;
             }
             let saved = self.capture_zone;
             self.capture_zone = zone;
-            self.insert_def(key, effect);
+            self.insert_owned(effect);
             self.capture_zone = saved;
         }
     }
@@ -520,18 +537,15 @@ impl FxCatalog {
             return Ok(());
         }
 
-        let key = ascii_lower(name);
-
         self.last_captured = Some(name.to_owned());
-        self.insert_def(
-            key,
-            OwnedFxEffectDef {
-                name: name.to_owned(),
-                view,
-                header_raw: header_raw.to_vec(),
-                elems,
-            },
-        );
+        let namespace = self.capture_ns;
+        self.insert_owned(OwnedFxEffectDef {
+            namespace,
+            name: name.to_owned(),
+            view,
+            header_raw: header_raw.to_vec(),
+            elems,
+        });
         Ok(())
     }
 
@@ -591,17 +605,15 @@ impl FxCatalog {
             return;
         }
 
-        let key = ascii_lower(name);
         self.last_captured = Some(name.to_owned());
-        self.insert_def(
-            key,
-            OwnedFxEffectDef {
-                name: name.to_owned(),
-                view,
-                header_raw: leftover_pack_iw4_effect_header(&view),
-                elems,
-            },
-        );
+        let namespace = self.capture_ns;
+        self.insert_owned(OwnedFxEffectDef {
+            namespace,
+            name: name.to_owned(),
+            view,
+            header_raw: leftover_pack_iw4_effect_header(&view),
+            elems,
+        });
     }
 
     pub fn name_at_slot(&self, slot: fastfile_iw4::Ptr) -> Option<&str> {
@@ -616,23 +628,21 @@ impl FxCatalog {
     }
 
     pub fn bind_named_slot(&mut self, slot: fastfile_iw4::Ptr, name: &str) {
-        let key = ascii_lower(name);
-        if !self.by_name.contains_key(&key) {
-            self.insert_def(
-                key,
-                OwnedFxEffectDef {
-                    name: name.to_owned(),
-                    view: FxEffectDefView {
-                        flags: 0,
-                        msec_looping_life: 0,
-                        looping_count: 0,
-                        one_shot_count: 0,
-                        emission_count: 0,
-                    },
-                    header_raw: Vec::new(),
-                    elems: Vec::new(),
+        let ns = self.capture_ns;
+        if self.index_in(ns, name).is_none() {
+            self.insert_owned(OwnedFxEffectDef {
+                namespace: ns,
+                name: name.to_owned(),
+                view: FxEffectDefView {
+                    flags: 0,
+                    msec_looping_life: 0,
+                    looping_count: 0,
+                    one_shot_count: 0,
+                    emission_count: 0,
                 },
-            );
+                header_raw: Vec::new(),
+                elems: Vec::new(),
+            });
         }
         self.links.insert(slot, FxLink::Direct(name.to_owned()));
     }
@@ -653,30 +663,28 @@ impl FxDefinitions {
         self.defs.is_empty()
     }
 
-    pub fn get(&self, name: &str) -> Option<&OwnedFxEffectDef> {
-        if let Some(index) = self.by_name.get(name) {
-            return self.defs.get(*index);
+    pub fn index_in(&self, ns: crate::AssetNamespace, name: &str) -> Option<usize> {
+        if let Some(index) = self.by_key.get(&(ns, name.to_owned())) {
+            return Some(*index);
         }
-        if name.bytes().any(|b| b.is_ascii_uppercase()) {
-            self.by_name
-                .get(&ascii_lower(name))
-                .and_then(|index| self.defs.get(*index))
-        } else {
-            None
-        }
+        name.bytes()
+            .any(|b| b.is_ascii_uppercase())
+            .then(|| self.by_key.get(&(ns, ascii_lower(name))).copied())
+            .flatten()
+    }
+
+    pub fn get_in(&self, ns: crate::AssetNamespace, name: &str) -> Option<&OwnedFxEffectDef> {
+        self.index_in(ns, name)
+            .and_then(|index| self.defs.get(index))
+    }
+
+    pub fn index_of(&self, def: &OwnedFxEffectDef) -> Option<usize> {
+        self.index_in(def.namespace, &def.name)
+            .filter(|&index| std::ptr::eq(&self.defs[index], def))
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.order.iter().map(String::as_str)
-    }
-
-    pub fn index_by_name(&self, name: &str) -> Option<usize> {
-        self.by_name.get(name).copied().or_else(|| {
-            name.bytes()
-                .any(|b| b.is_ascii_uppercase())
-                .then(|| self.by_name.get(&ascii_lower(name)).copied())
-                .flatten()
-        })
+        self.defs.iter().map(|def| def.name.as_str())
     }
 
     pub fn set_capture_zone(&mut self, zone: ZoneOwner) {
@@ -687,14 +695,14 @@ impl FxDefinitions {
         self.zones.get(index).copied().unwrap_or(self.capture_zone)
     }
 
-    fn insert_def(&mut self, key: String, def: OwnedFxEffectDef) {
-        if let Some(index) = self.by_name.get(&key).copied() {
+    pub fn insert_owned(&mut self, def: OwnedFxEffectDef) {
+        let key = (def.namespace, ascii_lower(&def.name));
+        if let Some(index) = self.by_key.get(&key).copied() {
             self.zones[index] = self.capture_zone;
             self.defs[index] = def;
         } else {
             let index = self.defs.len();
-            self.by_name.insert(key.clone(), index);
-            self.order.push(key);
+            self.by_key.insert(key, index);
             self.zones.push(self.capture_zone);
             self.defs.push(def);
         }
@@ -708,24 +716,48 @@ impl FxDefinitions {
         self.defs.iter()
     }
 
-    pub fn resolve_createfx_id(&self, fxid: &str) -> Option<&OwnedFxEffectDef> {
-        self.resolve_def(fxid).or_else(|| self.get(fxid))
+    pub fn set_map_namespace(&mut self, ns: crate::AssetNamespace) {
+        self.map_namespace = ns;
     }
 
-    pub fn resolve_def(&self, name: &str) -> Option<&OwnedFxEffectDef> {
-        if let Some(def) = self.get(name).filter(|d| !d.elems.is_empty()) {
+    pub fn map_namespace(&self) -> crate::AssetNamespace {
+        self.map_namespace
+    }
+
+    pub fn resolve_createfx_id(&self, fxid: &str) -> Option<&OwnedFxEffectDef> {
+        self.resolve_def_for_map(fxid)
+            .or_else(|| self.get_in(fx_body_namespace(self.map_namespace), fxid))
+    }
+
+    pub fn map_fx_name<'a>(&self, name: &'a str) -> FxName<'a> {
+        match self.resolve_def_for_map(name) {
+            Some(def) => FxName::new(def.namespace, name),
+            None => FxName::new(self.map_namespace, name),
+        }
+    }
+
+    pub fn resolve_def_in(
+        &self,
+        ns: crate::AssetNamespace,
+        name: &str,
+    ) -> Option<&OwnedFxEffectDef> {
+        if let Some(def) = self.get_in(ns, name).filter(|d| !d.elems.is_empty()) {
             return Some(def);
         }
         let bind = fx_material_bind_name(name);
         if bind == name {
             return None;
         }
-        self.get(bind).filter(|d| !d.elems.is_empty())
+        self.get_in(ns, bind).filter(|d| !d.elems.is_empty())
     }
 
-    pub fn insert_owned(&mut self, def: OwnedFxEffectDef) {
-        let key = ascii_lower(&def.name);
-        self.insert_def(key, def);
+    pub fn resolve_def_for_map(&self, name: &str) -> Option<&OwnedFxEffectDef> {
+        let map_ns = fx_body_namespace(self.map_namespace);
+        self.resolve_def_in(map_ns, name).or_else(|| {
+            (map_ns != crate::AssetNamespace::Iw4)
+                .then(|| self.resolve_def_in(crate::AssetNamespace::Iw4, name))
+                .flatten()
+        })
     }
 
     pub fn resolve_materials(&mut self, materials: &crate::MaterialDefinitions) {
@@ -736,17 +768,26 @@ impl FxDefinitions {
                         OwnedFxVisual::Material {
                             material,
                             hint,
+                            material_namespace,
                             authored,
-                        } => remap_elem_material(material, hint, *authored, materials),
+                        } => remap_elem_material(
+                            material,
+                            hint,
+                            *material_namespace,
+                            *authored,
+                            materials,
+                        ),
                         OwnedFxVisual::Mark {
                             materials: mats,
                             hints,
+                            material_namespaces,
                             authored,
                         } => {
                             for i in 0..2 {
                                 remap_elem_material(
                                     &mut mats[i],
                                     &mut hints[i],
+                                    material_namespaces[i],
                                     authored[i],
                                     materials,
                                 );
@@ -760,38 +801,34 @@ impl FxDefinitions {
     }
 
     pub fn resolve_nested_edges(&mut self) {
-        let playable: Vec<(String, usize, ZoneOwner)> = self
-            .order
+        let playable: HashMap<(crate::AssetNamespace, String), (usize, ZoneOwner)> = self
+            .by_key
             .iter()
-            .enumerate()
-            .filter_map(|(index, key)| {
-                let def = self.defs.get(index)?;
-                if def.elems.is_empty() {
-                    return None;
-                }
-                Some((key.clone(), index, self.zone_of(index)))
-            })
+            .filter(|(_, index)| !self.defs[**index].elems.is_empty())
+            .map(|(key, &index)| (key.clone(), (index, self.zone_of(index))))
             .collect();
         for effect in &mut self.defs {
+            let ns = effect.namespace;
+            let playable = |name: &str| lookup_playable_fx(&playable, ns, name);
             for elem in &mut effect.elems {
                 remap_nested_child(
                     &mut elem.effect_on_impact,
                     elem.effect_on_impact_hint.as_deref(),
-                    &playable,
+                    playable,
                 );
                 remap_nested_child(
                     &mut elem.effect_on_death,
                     elem.effect_on_death_hint.as_deref(),
-                    &playable,
+                    playable,
                 );
                 remap_nested_child(
                     &mut elem.effect_emitted,
                     elem.effect_emitted_hint.as_deref(),
-                    &playable,
+                    playable,
                 );
                 for vis in &mut elem.visuals {
                     if let OwnedFxVisual::Runner { edge, hint } = vis {
-                        remap_nested_child(edge, hint.as_deref(), &playable);
+                        remap_nested_child(edge, hint.as_deref(), playable);
                     }
                 }
             }
@@ -800,10 +837,11 @@ impl FxDefinitions {
 
     pub fn resolve_model_edges(&mut self, models: &crate::FxModelCatalog) {
         for effect in &mut self.defs {
+            let ns = effect.namespace;
             for elem in &mut effect.elems {
                 for vis in &mut elem.visuals {
                     if let OwnedFxVisual::Model { edge, hint } = vis {
-                        *edge = model_hint_edge(hint.as_deref(), models);
+                        *edge = model_hint_edge(ns, hint.as_deref(), models);
                     }
                 }
             }
@@ -838,18 +876,21 @@ impl FxDefinitions {
         self.unique_bound_hints().len()
     }
 
-    pub fn unique_material_name_hints(&self) -> Vec<&str> {
-        let mut seen = std::collections::BTreeSet::new();
+    pub fn unique_material_keys(&self) -> Vec<asset_core::MaterialKey> {
+        let mut seen = HashSet::new();
+        let mut keys = Vec::new();
         for vis in self
             .effects()
             .flat_map(|effect| effect.elems.iter())
             .flat_map(|elem| elem.visuals.iter())
         {
-            for name in vis.decode_hints() {
-                seen.insert(name);
+            for key in vis.decode_keys() {
+                if seen.insert(key.clone()) {
+                    keys.push(key);
+                }
             }
         }
-        seen.into_iter().collect()
+        keys
     }
 
     pub fn unique_bound_hints(&self) -> Vec<(usize, &str)> {
@@ -939,7 +980,7 @@ impl FxDefinitions {
     pub fn unique_decal_mark_decoded_color_count(&self, materials: &MaterialDefinitions) -> usize {
         self.unique_decal_mark_hints()
             .into_iter()
-            .filter(|(index, hint)| fx_elem_color_image(materials, Some(*index), hint).is_some())
+            .filter(|(index, _)| material_has_decoded_color(materials, *index))
             .count()
     }
 
@@ -953,7 +994,7 @@ impl FxDefinitions {
             if out.len() >= cap {
                 break;
             }
-            if fx_elem_color_image(materials, Some(index), hint).is_some() {
+            if material_has_decoded_color(materials, index) {
                 continue;
             }
             out.push(hint.to_owned());
@@ -1093,14 +1134,14 @@ impl FxDefinitions {
             .count()
     }
 
-    pub fn model_hints(&self) -> HashSet<String> {
+    pub fn model_hints(&self) -> HashSet<(crate::AssetNamespace, String)> {
         self.effects()
-            .flat_map(|def| def.elems.iter())
-            .flat_map(|elem| elem.visuals.iter())
-            .filter_map(|vis| match vis {
+            .flat_map(|def| def.elems.iter().map(move |elem| (def.namespace, elem)))
+            .flat_map(|(ns, elem)| elem.visuals.iter().map(move |vis| (ns, vis)))
+            .filter_map(|(ns, vis)| match vis {
                 OwnedFxVisual::Model {
                     hint: Some(name), ..
-                } if !name.is_empty() => Some(name.clone()),
+                } if !name.is_empty() => Some((ns, name.clone())),
                 _ => None,
             })
             .collect()
@@ -1435,6 +1476,7 @@ fn capture_visuals(
                     .map(|_| OwnedFxVisual::Material {
                         material: FxElemMaterial::unresolved_for(Some(vis), None),
                         hint: Some(kind.to_string()),
+                        material_namespace: materials.capture_ns(),
                         authored: AuthoredRef::from_ptrs(Some(vis), None),
                     })
                     .collect();
@@ -1532,10 +1574,14 @@ fn model_visual(name: Option<String>) -> OwnedFxVisual {
     }
 }
 
-fn model_hint_edge(hint: Option<&str>, models: &crate::FxModelCatalog) -> FxElemModelEdge {
+fn model_hint_edge(
+    ns: crate::AssetNamespace,
+    hint: Option<&str>,
+    models: &crate::FxModelCatalog,
+) -> FxElemModelEdge {
     match hint.filter(|name| !name.is_empty()) {
         None => AssetEdge::Absent,
-        Some(name) => match models.index_by_name(name) {
+        Some(name) => match models.index_in(ns, name) {
             Some(index) => AssetEdge::bind_order(index, models.zone_of(index)),
             None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
         },
@@ -1561,6 +1607,7 @@ fn resolve_material_visual(
     OwnedFxVisual::Material {
         material: FxElemMaterial::unresolved_for(Some(slot), alias),
         hint: name,
+        material_namespace: materials.capture_ns(),
         authored: AuthoredRef::from_ptrs(Some(slot), alias),
     }
 }
@@ -1568,12 +1615,13 @@ fn resolve_material_visual(
 fn remap_elem_material(
     material: &mut FxElemMaterial,
     hint: &mut Option<String>,
+    namespace: crate::AssetNamespace,
     authored: AuthoredRef,
     materials: &crate::MaterialDefinitions,
 ) {
     let index = hint
         .as_deref()
-        .and_then(|name| materials.material_index_by_name(name));
+        .and_then(|name| materials.material_index_by_ns(namespace, name));
     if let Some(index) = index.filter(|i| {
         materials
             .materials
@@ -1594,44 +1642,24 @@ fn mark_pair(a: OwnedFxVisual, b: OwnedFxVisual) -> OwnedFxVisual {
         OwnedFxVisual::Material {
             material,
             hint,
+            material_namespace,
             authored,
-        } => (material, hint, authored),
-        _ => (FxElemMaterial::Absent, None, AuthoredRef::default()),
+        } => (material, hint, material_namespace, authored),
+        _ => (
+            FxElemMaterial::Absent,
+            None,
+            crate::AssetNamespace::Iw4,
+            AuthoredRef::default(),
+        ),
     };
-    let (m0, h0, v0) = peel(a);
-    let (m1, h1, v1) = peel(b);
+    let (m0, h0, ns0, v0) = peel(a);
+    let (m1, h1, ns1, v1) = peel(b);
     OwnedFxVisual::Mark {
         materials: [m0, m1],
         hints: [h0, h1],
+        material_namespaces: [ns0, ns1],
         authored: [v0, v1],
     }
-}
-
-fn fx_elem_color_image(
-    materials: &MaterialDefinitions,
-    mat_i: Option<usize>,
-    authored_name: &str,
-) -> Option<bevy::prelude::Image> {
-    if let Some(image) = mat_i.and_then(|i| material_decoded_color(materials, i)) {
-        return Some(image);
-    }
-    let bind = fx_material_bind_name(authored_name);
-    materials
-        .material_index_by_name(bind)
-        .and_then(|i| material_decoded_color(materials, i.order()))
-}
-
-pub fn fx_color_image_for_name(
-    materials: &MaterialCatalog,
-    authored_name: &str,
-) -> Option<bevy::prelude::Image> {
-    let bind = fx_material_bind_name(authored_name);
-    if bind.is_empty() {
-        return None;
-    }
-    let index = materials.material_index_by_name(bind)?;
-    material_decoded_color(materials, index.order())
-        .or_else(|| fx_elem_color_image(materials, Some(index.order()), bind))
 }
 
 fn material_has_decoded_color(materials: &MaterialDefinitions, mat_i: usize) -> bool {
@@ -1654,39 +1682,8 @@ fn material_has_decoded_color(materials: &MaterialDefinitions, mat_i: usize) -> 
         .is_some_and(|img| img.decoded.is_some())
 }
 
-pub fn fx_color_decoded_in_catalog(materials: &MaterialDefinitions, authored_name: &str) -> bool {
-    let bind = fx_material_bind_name(authored_name);
-    if bind.is_empty() {
-        return false;
-    }
-    let Some(index) = materials.material_index_by_name(bind) else {
-        return false;
-    };
-    material_has_decoded_color(materials, index.order())
-}
-
-fn material_decoded_color(
-    materials: &MaterialDefinitions,
-    mat_i: usize,
-) -> Option<bevy::prelude::Image> {
-    let mat = materials.materials.get(mat_i)?;
-    let img_i = mat
-        .textures
-        .iter()
-        .find(|t| t.semantic == TS_COLOR_MAP)
-        .and_then(|t| t.image)
-        .or_else(|| {
-            mat.textures
-                .iter()
-                .find(|t| t.semantic == TS_2D)
-                .and_then(|t| t.image)
-        })?;
-    materials
-        .images
-        .get(img_i)?
-        .decoded
-        .as_ref()
-        .map(|image| (**image).clone())
+pub fn fx_color_decoded_in_catalog(materials: &MaterialDefinitions, material: usize) -> bool {
+    material_has_decoded_color(materials, material)
 }
 
 fn read_xmodel_name(
@@ -1724,33 +1721,65 @@ fn capture_named_child(name: String) -> (FxChildEdge, Option<String>) {
 fn remap_nested_child(
     edge: &mut FxChildEdge,
     hint: Option<&str>,
-    playable: &[(String, usize, ZoneOwner)],
+    playable: impl Fn(&str) -> Option<(usize, ZoneOwner)>,
 ) {
     let Some(name) = hint.filter(|n| !n.is_empty()) else {
         *edge = FxChildEdge::Absent;
         return;
     };
-    *edge = match lookup_playable_fx(playable, name) {
+    *edge = match playable(name) {
         Some((index, zone)) => FxChildEdge::bind_order(index, zone),
         None => FxChildEdge::Unresolved(AssetEdgeReason::CatalogMiss),
     };
 }
 
 fn lookup_playable_fx(
-    playable: &[(String, usize, ZoneOwner)],
+    playable: &HashMap<(crate::AssetNamespace, String), (usize, ZoneOwner)>,
+    ns: crate::AssetNamespace,
     name: &str,
 ) -> Option<(usize, ZoneOwner)> {
     let key = ascii_lower(name);
-    if let Some((_, index, zone)) = playable.iter().find(|(n, _, _)| n == &key) {
-        return Some((*index, *zone));
-    }
     let bind = ascii_lower(fx_material_bind_name(name));
-    if bind != key {
-        if let Some((_, index, zone)) = playable.iter().find(|(n, _, _)| n == &bind) {
-            return Some((*index, *zone));
+    playable
+        .get(&(ns, key))
+        .or_else(|| playable.get(&(ns, bind)))
+        .copied()
+}
+
+pub fn fx_body_namespace(ns: crate::AssetNamespace) -> crate::AssetNamespace {
+    match ns {
+        crate::AssetNamespace::Iw5 => crate::AssetNamespace::Iw4,
+        other => other,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FxName<'a> {
+    pub namespace: crate::AssetNamespace,
+    pub name: &'a str,
+}
+
+impl<'a> FxName<'a> {
+    pub fn new(namespace: crate::AssetNamespace, name: &'a str) -> Self {
+        Self {
+            namespace: fx_body_namespace(namespace),
+            name,
         }
     }
-    None
+
+    pub fn engine(name: &'a str) -> Self {
+        Self::new(crate::AssetNamespace::Iw4, name)
+    }
+
+    pub fn resolve(self, catalog: &'a FxDefinitions) -> Option<&'a OwnedFxEffectDef> {
+        catalog.resolve_def_in(self.namespace, self.name)
+    }
+}
+
+impl std::fmt::Display for FxName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name)
+    }
 }
 
 fn read_name_field(s: &ZoneStream<'_>, p: Ptr, field: usize) -> String {
@@ -2145,6 +2174,7 @@ fn leftover_capture_visuals_t5(
                     .map(|_| OwnedFxVisual::Material {
                         material: FxElemMaterial::unresolved_for(Some(vis_iw4), None),
                         hint: Some(kind.to_string()),
+                        material_namespace: materials.capture_ns(),
                         authored: AuthoredRef::from_ptrs(Some(vis_iw4), None),
                     })
                     .collect();
@@ -2237,6 +2267,7 @@ fn leftover_resolve_material_t5(
     OwnedFxVisual::Material {
         material: FxElemMaterial::unresolved_for(Some(slot_iw4), alias),
         hint: name,
+        material_namespace: materials.capture_ns(),
         authored: AuthoredRef::from_ptrs(Some(slot_iw4), alias),
     }
 }

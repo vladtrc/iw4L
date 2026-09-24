@@ -5,7 +5,6 @@ use hud_iw4::{
     cg_should_draw_blood_overlay,
 };
 use net::{CgFrameClock, LocalPresentClient, PresentedSnapshot};
-use playerstate_iw4::KillCamMode;
 
 use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance, tessellate};
 use crate::gaps::{GapCause, HudGap, HudPresentationGaps};
@@ -82,8 +81,7 @@ pub(crate) fn update_blood_overlay(
     };
     let health_frac = cg_get_health_fraction(ps.health, ps.max_health, ps.pm_type);
     let in_killcam = view.in_killcam();
-    let killcam_mode = KillCamMode::Mode0;
-    let in_killcam_hud_gate = in_killcam && killcam_mode != KillCamMode::Mode0;
+    let in_killcam_hud_gate = in_killcam && ps.kill_cam_entity != playerstate_iw4::ENTITYNUM_NONE;
 
     if !in_game {
         latch.intensity = 0.0;

@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use assets::{CreateFxOneshot, FxDefinitions, OwnedFxEffectDef};
+use assets::{CreateFxOneshot, FxDefinitions, FxName, OwnedFxEffectDef};
 use bevy::tasks::ComputeTaskPool;
 use fx::{
     FX_CATALOG_INDEX_NONE, FxBoltTarget, FxChildKind, FxCloudInstance, FxDrawElemContext,
@@ -114,7 +114,7 @@ impl FxElemInfoCache {
         effect: &OwnedFxEffectDef,
     ) -> Arc<[FxElemDefInfo]> {
         catalog
-            .index_by_name(&effect.name)
+            .index_of(effect)
             .and_then(|index| self.by_index.get(index).cloned())
             .unwrap_or_else(|| Arc::from(owned_elem_infos(effect)))
     }
@@ -139,10 +139,9 @@ fn stamp_packed_lighting(
     let Some(effect) = host.slot_for_handle(handle) else {
         return;
     };
-    let def_name = effect.def_name.clone();
+    let index = effect.catalog_index;
     let origin = effect.origin;
-    let needs = catalog
-        .get(&def_name)
+    let needs = catalog_lookup(catalog, index)
         .is_some_and(|d| fx_effect_def_needs_lighting_sample(d.view.flags));
     if !needs {
         return;
@@ -264,7 +263,7 @@ pub fn boot_createfx_effects(
                     msec: createfx_spawn_msec(msec_now, shot.delay),
                 },
                 wants_spotlight: false,
-                catalog_index: catalog_index_of(catalog, effect.name.as_str()),
+                catalog_index: catalog_index_of(catalog, effect),
                 def: Some(def_info(effect, &elem_infos)),
             },
         );
@@ -288,13 +287,13 @@ pub fn play_named_oriented_in_world(
     host: &mut FxSystemHost,
     catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
-    def_name: &str,
+    name: FxName<'_>,
     origin: [f32; 3],
     axis: [[f32; 3]; 3],
     world: Option<&dyn FxScene>,
 ) -> Option<PlayResult> {
     let msec = host.msec_now;
-    let result = play_named_at(host, catalog, cache, def_name, origin, axis, msec, world)?;
+    let result = play_named_at(host, catalog, cache, name, origin, axis, msec, world)?;
     drain_spawn_side_effects(host, catalog, cache, world);
     Some(result)
 }
@@ -303,11 +302,11 @@ pub fn play_named_bolted_in_world(
     host: &mut FxSystemHost,
     catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
-    def_name: &str,
+    name: FxName<'_>,
     target: FxBoltTarget,
     world: Option<&dyn FxScene>,
 ) -> Option<PlayResult> {
-    let effect = catalog.resolve_def(def_name)?;
+    let effect = name.resolve(catalog)?;
     let elem_infos = cache.arc_for(catalog, effect);
     let result = play_bolted(
         host,
@@ -319,7 +318,7 @@ pub fn play_named_bolted_in_world(
                 msec: host.msec_now,
             },
             wants_spotlight: false,
-            catalog_index: catalog_index_of(catalog, effect.name.as_str()),
+            catalog_index: catalog_index_of(catalog, effect),
             def: Some(def_info(effect, &elem_infos)),
         },
         target,
@@ -333,13 +332,13 @@ fn play_named_at(
     host: &mut FxSystemHost,
     catalog: &FxDefinitions,
     cache: &FxElemInfoCache,
-    def_name: &str,
+    name: FxName<'_>,
     origin: [f32; 3],
     axis: [[f32; 3]; 3],
     msec: i32,
     world: Option<&dyn FxScene>,
 ) -> Option<PlayResult> {
-    let effect = catalog.resolve_def(def_name)?;
+    let effect = name.resolve(catalog)?;
 
     let elem_infos = cache.arc_for(catalog, effect);
     let result = play_oriented(
@@ -348,7 +347,7 @@ fn play_named_at(
             def_name: effect.name.as_str(),
             pose: FxPlayPose { origin, axis, msec },
             wants_spotlight: false,
-            catalog_index: catalog_index_of(catalog, effect.name.as_str()),
+            catalog_index: catalog_index_of(catalog, effect),
             def: Some(def_info(effect, &elem_infos)),
         },
     );
@@ -367,8 +366,7 @@ pub fn drain_spawn_runners(
         steps += 1;
         let batch = std::mem::take(&mut host.pending_runners);
         for req in batch {
-            let Some(edge) = catalog
-                .get(&req.parent_name)
+            let Some(edge) = catalog_lookup(catalog, req.catalog_index)
                 .and_then(|parent| parent.elems.get(req.def_index as usize))
                 .and_then(|elem| elem.runner_child_edge(req.random_seed))
             else {
@@ -434,7 +432,7 @@ fn play_def_at(
             def_name: effect.name.as_str(),
             pose: FxPlayPose { origin, axis, msec },
             wants_spotlight: false,
-            catalog_index: catalog_index_of(catalog, effect.name.as_str()),
+            catalog_index: catalog_index_of(catalog, effect),
             def: Some(def_info(effect, &elem_infos)),
         },
     );
@@ -498,8 +496,7 @@ fn record_spawn_decal(
     host.last_decal_mat1 = None;
     host.last_decal_color = None;
 
-    if let Some(elem) = catalog
-        .get(&req.parent_name)
+    if let Some(elem) = catalog_lookup(catalog, req.catalog_index)
         .and_then(|parent| parent.elems.get(req.def_index as usize))
     {
         host.last_decal_vis =
@@ -570,22 +567,15 @@ fn record_spawn_decal(
     host.push_mark_trace(&result);
 }
 
-fn catalog_lookup<'a>(
-    catalog: &'a FxDefinitions,
-    index: u16,
-    name: &str,
-) -> Option<&'a OwnedFxEffectDef> {
-    if index != FX_CATALOG_INDEX_NONE {
-        catalog.def_at(index as usize)
-    } else {
-        catalog.get(name)
-    }
+pub fn catalog_lookup(catalog: &FxDefinitions, index: u16) -> Option<&OwnedFxEffectDef> {
+    (index != FX_CATALOG_INDEX_NONE)
+        .then(|| catalog.def_at(index as usize))
+        .flatten()
 }
 
 fn catalog_lookup_draw<'a>(
     catalog: &'a FxDefinitions,
     index: u16,
-    name: &str,
     index_n: &Cell<u32>,
     name_n: &Cell<u32>,
 ) -> Option<&'a OwnedFxEffectDef> {
@@ -594,13 +584,13 @@ fn catalog_lookup_draw<'a>(
         catalog.def_at(index as usize)
     } else {
         name_n.set(name_n.get().saturating_add(1));
-        catalog.get(name)
+        None
     }
 }
 
-fn catalog_index_of(catalog: &FxDefinitions, name: &str) -> u16 {
+fn catalog_index_of(catalog: &FxDefinitions, effect: &OwnedFxEffectDef) -> u16 {
     catalog
-        .index_by_name(name)
+        .index_of(effect)
         .and_then(|i| u16::try_from(i).ok())
         .unwrap_or(FX_CATALOG_INDEX_NONE)
 }
@@ -622,7 +612,7 @@ fn eval_pending_collide(
         result: None,
         gap: None,
     };
-    let Some(effect) = catalog_lookup(catalog, q.catalog_index, q.def_name) else {
+    let Some(effect) = catalog_lookup(catalog, q.catalog_index) else {
         return out;
     };
     let Some(elem) = effect.elems.get(q.def_index as usize) else {
@@ -786,19 +776,19 @@ fn tick_fx_pass(
         host,
         non_bolted_only,
         camera_origin,
-        |sys, slot, prev, now, name| {
+        |sys, slot, prev, now, _| {
             let index = sys
                 .effect_at(slot)
                 .map(|e| e.catalog_index)
                 .unwrap_or(FX_CATALOG_INDEX_NONE);
-            let effect = catalog_lookup(catalog, index, name)?;
+            let effect = catalog_lookup(catalog, index)?;
             let elems = cache.arc_for(catalog, effect);
             spawn_looping_partial(sys, slot, def_info(effect, &elems), prev, now);
             Some(effect.view.msec_looping_life)
         },
         |q| {
             let out = (|| {
-                let effect = catalog_lookup(catalog, q.catalog_index, q.def_name)?;
+                let effect = catalog_lookup(catalog, q.catalog_index)?;
                 let elem = effect.elems.get(q.def_index as usize)?;
                 if fx_iw4::fx_elem_uses_collision(elem.view.flags) {
                     let Some(world) = clip_world else {
@@ -843,7 +833,7 @@ fn tick_fx_pass(
             out
         },
         |q| {
-            let effect = catalog_lookup(catalog, q.catalog_index, q.def_name)?;
+            let effect = catalog_lookup(catalog, q.catalog_index)?;
             let elem = effect.elems.get(q.def_index as usize)?;
             if elem.effect_emitted.is_absent() {
                 return None;
@@ -871,8 +861,7 @@ fn tick_fx_pass(
             ))
         },
         |sys, req| {
-            let Some(parent) = catalog_lookup(catalog, req.catalog_index, req.parent_def_name)
-            else {
+            let Some(parent) = catalog_lookup(catalog, req.catalog_index) else {
                 return false;
             };
             let Some(elem) = parent.elems.get(req.def_index as usize) else {
@@ -906,7 +895,7 @@ fn tick_fx_pass(
                         msec: req.msec,
                     },
                     wants_spotlight: false,
-                    catalog_index: catalog_index_of(catalog, child_name),
+                    catalog_index: catalog_index_of(catalog, child),
                     def: Some(def_info(child, &elems)),
                 },
             ) {
@@ -914,8 +903,8 @@ fn tick_fx_pass(
                 PlayResult::Failed(_) => false,
             }
         },
-        |name, def_index| {
-            let effect = catalog.get(name)?;
+        |index, def_index| {
+            let effect = catalog_lookup(catalog, index)?;
             cache
                 .arc_for(catalog, effect)
                 .get(def_index as usize)
@@ -934,15 +923,14 @@ fn tick_fx_pass(
                 allsolid: t.allsolid != 0,
             })
         },
-        |name, def_index| {
-            catalog
-                .get(name)
+        |index, def_index| {
+            catalog_lookup(catalog, index)
                 .and_then(|effect| effect.elems.get(def_index as usize))
                 .map(|elem| (elem.vel_graph_local.clone(), elem.vel_graph_world.clone()))
                 .unwrap_or_else(|| (Vec::new(), Vec::new()))
         },
         |q: FxSparkFillQuery<'_>| {
-            let effect = catalog_lookup(catalog, q.catalog_index, q.def_name)?;
+            let effect = catalog_lookup(catalog, q.catalog_index)?;
             let elem = effect.elems.get(q.def_index as usize)?;
             let rand_size = fx_random_table_f32(q.elem_random_seed, FX_RAND_CH_SIZE0);
             let rand_scale = fx_random_table_f32(q.elem_random_seed, FX_RAND_CH_SCALE);
@@ -1027,7 +1015,6 @@ pub fn build_fx_verts(
         let Some(effect) = catalog_lookup_draw(
             catalog,
             ctx.catalog_index,
-            ctx.def_name,
             &catalog_index_n,
             &catalog_name_n,
         ) else {
@@ -1168,6 +1155,7 @@ pub fn build_fx_verts(
             color_rgba: color,
             elem_type: ctx.elem_type,
             def_name: Arc::clone(def_name),
+            catalog_index: ctx.catalog_index,
             def_index: ctx.def_index,
             material_name: Arc::clone(material_name),
             material_index: Some(material_index),
@@ -1186,7 +1174,6 @@ pub fn build_fx_verts(
         let effect = catalog_lookup_draw(
             catalog,
             ctx.catalog_index,
-            ctx.def_name,
             &catalog_index_n,
             &catalog_name_n,
         )?;
@@ -1213,7 +1200,6 @@ pub fn build_fx_verts(
         let effect = catalog_lookup_draw(
             catalog,
             ctx.catalog_index,
-            ctx.def_name,
             &catalog_index_n,
             &catalog_name_n,
         )?;
@@ -1272,7 +1258,6 @@ pub fn build_fx_verts(
         let effect = catalog_lookup_draw(
             catalog,
             ctx.catalog_index,
-            ctx.def_name,
             &catalog_index_n,
             &catalog_name_n,
         )?;
@@ -1290,7 +1275,6 @@ pub fn build_fx_verts(
         let effect = catalog_lookup_draw(
             catalog,
             ctx.catalog_index,
-            ctx.def_name,
             &catalog_index_n,
             &catalog_name_n,
         )?;
@@ -1362,6 +1346,7 @@ pub fn build_fx_verts(
         );
         Some(FxCloudInstance {
             def_name: ctx.def_name.to_owned(),
+            catalog_index: ctx.catalog_index,
             def_index: ctx.def_index,
             cloud: fx_build_cloud(
                 ctx.origin,
@@ -1380,7 +1365,6 @@ pub fn build_fx_verts(
         let effect = catalog_lookup_draw(
             catalog,
             ctx.catalog_index,
-            ctx.def_name,
             &catalog_index_n,
             &catalog_name_n,
         )?;
@@ -1478,13 +1462,7 @@ fn evaluate_fx_model_instance(
     catalog_index_n: &Cell<u32>,
     catalog_name_n: &Cell<u32>,
 ) -> Option<FxModelInstance> {
-    let effect = catalog_lookup_draw(
-        catalog,
-        ctx.catalog_index,
-        ctx.def_name,
-        catalog_index_n,
-        catalog_name_n,
-    )?;
+    let effect = catalog_lookup_draw(catalog, ctx.catalog_index, catalog_index_n, catalog_name_n)?;
     let elem = effect.elems.get(ctx.def_index as usize)?;
     let model_index = elem.model_edge(ctx.elem_random_seed)?.bound_index()?;
     let rand_scale = fx_random_table_f32(ctx.elem_random_seed, FX_RAND_CH_SCALE);

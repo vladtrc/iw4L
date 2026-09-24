@@ -269,10 +269,10 @@ pub use fpv_catalog::{
 };
 pub use fx_catalog::{
     FxBankSound, FxCatalog, FxChildEdge, FxDefinitions, FxElemMaterial, FxElemMaterialReason,
-    FxElemModelEdge, OwnedFxEffectDef, OwnedFxElemDef, OwnedFxSparkFountainDef, OwnedFxTrailDef,
-    OwnedFxVisual, alias_fx_color_map_stubs, elem_type as fx_elem_type,
-    fx_color_decoded_in_catalog, fx_color_image_for_name, fx_material_bind_name,
-    insert_fx_color_image, lookup_fx_color_image,
+    FxElemModelEdge, FxName, OwnedFxEffectDef, OwnedFxElemDef, OwnedFxSparkFountainDef,
+    OwnedFxTrailDef, OwnedFxVisual, alias_fx_color_map_stubs, elem_type as fx_elem_type,
+    fx_body_namespace, fx_color_decoded_in_catalog, fx_material_bind_name, insert_fx_color_image,
+    lookup_fx_color_image,
 };
 pub use fx_model_catalog::{FxModelCatalog, FxModelEntry};
 pub use glass_catalog::{FxGlassReset, GlassZoneCensus, build_fx_glass_reset, build_glass_census};
@@ -406,7 +406,7 @@ pub use progress::{
     process_resident_bytes,
 };
 pub use projectile_mesh_catalog::{
-    ProjectileMeshBuild, ProjectileMeshCatalog, ProjectileMeshEntry,
+    ProjectileMeshBuild, ProjectileMeshCatalog, ProjectileMeshEntry, ProjectileMeshKey,
 };
 pub use session_load::{
     MatchLoadOutcome, MatchMaterialSeed, PreparedMatch, PreparedWorld, ShellCommon,
@@ -498,7 +498,9 @@ pub use world_mesh::{
     unpack_packed_tex_coords,
 };
 pub use world_t5::{build_t5_world_draw, build_t5_world_mesh};
-pub use world_weapon_catalog::{WorldWeaponBuild, WorldWeaponCatalog, WorldWeaponEntry};
+pub use world_weapon_catalog::{
+    WorldWeaponBuild, WorldWeaponCatalog, WorldWeaponEntry, WorldWeaponKey,
+};
 pub use xanim_catalog::{CapturedXAnim, XAnimBuild, XAnimCatalog, XAnimKey};
 pub use xanim_clip::{
     AnimClip, ClipError, ClipNotify, FrameIndices, Keyed, RawXAnimParts, Rotation, SampledTrack,

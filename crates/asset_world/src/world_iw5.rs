@@ -916,6 +916,7 @@ pub fn capture_iw5_light_defs(
                         .and_then(|p| s.cstr(p).ok().map(str::to_owned))
                 });
             Some(CapturedLightDef {
+                namespace: crate::AssetNamespace::Iw5,
                 name,
                 attenuation_image_name,
                 attenuation_width: def.attenuation_width,

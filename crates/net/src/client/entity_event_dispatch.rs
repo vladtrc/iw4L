@@ -65,6 +65,13 @@ pub struct EntityGrenadeContact {
     pub event: DispatchedEntityEvent,
 }
 
+// Fires before the first events of the other world, so FX for the switch
+// are cleared before the replay plays them again.
+#[derive(Event, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KillcamFxTransition {
+    pub entering: bool,
+}
+
 #[derive(EntityEvent, Clone, Copy, Debug, PartialEq)]
 pub struct EntityExplosion {
     pub entity: Entity,
@@ -81,6 +88,7 @@ pub struct EntityPlayFx {
 pub struct EntityObituary {
     pub entity: Entity,
     pub event: DispatchedEntityEvent,
+    pub in_killcam: bool,
 }
 
 #[derive(EntityEvent, Clone, Copy, Debug, PartialEq)]
@@ -104,6 +112,9 @@ pub struct EntityMeleeBlood {
 #[derive(Resource, Default, Debug)]
 pub struct EntityEventCursor {
     seen_through: u32,
+
+    archived_through: Option<(EventSequence, Tick)>,
+    in_killcam: bool,
 }
 
 #[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +192,27 @@ impl EntityEventCursor {
         true
     }
 
+    pub fn accepts_archived(
+        &mut self,
+        record: &sim::EntityEventRecord,
+        local: sim::ClientId,
+    ) -> bool {
+        if !record.audience.projects_to(local) {
+            return false;
+        }
+        // Each snapshot re-carries the records of the last temp-event lifetime,
+        // so only a tick further back than that window marks a rewind.
+        if let Some((sequence, tick)) = self.archived_through
+            && tick.0.saturating_sub(record.tick.0) * sim::MATCH_TICK_MS
+                <= sim::GENTITY_TEMP_EVENT_LIFETIME_MS as u32
+            && !record.sequence.is_newer_than(sequence)
+        {
+            return false;
+        }
+        self.archived_through = Some((record.sequence, record.tick));
+        true
+    }
+
     pub const fn seen_through(&self) -> EventSequence {
         EventSequence(self.seen_through)
     }
@@ -213,12 +245,26 @@ fn dispatch_entity_events(
         .map(|snapshot| snapshot.tick)
         .unwrap_or(Tick(0));
     let local_number = i32::try_from(local.0.0).unwrap_or(-1);
+    let killcam_transition = pending.in_killcam != cursor.in_killcam;
+    if killcam_transition {
+        cursor.in_killcam = pending.in_killcam;
+        cursor.archived_through = None;
+        commands.trigger(KillcamFxTransition {
+            entering: pending.in_killcam,
+        });
+    }
     for (entity, identity, mut runtime) in runtimes.iter_mut() {
         if !cg_packet_entity_uses_event_ring(runtime.next_state.e_type) {
             continue;
         }
 
         let next_state = runtime.next_state;
+        // The archive and the live world share entity numbers but not event
+        // rings: adopt the new ring position instead of replaying across it.
+        if killcam_transition {
+            runtime.previous_event_sequence = next_state.event_sequence;
+            continue;
+        }
         let origin = runtime.origin;
         let mut cursor = runtime.previous_event_sequence;
         consume_entity_events(&next_state, &mut cursor, |ev| {
@@ -242,15 +288,27 @@ fn dispatch_entity_events(
                         ..Default::default()
                     },
                 },
+                pending.in_killcam,
                 &mut walk,
                 &mut unsupported,
             );
         });
         runtime.previous_event_sequence = cursor;
     }
-    for record in pending.0.iter() {
+    let pending = &mut *pending;
+    let records = pending
+        .live
+        .iter()
+        .map(|record| (false, record))
+        .chain(pending.archived.iter().map(|record| (true, record)));
+    for (archived, record) in records {
         walk.walked = walk.walked.saturating_add(1);
-        if !cursor.accepts(record, local.0) {
+        let accepted = if archived {
+            cursor.accepts_archived(record, local.0)
+        } else {
+            cursor.accepts(record, local.0)
+        };
+        if !accepted {
             continue;
         }
         walk.last_event = record.event.0;
@@ -285,11 +343,13 @@ fn dispatch_entity_events(
             number,
             entity,
             dispatched,
+            archived,
             &mut walk,
             &mut unsupported,
         );
     }
-    pending.0.clear();
+    pending.live.clear();
+    pending.archived.clear();
     walk.seen_through = cursor.seen_through;
 }
 
@@ -299,6 +359,7 @@ fn dispatch_classified(
     number: i32,
     entity: Entity,
     dispatched: DispatchedEntityEvent,
+    in_killcam: bool,
     walk: &mut AppliedEntityEventWalk,
     unsupported: &mut UnsupportedEntityEvents,
 ) {
@@ -362,6 +423,7 @@ fn dispatch_classified(
             commands.trigger(EntityObituary {
                 entity,
                 event: dispatched,
+                in_killcam,
             });
         }
         Ok(EntityEventAction::MovementSound) => {

@@ -30,6 +30,7 @@ pub struct OccupiedMissile {
     pub origin: [f32; 3],
     pub angles: [f32; 3],
     pub name: String,
+    pub namespace: assets::AssetNamespace,
     pub lighting_origin: [f32; 3],
     pub lighting_owner: ModelLightingOwner,
 }
@@ -45,6 +46,7 @@ struct MissilePosed {
     origin: [f32; 3],
     angles: [f32; 3],
     name: String,
+    namespace: assets::AssetNamespace,
     lighting_origin: [f32; 3],
     lighting_owner: ModelLightingOwner,
     surfaces: Vec<PosedModelSurface>,
@@ -144,6 +146,7 @@ fn occupy_missile_scene_ents(
     mut scene_skels: ResMut<AnimDObjSceneSkels>,
     mut scene_submissions: MessageWriter<AnimDObjSceneSubmission>,
     cg_clock: Option<Res<net::CgFrameClock>>,
+    local: Option<Res<net::LocalPresentClient>>,
 ) {
     occupancy.rows.clear();
     let Some(snapshot) = presented.as_ref() else {
@@ -155,26 +158,47 @@ fn occupy_missile_scene_ents(
         .filter(|clock| clock.started())
         .map(|clock| clock.time())
         .unwrap_or_else(|| snapshot.tick().map(sim::level_time_ms).unwrap_or(0));
+    let at_time = snapshot.trajectory_time_ms(at_time);
     let weapons_reg = weapons.as_ref().map(|w| &w.0).filter(|reg| !reg.is_empty());
     let catalog = missile_pose_catalog(projectile_meshes.as_deref());
     let Some(catalog) = catalog else {
         return;
     };
+    let piloted = local
+        .and_then(|local| {
+            snapshot
+                .snapshot()?
+                .meta
+                .for_client(local.0)?
+                .remote_missile
+        })
+        .map(|link| link.projectile);
     for (index, row) in rows.iter().enumerate() {
         if entity_iw4::cg_missile_nodraw(0, row.launch_time(), at_time).is_some() {
+            continue;
+        }
+        if piloted.is_some() && row.authoritative_id() == piloted {
             continue;
         }
         let model = weapons_reg.and_then(|reg| reg.projectile_model_of(row.weapon()));
         let Some(name) = model else {
             continue;
         };
-        let Some(entry) = catalog.get(name) else {
+        let ns = weapons_reg
+            .and_then(|reg| reg.namespace_of(row.weapon()))
+            .unwrap_or(assets::AssetNamespace::Iw4);
+        let Some(entry) = catalog.get(ns, name) else {
             continue;
         };
         let Some(_pose) = entry.skel.pose.as_ref() else {
             continue;
         };
-        let origin = row.origin_at(at_time);
+        let origin = match row {
+            net::PresentedProjectile::Authoritative(projectile) => {
+                snapshot.projectile_origin_at(projectile, at_time)
+            }
+            net::PresentedProjectile::Predicted { .. } => row.origin_at(at_time),
+        };
         let lighting_origin = missile_lighting_origin(origin);
         let angles = entity_iw4::bg_evaluate_trajectory(&row.apos(), at_time);
         let entnum = row.authoritative_id().map(|id| id.0).unwrap_or(0);
@@ -205,6 +229,7 @@ fn occupy_missile_scene_ents(
             origin,
             angles,
             name: name.to_owned(),
+            namespace: ns,
             lighting_origin,
             lighting_owner,
         });
@@ -220,7 +245,7 @@ fn publish_missile_dobj_poses(
         let Some(id) = row.id else {
             continue;
         };
-        let Some(dobj) = prepared.projectile_dobj(&row.name) else {
+        let Some(dobj) = prepared.projectile_dobj(row.namespace, &row.name) else {
             continue;
         };
         let entity_world = missile_world_from_local(row.origin, row.angles);
@@ -255,10 +280,10 @@ fn pose_missiles(
         if slot.hidden {
             continue;
         }
-        let Some(entry) = catalog.get(&row.name) else {
+        let Some(entry) = catalog.get(row.namespace, &row.name) else {
             continue;
         };
-        let Some(dobj) = prepared.projectile_dobj(&row.name) else {
+        let Some(dobj) = prepared.projectile_dobj(row.namespace, &row.name) else {
             continue;
         };
         let dobj_state = assets::dobj::DObjSemanticState::bind_pose(row.name.clone(), 1, 1);
@@ -281,6 +306,7 @@ fn pose_missiles(
             origin: row.origin,
             angles: row.angles,
             name: row.name.clone(),
+            namespace: row.namespace,
             lighting_origin: row.lighting_origin,
             lighting_owner: row.lighting_owner,
             surfaces,
@@ -320,7 +346,7 @@ fn append_missile_draws(
     };
     for row in &product.rows {
         let entnum = row.id.unwrap_or(0);
-        let Some(entry) = catalog.get(&row.name) else {
+        let Some(entry) = catalog.get(row.namespace, &row.name) else {
             continue;
         };
         let materials: Vec<Option<SmodelPassMaterial>> = row

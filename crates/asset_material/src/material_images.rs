@@ -381,14 +381,14 @@ fn requested_color_map_slots(catalog: &MaterialDefinitions) -> Vec<ImageRequest>
         .collect()
 }
 
-pub fn decode_color_or_2d_for_names(
+pub fn decode_color_or_2d_for_keys(
     zone_ff: &Path,
     catalog: &mut MaterialDefinitions,
-    names: impl IntoIterator<Item = impl AsRef<str>>,
+    keys: impl IntoIterator<Item = crate::MaterialKey>,
     stage: &StageHandle,
     pool: &TaskPool,
 ) -> Result<usize, String> {
-    let work = requested_named_2d_slots(catalog, names);
+    let work = requested_keyed_2d_slots(catalog, keys);
     if work.is_empty() {
         return Ok(0);
     }
@@ -417,14 +417,17 @@ pub fn decode_color_or_2d_for_names(
     Ok(n)
 }
 
-fn requested_named_2d_slots(
+fn requested_keyed_2d_slots(
     catalog: &MaterialDefinitions,
-    names: impl IntoIterator<Item = impl AsRef<str>>,
+    keys: impl IntoIterator<Item = crate::MaterialKey>,
 ) -> Vec<ImageRequest> {
-    let wanted: std::collections::HashSet<String> = names
+    let wanted: std::collections::HashSet<(crate::AssetNamespace, String)> = keys
         .into_iter()
-        .map(|n| crate::AssetRef::bare_name(n.as_ref()).to_owned())
-        .filter(|n| !n.is_empty())
+        .map(|key| {
+            let name = crate::AssetRef::bare_name(&key.name).to_owned();
+            (key.namespace, name)
+        })
+        .filter(|(_, name)| !name.is_empty())
         .collect();
     if wanted.is_empty() {
         return Vec::new();
@@ -435,7 +438,7 @@ fn requested_named_2d_slots(
             continue;
         }
         let bind = material.name.as_str();
-        if bind.is_empty() || !wanted.contains(bind) {
+        if bind.is_empty() || !wanted.contains(&(material.namespace, bind.to_owned())) {
             continue;
         }
         let tex = material
@@ -2460,7 +2463,7 @@ impl ImageDemandPlan {
     /// row carrying the plan's id, whether or not the plan had anything to put
     /// there. A plan that [`Self::prune_to`] emptied never reaches `apply`, so
     /// without this its rows keep a mark saying a decode is owed on them —
-    /// and [`requested_color_map_slots`] and [`requested_named_2d_slots`] read
+    /// and [`requested_color_map_slots`] and [`requested_keyed_2d_slots`] read
     /// that mark as "somebody else is already handling this name" and skip the
     /// row. Every row still marked here was answered by another plan, which is
     /// why the plan is empty; the count is that plan's `already_decoded`.
@@ -2908,14 +2911,14 @@ fn claim(
     inline
 }
 
-pub fn plan_color_or_2d_for_names(
+pub fn plan_color_or_2d_for_keys(
     plan: &mut ImageDemandPlan,
     catalog: &mut MaterialDefinitions,
-    names: impl IntoIterator<Item = impl AsRef<str>>,
+    keys: impl IntoIterator<Item = crate::MaterialKey>,
     stage: &StageHandle,
     pool: &TaskPool,
 ) -> usize {
-    let requested = requested_named_2d_slots(catalog, names);
+    let requested = requested_keyed_2d_slots(catalog, keys);
     let inline = claim(catalog, plan, requested);
     decode_inline(catalog, &inline, stage, pool).decoded
 }

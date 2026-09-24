@@ -9,10 +9,12 @@ pub type TracerMaterialReason = AssetEdgeReason;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OwnedTracerDef {
+    pub namespace: crate::AssetNamespace,
     pub name: String,
     pub material: TracerMaterial,
 
     pub material_hint: Option<String>,
+    pub material_namespace: crate::AssetNamespace,
 
     /// Whether the zone named a material for this tracer, and whether it did so
     /// through an alias. The pointers that answered it stop at the walk.
@@ -50,7 +52,7 @@ impl OwnedTracerDef {
 
 #[derive(Clone, Debug)]
 enum TracerLink {
-    Direct(String),
+    Direct(usize),
     Alias(Ptr),
 }
 
@@ -58,8 +60,8 @@ enum TracerLink {
 /// link map to resolve one more pointer against.
 #[derive(Clone, Debug, Default)]
 pub struct TracerDefinitions {
-    by_name: HashMap<String, OwnedTracerDef>,
-    order: Vec<String>,
+    by_key: HashMap<(crate::AssetNamespace, String), usize>,
+    defs: Vec<OwnedTracerDef>,
     zones: Vec<ZoneOwner>,
     capture_zone: ZoneOwner,
     pub capture_gaps: usize,
@@ -70,7 +72,8 @@ pub struct TracerDefinitions {
 pub struct TracerCatalog {
     published: TracerDefinitions,
     links: HashMap<Ptr, TracerLink>,
-    last_captured: Option<String>,
+    last_captured: Option<usize>,
+    capture_ns: crate::AssetNamespace,
 }
 
 impl std::ops::Deref for TracerCatalog {
@@ -89,12 +92,12 @@ impl std::ops::DerefMut for TracerCatalog {
 
 impl TracerCatalog {
     pub fn note_loaded(&mut self, slot: Ptr, insert_slot: Option<Ptr>) {
-        let Some(name) = self.last_captured.take() else {
+        let Some(index) = self.last_captured.take() else {
             return;
         };
-        self.links.insert(slot, TracerLink::Direct(name.clone()));
+        self.links.insert(slot, TracerLink::Direct(index));
         if let Some(insert_slot) = insert_slot {
-            self.links.insert(insert_slot, TracerLink::Direct(name));
+            self.links.insert(insert_slot, TracerLink::Direct(index));
         }
     }
 
@@ -102,36 +105,42 @@ impl TracerCatalog {
         self.links.insert(slot, TracerLink::Alias(target));
     }
 
-    pub fn name_at_slot(&self, slot: Ptr) -> Option<&str> {
+    pub fn index_at_slot(&self, slot: Ptr) -> Option<usize> {
         let mut cur = slot;
         for _ in 0..8 {
             match self.links.get(&cur)? {
-                TracerLink::Direct(name) => return Some(name.as_str()),
+                TracerLink::Direct(index) => return Some(*index),
                 TracerLink::Alias(next) => cur = *next,
             }
         }
         None
     }
 
+    pub fn set_capture_ns(&mut self, ns: crate::AssetNamespace) {
+        self.capture_ns = ns;
+    }
+
     pub fn bind_last_material(&mut self, name: String) {
         if name.is_empty() {
             return;
         }
-        let Some(key) = self.last_captured.clone() else {
+        let Some(index) = self.last_captured else {
             return;
         };
-        if let Some(def) = self.by_name.get_mut(&key) {
+        let ns = self.capture_ns;
+        if let Some(def) = self.published.defs.get_mut(index) {
             def.material_hint = Some(name);
+            def.material_namespace = ns;
         }
     }
 
     /// The zone reached this tracer's material through an alias. Which pointer
     /// it was does not survive the walk; that it was one does.
     pub fn note_last_material_alias(&mut self) {
-        let Some(key) = self.last_captured.clone() else {
+        let Some(index) = self.last_captured else {
             return;
         };
-        if let Some(def) = self.by_name.get_mut(&key) {
+        if let Some(def) = self.published.defs.get_mut(index) {
             def.material_authored.alias = true;
             if !def.material.is_bound() {
                 def.material = def.material_authored.unresolved();
@@ -149,8 +158,6 @@ impl TracerCatalog {
             self.last_captured = None;
             return Ok(());
         }
-        self.last_captured = Some(name.clone());
-        self.retain_order(name.clone());
         let captured_name = geometry.material_name.and_then(|ptr| {
             s.cstr(ptr)
                 .ok()
@@ -158,22 +165,23 @@ impl TracerCatalog {
                 .map(str::to_owned)
         });
         let material = TracerMaterial::from_capture(geometry.material_slot, None);
-        self.by_name.insert(
-            name.clone(),
-            OwnedTracerDef {
-                name,
-                material,
-                material_hint: captured_name,
-                material_authored: crate::AuthoredRef::from_ptrs(geometry.material_slot, None),
-                draw_interval: geometry.draw_interval,
-                speed: geometry.speed,
-                beam_length: geometry.beam_length,
-                beam_width: geometry.beam_width,
-                screw_radius: geometry.screw_radius,
-                screw_dist: geometry.screw_dist,
-                colors: geometry.colors,
-            },
-        );
+        let namespace = self.capture_ns;
+        let index = self.published.insert_owned(OwnedTracerDef {
+            namespace,
+            name,
+            material,
+            material_hint: captured_name,
+            material_namespace: namespace,
+            material_authored: crate::AuthoredRef::from_ptrs(geometry.material_slot, None),
+            draw_interval: geometry.draw_interval,
+            speed: geometry.speed,
+            beam_length: geometry.beam_length,
+            beam_width: geometry.beam_width,
+            screw_radius: geometry.screw_radius,
+            screw_dist: geometry.screw_dist,
+            colors: geometry.colors,
+        });
+        self.last_captured = Some(index);
         Ok(())
     }
 
@@ -185,27 +193,20 @@ impl TracerCatalog {
 
 impl TracerDefinitions {
     pub fn len(&self) -> usize {
-        self.by_name.len()
+        self.defs.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
-    }
-
-    pub fn get(&self, name: &str) -> Option<&OwnedTracerDef> {
-        self.by_name.get(name)
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.order.iter().map(String::as_str)
+        self.defs.is_empty()
     }
 
     pub fn resolve_materials(&mut self, materials: &crate::MaterialDefinitions) {
-        for def in self.by_name.values_mut() {
+        for def in &mut self.defs {
+            let ns = def.material_namespace;
             let index = def
                 .material_hint
                 .as_deref()
-                .and_then(|name| materials.material_index_by_name(name));
+                .and_then(|name| materials.material_index_by_ns(ns, name));
             if let Some(index) = index.filter(|i| {
                 materials
                     .materials
@@ -223,11 +224,7 @@ impl TracerDefinitions {
     }
 
     pub fn defs(&self) -> impl Iterator<Item = &OwnedTracerDef> {
-        self.order.iter().filter_map(|name| self.by_name.get(name))
-    }
-
-    pub fn index_by_name(&self, name: &str) -> Option<usize> {
-        self.order.iter().position(|n| n == name)
+        self.defs.iter()
     }
 
     pub fn set_capture_zone(&mut self, zone: ZoneOwner) {
@@ -238,45 +235,56 @@ impl TracerDefinitions {
         self.zones.get(index).copied().unwrap_or(self.capture_zone)
     }
 
-    fn retain_order(&mut self, name: String) {
-        if let Some(pos) = self.order.iter().position(|n| n == &name) {
-            self.zones[pos] = self.capture_zone;
+    fn insert_owned(&mut self, def: OwnedTracerDef) -> usize {
+        let key = (def.namespace, def.name.clone());
+        if let Some(index) = self.by_key.get(&key).copied() {
+            self.zones[index] = self.capture_zone;
+            self.defs[index] = def;
+            index
         } else {
-            self.order.push(name);
+            let index = self.defs.len();
+            self.by_key.insert(key, index);
             self.zones.push(self.capture_zone);
+            self.defs.push(def);
+            index
         }
     }
 
     pub fn def_at(&self, index: usize) -> Option<&OwnedTracerDef> {
-        self.order
-            .get(index)
-            .and_then(|name| self.by_name.get(name))
+        self.defs.get(index)
     }
 
     pub fn material_edge_census(&self) -> AssetEdgeCensus {
         let mut census = AssetEdgeCensus::default();
-        for def in self.by_name.values() {
+        for def in self.defs.iter() {
             census.push(def.material);
         }
         census
     }
 
     pub fn bound_count(&self) -> usize {
-        self.by_name
-            .values()
+        self.defs
+            .iter()
             .filter(|def| def.material.is_bound())
             .count()
     }
 
     pub fn named_materials(&self) -> impl Iterator<Item = &str> {
-        self.by_name
-            .values()
-            .filter_map(OwnedTracerDef::decode_hint)
+        self.defs.iter().filter_map(OwnedTracerDef::decode_hint)
+    }
+
+    pub fn material_keys(&self) -> impl Iterator<Item = asset_core::MaterialKey> + '_ {
+        self.defs.iter().filter_map(|def| {
+            def.decode_hint().map(|name| asset_core::MaterialKey {
+                namespace: def.material_namespace,
+                name: name.to_owned(),
+            })
+        })
     }
 
     pub fn unresolved_count(&self) -> usize {
-        self.by_name
-            .values()
+        self.defs
+            .iter()
             .filter(|def| def.material.is_unresolved())
             .count()
     }

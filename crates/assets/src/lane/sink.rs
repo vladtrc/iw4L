@@ -281,6 +281,9 @@ impl ZoneWalkSink {
         self.materials.set_capture_ns(ns);
         self.xanims.set_capture_ns(ns);
         self.fpv_meshes.set_capture_ns(ns);
+        self.tracers.set_capture_ns(ns);
+        self.fx.set_capture_ns(ns);
+        self.fx_models.set_capture_ns(ns);
     }
 }
 
@@ -319,6 +322,12 @@ impl CommonWalkSink {
         self.materials.set_capture_ns(ns);
         self.xanims.set_capture_ns(ns);
         self.fpv_meshes.set_capture_ns(ns);
+        self.world_weapons.set_capture_ns(ns);
+        self.projectile_meshes.set_capture_ns(ns);
+        self.tracers.set_capture_ns(ns);
+        self.weapons.set_capture_ns(ns);
+        self.fx.set_capture_ns(ns);
+        self.fx_models.set_capture_ns(ns);
     }
 
     fn keep_stats_table(&mut self, table: crate::CapturedStringTable) {

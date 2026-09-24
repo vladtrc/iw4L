@@ -81,6 +81,7 @@ struct WeaponbarExprHost<'a> {
     ms: i32,
     cg_time: i32,
     in_killcam: bool,
+    missilecam: bool,
     game_ended: bool,
     spectating_client: bool,
     local_vars: &'a UiLocalVars,
@@ -246,6 +247,9 @@ impl ExprHost for WeaponbarExprHost<'_> {
     }
     fn in_killcam(&self) -> Result<i32, ExprError> {
         Ok(i32::from(self.in_killcam))
+    }
+    fn missilecam(&self) -> Result<i32, ExprError> {
+        Ok(i32::from(self.missilecam))
     }
     fn flashbanged(&self) -> Result<i32, ExprError> {
         let Some(ps) = self.ps else {
@@ -625,6 +629,7 @@ pub(crate) fn update_weaponbar(
         ms: sys_milliseconds() as i32,
         cg_time: cg_clock.time(),
         in_killcam: view.as_deref().is_some_and(|v| v.in_killcam()),
+        missilecam: meta.is_some_and(|m| m.remote_missile.is_some()),
         game_ended: presented.snapshot().is_some_and(|s| {
             matches!(
                 s.meta.phase,

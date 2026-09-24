@@ -169,6 +169,9 @@ pub(crate) fn cg_obituary(
     weapons: Option<Res<PreparedWeapons>>,
     presented: Res<net::PresentedSnapshot>,
 ) {
+    if obituary.in_killcam {
+        return;
+    }
     let payload = obituary.event.payload;
     let pick = pick_kill_icon(&payload, weapons.as_deref());
     let attacker = snapshot_client_name(&presented, payload.attacker_entity_num);
@@ -244,6 +247,7 @@ pub(crate) fn update_killfeed(
     mut window: ResMut<KillfeedWindow>,
     mut pass: ResMut<HudTessPass>,
     mut notifies: MessageReader<net::SvcGameNotify>,
+    view: Option<Res<frame::ViewSubject>>,
 ) {
     if !surface.is_ready() {
         hide(&mut pass);
@@ -285,6 +289,10 @@ pub(crate) fn update_killfeed(
         .retain(|line| now.saturating_sub(line.start_ms()) < GAME_MSG_WIN0_MSG_TIME_MS);
     if window.lines.is_empty() {
         gaps.clear(HudGap::Obituary);
+        hide(&mut pass);
+        return;
+    }
+    if view.is_some_and(|v| v.in_killcam()) {
         hide(&mut pass);
         return;
     }

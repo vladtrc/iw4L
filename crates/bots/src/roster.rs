@@ -12,14 +12,30 @@ pub struct BotClassPool {
 }
 
 #[derive(Resource, Debug, Default)]
-pub struct BotAddQueue(pub Vec<u32>);
+pub struct BotAddQueue(pub Vec<BotAddRequest>);
+
+#[derive(Debug)]
+pub struct BotAddRequest {
+    pub count: u32,
+    pub dummy: bool,
+}
 
 impl BotAddQueue {
     pub fn push(&mut self, count: u32) {
-        self.0.push(count.max(1));
+        self.0.push(BotAddRequest {
+            count: count.max(1),
+            dummy: false,
+        });
     }
 
-    pub fn drain(&mut self) -> Vec<u32> {
+    pub fn push_dummy(&mut self, count: u32) {
+        self.0.push(BotAddRequest {
+            count: count.max(1),
+            dummy: true,
+        });
+    }
+
+    pub fn drain(&mut self) -> Vec<BotAddRequest> {
         core::mem::take(&mut self.0)
     }
 }
@@ -81,7 +97,7 @@ impl BotFireQueue {
 #[derive(Debug)]
 pub struct BotSlot {
     pub id: ClientId,
-    pub brain: HostController,
+    pub brain: Option<HostController>,
     pub joined: bool,
     pub class_requested: bool,
 }
@@ -113,7 +129,7 @@ impl BotRoster {
     // them *is* that client as far as the roster is concerned: `is_bot` claims
     // the player, and the slot is dead weight because no system can drive an
     // id someone else is already playing.
-    pub fn add_bots(&mut self, count: u32, taken: &[ClientId]) -> Vec<ClientId> {
+    pub fn add_bots(&mut self, count: u32, taken: &[ClientId], dummy: bool) -> Vec<ClientId> {
         let room = MAX_HOST_BOTS.saturating_sub(self.bots.len() as u32);
         let count = count.min(room);
         let seed = self.seed;
@@ -122,7 +138,8 @@ impl BotRoster {
             let Some(id) = self.claim_id(taken) else {
                 break;
             };
-            let brain = HostController::new(seed ^ (u64::from(id.0) << 32) ^ u64::from(i));
+            let brain = (!dummy)
+                .then(|| HostController::new(seed ^ (u64::from(id.0) << 32) ^ u64::from(i)));
             self.bots.push(BotSlot {
                 id,
                 brain,

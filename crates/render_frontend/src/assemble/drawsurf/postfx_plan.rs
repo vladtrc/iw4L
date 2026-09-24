@@ -373,9 +373,7 @@ fn admit_unlit_2d(
         return Err(PostFxAdmissionRefusal::AlphaTestEnabled);
     }
     let Some(port) = programs.get(pass.port).cloned() else {
-        return Err(PostFxAdmissionRefusal::PortMissing {
-            port: pass.port,
-        });
+        return Err(PostFxAdmissionRefusal::PortMissing { port: pass.port });
     };
     let Some(shell) = super::capture_stable_shell(
         catalog,
@@ -393,9 +391,7 @@ fn admit_unlit_2d(
         .zip(shaders)
         .find(|(candidate, _)| candidate.id() == pass.port)
     else {
-        return Err(PostFxAdmissionRefusal::ShaderHandleMissing {
-            port: pass.port,
-        });
+        return Err(PostFxAdmissionRefusal::ShaderHandleMissing { port: pass.port });
     };
     Ok(RuntimePostFx {
         name: material_name,

@@ -19,7 +19,7 @@ pub struct PreparedModelMaterials {
     by_authored: HashMap<assets::MaterialIndex, SmodelPassMaterial>,
     scene_dobjs: HashMap<String, Arc<assets::DObj>>,
     projectile_materials: HashMap<assets::MaterialIndex, SmodelPassMaterial>,
-    projectile_dobjs: HashMap<String, Arc<assets::DObj>>,
+    projectile_dobjs: HashMap<(assets::AssetNamespace, String), Arc<assets::DObj>>,
 }
 
 impl PreparedModelMaterials {
@@ -77,8 +77,12 @@ impl PreparedModelMaterials {
         self.projectile_materials.get(&authored)
     }
 
-    pub fn projectile_dobj(&self, model: &str) -> Option<&Arc<assets::DObj>> {
-        self.projectile_dobjs.get(model)
+    pub fn projectile_dobj(
+        &self,
+        namespace: assets::AssetNamespace,
+        model: &str,
+    ) -> Option<&Arc<assets::DObj>> {
+        self.projectile_dobjs.get(&(namespace, model.to_owned()))
     }
 
     pub fn clear(&mut self) {
@@ -242,10 +246,19 @@ pub fn prepare_model_materials(
     let mut projectile_materials = HashMap::new();
     let mut projectile_dobjs = HashMap::new();
     if let Some(projectiles) = projectiles.as_deref() {
-        for name in projectiles.0.names() {
-            let Some(entry) = projectiles.0.get(name) else {
+        for index in 0..projectiles.0.len() {
+            let Some(entry) = projectiles.0.get_at(index) else {
                 continue;
             };
+            let key =
+                projectiles
+                    .0
+                    .key_at(index)
+                    .cloned()
+                    .unwrap_or(assets::ProjectileMeshKey::new(
+                        entry.namespace,
+                        &entry.skel.name,
+                    ));
             for surface in 0..entry.material_edges.len() {
                 let Some(authored) = entry.material_index(surface) else {
                     continue;
@@ -265,7 +278,7 @@ pub fn prepare_model_materials(
             if let Some(pose) = entry.skel.pose.as_ref()
                 && let Ok(dobj) = assets::DObj::build(&[(pose, None)])
             {
-                projectile_dobjs.insert(name.to_owned(), Arc::new(dobj));
+                projectile_dobjs.insert((key.namespace, key.name), Arc::new(dobj));
             }
         }
     }

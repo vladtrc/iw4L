@@ -440,6 +440,7 @@ pub fn build_t5_world_draw(
                 .iter()
                 .filter_map(|def| {
                     Some(crate::world_draw::CapturedLightDef {
+                        namespace: crate::AssetNamespace::T5,
                         name: crate::AssetRef::decode(s.cstr(def.name?).ok()?),
                         attenuation_image_name: def
                             .attenuation_image_name

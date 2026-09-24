@@ -3,6 +3,7 @@ pub mod dyn_ent_phys;
 pub mod fpv_present;
 pub mod held_sync;
 pub mod item;
+pub mod killcam;
 pub mod match_reset;
 pub mod missile;
 pub mod remote_body;

@@ -27,12 +27,20 @@ impl OwnedFxImpactTable {
         self.entries.len()
     }
 
+    pub fn namespace(&self) -> crate::AssetNamespace {
+        if self.t5 {
+            crate::AssetNamespace::T5
+        } else {
+            crate::AssetNamespace::Iw4
+        }
+    }
+
     pub fn effect_name(
         &self,
         row: usize,
         surf_type: usize,
         flesh_slot: Option<usize>,
-    ) -> Option<&str> {
+    ) -> Option<crate::FxName<'_>> {
         let entry = self.entries.get(row)?;
         let name = if surf_type == FX_SURF_TYPE_FLESH {
             entry.flesh.get(flesh_slot?)?.as_str()
@@ -42,7 +50,7 @@ impl OwnedFxImpactTable {
             }
             entry.nonflesh[surf_type].as_str()
         };
-        (!name.is_empty()).then_some(name)
+        (!name.is_empty()).then(|| crate::FxName::new(self.namespace(), name))
     }
 }
 

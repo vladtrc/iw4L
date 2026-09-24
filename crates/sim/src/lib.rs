@@ -125,8 +125,8 @@ pub use match_state::{
     ClassRejectReason, ClientLifecycle, ClientSnapshotMeta, ConfigurationChangeRejectReason,
     DroppedItemAmmo, EntityEventPayload, EntityEventRecord, EventAudience, EventRecord,
     GiveRejectReason, HealthRegenCensus, InputReceipt, ItemPickupRecord, KillcamHud, LoadoutSpec,
-    MatchEndReason, PaveLow, PelletFxRecord, RngDebugMeta, SIM_EVENT_ROSTER, SimEvent, SimEventRow,
-    SnapshotMeta, UNRELIABLE_SIM_EVENT_COUNT, Uav, class_catalog_has,
+    MatchEndReason, PaveLow, PelletFxRecord, RemoteMissile, RngDebugMeta, SIM_EVENT_ROSTER,
+    SimEvent, SimEventRow, SnapshotMeta, UNRELIABLE_SIM_EVENT_COUNT, Uav, class_catalog_has,
     class_catalog_radar_jam_e_flags, perk_bits_from_class_catalog, sim_event_is_reliable,
 };
 pub use player_anim_script::{

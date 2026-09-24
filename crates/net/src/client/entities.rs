@@ -174,6 +174,9 @@ pub fn sync_client_entities(
         &mut runtimes,
         at_time_ms,
         adopted.snap.is_some(),
+        archived
+            .then(|| local.as_ref().map(|local| local.0))
+            .flatten(),
         CEntitySyncArm::Client,
         Some(&mut census),
     );
@@ -221,6 +224,7 @@ pub(crate) fn sync_authority_entities(
         &mut runtimes,
         at_time_ms,
         false,
+        None,
         CEntitySyncArm::Authority,
         Some(&mut census),
     );
@@ -260,10 +264,6 @@ fn client_entity_sync_needed(applied_this_frame: bool, has_next: bool) -> bool {
     applied_this_frame || !has_next
 }
 
-fn player_row_claims_entity_slot(ps: &playerstate_iw4::PlayerState) -> bool {
-    ps.is_live_frame()
-}
-
 fn replicated_entity_occupies(es: &entity_iw4::EntityState) -> bool {
     es.e_type == entity_iw4::ET_SCRIPTMOVER
         || es.e_type == entity_iw4::ET_MISSILE
@@ -282,6 +282,7 @@ fn sync_snapshot_entities(
     runtimes: &mut Query<&mut CEntityRuntime>,
     at_time_ms: i32,
     pair_ready: bool,
+    seated_viewer: Option<ClientId>,
     arm: CEntitySyncArm,
     mut census: Option<&mut CEntityBirthCensus>,
 ) {
@@ -306,7 +307,7 @@ fn sync_snapshot_entities(
     };
 
     for (client, ps) in players {
-        if !player_row_claims_entity_slot(ps) {
+        if Some(*client) == seated_viewer {
             continue;
         }
         let Some(number) = player_entity_number(*client) else {

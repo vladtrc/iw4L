@@ -570,12 +570,12 @@ pub fn update_effect_trails(
     prev_msec: i32,
     msec_now: i32,
     camera_origin: [f32; 3],
-    mut on_trail_def: impl FnMut(&str, u8) -> Option<FxElemDefInfo>,
+    mut on_trail_def: impl FnMut(u16, u8) -> Option<FxElemDefInfo>,
 ) {
-    let (def_name, mut handle, begin, end, distance, looping, msec_begin) =
+    let (catalog_index, mut handle, begin, end, distance, looping, msec_begin) =
         match host.effect_at(effect_slot) {
             Some(e) if e.ring_resident => (
-                e.def_name.clone(),
+                e.catalog_index,
                 e.first_trail_handle,
                 FxOrientFrame {
                     origin: e.origin_last,
@@ -607,7 +607,7 @@ pub fn update_effect_trails(
         let trail_def_index = trail.def_index as u8;
         let def_index = i32::from(trail_def_index);
         if def_index_begin <= def_index && def_index < def_index_end {
-            let Some(elem_def) = on_trail_def(def_name.as_str(), trail.def_index as u8) else {
+            let Some(elem_def) = on_trail_def(catalog_index, trail.def_index as u8) else {
                 host.gaps.raise(FxGapCause::TrailDefNotFound {
                     def_index: trail_def_index,
                 });
@@ -710,7 +710,7 @@ pub fn apply_partial_last_trail_spawn_dist(
     msec_now: i32,
     spawn_dist: f32,
     looping: bool,
-    mut on_trail_def: impl FnMut(&str, u8) -> Option<FxElemDefInfo>,
+    mut on_trail_def: impl FnMut(u16, u8) -> Option<FxElemDefInfo>,
     mut on_trail_trace: impl FnMut(
         [f32; 3],
         [f32; 3],
@@ -719,14 +719,14 @@ pub fn apply_partial_last_trail_spawn_dist(
         u32,
     ) -> Option<FxTrailCollideHit>,
     mut on_trail_vel_graphs: impl FnMut(
-        &str,
+        u16,
         u8,
     )
         -> (Vec<fx_iw4::FxElemVec3Range>, Vec<fx_iw4::FxElemVec3Range>),
 ) {
-    let (def_name, now, alt, random_seed, mut handle) = match host.effect_at(effect_slot) {
+    let (catalog_index, now, alt, random_seed, mut handle) = match host.effect_at(effect_slot) {
         Some(e) if e.ring_resident => (
-            e.def_name.clone(),
+            e.catalog_index,
             e.frame_now(),
             e.frame_when_played(),
             e.random_seed,
@@ -746,7 +746,7 @@ pub fn apply_partial_last_trail_spawn_dist(
         let next_trail = trail.next_trail_handle;
         let last = trail.last_elem_handle;
         let def_index = trail.def_index as u8;
-        let elem_def = on_trail_def(def_name.as_str(), def_index);
+        let elem_def = on_trail_def(catalog_index, def_index);
         {
             let mut prev = FX_TRAIL_HANDLE_NONE;
             let mut still_prefix = true;
@@ -790,7 +790,7 @@ pub fn apply_partial_last_trail_spawn_dist(
         if prev_msec != msec_now
             && let Some(def) = elem_def
         {
-            let (vel_local, vel_world) = on_trail_vel_graphs(def_name.as_str(), def_index);
+            let (vel_local, vel_world) = on_trail_vel_graphs(catalog_index, def_index);
             let mut prev_elem = FX_TRAIL_HANDLE_NONE;
             let mut cur = host.trails[trail_slot].first_elem_handle;
             while cur != FX_TRAIL_HANDLE_NONE {

@@ -47,6 +47,7 @@ pub struct ImageVariantId {
 
 #[derive(Clone, Debug)]
 pub struct AuthoredImage {
+    pub namespace: crate::AssetNamespace,
     pub name: AssetRef,
     pub map_type: u8,
     pub semantic: u8,
@@ -547,6 +548,10 @@ impl MaterialCatalog {
         self.capture_ns = ns;
     }
 
+    pub fn capture_ns(&self) -> crate::AssetNamespace {
+        self.capture_ns
+    }
+
     /// Pointer→row lookup: this is the walk's question, and it only has an
     /// answer while the walk is still on.
     pub fn material_index(&self, slot: Ptr) -> Option<crate::WalkLocalMaterialIndex> {
@@ -569,11 +574,9 @@ impl MaterialCatalog {
     }
 
     pub fn link_image(&mut self, incoming: AuthoredImage) -> usize {
-        if let Some(index) = self
-            .images
-            .iter()
-            .position(|owned| owned.name.same_name(&incoming.name))
-        {
+        if let Some(index) = self.images.iter().position(|owned| {
+            owned.namespace == incoming.namespace && owned.name.same_name(&incoming.name)
+        }) {
             let existing = &self.images[index];
             if existing.name.is_real()
                 && incoming.name.is_real()
@@ -614,10 +617,7 @@ impl MaterialCatalog {
 
     fn linkable_material_index(&self, incoming: &AuthoredMaterial) -> Option<usize> {
         self.materials.iter().position(|owned| {
-            owned.name.same_name(&incoming.name)
-                && (owned.namespace == incoming.namespace
-                    || !owned.name.is_real()
-                    || !incoming.name.is_real())
+            owned.namespace == incoming.namespace && owned.name.same_name(&incoming.name)
         })
     }
 
@@ -997,7 +997,7 @@ impl MaterialCatalog {
         let image_ids = images
             .into_iter()
             .map(|image| {
-                if let Some(index) = self.real_image_index(&image.name) {
+                if let Some(index) = self.real_image_index(image.namespace, &image.name) {
                     return index;
                 }
                 self.link_image(image)
@@ -1071,10 +1071,10 @@ impl MaterialCatalog {
         }
     }
 
-    fn real_image_index(&self, name: &AssetRef) -> Option<usize> {
-        self.images
-            .iter()
-            .position(|owned| owned.name.is_real() && owned.name.same_name(name))
+    fn real_image_index(&self, namespace: crate::AssetNamespace, name: &AssetRef) -> Option<usize> {
+        self.images.iter().position(|owned| {
+            owned.namespace == namespace && owned.name.is_real() && owned.name.same_name(name)
+        })
     }
 
     fn real_shader_index(
@@ -1388,6 +1388,7 @@ impl MaterialCatalog {
                 .to_vec()
         };
         Some(self.take_image_slot(AuthoredImage {
+            namespace: self.capture_ns,
             name,
             map_type: geometry.map_type,
             semantic: geometry.semantic,
@@ -2364,6 +2365,7 @@ impl MaterialCatalog {
                 .to_vec()
         };
         Some(self.take_image_slot(AuthoredImage {
+            namespace: self.capture_ns,
             name,
             map_type: geometry.map_type,
             semantic: geometry.semantic,
@@ -2679,6 +2681,7 @@ impl MaterialCatalog {
                 .to_vec()
         };
         Some(self.take_image_slot(AuthoredImage {
+            namespace: self.capture_ns,
             name,
             map_type: geometry.map_type,
             semantic: geometry.semantic,
@@ -3093,20 +3096,6 @@ impl MaterialDefinitions {
         census
     }
 
-    fn real_index_by_name<'a>(
-        names: impl Iterator<Item = &'a AssetRef>,
-        name: &str,
-    ) -> Option<usize> {
-        let want = AssetRef::bare_name(name);
-        if want.is_empty() {
-            return None;
-        }
-        names
-            .enumerate()
-            .find(|(_, n)| n.is_real() && n.as_str() == want)
-            .map(|(index, _)| index)
-    }
-
     pub fn image_memory(&self) -> MaterialImageMemory {
         let mut census = MaterialImageMemory {
             images: self.images.len(),
@@ -3134,23 +3123,36 @@ impl MaterialDefinitions {
     }
 
     pub fn material_index_by_key(&self, key: &crate::MaterialKey) -> Option<crate::MaterialIndex> {
-        let want = AssetRef::bare_name(&key.name);
+        self.material_index_by_ns(key.namespace, &key.name)
+    }
+
+    pub fn material_index_by_ns(
+        &self,
+        namespace: crate::AssetNamespace,
+        name: &str,
+    ) -> Option<crate::MaterialIndex> {
+        let want = AssetRef::bare_name(name);
         if want.is_empty() {
             return None;
         }
         self.materials
             .iter()
-            .position(|m| m.namespace == key.family && m.name.is_real() && m.name.as_str() == want)
+            .position(|m| m.namespace == namespace && m.name.is_real() && m.name.as_str() == want)
             .map(crate::MaterialIndex::from_order)
     }
 
-    pub fn material_index_by_name(&self, name: &str) -> Option<crate::MaterialIndex> {
-        Self::real_index_by_name(self.materials.iter().map(|m| &m.name), name)
-            .map(crate::MaterialIndex::from_order)
-    }
-
-    pub fn image_index_by_name(&self, name: &str) -> Option<usize> {
-        Self::real_index_by_name(self.images.iter().map(|image| &image.name), name)
+    pub fn image_index_by_key(
+        &self,
+        namespace: crate::AssetNamespace,
+        name: &str,
+    ) -> Option<usize> {
+        let want = AssetRef::bare_name(name);
+        if want.is_empty() {
+            return None;
+        }
+        self.images.iter().position(|image| {
+            image.namespace == namespace && image.name.is_real() && image.name.as_str() == want
+        })
     }
 
     pub fn material_ref_census(&self) -> AssetRefCensus {

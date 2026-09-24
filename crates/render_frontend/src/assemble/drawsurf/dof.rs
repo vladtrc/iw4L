@@ -138,6 +138,7 @@ fn update_dof(
     clip: Res<crate::adapters::anim::dyn_ent::DynEntPhysClip>,
     world: Res<frame::WorldGeneration>,
     subject: Res<frame::ViewSubject>,
+    camera: Option<Res<render_anim::occupancy::view_kick::SessionViewKick>>,
     mut generation: Local<Option<u64>>,
 ) {
     *frame = DofFrame::default();
@@ -210,6 +211,17 @@ fn update_dof(
             scene.view_model_start = range[0] * ads;
             scene.view_model_end = range[1] * ads;
         }
+    }
+    if let Some(distance) = camera.as_ref().and_then(|c| c.killcam_focus_distance) {
+        *scene = DepthOfField {
+            near_start: 0.0,
+            near_end: 100.0,
+            far_start: distance + 100.0,
+            far_end: distance + 400.0,
+            near_blur: 4.0,
+            far_blur: 2.0,
+            ..Default::default()
+        };
     }
     *frame = DofFrame {
         dof: if dvars.tweak {

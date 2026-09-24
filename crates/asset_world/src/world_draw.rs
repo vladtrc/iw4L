@@ -497,6 +497,7 @@ pub struct WorldPrimaryLight {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CapturedLightDef {
+    pub namespace: crate::AssetNamespace,
     pub name: crate::AssetRef,
     pub attenuation_image_name: Option<String>,
     pub attenuation_width: Option<u16>,
@@ -522,7 +523,7 @@ pub fn resolve_named_light_def(
     let image = def
         .attenuation_image_name
         .as_deref()
-        .and_then(|name| catalog.image_index_by_name(name));
+        .and_then(|name| catalog.image_index_by_key(def.namespace, name));
     let width = image
         .and_then(|index| catalog.images.get(index))
         .and_then(|image| {
@@ -1450,6 +1451,7 @@ pub fn capture_light_defs(
                         .and_then(|p| s.cstr(p).ok().map(str::to_owned))
                 });
             Some(CapturedLightDef {
+                namespace: crate::AssetNamespace::Iw4,
                 name,
                 attenuation_image_name,
                 attenuation_width: def.attenuation_width,
@@ -1503,14 +1505,15 @@ pub fn resolve_primary_light_attenuation(
 
 pub fn resolve_outdoor_image(
     world_ptr_name: Option<&str>,
+    map_namespace: crate::AssetNamespace,
     catalog: &MaterialDefinitions,
 ) -> (Option<usize>, &'static str) {
     if let Some(name) = world_ptr_name
-        && let Some(index) = catalog.image_index_by_name(name)
+        && let Some(index) = catalog.image_index_by_key(map_namespace, name)
     {
         return (Some(index), "gfxworld+412");
     }
-    match catalog.image_index_by_name("$outdoor") {
+    match catalog.image_index_by_key(map_namespace, "$outdoor") {
         Some(index) => (Some(index), "$outdoor"),
         None => (None, "missing"),
     }
@@ -1526,7 +1529,7 @@ fn apply_captured_def(
     light.attenuation_image = def
         .attenuation_image_name
         .as_deref()
-        .and_then(|image_name| catalog.image_index_by_name(image_name));
+        .and_then(|image_name| catalog.image_index_by_key(def.namespace, image_name));
 
     light.falloff_image_width = light
         .attenuation_image

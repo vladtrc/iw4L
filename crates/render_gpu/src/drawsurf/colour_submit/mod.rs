@@ -211,6 +211,8 @@ pub struct RenderFrameData {
     pub particle_cloud_vertices: Arc<Vec<[u8; fx_iw4::GFX_POS_TEX_VERTEX_STRIDE]>>,
     pub particle_cloud_indices: Arc<Vec<u32>>,
     pub particle_cloud_surface_ranges: Arc<Vec<(u32, u32)>>,
+    pub particle_cloud_template: (usize, usize),
+    pub particle_cloud_revision: u64,
     pub mark_mesh_vertices: Arc<Vec<[u8; asset_iw4::size::GFX_WORLD_VERTEX]>>,
     pub mark_mesh_indices: Arc<Vec<u16>>,
     pub mark_mesh_surface_ranges: Arc<Vec<(u32, u32)>>,
@@ -283,8 +285,8 @@ struct ExactColourGeometry {
     fx_revision: u64,
 
     fx_copy_dst: bool,
-    particle_cloud_vertex: Option<Buffer>,
-    particle_cloud_index: Option<Buffer>,
+    particle_cloud: residency::GpuMesh,
+    particle_cloud_template_resident: Option<(u64, u64, (usize, usize))>,
     particle_cloud_surface_ranges: Vec<(u32, u32)>,
     mark_mesh: residency::GpuMesh,
     mark_mesh_surface_ranges: Vec<(u32, u32)>,
@@ -3408,8 +3410,8 @@ fn submit_exact_draw_run<'a>(
             ),
             ExactTessBind::CodeMesh => (geometry.fx_vertex.as_ref(), geometry.fx_index.as_ref()),
             ExactTessBind::ParticleCloud => (
-                geometry.particle_cloud_vertex.as_ref(),
-                geometry.particle_cloud_index.as_ref(),
+                geometry.particle_cloud.vertex.buffer(),
+                geometry.particle_cloud.index.buffer(),
             ),
             ExactTessBind::MarkMesh => (
                 geometry.mark_mesh.vertex.buffer(),
@@ -5841,9 +5843,7 @@ impl ExactPrepare<'_> {
                 if count == 0 {
                     return Err(GpuSubmitRefusal::EmptyParticleCloudIndexRange { draw });
                 }
-                if self.geometry.particle_cloud_vertex.is_none()
-                    || self.geometry.particle_cloud_index.is_none()
-                {
+                if !self.geometry.particle_cloud.drawable() {
                     return Err(GpuSubmitRefusal::PackedVertex(
                         render_frame::RetailPackedVertexRefusal::ForeignLayout {
                             source_layout: "exact colour particle-cloud buffers absent",

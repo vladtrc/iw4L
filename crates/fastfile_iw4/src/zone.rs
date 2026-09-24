@@ -1270,6 +1270,8 @@ pub struct WeaponGeometry {
     pub explosion_inner_damage: i32,
     pub explosion_outer_damage: i32,
 
+    pub missile_guidance: i32,
+    pub stickiness: i32,
     pub projectile_speed: i32,
     pub projectile_speed_up: i32,
     pub projectile_speed_forward: i32,

@@ -481,8 +481,11 @@ pub(super) async fn walk_prepared_match(
         let dynamic_light = dynamic_light_name.and_then(|name| {
             crate::resolve_named_light_def(name, &draw.light_defs, &common_light_defs, &global)
         });
-        let (ordinal, source) =
-            crate::resolve_outdoor_image(draw.outdoor_image_name.as_deref(), &global);
+        let (ordinal, source) = crate::resolve_outdoor_image(
+            draw.outdoor_image_name.as_deref(),
+            map_namespace.unwrap_or(crate::AssetNamespace::Iw4),
+            &global,
+        );
         draw.outdoor_image = ordinal;
         if source == "$outdoor" && draw.outdoor_image_name.is_none() {
             draw.outdoor_image_name = Some("$outdoor".into());
@@ -601,10 +604,10 @@ pub(super) async fn walk_prepared_match(
     }
     if let Ok(path) = &zone_ff {
         let stage = progress.begin_scoped(StageId::Images, "tracers", None);
-        let decoded = crate::material_images::decode_color_or_2d_for_names(
+        let decoded = crate::material_images::decode_color_or_2d_for_keys(
             path,
             &mut global,
-            common_tracers.named_materials(),
+            common_tracers.material_keys(),
             &stage,
             load_pool(),
         );
@@ -785,21 +788,27 @@ pub(super) async fn walk_prepared_match(
             .into(),
     );
     {
-        let missing: Vec<String> = world
+        let missing: Vec<crate::MaterialKey> = world
             .fx
             .unique_bound_hints()
             .into_iter()
             .chain(world.fx.unique_decal_mark_hints())
-            .filter(|(_, hint)| !crate::fx_color_decoded_in_catalog(&global, hint))
-            .map(|(_, hint)| hint.to_owned())
+            .filter(|(index, _)| !crate::fx_color_decoded_in_catalog(&global, *index))
+            .filter_map(|(index, _)| {
+                let material = global.materials.get(index)?;
+                Some(crate::MaterialKey {
+                    namespace: material.namespace,
+                    name: material.name.as_str().to_owned(),
+                })
+            })
             .collect();
         if !missing.is_empty() {
             if let Ok(path) = &zone_ff {
                 let stage = progress.begin_scoped(StageId::Images, "fx_elem", None);
-                let decoded = crate::material_images::decode_color_or_2d_for_names(
+                let decoded = crate::material_images::decode_color_or_2d_for_keys(
                     path,
                     &mut global,
-                    missing.iter(),
+                    missing,
                     &stage,
                     load_pool(),
                 );
@@ -816,7 +825,7 @@ pub(super) async fn walk_prepared_match(
             .fx
             .unique_bound_hints()
             .into_iter()
-            .filter(|(_, hint)| !crate::fx_color_decoded_in_catalog(&global, hint))
+            .filter(|(index, _)| !crate::fx_color_decoded_in_catalog(&global, *index))
             .map(|(index, hint)| (index, hint.to_owned()))
             .collect();
         if !nocolor.is_empty() {
@@ -998,7 +1007,8 @@ pub(super) async fn walk_prepared_match(
             set.fx_bytes as f64 / (1024.0 * 1024.0),
         ));
     }
-    let fx = std::mem::take(&mut world.fx).publish();
+    let mut fx = std::mem::take(&mut world.fx).publish();
+    fx.set_map_namespace(map_namespace.unwrap_or(crate::AssetNamespace::Iw4));
     let xanims = xanims.publish();
     let destructible_death =
         crate::stamp_match_destructible_death(&xanims, &world.map_xmodel_scene_assets);

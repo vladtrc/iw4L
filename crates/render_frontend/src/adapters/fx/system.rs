@@ -143,6 +143,7 @@ pub(crate) fn register_combat_fx_systems(app: &mut App) {
         .add_observer(cg_fire_weapon)
         .add_observer(cg_eject_brass)
         .add_observer(cg_explosion)
+        .add_observer(stop_killcam_explosion_fx)
         .add_observer(cg_play_fx)
         .add_observer(cg_play_fx_bullet_hit)
         .add_observer(cg_melee_blood);
@@ -209,7 +210,7 @@ fn present_tracker_light(
         &mut host.0,
         &catalog.0,
         &elem_infos.0,
-        EFFECT,
+        assets::FxName::engine(EFFECT),
         target,
         fx_world.view().as_ref().map(|scene| scene as &dyn FxScene),
     )
@@ -389,7 +390,7 @@ fn tick_fx_non_dependent_update(
                 &mut host.0,
                 &catalog.0,
                 &elem_infos.0,
-                name,
+                assets::FxName::engine(name),
                 ev.origin,
                 axis,
                 scene,
@@ -401,7 +402,7 @@ fn tick_fx_non_dependent_update(
                     &mut host.0,
                     &catalog.0,
                     &elem_infos.0,
-                    fallback,
+                    assets::FxName::engine(fallback),
                     ev.origin,
                     axis,
                     scene,
@@ -939,7 +940,7 @@ fn commit_fx_transaction(
 
     let mut spark_drawn = 0usize;
     for spark in &out.spark_clouds {
-        let Some(asset_id) = spark_elem_asset_id(&catalog.0, &spark.def_name, spark.def_index)
+        let Some(asset_id) = spark_elem_asset_id(&catalog.0, spark.catalog_index, spark.def_index)
         else {
             spark_plan.miss_material = spark_plan.miss_material.saturating_add(1);
             continue;
@@ -960,7 +961,7 @@ fn commit_fx_transaction(
         }
     }
     for cloud in &out.clouds {
-        let Some(asset_id) = spark_elem_asset_id(&catalog.0, &cloud.def_name, cloud.def_index)
+        let Some(asset_id) = spark_elem_asset_id(&catalog.0, cloud.catalog_index, cloud.def_index)
         else {
             spark_plan.miss_material = spark_plan.miss_material.saturating_add(1);
             continue;
@@ -986,7 +987,7 @@ fn commit_fx_transaction(
     }
     for fountain in &out.fountains {
         let Some(asset_id) =
-            spark_elem_asset_id(&catalog.0, &fountain.def_name, fountain.def_index)
+            spark_elem_asset_id(&catalog.0, fountain.catalog_index, fountain.def_index)
         else {
             spark_plan.miss_material = spark_plan.miss_material.saturating_add(1);
             continue;
@@ -1444,7 +1445,7 @@ fn log_fx_near_camera(
     }
     for spark in spark_clouds.iter().take(8) {
         let dist = sprite_dist(spark.origin, cam);
-        let mat = spark_elem_material(catalog, &spark.def_name, spark.def_index)
+        let mat = spark_elem_material(catalog, spark.catalog_index, spark.def_index)
             .unwrap_or_else(|| "-".into());
         let c0 = &spark.clouds[0];
         let c1 = &spark.clouds[1];
@@ -1728,7 +1729,7 @@ fn log_fx_run_mode_census(
     });
     let (offset_r, offset_h, flags) = nearest
         .and_then(|s| {
-            let effect = catalog.get(&s.def_name)?;
+            let effect = render_fx::present::catalog_lookup(catalog, s.catalog_index)?;
             let elem = effect.elems.get(s.def_index as usize)?;
             Some((
                 elem.view.spawn_offset_radius_base,
@@ -1818,8 +1819,12 @@ fn count_fx_present_skip(cursor: &mut FxJournalCursor, cause: FxPresentSkip) {
     }
 }
 
-fn spark_elem_material(catalog: &FxDefinitions, def_name: &str, def_index: u8) -> Option<String> {
-    let effect = catalog.get(def_name)?;
+fn spark_elem_material(
+    catalog: &FxDefinitions,
+    catalog_index: u16,
+    def_index: u8,
+) -> Option<String> {
+    let effect = render_fx::present::catalog_lookup(catalog, catalog_index)?;
     let elem = effect.elems.get(def_index as usize)?;
     elem.visuals
         .iter()
@@ -1827,8 +1832,12 @@ fn spark_elem_material(catalog: &FxDefinitions, def_name: &str, def_index: u8) -
         .map(str::to_owned)
 }
 
-fn spark_elem_asset_id(catalog: &FxDefinitions, def_name: &str, def_index: u8) -> Option<usize> {
-    let effect = catalog.get(def_name)?;
+fn spark_elem_asset_id(
+    catalog: &FxDefinitions,
+    catalog_index: u16,
+    def_index: u8,
+) -> Option<usize> {
+    let effect = render_fx::present::catalog_lookup(catalog, catalog_index)?;
     let elem = effect.elems.get(def_index as usize)?;
     elem.visuals.iter().find_map(OwnedFxVisual::bound_index)
 }
@@ -2154,7 +2163,7 @@ fn cg_fire_weapon(
     combat.last_weapon_flash_edge =
         combat_fx.map(|fx| fx.flash_edge(player_view).edge_kind().to_owned());
     let muzzle_name = combat_fx.and_then(|fx| fx.flash_present(player_view));
-    combat.last_muzzle_name = muzzle_name.map(str::to_owned);
+    combat.last_muzzle_name = muzzle_name.map(|n| n.name.to_owned());
 
     let hand = usize::from(bg_is_left_hand_fire_event(fire.event.event));
     let remote_bolts = world_bolts
@@ -2406,7 +2415,7 @@ fn tick_missile_present_state(
         };
 
         if want_trail && let Some(name) = weapons.proj_trail_of(row.weapon) {
-            match missile_bolt_target(poses.as_deref(), meshes, &row.name, entnum) {
+            match missile_bolt_target(poses.as_deref(), meshes, row.namespace, &row.name, entnum) {
                 Some(target) => {
                     let mut played = 0;
                     if try_play_weapon_fx_bolted(
@@ -2428,7 +2437,7 @@ fn tick_missile_present_state(
         }
 
         if want_beacon && let Some(name) = weapons.proj_beacon_of(row.weapon) {
-            match missile_bolt_target(poses.as_deref(), meshes, &row.name, entnum) {
+            match missile_bolt_target(poses.as_deref(), meshes, row.namespace, &row.name, entnum) {
                 Some(target) => {
                     let mut played = 0;
                     if try_play_weapon_fx_bolted(
@@ -2450,7 +2459,8 @@ fn tick_missile_present_state(
         }
 
         if let Some(name) = weapons.proj_ignition_of(row.weapon)
-            && let Some(target) = missile_bolt_target(poses.as_deref(), meshes, &row.name, entnum)
+            && let Some(target) =
+                missile_bolt_target(poses.as_deref(), meshes, row.namespace, &row.name, entnum)
         {
             let mut played = 0;
             if !try_play_weapon_fx_bolted(
@@ -2528,13 +2538,13 @@ fn cg_explosion(
         impact_fx.as_ref().and_then(|fx| fx.0.as_ref()),
         slot,
     );
-    combat.last_explosion_table = names.table.map(str::to_owned);
-    combat.last_explosion_slot = names.slot.map(str::to_owned);
-    combat.last_explosion_name = names.table.or(names.slot).map(str::to_owned);
+    combat.last_explosion_table = names.table.map(|n| n.name.to_owned());
+    combat.last_explosion_slot = names.slot.map(|n| n.name.to_owned());
+    combat.last_explosion_name = names.table.or(names.slot).map(|n| n.name.to_owned());
     if let Some(row) = names.row {
         combat.last_row = Some(row as i64);
         combat.last_surf = Some(i64::from(payload.surf_type));
-        combat.last_impact_def = names.table.map(str::to_owned);
+        combat.last_impact_def = names.table.map(|n| n.name.to_owned());
     }
     let axis = if payload.direction == [0.0, 0.0, 0.0] {
         IDENTITY_AXIS
@@ -2601,6 +2611,36 @@ fn cg_explosion(
     sync_combat_dump(&cursor, &mut combat);
 }
 
+const KILLCAM_FX_REMOVAL_WEAPONS: [&str; 1] = [gamemode_iw4::killstreaks::PREDATOR_PROJECTILE];
+
+fn stop_killcam_explosion_fx(
+    _transition: On<net::KillcamFxTransition>,
+    weapons: Option<Res<PreparedWeapons>>,
+    catalog: Option<Res<PreparedFxCatalog>>,
+    prediction: Res<ClientPredictionState>,
+    mut host: ResMut<HostFxSystem>,
+) {
+    let (Some(weapons), Some(catalog)) = (weapons, catalog) else {
+        return;
+    };
+    let delta_time = prediction.0.predicted_local().map_or(0, |ps| ps.delta_time);
+    let newer_than = host.0.msec_now.wrapping_sub(delta_time);
+    for name in KILLCAM_FX_REMOVAL_WEAPONS {
+        let Ok(Some(weapon)) = weapons.0.resolve_index(name) else {
+            continue;
+        };
+        let Some(effect) = weapons
+            .0
+            .combat_fx_of(weapon)
+            .and_then(|fx| fx.explosion_present())
+            .and_then(|name| name.resolve(&catalog.0))
+        else {
+            continue;
+        };
+        host.0.kill_def_newer_than(&effect.name, newer_than);
+    }
+}
+
 fn cg_play_fx(
     play: On<net::EntityPlayFx>,
     catalog: Option<Res<PreparedFxCatalog>>,
@@ -2641,7 +2681,7 @@ fn cg_play_fx(
         &mut host.0,
         &catalog.0,
         &elem_infos.0,
-        &def_name,
+        catalog.0.map_fx_name(&def_name),
         payload.origin,
         axis_from_hit_normal(normal),
         fx_world.view().as_ref().map(|s| s as &dyn FxScene),
@@ -2827,7 +2867,7 @@ fn cg_melee_blood(
         &mut host.0,
         &catalog.0,
         &mut elem_infos.0,
-        Some("impacts/flesh_hit_knife"),
+        Some(assets::FxName::engine("impacts/flesh_hit_knife")),
         target,
         &mut played,
         fx_world.view().as_ref().map(|s| s as &dyn FxScene),

@@ -660,6 +660,15 @@ fn run_players_system(ecs: &mut World) {
                 crate::damage::shellshock_dump_affects_movement(ps.shellshock_index),
             );
             let mut cmd = *cmd;
+            if world
+                .client_meta(*id)
+                .is_some_and(|m| m.remote_missile.is_some())
+            {
+                crate::killstreaks::steer_remote_missile(&mut world, *id, &cmd, delta.min(200));
+                cmd.forwardmove = 0;
+                cmd.rightmove = 0;
+                cmd.buttons &= playerstate_iw4::buttons::CROUCH | playerstate_iw4::buttons::PRONE;
+            }
             let commanded_move = cmd.forwardmove != 0 || cmd.rightmove != 0;
             let linked_brushes: Vec<LinkedBrushCollisionBrush> = world
                 .entity_collision_capabilities()
@@ -822,6 +831,7 @@ fn run_entity_types_system(ecs: &mut World) {
             world.record_entity_collision_history(tick);
         }
 
+        crate::killstreaks::advance_remote_missiles(&mut world, tick);
         crate::entity_run::phase_run_entity_thinks(&mut world, tick);
         if world.publishes_snapshot() {
             let drain = world

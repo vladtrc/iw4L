@@ -409,6 +409,7 @@ pub struct ClientSnapshotMeta {
     pub owned_streaks: Vec<gamemode_iw4::killstreaks::Killstreak>,
     pub radar_until_ms: i32,
     pub last_combat_weapon: u32,
+    pub remote_missile: Option<RemoteMissile>,
 
     pub ammo_by_weapon: Vec<(u32, i32, i32)>,
 
@@ -520,6 +521,17 @@ pub struct Uav {
     pub origin: [f32; 3],
     pub started_at_ms: i32,
     pub expires_at_ms: i32,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RemoteMissile {
+    pub projectile: crate::ProjectileId,
+    pub entnum: i32,
+    pub angles: [f32; 3],
+    pub armed: bool,
+    pub boosted: bool,
+    pub attack: bool,
+    pub unlink_at_ms: Option<i32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -653,6 +665,7 @@ pub struct ClientMatchState {
     pub owned_streaks: Vec<gamemode_iw4::killstreaks::Killstreak>,
     pub radar_until_ms: i32,
     pub last_combat_weapon: u32,
+    pub remote_missile: Option<RemoteMissile>,
 
     pub(crate) cur_death_streak: i32,
 
@@ -776,6 +789,7 @@ impl ClientMatchState {
             owned_streaks: self.owned_streaks.clone(),
             radar_until_ms: self.radar_until_ms,
             last_combat_weapon: self.last_combat_weapon,
+            remote_missile: self.remote_missile,
             ammo_by_weapon: self.ammo_by_weapon.clone(),
             taped_mag_spent: self.taped_mag_spent.clone(),
             weapon_shot_count: self.weapon_shot_count,
@@ -813,6 +827,7 @@ impl ClientMatchState {
         self.owned_streaks = meta.owned_streaks.clone();
         self.radar_until_ms = meta.radar_until_ms;
         self.last_combat_weapon = meta.last_combat_weapon;
+        self.remote_missile = meta.remote_missile;
         self.ammo_by_weapon = meta.ammo_by_weapon.clone();
         self.taped_mag_spent = meta.taped_mag_spent.clone();
         self.weapon_shot_count = meta.weapon_shot_count;

@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use frame::{LaunchReport, LifeEnded, LifeFrontPublished, LifeStarted};
+use frame::{LaunchReport, LifeEnded, LifeFrontPublished, LifeStarted, ViewSubject};
 use net::{ClientSet, LocalPresentClient, PresentedSnapshot};
 
 use crate::anim::fpv_prepared::PreparedFpv;
@@ -14,6 +14,7 @@ pub fn sync_fpv_to_held_weapon(
     mut commands: Commands,
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
+    view: Res<ViewSubject>,
     prepared: Res<PreparedFpv>,
     mut pending_fpv: ResMut<PendingFpvSpawn>,
     mut session_vm: ResMut<SessionViewmodel>,
@@ -68,7 +69,8 @@ pub fn sync_fpv_to_held_weapon(
 
     if presented
         .snapshot()
-        .is_some_and(|s| s.meta.kind.is_team() && s.meta.phase == sim::MatchPhase::Intermission)
+        .is_some_and(|s| s.meta.phase == sim::MatchPhase::Intermission)
+        && !view.in_killcam()
     {
         if session_vm.0.is_some() || pending_fpv.0.is_some() || settled.0.is_some() {
             clear_fpv(

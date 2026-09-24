@@ -123,9 +123,7 @@ fn play_pending_fx_sounds(
         if req.msec_begin < clock.old_time() {
             continue;
         }
-        match catalog
-            .0
-            .get(&req.parent_name)
+        match crate::present::catalog_lookup(&catalog.0, req.catalog_index)
             .and_then(|parent| parent.elems.get(req.def_index as usize))
             .map(|elem| elem.sound_in_bank(req.random_seed, &bank.0))
         {

@@ -47,7 +47,8 @@ pub use client::entity_event_dispatch::{
     AppliedEntityEventWalk, DispatchedEntityEvent, EntityBulletHit, EntityEjectBrass,
     EntityEventCursor, EntityEventSound, EntityExplosion, EntityGrenadeContact, EntityMeleeBlood,
     EntityMovementSound, EntityObituary, EntityPlayFx, EntityResetAds, EntityWeaponFire,
-    UnsupportedEntityEvents, WeaponFirePing, WeaponFirePingBus, register_entity_event_dispatch,
+    KillcamFxTransition, UnsupportedEntityEvents, WeaponFirePing, WeaponFirePingBus,
+    register_entity_event_dispatch,
 };
 pub use client::entity_event_registry::{
     EV_DISPATCH_REGISTRY, EntityEventDispatch, EntityEventRow, ev_dispatch_row,

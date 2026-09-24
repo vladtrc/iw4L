@@ -20,7 +20,9 @@ use weapon_iw4::{
 use crate::anim::view_kick_state::{KickParams, ViewKickState, add_kick_to_viewangles};
 use crate::anim::view_sway::ViewSwayState;
 use crate::occupancy::remote_body::RemotePlayer;
-use crate::occupancy::third_person::{death_watch_camera, presented_is_third_person};
+use crate::occupancy::third_person::{
+    death_watch_camera, presented_is_third_person, remote_missile_camera,
+};
 use render_scene::{FlyCamera, FpvLens, SimCamera, transform_from_iw_view};
 use render_scene::{WorldCameraPose, WorldScriptModelInstance};
 
@@ -92,6 +94,8 @@ pub struct SessionViewKick {
     pub refdef_vieworg: [f32; 3],
 
     pub horiz_fov_deg: f32,
+
+    pub killcam_focus_distance: Option<f32>,
 
     pub damage_time: i32,
 
@@ -231,6 +235,7 @@ pub fn tick_session_view_kick(
 }
 
 pub fn sync_camera_from_presented(
+    mut killcam: Local<super::killcam::KillcamCamera>,
     clock: Res<CgFrameClock>,
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
@@ -251,6 +256,7 @@ pub fn sync_camera_from_presented(
     view: Res<ViewSubject>,
     death_cam_clip: Res<crate::occupancy::dyn_ent::DynEntPhysClip>,
 ) {
+    kick.killcam_focus_distance = None;
     if !sim_cam.enabled {
         return;
     }
@@ -258,6 +264,49 @@ pub fn sync_camera_from_presented(
         return;
     };
     let viewmodel = bg_get_viewmodel_weapon_index(ps);
+    if let Some((pose, fov, focus_distance)) = killcam.update(
+        &presented,
+        local.0,
+        clock.time(),
+        view.in_killcam(),
+        weapons.as_deref(),
+        death_cam_clip.0.as_deref(),
+    ) {
+        let eye = transform_from_iw_view(pose);
+        for mut transform in &mut q {
+            transform.translation = eye.translation;
+            transform.rotation = eye.rotation;
+        }
+        for mut projection in &mut lenses {
+            if let Projection::Perspective(perspective) = &mut *projection {
+                perspective.fov = cg_horizontal_to_vertical_fov_deg(fov).to_radians();
+            }
+        }
+        kick.horiz_fov_deg = fov;
+        kick.refdef_vieworg = pose.origin;
+        kick.refdef_view_angles = pose.angles;
+        kick.killcam_focus_distance = focus_distance;
+        return;
+    }
+    if let Some(pose) = remote_missile_camera(&presented, local.0, clock.time()) {
+        let eye = transform_from_iw_view(pose);
+        for mut transform in &mut q {
+            transform.translation = eye.translation;
+            transform.rotation = eye.rotation;
+        }
+        let horiz = gamemode_iw4::killstreaks::PREDATOR_FOV;
+        if let Some(actions) = actions.as_deref_mut() {
+            actions.fov_scale = cg_zoom_sensitivity(horiz) * actions.shellshock_look_scale;
+        }
+        let vertical = cg_horizontal_to_vertical_fov_deg(horiz).to_radians();
+        for mut projection in lenses.iter_mut() {
+            if let Projection::Perspective(perspective) = &mut *projection {
+                perspective.fov = vertical;
+            }
+        }
+        kick.horiz_fov_deg = horiz;
+        return;
+    }
     if presented_is_third_person(&presented, local.0, view.in_killcam()) {
         let Some(pose) = death_watch_camera(&presented, local.0, death_cam_clip.0.as_deref())
         else {

@@ -228,6 +228,8 @@ pub struct WeaponBodyFacts {
     pub explosion_radius_min: i32,
     pub explosion_inner_damage: i32,
     pub explosion_outer_damage: i32,
+    pub missile_guidance: i32,
+    pub stickiness: i32,
     pub projectile_speed: i32,
     pub projectile_speed_up: i32,
     pub projectile_speed_forward: i32,
@@ -427,6 +429,7 @@ pub fn cac_offhand_bucket(offhand_class: i32) -> Option<CacOffhandBucket> {
 
 #[derive(Clone, Debug)]
 pub struct CatalogWeapon {
+    pub namespace: crate::AssetNamespace,
     pub name: String,
     pub alternate_weapon: Option<String>,
 
@@ -1009,29 +1012,33 @@ pub struct WeaponCombatFx {
 
     pub tracer_hint: Option<String>,
 
+    pub namespace: crate::AssetNamespace,
+
     last_shot_eject_pair_authored: bool,
 }
 
-fn present_bound<'a, S: crate::asset_graph::IndexSpace>(
-    edge: AssetEdge<S>,
-    hint: &'a Option<String>,
-) -> Option<&'a str> {
-    edge.is_bound()
-        .then(|| hint.as_deref())
-        .flatten()
-        .filter(|name| !name.is_empty())
-}
-
 impl WeaponCombatFx {
-    pub fn view_flash_present(&self) -> Option<&str> {
-        present_bound(self.view_flash, &self.view_flash_hint)
+    fn present_bound<'a>(
+        &self,
+        edge: AssetEdge<FxSpace>,
+        hint: &'a Option<String>,
+    ) -> Option<crate::FxName<'a>> {
+        edge.is_bound()
+            .then(|| hint.as_deref())
+            .flatten()
+            .filter(|name| !name.is_empty())
+            .map(|name| crate::FxName::new(self.namespace, name))
     }
 
-    pub fn world_flash_present(&self) -> Option<&str> {
-        present_bound(self.world_flash, &self.world_flash_hint)
+    pub fn view_flash_present(&self) -> Option<crate::FxName<'_>> {
+        self.present_bound(self.view_flash, &self.view_flash_hint)
     }
 
-    pub fn flash_present(&self, player_view: bool) -> Option<&str> {
+    pub fn world_flash_present(&self) -> Option<crate::FxName<'_>> {
+        self.present_bound(self.world_flash, &self.world_flash_hint)
+    }
+
+    pub fn flash_present(&self, player_view: bool) -> Option<crate::FxName<'_>> {
         if player_view {
             self.view_flash_present()
         } else {
@@ -1047,15 +1054,15 @@ impl WeaponCombatFx {
         }
     }
 
-    pub fn view_shell_eject_present(&self) -> Option<&str> {
-        present_bound(self.view_shell_eject, &self.view_shell_eject_hint)
+    pub fn view_shell_eject_present(&self) -> Option<crate::FxName<'_>> {
+        self.present_bound(self.view_shell_eject, &self.view_shell_eject_hint)
     }
 
-    pub fn world_shell_eject_present(&self) -> Option<&str> {
-        present_bound(self.world_shell_eject, &self.world_shell_eject_hint)
+    pub fn world_shell_eject_present(&self) -> Option<crate::FxName<'_>> {
+        self.present_bound(self.world_shell_eject, &self.world_shell_eject_hint)
     }
 
-    pub fn brass_present(&self, player_view: bool) -> Option<&str> {
+    pub fn brass_present(&self, player_view: bool) -> Option<crate::FxName<'_>> {
         if player_view {
             self.view_shell_eject_present()
         } else {
@@ -1067,15 +1074,19 @@ impl WeaponCombatFx {
         self.last_shot_eject_pair_authored
     }
 
-    pub fn last_shot_eject_present(&self, player_view: bool) -> Option<&str> {
+    pub fn last_shot_eject_present(&self, player_view: bool) -> Option<crate::FxName<'_>> {
         if player_view {
-            present_bound(self.view_last_shot_eject, &self.view_last_shot_eject_hint)
+            self.present_bound(self.view_last_shot_eject, &self.view_last_shot_eject_hint)
         } else {
-            present_bound(self.world_last_shot_eject, &self.world_last_shot_eject_hint)
+            self.present_bound(self.world_last_shot_eject, &self.world_last_shot_eject_hint)
         }
     }
 
-    pub fn brass_present_for_event(&self, player_view: bool, last_shot: bool) -> Option<&str> {
+    pub fn brass_present_for_event(
+        &self,
+        player_view: bool,
+        last_shot: bool,
+    ) -> Option<crate::FxName<'_>> {
         if last_shot && self.last_shot_eject_pair_authored() {
             self.last_shot_eject_present(player_view)
         } else {
@@ -1103,8 +1114,8 @@ impl WeaponCombatFx {
         }
     }
 
-    pub fn explosion_present(&self) -> Option<&str> {
-        present_bound(self.explosion, &self.explosion_hint)
+    pub fn explosion_present(&self) -> Option<crate::FxName<'_>> {
+        self.present_bound(self.explosion, &self.explosion_hint)
     }
 
     pub fn fx_edges(&self) -> [AssetEdge<FxSpace>; 7] {
@@ -1132,6 +1143,7 @@ impl CatalogWeapon {
         ads_move_speed_scale: f32,
     ) -> Self {
         Self {
+            namespace: crate::AssetNamespace::Iw4,
             name: name.into(),
             alternate_weapon: None,
             weap_def,
@@ -1201,6 +1213,7 @@ pub struct WeaponCatalog {
     entries: Vec<CatalogWeapon>,
     strings: ScriptStrings,
     iw5_attachments: HashMap<String, Iw5ScopeRow>,
+    capture_ns: crate::AssetNamespace,
 }
 
 impl WeaponCatalog {
@@ -1317,6 +1330,10 @@ impl WeaponCatalog {
         self.strings = strings;
     }
 
+    pub fn set_capture_ns(&mut self, ns: crate::AssetNamespace) {
+        self.capture_ns = ns;
+    }
+
     pub fn capture(&mut self, stream: &ZoneStream<'_>) {
         let Some(geometry) = stream.weapon() else {
             return;
@@ -1369,6 +1386,7 @@ impl WeaponCatalog {
             .unwrap_or([const { None }; WEAPON_ANIM_SLOTS]);
         let hide_tags = read_hide_tags(stream, &self.strings, geometry.hide_tags);
         self.entries.push(CatalogWeapon {
+            namespace: self.capture_ns,
             alternate_weapon: geometry
                 .alternate_weapon_name
                 .and_then(|p| read_name(stream, p)),
@@ -1702,6 +1720,8 @@ impl WeaponCatalog {
                 explosion_radius_min: geometry.explosion_radius_min,
                 explosion_inner_damage: geometry.explosion_inner_damage,
                 explosion_outer_damage: geometry.explosion_outer_damage,
+                missile_guidance: geometry.missile_guidance,
+                stickiness: geometry.stickiness,
                 projectile_speed: geometry.projectile_speed,
                 projectile_speed_up: geometry.projectile_speed_up,
                 projectile_speed_forward: geometry.projectile_speed_forward,
@@ -1725,6 +1745,7 @@ impl WeaponCatalog {
     }
 
     pub fn resolve_reticles(&mut self, materials: &crate::MaterialCatalog) {
+        let ns = self.capture_ns;
         let names_of = |slot: Ptr| {
             let material = materials
                 .material_index(slot)
@@ -1742,7 +1763,7 @@ impl WeaponCatalog {
             }
             if entry.reticle.center_image.is_none() {
                 if let Some(name) = entry.reticle.center_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_name(name) {
+                    if let Some(index) = materials.material_index_by_ns(ns, name) {
                         if let Some(material) = materials.materials.get(index.order()) {
                             entry.reticle.center_image =
                                 materials.hud_image_name(material).map(str::to_owned);
@@ -1758,7 +1779,7 @@ impl WeaponCatalog {
             }
             if entry.reticle.side_image.is_none() {
                 if let Some(name) = entry.reticle.side_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_name(name) {
+                    if let Some(index) = materials.material_index_by_ns(ns, name) {
                         if let Some(material) = materials.materials.get(index.order()) {
                             entry.reticle.side_image =
                                 materials.hud_image_name(material).map(str::to_owned);
@@ -1774,7 +1795,7 @@ impl WeaponCatalog {
             }
             if entry.overlay_image.is_none() {
                 if let Some(name) = entry.overlay_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_name(name) {
+                    if let Some(index) = materials.material_index_by_ns(ns, name) {
                         if let Some(material) = materials.materials.get(index.order()) {
                             entry.overlay_image =
                                 materials.hud_image_name(material).map(str::to_owned);
@@ -1798,7 +1819,7 @@ impl WeaponCatalog {
             }
             if entry.hud_icon_image.is_none() {
                 if let Some(name) = entry.hud_icon.as_deref() {
-                    if let Some(index) = materials.material_index_by_name(name) {
+                    if let Some(index) = materials.material_index_by_ns(ns, name) {
                         if let Some(material) = materials.materials.get(index.order()) {
                             entry.hud_icon_image =
                                 materials.hud_image_name(material).map(str::to_owned);
@@ -1818,7 +1839,7 @@ impl WeaponCatalog {
             }
             if entry.kill_icon_image.is_none() {
                 if let Some(name) = entry.kill_icon.as_deref() {
-                    if let Some(index) = materials.material_index_by_name(name) {
+                    if let Some(index) = materials.material_index_by_ns(ns, name) {
                         if let Some(material) = materials.materials.get(index.order()) {
                             entry.kill_icon_image =
                                 materials.hud_image_name(material).map(str::to_owned);
@@ -1827,7 +1848,7 @@ impl WeaponCatalog {
                 }
             }
             if let Some(name) = entry.dpad_icon.as_deref()
-                && let Some(index) = materials.material_index_by_name(name)
+                && let Some(index) = materials.material_index_by_ns(ns, name)
                 && let Some(material) = materials.materials.get(index.order())
             {
                 entry.dpad_icon_image = materials.hud_image_name(material).map(str::to_owned);
@@ -1835,31 +1856,37 @@ impl WeaponCatalog {
             }
             entry.reticle.center_edge = material_hint_edge(
                 entry.reticle.center_material.as_deref(),
+                ns,
                 entry.reticle.center_authored,
                 materials,
             );
             entry.reticle.side_edge = material_hint_edge(
                 entry.reticle.side_material.as_deref(),
+                ns,
                 entry.reticle.side_authored,
                 materials,
             );
             entry.hud_material_edges.overlay = material_hint_edge(
                 entry.overlay_material.as_deref(),
+                ns,
                 entry.overlay_material_slot.is_some(),
                 materials,
             );
             entry.hud_material_edges.hud_icon = material_hint_edge(
                 entry.hud_icon.as_deref(),
+                ns,
                 entry.hud_icon_slot.is_some(),
                 materials,
             );
             entry.hud_material_edges.pickup_icon = material_hint_edge(
                 entry.pickup_icon.as_deref(),
+                ns,
                 entry.pickup_icon_slot.is_some(),
                 materials,
             );
             entry.hud_material_edges.kill_icon = material_hint_edge(
                 entry.kill_icon.as_deref(),
+                ns,
                 entry.kill_icon_slot.is_some(),
                 materials,
             );
@@ -1871,10 +1898,11 @@ impl WeaponCatalog {
     /// not. Running the slot half against a finished population was reading a
     /// map that `finalize` had already emptied, so every one of them was `None`.
     pub fn resolve_reticle_images(&mut self, materials: &crate::MaterialDefinitions) {
+        let ns = self.capture_ns;
         for entry in &mut self.entries {
             if entry.reticle.center_image.is_none() {
                 if let Some(name) = entry.reticle.center_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_name(name) {
+                    if let Some(index) = materials.material_index_by_ns(ns, name) {
                         if let Some(material) = materials.materials.get(index.order()) {
                             entry.reticle.center_image =
                                 materials.hud_image_name(material).map(str::to_owned);
@@ -1884,7 +1912,7 @@ impl WeaponCatalog {
             }
             if entry.reticle.side_image.is_none() {
                 if let Some(name) = entry.reticle.side_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_name(name) {
+                    if let Some(index) = materials.material_index_by_ns(ns, name) {
                         if let Some(material) = materials.materials.get(index.order()) {
                             entry.reticle.side_image =
                                 materials.hud_image_name(material).map(str::to_owned);
@@ -1894,7 +1922,7 @@ impl WeaponCatalog {
             }
             if entry.overlay_image.is_none() {
                 if let Some(name) = entry.overlay_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_name(name) {
+                    if let Some(index) = materials.material_index_by_ns(ns, name) {
                         if let Some(material) = materials.materials.get(index.order()) {
                             entry.overlay_image =
                                 materials.hud_image_name(material).map(str::to_owned);
@@ -1904,7 +1932,7 @@ impl WeaponCatalog {
             }
             if entry.hud_icon_image.is_none() {
                 if let Some(name) = entry.hud_icon.as_deref() {
-                    if let Some(index) = materials.material_index_by_name(name) {
+                    if let Some(index) = materials.material_index_by_ns(ns, name) {
                         if let Some(material) = materials.materials.get(index.order()) {
                             entry.hud_icon_image =
                                 materials.hud_image_name(material).map(str::to_owned);
@@ -1914,7 +1942,7 @@ impl WeaponCatalog {
             }
             if entry.kill_icon_image.is_none() {
                 if let Some(name) = entry.kill_icon.as_deref() {
-                    if let Some(index) = materials.material_index_by_name(name) {
+                    if let Some(index) = materials.material_index_by_ns(ns, name) {
                         if let Some(material) = materials.materials.get(index.order()) {
                             entry.kill_icon_image =
                                 materials.hud_image_name(material).map(str::to_owned);
@@ -1923,7 +1951,7 @@ impl WeaponCatalog {
                 }
             }
             if let Some(name) = entry.dpad_icon.as_deref()
-                && let Some(index) = materials.material_index_by_name(name)
+                && let Some(index) = materials.material_index_by_ns(ns, name)
                 && let Some(material) = materials.materials.get(index.order())
             {
                 entry.dpad_icon_image = materials.hud_image_name(material).map(str::to_owned);
@@ -1931,31 +1959,37 @@ impl WeaponCatalog {
             }
             entry.reticle.center_edge = material_hint_edge(
                 entry.reticle.center_material.as_deref(),
+                ns,
                 entry.reticle.center_authored,
                 materials,
             );
             entry.reticle.side_edge = material_hint_edge(
                 entry.reticle.side_material.as_deref(),
+                ns,
                 entry.reticle.side_authored,
                 materials,
             );
             entry.hud_material_edges.overlay = material_hint_edge(
                 entry.overlay_material.as_deref(),
+                ns,
                 entry.overlay_material_slot.is_some(),
                 materials,
             );
             entry.hud_material_edges.hud_icon = material_hint_edge(
                 entry.hud_icon.as_deref(),
+                ns,
                 entry.hud_icon_slot.is_some(),
                 materials,
             );
             entry.hud_material_edges.pickup_icon = material_hint_edge(
                 entry.pickup_icon.as_deref(),
+                ns,
                 entry.pickup_icon_slot.is_some(),
                 materials,
             );
             entry.hud_material_edges.kill_icon = material_hint_edge(
                 entry.kill_icon.as_deref(),
+                ns,
                 entry.kill_icon_slot.is_some(),
                 materials,
             );
@@ -1976,21 +2010,25 @@ impl WeaponCatalog {
     }
 
     pub fn resolve_projectile_fx_edges(&mut self, fx: &crate::FxCatalog) {
+        let ns = crate::fx_body_namespace(self.capture_ns);
         for entry in &mut self.entries {
             stamp_fx_edge(
                 entry.proj_trail_slot,
+                ns,
                 fx,
                 &mut entry.projectile_fx.trail,
                 &mut entry.proj_trail,
             );
             stamp_fx_edge(
                 entry.proj_beacon_slot,
+                ns,
                 fx,
                 &mut entry.projectile_fx.beacon,
                 &mut entry.proj_beacon,
             );
             stamp_fx_edge(
                 entry.proj_ignition_slot,
+                ns,
                 fx,
                 &mut entry.projectile_fx.ignition,
                 &mut entry.proj_ignition,
@@ -2009,8 +2047,9 @@ impl WeaponCatalog {
     }
 
     pub fn resolve_combat_fx(&mut self, fx: &crate::FxCatalog, tracers: &crate::TracerCatalog) {
+        let ns = self.capture_ns;
         for entry in &mut self.entries {
-            stamp_combat_fx(&mut entry.combat_fx, entry.combat_slots, fx, tracers);
+            stamp_combat_fx(&mut entry.combat_fx, entry.combat_slots, ns, fx, tracers);
         }
     }
 
@@ -2068,6 +2107,7 @@ impl WeaponCatalog {
         let leftover_anim_overrides = leftover_iw5_anim_overrides(stream, &geometry);
         apply_leftover_default_anim_overrides(&mut sz_xanims, &leftover_anim_overrides);
         self.entries.push(CatalogWeapon {
+            namespace: self.capture_ns,
             alternate_weapon: geometry
                 .alternate_weapon_name
                 .and_then(|p| leftover_cstr_iw5(stream, p)),
@@ -2192,6 +2232,7 @@ impl WeaponCatalog {
             .map(|arr| read_sz_xanims_t5(stream, arr))
             .unwrap_or([const { None }; WEAPON_ANIM_SLOTS]);
         self.entries.push(CatalogWeapon {
+            namespace: self.capture_ns,
             alternate_weapon: geometry
                 .alternate_weapon_name
                 .and_then(|p| stream.cstr(p).ok())
@@ -2330,18 +2371,24 @@ impl WeaponCatalog {
         census
     }
 
-    pub fn projectile_model_hints(&self) -> HashSet<String> {
+    pub fn projectile_model_hints(&self) -> HashSet<asset_model::ProjectileMeshKey> {
         self.entries
             .iter()
-            .filter_map(|entry| entry.projectile_model.clone())
-            .filter(|name| !name.is_empty())
+            .filter_map(|entry| {
+                let name = entry.projectile_model.as_deref()?;
+                (!name.is_empty())
+                    .then(|| asset_model::ProjectileMeshKey::new(entry.namespace, name))
+            })
             .collect()
     }
 
-    pub fn rocket_model_hints(&self) -> HashSet<String> {
+    pub fn rocket_model_hints(&self) -> HashSet<asset_model::ProjectileMeshKey> {
         self.entries
             .iter()
-            .filter_map(|entry| entry.rocket_model.clone())
+            .filter_map(|entry| {
+                let name = entry.rocket_model.as_deref()?;
+                Some(asset_model::ProjectileMeshKey::new(entry.namespace, name))
+            })
             .collect()
     }
 
@@ -2352,6 +2399,7 @@ impl WeaponCatalog {
 
 fn material_hint_edge(
     hint: Option<&str>,
+    namespace: crate::AssetNamespace,
     authored_slot: bool,
     materials: &crate::MaterialDefinitions,
 ) -> AssetEdge<MaterialSpace> {
@@ -2359,7 +2407,7 @@ fn material_hint_edge(
     if !authored_slot && hint.is_none() {
         return AssetEdge::Absent;
     }
-    match hint.and_then(|name| materials.material_index_by_name(name)) {
+    match hint.and_then(|name| materials.material_index_by_ns(namespace, name)) {
         Some(index) => AssetEdge::bind(index, materials.zone_of(index.order())),
         None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
     }
@@ -2367,6 +2415,7 @@ fn material_hint_edge(
 
 fn stamp_fx_edge(
     slot: Option<Ptr>,
+    ns: crate::AssetNamespace,
     fx: &crate::FxCatalog,
     edge: &mut AssetEdge<FxSpace>,
     hint: &mut Option<String>,
@@ -2377,7 +2426,7 @@ fn stamp_fx_edge(
     *hint = name.clone();
     *edge = match name.as_deref() {
         None if slot.is_none() => AssetEdge::Absent,
-        Some(name) => match fx.index_by_name(name) {
+        Some(name) => match fx.index_in(ns, name) {
             Some(index) => AssetEdge::bind_order(index, fx.zone_of(index)),
             None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
         },
@@ -2388,59 +2437,69 @@ fn stamp_fx_edge(
 fn stamp_combat_fx(
     combat: &mut WeaponCombatFx,
     slots: CombatFxSlots,
+    ns: crate::AssetNamespace,
     fx: &crate::FxCatalog,
     tracers: &crate::TracerCatalog,
 ) {
+    let ns = crate::fx_body_namespace(ns);
+    combat.namespace = ns;
     stamp_fx_edge(
         slots.view_flash,
+        ns,
         fx,
         &mut combat.view_flash,
         &mut combat.view_flash_hint,
     );
     stamp_fx_edge(
         slots.world_flash,
+        ns,
         fx,
         &mut combat.world_flash,
         &mut combat.world_flash_hint,
     );
     stamp_fx_edge(
         slots.view_shell_eject,
+        ns,
         fx,
         &mut combat.view_shell_eject,
         &mut combat.view_shell_eject_hint,
     );
     stamp_fx_edge(
         slots.world_shell_eject,
+        ns,
         fx,
         &mut combat.world_shell_eject,
         &mut combat.world_shell_eject_hint,
     );
     stamp_fx_edge(
         slots.view_last_shot_eject,
+        ns,
         fx,
         &mut combat.view_last_shot_eject,
         &mut combat.view_last_shot_eject_hint,
     );
     stamp_fx_edge(
         slots.world_last_shot_eject,
+        ns,
         fx,
         &mut combat.world_last_shot_eject,
         &mut combat.world_last_shot_eject_hint,
     );
     stamp_fx_edge(
         slots.explosion,
+        ns,
         fx,
         &mut combat.explosion,
         &mut combat.explosion_hint,
     );
-    let tracer_name = slots.tracer.and_then(|s| tracers.name_at_slot(s));
-    combat.tracer_hint = tracer_name.map(str::to_owned);
-    combat.tracer = match (slots.tracer, tracer_name) {
+    let tracer = slots
+        .tracer
+        .and_then(|s| tracers.index_at_slot(s))
+        .and_then(|index| Some((index, tracers.def_at(index)?)));
+    combat.tracer_hint = tracer.map(|(_, def)| def.name.clone());
+    combat.tracer = match (slots.tracer, tracer) {
         (None, _) => AssetEdge::Absent,
-        (_, Some(name)) => match tracers.index_by_name(name) {
-            Some(index) => AssetEdge::bind_order(index, tracers.zone_of(index)),
-            None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
-        },
+        (_, Some((index, _))) => AssetEdge::bind_order(index, tracers.zone_of(index)),
         (Some(_), None) => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
     };
     combat.last_shot_eject_pair_authored = slots.last_shot_pair_authored();
@@ -2463,12 +2522,13 @@ fn fpv_model_edge(
 
 fn world_model_edge(
     hint: Option<&str>,
+    namespace: crate::AssetNamespace,
     catalog: &crate::WorldWeaponCatalog,
 ) -> AssetEdge<WorldWeaponSpace> {
     let hint = hint.filter(|name| !name.is_empty());
     match hint {
         None => AssetEdge::Absent,
-        Some(name) => match catalog.index_by_name(name) {
+        Some(name) => match catalog.index_by_name(namespace, name) {
             Some(index) => AssetEdge::bind_order(index, catalog.zone_of(index)),
             None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
         },
@@ -2503,13 +2563,15 @@ fn xanim_hint_edge(
 fn fx_hint_edge(
     authored_slot: bool,
     hint: Option<&str>,
+    ns: crate::AssetNamespace,
     fx: &crate::FxCatalog,
 ) -> AssetEdge<FxSpace> {
     let hint = hint.filter(|name| !name.is_empty());
     if !authored_slot && hint.is_none() {
         return AssetEdge::Absent;
     }
-    match hint.and_then(|name| fx.index_by_name(name)) {
+    let ns = crate::fx_body_namespace(ns);
+    match hint.and_then(|name| fx.index_in(ns, name)) {
         Some(index) => AssetEdge::bind_order(index, fx.zone_of(index)),
         None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
     }
@@ -5169,9 +5231,11 @@ impl WeaponBuild {
     pub fn resolve_combat_fx(&mut self, fx: &crate::FxCatalog, tracers: &crate::TracerCatalog) {
         let n = self.registry.rows.len().min(self.combat_slots.len());
         for i in 1..n {
+            let row = &mut self.registry.rows[i];
             stamp_combat_fx(
-                &mut self.registry.rows[i].combat_fx,
+                &mut row.combat_fx,
                 self.combat_slots[i],
+                row.namespace,
                 fx,
                 tracers,
             );
@@ -5199,39 +5263,45 @@ impl WeaponBuild {
         for row in &mut self.registry.rows {
             if row.overlay_image.is_none()
                 && let Some(name) = row.overlay_material.as_deref()
-                && let Some(index) = materials.material_index_by_name(name)
+                && let Some(index) = materials.material_index_by_ns(row.namespace, name)
                 && let Some(material) = materials.materials.get(index.order())
             {
                 row.overlay_image = materials.hud_image_name(material).map(str::to_owned);
             }
             row.reticle.center_edge = material_hint_edge(
                 row.reticle.center_material.as_deref(),
+                row.namespace,
                 row.reticle.center_authored,
                 materials,
             );
             row.reticle.side_edge = material_hint_edge(
                 row.reticle.side_material.as_deref(),
+                row.namespace,
                 row.reticle.side_authored,
                 materials,
             );
             row.hud_material_edges = WeaponHudMaterialEdges {
                 overlay: material_hint_edge(
                     row.overlay_material.as_deref(),
+                    row.namespace,
                     row.overlay_material_from_slot,
                     materials,
                 ),
                 hud_icon: material_hint_edge(
                     row.hud_icon.as_deref(),
+                    row.namespace,
                     row.hud_icon_from_slot,
                     materials,
                 ),
                 pickup_icon: material_hint_edge(
                     row.pickup_icon.as_deref(),
+                    row.namespace,
                     row.pickup_icon_authored,
                     materials,
                 ),
                 kill_icon: material_hint_edge(
                     row.kill_icon.as_deref(),
+                    row.namespace,
                     row.kill_icon_from_slot,
                     materials,
                 ),
@@ -5242,11 +5312,22 @@ impl WeaponBuild {
     pub fn resolve_projectile_fx_edges(&mut self, fx: &crate::FxCatalog) {
         for row in &mut self.registry.rows {
             row.projectile_fx = WeaponProjectileFx {
-                trail: fx_hint_edge(row.proj_trail_from_slot, row.proj_trail.as_deref(), fx),
-                beacon: fx_hint_edge(row.proj_beacon_from_slot, row.proj_beacon.as_deref(), fx),
+                trail: fx_hint_edge(
+                    row.proj_trail_from_slot,
+                    row.proj_trail.as_deref(),
+                    row.namespace,
+                    fx,
+                ),
+                beacon: fx_hint_edge(
+                    row.proj_beacon_from_slot,
+                    row.proj_beacon.as_deref(),
+                    row.namespace,
+                    fx,
+                ),
                 ignition: fx_hint_edge(
                     row.proj_ignition_from_slot,
                     row.proj_ignition.as_deref(),
+                    row.namespace,
                     fx,
                 ),
             };
@@ -5505,11 +5586,12 @@ impl WeaponBuild {
     pub fn resolve_world_model_edges(&mut self, catalog: &crate::WorldWeaponCatalog) {
         self.registry.world_catalog_identity = catalog.identity();
         for row in &mut self.registry.rows {
-            row.world_model_edge = world_model_edge(row.world_model.as_deref(), catalog);
+            row.world_model_edge =
+                world_model_edge(row.world_model.as_deref(), row.namespace, catalog);
             row.attachment_world_model_edges = row
                 .attachment_world_models
                 .iter()
-                .map(|name| world_model_edge(Some(name), catalog))
+                .map(|name| world_model_edge(Some(name), row.namespace, catalog))
                 .collect();
             let gun = row
                 .world_model_edge
@@ -5570,7 +5652,7 @@ impl WeaponBuild {
         for row in &mut self.registry.rows {
             row.projectile_model_edge = match row.projectile_model.as_deref() {
                 None | Some("") => AssetEdge::Absent,
-                Some(name) => match catalog.index_by_name(name) {
+                Some(name) => match catalog.index_by_name(row.namespace, name) {
                     Some(order) => AssetEdge::bind_order(order, zone),
                     None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
                 },
@@ -7369,22 +7451,31 @@ impl WeaponRegistry {
             .and_then(|row| row.kill_icon_image.as_deref())
     }
 
-    pub fn proj_trail_of(&self, index: u32) -> Option<&str> {
+    pub fn proj_trail_of(&self, index: u32) -> Option<crate::FxName<'_>> {
         let row = self.rows.get(index as usize)?;
         row.projectile_fx.trail.is_bound().then_some(())?;
-        row.proj_trail.as_deref()
+        Some(crate::FxName::new(
+            row.namespace,
+            row.proj_trail.as_deref()?,
+        ))
     }
 
-    pub fn proj_beacon_of(&self, index: u32) -> Option<&str> {
+    pub fn proj_beacon_of(&self, index: u32) -> Option<crate::FxName<'_>> {
         let row = self.rows.get(index as usize)?;
         row.projectile_fx.beacon.is_bound().then_some(())?;
-        row.proj_beacon.as_deref()
+        Some(crate::FxName::new(
+            row.namespace,
+            row.proj_beacon.as_deref()?,
+        ))
     }
 
-    pub fn proj_ignition_of(&self, index: u32) -> Option<&str> {
+    pub fn proj_ignition_of(&self, index: u32) -> Option<crate::FxName<'_>> {
         let row = self.rows.get(index as usize)?;
         row.projectile_fx.ignition.is_bound().then_some(())?;
-        row.proj_ignition.as_deref()
+        Some(crate::FxName::new(
+            row.namespace,
+            row.proj_ignition.as_deref()?,
+        ))
     }
 
     pub fn world_model_count(&self) -> usize {

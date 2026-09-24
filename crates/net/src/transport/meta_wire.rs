@@ -1260,6 +1260,23 @@ fn encode_client_meta(out: &mut WireWriter, meta: &ClientSnapshotMeta) {
     }
     out.put_i32(meta.radar_until_ms);
     out.put_u32(meta.last_combat_weapon);
+    match &meta.remote_missile {
+        None => out.put_u8(0),
+        Some(remote) => {
+            out.put_u8(1);
+            out.put_u32(remote.projectile.0);
+            out.put_i32(remote.entnum);
+            for angle in remote.angles {
+                out.put_f32(angle);
+            }
+            out.put_u8(
+                u8::from(remote.armed)
+                    | (u8::from(remote.boosted) << 1)
+                    | (u8::from(remote.attack) << 2),
+            );
+            out.put_i32(remote.unlink_at_ms.unwrap_or(i32::MIN));
+        }
+    }
     match &meta.loadout {
         None => out.put_u8(0),
         Some(loadout) => {
@@ -1359,6 +1376,26 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
     }
     let radar_until_ms = input.get_i32()?;
     let last_combat_weapon = input.get_u32()?;
+    let remote_missile = match input.get_u8()? {
+        0 => None,
+        1 => {
+            let projectile = sim::ProjectileId(input.get_u32()?);
+            let entnum = input.get_i32()?;
+            let angles = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
+            let flags = input.get_u8()?;
+            let unlink_at_ms = Some(input.get_i32()?).filter(|&ms| ms != i32::MIN);
+            Some(sim::RemoteMissile {
+                projectile,
+                entnum,
+                angles,
+                armed: flags & 1 != 0,
+                boosted: flags & 2 != 0,
+                attack: flags & 4 != 0,
+                unlink_at_ms,
+            })
+        }
+        _ => return Err(WireError::Malformed("bad remote missile tag")),
+    };
     let loadout = match input.get_u8()? {
         0 => None,
         1 => Some(decode_loadout(input)?),
@@ -1431,6 +1468,7 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
         owned_streaks,
         radar_until_ms,
         last_combat_weapon,
+        remote_missile,
         ammo_by_weapon,
         taped_mag_spent,
         weapon_shot_count,

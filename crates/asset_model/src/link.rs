@@ -13,7 +13,7 @@ pub fn capture_xmodel_material_slots(
                     .materials
                     .get(index.get())
                     .map(|material| MaterialKey {
-                        family: material.namespace,
+                        namespace: material.namespace,
                         name: material.name.to_string(),
                     })
             })
@@ -59,11 +59,7 @@ pub fn stamp_xmodel_material_edges(
             edges[i] = AssetEdge::Absent;
             continue;
         }
-        let index = hint.and_then(|key| {
-            materials
-                .material_index_by_key(key)
-                .or_else(|| materials.material_index_by_name(&key.name))
-        });
+        let index = hint.and_then(|key| materials.material_index_by_key(key));
         if let Some(index) = index.filter(|index| {
             materials
                 .materials
@@ -77,7 +73,7 @@ pub fn stamp_xmodel_material_edges(
             {
                 let material = &materials.materials[index.order()];
                 *slot = Some(MaterialKey {
-                    family: material.namespace,
+                    namespace: material.namespace,
                     name: material.name.to_string(),
                 });
             }

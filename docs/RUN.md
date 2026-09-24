@@ -46,7 +46,7 @@ whatever screenshot was queued or half-written; `finish_run` is the scripted
 ending that waits for those files first. `disconnect` leaves the session, not
 just the world — it also leaves the room, or closes it when hosting, and works
 with no map installed. `bot` is
-`add | hold | tp | give | fire`; `dump [name]` writes the current snapshot into
+`add | dummy | hold | tp | give | fire`; `dump [name]` writes the current snapshot into
 `dumps/`. `clip` writes the last available 45 s into `clips/<ULID>/` (demo + dump)
 on host and clients — the host records authority, a client the snapshots it
 received plus its own presented state; `demo LATEST` plays it back.

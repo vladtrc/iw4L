@@ -352,7 +352,7 @@ fn spawn_elem(
     sequence: u8,
     spawn_msec: i32,
 ) {
-    let (effect_origin, effect_axis, random_seed, parent_name, bolt, mark_entity) = {
+    let (effect_origin, effect_axis, random_seed, parent_name, catalog_index, bolt, mark_entity) = {
         let e = match host.effect_at(effect_slot) {
             Some(e) if e.ring_resident => e,
             _ => return,
@@ -362,6 +362,7 @@ fn spawn_elem(
             e.axis,
             e.random_seed,
             e.def_name.as_str(),
+            e.catalog_index,
             e.bolt,
             e.mark_entity,
         )
@@ -383,6 +384,7 @@ fn spawn_elem(
             let parent_name = parent_name.to_owned();
             host.pending_sounds.push(crate::PendingSoundSpawn {
                 parent_name,
+                catalog_index,
                 def_index,
                 msec_begin,
                 random_seed: life_idx,
@@ -396,6 +398,7 @@ fn spawn_elem(
             host.pending_decals.push(crate::PendingDecalSpawn {
                 mark_entity,
                 parent_name,
+                catalog_index,
                 def_index,
                 msec_begin,
                 random_seed: life_idx,
@@ -420,6 +423,7 @@ fn spawn_elem(
             host.pending_runners.push(crate::PendingRunnerSpawn {
                 mark_entity,
                 parent_name,
+                catalog_index,
                 def_index,
                 msec_begin,
                 random_seed: life_idx,

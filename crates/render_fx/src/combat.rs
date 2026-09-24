@@ -21,7 +21,7 @@ pub fn try_play_weapon_fx_at_origin(
     host: &mut FxSystemHost,
     catalog: &assets::FxDefinitions,
     cache: &mut FxElemInfoCache,
-    name: Option<&str>,
+    name: Option<assets::FxName<'_>>,
     origin: [f32; 3],
     axis: [[f32; 3]; 3],
     played: &mut u32,
@@ -44,7 +44,7 @@ pub fn try_play_weapon_fx_bolted(
     host: &mut FxSystemHost,
     catalog: &assets::FxDefinitions,
     cache: &mut FxElemInfoCache,
-    name: Option<&str>,
+    name: Option<assets::FxName<'_>>,
     target: Option<fx::FxBoltTarget>,
     played: &mut u32,
     scene: Option<&dyn FxScene>,
@@ -84,7 +84,7 @@ pub fn play_shell_eject(
             .to_owned()
     });
     if let Some(name) = name {
-        combat.last_brass_name = Some(name.to_owned());
+        combat.last_brass_name = Some(name.name.to_owned());
     }
     if !try_play_weapon_fx_bolted(
         host,
@@ -102,10 +102,11 @@ pub fn play_shell_eject(
 pub fn missile_bolt_target(
     poses: Option<&render_anim::HostDObjPoseFrame>,
     meshes: &assets::ProjectileMeshCatalog,
+    namespace: assets::AssetNamespace,
     model: &str,
     entnum: u32,
 ) -> Option<fx::FxBoltTarget> {
-    let entry = meshes.get(model)?;
+    let entry = meshes.get(namespace, model)?;
     let bone = entry
         .skel
         .bone_names
@@ -124,8 +125,8 @@ pub fn missile_bolt_target(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExplosionFxNames<'a> {
-    pub table: Option<&'a str>,
-    pub slot: Option<&'a str>,
+    pub table: Option<assets::FxName<'a>>,
+    pub slot: Option<assets::FxName<'a>>,
     pub row: Option<usize>,
 }
 
@@ -133,7 +134,7 @@ pub fn explosion_fx_names<'a>(
     impact_type: Option<i32>,
     surf_type: u8,
     table: Option<&'a assets::OwnedFxImpactTable>,
-    slot: Option<&'a str>,
+    slot: Option<assets::FxName<'a>>,
 ) -> ExplosionFxNames<'a> {
     let row = impact_type.and_then(|t| {
         table.map_or_else(
@@ -344,7 +345,7 @@ pub fn play_impact_table_cell(
         sync_combat_dump(cursor, combat);
         return;
     };
-    combat.last_impact_def = Some(def_name.to_owned());
+    combat.last_impact_def = Some(def_name.name.to_owned());
     combat.last_impact_miss_why = None;
     let Some(catalog) = catalog else {
         return;

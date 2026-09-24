@@ -235,14 +235,16 @@ pub(crate) fn update_reticle(
     );
 
     let mantle_inactive = mantle_is_weapon_inactive(ps, true);
-    let rendering_third_person = cg_is_third_person_view(CgIsThirdPersonViewInputs {
-        pm_type: ps.pm_type,
-        other_flags: ps.other_flags,
-        link_flags: ps.link_flags,
-        cg_third_person: false,
-        in_killcam: view.in_killcam(),
-        killcam_mode: KillCamMode::Mode0,
-    });
+    let rendering_third_person = (view.in_killcam()
+        && ps.kill_cam_entity != playerstate_iw4::ENTITYNUM_NONE)
+        || cg_is_third_person_view(CgIsThirdPersonViewInputs {
+            pm_type: ps.pm_type,
+            other_flags: ps.other_flags,
+            link_flags: ps.link_flags,
+            cg_third_person: false,
+            in_killcam: view.in_killcam(),
+            killcam_mode: KillCamMode::Mode0,
+        });
     let gate = CgHipCrosshairGate {
         rendering_third_person,
         e_flags: ps.e_flags,

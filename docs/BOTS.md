@@ -1,13 +1,11 @@
 # `bots` — host AI
 
-One pipeline per bot per think tick, all of it on the authority:
+Authority tick: observation → memory → utility → task → route → motor → UserCmd.
 
-```
-observation → memory → utility → task → route → motor → UserCmd
-```
-
-A bot is an entry in `TickInput.cmds` like a player, so nothing downstream in
-`sim` can tell the two apart — [`SIM-STEP.md`](SIM-STEP.md).
+`bot dummy [N]` creates bots with no controller or perception queries. They keep
+their aim and weapon, accept `bot tp/give/fire`, and take damage and respawn normally.
+They retain normal bot loadouts/perks; `bot hold off` leaves dummies idle.
+Bots submit `TickInput.cmds` like players — [`SIM-STEP.md`](SIM-STEP.md).
 
 | file | owns |
 |---|---|

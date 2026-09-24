@@ -212,6 +212,14 @@ impl RemoteProxy {
             .map(|entry| Arc::clone(&entry.snap))
     }
 
+    pub(crate) fn snapshot_after(&self, render_time_ms: i32) -> Option<Arc<Snapshot>> {
+        let effective = render_time_ms.saturating_sub(PROXY_DELAY_MS);
+        self.buffer
+            .iter()
+            .find(|entry| entry.time_ms > effective)
+            .map(|entry| Arc::clone(&entry.snap))
+    }
+
     pub fn interpolate_at(&self, client: ClientId, render_time_ms: i32) -> ProxySample {
         let sample = self.sample_at(client, render_time_ms);
         self.hold_across_teleport(client, sample)

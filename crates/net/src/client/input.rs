@@ -151,6 +151,20 @@ pub fn build_usercmd(input: &mut ClientActionInput, look: &LookState, server_tim
     })
 }
 
+pub fn remote_control_axes(input: &ClientActionInput, mouse_x: f32, mouse_y: f32) -> [u8; 2] {
+    let (mx, my) = input_iw4::apply_mouse_sensitivity(
+        mouse_x,
+        mouse_y,
+        mouse_x.abs() + mouse_y.abs(),
+        input.frame_msec.max(1) as f32,
+        input.sensitivity,
+        input.mouse_accel,
+        input.fov_scale,
+    );
+    let axis = |v: f32| (v.clamp(-1.0, 1.0) * 127.0).round() as i8 as u8;
+    [axis(input.m_pitch * my), axis(-input.m_yaw * mx)]
+}
+
 pub fn idle_usercmd(server_time: i32) -> UserCmd {
     UserCmd {
         server_time,

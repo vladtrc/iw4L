@@ -91,6 +91,13 @@ impl FxParticleCloudPlan {
         self.revision = self.revision.wrapping_add(1);
     }
 
+    pub fn template_counts(&self) -> (usize, usize) {
+        (
+            self.template_vert_count as usize,
+            self.template_index_count as usize,
+        )
+    }
+
     pub fn publish_share(&mut self) {
         self.range_share = Some(super::publish_index_ranges(
             self.draws

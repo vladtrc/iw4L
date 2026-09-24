@@ -1459,24 +1459,24 @@ fn log_destructible_fx_assets(fx: &PreparedFxCatalog) {
     }
     names.sort_unstable();
     names.dedup();
-    for name in names {
-        let status = if fx.0.resolve_def(name).is_some() {
+    let status_of = |name: &str| {
+        let map_ns = assets::fx_body_namespace(fx.0.map_namespace());
+        if fx.0.resolve_def_for_map(name).is_some() {
             "captured"
-        } else if fx.0.get(name).is_some() {
+        } else if fx.0.get_in(map_ns, name).is_some()
+            || fx.0.get_in(assets::AssetNamespace::Iw4, name).is_some()
+        {
             "empty"
         } else {
             "MISSING"
-        };
+        }
+    };
+    for name in names {
+        let status = status_of(name);
         diag::info!(World, "destructible fx {name}: {status}");
     }
     let tanker = gamemode_iw4::dd::PLANTED_BOMB_EXPLODE_FX_PATH.expect("GSC-cited");
-    let tanker_status = if fx.0.resolve_def(tanker).is_some() {
-        "captured"
-    } else if fx.0.get(tanker).is_some() {
-        "empty"
-    } else {
-        "MISSING"
-    };
+    let tanker_status = status_of(tanker);
     diag::info!(World, "suitcase explode fx {tanker}: {tanker_status}");
 }
 
