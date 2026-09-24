@@ -212,7 +212,7 @@ fn settings_path(artifacts: &std::path::Path) -> Option<PathBuf> {
 fn serialize_settings(settings: &frame::GameSettings, binds: &KeyBinds) -> String {
     let safe_name = settings.player_name.replace(['\n', '\r', '='], " ");
     let mut lines = vec![
-        "// IW4L user settings v1".to_owned(),
+        "// IW4L user settings v2".to_owned(),
         format!(
             "resolution={}x{}",
             settings.resolution.width, settings.resolution.height
@@ -288,5 +288,14 @@ fn parse_settings(source: &str, settings: &mut frame::GameSettings, binds: &mut 
         for warning in warnings {
             warn!("settings bind: {warning}");
         }
+    }
+    if source
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim() == "// IW4L user settings v1")
+        && binds.get(BindButton::Key(KeyCode::Digit4)).is_none()
+        && !binds.iter().any(|(_, id)| id == 21)
+    {
+        binds.set(BindButton::Key(KeyCode::Digit4), 21);
     }
 }

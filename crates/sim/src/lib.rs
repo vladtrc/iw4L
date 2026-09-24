@@ -17,6 +17,11 @@ pub mod hudelem;
 pub mod identities;
 pub mod input;
 mod item;
+mod killstreaks;
+pub use killstreaks::{
+    CRATE_MODEL_KIND, LITTLE_BIRD_MODEL_KIND, PAVELOW_MODEL_KIND, UAV_MODEL_KIND,
+    model_source as killstreak_model_source,
+};
 mod mantle_xanim;
 pub mod match_state;
 mod missile;
@@ -116,13 +121,13 @@ pub use match_state::{
     CLASS_CATALOG_BLING, CLASS_CATALOG_COLD_BLOODED, CLASS_CATALOG_DANGER_CLOSE,
     CLASS_CATALOG_LIGHTWEIGHT, CLASS_CATALOG_MARATHON, CLASS_CATALOG_NINJA,
     CLASS_CATALOG_SCAVENGER, CLASS_CATALOG_SCRAMBLER, CLASS_CATALOG_SLEIGHT_OF_HAND,
-    CLASS_CATALOG_STEADY_AIM, CLASS_CATALOG_STOPPING_POWER, ClassDef, ClassRejectReason,
-    ClientLifecycle, ClientSnapshotMeta, ConfigurationChangeRejectReason, DroppedItemAmmo,
-    EntityEventPayload, EntityEventRecord, EventAudience, EventRecord, GiveRejectReason,
-    HealthRegenCensus, InputReceipt, ItemPickupRecord, KillcamHud, LoadoutSpec, MatchEndReason,
-    PelletFxRecord, RngDebugMeta, SIM_EVENT_ROSTER, SimEvent, SimEventRow, SnapshotMeta,
-    UNRELIABLE_SIM_EVENT_COUNT, class_catalog_has, class_catalog_radar_jam_e_flags,
-    perk_bits_from_class_catalog, sim_event_is_reliable,
+    CLASS_CATALOG_STEADY_AIM, CLASS_CATALOG_STOPPING_POWER, CarePackage, ClassDef,
+    ClassRejectReason, ClientLifecycle, ClientSnapshotMeta, ConfigurationChangeRejectReason,
+    DroppedItemAmmo, EntityEventPayload, EntityEventRecord, EventAudience, EventRecord,
+    GiveRejectReason, HealthRegenCensus, InputReceipt, ItemPickupRecord, KillcamHud, LoadoutSpec,
+    MatchEndReason, PaveLow, PelletFxRecord, RngDebugMeta, SIM_EVENT_ROSTER, SimEvent, SimEventRow,
+    SnapshotMeta, UNRELIABLE_SIM_EVENT_COUNT, Uav, class_catalog_has,
+    class_catalog_radar_jam_e_flags, perk_bits_from_class_catalog, sim_event_is_reliable,
 };
 pub use player_anim_script::{
     AnimConditions, AnimScriptCommand, AnimScriptCondition, AnimScriptItem, PlayerAnimScript,

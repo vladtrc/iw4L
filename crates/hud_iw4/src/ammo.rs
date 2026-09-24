@@ -92,9 +92,9 @@ pub fn clip_pip_belt_xy(
     let mut x = base[0];
     let mut y = metrics.height * 0.5 * (clip_size / wrap) as f32 + base[1];
     let mut step = if align == CLIP_PIP_ALIGN_RIGHT {
-        -metrics.step_x
-    } else {
         metrics.step_x
+    } else {
+        -metrics.step_x
     };
     if clip_size <= 0 || index < 0 {
         return [x, y];

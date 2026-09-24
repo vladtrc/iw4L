@@ -404,6 +404,11 @@ pub struct ClientSnapshotMeta {
     pub score: i32,
     pub kills: i32,
     pub deaths: i32,
+    pub kill_streak: i32,
+    pub last_earned_streak: Option<gamemode_iw4::killstreaks::Killstreak>,
+    pub owned_streaks: Vec<gamemode_iw4::killstreaks::Killstreak>,
+    pub radar_until_ms: i32,
+    pub last_combat_weapon: u32,
 
     pub ammo_by_weapon: Vec<(u32, i32, i32)>,
 
@@ -453,6 +458,9 @@ pub struct SnapshotMeta {
 
     pub kind: gamemode_iw4::GameModeKind,
     pub clients: Vec<(ClientId, ClientSnapshotMeta)>,
+    pub care_packages: Vec<CarePackage>,
+    pub pave_lows: Vec<PaveLow>,
+    pub uavs: Vec<Uav>,
 
     pub journal: Vec<EventRecord>,
 
@@ -488,6 +496,44 @@ pub struct SnapshotMeta {
     pub item_ammo: Vec<DroppedItemAmmo>,
 
     pub item_pickups: Vec<ItemPickupRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CarePackage {
+    pub id: u32,
+    pub owner: ClientId,
+    pub team: i32,
+    pub origin: [f32; 3],
+    pub contents: gamemode_iw4::killstreaks::CrateContents,
+    pub ready_at_ms: i32,
+    pub expires_at_ms: i32,
+    pub capturer: Option<ClientId>,
+    pub capture_ms: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Uav {
+    pub id: u32,
+    pub owner: ClientId,
+    pub team: i32,
+    pub center: [f32; 3],
+    pub origin: [f32; 3],
+    pub started_at_ms: i32,
+    pub expires_at_ms: i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaveLow {
+    pub id: u32,
+    pub owner: ClientId,
+    pub team: i32,
+    pub origin: [f32; 3],
+    pub center: [f32; 3],
+    pub started_at_ms: i32,
+    pub expires_at_ms: i32,
+    pub health: i32,
+    pub next_shot_ms: i32,
+    pub burst_remaining: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -602,12 +648,23 @@ pub struct ClientMatchState {
     pub kills: i32,
     pub deaths: i32,
     pub score: i32,
+    pub kill_streak: i32,
+    pub last_earned_streak: Option<gamemode_iw4::killstreaks::Killstreak>,
+    pub owned_streaks: Vec<gamemode_iw4::killstreaks::Killstreak>,
+    pub radar_until_ms: i32,
+    pub last_combat_weapon: u32,
 
     pub(crate) cur_death_streak: i32,
 
     pub(crate) attackers_this_life: Vec<(ClientId, i32)>,
 
     pub(crate) last_kill: Option<(ClientId, i32)>,
+
+    pub(crate) last_killed_by: Option<ClientId>,
+
+    pub(crate) damaged_players: Vec<(ClientId, i32)>,
+
+    pub(crate) objective_seen: bool,
 
     pub(crate) combathigh_until_ms: Option<i32>,
 
@@ -714,6 +771,11 @@ impl ClientMatchState {
             score: self.score,
             kills: self.kills,
             deaths: self.deaths,
+            kill_streak: self.kill_streak,
+            last_earned_streak: self.last_earned_streak,
+            owned_streaks: self.owned_streaks.clone(),
+            radar_until_ms: self.radar_until_ms,
+            last_combat_weapon: self.last_combat_weapon,
             ammo_by_weapon: self.ammo_by_weapon.clone(),
             taped_mag_spent: self.taped_mag_spent.clone(),
             weapon_shot_count: self.weapon_shot_count,
@@ -746,6 +808,11 @@ impl ClientMatchState {
         self.score = meta.score;
         self.kills = meta.kills;
         self.deaths = meta.deaths;
+        self.kill_streak = meta.kill_streak;
+        self.last_earned_streak = meta.last_earned_streak;
+        self.owned_streaks = meta.owned_streaks.clone();
+        self.radar_until_ms = meta.radar_until_ms;
+        self.last_combat_weapon = meta.last_combat_weapon;
         self.ammo_by_weapon = meta.ammo_by_weapon.clone();
         self.taped_mag_spent = meta.taped_mag_spent.clone();
         self.weapon_shot_count = meta.weapon_shot_count;
@@ -808,6 +875,7 @@ pub const CLASS_CATALOG_SLEIGHT_OF_HAND: u32 = 2;
 pub const CLASS_CATALOG_COLD_BLOODED: u32 = 3;
 pub const CLASS_CATALOG_LIGHTWEIGHT: u32 = 4;
 pub const CLASS_CATALOG_SCAVENGER: u32 = 5;
+pub const CLASS_CATALOG_HARDLINE: u32 = 6;
 pub const CLASS_CATALOG_NINJA: u32 = 7;
 pub const CLASS_CATALOG_MARATHON: u32 = 8;
 pub const CLASS_CATALOG_DANGER_CLOSE: u32 = 9;

@@ -36,6 +36,7 @@ pub(crate) struct CompassRaster;
 pub(crate) struct CompassPingLatch {
     actors: HashMap<u32, PingActor>,
     last_time: Option<i32>,
+    last_radar_sweep: Option<(i32, i32)>,
 }
 
 struct PingActor {
@@ -196,6 +197,7 @@ pub(crate) fn update_compass(
         .snapshot()
         .and_then(|s| s.meta.for_client(local.0))
         .map_or(3, |m| m.client_state_team);
+    take_radar_pings(&presented, local.0, local_team, cg_clock.time(), &mut latch);
     let mut live: Vec<([f32; 2], f32)> = Vec::new();
     for (&id, actor) in &latch.actors {
         let Some(meta) = presented
@@ -242,6 +244,56 @@ pub(crate) fn update_compass(
         &live,
         jam_fade,
     );
+    if let Some(snapshot) = presented.snapshot() {
+        let size = map_item.rect.h * COMPASS_SIZE_DEFAULT;
+        for package in &snapshot.meta.care_packages {
+            if cg_clock.time() < package.ready_at_ms {
+                continue;
+            }
+            let offset = cg_world_pos_to_compass_partial(
+                north,
+                player_xy,
+                [package.origin[0], package.origin[1]],
+                size,
+                drawable.max_range,
+            );
+            let offset =
+                compass_clamp_offset(offset, [map_item.rect.w * COMPASS_SIZE_DEFAULT, size]);
+            let cx = map_item.rect.x + map_item.rect.w * COMPASS_SIZE_DEFAULT * 0.5 + offset[0];
+            let cy = map_item.rect.y + size * 0.5 + offset[1];
+            let rect = surface.apply_rect(
+                cx - 8.0,
+                cy - 8.0,
+                16.0,
+                16.0,
+                map_item.rect.horz_align as i32,
+                map_item.rect.vert_align as i32,
+            );
+            let friendly = package.owner == local.0
+                || (snapshot.meta.kind.is_team() && package.team == local_team);
+            list.cmds.push(Draw2dCmd {
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+                s0: 0.0,
+                t0: 0.0,
+                s1: 1.0,
+                t1: 1.0,
+                color: [1.0, 1.0, 1.0, jam_fade],
+                material: if friendly {
+                    "compass_objpoint_ammo_friendly"
+                } else {
+                    "compass_objpoint_ammo_enemy"
+                }
+                .to_owned(),
+                material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+                op: Draw2dOp::StretchPic,
+                provenance: Draw2dProvenance::Objective,
+                layer: 1,
+            });
+        }
+    }
 
     let map_ns = hud_images.map_namespace();
     if hud_images
@@ -536,6 +588,7 @@ fn take_fire_pings(
 ) -> i32 {
     if latch.last_time.is_some_and(|last| cg_time_ms < last) || presented.snapshot().is_none() {
         latch.actors.clear();
+        latch.last_radar_sweep = None;
     }
     latch.last_time = Some(cg_time_ms);
     latch.actors.retain(|_, actor| {
@@ -569,6 +622,56 @@ fn take_fire_pings(
         );
     }
     n
+}
+
+fn take_radar_pings(
+    presented: &PresentedSnapshot,
+    local: ClientId,
+    local_team: i32,
+    now_ms: i32,
+    latch: &mut CompassPingLatch,
+) {
+    let Some(snapshot) = presented.snapshot() else {
+        return;
+    };
+    let Some(local_meta) = snapshot.meta.for_client(local) else {
+        return;
+    };
+    let until = local_meta.radar_until_ms;
+    if now_ms >= until {
+        return;
+    }
+    let start = until.saturating_sub(gamemode_iw4::killstreaks::UAV_DURATION_MS as i32);
+    let sweep =
+        (now_ms.saturating_sub(start) as u32 / gamemode_iw4::killstreaks::RADAR_SWEEP_MS) as i32;
+    if latch.last_radar_sweep == Some((until, sweep)) {
+        return;
+    }
+    latch.last_radar_sweep = Some((until, sweep));
+    for (id, _) in &snapshot.players {
+        if *id == local {
+            continue;
+        }
+        let Some(meta) = snapshot.meta.for_client(*id) else {
+            continue;
+        };
+        if same_team(local_team, meta.client_state_team) {
+            continue;
+        }
+        let Some(ps) = presented.alive_player(*id) else {
+            continue;
+        };
+        if !radar_contact_trail_visible(ps.perks[0]) {
+            continue;
+        }
+        latch.actors.insert(
+            id.0,
+            PingActor {
+                begin_fade_ms: now_ms,
+                last_pos: [ps.origin[0], ps.origin[1]],
+            },
+        );
+    }
 }
 
 fn resolve(

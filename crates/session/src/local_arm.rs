@@ -1,7 +1,5 @@
 use bevy::prelude::*;
-use frame::{
-    AppScreen, ClassEquipResolved, HasWorld, LaunchReport, LifeFrontPublished, LifeStarted,
-};
+use frame::{AppScreen, ClassEquipResolved, HasWorld, LaunchReport};
 use net::{
     AuthorityInputGate, AuthorityLoadHold, ClientActionInbox, ClientPredictionState, ClientSet,
     LocalPresentClient, LookState, PresentedSnapshot, RuntimeRole, SignonState,
@@ -61,25 +59,6 @@ pub fn arm_local_from_presented(
         ps.weapon
     );
     armed.0 = true;
-}
-
-pub fn reset_look_on_life_started(
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
-    mut started: MessageReader<LifeStarted>,
-    mut look: ResMut<LookState>,
-) {
-    for ev in started.read() {
-        if ev.client != local.0.0 {
-            continue;
-        }
-        let Some(ps) = presented.player(local.0) else {
-            continue;
-        };
-        look.angles = look_angles_from_degrees(std::array::from_fn(|axis| {
-            ps.viewangles[axis] - ps.delta_angles[axis]
-        }));
-    }
 }
 
 pub fn join_local_on_class_select(
@@ -155,10 +134,6 @@ pub fn sync_prediction_metrics_to_probe(
 
 pub fn register_local_arm_systems(app: &mut App) {
     app.add_systems(
-        Update,
-        reset_look_on_life_started.in_set(LifeFrontPublished),
-    )
-    .add_systems(
         Update,
         (
             arm_local_from_presented.after(ClassEquipResolved),

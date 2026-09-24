@@ -25,8 +25,7 @@ pub use lifecycle::{
     SessionSwapTarget, TeardownGaps, TeardownRequest,
 };
 pub use local_arm::{
-    arm_local_from_presented, join_local_on_class_select, reset_look_on_life_started,
-    sync_prediction_metrics_to_probe,
+    arm_local_from_presented, join_local_on_class_select, sync_prediction_metrics_to_probe,
 };
 pub use match_apply::{
     AuthoritativeClassProjection, ClassRow, PendingConsoleLines, PerkRuntimeContract,

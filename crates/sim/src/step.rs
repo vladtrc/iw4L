@@ -748,6 +748,8 @@ fn run_players_system(ecs: &mut World) {
 
             crate::weapon_lock::update(&mut world, *id, level_time);
             let shots = advance_weapon_command(&mut world, tick, *id, cmd, delta.min(200));
+            crate::killstreaks::remember_combat_weapon(&mut world, *id);
+            crate::killstreaks::use_selected(&mut world, tick, *id);
             for shot in shots {
                 crate::missile::fire_accepted_shot(&mut world, tick, &shot);
 
@@ -763,6 +765,7 @@ fn run_players_system(ecs: &mut World) {
                 }
                 let emissions = phase_emit(&world, core::slice::from_ref(&shot));
                 phase_trace(&mut world, tick, &emissions);
+                crate::killstreaks::trace_pave_low_shots(&mut world, &emissions);
             }
             crate::equipment::phase_offhand(&mut world, tick, &[(*id, cmd)]);
             world.set_old_cmd(*id, cmd.buttons, cmd.angles);
@@ -856,6 +859,8 @@ fn run_entity_types_system(ecs: &mut World) {
                 apply_explode_glass_blast(&mut world, tick, explode);
             }
             phase_health_regen(&mut world, tick);
+            crate::killstreaks::advance_pave_lows(&mut world, tick);
+            crate::killstreaks::advance_uavs(&mut world, tick);
             phase_finalstand_timer(&mut world, tick);
             emit_vehicle_fx_events(&mut world, tick);
             publish_destructible_loop_sounds(&mut world);
@@ -910,6 +915,7 @@ fn dispatch_touches_system(ecs: &mut World) {
     crate::objectives::advance(&mut world, tick, &cmds);
     if allow_move && world.publishes_snapshot() {
         crate::item::phase_use_items(&mut world, tick, &presses, &cmds);
+        crate::killstreaks::advance_crates(&mut world, tick, msec, &latest_cmds);
     }
 }
 
@@ -921,11 +927,14 @@ fn finalize_system(ecs: &mut World) {
     world.enter_kernel_phase(crate::gentity::KernelPhase::Finalize);
     for &(id, cmd) in &input.cmds {
         emit_attack_events(&mut world, tick, &[(id, cmd)]);
-        if world
-            .client_meta(id)
-            .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive)
-        {
+        let Some(meta) = world.client_meta(id) else {
+            continue;
+        };
+        // A dead client keeps its look row: respawn takes delta_angles against it.
+        if meta.lifecycle == ClientLifecycle::Alive {
             world.set_old_cmd(id, cmd.buttons, cmd.angles);
+        } else {
+            world.set_old_cmd_angles(id, cmd.angles);
         }
     }
 
@@ -944,11 +953,7 @@ fn finalize_system(ecs: &mut World) {
     });
     *world.old_buttons_mut() = old_buttons;
     let mut old_angles = std::mem::take(world.old_cmd_angles_mut());
-    old_angles.retain(|(id, _)| {
-        world
-            .client_meta(*id)
-            .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive)
-    });
+    old_angles.retain(|(id, _)| world.client_meta(*id).is_some());
     *world.old_cmd_angles_mut() = old_angles;
 
     harvest_predictable_events(&mut world, tick);
@@ -1746,6 +1751,27 @@ fn apply_give_weapon(
         reject(world, crate::GiveRejectReason::UnknownWeaponId);
         return;
     }
+    if let Some(streak) = gamemode_iw4::killstreaks::Killstreak::ALL
+        .into_iter()
+        .find(|streak| streak.weapon() == world.weapon_script_name(weapon))
+    {
+        world.client_meta_mut(id).owned_streaks.insert(0, streak);
+        crate::killstreaks::sync_inventory(world, id);
+        if !world
+            .player(id)
+            .is_some_and(|ps| ps.action_slot_param[3] == weapon as i32)
+        {
+            world.client_meta_mut(id).owned_streaks.remove(0);
+            reject(world, crate::GiveRejectReason::UnsupportedWeapon);
+            return;
+        }
+        world.push_event(
+            tick,
+            EventAudience::Client(id),
+            SimEvent::GiveAccepted { request_id, weapon },
+        );
+        return;
+    }
     if !world.weapon_runnable(weapon) {
         reject(world, crate::GiveRejectReason::UnsupportedWeapon);
         return;
@@ -2479,6 +2505,7 @@ fn resolve_pending_spawns(world: &mut FrameWorld, tick: Tick) {
             meta.set_ammo(loadout.lethal, lethal_ammo, 0);
             meta.set_ammo(loadout.tactical, tactical_ammo, 0);
             meta.mirror_held_ammo(loadout.primary);
+            meta.last_combat_weapon = loadout.primary;
             meta.weapon_shot_count = 0;
             meta.burst_latch = false;
             meta.rechamber_pending = false;
@@ -2502,6 +2529,7 @@ fn resolve_pending_spawns(world: &mut FrameWorld, tick: Tick) {
                 ps.perks[0] |= playerstate_iw4::PERK_PISTOLDEATH;
             }
         }
+        crate::killstreaks::sync_inventory(world, id);
         world.push_player_card_open(id, hud_iw4::SCRIPT_MENU_KILLEDBY_HIDE);
         world.push_player_card_open(id, hud_iw4::SCRIPT_MENU_PERK_DISPLAY);
         world.push_spawn_music(id);
@@ -2722,7 +2750,7 @@ fn pmove_context(
     }
 }
 
-fn seed_ps_ammo_tables(
+pub(crate) fn seed_ps_ammo_tables(
     ps: &mut PlayerState,
     weapon: u32,
     facts: &weapon_iw4::WeaponCombatFacts,

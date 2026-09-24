@@ -213,6 +213,44 @@ impl RemoteProxy {
     }
 
     pub fn interpolate_at(&self, client: ClientId, render_time_ms: i32) -> ProxySample {
+        let sample = self.sample_at(client, render_time_ms);
+        self.hold_across_teleport(client, sample)
+    }
+
+    fn hold_across_teleport(&self, client: ClientId, sample: ProxySample) -> ProxySample {
+        let (sampled, provenance) = match &sample {
+            ProxySample::Pose { ps, provenance } => (Some(ps), *provenance),
+            ProxySample::Starved { held, provenance } => (held.as_ref(), *provenance),
+        };
+        let (Some(sampled), Some((_, newest))) = (sampled, self.last_sample(client)) else {
+            return sample;
+        };
+        let teleport_bit = |ps: &PlayerState| ps.e_flags & playerstate_iw4::eflags::TELEPORT;
+        if teleport_bit(sampled) == teleport_bit(&newest) {
+            return sample;
+        }
+        let first_after = self
+            .buffer
+            .iter()
+            .rev()
+            .filter_map(|entry| {
+                player_row(&entry.snap.players, client).map(|ps| (entry.snap.tick, ps))
+            })
+            .take_while(|(_, ps)| teleport_bit(ps) == teleport_bit(&newest))
+            .last();
+        let Some((tick, ps)) = first_after else {
+            return sample;
+        };
+        ProxySample::Pose {
+            ps: *ps,
+            provenance: PresentationSampleProvenance {
+                outcome: PresentationSampleOutcome::Exact { snapshot: tick },
+                ..provenance
+            },
+        }
+    }
+
+    fn sample_at(&self, client: ClientId, render_time_ms: i32) -> ProxySample {
         let effective_time = PresentationSampleTime(render_time_ms.saturating_sub(PROXY_DELAY_MS));
         let held = if self
             .buffer

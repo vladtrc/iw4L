@@ -14,7 +14,7 @@ use hud_iw4::{
 };
 use net::{CgFrameClock, CgWeaponSelect, LocalPresentClient, PresentedSnapshot};
 use playerstate_iw4::{PM_TYPE_DEAD, PlayerState};
-use weapon_iw4::bg_get_viewmodel_weapon_index;
+use weapon_iw4::{bg_get_viewmodel_weapon_index, bg_player_weapons_find_slot};
 
 use crate::ammo::{
     OWNERDRAW_CLIP, OWNERDRAW_CLIP_LEFT, OWNERDRAW_COMPASS_RING, OWNERDRAW_LOW_AMMO,
@@ -25,6 +25,7 @@ use crate::ammo::{
 use crate::chrome::{
     ChromeAssets, ChromeFrame, ChromeGapKind, ChromeMenuAnim, MenuVisOnError, OwnerDrawArgs,
     OwnerDrawPaint, execute_chrome_menu_ex, push_owner_pic, push_owner_text,
+    push_owner_text_right_of_rect,
 };
 use crate::draw2d::{Draw2dOp, tessellate_fonts};
 use crate::gaps::{GapCause, HudGap, HudPresentationGaps, ImageMiss};
@@ -37,6 +38,8 @@ use crate::weapon_name::localized_weapon_name;
 const EFLAGS_HIDE_AMMO_HUD: u32 = 0x100000;
 
 const WEAPFLAGS_HIDE_AMMO_HUD: u32 = 0x80;
+
+const WEAPON_NAME_RIGHT_INSET: f32 = 28.0;
 
 #[derive(Component)]
 pub(crate) struct WeaponbarRaster;
@@ -406,10 +409,16 @@ fn paint_weapon_name(
     let Some(name) = state.name.as_deref() else {
         return OwnerDrawPaint::Painted;
     };
-    match push_owner_text(args, name, color, frame) {
+    match push_owner_text_right_of_rect(args, name, WEAPON_NAME_RIGHT_INSET, color, frame) {
         Ok(()) => OwnerDrawPaint::Painted,
         Err(kind) => OwnerDrawPaint::Gap(kind),
     }
+}
+
+fn cg_selected_weapon_index(ps: &PlayerState, selected: u32) -> u32 {
+    let owned = i32::try_from(selected)
+        .is_ok_and(|weapon| weapon != 0 && bg_player_weapons_find_slot(&ps.weapons, weapon) >= 0);
+    if owned { selected } else { ps.weapon }
 }
 
 fn paint_offhand(
@@ -594,7 +603,12 @@ pub(crate) fn update_weaponbar(
         .as_ref()
         .map(|w| w.0.script_name_of(viewmodel))
         .unwrap_or_default();
-    let name = localized_weapon_name(viewmodel, weapons.as_deref(), strings.as_deref(), &mut gaps);
+    let name = localized_weapon_name(
+        cg_selected_weapon_index(ps, client_input.select.index),
+        weapons.as_deref(),
+        strings.as_deref(),
+        &mut gaps,
+    );
     let hide_ammo = ammo_hud_hidden(ps);
     let frag_ammo = weapons
         .as_ref()
@@ -864,6 +878,15 @@ fn action_slot_weapon(
     (weapon != 0 && ps.weapons.contains(&weapon)).then_some(weapon as u32)
 }
 
+fn action_slot_atlas_uv(atlas: [u8; 2], time_ms: i32) -> [f32; 4] {
+    let rows = usize::from(atlas[0].max(1));
+    let cols = usize::from(atlas[1].max(1));
+    let frame = (time_ms.max(0) as usize / 50) % (rows * cols);
+    let s0 = (frame % cols) as f32 / cols as f32;
+    let t0 = (frame / cols) as f32 / rows as f32;
+    [s0, t0, s0 + 1.0 / cols as f32, t0 + 1.0 / rows as f32]
+}
+
 fn paint_action_slot(
     state: &OwnerDrawState<'_>,
     mut args: OwnerDrawArgs<'_>,
@@ -897,6 +920,7 @@ fn paint_action_slot(
         }
         _ => {}
     }
+    let cmd_index = frame.list.cmds.len();
     push_owner_pic(
         &args,
         material.to_owned(),
@@ -908,5 +932,14 @@ fn paint_action_slot(
         Draw2dOp::StretchPic,
         frame,
     );
+    if let Some(atlas) = weapons.0.dpad_icon_atlas_of(weapon) {
+        let [s0, t0, s1, t1] = action_slot_atlas_uv(atlas, state.cg_time);
+        if let Some(cmd) = frame.list.cmds.get_mut(cmd_index) {
+            cmd.s0 = s0;
+            cmd.t0 = t0;
+            cmd.s1 = s1;
+            cmd.t1 = t1;
+        }
+    }
     OwnerDrawPaint::Painted
 }

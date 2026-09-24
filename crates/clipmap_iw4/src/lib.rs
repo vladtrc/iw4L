@@ -24,9 +24,9 @@ pub use layouts::{
     CollisionPartition,
 };
 pub use mesh::{
-    ClipAabbNode, ClipMeshRef, ClipMeshTables, ClipPartition, MeshWalkCensus, VERTS_PER_SEGMENT,
-    aabb_forest_roots, flatten_tri_material_index, flatten_tri_surface_flags, trace_through_mesh,
-    trace_through_mesh_into, trace_through_mesh_with_census,
+    ClipAabbNode, ClipBorder, ClipMeshRef, ClipMeshTables, ClipPartition, MeshWalkCensus,
+    VERTS_PER_SEGMENT, aabb_forest_roots, flatten_tri_material_index, flatten_tri_surface_flags,
+    trace_through_mesh, trace_through_mesh_into, trace_through_mesh_with_census,
 };
 pub use temp_box::transformed_temp_capsule_trace;
 pub use world_trace::{

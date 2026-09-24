@@ -306,10 +306,26 @@ pub(crate) fn advance_weapon_command(
                 quick_reload,
             },
         ];
+        let selected_airdrop_marker = world.weapon_script_name(ps.weapon)
+            == gamemode_iw4::killstreaks::AIRDROP_MARKER_WEAPON
+            && meta.owned_streaks.first() == Some(&gamemode_iw4::killstreaks::Killstreak::Airdrop);
+        let marker_offhand_class = i32::MAX;
         let mut wcmd = WeaponCmd {
             msec,
-            buttons: cmd.buttons,
-            old_buttons,
+            buttons: cmd.buttons
+                | if selected_airdrop_marker && cmd.buttons & playerstate_iw4::buttons::ATTACK != 0
+                {
+                    playerstate_iw4::buttons::FRAG
+                } else {
+                    0
+                },
+            old_buttons: old_buttons
+                | if selected_airdrop_marker && old_buttons & playerstate_iw4::buttons::ATTACK != 0
+                {
+                    playerstate_iw4::buttons::FRAG
+                } else {
+                    0
+                },
 
             cmd_weapon: if cmd.weapon != 0 {
                 cmd.weapon
@@ -413,7 +429,11 @@ pub(crate) fn advance_weapon_command(
                     let combat = world.combat_facts_for(weapon);
                     inventory[i] = OffhandInvRow {
                         weapon,
-                        offhand_class: eq.map(|e| e.offhand_class).unwrap_or(0),
+                        offhand_class: if selected_airdrop_marker && weapon == ps.weapon {
+                            marker_offhand_class
+                        } else {
+                            eq.map(|e| e.offhand_class).unwrap_or(0)
+                        },
                         ammo: clip + stock,
                         hold_fire_time_ms: eq.map(|e| e.hold_fire_time_ms).unwrap_or(0),
                         fire_time_ms: combat.map(|f| f.fire_time_ms).unwrap_or(0),
@@ -427,7 +447,11 @@ pub(crate) fn advance_weapon_command(
                 }
                 OffhandCmd {
                     inventory,
-                    offhand_primary: ps.offhand_primary,
+                    offhand_primary: if selected_airdrop_marker {
+                        marker_offhand_class
+                    } else {
+                        ps.offhand_primary
+                    },
                     offhand_secondary: ps.offhand_secondary,
                     cmd_off_hand_index: cmd.off_hand_index,
                     cmd_off_hand_owned: cmd.off_hand_index != 0
@@ -677,6 +701,7 @@ pub(crate) fn advance_weapon_command(
                         tick,
                         remaining_fuse_ms,
                     ) {
+                        crate::killstreaks::marker_fired(world, *id, weapon);
                         if let Some(ps) = world.player(*id).copied() {
                             let origin = [
                                 ps.origin[0],

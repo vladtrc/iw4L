@@ -367,7 +367,8 @@ pub(super) fn load_image(s: &mut ZoneStream<'_>) -> Result<()> {
     let map_type = s.u8_at(p, s.layout(4, 8))?;
     let semantic = s.u8_at(p, s.layout(5, 9))?;
     let category = s.u8_at(p, s.layout(6, 10))?;
-    let use_srgb_reads = s.u8_at(p, s.layout(7, 11))? != 0;
+    // Only bit 0 means sRGB; zones also carry 0x2 and 0x10 in this byte.
+    let use_srgb_reads = s.u8_at(p, s.layout(7, 11))? & 1 != 0;
     let width = s.u16_at(p, s.layout(20, 24))?;
     let height = s.u16_at(p, s.layout(22, 26))?;
     let depth = s.u16_at(p, s.layout(24, 28))?;

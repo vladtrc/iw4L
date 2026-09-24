@@ -657,7 +657,7 @@ fn unpack_packed_unit_vec(packed: u32) -> Vec3 {
 #[cfg(target_arch = "x86_64")]
 fn pack_unit_vec(direction: Vec3) -> u32 {
     use core::arch::x86_64::{
-        _mm_add_ps, _mm_cvtps_epi32, _mm_cvtsi128_si32, _mm_mul_ps, _mm_packs_epi32,
+        _mm_add_ps, _mm_cvtsi128_si32, _mm_cvttps_epi32, _mm_mul_ps, _mm_packs_epi32,
         _mm_packus_epi16, _mm_set_ps, _mm_set1_ps,
     };
 
@@ -667,7 +667,8 @@ fn pack_unit_vec(direction: Vec3) -> u32 {
             _mm_mul_ps(direction, _mm_set1_ps(dpvs_iw4::SKIN_PACKED_UNIT_VEC_SCALE)),
             _mm_set1_ps(dpvs_iw4::SKIN_PACKED_UNIT_VEC_BIAS),
         );
-        let integers = _mm_cvtps_epi32(scaled);
+        // The +0.5 bias expects a truncating convert; rounding lands 0 on 128.
+        let integers = _mm_cvttps_epi32(scaled);
         let words = _mm_packs_epi32(integers, integers);
         let bytes = _mm_packus_epi16(words, words);
         (_mm_cvtsi128_si32(bytes) as u32 & 0x00ff_ffff)
@@ -679,7 +680,6 @@ fn pack_unit_vec(direction: Vec3) -> u32 {
 fn pack_unit_vec(direction: Vec3) -> u32 {
     let component = |value: f32| {
         (value * dpvs_iw4::SKIN_PACKED_UNIT_VEC_SCALE + dpvs_iw4::SKIN_PACKED_UNIT_VEC_BIAS)
-            .round()
             .clamp(0.0, 255.0) as u8
     };
     u32::from_le_bytes([

@@ -665,6 +665,51 @@ pub fn encode_snapshot_meta_sections(
         out.put_u32(client.0);
         encode_client_meta(out, row);
     }
+    out.put_u16(meta.care_packages.len() as u16);
+    for package in &meta.care_packages {
+        out.put_u32(package.id);
+        out.put_u32(package.owner.0);
+        out.put_i32(package.team);
+        for value in package.origin {
+            out.put_f32(value);
+        }
+        out.put_u8(package.contents.wire_tag());
+        out.put_i32(package.ready_at_ms);
+        out.put_i32(package.expires_at_ms);
+        out.put_i32(package.capturer.map_or(-1, |id| id.0 as i32));
+        out.put_i32(package.capture_ms);
+    }
+    out.put_u16(meta.pave_lows.len() as u16);
+    for heli in &meta.pave_lows {
+        out.put_u32(heli.id);
+        out.put_u32(heli.owner.0);
+        out.put_i32(heli.team);
+        for value in heli.origin {
+            out.put_f32(value);
+        }
+        for value in heli.center {
+            out.put_f32(value);
+        }
+        out.put_i32(heli.started_at_ms);
+        out.put_i32(heli.expires_at_ms);
+        out.put_i32(heli.health);
+        out.put_i32(heli.next_shot_ms);
+        out.put_u32(heli.burst_remaining);
+    }
+    out.put_u16(meta.uavs.len() as u16);
+    for uav in &meta.uavs {
+        out.put_u32(uav.id);
+        out.put_u32(uav.owner.0);
+        out.put_i32(uav.team);
+        for value in uav.center {
+            out.put_f32(value);
+        }
+        for value in uav.origin {
+            out.put_f32(value);
+        }
+        out.put_i32(uav.started_at_ms);
+        out.put_i32(uav.expires_at_ms);
+    }
     sizes.match_header = section_span(out, mark);
     mark = out.len();
     debug_assert!(meta.journal.len() <= u16::MAX as usize);
@@ -749,6 +794,55 @@ pub fn decode_snapshot_meta(
         let client = ClientId(input.get_u32()?);
         clients.push((client, decode_client_meta(input)?));
     }
+    let package_count = input.get_u16()? as usize;
+    let mut care_packages = Vec::with_capacity(package_count.min(16));
+    for _ in 0..package_count {
+        care_packages.push(sim::CarePackage {
+            id: input.get_u32()?,
+            owner: ClientId(input.get_u32()?),
+            team: input.get_i32()?,
+            origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+            contents: gamemode_iw4::killstreaks::CrateContents::from_wire_tag(input.get_u8()?)
+                .ok_or(WireError::Malformed("bad care package contents"))?,
+            ready_at_ms: input.get_i32()?,
+            expires_at_ms: input.get_i32()?,
+            capturer: match input.get_i32()? {
+                -1 => None,
+                value if value >= 0 => Some(ClientId(value as u32)),
+                _ => return Err(WireError::Malformed("bad care package capturer")),
+            },
+            capture_ms: input.get_i32()?,
+        });
+    }
+    let heli_count = input.get_u16()? as usize;
+    let mut pave_lows = Vec::with_capacity(heli_count.min(4));
+    for _ in 0..heli_count {
+        pave_lows.push(sim::PaveLow {
+            id: input.get_u32()?,
+            owner: ClientId(input.get_u32()?),
+            team: input.get_i32()?,
+            origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+            center: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+            started_at_ms: input.get_i32()?,
+            expires_at_ms: input.get_i32()?,
+            health: input.get_i32()?,
+            next_shot_ms: input.get_i32()?,
+            burst_remaining: input.get_u32()?,
+        });
+    }
+    let uav_count = input.get_u16()? as usize;
+    let mut uavs = Vec::with_capacity(uav_count.min(16));
+    for _ in 0..uav_count {
+        uavs.push(sim::Uav {
+            id: input.get_u32()?,
+            owner: ClientId(input.get_u32()?),
+            team: input.get_i32()?,
+            center: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+            origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+            started_at_ms: input.get_i32()?,
+            expires_at_ms: input.get_i32()?,
+        });
+    }
     let journal_count = input.get_u16()? as usize;
     let mut journal = Vec::with_capacity(journal_count.min(64));
     for _ in 0..journal_count {
@@ -791,6 +885,9 @@ pub fn decode_snapshot_meta(
             time_limit_ms,
             kind,
             clients,
+            care_packages,
+            pave_lows,
+            uavs,
             journal,
             entity_events,
             pellet_fx,
@@ -1155,6 +1252,14 @@ fn encode_client_meta(out: &mut WireWriter, meta: &ClientSnapshotMeta) {
     out.put_i32(meta.score);
     out.put_i32(meta.kills);
     out.put_i32(meta.deaths);
+    out.put_i32(meta.kill_streak);
+    out.put_u8(meta.last_earned_streak.map_or(0xff, |s| s.wire_tag()));
+    out.put_u8(meta.owned_streaks.len().min(u8::MAX as usize) as u8);
+    for streak in meta.owned_streaks.iter().take(u8::MAX as usize) {
+        out.put_u8(streak.wire_tag());
+    }
+    out.put_i32(meta.radar_until_ms);
+    out.put_u32(meta.last_combat_weapon);
     match &meta.loadout {
         None => out.put_u8(0),
         Some(loadout) => {
@@ -1236,6 +1341,24 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
     let score = input.get_i32()?;
     let kills = input.get_i32()?;
     let deaths = input.get_i32()?;
+    let kill_streak = input.get_i32()?;
+    let last_earned_streak = match input.get_u8()? {
+        0xff => None,
+        tag => Some(
+            gamemode_iw4::killstreaks::Killstreak::from_wire_tag(tag)
+                .ok_or(WireError::Malformed("bad last earned streak"))?,
+        ),
+    };
+    let owned_len = input.get_u8()? as usize;
+    let mut owned_streaks = Vec::with_capacity(owned_len);
+    for _ in 0..owned_len {
+        owned_streaks.push(
+            gamemode_iw4::killstreaks::Killstreak::from_wire_tag(input.get_u8()?)
+                .ok_or(WireError::Malformed("bad owned streak"))?,
+        );
+    }
+    let radar_until_ms = input.get_i32()?;
+    let last_combat_weapon = input.get_u32()?;
     let loadout = match input.get_u8()? {
         0 => None,
         1 => Some(decode_loadout(input)?),
@@ -1303,6 +1426,11 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
         score,
         kills,
         deaths,
+        kill_streak,
+        last_earned_streak,
+        owned_streaks,
+        radar_until_ms,
+        last_combat_weapon,
         ammo_by_weapon,
         taped_mag_spent,
         weapon_shot_count,

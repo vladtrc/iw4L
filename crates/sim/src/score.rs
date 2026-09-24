@@ -18,6 +18,7 @@ pub(crate) struct KillFacts {
     pub execution: bool,
     pub posthumous: bool,
     pub longshot: bool,
+    pub throwing_knife: bool,
 }
 
 pub(crate) fn apply_death_score(
@@ -73,18 +74,40 @@ pub(crate) fn apply_death_score(
                 .client_meta(victim)
                 .and_then(|m| m.last_kill)
                 .is_some_and(|(killed, at)| killed != attacker && now - at <= 500);
-        world.client_meta_mut(attacker).last_kill = Some((victim, now));
-        let (score, kills, deaths) = {
+        let defended = if world.bootstrap_ref().kind.is_team() {
+            world.client_meta(victim).map_or(0, |m| {
+                m.damaged_players
+                    .iter()
+                    .filter(|&&(damaged, at)| damaged != attacker && now - at < 500)
+                    .count()
+            })
+        } else {
+            0
+        };
+        let revenge = world
+            .client_meta(attacker)
+            .is_some_and(|m| m.last_killed_by == Some(victim));
+        {
+            let meta = world.client_meta_mut(attacker);
+            meta.last_kill = Some((victim, now));
+            meta.damaged_players
+                .retain(|&(damaged, _)| damaged != victim);
+            if revenge {
+                meta.last_killed_by = None;
+            }
+        }
+        world.client_meta_mut(victim).last_killed_by = Some(attacker);
+        {
             let meta = world.client_meta_mut(attacker);
             meta.kills = meta.kills.saturating_add(1);
             meta.score = meta.score.saturating_add(points);
             meta.cur_death_streak = 0;
-            (meta.score, meta.kills, meta.deaths)
-        };
+        }
         {
             let meta = world.client_meta_mut(victim);
             meta.cur_death_streak = meta.cur_death_streak.saturating_add(1);
         }
+        crate::killstreaks::on_kill(world, victim, attacker);
         if let Some(row) = world.recent_kills.iter_mut().find(|row| row.0 == attacker) {
             row.1 = now;
             row.2 += 1;
@@ -121,9 +144,25 @@ pub(crate) fn apply_death_score(
         if avenger {
             award_splash(world, attacker, "avenger", 50, now);
         }
+        for _ in 0..defended {
+            award_splash(world, attacker, "defender", 50, now);
+        }
         if facts.longshot {
             award_splash(world, attacker, "longshot", 50, now);
         }
+        if revenge {
+            award_splash(world, attacker, "revenge", 50, now);
+        }
+        if facts.throwing_knife {
+            world.push_hud_splash(attacker, "knifethrow", 0, 100);
+        }
+        if world.bootstrap_ref().kind == gamemode_iw4::GameModeKind::Domination {
+            award_dom_kill(world, victim, attacker, now);
+        }
+        let (score, kills, deaths) = world
+            .client_meta(attacker)
+            .map(|m| (m.score, m.kills, m.deaths))
+            .unwrap_or((0, 0, 0));
 
         let score_limit = world.bootstrap_ref().score_limit;
         if score_limit > 0 && score >= score_limit {
@@ -142,6 +181,8 @@ pub(crate) fn apply_death_score(
             },
         );
     }
+
+    crate::killstreaks::on_death(world, victim);
 
     let (score, kills, deaths) = world
         .client_meta(victim)
@@ -410,16 +451,74 @@ pub fn bootstrap_score_defaults() -> (i32, i32, u32) {
     (SCORE_LIMIT, SCORE_KILL_POINTS, TIME_LIMIT_MS)
 }
 
-fn award_splash(world: &mut FrameWorld, client: ClientId, key: &'static str, xp: i32, now: i32) {
+pub(crate) fn award_splash(
+    world: &mut FrameWorld,
+    client: ClientId,
+    key: &'static str,
+    xp: i32,
+    now: i32,
+) {
     world.push_hud_splash(client, key, 0, xp);
     world.record_score_popup(client, xp as f32, now);
 }
 
-fn broadcast_card(world: &mut FrameWorld, source: ClientId, key: &'static str) {
-    for recipient in world.client_ids_sorted() {
-        world.push_player_card_slot(recipient, source, 5);
-        world.push_hud_splash(recipient, key, 1, 0);
+const DOM_ASSAULT_DEFEND_POINTS: i32 = 50;
+
+// Both flag contacts award points; a repeated splash of the same kind stays hidden.
+fn award_dom_kill(world: &mut FrameWorld, victim: ClientId, attacker: ClientId, now: i32) {
+    let team_of = |id: ClientId| world.client_meta(id).map(|m| m.client_state_team);
+    if team_of(victim) == team_of(attacker) {
+        return;
     }
+    let touched =
+        |id: ClientId| -> Vec<(gamemode_iw4::ProxClaimTeam, gamemode_iw4::ProxClaimTeam)> {
+            world
+                .use_objects()
+                .iter()
+                .filter_map(|object| {
+                    let owner = gamemode_iw4::claim_team_from_owner(object.owner_team)?;
+                    let (_, team, _) = object.touching.iter().find(|row| row.0 == id)?;
+                    Some((owner, *team))
+                })
+                .collect()
+        };
+    let mut awards = Vec::new();
+    let (mut assaulted, mut defended) = (false, false);
+    for (owner, team) in touched(victim) {
+        let assault = team == owner;
+        assaulted |= assault;
+        defended |= !assault;
+        awards.push((assault, true));
+    }
+    for (owner, team) in touched(attacker) {
+        let assault = team != owner;
+        awards.push((assault, if assault { !assaulted } else { !defended }));
+    }
+    for (assault, splash) in awards {
+        let key = if assault { "assault" } else { "defend" };
+        if splash {
+            world.push_hud_splash(attacker, key, 0, DOM_ASSAULT_DEFEND_POINTS);
+        }
+        world.record_score_popup(attacker, DOM_ASSAULT_DEFEND_POINTS as f32, now);
+        let meta = world.client_meta_mut(attacker);
+        meta.score = meta.score.saturating_add(DOM_ASSAULT_DEFEND_POINTS);
+    }
+}
+
+pub(crate) fn broadcast_card(world: &mut FrameWorld, source: ClientId, key: &'static str) {
+    for recipient in world.client_ids_sorted() {
+        player_card_splash(world, recipient, source, key);
+    }
+}
+
+fn player_card_splash(
+    world: &mut FrameWorld,
+    recipient: ClientId,
+    source: ClientId,
+    key: &'static str,
+) {
+    world.push_player_card_slot(recipient, source, 5);
+    world.push_hud_splash(recipient, key, 1, 0);
 }
 
 pub(crate) fn finish_recent_kills(world: &mut FrameWorld, tick: Tick) {

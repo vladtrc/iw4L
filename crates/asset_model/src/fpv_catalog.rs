@@ -135,7 +135,7 @@ pub struct FpvMeshEntry {
     pub namespace: AssetNamespace,
     pub skel: std::sync::Arc<FpvSkel>,
 
-    pub material_names: Vec<Option<String>>,
+    pub material_keys: Vec<Option<asset_core::MaterialKey>>,
 
     pub material_edges: Vec<AssetEdge<crate::MaterialSpace>>,
 }
@@ -146,12 +146,12 @@ impl FpvMeshEntry {
         skel: std::sync::Arc<FpvSkel>,
         materials: Option<&MaterialCatalog>,
     ) -> Self {
-        let (material_names, material_edges) =
+        let (material_keys, material_edges) =
             capture_xmodel_material_slots(&skel.surface_materials, materials.map(|c| &**c));
         Self {
             namespace,
             skel,
-            material_names,
+            material_keys,
             material_edges,
         }
     }
@@ -162,7 +162,7 @@ impl FpvMeshEntry {
 
     pub(crate) fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         stamp_xmodel_material_edges(
-            &mut self.material_names,
+            &mut self.material_keys,
             &mut self.material_edges,
             &self.skel.surface_materials,
             materials,
@@ -173,7 +173,7 @@ impl FpvMeshEntry {
         self.material_edges
             .get(surface)?
             .is_bound()
-            .then(|| self.material_names.get(surface)?.as_deref())
+            .then(|| Some(self.material_keys.get(surface)?.as_ref()?.name.as_str()))
             .flatten()
     }
 
@@ -422,9 +422,9 @@ impl FpvMeshCatalog {
     pub fn material_unresolved_hints(&self) -> Vec<&str> {
         let mut names = Vec::new();
         for entry in &self.entries {
-            for (edge, name) in entry.material_edges.iter().zip(entry.material_names.iter()) {
+            for (edge, key) in entry.material_edges.iter().zip(entry.material_keys.iter()) {
                 if edge.is_unresolved()
-                    && let Some(name) = name.as_deref()
+                    && let Some(name) = key.as_ref().map(|key| key.name.as_str())
                     && !name.is_empty()
                     && !names.contains(&name)
                 {

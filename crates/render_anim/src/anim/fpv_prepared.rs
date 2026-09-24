@@ -239,9 +239,9 @@ fn admit_surface(
         .copied()
         .unwrap_or(AssetEdge::Absent);
     let leftover = entry
-        .material_names
+        .material_keys
         .get(surface_index)
-        .and_then(|name| name.as_deref())
+        .and_then(|key| Some(key.as_ref()?.name.as_str()))
         .unwrap_or("-");
     let refused = |material: &str, cause: &'static str| FpvSurfaceVerdict::Refused {
         material: material.to_owned(),
@@ -274,7 +274,8 @@ fn admit_surface(
     let Some(authored) = global.materials.get(bound) else {
         return refused(present_name, "material outside the session catalog");
     };
-    let Some(ordinal) = global.ordinal_for_material_name(present_name) else {
+    let Some(ordinal) = global.ordinal_for_asset_id(assets::MaterialIndex::from_order(bound))
+    else {
         return refused(present_name, "material has no sorted ordinal");
     };
     let Some(color_image) = authored
@@ -584,9 +585,9 @@ impl FpvPreparationJob {
         };
         for (surface, verdict) in self.admission.verdicts_of(order) {
             let name = entry
-                .material_names
+                .material_keys
                 .get(*surface)
-                .and_then(|name| name.as_deref());
+                .and_then(|key| Some(key.as_ref()?.name.as_str()));
             match verdict {
                 FpvSurfaceVerdict::Admitted(_) => {
                     if let Some(name) = name

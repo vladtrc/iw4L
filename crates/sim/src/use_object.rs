@@ -370,6 +370,16 @@ fn apply_dom_on_use_body(world: &mut FrameWorld, object: u32, player: u32) {
     if matches!(old_owner, GameObjectTeam::Axis | GameObjectTeam::Allies) {
         world.set_best_spawn_flag(old_owner, object);
     }
+    let capturer = ClientId(player);
+    let first_objective =
+        !std::mem::replace(&mut world.client_meta_mut(capturer).objective_seen, true);
+    if first_objective
+        && world
+            .client_meta(capturer)
+            .is_some_and(|m| m.laststand_until_ms.is_some())
+    {
+        crate::score::award_splash(world, capturer, "heroic", 100, t);
+    }
     if let Some(team) = claim_team_from_owner(new_owner)
         && let Some(row) = world.use_object(object).cloned()
     {
@@ -408,6 +418,7 @@ fn apply_dom_on_use_body(world: &mut FrameWorld, object: u32, player: u32) {
                 client: credit.client,
                 optional: splash_optional,
             });
+            world.push_hud_splash(ClientId(credit.client), "capture", 0, splash_optional);
             let cpm = world.apply_capture_pace(ClientId(credit.client), time_ms);
             if rank_xp {
                 world.push_use_event(UseObjectEvent::CaptureRankXp {
@@ -430,6 +441,15 @@ fn apply_dom_on_use_body(world: &mut FrameWorld, object: u32, player: u32) {
             client: earliest,
             label,
         });
+        let callout = match label.as_str() {
+            "_a" => Some("callout_securedposition_a"),
+            "_b" => Some("callout_securedposition_b"),
+            "_c" => Some("callout_securedposition_c"),
+            _ => None,
+        };
+        if let Some(key) = callout {
+            crate::score::broadcast_card(world, ClientId(earliest), key);
+        }
     }
     world.push_use_event(UseObjectEvent::FlagCaptured {
         object,

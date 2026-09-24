@@ -574,6 +574,15 @@ impl MaterialCatalog {
             .iter()
             .position(|owned| owned.name.same_name(&incoming.name))
         {
+            let existing = &self.images[index];
+            if existing.name.is_real()
+                && incoming.name.is_real()
+                && existing.use_srgb_reads != incoming.use_srgb_reads
+            {
+                let index = self.images.len();
+                self.images.push(incoming);
+                return index;
+            }
             self.link_reused_images = self.link_reused_images.saturating_add(1);
             let take_body = AssetRef::incoming_owns_slot(&self.images[index].name, &incoming.name)
                 && !(incoming.payload.is_empty() && !self.images[index].payload.is_empty());
@@ -603,13 +612,18 @@ impl MaterialCatalog {
         }
     }
 
+    fn linkable_material_index(&self, incoming: &AuthoredMaterial) -> Option<usize> {
+        self.materials.iter().position(|owned| {
+            owned.name.same_name(&incoming.name)
+                && (owned.namespace == incoming.namespace
+                    || !owned.name.is_real()
+                    || !incoming.name.is_real())
+        })
+    }
+
     pub fn link_material(&mut self, incoming: AuthoredMaterial) -> usize {
         let canonical = incoming.name.clone();
-        if let Some(index) = self
-            .materials
-            .iter()
-            .position(|owned| owned.name.same_name(&canonical))
-        {
+        if let Some(index) = self.linkable_material_index(&incoming) {
             self.link_reused_materials = self.link_reused_materials.saturating_add(1);
             if AssetRef::incoming_owns_slot(&self.materials[index].name, &canonical) {
                 self.materials[index] = incoming;
@@ -633,10 +647,7 @@ impl MaterialCatalog {
     }
 
     fn link_material_host_real_wins(&mut self, incoming: AuthoredMaterial) -> usize {
-        if let Some(index) = self
-            .materials
-            .iter()
-            .position(|owned| owned.name.same_name(&incoming.name))
+        if let Some(index) = self.linkable_material_index(&incoming)
             && self.materials[index].name.is_real()
         {
             self.link_reused_materials = self.link_reused_materials.saturating_add(1);
@@ -1047,7 +1058,7 @@ impl MaterialCatalog {
             self.link_techset(facts);
         }
         for mut material in materials {
-            if self.real_material_index(&material.name).is_some() {
+            if self.real_material_index(&material).is_some() {
                 continue;
             }
             for texture in &mut material.textures {
@@ -1099,10 +1110,12 @@ impl MaterialCatalog {
         })
     }
 
-    fn real_material_index(&self, name: &AssetRef) -> Option<usize> {
-        self.materials
-            .iter()
-            .position(|owned| owned.name.is_real() && owned.name.same_name(name))
+    fn real_material_index(&self, material: &AuthoredMaterial) -> Option<usize> {
+        self.materials.iter().position(|owned| {
+            owned.name.is_real()
+                && owned.namespace == material.namespace
+                && owned.name.same_name(&material.name)
+        })
     }
 
     pub fn finalize_asset_population(&mut self) -> Vec<Option<usize>> {
@@ -3118,6 +3131,17 @@ impl MaterialDefinitions {
             .get(index)
             .map(|material| material.zone)
             .unwrap_or_default()
+    }
+
+    pub fn material_index_by_key(&self, key: &crate::MaterialKey) -> Option<crate::MaterialIndex> {
+        let want = AssetRef::bare_name(&key.name);
+        if want.is_empty() {
+            return None;
+        }
+        self.materials
+            .iter()
+            .position(|m| m.namespace == key.family && m.name.is_real() && m.name.as_str() == want)
+            .map(crate::MaterialIndex::from_order)
     }
 
     pub fn material_index_by_name(&self, name: &str) -> Option<crate::MaterialIndex> {

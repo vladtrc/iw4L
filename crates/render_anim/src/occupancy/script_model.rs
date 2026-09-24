@@ -33,6 +33,13 @@ struct PersistentScriptDobj {
     reuse_key: assets::dobj::DObjReuseKey,
 }
 
+#[derive(Component)]
+struct KillstreakSceneModel {
+    source: u32,
+}
+
+const KILLSTREAK_TARGETNAME: &str = "iw4l_killstreak";
+
 #[derive(Clone, Copy, Debug)]
 struct ScriptMoverCentitySample {
     angles: [f32; 3],
@@ -234,6 +241,7 @@ pub fn register_script_model_systems(app: &mut App) {
         .add_systems(
             Update,
             (
+                sync_killstreak_scene_models,
                 apply_presented_script_model_dobjs,
                 apply_script_mover_centity_pose,
                 occupy_script_model_scene_ents,
@@ -257,6 +265,168 @@ pub fn register_script_model_systems(app: &mut App) {
         );
 }
 
+fn sync_killstreak_scene_models(
+    mut commands: Commands,
+    presented: Option<Res<net::PresentedSnapshot>>,
+    local: Option<Res<net::LocalPresentClient>>,
+    assets: Option<Res<assets::MapXModelSceneCatalog>>,
+    mut existing: Query<(
+        Entity,
+        &KillstreakSceneModel,
+        &mut WorldScriptModelInstance,
+        &mut Transform,
+        &mut Visibility,
+    )>,
+) {
+    let Some(snapshot) = presented.as_ref().and_then(|p| p.snapshot()) else {
+        for (entity, _, _, _, _) in &mut existing {
+            commands.entity(entity).despawn();
+        }
+        return;
+    };
+    let Some(assets) = assets else {
+        return;
+    };
+    let local_id = local.as_ref().map(|l| l.0);
+    let local_team = local_id
+        .and_then(|id| snapshot.meta.for_client(id))
+        .map_or(entity_iw4::TEAM_FREE, |m| m.client_state_team);
+    let mut desired = Vec::new();
+    for package in &snapshot.meta.care_packages {
+        let drop_at = package.ready_at_ms - gamemode_iw4::killstreaks::CRATE_DROP_MS as i32;
+        if sim::level_time_ms(snapshot.tick) < drop_at {
+            let source = sim::killstreak_model_source(sim::LITTLE_BIRD_MODEL_KIND, package.id);
+            if let Some(mover) = snapshot
+                .meta
+                .script_movers
+                .iter()
+                .find(|m| m.id.to_wire() == source)
+            {
+                desired.push((
+                    sim::LITTLE_BIRD_MODEL_KIND,
+                    package.id,
+                    gamemode_iw4::killstreaks::LITTLE_BIRD_MODEL,
+                    mover.state.tr_base,
+                ));
+            }
+            continue;
+        }
+        let source = sim::killstreak_model_source(sim::CRATE_MODEL_KIND, package.id);
+        let Some(mover) = snapshot
+            .meta
+            .script_movers
+            .iter()
+            .find(|m| m.id.to_wire() == source)
+        else {
+            continue;
+        };
+        let friendly = Some(package.owner) == local_id
+            || (snapshot.meta.kind.is_team() && package.team == local_team);
+        desired.push((
+            sim::CRATE_MODEL_KIND,
+            package.id,
+            if friendly {
+                gamemode_iw4::killstreaks::CRATE_FRIENDLY_MODEL
+            } else {
+                gamemode_iw4::killstreaks::CRATE_ENEMY_MODEL
+            },
+            mover.state.tr_base,
+        ));
+    }
+    for heli in &snapshot.meta.pave_lows {
+        desired.push((
+            sim::PAVELOW_MODEL_KIND,
+            heli.id,
+            if heli.team == entity_iw4::TEAM_AXIS {
+                gamemode_iw4::killstreaks::PAVELOW_MODELS[0]
+            } else {
+                gamemode_iw4::killstreaks::PAVELOW_MODELS[1]
+            },
+            heli.origin,
+        ));
+    }
+    for uav in &snapshot.meta.uavs {
+        if Some(uav.owner) == local_id || (snapshot.meta.kind.is_team() && uav.team == local_team) {
+            continue;
+        }
+        desired.push((
+            sim::UAV_MODEL_KIND,
+            uav.id,
+            gamemode_iw4::killstreaks::UAV_MODEL,
+            uav.origin,
+        ));
+    }
+    let desired_sources: std::collections::HashSet<u32> = desired
+        .iter()
+        .map(|(kind, id, _, _)| sim::killstreak_model_source(*kind, *id))
+        .collect();
+    for (entity, marker, _, _, _) in &mut existing {
+        if !desired_sources.contains(&marker.source) {
+            commands.entity(entity).despawn();
+        }
+    }
+    for (kind, id, name, origin) in desired {
+        let source = sim::killstreak_model_source(kind, id);
+        let mover = snapshot
+            .meta
+            .script_movers
+            .iter()
+            .find(|m| m.id.to_wire() == source);
+        let Some(entnum) = mover.and_then(|m| u16::try_from(m.state.number).ok()) else {
+            continue;
+        };
+        let key = assets::MapXModelAssetKey(name.to_owned());
+        if !matches!(
+            assets.get(&key),
+            Some(
+                assets::MapXModelSceneAsset::Iw4(_)
+                    | assets::MapXModelSceneAsset::Iw5(_)
+                    | assets::MapXModelSceneAsset::T5(_)
+            )
+        ) {
+            continue;
+        }
+        let pos = Vec3::from_array(origin);
+        if let Some((_, _, mut owner, mut transform, mut visibility)) = existing
+            .iter_mut()
+            .find(|(_, marker, _, _, _)| marker.source == source)
+        {
+            if owner.current_model != key {
+                owner.current_model = key;
+                owner.dobj_state =
+                    assets::dobj::DObjSemanticState::bind_pose(name.to_owned(), source, 1);
+            }
+            owner.gentity_number = Some(entnum);
+            transform.translation = pos;
+            *visibility = Visibility::Inherited;
+        } else {
+            let transform = Transform::from_translation(pos);
+            commands.spawn((
+                KillstreakSceneModel { source },
+                transform,
+                Visibility::Inherited,
+                WorldScriptModelInstance {
+                    id: assets::ScriptModelId::from_source_ordinal(source),
+                    authority_owner: None,
+                    current_model: key,
+                    transform,
+                    lighting_origin: origin,
+                    dobj_state: assets::dobj::DObjSemanticState::bind_pose(
+                        name.to_owned(),
+                        source,
+                        1,
+                    ),
+                    metadata: assets::ScriptModelMetadata {
+                        targetname: KILLSTREAK_TARGETNAME.to_owned(),
+                        ..Default::default()
+                    },
+                    gentity_number: Some(entnum),
+                },
+            ));
+        }
+    }
+}
+
 fn apply_presented_script_model_dobjs(
     presented: Option<Res<net::PresentedSnapshot>>,
     mut owners: Query<(&mut WorldScriptModelInstance, &mut Visibility)>,
@@ -272,6 +442,10 @@ fn apply_presented_script_model_dobjs(
         by_owner.entry(*owner).or_insert(state);
     }
     for (mut owner, mut visibility) in &mut owners {
+        if owner.metadata.targetname == KILLSTREAK_TARGETNAME {
+            *visibility = Visibility::Inherited;
+            continue;
+        }
         let source = owner.id.source_ordinal();
         if let Some(flag) = snapshot
             .meta
@@ -554,7 +728,11 @@ fn pose_script_models(
         let owner_id = owner
             .authority_owner
             .and_then(|owner| owner.script_model())
-            .map(|id| id.to_wire());
+            .map(|id| id.to_wire())
+            .or_else(|| {
+                (owner.metadata.targetname == KILLSTREAK_TARGETNAME)
+                    .then_some(owner.id.source_ordinal())
+            });
         let focused_owner_id = focus_id.filter(|wanted| owner_id == Some(*wanted));
         if let Some(id) = focused_owner_id {
             focus.refuse(id, &owner.current_model.0, "unclassified_branch");

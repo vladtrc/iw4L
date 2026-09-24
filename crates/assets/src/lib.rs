@@ -188,7 +188,8 @@ pub use arena::{
 pub use artifact_cache::{cache_flight, cache_get, cache_put, fnv1a64, fnv1a64_more};
 pub use asset_core::{
     AssetKey, AssetKeyError, AssetKind, AssetNamespace, AssetRef, AssetRefCensus, BoundTarget,
-    CatalogIndex, IndexSpace, WalkLocalMaterialIndex, ZoneGame, ZoneOwner, bound_zone_names,
+    CatalogIndex, IndexSpace, MaterialKey, WalkLocalMaterialIndex, ZoneGame, ZoneOwner,
+    bound_zone_names,
 };
 pub(crate) use asset_graph::stamp_match_destructible_death;
 pub use asset_graph::{

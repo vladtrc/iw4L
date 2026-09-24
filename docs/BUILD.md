@@ -2,7 +2,9 @@
 
 Rust stable via rustup (`rust-toolchain.toml` pins it), plus a C toolchain
 and the Bevy system libs. IW4L enables both `x11` and `wayland`
-(`Cargo.toml`), so the Wayland headers stay required.
+(`Cargo.toml`), so the Wayland headers stay required. Gamepad input and
+rumble (`bevy_gilrs`) link libudev, so the udev headers (`systemd-devel` /
+`libudev-dev`) are required too.
 
 ```bash
 # Fedora

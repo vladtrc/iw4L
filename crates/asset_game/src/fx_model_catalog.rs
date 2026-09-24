@@ -16,24 +16,24 @@ use crate::{
 #[derive(Clone, Debug)]
 pub struct FxModelEntry {
     pub skel: Arc<ModelSkel>,
-    material_names: Vec<Option<String>>,
+    material_keys: Vec<Option<asset_core::MaterialKey>>,
     material_edges: Vec<AssetEdge<MaterialSpace>>,
 }
 
 impl FxModelEntry {
     fn capture(skel: ModelSkel, materials: &MaterialCatalog) -> Self {
-        let (material_names, material_edges) =
+        let (material_keys, material_edges) =
             capture_xmodel_material_slots(&skel.surface_materials, Some(materials));
         Self {
             skel: Arc::new(skel),
-            material_names,
+            material_keys,
             material_edges,
         }
     }
 
     fn resolve_materials(&mut self, materials: &MaterialDefinitions) {
         stamp_xmodel_material_edges(
-            &mut self.material_names,
+            &mut self.material_keys,
             &mut self.material_edges,
             &self.skel.surface_materials,
             materials,

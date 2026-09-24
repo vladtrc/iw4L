@@ -112,6 +112,22 @@ impl FrameWorld<'_> {
         Some(self.ecs.get::<ScriptMoverRow>(entity)?.0)
     }
 
+    pub(crate) fn remove_script_mover_by_number(&mut self, number: i32) -> bool {
+        let Some(entity) = entity_by_number(self.ecs, number) else {
+            return false;
+        };
+        if self.ecs.get::<ScriptMoverRow>(entity).is_none() {
+            return false;
+        }
+        unbind_number(self.ecs, number);
+        assert!(
+            self.ecs.despawn(entity),
+            "script mover vanished before removal"
+        );
+        self.free_dynamic_entity_number(number);
+        true
+    }
+
     pub(crate) fn visit_script_movers(&self, visit: impl FnMut(&ScriptMoverGentity)) {
         visit_script_movers(self.ecs, visit);
     }

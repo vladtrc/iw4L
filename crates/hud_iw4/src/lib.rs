@@ -134,12 +134,12 @@ pub use hudelem::{
     HudElem, HudElemPlacement, MATCH_START_ALIGN_SCREEN, OBJECTIVE_FLASH_DIM,
     OBJECTIVE_FLASH_HALF_MS, OBJECTIVE_MARKER_ALPHA, ORG_LEADING, ORG_MIDDLE, ORG_TRAILING,
     OUTCOME_ALIGN_SCREEN, PLAYERSTATE_HUD_ARCHIVAL, PLAYERSTATE_HUD_BANKS_END,
-    PLAYERSTATE_HUD_CURRENT, SCORE_POPUP_ALIGN_SCREEN, TEXT_CENTERED_ALIGN_ORG, VERT_ALIGN_MIDDLE,
-    VERT_ALIGN_TOP, align_org, align_screen, bg_lerp_hud_colors, color_rgba, copy_in_use_prefix,
-    flags, hud_elem_glow_color, hud_elem_lerp_font_scale, hud_elem_material_size,
-    hud_elem_movement_frac, hud_elem_origin, hud_elem_placement, hud_elem_position,
-    hud_elem_scale_frac, hud_elem_screen_align, objective_flash_elem, rebase_archival_times,
-    unpack_rgba,
+    PLAYERSTATE_HUD_CURRENT, SCORE_POPUP_ALIGN_ORG, SCORE_POPUP_ALIGN_SCREEN,
+    TEXT_CENTERED_ALIGN_ORG, VERT_ALIGN_MIDDLE, VERT_ALIGN_TOP, align_org, align_screen,
+    bg_lerp_hud_colors, color_rgba, copy_in_use_prefix, flags, hud_elem_glow_color,
+    hud_elem_lerp_font_scale, hud_elem_material_size, hud_elem_movement_frac, hud_elem_origin,
+    hud_elem_placement, hud_elem_position, hud_elem_scale_frac, hud_elem_screen_align,
+    objective_flash_elem, rebase_archival_times, unpack_rgba,
 };
 pub use iris::{
     ADS_IRIS_ZOOM_ACTIVE_MIN, ADS_OVERLAY_FOUR_QUAD_LETTERBOX_SCALE, ADS_OVERLAY_ONE_QUAD_HALF,

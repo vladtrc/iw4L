@@ -143,14 +143,13 @@ pub fn scene_lit_pass_material(
 }
 
 fn present_names<'a>(
-    names: &'a [Option<String>],
+    keys: &'a [Option<assets::MaterialKey>],
     edges: &'a [assets::AssetEdge<assets::MaterialSpace>],
 ) -> impl Iterator<Item = &'a str> {
-    names
-        .iter()
+    keys.iter()
         .zip(edges)
         .filter(|(_, edge)| edge.is_bound())
-        .filter_map(|(name, _)| name.as_deref())
+        .filter_map(|(key, _)| Some(key.as_ref()?.name.as_str()))
 }
 
 pub fn prepare_model_materials(
@@ -193,7 +192,7 @@ pub fn prepare_model_materials(
     for name in bodies.0.names() {
         if let Some(entry) = bodies.0.get(name) {
             admit_names(
-                present_names(&entry.material_names, &entry.material_edges),
+                present_names(&entry.material_keys, &entry.material_edges),
                 &atlas,
                 &tess.catalog,
                 &mut by_name,
@@ -204,7 +203,7 @@ pub fn prepare_model_materials(
     for index in 0..world.0.len() {
         if let Some(entry) = world.0.get_at(index) {
             admit_names(
-                present_names(&entry.material_names, &entry.material_edges),
+                present_names(&entry.material_keys, &entry.material_edges),
                 &atlas,
                 &tess.catalog,
                 &mut by_name,

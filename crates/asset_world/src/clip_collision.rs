@@ -437,10 +437,34 @@ fn extract_aabb_forest(
             let tri_n = s.u8_at(p, 0).map_err(|_| ClipCollisionError::Truncated)?;
             let seg = s.u8_at(p, 2).map_err(|_| ClipCollisionError::Truncated)?;
             let first = s.i32_at(p, 4).map_err(|_| ClipCollisionError::Truncated)?;
+            let border_n = s.u8_at(p, 1).map_err(|_| ClipCollisionError::Truncated)?;
+            let first_border = mesh.borders.len() as u32;
+            if border_n != 0
+                && let ZonePtr::Offset(b) =
+                    s.ptr_at(p, 8).map_err(|_| ClipCollisionError::Truncated)?
+            {
+                let b = s.resolve_alias(b);
+                for k in 0..border_n as usize {
+                    let f = |o: usize| {
+                        s.f32_at(b, k * 28 + o)
+                            .map_err(|_| ClipCollisionError::Truncated)
+                    };
+                    mesh.borders.push(clipmap_iw4::ClipBorder {
+                        dist_eq: [f(0)?, f(4)?, f(8)?],
+                        z_base: f(12)?,
+                        z_slope: f(16)?,
+                        start: f(20)?,
+                        length: f(24)?,
+                    });
+                }
+            }
+            let border_count = (mesh.borders.len() as u32 - first_border) as u8;
             mesh.partitions.push(clipmap_iw4::ClipPartition {
                 tri_count: tri_n,
                 first_tri: first,
                 first_vert_segment: seg,
+                border_count,
+                first_border,
             });
         }
     }
@@ -1333,10 +1357,34 @@ fn extract_iw5_aabb_forest(
             let tri_n = s.u8_at(p, 0).map_err(|_| ClipCollisionError::Truncated)?;
             let seg = s.u8_at(p, 2).map_err(|_| ClipCollisionError::Truncated)?;
             let first = s.i32_at(p, 4).map_err(|_| ClipCollisionError::Truncated)?;
+            let border_n = s.u8_at(p, 1).map_err(|_| ClipCollisionError::Truncated)?;
+            let first_border = mesh.borders.len() as u32;
+            if border_n != 0
+                && let fastfile_iw5::ZonePtr::Offset(b) =
+                    s.ptr_at(p, 8).map_err(|_| ClipCollisionError::Truncated)?
+            {
+                let b = s.resolve_alias(b);
+                for k in 0..border_n as usize {
+                    let f = |o: usize| {
+                        s.f32_at(b, k * 28 + o)
+                            .map_err(|_| ClipCollisionError::Truncated)
+                    };
+                    mesh.borders.push(clipmap_iw4::ClipBorder {
+                        dist_eq: [f(0)?, f(4)?, f(8)?],
+                        z_base: f(12)?,
+                        z_slope: f(16)?,
+                        start: f(20)?,
+                        length: f(24)?,
+                    });
+                }
+            }
+            let border_count = (mesh.borders.len() as u32 - first_border) as u8;
             mesh.partitions.push(clipmap_iw4::ClipPartition {
                 tri_count: tri_n,
                 first_tri: first,
                 first_vert_segment: seg,
+                border_count,
+                first_border,
             });
         }
     }
@@ -1828,6 +1876,8 @@ fn extract_t5_mesh_tables(
                 tri_count: s.u8_at(p, 0).map_err(|_| ClipCollisionError::Truncated)?,
                 first_tri: s.i32_at(p, 4).map_err(|_| ClipCollisionError::Truncated)?,
                 first_vert_segment: 0,
+                border_count: 0,
+                first_border: 0,
             });
         }
     }

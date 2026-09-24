@@ -498,6 +498,9 @@ pub struct SimState {
     num_kills: u32,
 
     pub(crate) recent_kills: Vec<(ClientId, i32, u32)>,
+    pub(crate) care_packages: Vec<crate::match_state::CarePackage>,
+    pub(crate) pave_lows: Vec<crate::match_state::PaveLow>,
+    pub(crate) uavs: Vec<crate::match_state::Uav>,
 
     pending_player_cards: Vec<PendingPlayerCardEvent>,
 
@@ -634,6 +637,9 @@ impl Default for SimState {
             pending_score_limit_soon: None,
             num_kills: 0,
             recent_kills: Vec::new(),
+            care_packages: Vec::new(),
+            pave_lows: Vec::new(),
+            uavs: Vec::new(),
             pending_player_cards: Vec::new(),
             pending_final_kill: None,
             last_pmove_walking: HashMap::new(),
@@ -738,6 +744,9 @@ impl SimState {
         self.game_win_winner = None;
         self.placement_cointoss_unwired = 0;
         self.pending_spawn_music.clear();
+        self.care_packages.clear();
+        self.pave_lows.clear();
+        self.uavs.clear();
         self.outcome_hud_latched = false;
         self.next_shot = ShotId(1);
         self.collision_history.clear();
@@ -2992,6 +3001,9 @@ impl SimState {
                 time_limit_ms: self.bootstrap.time_limit_ms,
                 kind: self.bootstrap.kind,
                 clients,
+                care_packages: self.care_packages.clone(),
+                pave_lows: self.pave_lows.clone(),
+                uavs: self.uavs.clone(),
                 journal: self.journal.clone(),
                 entity_events: self.entity_events.clone(),
                 pellet_fx: self.pellet_fx.clone(),
@@ -3115,6 +3127,9 @@ impl SimState {
             report.clients += 1;
         }
         self.clients = adopted_clients;
+        self.care_packages = snapshot.meta.care_packages.clone();
+        self.pave_lows = snapshot.meta.pave_lows.clone();
+        self.uavs = snapshot.meta.uavs.clone();
 
         self.entity_kernel = crate::EntityKernel::from_snapshot(&snapshot.meta.entity_kernel)
             .expect("authoritative snapshot carried an invalid EntityKernel state");
@@ -3879,6 +3894,7 @@ pub(crate) fn clip_trace(
         tri_content_flags: &mesh.tables.tri_content_flags,
         aabb_trees: &mesh.tables.aabb_trees,
         partitions: &mesh.tables.partitions,
+        borders: &mesh.tables.borders,
         aabb_roots: &mesh.tables.aabb_roots,
     };
 

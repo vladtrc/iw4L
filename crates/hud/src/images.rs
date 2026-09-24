@@ -137,6 +137,7 @@ pub struct HudImages {
     zone_rgba: HashMap<String, (u32, u32, Arc<Vec<u8>>)>,
     zone_handles: HashMap<ZoneKey, Handle<Image>>,
     zone_image_name: HashMap<String, String>,
+    material_images: HashMap<String, String>,
     zone_states: HashMap<String, Option<[u32; 2]>>,
     blood_plan: Option<Result<BloodMaterialBinding, String>>,
     zone_installed: bool,
@@ -195,6 +196,12 @@ impl HudImages {
         self.zone_installed = true;
         self.zone_uploaded = false;
         self.blood_plan = Some(blood_material_binding(catalog));
+        self.material_images.extend(
+            catalog
+                .material_images
+                .iter()
+                .map(|(material, image)| (cache_key(material), image.clone())),
+        );
         for (name, state) in &catalog.material_state_bits {
             self.zone_states.insert(name.clone(), state.agreed());
             if catalog.zone_images.contains_key(name) && state.agreed().is_none() {
@@ -416,18 +423,32 @@ impl HudImages {
             return Some((1, 1, vec![255; 4]));
         }
         let main = self.trees.main_for(ns)?;
-        match assets::decode_ui_image_from_main(main, name) {
-            Ok(image) => image,
-            Err(error) => {
-                diag::warn!(
-                    Ui,
-                    "hud: decode `{}:{name}` from {}: {error}",
-                    ns.as_str(),
-                    main.display()
-                );
-                None
+        let mapped = (ns == HUD_CHROME_NAMESPACE)
+            .then(|| {
+                self.material_images
+                    .get(&cache_key(name))
+                    .map(String::as_str)
+            })
+            .flatten();
+        for image_name in mapped
+            .filter(|image| *image != name)
+            .into_iter()
+            .chain(std::iter::once(name))
+        {
+            match assets::decode_ui_image_from_main(main, image_name) {
+                Ok(Some(image)) => return Some(image),
+                Ok(None) => {}
+                Err(error) => {
+                    diag::warn!(
+                        Ui,
+                        "hud: decode `{}:{image_name}` from {}: {error}",
+                        ns.as_str(),
+                        main.display()
+                    );
+                }
             }
         }
+        None
     }
 
     fn zone_lookup(&self, name: &str) -> Option<(u32, u32, Arc<Vec<u8>>)> {

@@ -71,6 +71,12 @@ impl AssetKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MaterialKey {
+    pub family: AssetNamespace,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AssetKey {
     pub namespace: AssetNamespace,
     pub kind: AssetKind,

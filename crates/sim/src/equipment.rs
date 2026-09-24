@@ -1055,6 +1055,31 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         }
     }
     for info in detonated {
+        if world.weapon_script_name(info.projectile.weapon)
+            == gamemode_iw4::killstreaks::AIRDROP_MARKER_WEAPON
+        {
+            crate::killstreaks::marker_impact(
+                world,
+                tick,
+                info.projectile.owner,
+                info.projectile.id.0,
+                info.origin,
+            );
+            continue;
+        }
+        if info.splash {
+            let facts = required_projectile_facts(world, info.projectile.weapon);
+            crate::killstreaks::blast_pave_lows(
+                world,
+                info.projectile.owner,
+                info.origin,
+                facts
+                    .explosion_radius
+                    .max(facts.explosion_radius_min)
+                    .max(0) as f32,
+                facts.explosion_inner_damage.max(facts.impact_damage),
+            );
+        }
         if !info.splash {
             continue;
         }

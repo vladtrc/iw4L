@@ -96,6 +96,7 @@ pub struct ObjectiveMatch {
     pub use_weapons: [u32; 2],
     pub restoring: Vec<(ClientId, u32, u32)>,
     pub bombs: Vec<BombSite>,
+    pub last_plant: Option<(ClientId, u32)>,
     pub scores: [i32; 3],
     pub attackers: Team,
     pub round: u32,
@@ -112,6 +113,7 @@ impl Default for ObjectiveMatch {
             use_weapons: [0; 2],
             restoring: Vec::new(),
             bombs: Vec::new(),
+            last_plant: None,
             scores: [0; 3],
             attackers: Team::Allies,
             round: 1,
@@ -396,6 +398,7 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
     let paused = state.bombs.iter().any(|s| s.planted_at_ms.is_some());
     let defenders = state.defenders();
     let mut busy = Vec::new();
+    let mut exploded = state.bombs.iter().filter(|s| s.destroyed).count();
     for site in &mut state.bombs {
         site.view.users.clear();
         if site.destroyed {
@@ -417,6 +420,15 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
             site.user = None;
             site.view.progress = 0.0;
             sound(world, tick, site.bomb_origin, dd::EXPLODE_SOUND_ALIAS);
+            exploded += 1;
+            if exploded < 2 {
+                for id in world.client_ids_sorted() {
+                    world.push_hud_splash(id, "time_added", 0, 0);
+                }
+                if let Some(planter) = site.planter {
+                    crate::score::broadcast_card(world, planter, "callout_time_added");
+                }
+            }
             if let Some(attacker) = site.planter {
                 let attacker_life = world
                     .client_meta(attacker)
@@ -564,7 +576,19 @@ pub(crate) fn advance(world: &mut FrameWorld, tick: Tick, cmds: &[(u32, u32)]) {
                     use_weapon_ammo(world, id, state.use_weapons[usize::from(planted)], 1);
                     if planted {
                         site.planted_at_ms = None;
+                        let ninja = state.last_plant.is_some_and(|(owner, at)| {
+                            at + 4000 + dd::DEFUSE_MS > now
+                                && world
+                                    .client_meta(owner)
+                                    .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive)
+                        });
+                        crate::score::broadcast_card(world, id, "callout_bombdefused");
+                        let key = if ninja { "ninja_defuse" } else { "defuse" };
+                        world.push_hud_splash(id, key, 0, 100);
                     } else {
+                        state.last_plant = Some((id, now));
+                        crate::score::broadcast_card(world, id, "callout_bombplanted");
+                        world.push_hud_splash(id, "plant", 0, 100);
                         site.planted_at_ms = Some(now);
                         site.planter = Some(id);
                         let p = world.player(id).expect("eligible player").origin;

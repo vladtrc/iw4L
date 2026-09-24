@@ -986,11 +986,11 @@ fn skel_camera_lod(
 
 fn surface_material_name(
     surface_index: usize,
-    names: &[Option<String>],
+    keys: &[Option<assets::MaterialKey>],
     edges: &[assets::AssetEdge<assets::MaterialSpace>],
 ) -> Option<String> {
     match edges.get(surface_index) {
-        Some(assets::AssetEdge::Bound(_)) => names.get(surface_index).cloned().flatten(),
+        Some(assets::AssetEdge::Bound(_)) => Some(keys.get(surface_index)?.as_ref()?.name.clone()),
         _ => None,
     }
 }
@@ -1002,7 +1002,7 @@ fn skin_slot_into(
     lod: u8,
     model: u16,
     entries: &[dpvs_iw4::SceneEntSkinEntry],
-    names: &[Option<String>],
+    keys: &[Option<assets::MaterialKey>],
     edges: &[assets::AssetEdge<assets::MaterialSpace>],
     geom: &mut CpuBodyGeom,
     skip_empty: bool,
@@ -1035,7 +1035,7 @@ fn skin_slot_into(
             geom.surfaces.push(CpuSurfMeta {
                 index_start: 0,
                 index_count: 0,
-                name: surface_material_name(surf.surface_index, names, edges),
+                name: surface_material_name(surf.surface_index, keys, edges),
             });
             continue;
         }
@@ -1050,7 +1050,7 @@ fn skin_slot_into(
         geom.surfaces.push(CpuSurfMeta {
             index_start,
             index_count: surf.index_count,
-            name: surface_material_name(surf.surface_index, names, edges),
+            name: surface_material_name(surf.surface_index, keys, edges),
         });
     }
     geom.decoded_n = geom.packed.len();
@@ -1124,7 +1124,7 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
         job.body_lod,
         0,
         job.skin_entries,
-        &job.body.material_names,
+        &job.body.material_keys,
         &job.body.material_edges,
         &mut geom,
         false,
@@ -1139,7 +1139,7 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
                 lod,
                 job.head_model.unwrap_or(1),
                 job.skin_entries,
-                &head.material_names,
+                &head.material_keys,
                 &head.material_edges,
                 &mut geom,
                 false,
@@ -1156,7 +1156,7 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
                 lod,
                 job.gun_model.unwrap_or(0),
                 job.skin_entries,
-                &gun.entry.material_names,
+                &gun.entry.material_keys,
                 &gun.entry.material_edges,
                 &mut geom,
                 true,
@@ -1174,7 +1174,7 @@ fn assemble_meshes(job: PendingBodySkin<'_>) -> Result<AssembledMeshes, String> 
             lod,
             *model,
             job.skin_entries,
-            &attachment.entry.material_names,
+            &attachment.entry.material_keys,
             &attachment.entry.material_edges,
             &mut geom,
             true,

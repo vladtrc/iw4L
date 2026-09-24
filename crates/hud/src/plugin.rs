@@ -136,8 +136,9 @@ impl Plugin for HudPlugin {
                     flush_flash_tess,
                     flush_overhead_names_tess,
                     flush_hud_tess,
-                    flush_scoreboard_tess,
                     flush_killcam_skip_tess,
+                    flush_playercard_tess,
+                    flush_scoreboard_tess,
                     flush_mantle_hint_tess,
                     flush_use_hint_tess,
                     flush_match_start_tess,
@@ -293,9 +294,9 @@ fn ensure_hud_root(mut commands: Commands, existing: Query<Entity, With<HudRoot>
             spawn_splash(root);
             spawn_score_popup(root);
             spawn_killfeed(root);
+            spawn_killcam_skip(root);
             spawn_playercard(root);
             spawn_scoreboard(root);
-            spawn_killcam_skip(root);
             spawn_mantle_hint(root);
             crate::font_overlay::spawn_overlay(root, crate::use_hint::UseHintRaster);
             spawn_match_start(root);
@@ -410,19 +411,6 @@ fn flush_hud_tess(
             Without<WeaponbarRaster>,
             Without<SplashRaster>,
             Without<ScorePopupRaster>,
-            Without<PlayerCardRaster>,
-        ),
-    >,
-    mut playercard: Query<
-        (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
-        (
-            With<PlayerCardRaster>,
-            Without<CompassRaster>,
-            Without<ScorebarRaster>,
-            Without<WeaponbarRaster>,
-            Without<SplashRaster>,
-            Without<ScorePopupRaster>,
-            Without<KillfeedRaster>,
         ),
     >,
 ) {
@@ -438,7 +426,6 @@ fn flush_hud_tess(
     let splash_job = std::mem::take(&mut pass.splash);
     let score_popup_job = std::mem::take(&mut pass.score_popup);
     let killfeed_job = std::mem::take(&mut pass.killfeed);
-    let playercard_job = std::mem::take(&mut pass.playercard);
     if let Ok((_, mut host, mut latch)) = compass.single_mut() {
         gpu_list::apply_tess_job(
             compass_job,
@@ -511,18 +498,6 @@ fn flush_hud_tess(
             h,
         );
     }
-    if let Ok((_, mut host, mut latch)) = playercard.single_mut() {
-        gpu_list::apply_tess_job(
-            playercard_job,
-            &mut host,
-            &mut latch,
-            &mut hud_images,
-            &mut images,
-            &mut frame,
-            w,
-            h,
-        );
-    }
 }
 
 fn flush_killcam_skip_tess(
@@ -542,6 +517,36 @@ fn flush_killcam_skip_tess(
     }
     let job = std::mem::take(&mut pass.killcam_skip);
     if let Ok((_, mut host, mut latch)) = skip.single_mut() {
+        gpu_list::apply_tess_job(
+            job,
+            &mut host,
+            &mut latch,
+            &mut hud_images,
+            &mut images,
+            &mut frame,
+            surface.width(),
+            surface.height(),
+        );
+    }
+}
+
+fn flush_playercard_tess(
+    surface: Res<crate::surface::Hud2dSurface>,
+    mut pass: ResMut<HudTessPass>,
+    mut hud_images: ResMut<HudImages>,
+    mut images: ResMut<Assets<Image>>,
+    mut frame: ResMut<crate::gpu_list::HudTessGpuFrame>,
+    mut card: Query<
+        (Entity, &mut Node, &mut crate::gpu_list::GpuListLatch),
+        With<PlayerCardRaster>,
+    >,
+) {
+    let _body = gpu_list::TessBody::open();
+    if !surface.is_ready() {
+        return;
+    }
+    let job = std::mem::take(&mut pass.playercard);
+    if let Ok((_, mut host, mut latch)) = card.single_mut() {
         gpu_list::apply_tess_job(
             job,
             &mut host,

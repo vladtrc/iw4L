@@ -178,9 +178,9 @@ impl PreparedFpvModel {
                 material,
                 authored,
                 lens_named: entry
-                    .material_names
+                    .material_keys
                     .get(surface.surface_index)
-                    .and_then(|name| name.as_deref())
+                    .and_then(|key| Some(key.as_ref()?.name.as_str()))
                     .is_some_and(leftover_scope_surf_is_lens),
             });
         }

@@ -1,8 +1,9 @@
 use hud_iw4::{
     DAMAGE_FEEDBACK_ALIGN_SCREEN, GAME_HUDELEM_CAPACITY, HE_TYPE_FREE, HE_TYPE_MATERIAL,
     HE_TYPE_PLAYERNAME, HE_TYPE_TEXT, HE_TYPE_VALUE, HUDELEM_BANK_CAPACITY, HudElem,
-    MATCH_START_ALIGN_SCREEN, OUTCOME_ALIGN_SCREEN, SCORE_POPUP_ALIGN_SCREEN,
-    TEXT_CENTERED_ALIGN_ORG, color_rgba, flags, rebase_archival_times, unpack_rgba,
+    MATCH_START_ALIGN_SCREEN, OUTCOME_ALIGN_SCREEN, SCORE_POPUP_ALIGN_ORG,
+    SCORE_POPUP_ALIGN_SCREEN, TEXT_CENTERED_ALIGN_ORG, color_rgba, flags, rebase_archival_times,
+    unpack_rgba,
 };
 use playerstate_iw4::ENTITYNUM_NONE;
 
@@ -167,7 +168,7 @@ pub fn pulse_score_popup(slot: &mut GameHudElemSlot, amount: f32, now_ms: i32) {
     slot.elem.x = SCORE_POPUP_X;
     slot.elem.y = SCORE_POPUP_Y;
     slot.elem.align_screen = SCORE_POPUP_ALIGN_SCREEN;
-    slot.elem.align_org = TEXT_CENTERED_ALIGN_ORG;
+    slot.elem.align_org = SCORE_POPUP_ALIGN_ORG;
     slot.elem.font = SCORE_POPUP_FONT_INDEX;
     slot.elem.font_scale = SCORE_POPUP_MAX_FONT_SCALE;
     slot.elem.from_font_scale = from_font_scale;

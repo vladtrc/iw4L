@@ -198,6 +198,7 @@ pub fn trace_leaf_mesh_into(
         tri_surface_flags: mesh.tri_surface_flags,
         tri_content_flags: mesh.tri_content_flags,
         aabb_trees: mesh.aabb_trees,
+        borders: mesh.borders,
         partitions: mesh.partitions,
         aabb_roots: scratch.as_slice(),
     };

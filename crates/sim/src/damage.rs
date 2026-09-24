@@ -652,6 +652,11 @@ pub(crate) fn apply_damage_attempt(
         {
             meta.attackers_this_life.push((intent.attacker, now));
         }
+        let damaged = &mut world.client_meta_mut(intent.attacker).damaged_players;
+        match damaged.iter_mut().find(|(v, _)| *v == intent.target) {
+            Some(row) => row.1 = now,
+            None => damaged.push((intent.target, now)),
+        }
     }
 
     let damage_dir = flinch_damage_dir(world, intent);
@@ -815,6 +820,9 @@ fn kill_facts(
         execution: headshot && already_down,
         posthumous,
         longshot,
+        throwing_knife: gamemode_iw4::cac_weapon_is_throwingknife(
+            world.weapon_script_name(commit.weapon),
+        ),
     }
 }
 

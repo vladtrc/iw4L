@@ -439,8 +439,6 @@ pub(crate) fn push_owner_text(
     let Some(font) = args.assets.catalog.and_then(|c| c.font(font_name)) else {
         return Err(ChromeGapKind::RetailFont);
     };
-    let draw_text_scale = item_text_paint_scale(args.item.text_scale, args.anim.scale);
-    let scale = r_normalized_text_scale(font.pixel_height, draw_text_scale);
     let measured_w = ui_text_width(font, text, args.item.text_scale);
     let measured_h = ui_text_height(args.item.text_scale);
     let (x, y) = item_text_origin(
@@ -454,6 +452,47 @@ pub(crate) fn push_owner_text(
         measured_w,
         measured_h,
     );
+    push_owner_text_run(args, font_name, font, text, color, x, y, frame);
+    Ok(())
+}
+
+pub(crate) fn push_owner_text_right_of_rect(
+    args: &OwnerDrawArgs<'_>,
+    text: &str,
+    right_inset: f32,
+    color: [f32; 4],
+    frame: &mut ChromeFrame,
+) -> Result<(), ChromeGapKind> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    let font_name = ui_get_font_handle(
+        args.item.font_enum,
+        args.surface.scale_virtual_to_real()[1],
+        args.item.text_scale,
+    );
+    let Some(font) = args.assets.catalog.and_then(|c| c.font(font_name)) else {
+        return Err(ChromeGapKind::RetailFont);
+    };
+    let width = ui_text_width(font, text, args.item.text_scale).trunc();
+    let x = args.rect.x + args.rect.w - width - right_inset;
+    push_owner_text_run(args, font_name, font, text, color, x, args.rect.y, frame);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_owner_text_run(
+    args: &OwnerDrawArgs<'_>,
+    font_name: &str,
+    font: &FontDef,
+    text: &str,
+    color: [f32; 4],
+    x: f32,
+    y: f32,
+    frame: &mut ChromeFrame,
+) {
+    let draw_text_scale = item_text_paint_scale(args.item.text_scale, args.anim.scale);
+    let scale = r_normalized_text_scale(font.pixel_height, draw_text_scale);
     let applied = args.surface.apply_rect(
         x,
         y,
@@ -487,7 +526,6 @@ pub(crate) fn push_owner_text(
         provenance: Draw2dProvenance::OwnerDraw(args.item.owner_draw),
         layer: 1,
     });
-    Ok(())
 }
 
 pub(crate) fn push_owner_pic(

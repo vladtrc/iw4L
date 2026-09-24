@@ -4876,6 +4876,7 @@ struct WeaponRow {
     hud_icon_image: Option<String>,
 
     dpad_icon_image: Option<String>,
+    dpad_icon_atlas: Option<[u8; 2]>,
     dpad_icon_ratio: i32,
     kill_icon: Option<String>,
     kill_icon_from_slot: bool,
@@ -4951,6 +4952,7 @@ impl Default for WeaponRow {
             hud_icon_ratio: 0,
             hud_icon_image: None,
             dpad_icon_image: None,
+            dpad_icon_atlas: None,
             dpad_icon_ratio: 0,
             kill_icon: None,
             kill_icon_from_slot: false,
@@ -5847,6 +5849,7 @@ impl WeaponBuild {
                 hud_icon_ratio: entry.hud_icon_ratio,
                 kill_icon_from_slot: entry.kill_icon_slot.is_some(),
                 dpad_icon_image: entry.dpad_icon_image,
+                dpad_icon_atlas: entry.dpad_icon_atlas,
                 dpad_icon_ratio: entry.dpad_icon_ratio,
                 kill_icon: entry.kill_icon,
                 kill_icon_image: entry.kill_icon_image,
@@ -7350,6 +7353,10 @@ impl WeaponRegistry {
         Some((row.dpad_icon_image.as_deref()?, row.dpad_icon_ratio))
     }
 
+    pub fn dpad_icon_atlas_of(&self, index: u32) -> Option<[u8; 2]> {
+        self.rows.get(index as usize)?.dpad_icon_atlas
+    }
+
     pub fn kill_icon_of(&self, index: u32) -> Option<&str> {
         self.rows
             .get(index as usize)
@@ -7520,19 +7527,20 @@ fn apply_iw5_parameter_blocks(facts: &mut WeaponBodyFacts, assets: &[&Iw5ScopeRo
         facts.ads_zoom_out_frac = ads.ads_zoom_out_frac;
         facts.ads_bob_factor_at_0x330 = ads.ads_bob_factor;
         facts.ads_view_bob_mult_at_0x334 = ads.ads_view_bob_mult;
+        // Attachment transition times are seconds; the rates are per millisecond.
         if ads.ads_trans_in_time > 0.0 {
-            facts.ads_in_rate = 1.0 / ads.ads_trans_in_time;
+            facts.ads_in_rate = 1.0 / (ads.ads_trans_in_time * 1000.0);
         }
         if ads.ads_trans_out_time > 0.0 {
-            facts.ads_out_rate = 1.0 / ads.ads_trans_out_time;
+            facts.ads_out_rate = 1.0 / (ads.ads_trans_out_time * 1000.0);
         }
     }
     if ads_scale != 1.0 {
         facts.ads_spread *= ads_scale;
         facts.ads_aim_pitch *= ads_scale;
         facts.ads_zoom_fov *= ads_scale;
-        facts.ads_in_rate /= ads_scale;
-        facts.ads_out_rate /= ads_scale;
+        facts.ads_in_rate *= ads_scale;
+        facts.ads_out_rate *= ads_scale;
     }
 
     if let Some(sight) = iw5_first_block(assets, |a| a.sight) {

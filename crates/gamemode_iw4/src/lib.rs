@@ -25,6 +25,7 @@ pub mod give_flag_capture_xp;
 pub mod globallogic;
 pub mod health_regen;
 pub mod hurt;
+pub mod killstreaks;
 pub mod kind;
 pub mod lead_swing;
 pub mod limits;
