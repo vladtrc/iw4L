@@ -519,12 +519,17 @@ pub fn create_cmd(input: &CreateCmdInput) -> UserCmd {
 pub fn sample_move(client: &mut ClientInput, now_msec: i32, frame_msec: u32) -> (u32, MoveAxes) {
     let bits = key_move_bits(&client.kb, client.using_ads, cmd_buttons(&client.kb));
     let axes = key_move_from_fractions(
-        key_state(&mut client.kb.forward, now_msec, frame_msec),
-        key_state(&mut client.kb.back, now_msec, frame_msec),
-        key_state(&mut client.kb.moveright, now_msec, frame_msec),
-        key_state(&mut client.kb.moveleft, now_msec, frame_msec),
+        movement_key_state(&mut client.kb.forward, now_msec, frame_msec),
+        movement_key_state(&mut client.kb.back, now_msec, frame_msec),
+        movement_key_state(&mut client.kb.moveright, now_msec, frame_msec),
+        movement_key_state(&mut client.kb.moveleft, now_msec, frame_msec),
     );
     (bits, axes)
+}
+
+fn movement_key_state(btn: &mut Kbutton, now_msec: i32, frame_msec: u32) -> f32 {
+    let fraction = key_state(btn, now_msec, frame_msec);
+    if btn.active { 1.0 } else { fraction }
 }
 
 pub const CMD_RING_MASK: u32 = 0x7f;
