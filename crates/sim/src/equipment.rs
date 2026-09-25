@@ -87,6 +87,7 @@ pub struct ProjectileState {
     pub travel_distance: f32,
     pub live: bool,
     pub stuck_pane: Option<u32>,
+    pub grounded: bool,
 }
 
 impl ProjectileState {
@@ -104,6 +105,7 @@ impl ProjectileState {
 }
 
 pub const GRENADE_FUSE_CAP_MS: i32 = 60_000;
+const OFFHAND_CLASS_SMOKE: i32 = 2;
 pub const GRENADE_DEFAULT_FUSE_MS: i32 = 30_000;
 pub const ROCKET_CLEANUP_MS: i32 = 60_000;
 pub const BOUNCE_EVENT_SPEED_DELTA: f32 = 100.0;
@@ -182,6 +184,12 @@ fn grenade_launch_velocity(
 
 fn grenade_fuse_due(now_ms: i32, detonate_at_ms: Option<i32>, live: bool) -> bool {
     detonate_at_ms.is_some_and(|deadline| live && deadline <= now_ms)
+}
+
+// The airdrop marker's fuse would otherwise pop the flare midair on a steep throw.
+fn waits_for_ground(world: &FrameWorld, facts: &EquipmentRuntimeFacts, weapon: u32) -> bool {
+    facts.offhand_class == OFFHAND_CLASS_SMOKE
+        || world.weapon_script_name(weapon) == gamemode_iw4::killstreaks::AIRDROP_MARKER_WEAPON
 }
 
 fn grenade_deadlines(
@@ -288,6 +296,7 @@ pub(crate) fn spawn_grenade_projectile(
         travel_distance: 0.0,
         live: true,
         stuck_pane: None,
+        grounded: false,
     });
     true
 }
@@ -659,7 +668,11 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
     if let Some((_end, _normal, _collider, fraction)) = hit {
         contact_time = prev.saturating_add(((eval_time - prev) as f32 * fraction) as i32);
     }
-    let fuse_due = grenade_fuse_due(time, projectile.detonate_at_ms, projectile.live);
+    let mut fuse_due = grenade_fuse_due(time, projectile.detonate_at_ms, projectile.live);
+    if fuse_due && !projectile.grounded && waits_for_ground(world, &facts, projectile.weapon) {
+        fuse_due = false;
+        projectile.detonate_at_ms = Some(time.saturating_add(crate::MATCH_TICK_MS as i32));
+    }
     let cleanup_due = time >= projectile.cleanup_at_ms;
     let contact_before_fuse = hit.is_some()
         && projectile
@@ -1058,6 +1071,21 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         if world.weapon_script_name(info.projectile.weapon)
             == gamemode_iw4::killstreaks::AIRDROP_MARKER_WEAPON
         {
+            world.push_entity_event(
+                tick,
+                EventAudience::All,
+                entity_iw4::EntityEventKind::GRENADE_EXPLODE,
+                crate::EntityEventPayload {
+                    number: info.projectile.entnum,
+                    attacker_entity_num: info.projectile.owner.0 as i32,
+                    weapon: info.projectile.weapon,
+                    correlation: info.projectile.id.0,
+                    origin: info.origin,
+                    direction: info.normal,
+                    surf_type: info.surf_type,
+                    ..Default::default()
+                },
+            );
             crate::killstreaks::marker_impact(
                 world,
                 tick,
@@ -1069,8 +1097,9 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         }
         if info.splash {
             let facts = required_projectile_facts(world, info.projectile.weapon);
-            crate::killstreaks::blast_pave_lows(
+            crate::killstreaks::blast_aircraft(
                 world,
+                tick,
                 info.projectile.owner,
                 info.origin,
                 facts
@@ -1338,6 +1367,7 @@ fn bounce_missile(
     let time = level_time_ms(tick);
     let prev = time.saturating_sub(crate::MATCH_TICK_MS as i32);
     let hit_time = prev.saturating_add(((time - prev) as f32 * fraction) as i32);
+    projectile.grounded |= normal[2] > 0.7;
     projectile.velocity = projectile.velocity_at(hit_time);
     let incoming = projectile.velocity;
     let facts = required_projectile_facts(world, projectile.weapon);

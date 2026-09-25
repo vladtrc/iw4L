@@ -774,7 +774,7 @@ fn run_players_system(ecs: &mut World) {
                 }
                 let emissions = phase_emit(&world, core::slice::from_ref(&shot));
                 phase_trace(&mut world, tick, &emissions);
-                crate::killstreaks::trace_pave_low_shots(&mut world, &emissions);
+                crate::killstreaks::trace_aircraft_shots(&mut world, tick, &emissions);
             }
             crate::equipment::phase_offhand(&mut world, tick, &[(*id, cmd)]);
             world.set_old_cmd(*id, cmd.buttons, cmd.angles);

@@ -251,21 +251,29 @@ fn overlay_archived_world(
     out
 }
 
+fn rebase_entity_state(es: &mut entity_iw4::EntityState, delta_ms: i32) {
+    if es.tr_time != 0 {
+        es.tr_time = es.tr_time.wrapping_add(delta_ms);
+    }
+    if es.apos_tr_time != 0 {
+        es.apos_tr_time = es.apos_tr_time.wrapping_add(delta_ms);
+    }
+    if es.time2 != 0 {
+        es.time2 = es.time2.wrapping_add(delta_ms);
+    }
+    // General's data[0] and missile launchTime share one union slot.
+    if es.e_type == entity_iw4::ET_GENERAL || es.e_type == entity_iw4::ET_MISSILE {
+        es.set_launch_time(es.launch_time().wrapping_add(delta_ms));
+    }
+}
+
 fn rebase_archived_world(out: &mut Snapshot, viewer: ClientId, delta_ms: i32) {
     for es in &mut out.meta.entities {
-        if es.tr_time != 0 {
-            es.tr_time = es.tr_time.wrapping_add(delta_ms);
-        }
-        if es.apos_tr_time != 0 {
-            es.apos_tr_time = es.apos_tr_time.wrapping_add(delta_ms);
-        }
-        if es.time2 != 0 {
-            es.time2 = es.time2.wrapping_add(delta_ms);
-        }
-        // General's data[0] and missile launchTime share one union slot.
-        if es.e_type == entity_iw4::ET_GENERAL || es.e_type == entity_iw4::ET_MISSILE {
-            es.set_launch_time(es.launch_time().wrapping_add(delta_ms));
-        }
+        rebase_entity_state(es, delta_ms);
+    }
+    // Adopt requires each typed mover to equal its entityState row.
+    for mover in &mut out.meta.script_movers {
+        rebase_entity_state(&mut mover.state, delta_ms);
     }
     for p in &mut out.projectiles {
         if p.pos.tr_time != 0 {

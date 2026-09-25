@@ -399,6 +399,14 @@ pub fn worldspawn_north_yaw(s: &ZoneStream<'_>) -> Option<f32> {
     parse_worldspawn_north_yaw(text)
 }
 
+pub fn airstrike_height(s: &ZoneStream<'_>) -> Option<f32> {
+    parse_airstrike_height(entity_string(s)?)
+}
+
+pub fn airstrike_height_iw5(s: &fastfile_iw5::ZoneStream<'_>) -> Option<f32> {
+    parse_airstrike_height(entity_string_iw5(s)?)
+}
+
 pub fn minimap_corners_t5(s: &fastfile_t5::ZoneStream<'_>) -> Option<MinimapCorners> {
     let text = entity_string_t5(s)?;
     parse_minimap_corners(text)
@@ -645,6 +653,13 @@ fn parse_minimap_corners(text: &str) -> Option<MinimapCorners> {
         a: corners[0],
         b: corners[1],
     })
+}
+
+fn parse_airstrike_height(text: &str) -> Option<f32> {
+    parse_entities(text)
+        .find(|e| e.targetname == Some("airstrikeheight"))
+        .and_then(|e| e.origin)
+        .map(|origin| origin[2])
 }
 
 fn parse_worldspawn_north_yaw(text: &str) -> Option<f32> {

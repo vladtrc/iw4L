@@ -722,6 +722,20 @@ fn reliable_seq_after(a: u16, b: u16) -> bool {
     a != b && a.wrapping_sub(b) < 0x8000
 }
 
+fn apply_weapon_switch_requests(
+    mut events: MessageReader<ReliableControlEvent>,
+    mut select: ResMut<CgWeaponSelect>,
+    clock: Res<CgFrameClock>,
+) {
+    for event in events.read() {
+        if let sim::SimEvent::WeaponSwitchRequested { weapon } = event.0 {
+            select.index = weapon;
+            select.mapped_index = weapon;
+            select.time = clock.time();
+        }
+    }
+}
+
 pub fn sample_client_input(
     time: Res<Time>,
     mut actions: ResMut<ClientActionInput>,
@@ -1567,6 +1581,9 @@ pub fn register_client_runtime(app: &mut App) {
             flush_bootstrap_applied
                 .in_set(ClientSet::Reconcile)
                 .after(reconcile_prediction),
+            apply_weapon_switch_requests
+                .in_set(ClientSet::Input)
+                .before(sample_client_input),
             sample_client_input.in_set(ClientSet::Input),
             predict_local_move.in_set(ClientSet::Predict),
             send_pending_commands.in_set(ClientSet::Send),

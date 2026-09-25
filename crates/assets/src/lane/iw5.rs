@@ -367,6 +367,7 @@ impl ZoneLane for Iw5Lane {
                 let intermission_view = intermission_view_iw5(&stream);
                 let minimap_corners = minimap_corners_iw5(&stream);
                 let north_yaw = crate::worldspawn_north_yaw_iw5(&stream);
+                let airstrike_height = crate::airstrike_height_iw5(&stream);
                 let dm_spawns = dm_spawn_points_iw5(&stream);
                 report.push(format!(
                     "ffa spawns: {} mp_dm_spawn* ({} start)",
@@ -617,6 +618,7 @@ impl ZoneLane for Iw5Lane {
                             script_sound: script_sound.clone(),
                             minimap_corners,
                             north_yaw,
+                            airstrike_height,
                             compass,
                             ..Default::default()
                         },

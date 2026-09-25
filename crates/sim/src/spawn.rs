@@ -71,6 +71,8 @@ pub struct MatchBootstrap {
     pub time_limit_ms: u32,
 
     pub intermission_view: Option<AuthoredSpawnPoint>,
+
+    pub airstrike_height: Option<f32>,
 }
 
 impl Default for MatchBootstrap {
@@ -90,6 +92,7 @@ impl Default for MatchBootstrap {
             score_kill_points,
             time_limit_ms,
             intermission_view: None,
+            airstrike_height: None,
         }
     }
 }

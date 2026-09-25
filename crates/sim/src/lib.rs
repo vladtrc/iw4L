@@ -121,7 +121,7 @@ pub use match_state::{
     CLASS_CATALOG_BLING, CLASS_CATALOG_COLD_BLOODED, CLASS_CATALOG_DANGER_CLOSE,
     CLASS_CATALOG_LIGHTWEIGHT, CLASS_CATALOG_MARATHON, CLASS_CATALOG_NINJA,
     CLASS_CATALOG_SCAVENGER, CLASS_CATALOG_SCRAMBLER, CLASS_CATALOG_SLEIGHT_OF_HAND,
-    CLASS_CATALOG_STEADY_AIM, CLASS_CATALOG_STOPPING_POWER, CarePackage, ClassDef,
+    CLASS_CATALOG_STEADY_AIM, CLASS_CATALOG_STOPPING_POWER, CareFlybyPhase, CarePackage, ClassDef,
     ClassRejectReason, ClientLifecycle, ClientSnapshotMeta, ConfigurationChangeRejectReason,
     DroppedItemAmmo, EntityEventPayload, EntityEventRecord, EventAudience, EventRecord,
     GiveRejectReason, HealthRegenCensus, InputReceipt, ItemPickupRecord, KillcamHud, LoadoutSpec,

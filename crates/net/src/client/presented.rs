@@ -387,7 +387,8 @@ fn fpv_cues_from_events(
             | SimEvent::ConfigurationChangeAccepted { .. }
             | SimEvent::ConfigurationChangeRejected { .. }
             | SimEvent::ScoreChanged { .. }
-            | SimEvent::MatchEnded { .. } => {}
+            | SimEvent::MatchEnded { .. }
+            | SimEvent::WeaponSwitchRequested { .. } => {}
         }
     }
     cues.shot_accepted = fire_weapon_count_in(entity_events, subject) > 0;

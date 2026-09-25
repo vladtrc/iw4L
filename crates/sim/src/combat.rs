@@ -701,7 +701,7 @@ pub(crate) fn advance_weapon_command(
                         tick,
                         remaining_fuse_ms,
                     ) {
-                        crate::killstreaks::marker_fired(world, *id, weapon);
+                        crate::killstreaks::marker_fired(world, tick, *id, weapon);
                         if let Some(ps) = world.player(*id).copied() {
                             let origin = [
                                 ps.origin[0],

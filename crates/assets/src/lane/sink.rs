@@ -1254,7 +1254,17 @@ impl AssetLinkSink for CommonWalkSink {
         if ty == AssetType::XModel {
             if let Some(geometry) = stream.xmodel()
                 && let Some(name) = geometry.name.and_then(|p| stream.cstr(p).ok())
-                && matches!(name, "prop_flag_neutral" | "prop_suitcase_bomb")
+                && matches!(
+                    name,
+                    "prop_flag_neutral"
+                        | "prop_suitcase_bomb"
+                        | "vehicle_uav_static_mp"
+                        | "vehicle_little_bird_armed"
+                        | "com_plasticcase_friendly"
+                        | "com_plasticcase_enemy"
+                        | "vehicle_pavelow"
+                        | "vehicle_pavelow_opfor"
+                )
             {
                 let asset = crate::capture_xmodel_skel(
                     stream,

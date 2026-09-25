@@ -595,6 +595,7 @@ impl ZoneLane for Iw4Lane {
                 let intermission_view = intermission_view(&stream);
                 let minimap_corners = minimap_corners(&stream);
                 let north_yaw = worldspawn_north_yaw(&stream);
+                let airstrike_height = crate::airstrike_height(&stream);
                 let dm_spawns = dm_spawn_points(&stream);
                 push_mapents_key_census(&mut report, &stream);
                 drop(stream);
@@ -790,6 +791,7 @@ impl ZoneLane for Iw4Lane {
                     facts: crate::MapFacts {
                         minimap_corners,
                         north_yaw,
+                        airstrike_height,
                         compass,
                         script_sound,
                         ..Default::default()

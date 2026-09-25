@@ -116,11 +116,74 @@ pub const FLYBY_DISTANCE: f32 = 15_000.0;
 
 pub const FLY_HEIGHT_OVER_SITE: f32 = 850.0;
 
+pub const FLYBY_GOAL_SHORT_OF_SITE: f32 = 50.0;
+
+pub const FLYBY_START_JITTER: f32 = 100.0;
+
+pub const FLYBY_END_JITTER: f32 = 150.0;
+
 pub const FLYBY_APPROACH_MPH: f32 = 250.0;
+
+pub const FLYBY_APPROACH_ACCEL_MPH: f32 = 175.0;
 
 pub const FLYBY_SLOW_AFTER_MS: u32 = 2_000;
 
-pub const CRATE_DROP_MS: u32 = 1_000;
+pub const FLYBY_SLOW_MPH: f32 = 75.0;
+
+pub const FLYBY_SLOW_ACCEL_MPH: f32 = 40.0;
+
+pub const FLYBY_DROP_AFTER_GOAL_MS: u32 = 100;
+
+pub const FLYBY_LEAVE_MPH: f32 = 300.0;
+
+pub const FLYBY_LEAVE_ACCEL_MPH: f32 = 75.0;
+
+pub const FLYBY_YAW_ACCEL_DEG: f32 = 180.0;
+
+pub const CRATE_TAG_GROUND_OFFSET: [f32; 3] = [32.0, 0.0, 5.0];
+
+pub const LITTLE_BIRD_TAG_GROUND: [f32; 3] = [0.0, 0.0, -107.168_78];
+
+pub const LITTLE_BIRD_TAIL_ROTOR: [f32; 3] = [-188.710_14, 11.686_385, -39.676_53];
+
+pub const LITTLE_BIRD_HEALTH: i32 = 500;
+
+pub const LITTLE_BIRD_MAX_PITCH: f32 = 45.0;
+
+pub const LITTLE_BIRD_MAX_ROLL: f32 = 85.0;
+
+// littlebird_mp VehicleDef accel, units/s^2.
+pub const LITTLE_BIRD_DEF_ACCEL: f32 = 616.0;
+
+// Not read from the def: CoD4 vehicle defaults.
+pub const VEHICLE_MAX_TILT_VEL: f32 = 45.0;
+
+pub const VEHICLE_FAKE_DRAG_MPH: f32 = 60.0;
+
+pub const VEHICLE_FAKE_DRAG_ACCEL: f32 = 100.0;
+
+// Sphere stand-in for the bird's model collision.
+pub const LITTLE_BIRD_HIT_CENTER: [f32; 3] = [-50.0, 0.0, -60.0];
+
+pub const LITTLE_BIRD_HIT_RADIUS: f32 = 140.0;
+
+pub const LITTLE_BIRD_DYING_MPH: f32 = 25.0;
+
+pub const LITTLE_BIRD_DYING_ACCEL_MPH: f32 = 5.0;
+
+pub const LITTLE_BIRD_SPIN_DEG: [u32; 2] = [180, 220];
+
+pub const LITTLE_BIRD_CRASH_DELAY_MS: [u32; 2] = [500, 1_500];
+
+pub const LITTLE_BIRD_TAIL_FX: &str = "explosions/aerial_explosion";
+
+pub const LITTLE_BIRD_DEATH_FX: &str = "explosions/helicopter_explosion_cobra_low";
+
+pub const LITTLE_BIRD_CRASH_SOUND: &str = "cobra_helicopter_crash";
+
+pub const CRATE_GRAVITY: f32 = 800.0;
+
+pub const CRATE_LOST_BELOW_SITE: f32 = 3_000.0;
 
 pub const CRATE_TIMEOUT_MS: u32 = 90_000;
 

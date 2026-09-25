@@ -293,23 +293,19 @@ fn sync_killstreak_scene_models(
         .map_or(entity_iw4::TEAM_FREE, |m| m.client_state_team);
     let mut desired = Vec::new();
     for package in &snapshot.meta.care_packages {
-        let drop_at = package.ready_at_ms - gamemode_iw4::killstreaks::CRATE_DROP_MS as i32;
-        if sim::level_time_ms(snapshot.tick) < drop_at {
-            let source = sim::killstreak_model_source(sim::LITTLE_BIRD_MODEL_KIND, package.id);
-            if let Some(mover) = snapshot
-                .meta
-                .script_movers
-                .iter()
-                .find(|m| m.id.to_wire() == source)
-            {
-                desired.push((
-                    sim::LITTLE_BIRD_MODEL_KIND,
-                    package.id,
-                    gamemode_iw4::killstreaks::LITTLE_BIRD_MODEL,
-                    mover.state.tr_base,
-                ));
-            }
-            continue;
+        let source = sim::killstreak_model_source(sim::LITTLE_BIRD_MODEL_KIND, package.id);
+        if let Some(mover) = snapshot
+            .meta
+            .script_movers
+            .iter()
+            .find(|m| m.id.to_wire() == source)
+        {
+            desired.push((
+                sim::LITTLE_BIRD_MODEL_KIND,
+                package.id,
+                gamemode_iw4::killstreaks::LITTLE_BIRD_MODEL,
+                mover.state.tr_base,
+            ));
         }
         let source = sim::killstreak_model_source(sim::CRATE_MODEL_KIND, package.id);
         let Some(mover) = snapshot
@@ -523,11 +519,11 @@ fn apply_presented_script_model_dobjs(
 
 fn sample_script_mover_pose(
     runtime: &net::CEntityRuntime,
-    at_time: net::ServerTime,
+    at_time_ms: i32,
 ) -> ([f32; 3], [f32; 3]) {
     (
-        entity_iw4::bg_evaluate_trajectory(&runtime.current.pos, at_time.ms()),
-        entity_iw4::bg_evaluate_trajectory(&runtime.current.apos, at_time.ms()),
+        entity_iw4::bg_evaluate_trajectory(&runtime.current.pos, at_time_ms),
+        entity_iw4::bg_evaluate_trajectory(&runtime.current.apos, at_time_ms),
     )
 }
 
@@ -537,15 +533,24 @@ fn apply_script_mover_centity_pose(
     runtimes: Query<&net::CEntityRuntime>,
     mut owners: Query<(&WorldScriptModelInstance, &mut Transform)>,
     mut persist: ResMut<ScriptModelDobjs>,
+    cg_clock: Option<Res<net::CgFrameClock>>,
 ) {
     persist.mover_pose.clear();
     let Some(slots) = slots else {
         return;
     };
-    let Some(snapshot) = presented.as_ref().and_then(|value| value.snapshot()) else {
+    let Some(presented) = presented.as_ref() else {
         return;
     };
-    let at_time = net::ServerTime::from_tick(snapshot.tick);
+    let Some(snapshot) = presented.snapshot() else {
+        return;
+    };
+    let at_time = cg_clock
+        .as_ref()
+        .filter(|clock| clock.started())
+        .map(|clock| clock.time())
+        .unwrap_or_else(|| sim::level_time_ms(snapshot.tick));
+    let at_time = presented.trajectory_time_ms(at_time);
     for (owner, mut transform) in &mut owners {
         let mapent = owner.id.source_ordinal();
         if let Some(bomb) = snapshot

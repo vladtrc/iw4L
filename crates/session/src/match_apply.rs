@@ -555,6 +555,7 @@ pub fn apply_prepared_match(
         let spawn_count = prepared_map.spawns.len();
 
         let facts = std::mem::take(&mut prepared_map.facts);
+        let airstrike_height = facts.airstrike_height;
         stage_resource(
             &mut install,
             assets::SessionCompass {
@@ -672,6 +673,7 @@ pub fn apply_prepared_match(
                 script_linkto: String::new(),
                 script_destructable_area: String::new(),
             }),
+            airstrike_height,
             &prepared_map.spawns,
             &weapons.0,
             &combat,
@@ -1718,6 +1720,7 @@ fn install_clip_and_player(
     clip: Option<Arc<ClipCollision>>,
     authority_models: AuthorityEntityModelInstall,
     intermission_view: Option<sim::AuthoredSpawnPoint>,
+    airstrike_height: Option<f32>,
     spawns_in: &[SpawnPoint],
     weapons: &WeaponRegistry,
     combat: &[sim::WeaponCombatFacts],
@@ -1918,6 +1921,7 @@ fn install_clip_and_player(
         allow_debug_actions: true,
         host_owns_respawn: true,
         intermission_view,
+        airstrike_height,
         ..Default::default()
     }) {
         diag::info!(Sim, "bootstrap: {err}");

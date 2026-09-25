@@ -6,12 +6,14 @@ use bevy::ui::{Display, FocusPolicy};
 use hud_iw4::{
     COMPASS_ENEMY_FIRING_PING_IMAGE, COMPASS_FRIENDLY_HEIGHT_DEFAULT,
     COMPASS_FRIENDLY_WIDTH_DEFAULT, COMPASS_MAX_RANGE_DEFAULT_MP, COMPASS_PLAYER_HEIGHT_DEFAULT,
-    COMPASS_PLAYER_WIDTH_DEFAULT, COMPASS_SIZE_DEFAULT, CompassMapBounds, CompassMapUvWindow,
+    COMPASS_PLAYER_WIDTH_DEFAULT, COMPASS_RADAR_LINE_IMAGE, COMPASS_RADAR_PING_FADE_TIME_DEFAULT,
+    COMPASS_RADAR_UPDATE_TIME_DEFAULT, COMPASS_SIZE_DEFAULT, CompassMapBounds, CompassMapUvWindow,
     RADARJAM_DIST_MAX, RADARJAM_DIST_MIN, cg_compass_fade_alpha, cg_compass_friendly_size,
     cg_compass_player_size, cg_compass_sound_ping_fade, cg_compass_up_yaw_vector,
     cg_radar_jam_intensity, cg_radar_jam_nearest_distance, cg_world_pos_to_compass_partial,
     compass_clamp_offset, compass_map_bounds_from_minimap_corners, compass_partial_map_uv,
-    radar_contact_trail_visible,
+    radar_contact_trail_visible, radar_line, radar_line_texture_center_s,
+    radar_lines_surround_point,
 };
 use net::{CgFrameClock, LocalPresentClient, PresentedSnapshot, WeaponFirePingBus};
 use sim::ClientId;
@@ -29,6 +31,10 @@ const OWNER_DRAW_PLAYER: i32 = 150;
 
 const OWNER_DRAW_ENEMIES: i32 = 175;
 
+const HELI_ICON_SIZE: f32 = 40.0;
+
+const HELI_ICON_FRAME_MS: i32 = 33;
+
 #[derive(Component)]
 pub(crate) struct CompassRaster;
 
@@ -36,11 +42,13 @@ pub(crate) struct CompassRaster;
 pub(crate) struct CompassPingLatch {
     actors: HashMap<u32, PingActor>,
     last_time: Option<i32>,
-    last_radar_sweep: Option<(i32, i32)>,
+    radar_progress: f32,
+    radar_last_ms: Option<i32>,
 }
 
 struct PingActor {
     begin_fade_ms: i32,
+    fade_seconds: f32,
     last_pos: [f32; 2],
 }
 pub(crate) fn spawn_compass(root: &mut ChildSpawnerCommands) {
@@ -197,7 +205,16 @@ pub(crate) fn update_compass(
         .snapshot()
         .and_then(|s| s.meta.for_client(local.0))
         .map_or(3, |m| m.client_state_team);
-    take_radar_pings(&presented, local.0, local_team, cg_clock.time(), &mut latch);
+    let radar = take_radar_pings(
+        &presented,
+        local.0,
+        local_team,
+        cg_clock.time(),
+        drawable.bounds,
+        drawable.max_range,
+        &mut latch,
+    )
+    .map(|line| radar_line_texture_center_s(line, player_xy, drawable.max_range));
     let mut live: Vec<([f32; 2], f32)> = Vec::new();
     for (&id, actor) in &latch.actors {
         let Some(meta) = presented
@@ -212,11 +229,9 @@ pub(crate) fn update_compass(
         {
             continue;
         }
-        let Some(alpha) = cg_compass_sound_ping_fade(
-            cg_clock.time(),
-            actor.begin_fade_ms,
-            hud_iw4::COMPASS_SOUND_PING_FADE_TIME_DEFAULT,
-        ) else {
+        let Some(alpha) =
+            cg_compass_sound_ping_fade(cg_clock.time(), actor.begin_fade_ms, actor.fade_seconds)
+        else {
             continue;
         };
         let offset = cg_world_pos_to_compass_partial(
@@ -233,15 +248,12 @@ pub(crate) fn update_compass(
         &surface,
         items.map,
         items.player.zip(player_stem),
-        items.enemies,
         &drawable.image_name,
         hud_images.map_namespace(),
         uv,
         map_rotation,
         [player_w, player_h],
-        [ping_w, ping_h],
-        COMPASS_ENEMY_FIRING_PING_IMAGE,
-        &live,
+        radar,
         jam_fade,
     );
     if let Some(snapshot) = presented.snapshot() {
@@ -368,6 +380,15 @@ pub(crate) fn update_compass(
         fonts.insert(crate::font_overlay::HUD_SMALL_FONT.to_owned(), font);
         gaps.clear(HudGap::CompassObjectives);
     }
+    list.cmds.extend(enemy_ping_cmds(
+        &surface,
+        map_item,
+        items.enemies,
+        [ping_w, ping_h],
+        COMPASS_ENEMY_FIRING_PING_IMAGE,
+        &live,
+        jam_fade,
+    ));
     let (mut quads, _) = crate::draw2d::tessellate_fonts(&list, &fonts);
     if let Some(snapshot) = presented.snapshot() {
         for (id, _) in &snapshot.players {
@@ -397,6 +418,70 @@ pub(crate) fn update_compass(
                 [ping_w, ping_h],
                 ps.viewangles[1] - other.viewangles[1],
                 jam_fade,
+                "compassping_friendly_mp",
+                [0.0, 0.0, 1.0, 1.0],
+                Draw2dProvenance::OwnerDraw(158),
+            ));
+        }
+        let size = map_item.rect.h * COMPASS_SIZE_DEFAULT;
+        let frame = (cg_clock.time().max(0) / HELI_ICON_FRAME_MS) as u32 % 16;
+        let st = [
+            (frame % 8) as f32 / 8.0,
+            (frame / 8) as f32 / 2.0,
+            (frame % 8 + 1) as f32 / 8.0,
+            (frame / 8 + 1) as f32 / 2.0,
+        ];
+        let friendly = |owner: ClientId, team: i32| {
+            owner == local.0 || (snapshot.meta.kind.is_team() && team == local_team)
+        };
+        let mut helis = Vec::new();
+        for package in &snapshot.meta.care_packages {
+            let source = sim::killstreak_model_source(sim::LITTLE_BIRD_MODEL_KIND, package.id);
+            if let Some(mover) = snapshot
+                .meta
+                .script_movers
+                .iter()
+                .find(|m| m.id.to_wire() == source)
+            {
+                let material = if friendly(package.owner, package.team) {
+                    "compass_objpoint_helicopter_friendly"
+                } else {
+                    "compass_objpoint_helicopter_busy"
+                };
+                helis.push((mover.state.tr_base, mover.state.apos_tr_base[1], material));
+            }
+        }
+        for heli in &snapshot.meta.pave_lows {
+            let radial = [
+                heli.origin[0] - heli.center[0],
+                heli.origin[1] - heli.center[1],
+            ];
+            let yaw = radial[1].atan2(radial[0]).to_degrees() + 90.0;
+            let material = if friendly(heli.owner, heli.team) {
+                "compass_objpoint_pavelow_green"
+            } else {
+                "compass_objpoint_pavelow_red"
+            };
+            helis.push((heli.origin, yaw, material));
+        }
+        for (origin, yaw, material) in helis {
+            let offset = cg_world_pos_to_compass_partial(
+                north,
+                player_xy,
+                [origin[0], origin[1]],
+                size,
+                drawable.max_range,
+            );
+            quads.push(friendly_quad(
+                &surface,
+                map_item,
+                offset,
+                [HELI_ICON_SIZE * COMPASS_SIZE_DEFAULT; 2],
+                ps.viewangles[1] - yaw,
+                jam_fade,
+                material,
+                st,
+                Draw2dProvenance::Objective,
             ));
         }
     }
@@ -412,15 +497,12 @@ fn build_compass_list(
     surface: &crate::surface::Hud2dSurface,
     map: (usize, &MenuItem),
     player: Option<((usize, &MenuItem), &str)>,
-    enemies: Option<(usize, &MenuItem)>,
     map_image: &str,
     map_namespace: assets::AssetNamespace,
     uv: CompassMapUvWindow,
     rotation_deg: f32,
     player_size: [f32; 2],
-    ping_size: [f32; 2],
-    ping_image: &str,
-    pings: &[([f32; 2], f32)],
+    radar_center_s: Option<f32>,
     jam_fade: f32,
 ) -> Draw2dList {
     let (map_index, map_item) = map;
@@ -454,9 +536,34 @@ fn build_compass_list(
             scale_final_t: uv.scale_final_t,
             deg: rotation_deg,
         },
-        provenance: provenance_map,
+        provenance: provenance_map.clone(),
         layer: 1,
     });
+    if let Some(center_s) = radar_center_s {
+        cmds.push(Draw2dCmd {
+            material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+            x: applied.x,
+            y: applied.y,
+            w: applied.w,
+            h: applied.h,
+            s0: 0.0,
+            t0: 0.0,
+            s1: 1.0,
+            t1: 1.0,
+            color: map_item.fore_color,
+            material: COMPASS_RADAR_LINE_IMAGE.into(),
+            op: Draw2dOp::RotateSt {
+                center_s,
+                center_t: 0.0,
+                radius_st: 0.5 / hud_iw4::COMPASS_RADAR_LINE_THICKNESS_DEFAULT,
+                scale_final_s: 1.0,
+                scale_final_t: 1.0,
+                deg: rotation_deg,
+            },
+            provenance: provenance_map,
+            layer: 1,
+        });
+    }
     if let Some(((player_index, player_item), player_image)) = player {
         let cx = map_item.rect.x + vw * 0.5;
         let cy = map_item.rect.y + vh * 0.5;
@@ -488,6 +595,23 @@ fn build_compass_list(
             layer: 1,
         });
     }
+    Draw2dList { cmds }
+}
+
+fn enemy_ping_cmds(
+    surface: &crate::surface::Hud2dSurface,
+    map_item: &MenuItem,
+    enemies: Option<(usize, &MenuItem)>,
+    ping_size: [f32; 2],
+    ping_image: &str,
+    pings: &[([f32; 2], f32)],
+    jam_fade: f32,
+) -> Vec<Draw2dCmd> {
+    let horz = map_item.rect.horz_align as i32;
+    let vert = map_item.rect.vert_align as i32;
+    let vw = map_item.rect.w * COMPASS_SIZE_DEFAULT;
+    let vh = map_item.rect.h * COMPASS_SIZE_DEFAULT;
+    let mut cmds = Vec::new();
     let ping_prov = match enemies {
         Some((index, _)) => Draw2dProvenance::MenuItem {
             menu: MINIMAP_MENU.into(),
@@ -524,7 +648,7 @@ fn build_compass_list(
             layer: 1,
         });
     }
-    Draw2dList { cmds }
+    cmds
 }
 
 fn same_team(local: i32, other: i32) -> bool {
@@ -538,6 +662,9 @@ fn friendly_quad(
     size: [f32; 2],
     yaw: f32,
     alpha: f32,
+    material: &str,
+    st: [f32; 4],
+    provenance: Draw2dProvenance,
 ) -> crate::draw2d::Draw2dQuad {
     let map_size = [
         map.rect.w * COMPASS_SIZE_DEFAULT,
@@ -564,11 +691,16 @@ fn friendly_quad(
     });
     crate::draw2d::Draw2dQuad {
         xy,
-        st: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        st: [
+            [st[0], st[1]],
+            [st[2], st[1]],
+            [st[2], st[3]],
+            [st[0], st[3]],
+        ],
         color: [1.0, 1.0, 1.0, alpha],
-        material: "compassping_friendly_mp".to_owned(),
+        material: material.to_owned(),
         material_namespace: crate::images::HUD_CHROME_NAMESPACE,
-        provenance: Draw2dProvenance::OwnerDraw(158),
+        provenance,
         layer: 1,
         clip: None,
     }
@@ -588,16 +720,12 @@ fn take_fire_pings(
 ) -> i32 {
     if latch.last_time.is_some_and(|last| cg_time_ms < last) || presented.snapshot().is_none() {
         latch.actors.clear();
-        latch.last_radar_sweep = None;
+        latch.radar_progress = 0.0;
+        latch.radar_last_ms = None;
     }
     latch.last_time = Some(cg_time_ms);
     latch.actors.retain(|_, actor| {
-        cg_compass_sound_ping_fade(
-            cg_time_ms,
-            actor.begin_fade_ms,
-            hud_iw4::COMPASS_SOUND_PING_FADE_TIME_DEFAULT,
-        )
-        .is_some()
+        cg_compass_sound_ping_fade(cg_time_ms, actor.begin_fade_ms, actor.fade_seconds).is_some()
     });
     let n = bus.pings.len() as i32;
     for ping in bus.pings.drain(..) {
@@ -617,6 +745,7 @@ fn take_fire_pings(
             id,
             PingActor {
                 begin_fade_ms: cg_time_ms,
+                fade_seconds: hud_iw4::COMPASS_SOUND_PING_FADE_TIME_DEFAULT,
                 last_pos: ping.origin_xy,
             },
         );
@@ -624,30 +753,39 @@ fn take_fire_pings(
     n
 }
 
+/// `CG_CompassIncreaseRadarTime`: the sweep pings an enemy when it crosses them.
 fn take_radar_pings(
     presented: &PresentedSnapshot,
     local: ClientId,
     local_team: i32,
     now_ms: i32,
+    bounds: CompassMapBounds,
+    max_range: f32,
     latch: &mut CompassPingLatch,
-) {
-    let Some(snapshot) = presented.snapshot() else {
-        return;
-    };
-    let Some(local_meta) = snapshot.meta.for_client(local) else {
-        return;
-    };
-    let until = local_meta.radar_until_ms;
-    if now_ms >= until {
-        return;
+) -> Option<[f32; 3]> {
+    let snapshot = presented.snapshot()?;
+    let radar_on = snapshot
+        .meta
+        .for_client(local)
+        .is_some_and(|meta| now_ms < meta.radar_until_ms);
+    if !radar_on {
+        latch.radar_progress = 0.0;
+        latch.radar_last_ms = None;
+        return None;
     }
-    let start = until.saturating_sub(gamemode_iw4::killstreaks::UAV_DURATION_MS as i32);
-    let sweep =
-        (now_ms.saturating_sub(start) as u32 / gamemode_iw4::killstreaks::RADAR_SWEEP_MS) as i32;
-    if latch.last_radar_sweep == Some((until, sweep)) {
-        return;
+    let frametime = latch
+        .radar_last_ms
+        .map_or(0, |last| now_ms.saturating_sub(last).max(0));
+    latch.radar_last_ms = Some(now_ms);
+    let old = latch.radar_progress;
+    let new = old + frametime as f32 / (COMPASS_RADAR_UPDATE_TIME_DEFAULT * 1000.0);
+    let new = new - new.floor();
+    latch.radar_progress = new;
+    let line = radar_line(bounds, max_range, new);
+    if new < old {
+        return Some(line);
     }
-    latch.last_radar_sweep = Some((until, sweep));
+    let prev = radar_line(bounds, max_range, old);
     for (id, _) in &snapshot.players {
         if *id == local {
             continue;
@@ -661,17 +799,21 @@ fn take_radar_pings(
         let Some(ps) = presented.alive_player(*id) else {
             continue;
         };
-        if !radar_contact_trail_visible(ps.perks[0]) {
+        let pos = [ps.origin[0], ps.origin[1]];
+        if !radar_contact_trail_visible(ps.perks[0]) || !radar_lines_surround_point(prev, line, pos)
+        {
             continue;
         }
         latch.actors.insert(
             id.0,
             PingActor {
                 begin_fade_ms: now_ms,
-                last_pos: [ps.origin[0], ps.origin[1]],
+                fade_seconds: COMPASS_RADAR_PING_FADE_TIME_DEFAULT,
+                last_pos: pos,
             },
         );
     }
+    Some(line)
 }
 
 fn resolve(

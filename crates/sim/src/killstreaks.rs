@@ -1,5 +1,8 @@
 use crate::frame::FrameWorld;
-use crate::match_state::{CarePackage, ClientLifecycle, PaveLow, RemoteMissile, Uav};
+use crate::match_state::{
+    CareFlybyPhase, CarePackage, ClientLifecycle, EventAudience, PaveLow, RemoteMissile, SimEvent,
+    Uav,
+};
 use crate::world::{ClientId, Tick, inventory_add_weapon};
 use gamemode_iw4::killstreaks::{self, Killstreak};
 
@@ -145,6 +148,7 @@ pub(crate) fn sync_inventory(world: &mut FrameWorld, id: ClientId) {
 }
 
 pub(crate) fn use_selected(world: &mut FrameWorld, tick: Tick, id: ClientId) {
+    drop_spent_weapon(world, id);
     let Some(streak) = world
         .client_meta(id)
         .filter(|m| m.lifecycle == ClientLifecycle::Alive)
@@ -155,7 +159,11 @@ pub(crate) fn use_selected(world: &mut FrameWorld, tick: Tick, id: ClientId) {
     let Some(weapon) = world.weapon_index_by_script_name(streak.weapon()) else {
         return;
     };
-    if !world.player(id).is_some_and(|ps| ps.weapon == weapon) {
+    if !world.player(id).is_some_and(|ps| ps.weapon == weapon)
+        || world
+            .client_meta(id)
+            .is_some_and(|m| m.spent_streak_weapon == weapon)
+    {
         return;
     }
 
@@ -231,24 +239,22 @@ pub(crate) fn use_selected(world: &mut FrameWorld, tick: Tick, id: ClientId) {
                 world.spawn_script_mover(model_id(PAVELOW_MODEL_KIND, id_value), origin, [0.0; 3]);
         }
     }
-    consume_top(world, id, streak, weapon);
+    consume_top(world, tick, id, weapon);
 }
 
-pub(crate) fn marker_fired(world: &mut FrameWorld, id: ClientId, weapon: u32) {
+pub(crate) fn marker_fired(world: &mut FrameWorld, tick: Tick, id: ClientId, weapon: u32) {
     if world.weapon_script_name(weapon) != killstreaks::AIRDROP_MARKER_WEAPON {
         return;
     }
     if world.client_meta(id).and_then(|m| m.owned_streaks.first()) != Some(&Killstreak::Airdrop) {
         return;
     }
-    consume_top(world, id, Killstreak::Airdrop, weapon);
+    consume_top(world, tick, id, weapon);
 }
 
-fn consume_top(world: &mut FrameWorld, id: ClientId, streak: Killstreak, weapon: u32) {
+fn consume_top(world: &mut FrameWorld, tick: Tick, id: ClientId, weapon: u32) {
     world.client_meta_mut(id).owned_streaks.remove(0);
-    let still_owned = world
-        .client_meta(id)
-        .is_some_and(|m| m.owned_streaks.contains(&streak));
+    world.client_meta_mut(id).spent_streak_weapon = weapon;
     let remembered = world.client_meta(id).map_or(0, |m| m.last_combat_weapon);
     let restore = world.player(id).map_or(0, |ps| {
         if remembered != 0 && ps.weapons.contains(&(remembered as i32)) {
@@ -257,28 +263,52 @@ fn consume_top(world: &mut FrameWorld, id: ClientId, streak: Killstreak, weapon:
             ps.weapons
                 .iter()
                 .filter_map(|&w| (w > 0).then_some(w as u32))
-                .find(|&w| {
-                    let name = world.weapon_script_name(w);
-                    !name.starts_with("killstreak_") && name != killstreaks::AIRDROP_MARKER_WEAPON
-                })
+                .find(|&w| !is_streak_weapon(world, w))
                 .unwrap_or(0)
         }
     });
+    sync_inventory(world, id);
+    if restore != 0 {
+        world.push_event(
+            tick,
+            EventAudience::Client(id),
+            SimEvent::WeaponSwitchRequested { weapon: restore },
+        );
+    }
+}
+
+fn is_streak_weapon(world: &FrameWorld, weapon: u32) -> bool {
+    let name = world.weapon_script_name(weapon);
+    name.starts_with("killstreak_") || name == killstreaks::AIRDROP_MARKER_WEAPON
+}
+
+fn drop_spent_weapon(world: &mut FrameWorld, id: ClientId) {
+    let Some(spent) = world
+        .client_meta(id)
+        .map(|m| m.spent_streak_weapon)
+        .filter(|&w| w != 0)
+    else {
+        return;
+    };
+    if world.player(id).is_none_or(|ps| ps.weapon == spent) {
+        return;
+    }
+    world.client_meta_mut(id).spent_streak_weapon = 0;
+    let still_owned = world.client_meta(id).is_some_and(|m| {
+        m.owned_streaks
+            .iter()
+            .any(|streak| world.weapon_index_by_script_name(streak.weapon()) == Some(spent))
+    });
+    if still_owned {
+        return;
+    }
     if let Some(ps) = world.player_mut(id) {
-        ps.weapon = restore;
-        ps.weapon_primary = restore;
-        ps.weaponstate_primary = 0;
-        ps.weapon_time = 0;
-        ps.weapon_delay = 0;
-        if !still_owned {
-            for slot in &mut ps.weapons {
-                if *slot == weapon as i32 {
-                    *slot = 0;
-                }
+        for slot in &mut ps.weapons {
+            if *slot == spent as i32 {
+                *slot = 0;
             }
         }
     }
-    sync_inventory(world, id);
 }
 
 pub(crate) fn marker_impact(
@@ -292,32 +322,508 @@ pub(crate) fn marker_impact(
         return;
     }
     let now = crate::level_time_ms(tick);
-    let flight_ms = (killstreaks::FLYBY_DISTANCE
-        / (killstreaks::FLYBY_APPROACH_MPH * killstreaks::MPH_TO_UNITS)
-        * 1000.0) as i32
-        + killstreaks::FLYBY_SLOW_AFTER_MS as i32;
-    let ready_at_ms = now
-        .saturating_add(flight_ms)
-        .saturating_add(killstreaks::CRATE_DROP_MS as i32);
     let team = world.client_meta(owner).map_or(0, |m| m.client_state_team);
     let contents = killstreaks::crate_contents(world.combat_rng_mut().next_u32());
-    world.care_packages.push(CarePackage {
+    let drop_yaw = (world.combat_rng_mut().next_u32() % 36_000) as f32 / 100.0;
+    let height = world
+        .bootstrap_ref()
+        .airstrike_height
+        .unwrap_or(origin[2] + killstreaks::FLY_HEIGHT_OVER_SITE);
+    let path = flyby_path(world, origin, drop_yaw, height);
+    let approach_yaw = heading(path[0], path[1]);
+    let angles = [0.0, approach_yaw, 0.0];
+    let package = CarePackage {
         id,
         owner,
         team,
         origin,
+        path,
+        approach_yaw,
+        flyby: CareFlybyPhase::Approach,
+        phase_started_ms: now,
+        bird_speed: 0.0,
+        bird_velocity: [0.0; 2],
+        bird_tilt: [0.0; 4],
+        bird_health: killstreaks::LITTLE_BIRD_HEALTH,
+        bird_spin: 0.0,
+        bird_crash_ms: i32::MAX,
+        crate_slung: true,
+        crate_fall_speed: 0.0,
         contents,
-        ready_at_ms,
-        expires_at_ms: ready_at_ms.saturating_add(killstreaks::CRATE_TIMEOUT_MS as i32),
+        ready_at_ms: i32::MAX,
+        expires_at_ms: i32::MAX,
         capturer: None,
         capture_ms: 0,
-    });
+    };
+    let _ = world.spawn_script_mover(model_id(LITTLE_BIRD_MODEL_KIND, id), path[0], angles);
+    let _ = world.spawn_script_mover(
+        model_id(CRATE_MODEL_KIND, id),
+        slung_crate_origin(path[0], angles),
+        angles,
+    );
+    world.care_packages.push(package);
+}
+
+// The crate is gone but its bird is still leaving.
+const CRATE_CLAIMED: i32 = i32::MAX - 1;
+
+// Player clip caps the playable volume below the flyby height; a crate stopped by it hangs midair.
+const CRATE_FALL_MASK: u32 = crate::bullet_collision::MASK_PLAYER_SOLID & !0x0001_0000;
+
+fn yaw_forward(yaw: f32) -> [f32; 2] {
+    let (sin, cos) = yaw.to_radians().sin_cos();
+    [cos, sin]
+}
+
+fn heading(from: [f32; 3], to: [f32; 3]) -> f32 {
+    (to[1] - from[1]).atan2(to[0] - from[0]).to_degrees()
+}
+
+fn flat_dir(from: [f32; 3], to: [f32; 3]) -> [f32; 2] {
+    let d = [to[0] - from[0], to[1] - from[1]];
+    let len = d[0].hypot(d[1]);
+    if len < 1.0 {
+        [0.0; 2]
+    } else {
+        [d[0] / len, d[1] / len]
+    }
+}
+
+fn jitter(world: &mut FrameWorld, amount: f32) -> f32 {
+    ((world.combat_rng_mut().next_u32() % 20_001) as f32 / 10_000.0 - 1.0) * amount
+}
+
+fn flyby_path(world: &mut FrameWorld, site: [f32; 3], drop_yaw: f32, height: f32) -> [[f32; 3]; 3] {
+    let forward = yaw_forward(drop_yaw);
+    let side = yaw_forward(drop_yaw + 90.0);
+    let far = killstreaks::FLYBY_DISTANCE;
+    let short = killstreaks::FLYBY_GOAL_SHORT_OF_SITE;
     let start = [
-        origin[0] - killstreaks::FLYBY_DISTANCE,
-        origin[1],
-        origin[2] + killstreaks::FLY_HEIGHT_OVER_SITE,
+        site[0] - forward[0] * far + jitter(world, killstreaks::FLYBY_START_JITTER),
+        site[1] - forward[1] * far + jitter(world, killstreaks::FLYBY_START_JITTER),
+        height,
     ];
-    let _ = world.spawn_script_mover(model_id(LITTLE_BIRD_MODEL_KIND, id), start, [0.0; 3]);
+    let end = [
+        site[0] + side[0] * far + jitter(world, killstreaks::FLYBY_END_JITTER),
+        site[1] + side[1] * far + jitter(world, killstreaks::FLYBY_END_JITTER),
+        height,
+    ];
+    let goal = [
+        site[0] - forward[0] * short,
+        site[1] - forward[1] * short,
+        height,
+    ];
+    [start, goal, end]
+}
+
+fn bird_point(bird: [f32; 3], angles: [f32; 3], local: [f32; 3]) -> [f32; 3] {
+    let (forward, right, up) = math_iw4::angle_vectors(angles);
+    std::array::from_fn(|i| {
+        bird[i] + forward[i] * local[0] - right[i] * local[1] + up[i] * local[2]
+    })
+}
+
+fn slung_crate_origin(bird: [f32; 3], angles: [f32; 3]) -> [f32; 3] {
+    let tag = killstreaks::LITTLE_BIRD_TAG_GROUND;
+    let link = killstreaks::CRATE_TAG_GROUND_OFFSET;
+    bird_point(bird, angles, std::array::from_fn(|i| tag[i] + link[i]))
+}
+
+// Vehicle_SetSpeed toward a setVehGoalPos(.., 1) goal: brake at `decel` so the
+// bird reaches the goal at rest.
+fn vehicle_speed(speed: f32, max: f32, accel: f32, decel: f32, remaining: f32, dt: f32) -> f32 {
+    let target = max.min((2.0 * decel * remaining.max(0.0)).sqrt());
+    if speed < target {
+        (speed + accel * dt).min(target)
+    } else {
+        (speed - decel * dt).max(target)
+    }
+}
+
+fn yaw_turn(turn: f32, since_ms: i32) -> f32 {
+    let accel = killstreaks::FLYBY_YAW_ACCEL_DEG;
+    let size = turn.abs();
+    let half = (size / accel).sqrt();
+    let t = since_ms.max(0) as f32 / 1000.0;
+    let done = if t >= 2.0 * half {
+        size
+    } else if t < half {
+        0.5 * accel * t * t
+    } else {
+        size - 0.5 * accel * (2.0 * half - t).powi(2)
+    };
+    done.copysign(turn)
+}
+
+fn approach_value(value: f32, target: f32, step: f32) -> f32 {
+    if value < target {
+        (value + step).min(target)
+    } else {
+        (value - step).max(target)
+    }
+}
+
+fn step_tilt(angle: &mut f32, vel: &mut f32, target: f32, accel: f32, decel: f32, dt: f32) {
+    let delta = math_iw4::angle_subtract(target, *angle);
+    if delta * delta < 1.0e-4 && *vel * *vel < 0.0025 {
+        *angle = target;
+        *vel = 0.0;
+        return;
+    }
+    let speed = vel.abs();
+    let (mut goal_vel, mut rate) = (killstreaks::VEHICLE_MAX_TILT_VEL, accel);
+    if *vel * delta >= 0.0 && delta.abs() <= speed / decel * speed * 0.5 {
+        goal_vel = 0.0;
+        rate = decel;
+    }
+    if delta < 0.0 {
+        goal_vel = -goal_vel;
+    }
+    if rate * dt <= speed || speed * dt <= delta.abs() {
+        *vel = approach_value(*vel, goal_vel, rate * dt);
+        *angle = math_iw4::angle_subtract(*angle + *vel * dt, 0.0);
+    } else {
+        *angle = target;
+        *vel = 0.0;
+    }
+}
+
+fn update_tilt(
+    package: &mut CarePackage,
+    velocity: [f32; 2],
+    yaw: f32,
+    manual_accel: f32,
+    remaining: f32,
+    dt: f32,
+) {
+    let mut accel = [
+        (velocity[0] - package.bird_velocity[0]) / dt,
+        (velocity[1] - package.bird_velocity[1]) / dt,
+    ];
+    package.bird_velocity = velocity;
+    let speed = velocity[0].hypot(velocity[1]);
+    let drag_speed = killstreaks::VEHICLE_FAKE_DRAG_MPH * killstreaks::MPH_TO_UNITS;
+    if speed > 0.0 {
+        let drag =
+            (speed.min(drag_speed) / drag_speed).powi(2) * killstreaks::VEHICLE_FAKE_DRAG_ACCEL;
+        accel[0] += drag * velocity[0] / speed;
+        accel[1] += drag * velocity[1] / speed;
+    }
+    let horizontal = accel[0].hypot(accel[1]);
+    let def_accel = killstreaks::LITTLE_BIRD_DEF_ACCEL;
+    let (mut pitch, mut roll) = (0.0, 0.0);
+    let levelling = remaining < 15.0 && speed < 10.0 * killstreaks::MPH_TO_UNITS;
+    if !levelling && horizontal > 0.0 {
+        let frac = (horizontal / def_accel).min(1.0);
+        let stop_time = speed / horizontal;
+        let stopping = frac * 2.5 + (1.0 - frac) * 3.5;
+        let settle = if stop_time < stopping {
+            stop_time / stopping
+        } else {
+            1.0
+        };
+        let scale = (frac + (1.0 - frac) * 0.1) * settle;
+        let n = [accel[0] / horizontal, accel[1] / horizontal];
+        let (sin, cos) = yaw.to_radians().sin_cos();
+        pitch = killstreaks::LITTLE_BIRD_MAX_PITCH * scale * (n[0] * cos + n[1] * sin);
+        roll = killstreaks::LITTLE_BIRD_MAX_ROLL * scale * (n[0] * sin - n[1] * cos);
+    }
+    let f = (manual_accel / def_accel).clamp(0.0, 1.0);
+    let rate = f * 45.0 + (1.0 - f);
+    let [p, r, pv, rv] = &mut package.bird_tilt;
+    step_tilt(p, pv, pitch, rate, rate * 0.4, dt);
+    step_tilt(r, rv, roll, rate, rate * 0.4, dt);
+}
+
+fn advance_flyby(world: &mut FrameWorld, tick: Tick, package: &mut CarePackage, now: i32, dt: f32) {
+    let Some(number) = world.gentity_number(model_id(LITTLE_BIRD_MODEL_KIND, package.id)) else {
+        package.flyby = CareFlybyPhase::Gone;
+        return;
+    };
+    let Some((bird, angles)) = world
+        .script_mover_by_number(number)
+        .map(|mover| (mover.state.tr_base, mover.state.apos_tr_base))
+    else {
+        return;
+    };
+    let mph = killstreaks::MPH_TO_UNITS;
+    let [start, goal, end] = package.path;
+    let mut yaw = angles[1];
+    let (target, dir, max, accel) = match package.flyby {
+        CareFlybyPhase::Approach => {
+            yaw = package.approach_yaw;
+            let (max, accel) =
+                if now - package.phase_started_ms < killstreaks::FLYBY_SLOW_AFTER_MS as i32 {
+                    (
+                        killstreaks::FLYBY_APPROACH_MPH,
+                        killstreaks::FLYBY_APPROACH_ACCEL_MPH,
+                    )
+                } else {
+                    (
+                        killstreaks::FLYBY_SLOW_MPH,
+                        killstreaks::FLYBY_SLOW_ACCEL_MPH,
+                    )
+                };
+            (goal, flat_dir(start, goal), max, accel)
+        }
+        CareFlybyPhase::Hover => {
+            if now - package.phase_started_ms >= killstreaks::FLYBY_DROP_AFTER_GOAL_MS as i32 {
+                package.flyby = CareFlybyPhase::Leave;
+                package.phase_started_ms = now;
+                package.crate_slung = false;
+            }
+            (goal, [0.0; 2], 0.0, killstreaks::FLYBY_SLOW_ACCEL_MPH)
+        }
+        CareFlybyPhase::Leave => {
+            let turn = math_iw4::angle_subtract(heading(goal, end), package.approach_yaw);
+            yaw = package.approach_yaw + yaw_turn(turn, now - package.phase_started_ms);
+            (
+                end,
+                flat_dir(goal, end),
+                killstreaks::FLYBY_LEAVE_MPH,
+                killstreaks::FLYBY_LEAVE_ACCEL_MPH,
+            )
+        }
+        CareFlybyPhase::Dying => {
+            if now >= package.bird_crash_ms {
+                crash_bird(world, tick, package, bird);
+                return;
+            }
+            let spun = ((now - package.phase_started_ms) as f32 / 1000.0).min(1.0);
+            yaw += package.bird_spin * spun * dt;
+            let target = if package.crate_slung { goal } else { end };
+            (
+                target,
+                flat_dir(bird, target),
+                killstreaks::LITTLE_BIRD_DYING_MPH,
+                killstreaks::LITTLE_BIRD_DYING_ACCEL_MPH,
+            )
+        }
+        CareFlybyPhase::Gone => return,
+    };
+    let remaining = (target[0] - bird[0]) * dir[0] + (target[1] - bird[1]) * dir[1];
+    package.bird_speed = vehicle_speed(
+        package.bird_speed,
+        max * mph,
+        accel * mph,
+        accel * mph,
+        remaining,
+        dt,
+    );
+    let step = (package.bird_speed * dt).min(remaining.max(0.0));
+    let arrived = remaining - step <= 1.0;
+    if arrived && package.flyby == CareFlybyPhase::Leave {
+        remove_model(world, LITTLE_BIRD_MODEL_KIND, package.id);
+        package.flyby = CareFlybyPhase::Gone;
+        return;
+    }
+    let next = if arrived && package.flyby == CareFlybyPhase::Approach {
+        package.flyby = CareFlybyPhase::Hover;
+        package.phase_started_ms = now;
+        package.bird_speed = 0.0;
+        goal
+    } else {
+        [bird[0] + dir[0] * step, bird[1] + dir[1] * step, goal[2]]
+    };
+    let velocity = [(next[0] - bird[0]) / dt, (next[1] - bird[1]) / dt];
+    update_tilt(package, velocity, yaw, accel * mph, remaining - step, dt);
+    world.set_script_mover_pose(
+        number,
+        now,
+        next,
+        [package.bird_tilt[0], yaw, package.bird_tilt[1]],
+    );
+}
+
+fn crash_bird(world: &mut FrameWorld, tick: Tick, package: &mut CarePackage, bird: [f32; 3]) {
+    package.crate_slung = false;
+    package.flyby = CareFlybyPhase::Gone;
+    remove_model(world, LITTLE_BIRD_MODEL_KIND, package.id);
+    push_world_event(
+        world,
+        tick,
+        entity_iw4::EntityEventKind::PLAY_FX,
+        killstreaks::LITTLE_BIRD_DEATH_FX,
+        bird,
+    );
+    push_world_event(
+        world,
+        tick,
+        entity_iw4::EntityEventKind::SOUND_ALIAS,
+        killstreaks::LITTLE_BIRD_CRASH_SOUND,
+        bird,
+    );
+}
+
+fn push_world_event(
+    world: &mut FrameWorld,
+    tick: Tick,
+    kind: entity_iw4::EntityEventKind,
+    name: &str,
+    origin: [f32; 3],
+) {
+    let event_parm = if kind == entity_iw4::EntityEventKind::PLAY_FX {
+        world.effect_name_index(name)
+    } else {
+        world.sound_alias_index(name)
+    };
+    world.push_entity_event(
+        tick,
+        EventAudience::All,
+        kind,
+        crate::EntityEventPayload {
+            number: i32::from(trace_iw4::ENTITYNUM_WORLD),
+            event_parm: i32::from(event_parm),
+            origin,
+            direction: [0.0, 0.0, 1.0],
+            ..Default::default()
+        },
+    );
+}
+
+fn bird_alive(package: &CarePackage) -> bool {
+    matches!(
+        package.flyby,
+        CareFlybyPhase::Approach | CareFlybyPhase::Hover | CareFlybyPhase::Leave
+    )
+}
+
+fn bird_hit_center(world: &FrameWorld, package: &CarePackage) -> Option<[f32; 3]> {
+    let number = world.gentity_number(model_id(LITTLE_BIRD_MODEL_KIND, package.id))?;
+    let mover = world.script_mover_by_number(number)?;
+    Some(bird_point(
+        mover.state.tr_base,
+        mover.state.apos_tr_base,
+        killstreaks::LITTLE_BIRD_HIT_CENTER,
+    ))
+}
+
+// The owner may shoot their own bird; teammates may not.
+fn bird_spares(world: &FrameWorld, package: &CarePackage, attacker: ClientId) -> bool {
+    attacker != package.owner
+        && world.bootstrap_ref().kind.is_team()
+        && world
+            .client_meta(attacker)
+            .is_some_and(|m| m.client_state_team == package.team)
+}
+
+fn damage_care_bird(world: &mut FrameWorld, tick: Tick, id: u32, attacker: ClientId, damage: i32) {
+    let now = crate::level_time_ms(tick);
+    let Some(index) = world
+        .care_packages
+        .iter()
+        .position(|p| p.id == id && bird_alive(p))
+    else {
+        return;
+    };
+    world.record_damage_feedback(
+        attacker,
+        attacker,
+        gamemode_iw4::TypeHit::Standard,
+        damage,
+        now,
+    );
+    let package = &mut world.care_packages[index];
+    package.bird_health = package.bird_health.saturating_sub(damage.max(0));
+    if package.bird_health > 0 {
+        return;
+    }
+    package.flyby = CareFlybyPhase::Dying;
+    package.phase_started_ms = now;
+    let [spin_lo, spin_hi] = killstreaks::LITTLE_BIRD_SPIN_DEG;
+    let [crash_lo, crash_hi] = killstreaks::LITTLE_BIRD_CRASH_DELAY_MS;
+    let spin = spin_lo + world.combat_rng_mut().next_u32() % (spin_hi - spin_lo);
+    let crash = crash_lo + world.combat_rng_mut().next_u32() % (crash_hi - crash_lo);
+    let package = &mut world.care_packages[index];
+    package.bird_spin = spin as f32;
+    package.bird_crash_ms = now.saturating_add(crash as i32);
+    let tail = world
+        .gentity_number(model_id(LITTLE_BIRD_MODEL_KIND, id))
+        .and_then(|number| world.script_mover_by_number(number))
+        .map(|mover| {
+            bird_point(
+                mover.state.tr_base,
+                mover.state.apos_tr_base,
+                killstreaks::LITTLE_BIRD_TAIL_ROTOR,
+            )
+        });
+    if let Some(tail) = tail {
+        push_world_event(
+            world,
+            tick,
+            entity_iw4::EntityEventKind::PLAY_FX,
+            killstreaks::LITTLE_BIRD_TAIL_FX,
+            tail,
+        );
+    }
+}
+
+// Returns false once the crate fell out of the world and was deleted.
+fn advance_crate_fall(
+    world: &mut FrameWorld,
+    package: &mut CarePackage,
+    now: i32,
+    dt: f32,
+) -> bool {
+    let Some(number) = world.gentity_number(model_id(CRATE_MODEL_KIND, package.id)) else {
+        return false;
+    };
+    if package.crate_slung {
+        if let Some(bird) = world
+            .gentity_number(model_id(LITTLE_BIRD_MODEL_KIND, package.id))
+            .and_then(|bird| world.script_mover_by_number(bird))
+        {
+            let angles = bird.state.apos_tr_base;
+            world.set_script_mover_pose(
+                number,
+                now,
+                slung_crate_origin(bird.state.tr_base, angles),
+                angles,
+            );
+        }
+        return true;
+    }
+    let Some(from) = world
+        .script_mover_by_number(number)
+        .map(|mover| mover.state.tr_base)
+    else {
+        return false;
+    };
+    package.crate_fall_speed += killstreaks::CRATE_GRAVITY * dt;
+    let to = [from[0], from[1], from[2] - package.crate_fall_speed * dt];
+    let trace = world.trace_world(
+        from,
+        to,
+        [-8.0, -8.0, 0.0],
+        [8.0, 8.0, 8.0],
+        CRATE_FALL_MASK,
+    );
+    if trace.fraction < 1.0 || trace.startsolid != 0 {
+        let rest = if trace.startsolid != 0 {
+            from
+        } else {
+            trace.endpos
+        };
+        let yaw = world
+            .script_mover_by_number(number)
+            .map_or(0.0, |mover| mover.state.apos_tr_base[1]);
+        world.set_script_mover_origin(number, rest);
+        world.set_script_mover_angles(number, [0.0, yaw, 0.0]);
+        package.origin = rest;
+        package.crate_fall_speed = 0.0;
+        package.ready_at_ms = now;
+        package.expires_at_ms = now.saturating_add(killstreaks::CRATE_TIMEOUT_MS as i32);
+        return true;
+    }
+    if to[2] < package.origin[2] - killstreaks::CRATE_LOST_BELOW_SITE {
+        remove_model(world, CRATE_MODEL_KIND, package.id);
+        return false;
+    }
+    let angles = world
+        .script_mover_by_number(number)
+        .map_or([0.0; 3], |mover| mover.state.apos_tr_base);
+    world.set_script_mover_pose(number, now, to, angles);
+    true
 }
 
 pub(crate) fn advance_crates(
@@ -327,6 +833,7 @@ pub(crate) fn advance_crates(
     cmds: &[(ClientId, playerstate_iw4::UserCmd)],
 ) {
     let now = crate::level_time_ms(tick);
+    let dt = msec as f32 / 1000.0;
     let mut packages = std::mem::take(&mut world.care_packages);
     for mut package in packages.drain(..) {
         if now >= package.expires_at_ms {
@@ -334,51 +841,18 @@ pub(crate) fn advance_crates(
             remove_model(world, LITTLE_BIRD_MODEL_KIND, package.id);
             continue;
         }
-        let drop_at = package.ready_at_ms - killstreaks::CRATE_DROP_MS as i32;
-        if now < drop_at {
-            let flight_ms = (killstreaks::FLYBY_DISTANCE
-                / (killstreaks::FLYBY_APPROACH_MPH * killstreaks::MPH_TO_UNITS)
-                * 1000.0) as i32
-                + killstreaks::FLYBY_SLOW_AFTER_MS as i32;
-            let fraction =
-                ((now - (drop_at - flight_ms)) as f32 / flight_ms.max(1) as f32).clamp(0.0, 1.0);
-            let bird = [
-                package.origin[0] - killstreaks::FLYBY_DISTANCE * (1.0 - fraction),
-                package.origin[1],
-                package.origin[2] + killstreaks::FLY_HEIGHT_OVER_SITE,
-            ];
-            if let Some(number) = world.gentity_number(model_id(LITTLE_BIRD_MODEL_KIND, package.id))
-            {
-                world.set_script_mover_origin(number, bird);
+        advance_flyby(world, tick, &mut package, now, dt);
+        if package.ready_at_ms == CRATE_CLAIMED {
+            if package.flyby != CareFlybyPhase::Gone {
+                world.care_packages.push(package);
             }
-            world.care_packages.push(package);
             continue;
         }
-        remove_model(world, LITTLE_BIRD_MODEL_KIND, package.id);
-        if world
-            .gentity_number(model_id(CRATE_MODEL_KIND, package.id))
-            .is_none()
-        {
-            let _ = world.spawn_script_mover(
-                model_id(CRATE_MODEL_KIND, package.id),
-                [
-                    package.origin[0],
-                    package.origin[1],
-                    package.origin[2] + killstreaks::FLY_HEIGHT_OVER_SITE,
-                ],
-                [0.0; 3],
-            );
-        }
-        let fraction = ((now - drop_at) as f32 / killstreaks::CRATE_DROP_MS as f32).clamp(0.0, 1.0);
-        if let Some(number) = world.gentity_number(model_id(CRATE_MODEL_KIND, package.id)) {
-            world.set_script_mover_origin(
-                number,
-                [
-                    package.origin[0],
-                    package.origin[1],
-                    package.origin[2] + killstreaks::FLY_HEIGHT_OVER_SITE * (1.0 - fraction),
-                ],
-            );
+        if package.ready_at_ms == i32::MAX && !advance_crate_fall(world, &mut package, now, dt) {
+            if package.flyby != CareFlybyPhase::Gone {
+                world.care_packages.push(package);
+            }
+            continue;
         }
         if now < package.ready_at_ms {
             world.care_packages.push(package);
@@ -417,6 +891,11 @@ pub(crate) fn advance_crates(
             if package.capture_ms >= needed {
                 capture_crate(world, id, &package, now);
                 remove_model(world, CRATE_MODEL_KIND, package.id);
+                if package.flyby != CareFlybyPhase::Gone {
+                    package.ready_at_ms = CRATE_CLAIMED;
+                    package.capturer = None;
+                    world.care_packages.push(package);
+                }
                 continue;
             }
         }
@@ -481,7 +960,12 @@ pub(crate) fn advance_pave_lows(world: &mut FrameWorld, tick: Tick) {
             heli.center[2],
         ];
         if let Some(number) = world.gentity_number(model_id(PAVELOW_MODEL_KIND, heli.id)) {
-            world.set_script_mover_origin(number, heli.origin);
+            world.set_script_mover_pose(
+                number,
+                now,
+                heli.origin,
+                [0.0, angle.to_degrees() + 90.0, 0.0],
+            );
         }
         if now >= heli.next_shot_ms {
             let team_based = world.bootstrap_ref().kind.is_team();
@@ -601,14 +1085,58 @@ pub(crate) fn advance_uavs(world: &mut FrameWorld, tick: Tick) {
             uav.center[2] + 4_000.0,
         ];
         if let Some(number) = world.gentity_number(model_id(UAV_MODEL_KIND, uav.id)) {
-            world.set_script_mover_origin(number, uav.origin);
+            let angles = world
+                .script_mover_by_number(number)
+                .map_or([0.0; 3], |mover| mover.state.apos_tr_base);
+            world.set_script_mover_pose(number, now, uav.origin, angles);
         }
         world.uavs.push(uav);
     }
 }
 
-pub(crate) fn trace_pave_low_shots(world: &mut FrameWorld, shots: &[crate::combat::Emission]) {
-    if world.pave_lows.is_empty() || !world.publishes_snapshot() {
+fn shot_reaches(
+    world: &FrameWorld,
+    shot: &crate::combat::Emission,
+    center: [f32; 3],
+    radius: f32,
+) -> bool {
+    let delta: [f32; 3] = std::array::from_fn(|i| center[i] - shot.origin[i]);
+    let along = delta
+        .iter()
+        .zip(shot.direction)
+        .map(|(a, b)| a * b)
+        .sum::<f32>();
+    if !(0.0..=shot.max_range).contains(&along) {
+        return false;
+    }
+    let miss2 = delta
+        .iter()
+        .zip(shot.direction)
+        .map(|(a, b)| (a - b * along).powi(2))
+        .sum::<f32>();
+    if miss2 > radius.powi(2) {
+        return false;
+    }
+    let trace = world.sensor_trace(crate::BulletTraceQuery {
+        start: shot.origin,
+        end: center,
+        mask: crate::MASK_BULLET_WORLD,
+        ignore: Some(shot.attacker),
+        ignore_hit: None,
+    });
+    match trace {
+        crate::TraceOutcome::Miss { .. } => true,
+        crate::TraceOutcome::Hit { fraction, .. } => fraction >= 0.98,
+        _ => false,
+    }
+}
+
+pub(crate) fn trace_aircraft_shots(
+    world: &mut FrameWorld,
+    tick: Tick,
+    shots: &[crate::combat::Emission],
+) {
+    if !world.publishes_snapshot() {
         return;
     }
     for shot in shots {
@@ -620,48 +1148,27 @@ pub(crate) fn trace_pave_low_shots(world: &mut FrameWorld, shots: &[crate::comba
             {
                 continue;
             }
-            let delta = [
-                heli.origin[0] - shot.origin[0],
-                heli.origin[1] - shot.origin[1],
-                heli.origin[2] - shot.origin[2],
-            ];
-            let along = delta
-                .iter()
-                .zip(shot.direction)
-                .map(|(a, b)| a * b)
-                .sum::<f32>();
-            if !(0.0..=shot.max_range).contains(&along) {
-                continue;
-            }
-            let miss2 = delta
-                .iter()
-                .zip(shot.direction)
-                .map(|(a, b)| (a - b * along).powi(2))
-                .sum::<f32>();
-            if miss2 > 200.0_f32.powi(2) {
-                continue;
-            }
-            let trace = world.sensor_trace(crate::BulletTraceQuery {
-                start: shot.origin,
-                end: heli.origin,
-                mask: crate::MASK_BULLET_WORLD,
-                ignore: Some(shot.attacker),
-                ignore_hit: None,
-            });
-            let clear = match trace {
-                crate::TraceOutcome::Miss { .. } => true,
-                crate::TraceOutcome::Hit { fraction, .. } => fraction >= 0.98,
-                _ => false,
-            };
-            if clear {
+            if shot_reaches(world, shot, heli.origin, 200.0) {
                 damage_pave_low(world, heli.id, shot.base_damage);
+            }
+        }
+        for package in world.care_packages.clone() {
+            if !bird_alive(&package) || bird_spares(world, &package, shot.attacker) {
+                continue;
+            }
+            let Some(center) = bird_hit_center(world, &package) else {
+                continue;
+            };
+            if shot_reaches(world, shot, center, killstreaks::LITTLE_BIRD_HIT_RADIUS) {
+                damage_care_bird(world, tick, package.id, shot.attacker, shot.base_damage);
             }
         }
     }
 }
 
-pub(crate) fn blast_pave_lows(
+pub(crate) fn blast_aircraft(
     world: &mut FrameWorld,
+    tick: Tick,
     attacker: ClientId,
     origin: [f32; 3],
     radius: f32,
@@ -673,17 +1180,31 @@ pub(crate) fn blast_pave_lows(
     let team = world
         .client_meta(attacker)
         .map_or(0, |m| m.client_state_team);
+    let distance = |to: [f32; 3]| {
+        origin
+            .iter()
+            .zip(to)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f32>()
+            .sqrt()
+    };
     for heli in world.pave_lows.clone() {
         if world.bootstrap_ref().kind.is_team() && heli.team == team {
             continue;
         }
-        let dist2 = origin
-            .iter()
-            .zip(heli.origin)
-            .map(|(a, b)| (a - b) * (a - b))
-            .sum::<f32>();
-        if dist2 <= radius.powi(2) {
+        if distance(heli.origin) <= radius {
             damage_pave_low(world, heli.id, damage);
+        }
+    }
+    for package in world.care_packages.clone() {
+        if !bird_alive(&package) || bird_spares(world, &package, attacker) {
+            continue;
+        }
+        let Some(center) = bird_hit_center(world, &package) else {
+            continue;
+        };
+        if distance(center) - killstreaks::LITTLE_BIRD_HIT_RADIUS <= radius {
+            damage_care_bird(world, tick, package.id, attacker, damage);
         }
     }
 }
@@ -755,6 +1276,7 @@ fn launch_predator(world: &mut FrameWorld, tick: Tick, id: ClientId) -> bool {
         travel_distance: 0.0,
         live: true,
         stuck_pane: None,
+        grounded: false,
     });
     world.client_meta_mut(id).remote_missile = Some(RemoteMissile {
         projectile,

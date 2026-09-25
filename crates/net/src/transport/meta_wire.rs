@@ -673,6 +673,21 @@ pub fn encode_snapshot_meta_sections(
         for value in package.origin {
             out.put_f32(value);
         }
+        for value in package.path.as_flattened() {
+            out.put_f32(*value);
+        }
+        out.put_f32(package.approach_yaw);
+        out.put_u8(package.flyby.wire_tag());
+        out.put_i32(package.phase_started_ms);
+        out.put_f32(package.bird_speed);
+        for value in package.bird_velocity.iter().chain(&package.bird_tilt) {
+            out.put_f32(*value);
+        }
+        out.put_i32(package.bird_health);
+        out.put_f32(package.bird_spin);
+        out.put_i32(package.bird_crash_ms);
+        out.put_u8(u8::from(package.crate_slung));
+        out.put_f32(package.crate_fall_speed);
         out.put_u8(package.contents.wire_tag());
         out.put_i32(package.ready_at_ms);
         out.put_i32(package.expires_at_ms);
@@ -802,6 +817,30 @@ pub fn decode_snapshot_meta(
             owner: ClientId(input.get_u32()?),
             team: input.get_i32()?,
             origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+            path: {
+                let mut path = [[0.0; 3]; 3];
+                for value in path.as_flattened_mut() {
+                    *value = input.get_f32()?;
+                }
+                path
+            },
+            approach_yaw: input.get_f32()?,
+            flyby: sim::CareFlybyPhase::from_wire_tag(input.get_u8()?)
+                .ok_or(WireError::Malformed("bad care package flyby phase"))?,
+            phase_started_ms: input.get_i32()?,
+            bird_speed: input.get_f32()?,
+            bird_velocity: [input.get_f32()?, input.get_f32()?],
+            bird_tilt: [
+                input.get_f32()?,
+                input.get_f32()?,
+                input.get_f32()?,
+                input.get_f32()?,
+            ],
+            bird_health: input.get_i32()?,
+            bird_spin: input.get_f32()?,
+            bird_crash_ms: input.get_i32()?,
+            crate_slung: input.get_u8()? != 0,
+            crate_fall_speed: input.get_f32()?,
             contents: gamemode_iw4::killstreaks::CrateContents::from_wire_tag(input.get_u8()?)
                 .ok_or(WireError::Malformed("bad care package contents"))?,
             ready_at_ms: input.get_i32()?,
@@ -1686,6 +1725,10 @@ pub(crate) fn encode_event(out: &mut WireWriter, event: &SimEvent) {
             out.put_u32(life_sequence.0);
         }
         SimEvent::AttackReleased => out.put_u8(5),
+        SimEvent::WeaponSwitchRequested { weapon } => {
+            out.put_u8(18);
+            out.put_u32(weapon);
+        }
         SimEvent::Died {
             victim,
             life_sequence,
@@ -1862,6 +1905,9 @@ pub(crate) fn decode_event(input: &mut WireReader<'_>) -> Result<SimEvent, WireE
             from: input.get_u32()?,
             to: input.get_u32()?,
             reason: configuration_change_reject_reason_from_tag(input.get_u8()?)?,
+        }),
+        18 => Ok(SimEvent::WeaponSwitchRequested {
+            weapon: input.get_u32()?,
         }),
         _ => Err(WireError::Malformed("unknown SimEvent tag")),
     }

@@ -271,6 +271,10 @@ pub enum SimEvent {
     },
 
     AttackReleased,
+
+    WeaponSwitchRequested {
+        weapon: u32,
+    },
 }
 
 pub const UNRELIABLE_SIM_EVENT_COUNT: usize = 1;
@@ -349,6 +353,13 @@ pub const SIM_EVENT_ROSTER: &[SimEventRow] = &[
                        this client never sees. For the local player it is redundant with the \
                        client's own input, which is why it is the one unreliable variant",
     },
+    SimEventRow {
+        variant: "WeaponSwitchRequested",
+        reliable: true,
+        control_fact: "authority asks the client to select a weapon; the client owns weapon \
+                       selection, so a server-side switch must go through its usercmd to \
+                       play the drop and raise",
+    },
 ];
 
 pub fn sim_event_is_reliable(event: &SimEvent) -> bool {
@@ -364,6 +375,7 @@ pub fn sim_event_is_reliable(event: &SimEvent) -> bool {
         SimEvent::ScoreChanged { .. } => "ScoreChanged",
         SimEvent::MatchEnded { .. } => "MatchEnded",
         SimEvent::AttackReleased => "AttackReleased",
+        SimEvent::WeaponSwitchRequested { .. } => "WeaponSwitchRequested",
     };
     SIM_EVENT_ROSTER
         .iter()
@@ -505,11 +517,56 @@ pub struct CarePackage {
     pub owner: ClientId,
     pub team: i32,
     pub origin: [f32; 3],
+    pub path: [[f32; 3]; 3],
+    pub approach_yaw: f32,
+    pub flyby: CareFlybyPhase,
+    pub phase_started_ms: i32,
+    pub bird_speed: f32,
+    pub bird_velocity: [f32; 2],
+    // pitch, roll, pitch velocity, roll velocity
+    pub bird_tilt: [f32; 4],
+    pub bird_health: i32,
+    pub bird_spin: f32,
+    pub bird_crash_ms: i32,
+    pub crate_slung: bool,
+    pub crate_fall_speed: f32,
     pub contents: gamemode_iw4::killstreaks::CrateContents,
     pub ready_at_ms: i32,
     pub expires_at_ms: i32,
     pub capturer: Option<ClientId>,
     pub capture_ms: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CareFlybyPhase {
+    Approach,
+    Hover,
+    Leave,
+    Dying,
+    Gone,
+}
+
+impl CareFlybyPhase {
+    pub fn wire_tag(self) -> u8 {
+        match self {
+            Self::Approach => 0,
+            Self::Hover => 1,
+            Self::Leave => 2,
+            Self::Gone => 3,
+            Self::Dying => 4,
+        }
+    }
+
+    pub fn from_wire_tag(tag: u8) -> Option<Self> {
+        Some(match tag {
+            0 => Self::Approach,
+            1 => Self::Hover,
+            2 => Self::Leave,
+            3 => Self::Gone,
+            4 => Self::Dying,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -652,6 +709,8 @@ pub struct ClientMatchState {
     pub(crate) dead_since_tick: Option<u32>,
 
     pub(crate) forced_spawn: Option<crate::SpawnPick>,
+
+    pub(crate) spent_streak_weapon: u32,
 
     pub(crate) look_at_killer_yaw: i32,
 

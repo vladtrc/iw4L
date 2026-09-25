@@ -236,7 +236,66 @@ impl FrameWorld<'_> {
         let Some(mover) = self.script_mover_mut_by_number(number) else {
             return false;
         };
+        mover.state.tr_type = entity_iw4::TR_STATIONARY;
+        mover.state.tr_delta = [0.0; 3];
         mover.state.tr_base = origin;
+        true
+    }
+
+    // Clients evaluate the trajectory between snapshots; a bare base write draws as a 20 Hz step.
+    pub fn set_script_mover_pose(
+        &mut self,
+        number: i32,
+        time_ms: i32,
+        origin: [f32; 3],
+        angles: [f32; 3],
+    ) -> bool {
+        let Some(mover) = self.script_mover_mut_by_number(number) else {
+            return false;
+        };
+        let state = &mut mover.state;
+        let per_sec = 1000.0 / crate::MATCH_TICK_MS as f32;
+        let consecutive = time_ms - crate::MATCH_TICK_MS as i32;
+        let delta: [f32; 3] = if state.tr_time == consecutive {
+            core::array::from_fn(|i| (origin[i] - state.tr_base[i]) * per_sec)
+        } else {
+            [0.0; 3]
+        };
+        let apos_delta: [f32; 3] = if state.apos_tr_time == consecutive {
+            core::array::from_fn(|i| {
+                math_iw4::angle_subtract(angles[i], state.apos_tr_base[i]) * per_sec
+            })
+        } else {
+            [0.0; 3]
+        };
+        state.tr_type = if delta == [0.0; 3] {
+            entity_iw4::TR_STATIONARY
+        } else {
+            entity_iw4::TR_LINEAR
+        };
+        state.tr_time = time_ms;
+        state.tr_duration = 0;
+        state.tr_base = origin;
+        state.tr_delta = delta;
+        state.apos_tr_type = if apos_delta == [0.0; 3] {
+            entity_iw4::TR_STATIONARY
+        } else {
+            entity_iw4::TR_LINEAR
+        };
+        state.apos_tr_time = time_ms;
+        state.apos_tr_duration = 0;
+        state.apos_tr_base = angles;
+        state.apos_tr_delta = apos_delta;
+        true
+    }
+
+    pub fn set_script_mover_angles(&mut self, number: i32, angles: [f32; 3]) -> bool {
+        let Some(mover) = self.script_mover_mut_by_number(number) else {
+            return false;
+        };
+        mover.state.apos_tr_type = entity_iw4::TR_STATIONARY;
+        mover.state.apos_tr_delta = [0.0; 3];
+        mover.state.apos_tr_base = angles;
         true
     }
 

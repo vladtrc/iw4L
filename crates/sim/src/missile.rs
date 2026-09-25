@@ -101,5 +101,6 @@ fn g_fire_missile(world: &mut FrameWorld, tick: crate::Tick, shot: &AcceptedShot
         travel_distance: 0.0,
         live: true,
         stuck_pane: None,
+        grounded: false,
     });
 }
