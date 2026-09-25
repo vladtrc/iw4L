@@ -517,3 +517,6 @@ pub use asset_material::vertex_layout::{T5_WORLD_LAYER_HOST_STRIDE, VertexLayout
 pub use asset_material::{material_alpha_test, t5_smodel_camera_emits};
 
 pub mod image_handles;
+
+mod script_sources;
+pub use script_sources::ScriptSources;

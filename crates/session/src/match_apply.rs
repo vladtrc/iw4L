@@ -516,6 +516,9 @@ pub fn apply_prepared_match(
     let prepared_install = (|| -> Result<bevy::ecs::world::CommandQueue, InstallRefusal> {
         let mut install = bevy::ecs::world::CommandQueue::default();
         let MatchInstallPlan {
+            scripts,
+            script_entries,
+            script_dvars,
             kind,
             scene: loaded_scene,
             weapons,
@@ -685,6 +688,15 @@ pub fn apply_prepared_match(
             &map_use_triggers,
             &flag_descriptors,
         )?;
+        sim.install_gsc_program(scripts, sim::gsc_ir::NativeRegistry::default())
+            .map_err(|e| InstallRefusal::new(format!("GSC install: {e}")))?;
+        for (name, value) in &script_dvars {
+            sim.set_gsc_dvar(name, value);
+        }
+        for entry in script_entries {
+            sim.start_gsc(&entry, sim::gsc_ir::Value::Undefined, Vec::new())
+                .map_err(|e| InstallRefusal::new(format!("GSC entry: {e}")))?;
+        }
         sim.objectives.flag_models = objective_flags;
         sim.objectives.attackers = objective_attackers;
         let defenders = sim.objectives.defenders();
@@ -918,6 +930,9 @@ pub fn apply_prepared_match(
 /// commit half of `apply_prepared_match` has nothing to install until preflight
 /// hands one over.
 struct MatchInstallPlan {
+    scripts: sim::gsc_ir::Program,
+    script_entries: Vec<String>,
+    script_dvars: [(&'static str, String); 2],
     kind: gamemode_iw4::GameModeKind,
     scene: WorldScene,
     weapons: PreparedWeapons,
@@ -1019,6 +1034,27 @@ fn preflight_match_install(
             return Err(InstallRefusal::with_gap(gap, gap));
         }
     };
+    struct Sources(assets::ScriptSources);
+    impl sim::gsc_ir::SourceResolver for Sources {
+        fn read(&self, module: &str) -> Result<String, String> {
+            self.0
+                .read(module)
+                .map(|bytes| sim::gsc_ir::decode_source(&bytes))
+        }
+        fn read_bytes(&self, module: &str) -> Result<Vec<u8>, String> {
+            self.0.read(module)
+        }
+    }
+    let sources = Sources(std::mem::take(&mut prepared.scripts));
+    let startup = sim::gsc_ir::Iw4Startup::new(&sources, kind.token(), zone);
+    let roots: Vec<&str> = startup.roots.iter().map(String::as_str).collect();
+    let scripts = sim::gsc_ir::Program::load(&sources, &roots, &sim::gsc_ir::Catalog::iw4())
+        .map_err(|e| InstallRefusal::new(format!("GSC compilation: {e}")))?;
+    let script_dvars = [
+        ("mapname", zone.to_owned()),
+        ("g_gametype", kind.token().to_owned()),
+    ];
+    let script_entries = startup.entries;
     apply_gameobjects_main(&mut prepared.world, kind);
     let flag_descriptors = std::mem::take(&mut prepared.world.flag_descriptors);
     let map_use_triggers = std::mem::take(&mut prepared.world.map_use_triggers);
@@ -1118,6 +1154,9 @@ fn preflight_match_install(
         ));
     }
     Ok(MatchInstallPlan {
+        scripts,
+        script_entries,
+        script_dvars,
         kind,
         scene,
         weapons,

@@ -135,6 +135,7 @@ pub struct PreparedWorld {
 
 #[derive(Default, Clone)]
 pub struct PreparedMatch {
+    pub scripts: crate::ScriptSources,
     pub world: PreparedWorld,
 
     pub fx: crate::FxDefinitions,

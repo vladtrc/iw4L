@@ -5552,6 +5552,7 @@ dependencies = [
  "movement_iw4",
  "perf",
  "playerstate_iw4",
+ "sha2",
  "sound_iw4",
  "trace_iw4",
  "weapon_iw4",

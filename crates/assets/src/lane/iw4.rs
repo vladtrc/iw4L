@@ -154,6 +154,7 @@ impl ZoneLane for Iw4Lane {
         ));
 
         let compass = std::mem::take(&mut sink.compass).resolve(&materials);
+        let scripts = std::mem::take(&mut sink.scripts);
         let script_sound = std::mem::take(&mut sink.script_sound).finish();
         let exp_fog = sink.exp_fog.take();
         let createart_name = sink.createart_name.take();
@@ -401,6 +402,7 @@ impl ZoneLane for Iw4Lane {
                 arena_bytes as f64 / (1024.0 * 1024.0),
             ));
             return LoadedWorld {
+                scripts,
                 sound: map_sound,
                 materials,
                 world: PreparedWorld {
@@ -752,6 +754,7 @@ impl ZoneLane for Iw4Lane {
                 let world_bounds = draw.stats.bounds;
                 handoff.done();
                 LoadedWorld {
+                    scripts,
                     sound: map_sound,
                     materials: map_materials,
                     world: PreparedWorld {
@@ -809,6 +812,7 @@ impl ZoneLane for Iw4Lane {
                 let arena_bytes = memory.total_bytes();
                 drop(memory);
                 LoadedWorld {
+                    scripts,
                     sound: map_sound,
                     materials: crate::MaterialCatalog::default(),
                     world: PreparedWorld {
@@ -1213,6 +1217,7 @@ impl ZoneLane for Iw4Lane {
                 xmodel_walk: sink.models.walk_census(),
                 s1_common_bytes,
                 teamsets: std::collections::HashMap::new(),
+                scripts: sink.scripts,
                 film_visions: sink.film_visions,
             }
         } else {
@@ -1248,6 +1253,7 @@ impl ZoneLane for Iw4Lane {
                 xmodel_walk: sink.models.walk_census(),
                 s1_common_bytes,
                 teamsets: std::collections::HashMap::new(),
+                scripts: sink.scripts,
                 film_visions: sink.film_visions,
             }
         }

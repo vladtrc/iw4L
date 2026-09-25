@@ -63,6 +63,7 @@ pub(super) struct CommonCounts {
 
 #[derive(Clone)]
 pub(super) struct CommonProducts {
+    pub(super) scripts: crate::ScriptSources,
     pub(super) material_seed: MaterialCatalog,
     pub(super) shared_surfaces: asset_model::SharedXModelSurfaces,
     pub(super) scene_models: crate::MapXModelSceneCatalog,
@@ -409,6 +410,7 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
     let mut xmodel_walk = crate::PreparedXModelWalkCensus::default();
     let mut s1_common_bytes = 0;
     let mut teamsets = t5_teamsets;
+    let mut scripts = crate::ScriptSources::default();
     let mut common_film_visions = std::collections::BTreeMap::new();
     let mut fpv_plan = None;
     let mut iw4_census_stats = Vec::new();
@@ -443,6 +445,7 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
             s1_common_bytes = census.s1_common_bytes;
             teamsets.extend(census.teamsets);
             common_film_visions = census.film_visions;
+            scripts = census.scripts;
             iw4_census_stats = census.cac_tables;
             (
                 census.weapons,
@@ -635,6 +638,7 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
         id: NEXT_COMMON_PROFILE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         key,
         products: CommonProducts {
+            scripts,
             material_seed,
             shared_surfaces,
             scene_models: common_scene_models,

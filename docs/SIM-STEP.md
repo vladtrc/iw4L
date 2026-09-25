@@ -12,7 +12,9 @@ pub fn step(
 
 `crates/sim/src/carrier.rs`. Everything able to change the authoritative world
 enters through `TickInput` and leaves through `Snapshot`. There is no second
-door.
+door. `try_step` exposes the same path as a `Result<Snapshot, gsc_ir::Fault>`;
+`step` panics on script failure. Authority/replay require a loaded, started GSC
+program. The gameplay cutover is incomplete; see `GSC-RUNTIME.md`.
 
 ## One function, three callers
 
@@ -47,4 +49,4 @@ A human at a keyboard and a bot both arrive as entries in `TickInput.cmds`.
 reconciles the local client against one. Both live in `crates/sim/src/adopt.rs`
 and answer with an `AdoptReport`.
 
-Snapshot entity taxonomy: [`ENTITIES.md`](ENTITIES.md).
+See [`ENTITIES.md`](ENTITIES.md) for snapshots and [`GSC-RUNTIME.md`](GSC-RUNTIME.md) for script execution and migration.

@@ -13,6 +13,7 @@ mod entity_run;
 mod equipment;
 mod frame;
 mod gentity;
+pub mod gsc_ir;
 pub mod hudelem;
 pub mod identities;
 pub mod input;
@@ -66,7 +67,7 @@ pub use bullet_collision::{
     bullet_trace_segments_with_entity_models, bullet_trace_with_entity_models,
     dobj_contents_match_mask, glass_piece_from_hit, lagcomp_rewind_ticks,
 };
-pub use carrier::{SimWorld, StepReason, step};
+pub use carrier::{SimWorld, StepReason, step, try_step};
 pub use clipmap_iw4::{
     ClipCmodel, ClipLeaf, ClipNode, ClipStaticModel, XModelColl, XModelCollSurf, XModelCollTri,
 };

@@ -26,6 +26,8 @@ impl Default for SimWorld {
         let state_entity = ecs.spawn(SimState::default()).id();
         ecs.entity_mut(state_entity).insert(PayloadIndex::default());
         install_state_entity(&mut ecs, state_entity);
+        ecs.insert_resource(crate::gsc_ir::Runtime::default());
+        ecs.insert_resource(crate::gsc_ir::NativeRegistry::default());
         Self {
             ecs,
             state_entity,
@@ -47,6 +49,7 @@ impl Clone for SimWorld {
             collect_script_movers(&self.ecs),
             collect_dropped_items(&self.ecs),
         );
+        crate::gsc_ir::copy_state(&self.ecs, &mut ecs);
         Self {
             ecs,
             state_entity,
@@ -89,7 +92,13 @@ impl SimWorld {
         FrameWorld::new(&mut self.ecs, self.state_entity)
     }
 
-    fn run(&mut self, tick: Tick, input: &TickInput, msec: i32, reason: StepReason) -> Snapshot {
+    fn run(
+        &mut self,
+        tick: Tick,
+        input: &TickInput,
+        msec: i32,
+        reason: StepReason,
+    ) -> Result<Snapshot, crate::gsc_ir::Fault> {
         crate::step::run_schedule(&mut self.ecs, &mut self.schedule, tick, input, msec, reason)
     }
 
@@ -111,6 +120,37 @@ impl SimWorld {
 
     pub fn script_mover_by_id(&self, id: ScriptModelId) -> Option<ScriptMoverGentity> {
         crate::frame::script_mover_by_id(&self.ecs, id)
+    }
+
+    pub fn install_gsc_program(
+        &mut self,
+        program: crate::gsc_ir::Program,
+        natives: crate::gsc_ir::NativeRegistry,
+    ) -> Result<(), crate::gsc_ir::Fault> {
+        crate::gsc_ir::install(&mut self.ecs, program, natives)
+    }
+
+    pub fn start_gsc(
+        &mut self,
+        name: &str,
+        receiver: crate::gsc_ir::Value,
+        arguments: Vec<crate::gsc_ir::Value>,
+    ) -> Result<u64, crate::gsc_ir::Fault> {
+        crate::gsc_ir::start(&mut self.ecs, name, receiver, arguments)
+    }
+
+    pub fn set_gsc_dvar(&mut self, name: &str, value: &str) {
+        crate::gsc_ir::set_dvar(&mut self.ecs, name, value);
+    }
+
+    pub fn gsc_program_fingerprint(&self) -> Option<[u8; 32]> {
+        self.ecs
+            .resource::<crate::gsc_ir::Runtime>()
+            .program_fingerprint()
+    }
+
+    pub fn gsc_fault(&self) -> Option<&crate::gsc_ir::Fault> {
+        self.ecs.resource::<crate::gsc_ir::Runtime>().fault.as_ref()
     }
 
     pub fn spawn_script_mover(
@@ -251,6 +291,10 @@ impl SimWorld {
     }
 
     pub fn adopt_snapshot(&mut self, snapshot: &Snapshot) -> crate::AdoptReport {
+        assert!(
+            self.gsc_program_fingerprint().is_none(),
+            "snapshot lacks GSC state; restore a full SimWorld checkpoint"
+        );
         self.frame().adopt_snapshot(snapshot)
     }
 
@@ -259,11 +303,16 @@ impl SimWorld {
         snapshot: &Snapshot,
         local: ClientId,
     ) -> crate::AdoptReport {
+        assert!(
+            self.gsc_program_fingerprint().is_none(),
+            "prediction snapshots cannot restore authority GSC state"
+        );
         self.frame().adopt_prediction_snapshot(snapshot, local)
     }
 
     pub fn shutdown_game(&mut self) {
         self.frame().shutdown_game();
+        crate::gsc_ir::reset(&mut self.ecs);
     }
 
     pub fn hitvol_dump(&self) -> Vec<crate::world::HitvolDumpRow> {
@@ -308,5 +357,16 @@ pub fn step(
     msec: i32,
     reason: StepReason,
 ) -> Snapshot {
+    try_step(world, tick, input, msec, reason)
+        .unwrap_or_else(|fault| panic!("GSC execution failed: {fault}"))
+}
+
+pub fn try_step(
+    world: &mut SimWorld,
+    tick: Tick,
+    input: &TickInput,
+    msec: i32,
+    reason: StepReason,
+) -> Result<Snapshot, crate::gsc_ir::Fault> {
     world.run(tick, input, msec, reason)
 }

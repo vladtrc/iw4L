@@ -29,11 +29,11 @@ use playerstate_iw4::PlayerState;
 use playerstate_iw4::buttons;
 
 #[derive(Resource)]
-struct StepRequest {
-    tick: Tick,
+pub(crate) struct StepRequest {
+    pub(crate) tick: Tick,
     input: TickInput,
     msec: i32,
-    reason: crate::StepReason,
+    pub(crate) reason: crate::StepReason,
     output: Option<Snapshot>,
 }
 
@@ -43,13 +43,18 @@ pub(crate) fn schedule() -> Schedule {
         (
             advance_time_system,
             expire_transient_events_system,
-            apply_actions_system,
-            run_players_system,
-            record_collision_state_system,
-            run_entity_types_system,
-            dispatch_touches_system,
-            finalize_system,
-            publish_snapshot_system,
+            crate::gsc_ir::advance_scheduler,
+            (
+                apply_actions_system,
+                run_players_system,
+                record_collision_state_system,
+                run_entity_types_system,
+                dispatch_touches_system,
+                finalize_system,
+                publish_snapshot_system,
+            )
+                .chain()
+                .run_if(crate::gsc_ir::healthy),
         )
             .chain(),
     );
@@ -63,7 +68,8 @@ pub(crate) fn run_schedule(
     input: &TickInput,
     msec: i32,
     reason: crate::StepReason,
-) -> Snapshot {
+) -> Result<Snapshot, crate::gsc_ir::Fault> {
+    crate::gsc_ir::preflight(ecs, tick, reason)?;
     assert!(
         !ecs.contains_resource::<StepRequest>(),
         "simulation schedule already has a pending frame"
@@ -76,9 +82,15 @@ pub(crate) fn run_schedule(
         output: None,
     });
     schedule.run(ecs);
-    ecs.remove_resource::<StepRequest>()
-        .and_then(|request| request.output)
-        .expect("simulation schedule did not publish a snapshot")
+    let request = ecs
+        .remove_resource::<StepRequest>()
+        .expect("simulation request missing");
+    if let Some(fault) = ecs.resource::<crate::gsc_ir::Runtime>().fault.as_ref() {
+        return Err(fault.clone());
+    }
+    Ok(request
+        .output
+        .expect("simulation schedule did not publish a snapshot"))
 }
 
 fn frame_world(world: &mut World) -> FrameWorld<'_> {
@@ -757,8 +769,6 @@ fn run_players_system(ecs: &mut World) {
 
             crate::weapon_lock::update(&mut world, *id, level_time);
             let shots = advance_weapon_command(&mut world, tick, *id, cmd, delta.min(200));
-            crate::killstreaks::remember_combat_weapon(&mut world, *id);
-            crate::killstreaks::use_selected(&mut world, tick, *id);
             for shot in shots {
                 crate::missile::fire_accepted_shot(&mut world, tick, &shot);
 
@@ -869,8 +879,6 @@ fn run_entity_types_system(ecs: &mut World) {
                 apply_explode_glass_blast(&mut world, tick, explode);
             }
             phase_health_regen(&mut world, tick);
-            crate::killstreaks::advance_pave_lows(&mut world, tick);
-            crate::killstreaks::advance_uavs(&mut world, tick);
             phase_finalstand_timer(&mut world, tick);
             emit_vehicle_fx_events(&mut world, tick);
             publish_destructible_loop_sounds(&mut world);
@@ -913,19 +921,12 @@ fn dispatch_touches_system(ecs: &mut World) {
         .map(|(id, bits)| (id.0, *bits))
         .collect();
     let presses = crate::collect_use_presses(&command_buttons, &old);
-    crate::map_doors::advance(&mut world, tick, &latest_cmds);
-    crate::map_lights::advance(&mut world, tick);
-    crate::map_diggers::advance(&mut world, tick);
-    crate::map_moving_diggers::advance(&mut world, tick);
-    crate::map_conveyer::advance(&mut world);
     world.stamp_use_presses(presses.clone());
     if allow_move && world.publishes_snapshot() {
         crate::use_object::phase_use_objects(&mut world, tick, msec as u32, &presses, &cmds);
     }
-    crate::objectives::advance(&mut world, tick, &cmds);
     if allow_move && world.publishes_snapshot() {
         crate::item::phase_use_items(&mut world, tick, &presses, &cmds);
-        crate::killstreaks::advance_crates(&mut world, tick, msec, &latest_cmds);
     }
 }
 
@@ -951,8 +952,6 @@ fn finalize_system(ecs: &mut World) {
     if reason.advances_authority_world() {
         crate::voice::tick_delayed(&mut world, tick);
         crate::damage::tick_delayed_concussion(&mut world, tick);
-        crate::score::finish_recent_kills(&mut world, tick);
-        crate::score::advance_match_clock(&mut world, tick);
     }
 
     let mut old_buttons = std::mem::take(world.old_buttons_mut());

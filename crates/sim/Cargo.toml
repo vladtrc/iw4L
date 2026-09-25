@@ -7,6 +7,7 @@ description = "The funnel: UserCmd in, Snapshot out. The single simulation path 
 
 [dependencies]
 bevy_ecs.workspace = true
+sha2.workspace = true
 diag.workspace = true
 playerstate_iw4.workspace = true
 movement_iw4.workspace = true

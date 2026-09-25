@@ -154,6 +154,7 @@ use crate::{
 
 #[derive(Default)]
 pub(crate) struct ZoneWalkSink {
+    pub scripts: crate::ScriptSources,
     pub walked: usize,
 
     pub stage: Option<StageHandle>,
@@ -202,6 +203,7 @@ pub(crate) struct ZoneWalkSink {
 
 #[derive(Default)]
 pub(crate) struct CommonWalkSink {
+    pub scripts: crate::ScriptSources,
     pub scene_models: crate::MapXModelSceneCatalog,
     pub shared_surfaces: asset_model::SharedXModelSurfaces,
     script_strings: ScriptStrings,
@@ -1092,6 +1094,7 @@ impl AssetLinkSink for ZoneWalkSink {
         data: &[u8],
         zlib_compressed: bool,
     ) -> fastfile_iw4::Result<()> {
+        self.scripts.capture(name, data, zlib_compressed);
         if let Some(sound) = self.sound.as_mut() {
             sound.raw_file(name, data, zlib_compressed);
         }
@@ -1329,6 +1332,7 @@ impl AssetLinkSink for CommonWalkSink {
         data: &[u8],
         zlib_compressed: bool,
     ) -> fastfile_iw4::Result<()> {
+        self.scripts.capture(name, data, zlib_compressed);
         if let Some(sound) = self.sound.as_mut() {
             sound.raw_file(name, data, zlib_compressed);
         }

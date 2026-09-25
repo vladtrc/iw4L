@@ -55,6 +55,7 @@ pub(super) async fn walk_prepared_match(
 
     let cloning = std::time::Instant::now();
     let CommonProducts {
+        mut scripts,
         material_seed,
         shared_surfaces,
         scene_models: common_scene_models,
@@ -152,6 +153,7 @@ pub(super) async fn walk_prepared_match(
     };
 
     let LoadedWorld {
+        scripts: map_scripts,
         mut world,
         mut materials,
         collision: clip,
@@ -165,6 +167,11 @@ pub(super) async fn walk_prepared_match(
         mut report,
         gaps,
     } = loaded;
+    scripts.overlay(map_scripts);
+    report.push(format!(
+        "GSC source assets: {} (map overrides common_mp)",
+        scripts.len()
+    ));
     world
         .map_xmodel_scene_assets
         .absorb_captured(common_scene_models);
@@ -1021,6 +1028,7 @@ pub(super) async fn walk_prepared_match(
         ));
     }
     let prepared = PreparedMatch {
+        scripts,
         fx,
         world,
         materials: crate::MatchMaterials {
