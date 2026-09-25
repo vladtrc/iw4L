@@ -35,7 +35,7 @@ home, and diagnostic files sit on your disk until you attach them to a report.
 | physics | Fixed 17 ms step on its own accumulator. Framerate changes nothing about how a body falls. |
 | simulation | One `TickInput → sim::step → Snapshot` funnel for server, prediction and replay. |
 | network | Custom p2p wire over UDP: deltas, reliability, reconciliation. A QUIC master only introduces peers. |
-| platforms | Linux and a portable Windows build. |
+| platforms | Linux, macOS (Metal) and a portable Windows build. |
 
 Retail protocols, the original ABI and patched executables are out of scope.
 IW4L clients talk to IW4L clients.
@@ -58,7 +58,8 @@ writes anything back; caches, settings, demos and logs land in
 ## Build and run
 
 System packages first: [`docs/BUILD.md`](docs/BUILD.md) (Fedora / Debian /
-Arch — compiler, ALSA, udev, X11/Wayland headers).
+Arch — compiler, ALSA, udev, X11/Wayland headers; macOS — Xcode command line
+tools).
 
 ```bash
 cp .env.example .env          # IW4L_GAMES — folder containing the game trees
@@ -78,7 +79,7 @@ Implementation notes live under `docs/`, one short file per area. Start at
 
 | file | about |
 | ---- | ----- |
-| [`docs/BUILD.md`](docs/BUILD.md)         | system packages per distro, Windows cross prerequisites     |
+| [`docs/BUILD.md`](docs/BUILD.md)         | system packages per distro, macOS, Windows cross prerequisites |
 | [`docs/RUN.md`](docs/RUN.md)           | running the game, console scripts, commands and traps |
 | [`docs/PERF.md`](docs/PERF.md)         | Perfetto tracing and performance analysis             |
 | [`docs/RENDER.md`](docs/RENDER.md)     | rendering pipeline                                    |
