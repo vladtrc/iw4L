@@ -1343,6 +1343,18 @@ pub fn options(host: Host<'_>) -> Screen {
                     None,
                     "Synchronize presentation to the display refresh.",
                 ),
+                slider(
+                    "options/fov",
+                    238.0,
+                    122.0,
+                    "Field of View",
+                    settings.fov,
+                    frame::GameSettings::FOV_MIN,
+                    frame::GameSettings::FOV_MAX,
+                    1.0,
+                    crate::SettingKey::Fov,
+                    "Show more of your surroundings. Default: 65.",
+                ),
             ]);
         }
         OptionsTab::Audio => {

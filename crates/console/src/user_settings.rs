@@ -219,6 +219,7 @@ fn serialize_settings(settings: &frame::GameSettings, binds: &KeyBinds) -> Strin
         ),
         format!("fullscreen={}", settings.fullscreen),
         format!("vsync={}", settings.vsync),
+        format!("fov={:.0}", settings.fov),
         format!("master_volume={:.3}", settings.master_volume),
         format!("sensitivity={:.3}", settings.sensitivity),
         format!("invert_mouse={}", settings.invert_mouse),
@@ -267,6 +268,11 @@ fn parse_settings(source: &str, settings: &mut frame::GameSettings, binds: &mut 
             "master_volume" => {
                 if let Ok(value) = value.parse() {
                     settings.master_volume = value;
+                }
+            }
+            "fov" => {
+                if let Ok(value) = value.parse() {
+                    settings.fov = value;
                 }
             }
             "sensitivity" => {

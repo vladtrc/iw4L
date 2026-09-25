@@ -143,6 +143,7 @@ pub enum SettingKey {
     Resolution,
     Fullscreen,
     Vsync,
+    Fov,
     MasterVolume,
     Sensitivity,
     InvertMouse,
