@@ -167,7 +167,7 @@ pub(crate) fn options_widget_is_active(state: &OptionsState, id: &str) -> bool {
         OptionsDepth::SectionRows => match state.tab {
             OptionsTab::Video => matches!(
                 id,
-                "options/resolution" | "options/fullscreen" | "options/vsync"
+                "options/resolution" | "options/fullscreen" | "options/vsync" | "options/fov"
             ),
             OptionsTab::Audio => id == "options/volume",
             OptionsTab::Controls => OptionsControlGroup::from_widget_id(id).is_some(),
@@ -273,6 +273,7 @@ pub(crate) fn drive_options_navigation(
             focus.widget.as_deref(),
             Some(
                 "options/volume"
+                    | "options/fov"
                     | "options/sensitivity"
                     | "options/fullscreen"
                     | "options/vsync"
@@ -444,6 +445,12 @@ pub(crate) fn apply_option_intents(
                     }
                     (SettingKey::Vsync, SettingValue::Bool(value)) => {
                         replace(&mut settings.vsync, *value)
+                    }
+                    (SettingKey::Fov, SettingValue::Float(value)) if value.is_finite() => {
+                        let value = value
+                            .clamp(frame::GameSettings::FOV_MIN, frame::GameSettings::FOV_MAX)
+                            .round();
+                        replace(&mut settings.fov, value)
                     }
                     (SettingKey::MasterVolume, SettingValue::Float(value)) => {
                         let value = value.clamp(0.0, 1.0);

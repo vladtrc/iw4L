@@ -2,9 +2,8 @@ use assets::{PreparedWeapons, WeaponBodyFacts, WeaponKickFacts};
 use bevy::prelude::*;
 use frame::{LifeStarted, ViewSubject};
 use hud_iw4::{
-    CG_FOV_DEFAULT, CG_FOV_MIN_DEFAULT, CG_FOV_SCALE_DEFAULT, CgCalcFovInputs,
-    WeaponAdsOverlayFacts, cg_calc_fov_from_ads, cg_horizontal_to_vertical_fov_deg,
-    cg_zoom_sensitivity,
+    CG_FOV_MIN_DEFAULT, CG_FOV_SCALE_DEFAULT, CgCalcFovInputs, WeaponAdsOverlayFacts,
+    cg_calc_fov_from_ads, cg_horizontal_to_vertical_fov_deg, cg_zoom_sensitivity,
 };
 use math_iw4::{add_lean_to_position, angle_vectors};
 use net::{
@@ -240,6 +239,7 @@ pub fn sync_camera_from_presented(
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
     sim_cam: Res<SimCamera>,
+    settings: Res<frame::GameSettings>,
     mut kick: ResMut<SessionViewKick>,
     mut hurt: ResMut<PendingViewHurt>,
     weapons: Option<Res<PreparedWeapons>>,
@@ -319,6 +319,7 @@ pub fn sync_camera_from_presented(
         }
         apply_fpv_lens_fov(
             &mut lenses,
+            settings.fov,
             ps.pm_type,
             ps.link_flags,
             ps.e_flags,
@@ -439,6 +440,7 @@ pub fn sync_camera_from_presented(
     kick.last_weapon_pos_frac = ps.f_weapon_pos_frac;
     if let Some(horiz) = apply_fpv_lens_fov(
         &mut lenses,
+        settings.fov,
         ps.pm_type,
         ps.link_flags,
         ps.e_flags,
@@ -454,6 +456,7 @@ pub fn sync_camera_from_presented(
 
 fn apply_fpv_lens_fov(
     lenses: &mut Query<&mut Projection, With<FpvLens>>,
+    base_fov: f32,
     pm_type: i32,
     link_flags: u32,
     e_flags: u32,
@@ -463,9 +466,7 @@ fn apply_fpv_lens_fov(
     b_position_to_ads: bool,
     actions: Option<&mut ClientActionInput>,
 ) -> Option<f32> {
-    let Some(facts) = facts.filter(|f| f.body_resolved) else {
-        return None;
-    };
+    let facts = facts.filter(|f| f.body_resolved).unwrap_or_default();
     let overlay = WeaponAdsOverlayFacts {
         ads_zoom_in_frac: facts.ads_zoom_in_frac,
         ads_zoom_out_frac: facts.ads_zoom_out_frac,
@@ -475,10 +476,10 @@ fn apply_fpv_lens_fov(
     let ads_target = if facts.ads_zoom_fov > 0.0 {
         facts.ads_zoom_fov
     } else {
-        CG_FOV_DEFAULT
+        base_fov
     };
     let inputs = CgCalcFovInputs {
-        cg_fov: CG_FOV_DEFAULT,
+        cg_fov: base_fov,
         pm_type,
         link_flags,
         e_flags,
