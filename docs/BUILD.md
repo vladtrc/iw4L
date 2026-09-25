@@ -29,6 +29,15 @@ sudo dnf install llvm        # Fedora: provides llvm-lib
 make setup-windows           # rustup target + cargo-xwin, once
 ```
 
+macOS needs only the Xcode command line tools (`xcode-select --install`)
+and rustup: winit, wgpu (Metal), CoreAudio and gilrs link system frameworks,
+and the `x11` / `wayland` features compile to nothing. Menu and
+`make map mp_boneyard` run on Apple silicon (M2 Max, Metal). Pipelined
+rendering is off by default there (`bootstrap/src/plugins.rs` says why).
+Game data: the Windows depot of a Steam copy, `steamcmd
++@sSteamCmdForcePlatformType windows +force_install_dir ~/Games/MW2 +login
+<user> +app_update 10190 +quit`, then `IW4L_GAMES=~/Games`.
+
 Then follow `README.md` (Build and run): copy `.env.example`, set
 `IW4L_GAMES`, `make map mp_boneyard`. Portable Windows is
 [`WINDOWS.md`](WINDOWS.md).
