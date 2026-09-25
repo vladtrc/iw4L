@@ -144,6 +144,84 @@ pub(crate) fn update(
             .replace("&&1", bind);
             return Ok(Some((text, key.to_owned(), None)));
         }
+        let now_ms = snapshot.tick.0.saturating_mul(sim::MATCH_TICK_MS as u32) as i32;
+        if let Some(package) = snapshot
+            .meta
+            .care_packages
+            .iter()
+            .filter(|package| now_ms >= package.ready_at_ms && now_ms < package.expires_at_ms)
+            .filter(|package| {
+                ps.origin
+                    .iter()
+                    .zip(package.origin)
+                    .map(|(a, b)| (a - b) * (a - b))
+                    .sum::<f32>()
+                    <= gamemode_iw4::killstreaks::CRATE_USE_RADIUS.powi(2)
+            })
+            .min_by(|a, b| {
+                let distance = |package: &sim::CarePackage| {
+                    ps.origin
+                        .iter()
+                        .zip(package.origin)
+                        .map(|(a, b)| (a - b) * (a - b))
+                        .sum::<f32>()
+                };
+                distance(a).total_cmp(&distance(b))
+            })
+        {
+            let key = match package.contents {
+                gamemode_iw4::killstreaks::CrateContents::Ammo => "MP_AMMO_PICKUP",
+                gamemode_iw4::killstreaks::CrateContents::Streak(
+                    gamemode_iw4::killstreaks::Killstreak::Uav,
+                ) => "MP_UAV_PICKUP",
+                gamemode_iw4::killstreaks::CrateContents::Streak(
+                    gamemode_iw4::killstreaks::Killstreak::PredatorMissile,
+                ) => "MP_PREDATOR_MISSILE_PICKUP",
+                gamemode_iw4::killstreaks::CrateContents::Streak(
+                    gamemode_iw4::killstreaks::Killstreak::HelicopterFlares,
+                ) => "MP_HELICOPTER_FLARES_PICKUP",
+                gamemode_iw4::killstreaks::CrateContents::Streak(
+                    gamemode_iw4::killstreaks::Killstreak::Airdrop,
+                ) => "PLATFORM_GET_KILLSTREAK",
+            };
+            let localized = strings
+                .as_ref()
+                .and_then(|s| s.0.text(key))
+                .ok_or_else(|| format!("missing {key}"))?;
+            let unbound = strings
+                .as_ref()
+                .and_then(|s| s.0.text(hud_iw4::KEY_UNBOUND))
+                .ok_or_else(|| "KEY_UNBOUND localization missing".to_owned())?;
+            let hint = hud_iw4::replace_directive(localized, |cmd| {
+                if matches!(cmd, "+activate" | "+usereload") {
+                    bind.to_owned()
+                } else {
+                    hud_iw4::unbound_directive(unbound, cmd)
+                }
+            })
+            .replace("&&1", bind);
+            let (text, draw_key) = if package.capturer == Some(local.0) {
+                let capture_time = if package.owner == local.0 {
+                    gamemode_iw4::killstreaks::CRATE_OWNER_USE_MS
+                } else {
+                    gamemode_iw4::killstreaks::CRATE_OTHER_USE_MS
+                };
+                let capture_key = "MP_CAPTURING_CRATE";
+                let capture_label = strings
+                    .as_ref()
+                    .and_then(|s| s.0.text(capture_key))
+                    .ok_or_else(|| format!("missing {capture_key}"))?;
+                let progress =
+                    (package.capture_ms.clamp(0, capture_time) * 100 / capture_time.max(1)) as u32;
+                (
+                    format!("{capture_label} {progress}%"),
+                    capture_key.to_owned(),
+                )
+            } else {
+                (hint, key.to_owned())
+            };
+            return Ok(Some((text, draw_key, None)));
+        }
         if ps.cursor_hint <= 4 {
             return Ok(None);
         }
