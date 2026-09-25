@@ -433,6 +433,7 @@ impl fastfile_iw5::AssetLinkSink for ZoneWalkSink {
         bytecode: &[u8],
     ) -> fastfile_iw5::Result<()> {
         self.script_sound.capture_iw5(name, stack, bytecode);
+        self.compass.capture_iw5(name, stack);
         Ok(())
     }
 
