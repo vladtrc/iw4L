@@ -306,9 +306,8 @@ pub(crate) fn advance_weapon_command(
                 quick_reload,
             },
         ];
-        let selected_airdrop_marker = world.weapon_script_name(ps.weapon)
-            == gamemode_iw4::killstreaks::AIRDROP_MARKER_WEAPON
-            && meta.owned_streaks.first() == Some(&gamemode_iw4::killstreaks::Killstreak::Airdrop);
+        let selected_airdrop_marker =
+            world.weapon_script_name(ps.weapon) == crate::equipment::AIRDROP_MARKER_WEAPON;
         let marker_offhand_class = i32::MAX;
         let mut wcmd = WeaponCmd {
             msec,
@@ -620,7 +619,9 @@ pub(crate) fn advance_weapon_command(
                             ..Default::default()
                         },
                     );
-                    crate::voice::on_begin_firing(world, tick, *id, weapon);
+                    world
+                        .weapon_notes
+                        .push(crate::equipment::WeaponNote::Fired { owner: *id });
 
                     if let Some(ps_mut) = world.player_mut(*id) {
                         pm_add_aim_spread_fire(
@@ -667,6 +668,9 @@ pub(crate) fn advance_weapon_command(
                     });
                 }
                 WeaponTickEvent::OffhandPrepare { weapon } => {
+                    world
+                        .weapon_notes
+                        .push(crate::equipment::WeaponNote::Pullback { owner: *id, weapon });
                     if let Some(ps) = world.player_mut(*id) {
                         movement_iw4::add_predictable_event(
                             ps,
@@ -701,7 +705,6 @@ pub(crate) fn advance_weapon_command(
                         tick,
                         remaining_fuse_ms,
                     ) {
-                        crate::killstreaks::marker_fired(world, tick, *id, weapon);
                         if let Some(ps) = world.player(*id).copied() {
                             let origin = [
                                 ps.origin[0],
@@ -721,7 +724,6 @@ pub(crate) fn advance_weapon_command(
                                 },
                             );
                         }
-                        crate::voice::on_grenade_fire(world, tick, *id, weapon);
                     }
                 }
                 WeaponTickEvent::OffhandCookedOff { weapon } => {
@@ -754,7 +756,9 @@ pub(crate) fn advance_weapon_command(
                         );
                         movement_iw4::add_predictable_event(ps, event, 0);
                     }
-                    crate::voice::on_reload_start(world, tick, *id);
+                    world
+                        .weapon_notes
+                        .push(crate::equipment::WeaponNote::ReloadStarted { owner: *id });
                 }
                 WeaponTickEvent::ReloadInsert => {
                     let hand = &hands[_hand_i as usize];
@@ -1178,33 +1182,34 @@ pub(crate) fn phase_trace(
                     {
                         continue;
                     }
-                    if let Some(ColliderId::EntityDObjBone { bone, .. }) = segment.collider
-                        && crate::vehicle_glass::apply_hit(world, tick, owner, bone, scaled as u32)
-                    {
-                        continue;
-                    }
-                    if let (Some(target), Some(epoch)) = (owner.script_model(), entity_epoch) {
-                        let intent = crate::DestructibleDamageIntent {
-                            source: DamageSource::Shot(em.shot_id),
-                            pellet: em.pellet,
-                            attacker: em.attacker,
-                            attacker_life: em.attacker_life,
-                            target,
-                            amount: scaled as u32,
-                            splash: false,
-                            epoch,
+                    if let Some(target) = owner.script_model() {
+                        let bone = match segment.collider {
+                            Some(ColliderId::EntityDObjBone { bone, .. }) => {
+                                Some(usize::from(bone))
+                            }
+                            _ => None,
                         };
-                        let report = world
-                            .world_objects_mut()
-                            .apply_destructible_damage_batch(&[intent]);
-                        for explode in &report.explodes {
-                            crate::damage::apply_explosion_blast(
-                                world,
-                                tick,
-                                &crate::damage::ExplosionBlast::from_destructible(explode),
-                            );
-                            crate::damage::apply_explode_glass_blast(world, tick, explode);
-                        }
+                        let means = crate::script_player::means(
+                            world,
+                            DamageSource::Shot(em.shot_id),
+                            em.weapon,
+                            0,
+                            false,
+                        );
+                        crate::gsc_ir::damage_entity(
+                            world.ecs(),
+                            &crate::gsc_ir::EntityHit {
+                                target,
+                                amount: scaled,
+                                attacker: Some(em.attacker),
+                                means,
+                                weapon: em.weapon,
+                                point: segment.end,
+                                dir: em.direction,
+                                bone,
+                                flags: 0,
+                            },
+                        );
                     }
                 }
                 Some(ColliderId::World { .. }) => {

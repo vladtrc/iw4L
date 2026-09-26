@@ -10,6 +10,31 @@ pub const ROCKET_SPREAD_PLANE: f32 = 16.0;
 pub const HITLOC_COUNT: usize = 20;
 pub const LOCATION_DAMAGE_IDENTITY: [f32; HITLOC_COUNT] = [1.0; HITLOC_COUNT];
 
+pub const HITLOC_NAMES: [&str; HITLOC_COUNT] = [
+    "none",
+    "helmet",
+    "head",
+    "neck",
+    "torso_upper",
+    "torso_lower",
+    "right_arm_upper",
+    "left_arm_upper",
+    "right_arm_lower",
+    "left_arm_lower",
+    "right_hand",
+    "left_hand",
+    "right_leg_upper",
+    "left_leg_upper",
+    "right_leg_lower",
+    "left_leg_lower",
+    "right_foot",
+    "left_foot",
+    "gun",
+    "shield",
+];
+
+pub const WEAPCLASS_PISTOL: i32 = 5;
+
 pub fn bake_location_damage(
     weap_type: i32,
     weap_class: i32,

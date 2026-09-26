@@ -11,6 +11,7 @@ pub struct AcceptanceLaunch {
 pub enum LaunchMode {
     Menu,
     Map(String),
+    Serve(String),
     ExportGltf(String),
     Play {
         name: String,
@@ -72,7 +73,7 @@ fn parse_acceptance_flag(
     Ok((out, acceptance))
 }
 
-const USAGE: &str = "usage: iw4l [--cmds '<script>'] map <zone> | menu | play <demo>\n       iw4l export-gltf <zone>\n       iw4l --help";
+const USAGE: &str = "usage: iw4l [--cmds '<script>'] map <zone> | serve <zone> | menu | play <demo>\n       iw4l export-gltf <zone>\n       iw4l --help";
 
 pub fn parse_launch_args(mut args: impl Iterator<Item = String>) -> Result<LaunchMode, String> {
     match args.next().as_deref() {
@@ -82,6 +83,12 @@ pub fn parse_launch_args(mut args: impl Iterator<Item = String>) -> Result<Launc
                 return Err("usage: iw4l map <zone> [--cmds '<script>']".into());
             };
             Ok(LaunchMode::Map(zone))
+        }
+        Some("serve") => {
+            let Some(zone) = args.next().filter(|z| !z.is_empty()) else {
+                return Err("usage: iw4l serve <zone> [--cmds '<script>']".into());
+            };
+            Ok(LaunchMode::Serve(zone))
         }
         Some("export-gltf") => {
             let Some(zone) = args.next().filter(|zone| !zone.is_empty()) else {
@@ -100,7 +107,7 @@ pub fn parse_launch_args(mut args: impl Iterator<Item = String>) -> Result<Launc
         }
         Some("play") => parse_play_args(args),
         Some(other) => Err(format!(
-            "unknown launch args starting with `{other}` — expected: map <zone> | menu | play <demo> [--cmds '<script>'] | export-gltf <zone>"
+            "unknown launch args starting with `{other}` — expected: map <zone> | serve <zone> | menu | play <demo> [--cmds '<script>'] | export-gltf <zone>"
         )),
         None => Err(USAGE.into()),
     }

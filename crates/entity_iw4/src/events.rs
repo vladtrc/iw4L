@@ -5,6 +5,8 @@ pub const EVENT_SEQUENCE_MASK: i32 = 0x7ff;
 pub const EVENT_SEQUENCE_WRAP_WINDOW: i32 = 0x200;
 pub const EVENT_RING_LEN: i32 = 4;
 
+pub const LOCAL_SOUND_ENTITY: i32 = 0x7ff;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct EntityEventKind(pub i32);

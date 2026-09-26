@@ -44,13 +44,6 @@ pub(crate) struct RetailPaintCtx<'w> {
     frontend: Res<'w, MenuFrontend>,
     app_screen: Res<'w, frame::AppScreen>,
     identity: Option<Res<'w, frame::LaunchIdentity>>,
-    compass: Option<Res<'w, assets::SessionCompass>>,
-    presented: Option<Res<'w, net::PresentedSnapshot>>,
-    local: Option<Res<'w, net::LocalPresentClient>>,
-    team_settings: Option<Res<'w, assets::SessionTeamSettings>>,
-    class_store: Res<'w, crate::SessionClassStore>,
-    class_phase: Res<'w, crate::ClassSelectPhase>,
-    class_status: Res<'w, crate::ClassSelectStatus>,
     class_icons: Res<'w, crate::ClassSelectIconCache>,
     strings: Option<Res<'w, assets::PreparedLocalizedStrings>>,
 }
@@ -97,59 +90,8 @@ pub(crate) fn spawn_retail_shell(
     } else {
         loc
     };
-    let mut match_info = screens::InGameMenuInfo::default();
-    if in_game {
-        if let Some(identity) = paint.identity.as_deref() {
-            let key = format!(
-                "MPUI_{}",
-                identity.zone.trim_start_matches("mp_").to_uppercase()
-            );
-            match_info.map = loc.text(&key).unwrap_or(&identity.zone).to_owned();
-            let icons = paint.team_settings.as_deref().map(|icons| icons.0.clone());
-            if let (Some(icons), Some(snapshot), Some(local)) = (
-                icons,
-                paint.presented.as_deref().and_then(|p| p.snapshot()),
-                paint.local.as_deref(),
-            ) {
-                match_info.icon = snapshot.meta.for_client(local.0).and_then(|meta| {
-                    match meta.client_state_team {
-                        1 => icons.axis,
-                        2 => icons.allies,
-                        _ => None,
-                    }
-                });
-            }
-        }
-        match_info.compass = paint
-            .compass
-            .as_deref()
-            .and_then(|c| c.declaration.image.clone());
-        if let Some(snapshot) = paint.presented.as_deref().and_then(|p| p.snapshot()) {
-            match_info.mode = snapshot.meta.kind.display_name().to_owned();
-            let objective = match snapshot.meta.kind.token() {
-                "dm" => Some("OBJECTIVES_DM"),
-                "dom" => Some("OBJECTIVES_DOM"),
-                _ => None,
-            };
-            if let Some(key) = objective {
-                let key = if snapshot.meta.score_limit > 0 {
-                    format!("{key}_SCORE")
-                } else {
-                    key.to_owned()
-                };
-                match_info.description = loc
-                    .text(&key)
-                    .map(|text| text.replace("&&1", &snapshot.meta.score_limit.to_string()));
-            }
-        }
-    }
     let host = Host {
         in_game,
-        match_info: in_game.then_some(&match_info),
-        class_store: Some(&paint.class_store),
-        class_pending: paint.class_phase.is_pending(),
-        class_status: paint.class_status.0.as_deref(),
-        initial_class_select: *paint.app_screen == frame::AppScreen::ClassSelect,
         maps,
         menus: Some(catalog),
         loc: Some(loc),
@@ -630,7 +572,6 @@ fn run_screen_cmds(
                 | UiIntent::BeginPlayerNameEdit
                 | UiIntent::CommitPlayerNameEdit(_)
                 | UiIntent::CancelPlayerNameEdit
-                | UiIntent::Disconnect
                 | UiIntent::SelectClass(_),
             ) => {}
             ScreenCmd::Emit(intent) => {
@@ -715,7 +656,6 @@ pub(crate) fn handle_retail_clicks(
                 | UiIntent::CacCommitRename(_)
                 | UiIntent::CacCancelRename
                 | UiIntent::CacCancelEdit
-                | UiIntent::Disconnect
                 | UiIntent::SelectClass(_)),
             ) = cmd
             {
@@ -757,12 +697,12 @@ fn action_widget_is_active(
 
 #[derive(SystemParam)]
 pub(crate) struct MenuOccupancy<'w> {
-    enabled: ResMut<'w, MenuEnabled>,
+    enabled: Res<'w, MenuEnabled>,
     screen: Res<'w, frame::AppScreen>,
 }
 
 pub(crate) fn handle_menu_back(
-    mut occupancy: MenuOccupancy,
+    occupancy: MenuOccupancy,
     catalog: Option<Res<MenuCatalog>>,
     maps: Option<Res<MenuMapList>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -791,20 +731,9 @@ pub(crate) fn handle_menu_back(
         }
     }
     if !occupancy.enabled.0 {
-        if back && *occupancy.screen == frame::AppScreen::InGame {
-            stack.names.push("ingame_options".into());
-            occupancy.enabled.0 = true;
-            focus.widget = Some("ingame_options/choose_class".into());
-        }
         return;
     }
     if *occupancy.screen == frame::AppScreen::ClassSelect {
-        return;
-    }
-    if back && stack.names.last().map(String::as_str) == Some("ingame_options") {
-        stack.names.pop();
-        occupancy.enabled.0 = false;
-        focus.widget = None;
         return;
     }
     let class_left = left

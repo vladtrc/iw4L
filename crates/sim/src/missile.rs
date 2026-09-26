@@ -26,7 +26,9 @@ pub(crate) fn fire_accepted_shot(world: &mut FrameWorld, tick: crate::Tick, shot
                 GrenadeLaunchKind::Launcher,
             );
         }
-        Some(FireWeaponKind::Missile) => g_fire_missile(world, tick, shot),
+        Some(FireWeaponKind::Missile) => {
+            g_fire_missile(world, tick, shot);
+        }
         Some(FireWeaponKind::ThrownGrenade) => {
             spawn_grenade_projectile(
                 world,
@@ -45,7 +47,79 @@ pub(crate) fn fire_accepted_shot(world: &mut FrameWorld, tick: crate::Tick, shot
     }
 }
 
-fn g_fire_missile(world: &mut FrameWorld, tick: crate::Tick, shot: &AcceptedShot) {
+pub(crate) fn magic_bullet(
+    world: &mut FrameWorld,
+    tick: crate::Tick,
+    owner: crate::ClientId,
+    weapon: u32,
+    start: [f32; 3],
+    end: [f32; 3],
+) -> Result<ProjectileState, String> {
+    let combat = world
+        .combat_facts_for(weapon)
+        .ok_or_else(|| format!("weapon {weapon} has no combat facts"))?;
+    let attacker_life = world
+        .client_meta(owner)
+        .ok_or("MagicBullet owner is not connected")?
+        .life_sequence;
+    let shot = AcceptedShot {
+        shot_id: crate::ShotId(0),
+        attacker: owner,
+        attacker_life,
+        hand: 0,
+        weapon,
+        ammo_used: 0,
+        origin: start,
+        angles: math_iw4::vect_to_angles(std::array::from_fn(|i| end[i] - start[i])),
+        ads_frac: 1.0,
+        view_height_current: 0.0,
+        aim_spread_scale: 0.0,
+        perks0: 0,
+        combat_seed: 0,
+        owner_velocity: [0.0; 3],
+        spread_degrees: 0.0,
+    };
+    let launched = match fire_weapon_kind(combat.weap_type, combat.weap_class) {
+        Some(FireWeaponKind::Missile) => Some(g_fire_missile(world, tick, &shot)),
+        Some(kind @ (FireWeaponKind::GrenadeLauncher | FireWeaponKind::ThrownGrenade)) => {
+            let launch = if kind == FireWeaponKind::GrenadeLauncher {
+                GrenadeLaunchKind::Launcher
+            } else {
+                GrenadeLaunchKind::Thrown {
+                    remaining_fuse_ms: None,
+                }
+            };
+            spawn_grenade_projectile(
+                world,
+                owner,
+                weapon,
+                tick,
+                start,
+                shot.angles,
+                [0.0; 3],
+                launch,
+            )
+            .then(|| {
+                let now = crate::level_time_ms(tick);
+                crate::frame::collect_projectiles(world.ecs())
+                    .into_iter()
+                    .filter(|p| p.owner == owner && p.weapon == weapon && p.spawn_time_ms == now)
+                    .max_by_key(|p| p.id.0)
+            })
+            .flatten()
+        }
+        Some(FireWeaponKind::Bullet) | None => {
+            return Err("MagicBullet bullets are not simulated".into());
+        }
+    };
+    launched.ok_or_else(|| format!("weapon {weapon} launched no projectile"))
+}
+
+fn g_fire_missile(
+    world: &mut FrameWorld,
+    tick: crate::Tick,
+    shot: &AcceptedShot,
+) -> ProjectileState {
     let Some(facts) = world.missile_launch_facts(shot.weapon) else {
         panic!(
             "G_FireMissile needs iProjectileSpeed@+0x404 on the equipment row; RPG is not an offhand"
@@ -84,7 +158,7 @@ fn g_fire_missile(world: &mut FrameWorld, tick: crate::Tick, shot: &AcceptedShot
         tr_base: shot.origin,
     };
     perf::projectile(shot.weapon);
-    world.push_projectile(ProjectileState {
+    let projectile = ProjectileState {
         id,
         owner: shot.attacker,
         owner_life: shot.attacker_life,
@@ -102,5 +176,7 @@ fn g_fire_missile(world: &mut FrameWorld, tick: crate::Tick, shot: &AcceptedShot
         live: true,
         stuck_pane: None,
         grounded: false,
-    });
+    };
+    world.push_projectile(projectile);
+    projectile
 }

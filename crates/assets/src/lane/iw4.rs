@@ -154,7 +154,10 @@ impl ZoneLane for Iw4Lane {
         ));
 
         let compass = std::mem::take(&mut sink.compass).resolve(&materials);
-        let scripts = std::mem::take(&mut sink.scripts);
+        let mut scripts = std::mem::take(&mut sink.scripts);
+        if let Some(entities) = map_ents_entity_string(&stream) {
+            scripts.set_entities(entities.to_owned());
+        }
         let script_sound = std::mem::take(&mut sink.script_sound).finish();
         let exp_fog = sink.exp_fog.take();
         let createart_name = sink.createart_name.take();
@@ -293,6 +296,12 @@ impl ZoneLane for Iw4Lane {
                             &sink.xmodel_coll,
                             &mut clip,
                         );
+                        clip.trigger_models = asset_world::trigger_models(&stream);
+                        clip_report.push(format!(
+                            "trigger models: {} ({} with hulls)",
+                            clip.trigger_models.len(),
+                            clip.trigger_models.iter().filter(|h| !h.is_empty()).count()
+                        ));
                         clip_report.push(format!(
                     "clipmap: planes={} brushes={} leaves={} nodes={} cmodels={} verts={} tris={} smodels={}",
                     geometry.plane_count,
@@ -508,7 +517,6 @@ impl ZoneLane for Iw4Lane {
                     scene_assets: map_xmodel_scene_assets,
                     script_instances: script_model_instances,
                     script_brush_models,
-                    map_use_triggers,
                     flag_descriptors,
                     script_structs,
                     ..
@@ -765,7 +773,6 @@ impl ZoneLane for Iw4Lane {
                         map_xmodel_scene_assets,
                         script_model_instances,
                         script_brush_models,
-                        map_use_triggers,
                         flag_descriptors,
                         script_structs,
                         dyn_ents,
@@ -1332,6 +1339,7 @@ impl ZoneLane for Iw4Lane {
             materials: sink.materials,
             report,
             cac_tables: sink.stats_tables.into_values().collect(),
+            scripts: sink.scripts,
         }
     }
 }

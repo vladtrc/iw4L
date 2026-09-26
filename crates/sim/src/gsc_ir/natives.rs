@@ -16,7 +16,6 @@ pub enum Owner {
     PlayerCommand,
     Helicopter,
     Vehicle,
-    Probe,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,33 +41,41 @@ impl Builtin {
     }
 }
 
-/// The builtin names a program may link against. Linking is decided by the catalog;
-/// binding an implementation happens at install.
 #[derive(Clone, Debug)]
-pub struct Catalog(BTreeMap<Namespace, BTreeMap<&'static str, Builtin>>);
+pub struct Catalog {
+    realm: super::Realm,
+    names: BTreeMap<Namespace, BTreeMap<&'static str, Builtin>>,
+}
 impl Catalog {
     pub fn iw4() -> Self {
-        let mut catalog = Self(BTreeMap::new());
-        for builtin in super::iw4_builtins::IW4 {
+        Self::from_list(super::Realm::Iw4, super::iw4_builtins::IW4)
+    }
+    pub fn t5() -> Self {
+        Self::from_list(super::Realm::T5, super::t5_builtins::T5)
+    }
+    fn from_list(realm: super::Realm, list: &[Builtin]) -> Self {
+        let mut catalog = Self {
+            realm,
+            names: BTreeMap::new(),
+        };
+        for builtin in list {
             catalog.insert(builtin.clone());
         }
         catalog
     }
+    pub fn realm(&self) -> super::Realm {
+        self.realm
+    }
     fn insert(&mut self, builtin: Builtin) {
-        self.0
+        self.names
             .entry(builtin.namespace)
             .or_default()
             .insert(builtin.name, builtin);
     }
-    /// Adds a name outside the engine ABI; for probes only.
-    pub fn with(mut self, namespace: Namespace, name: &'static str) -> Self {
-        self.insert(Builtin::new(namespace, name, Owner::Probe, false));
-        self
-    }
     pub fn get(&self, namespace: Namespace, name: &str) -> Option<&Builtin> {
-        self.0.get(&namespace)?.get(name)
+        self.names.get(&namespace)?.get(name)
     }
     pub fn iter(&self) -> impl Iterator<Item = &Builtin> {
-        self.0.values().flat_map(BTreeMap::values)
+        self.names.values().flat_map(BTreeMap::values)
     }
 }

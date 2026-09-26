@@ -112,6 +112,7 @@ pub fn sync_class_change_allowed(
             ClientLifecycle::Alive
             | ClientLifecycle::Dead
             | ClientLifecycle::ChoosingClass
+            | ClientLifecycle::Spectating
             | ClientLifecycle::Connecting => (true, None),
             other => (
                 false,

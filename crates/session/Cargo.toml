@@ -17,6 +17,7 @@ render_frontend.workspace = true
 render_fx.workspace = true
 sim.workspace = true
 gamemode_iw4.workspace = true
+hud_iw4.workspace = true
 bots.workspace = true
 perf.workspace = true
 

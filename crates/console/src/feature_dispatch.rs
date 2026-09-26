@@ -10,7 +10,7 @@ use bots::{
     BotTpWhere,
 };
 use frame::{HasWorld, LaunchIdentity, RuntimeRole};
-use hud::{PendingHitmarker, PendingSplash};
+use hud::PendingSplash;
 use net::{
     AuthorityClock, AuthorityInputGate, AuthorityWorld, ClientActionInbox, MasterBridge,
     MasterBridgeState, PresentedSnapshot,
@@ -391,6 +391,7 @@ pub(crate) fn route_ui_commands(
         Option<Res<AuthorityClock>>,
         Option<Res<PresentedSnapshot>>,
     ),
+    mut menu_requests: MessageWriter<frame::UiMenuRequest>,
 ) {
     let (console, settings, line) = &mut output;
     let capacity = settings.log_capacity;
@@ -418,6 +419,35 @@ pub(crate) fn route_ui_commands(
                 }
                 _ => echo("usage: ui [0|1]".into(), console, line),
             },
+
+            "togglemenu" => {
+                menu_requests.write(frame::UiMenuRequest::Toggle);
+            }
+            "openmenu" | "closemenu" => match cmd.args.as_slice() {
+                [name] => {
+                    menu_requests.write(if cmd.name == "openmenu" {
+                        frame::UiMenuRequest::Open(name.clone())
+                    } else {
+                        frame::UiMenuRequest::Close(name.clone())
+                    });
+                }
+                _ => echo(format!("usage: {} <menu>", cmd.name), console, line),
+            },
+            "menukey" => {
+                let key = match cmd.args.first().map(|a| a.to_ascii_lowercase()).as_deref() {
+                    Some("escape") => Some(frame::UiMenuKey::Escape),
+                    Some("enter") => Some(frame::UiMenuKey::Enter),
+                    Some("up") => Some(frame::UiMenuKey::Up),
+                    Some("down") => Some(frame::UiMenuKey::Down),
+                    _ => None,
+                };
+                match key {
+                    Some(key) => {
+                        menu_requests.write(frame::UiMenuRequest::Key(key));
+                    }
+                    None => echo("usage: menukey escape|enter|up|down".into(), console, line),
+                }
+            }
 
             "menu" => match parse_menu_args(&cmd.args) {
                 Err(msg) => echo(msg, console, line),
@@ -826,11 +856,7 @@ pub(crate) fn route_debug_feature_commands(
         ResMut<net::ActionRequestIds>,
         Option<Res<BotRoster>>,
     ),
-    (mut hurt, mut hitmarker, mut pending_splash): (
-        ResMut<PendingViewHurt>,
-        ResMut<PendingHitmarker>,
-        ResMut<PendingSplash>,
-    ),
+    (mut hurt, mut pending_splash): (ResMut<PendingViewHurt>, ResMut<PendingSplash>),
 ) {
     let (console, settings, line) = &mut output;
     let capacity = settings.log_capacity;
@@ -916,14 +942,6 @@ pub(crate) fn route_debug_feature_commands(
                 hurt.0 = hurt.0.saturating_add(1);
                 echo(
                     "hurt: queued undirected view punch (255/255 count=1)".into(),
-                    console,
-                    line,
-                );
-            }
-            "hitmarker" => {
-                hitmarker.0 = hitmarker.0.saturating_add(1);
-                echo(
-                    "hitmarker: queued attacker X (updateDamageFeedback standard)".into(),
                     console,
                     line,
                 );
@@ -1335,6 +1353,19 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         ),
         ("ui", "ui [0|1] — hide/show game UI; console Overlay stays"),
         (
+            "togglemenu",
+            "togglemenu — open the script main menu (g_scriptMainMenu), or escape the top menu",
+        ),
+        ("openmenu", "openmenu <menu> — open an in-game menuDef"),
+        (
+            "closemenu",
+            "closemenu <menu> — close an open in-game menuDef",
+        ),
+        (
+            "menukey",
+            "menukey escape|enter|up|down — a key to the top in-game menu (not a retail command string)",
+        ),
+        (
             "dump",
             "dump [name] - atomically write the current authority + presented state to iw4l-artifacts/dumps/<timestamp>-<name>.txt (one shot; no history or timing)",
         ),
@@ -1353,10 +1384,6 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         (
             "hurt",
             "hurt — stamp one undirected CG_DamageFeedback punch (listen-host experiment)",
-        ),
-        (
-            "hitmarker",
-            "hitmarker — stamp one attacker X (_damagefeedback standard, listen-host experiment)",
         ),
         (
             "splash",

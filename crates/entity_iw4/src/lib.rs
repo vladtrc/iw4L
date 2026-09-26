@@ -31,8 +31,8 @@ pub use corpse_info::{CORPSE_INFO_LIVE_INFO_AT, CORPSE_INFO_TREE_REWRITE_AT, Cor
 pub use entity_state::EntityState;
 pub use events::{
     ET_EVENTS, EVENT_RING_LEN, EVENT_SEQUENCE_MASK, EVENT_SEQUENCE_WRAP_WINDOW, EntityEventAction,
-    EntityEventFact, EntityEventKind, SequencedEntityEvent, UnsupportedEntityEvent,
-    add_entity_event, bg_bullet_hit_event, bg_is_left_hand_fire_event,
+    EntityEventFact, EntityEventKind, LOCAL_SOUND_ENTITY, SequencedEntityEvent,
+    UnsupportedEntityEvent, add_entity_event, bg_bullet_hit_event, bg_is_left_hand_fire_event,
     bg_is_weapon_fire_last_shot_event, cg_entity_event_action, cg_packet_entity_uses_event_ring,
     cg_predicted_weapon_fire_event, consume_entity_events,
 };

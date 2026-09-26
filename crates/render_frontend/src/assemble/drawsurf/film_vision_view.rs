@@ -213,8 +213,7 @@ fn intro_stage(phase: sim::MatchPhase, prematch: gamemode_iw4::PrematchStep) -> 
     }
     match prematch {
         gamemode_iw4::PrematchStep::Starting { elapsed_ms } => {
-            let return_at = gamemode_iw4::MATCH_START_MS.saturating_sub(2000)
-                + gamemode_iw4::MATCH_START_PULSE_IN_MS as u32;
+            let return_at = gamemode_iw4::MATCH_START_MS.saturating_sub(2000) + 100;
             if elapsed_ms >= return_at {
                 (
                     IntroStage::Returning,

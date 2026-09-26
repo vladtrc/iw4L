@@ -7,29 +7,14 @@ use std::sync::Arc;
 use crate::authority::inbox::{AuthorityClock, ClientActionInbox, ClientCommandInbox};
 use crate::client::predict::CmdSeq;
 use crate::client::presented::LocalPresentClient;
-use crate::gaps::{NetGapCause, NetIdentityGaps, ScriptNotify};
+use crate::gaps::NetIdentityGaps;
 use crate::policy::seat::ActiveKillcams;
 use crate::role::RuntimeRole;
 use crate::schedule::{AuthoritySet, ClientSet};
 use crate::transport::archive::FrameArchive;
 use crate::transport::loopback_live::ListenLoopback;
-use frame::{
-    AbortKillcam, BeginKillcam, ExitLevelCalled, GameEnded, GameWin, GameWinner, GlassDestroyed,
-    KillcamEnded, MatchEndingReason, MatchEndingSoon, MatchEndingVerySoon, MatchTornDown,
-    PrematchDone, RoundSwitchKind, RoundSwitchNotify, RoundWin, SpawnedPlayer, SpawnedPlayerNotify,
-    SpawningIntermission, register_script_notify,
-};
-use gamemode_iw4::end_game::EndGameTailOutput;
-use gamemode_iw4::sound_emit::{MatchEndingReason as GscEndingReason, MatchSoundEmit};
-use sim::{ClientAction, ClientId, ClientLifecycle, DamageSource, SimEvent};
-
-use crate::policy::killcam::{
-    ActiveKillcamSkips, PendingDeathTimelines, ScriptKillcamEmitStats,
-    abort_killcam_on_use_copycat, emit_spawned_player, end_ordinary_killcams_on_game_ended,
-    expire_with_notify, spawned_clients_from_journal, start_round_end_wait_from_journal,
-    start_timelines_from_deaths, tick_death_timelines, tick_final_killcam, tick_phase_b_skips,
-    tick_round_end_wait, watch_nothing_to_show,
-};
+use frame::{ExitLevelCalled, GameEnded, MatchTornDown, register_script_notify};
+use sim::{ClientId, ClientLifecycle, DamageSource, SimEvent};
 
 #[derive(Resource)]
 pub struct AuthorityWorld(pub sim::SimWorld);
@@ -76,6 +61,10 @@ pub struct ServerTickData {
     pub weapon_script_names: Arc<[String]>,
 
     pub pending_final_kill: Option<(ClientId, ClientId)>,
+
+    pub script_seats: Vec<(ClientId, sim::ScriptSeat)>,
+
+    pub script_exit_level: bool,
 }
 
 #[derive(Resource, Default)]
@@ -457,7 +446,6 @@ fn reset_authority_on_match_torn_down(
     mut world: Option<ResMut<AuthorityWorld>>,
     mut loopback: Option<ResMut<ListenLoopback>>,
     mut archive: Option<ResMut<FrameArchive>>,
-    mut end_game: ResMut<crate::policy::end_game::PendingEndGameTail>,
     mut inbox: ResMut<ClientCommandInbox>,
     mut transactions: ActionTransactionScope,
     mut samples: ResMut<ClientShotSamples>,
@@ -481,7 +469,6 @@ fn reset_authority_on_match_torn_down(
     pending_step.0 = None;
     server_tick.0 = None;
 
-    *end_game = crate::policy::end_game::PendingEndGameTail::default();
     if let Some(world) = world.as_mut() {
         world.0.shutdown_game();
     }
@@ -668,7 +655,7 @@ fn gather_authority_input(
             crate::ActionAdmission::PayloadMismatch => {
                 diag::warn!(
                     Net,
-                    "action request_id {request_id} re-used with a different payload by client {}                      — refused",
+                    "action request_id {request_id} re-used with a different payload by client {} — refused",
                     client.0
                 );
                 reliable.push_outcome(client, request_id, crate::ActionVerdict::PayloadMismatch);
@@ -743,12 +730,16 @@ fn step_authority(
     let respawn_delay_ticks = world.0.respawn_delay_ticks();
     let weapon_script_names = world.0.weapon_script_names();
     let pending_final_kill = world.0.take_pending_final_kill();
+    let script_seats = world.0.script_seats();
+    let script_exit_level = world.0.take_script_exit_level();
     pending_step.0 = Some(ServerTickData {
         input,
         snapshot,
         respawn_delay_ticks,
         weapon_script_names,
         pending_final_kill,
+        script_seats,
+        script_exit_level,
     });
 }
 
@@ -844,18 +835,10 @@ struct FanoutQueues<'w> {
     deaths: ResMut<'w, DumpDeathLog>,
     gives: ResMut<'w, DumpGiveLog>,
     configuration_changes: ResMut<'w, DumpConfigurationChangeLog>,
-    actions: ResMut<'w, ClientActionInbox>,
-    entity_slots: Option<Res<'w, crate::CEntitySlots>>,
-    entity_notify_gaps: ResMut<'w, NetIdentityGaps>,
-    pending_notifies: Option<ResMut<'w, PendingScriptEntityNotifies>>,
-    role: Res<'w, RuntimeRole>,
-    end_game: ResMut<'w, crate::policy::end_game::PendingEndGameTail>,
-    spawning_intermission: MessageWriter<'w, SpawningIntermission>,
     exit_level: MessageWriter<'w, ExitLevelCalled>,
 }
 
 fn fanout_loopback(
-    mut commands: Commands,
     loopback: Option<ResMut<ListenLoopback>>,
     hub: Option<ResMut<crate::transport::udp_session::UdpAuthorityHub>>,
     server_tick: Res<ServerTick>,
@@ -864,10 +847,7 @@ fn fanout_loopback(
     mut diag: ResMut<NetDiagnostics>,
     archive: Res<FrameArchive>,
     mut seats: ResMut<ActiveKillcams>,
-    mut pending_deaths: ResMut<PendingDeathTimelines>,
-    mut skips: ResMut<ActiveKillcamSkips>,
     clock: Res<AuthorityClock>,
-    mut kc_stats: ResMut<ScriptKillcamEmitStats>,
     trace: Option<ResMut<AuthorityPhaseTrace>>,
 ) {
     push_phase(trace, "Fanout");
@@ -877,282 +857,56 @@ fn fanout_loopback(
     queues
         .pending_playercard
         .adopt_from_world(&mut queues.world.0);
-    let tus = crate::policy::killcam::time_until_spawn_seconds(
-        tick.respawn_delay_ticks,
-        crate::AUTHORITY_MS as u32,
-    );
-    let mut level =
-        crate::policy::killcam::level_notifies_from_journal(&tick.snapshot.meta.journal);
-    let spawned = spawned_clients_from_journal(&tick.snapshot.meta.journal);
-    let mut spawned_notifies = Vec::new();
-    let mut ended_notifies = Vec::new();
-    let mut begin_notifies = Vec::new();
-    let mut abort_notifies = Vec::new();
-    emit_spawned_player(
+    queues
+        .pending_gamenotify
+        .adopt_from_world(&mut queues.world.0);
+    crate::policy::killcam::play_script_seats(
         &mut seats,
-        &mut skips,
-        &tick.snapshot.meta.journal,
-        &mut kc_stats,
-        &mut spawned_notifies,
-        &mut ended_notifies,
-    );
-    start_round_end_wait_from_journal(
-        &mut pending_deaths,
-        clock.time_ms,
-        &tick.snapshot.meta.journal,
-        &mut kc_stats,
-    );
-
-    level.extend(tick_round_end_wait(
-        &mut pending_deaths,
-        clock.time_ms,
-        &mut kc_stats,
-    ));
-
-    let copycat_victims: std::collections::HashSet<ClientId> = tick
-        .snapshot
-        .meta
-        .clients
-        .iter()
-        .filter_map(|(id, _)| {
-            queues
-                .world
-                .0
-                .client_meta(*id)
-                .is_some_and(|m| m.copycat_stash_defined())
-                .then_some(*id)
-        })
-        .collect();
-    start_timelines_from_deaths(
-        &mut pending_deaths,
-        clock.time_ms,
-        &tick.snapshot.meta.journal,
-        &tick.snapshot,
         &archive,
-        tus,
-        &tick.weapon_script_names,
-        tick.pending_final_kill,
-        &copycat_victims,
-        &mut kc_stats,
+        clock.time_ms,
+        &tick.script_seats,
     );
+    if tick.script_exit_level {
+        queues.exit_level.write(ExitLevelCalled);
+        diag::info!(Sim, "exitLevel: called by the match scripts");
+    }
     queues.deaths.push_journal(&tick.snapshot.meta.journal);
     queues.gives.push_journal(&tick.snapshot.meta.journal);
     queues
         .configuration_changes
         .push_journal(&tick.snapshot.meta.journal);
-    pending_deaths.queue_spawn_for_deaths_without_timeline(&tick.snapshot.meta.journal);
-    tick_death_timelines(
-        &mut pending_deaths,
-        &mut seats,
-        &mut skips,
-        &archive,
-        clock.time_ms,
-        &tick.input.cmds,
-        &level,
-        &spawned,
-        &mut kc_stats,
-        &mut begin_notifies,
-        &tick.snapshot,
-    );
-
-    end_ordinary_killcams_on_game_ended(
-        &mut seats,
-        &mut skips,
-        &level,
-        &mut kc_stats,
-        &mut ended_notifies,
-    );
-
-    let viewers: Vec<ClientId> = tick.snapshot.players.iter().map(|(id, _)| *id).collect();
-    let mut killedby_cards = Vec::new();
-    let showing_final_killcam = tick_final_killcam(
-        &mut pending_deaths,
-        &mut seats,
-        &archive,
-        clock.time_ms,
-        &viewers,
-        &level,
-        &mut kc_stats,
-        &mut begin_notifies,
-        &mut killedby_cards,
-    );
-    for (viewer, attacker) in killedby_cards {
-        queues
-            .world
-            .0
-            .push_player_card_slot(viewer, attacker, hud_iw4::PLAYER_CARD_SLOT_KILLEDBY);
-        queues
-            .world
-            .0
-            .push_player_card_open(viewer, hud_iw4::SCRIPT_MENU_KILLEDBY_DISPLAY);
-    }
-
-    queues
-        .end_game
-        .start_from_journal(&tick.snapshot.meta.journal);
-    let round_end_finished = level.contains(&killcam_iw4::NotifyKind::RoundEndFinished);
-    if round_end_finished && showing_final_killcam {
-        queues.world.0.reset_outcome();
-    }
-    match queues
-        .end_game
-        .advance(clock.time_ms, round_end_finished, showing_final_killcam)
-    {
-        Some(EndGameTailOutput::SpawningIntermission) => {
-            queues.world.0.reset_outcome();
-            queues.spawning_intermission.write(SpawningIntermission);
-            let request_id = 20_000u32.saturating_add(queues.end_game.spawning_intermission);
-            for (id, _) in tick.snapshot.meta.clients.iter() {
-                if let Err(error) = queues
-                    .actions
-                    .push(*id, ClientAction::SpawnIntermission { request_id })
-                {
-                    diag::warn!(
-                        Sim,
-                        "endGame: spawnIntermission for client {} not queued: {error}",
-                        id.0
-                    );
-                }
-            }
-            diag::info!(
-                Sim,
-                "endGame: level.intermission — spawnIntermission for {} clients",
-                tick.snapshot.meta.clients.len()
-            );
-        }
-        Some(EndGameTailOutput::ExitLevel) => {
-            queues.exit_level.write(ExitLevelCalled);
-            diag::info!(Sim, "endGame: exitLevel( false )");
-        }
-        None => {}
-    }
-
-    tick_phase_b_skips(
-        &mut seats,
-        &mut skips,
-        &tick.input.cmds,
-        &mut kc_stats,
-        &mut abort_notifies,
-        &mut ended_notifies,
-    );
-    abort_killcam_on_use_copycat(
-        &mut seats,
-        &mut skips,
-        &tick.input.actions,
-        &mut kc_stats,
-        &mut abort_notifies,
-        &mut ended_notifies,
-    );
-
-    watch_nothing_to_show(
-        &mut seats,
-        &mut skips,
-        &archive,
-        clock.time_ms,
-        &mut kc_stats,
-        &mut abort_notifies,
-        &mut ended_notifies,
-    );
-    expire_with_notify(
-        &mut seats,
-        &mut skips,
-        clock.time_ms,
-        &mut kc_stats,
-        &mut ended_notifies,
-    );
-    for id in ended_notifies.iter().chain(abort_notifies.iter()).copied() {
-        pending_deaths.on_ordinary_seat_finished(id);
-    }
-    for id in pending_deaths.take_spawn_client() {
-        let still_dead = tick
-            .snapshot
-            .meta
-            .for_client(id)
-            .is_some_and(|m| m.lifecycle == ClientLifecycle::Dead);
-        if !still_dead {
-            continue;
-        }
-        kc_stats.spawn_client = kc_stats.spawn_client.saturating_add(1);
-        let request_id = 10_000u32.saturating_add(kc_stats.spawn_client);
-        if let Err(error) = queues
-            .actions
-            .push(id, ClientAction::SpawnClient { request_id })
-        {
-            diag::warn!(
-                Sim,
-                "respawn: spawnClient for client {} not queued: {error}",
-                id.0
-            );
-        }
-    }
-    if *queues.role == RuntimeRole::Listen {
-        if let Some(pending) = queues.pending_notifies.as_mut() {
-            pending.store(
-                begin_notifies,
-                spawned_notifies,
-                abort_notifies,
-                ended_notifies,
-            );
-        }
-    } else if let Some(slots) = queues.entity_slots.as_ref() {
-        trigger_script_entity_notifies(
-            &mut commands,
-            slots,
-            &mut queues.entity_notify_gaps,
-            begin_notifies,
-            spawned_notifies,
-            abort_notifies,
-            ended_notifies,
-        );
-    }
 
     let mut listen_snapshot = tick.snapshot.clone();
     let mut seat_applied = 0i32;
     if let Some(local) = queues.local.as_ref() {
-        let already_alive = tick
-            .snapshot
-            .meta
-            .for_client(local.0)
-            .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive);
-
-        let ordinary_seat = seats
-            .get(local.0)
-            .is_some_and(|session| !session.final_kill);
-        if already_alive && ordinary_seat {
-            seats.clear(local.0);
-            skips.clear(local.0);
-            kc_stats.seats_refused_already_alive =
-                kc_stats.seats_refused_already_alive.saturating_add(1);
-        } else {
-            let (out, sample) = crate::policy::seat::snapshot_and_sample_for_viewer(
-                &archive,
-                &seats,
-                &tick.snapshot,
-                local.0,
-                clock.time_ms,
-            );
-            listen_snapshot = out;
-            if let Some(sample) = sample {
-                seat_applied = 1;
-                let session = seats.get(local.0);
-                queues.fanout_census.seat_archivetime_ms = session.map(|s| s.archivetime_ms);
-                queues.fanout_census.seat_focus_client = session.map(|s| s.focus_client.0 as i32);
-                queues.fanout_census.seat_lookup_tick = sample.lookup.tick.map(|t| t.0 as i32);
-                queues.fanout_census.seat_attained_ms = Some(sample.lookup.attained_ms);
-                queues.fanout_census.seat_rebase_ms = Some(sample.rebase_ms);
-                queues.fanout_census.seat_world_archived =
-                    Some(i32::from(sample.lookup.tick.is_some()));
-                let focus = session.map(|s| s.focus_client);
-                queues.fanout_census.seat_focus_live_origin =
-                    focus.and_then(|f| queues.world.0.player(f).map(|ps| ps.origin));
-                queues.fanout_census.seat_focus_lifecycle = focus.and_then(|f| {
-                    queues
-                        .world
-                        .0
-                        .client_meta(f)
-                        .map(|m| client_lifecycle_dump_label(m.lifecycle))
-                });
-            }
+        let (out, sample) = crate::policy::seat::snapshot_and_sample_for_viewer(
+            &archive,
+            &seats,
+            &tick.snapshot,
+            local.0,
+            clock.time_ms,
+        );
+        listen_snapshot = out;
+        if let Some(sample) = sample {
+            seat_applied = 1;
+            let session = seats.get(local.0);
+            queues.fanout_census.seat_archivetime_ms = session.map(|s| s.archivetime_ms);
+            queues.fanout_census.seat_focus_client = session.map(|s| s.focus_client.0 as i32);
+            queues.fanout_census.seat_lookup_tick = sample.lookup.tick.map(|t| t.0 as i32);
+            queues.fanout_census.seat_attained_ms = Some(sample.lookup.attained_ms);
+            queues.fanout_census.seat_rebase_ms = Some(sample.rebase_ms);
+            queues.fanout_census.seat_world_archived =
+                Some(i32::from(sample.lookup.tick.is_some()));
+            let focus = session.map(|s| s.focus_client);
+            queues.fanout_census.seat_focus_live_origin =
+                focus.and_then(|f| queues.world.0.player(f).map(|ps| ps.origin));
+            queues.fanout_census.seat_focus_lifecycle = focus.and_then(|f| {
+                queues
+                    .world
+                    .0
+                    .client_meta(f)
+                    .map(|m| client_lifecycle_dump_label(m.lifecycle))
+            });
         }
     }
     let local_id = queues.local.as_ref().map(|id| id.0);
@@ -1228,7 +982,7 @@ fn fanout_loopback(
         for value in splashes {
             queue.push(crate::ReliableRow::Splash(value));
         }
-        for value in queues.pending_gamenotify.take_broadcast() {
+        for value in queues.pending_gamenotify.take_for(*client) {
             queue.push(crate::ReliableRow::Notify(value));
         }
         if scores_broadcast_due {
@@ -1249,7 +1003,11 @@ fn fanout_loopback(
             .as_ref()
             .map(|id| queues.pending_playercard.take_for(id.0))
             .unwrap_or_default();
-        let svc_game_notifies = queues.pending_gamenotify.take_broadcast();
+        let svc_game_notifies = queues
+            .local
+            .as_ref()
+            .map(|id| queues.pending_gamenotify.take_for(id.0))
+            .unwrap_or_default();
         if let Err(e) = loopback.send_tick(
             &tick.input,
             &listen_snapshot,
@@ -1317,127 +1075,16 @@ fn fanout_loopback(
     queues.pending_gamenotify.clear_after_fanout();
 }
 
-#[derive(Resource, Debug, Default)]
-pub struct PendingScriptEntityNotifies {
-    begins: Vec<ClientId>,
-    spawned: Vec<ClientId>,
-    aborts: Vec<ClientId>,
-    ended: Vec<ClientId>,
-}
-
-impl PendingScriptEntityNotifies {
-    fn store(
-        &mut self,
-        begins: Vec<ClientId>,
-        spawned: Vec<ClientId>,
-        aborts: Vec<ClientId>,
-        ended: Vec<ClientId>,
-    ) {
-        self.begins = begins;
-        self.spawned = spawned;
-        self.aborts = aborts;
-        self.ended = ended;
-    }
-
-    fn take(&mut self) -> Self {
-        std::mem::take(self)
-    }
-}
-
-pub(crate) fn flush_script_entity_notifies(
-    mut commands: Commands,
-    slots: Res<crate::CEntitySlots>,
-    mut gaps: ResMut<NetIdentityGaps>,
-    mut pending: ResMut<PendingScriptEntityNotifies>,
-) {
-    let pending = pending.take();
-    trigger_script_entity_notifies(
-        &mut commands,
-        &slots,
-        &mut gaps,
-        pending.begins,
-        pending.spawned,
-        pending.aborts,
-        pending.ended,
-    );
-}
-
-fn trigger_script_entity_notifies(
-    commands: &mut Commands,
-    slots: &crate::CEntitySlots,
-    gaps: &mut NetIdentityGaps,
-    begins: Vec<ClientId>,
-    spawned: Vec<ClientId>,
-    aborts: Vec<ClientId>,
-    ended: Vec<ClientId>,
-) {
-    let mut resolve = |client: ClientId, notify: ScriptNotify| match slots.entity_for_client(client)
-    {
-        Some(entity) => Some(entity),
-        None => {
-            gaps.raise(NetGapCause::NotifyClientHasNoEntity { client, notify });
-            None
-        }
-    };
-    for client in begins {
-        if let Some(entity) = resolve(client, ScriptNotify::BeginKillcam) {
-            commands.trigger(BeginKillcam { entity });
-        }
-    }
-    for client in spawned {
-        if let Some(entity) = resolve(client, ScriptNotify::SpawnedPlayer) {
-            commands.trigger(SpawnedPlayer { entity });
-        }
-    }
-    for client in aborts {
-        if let Some(entity) = resolve(client, ScriptNotify::AbortKillcam) {
-            commands.trigger(AbortKillcam { entity });
-        }
-    }
-    for client in ended {
-        if let Some(entity) = resolve(client, ScriptNotify::EndedKillcam) {
-            commands.trigger(KillcamEnded { entity });
-        }
-    }
-    gaps.report();
-}
-
 #[derive(Resource, Debug, Default, Clone)]
 pub struct ScriptNotifyEmitStats {
-    pub match_ending_soon: u32,
-    pub match_ending_very_soon: u32,
-    pub countdown_tick: u32,
     pub game_ended: u32,
-    pub prematch_done: u32,
-    pub game_win: u32,
-    pub round_win: u32,
-    pub round_switch: u32,
-    pub spawn_music: u32,
-    pub glass_destroyed: u32,
-}
-
-fn team_winner(winner: Option<gamemode_iw4::Team>) -> GameWinner {
-    match winner {
-        Some(gamemode_iw4::Team::Allies) => GameWinner::Allies,
-        Some(gamemode_iw4::Team::Axis) => GameWinner::Axis,
-        Some(gamemode_iw4::Team::Free) | None => GameWinner::Undefined,
-    }
 }
 
 pub fn authority_bookkeeping(
     server_tick: Res<ServerTick>,
     mut archive: ResMut<FrameArchive>,
     seats: Res<ActiveKillcams>,
-    mut world: ResMut<AuthorityWorld>,
-    mut soon: MessageWriter<MatchEndingSoon>,
-    mut very_soon: MessageWriter<MatchEndingVerySoon>,
     mut ended: MessageWriter<GameEnded>,
-    mut prematch: MessageWriter<PrematchDone>,
-    mut game_win: MessageWriter<GameWin>,
-    mut round_win: MessageWriter<RoundWin>,
-    mut round_switch: MessageWriter<RoundSwitchNotify>,
-    mut spawned_music: MessageWriter<SpawnedPlayerNotify>,
-    mut glass_destroyed: MessageWriter<GlassDestroyed>,
     mut stats: ResMut<ScriptNotifyEmitStats>,
     trace: Option<ResMut<AuthorityPhaseTrace>>,
 ) {
@@ -1456,99 +1103,7 @@ pub fn authority_bookkeeping(
             stats.game_ended = stats.game_ended.saturating_add(1);
         }
     }
-    if world.0.take_prematch_done() {
-        prematch.write(PrematchDone);
-        stats.prematch_done = stats.prematch_done.saturating_add(1);
-    }
-    if let Some(winner) = world.0.take_game_win() {
-        game_win.write(GameWin {
-            winner: match winner {
-                Some(id) => GameWinner::Player(id.0),
-                None => GameWinner::Undefined,
-            },
-        });
-        stats.game_win = stats.game_win.saturating_add(1);
-    }
-    if let Some(winner) = world.0.take_round_win() {
-        round_win.write(RoundWin {
-            winner: team_winner(winner),
-        });
-        stats.round_win = stats.round_win.saturating_add(1);
-    }
-    if let Some(halftime) = world.0.take_round_switch() {
-        round_switch.write(RoundSwitchNotify {
-            kind: if halftime {
-                RoundSwitchKind::Halftime
-            } else {
-                RoundSwitchKind::Other
-            },
-        });
-        stats.round_switch = stats.round_switch.saturating_add(1);
-    }
-    if let Some(winner) = world.0.take_team_game_win() {
-        game_win.write(GameWin {
-            winner: team_winner(winner),
-        });
-        stats.game_win = stats.game_win.saturating_add(1);
-    }
-    for id in world.0.take_spawn_music() {
-        spawned_music.write(SpawnedPlayerNotify { client: id.0 });
-        stats.spawn_music = stats.spawn_music.saturating_add(1);
-    }
-    for piece in world.0.take_glass_destroyed() {
-        glass_destroyed.write(GlassDestroyed { piece });
-        stats.glass_destroyed = stats.glass_destroyed.saturating_add(1);
-    }
-    let score_soon = world.0.take_score_limit_soon();
-    let tick_emit = world.0.take_match_clock_emit();
-    if score_soon.is_none() && tick_emit.is_none() {
-        return;
-    }
-    if let Some(notify) = score_soon {
-        match notify {
-            gamemode_iw4::MatchSoundNotify::MatchEndingSoon(reason) => {
-                soon.write(MatchEndingSoon {
-                    reason: match reason {
-                        GscEndingReason::Time => MatchEndingReason::Time,
-                        GscEndingReason::Score => MatchEndingReason::Score,
-                    },
-                });
-                stats.match_ending_soon = stats.match_ending_soon.saturating_add(1);
-            }
-            gamemode_iw4::MatchSoundNotify::MatchEndingVerySoon => {
-                very_soon.write(MatchEndingVerySoon);
-                stats.match_ending_very_soon = stats.match_ending_very_soon.saturating_add(1);
-            }
-        }
-    }
-    let Some(tick_emit) = tick_emit else {
-        return;
-    };
-    let mut buf = [MatchSoundEmit::Notify(gamemode_iw4::MatchSoundNotify::MatchEndingVerySoon);
-        gamemode_iw4::ClockTickEmit::MAX_EMITS];
-    let n = tick_emit.emits(&mut buf);
-    for emit in buf.iter().take(n) {
-        match *emit {
-            MatchSoundEmit::Notify(gamemode_iw4::MatchSoundNotify::MatchEndingSoon(reason)) => {
-                soon.write(MatchEndingSoon {
-                    reason: match reason {
-                        GscEndingReason::Time => MatchEndingReason::Time,
-                        GscEndingReason::Score => MatchEndingReason::Score,
-                    },
-                });
-                stats.match_ending_soon = stats.match_ending_soon.saturating_add(1);
-            }
-            MatchSoundEmit::Notify(gamemode_iw4::MatchSoundNotify::MatchEndingVerySoon) => {
-                very_soon.write(MatchEndingVerySoon);
-                stats.match_ending_very_soon = stats.match_ending_very_soon.saturating_add(1);
-            }
-            MatchSoundEmit::EntitySound { .. } => {
-                stats.countdown_tick = stats.countdown_tick.saturating_add(1);
-            }
-        }
-    }
 }
-
 pub fn register_listen_runtime(app: &mut App) {
     register_script_notify(app);
     if *app.world().resource::<RuntimeRole>() != RuntimeRole::Client {
@@ -1563,13 +1118,9 @@ pub fn register_listen_runtime(app: &mut App) {
         .init_resource::<ServerTick>()
         .init_resource::<FrameArchive>()
         .init_resource::<ActiveKillcams>()
-        .init_resource::<PendingDeathTimelines>()
-        .init_resource::<ActiveKillcamSkips>()
-        .init_resource::<crate::policy::end_game::PendingEndGameTail>()
         .init_resource::<NetDiagnostics>()
         .init_resource::<ClientShotSamples>()
         .init_resource::<ScriptNotifyEmitStats>()
-        .init_resource::<ScriptKillcamEmitStats>()
         .init_resource::<NetIdentityGaps>()
         .init_resource::<crate::PendingSvcSounds>()
         .init_resource::<crate::PendingPlayerCard>()
@@ -1584,33 +1135,26 @@ pub fn register_listen_runtime(app: &mut App) {
         .init_resource::<PendingConnectionFaults>();
     let role = *app.world().resource::<RuntimeRole>();
     if role != RuntimeRole::Dedicated {
-        app.init_resource::<PendingScriptEntityNotifies>()
-            .add_systems(
-                FixedUpdate,
-                (
-                    begin_fixed_census
-                        .before(AuthoritySet::Advance)
-                        .before(frame::AuthorityEdge(0)),
-                    advance_authority_clock.in_set(AuthoritySet::Advance),
-                    ingress_authority.in_set(AuthoritySet::Ingress),
-                    gather_authority_input.in_set(AuthoritySet::Gather),
-                    step_authority.in_set(AuthoritySet::Step),
-                    publish_server_tick.in_set(AuthoritySet::Snapshot),
-                    fanout_loopback.in_set(AuthoritySet::Fanout),
-                    apply_connection_faults
-                        .in_set(AuthoritySet::Bookkeeping)
-                        .before(retire_departed_peers),
-                    retire_departed_peers.in_set(AuthoritySet::Bookkeeping),
-                    authority_bookkeeping.in_set(frame::AuthorityBookkeeping),
-                    end_fixed_census.after(AuthoritySet::Bookkeeping),
-                )
-                    .run_if(authority_should_tick),
-            );
         app.add_systems(
-            Update,
-            flush_script_entity_notifies
-                .in_set(ClientSet::Reconcile)
-                .after(crate::client::entities::sync_client_entities),
+            FixedUpdate,
+            (
+                begin_fixed_census
+                    .before(AuthoritySet::Advance)
+                    .before(frame::AuthorityEdge(0)),
+                advance_authority_clock.in_set(AuthoritySet::Advance),
+                ingress_authority.in_set(AuthoritySet::Ingress),
+                gather_authority_input.in_set(AuthoritySet::Gather),
+                step_authority.in_set(AuthoritySet::Step),
+                publish_server_tick.in_set(AuthoritySet::Snapshot),
+                fanout_loopback.in_set(AuthoritySet::Fanout),
+                apply_connection_faults
+                    .in_set(AuthoritySet::Bookkeeping)
+                    .before(retire_departed_peers),
+                retire_departed_peers.in_set(AuthoritySet::Bookkeeping),
+                authority_bookkeeping.in_set(frame::AuthorityBookkeeping),
+                end_fixed_census.after(AuthoritySet::Bookkeeping),
+            )
+                .run_if(authority_should_tick),
         );
     } else {
         app.add_systems(

@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use trace_iw4::{BrushRef, Trace, trace_box_into};
+use trace_iw4::{Trace, trace_box_into};
 
 use crate::{
     BrushView, ClipLeaf, ClipMapRef, ClipMeshRef, MeshWalkCensus, TraceExtents,
@@ -154,23 +154,13 @@ pub fn trace_leaf_brushes_into<B: BrushView>(
         return 0;
     };
     let n = ids.len() as u32;
-    let mut selected: Vec<BrushRef<'_>> = Vec::with_capacity(ids.len());
-    for &id in ids {
-        if let Some(b) = map.brushes.get(id as usize) {
-            if !crate::brush_glass_allowed(b, glass_is_solid) {
-                continue;
-            }
-            selected.push(crate::brush_ref(b));
-        }
-    }
+    let selected = ids
+        .iter()
+        .filter_map(|&id| map.brushes.get(id as usize))
+        .filter(|b| crate::brush_glass_allowed(*b, glass_is_solid))
+        .map(|b| crate::brush_ref(b));
     let _ = trace_box_into(
-        selected.iter().copied(),
-        ext.start,
-        ext.end,
-        ext.mins,
-        ext.maxs,
-        ext.mask,
-        best,
+        selected, ext.start, ext.end, ext.mins, ext.maxs, ext.mask, best,
     );
     n
 }

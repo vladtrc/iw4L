@@ -1,19 +1,45 @@
 mod compiler;
+mod entities;
+mod entity_damage;
+mod hud;
 mod iw4_builtins;
 mod iw4_natives;
 mod natives;
+mod natives_engine;
+mod natives_math;
+mod natives_player;
+mod natives_t5;
+mod objectives;
+mod physics;
+mod players;
+mod presence;
 mod runtime;
+mod t5_builtins;
+mod triggers;
+mod vehicles;
+mod weapons;
 
 use bevy_ecs::prelude::{Component, Resource};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 
+pub use entities::{LevelData, StringTable, parse_entity_string};
+pub(crate) use entity_damage::{
+    EntityHit, HitTarget, ScriptBlast, ScriptHit, damage_entity, radius_targets,
+};
 pub(crate) use iw4_natives::set_dvar;
 pub use natives::{Builtin, Catalog, Namespace, Owner};
+pub use natives_engine::{EXIT_LEVEL, MAP_RESTART};
+pub(crate) use players::{
+    answer_join, answer_menu, choose_class, choose_default_class, describe_players, flashbang,
+    force_death, note_team_answer, player_damage, script_seats, sync_players,
+};
+pub(crate) use presence::sync_presence;
 pub use runtime::{Native, NativeRegistry};
 pub(crate) use runtime::{
-    advance_scheduler, copy_state, healthy, install, preflight, reset, start,
+    advance_scheduler, copy_state, healthy, install, preflight, reset, start, take_signals,
 };
+pub(crate) use weapons::sync_engine_events;
 
 pub const IR_VERSION: u32 = 3;
 
@@ -37,6 +63,10 @@ pub enum Value {
 impl Value {
     pub fn string(text: &str) -> Self {
         Self::String(text.into())
+    }
+
+    pub fn level() -> Self {
+        Self::Object(0)
     }
 }
 
@@ -95,8 +125,7 @@ pub trait SourceResolver {
     }
 }
 
-/// Scripts and entry order for starting an IW4 multiplayer map: the struct helpers, the
-/// gametype main, the optional level main, then the start-gametype callback.
+/// Install runs the struct initializer itself, before the map's structs exist.
 pub struct Iw4Startup {
     pub roots: Vec<String>,
     pub entries: Vec<String>,
@@ -112,10 +141,7 @@ impl Iw4Startup {
             callbacks.to_owned(),
             gametype.clone(),
         ];
-        let mut entries = vec![
-            "codescripts/struct::initstructs".to_owned(),
-            format!("{gametype}::main"),
-        ];
+        let mut entries = vec![format!("{gametype}::main")];
         if resolver.read_bytes(&map).is_ok() {
             entries.push(format!("{map}::main"));
             roots.push(map);
@@ -200,57 +226,14 @@ impl Program {
     pub fn modules(&self) -> &[ModuleIdentity] {
         &self.modules
     }
+    pub fn realm(&self) -> Realm {
+        self.modules.first().map_or(Realm::Iw4, |m| m.realm)
+    }
     pub fn function_count(&self) -> usize {
         self.functions.len()
     }
-    /// One row per linked native: where it is called, whether the entries can reach it,
-    /// and whether `registry` binds it.
-    pub fn native_ledger(&self, registry: &NativeRegistry, entries: &[&str]) -> Vec<LedgerRow> {
-        let mut reachable = vec![false; self.functions.len()];
-        let mut queue: Vec<usize> = entries
-            .iter()
-            .filter_map(|entry| self.names.get(*entry).copied())
-            .collect();
-        while let Some(id) = queue.pop() {
-            if std::mem::replace(&mut reachable[id], true) {
-                continue;
-            }
-            for (_, op) in &self.functions[id].code {
-                if let Op::Call(Callee::Script(target), ..)
-                | Op::Spawn(Callee::Script(target), ..)
-                | Op::Constant(Value::Function(target)) = op
-                {
-                    queue.push(*target as usize);
-                }
-            }
-        }
-        let mut rows: Vec<LedgerRow> = self
-            .natives
-            .iter()
-            .map(|builtin| LedgerRow {
-                builtin: builtin.clone(),
-                sites: 0,
-                reachable_sites: 0,
-                first_site: None,
-                bound: registry.get(builtin.namespace, builtin.name).is_some(),
-            })
-            .collect();
-        for (function, reached) in self.functions.iter().zip(reachable) {
-            for (location, op) in &function.code {
-                if let Op::Call(Callee::Native(id), ..) | Op::Constant(Value::Builtin(id)) = op {
-                    let row = &mut rows[*id as usize];
-                    row.sites += 1;
-                    if reached {
-                        row.reachable_sites += 1;
-                    }
-                    row.first_site.get_or_insert_with(|| location.clone());
-                }
-            }
-        }
-        rows.sort_by(|a, b| {
-            (a.builtin.namespace, a.builtin.name).cmp(&(b.builtin.namespace, b.builtin.name))
-        });
-        rows
+    pub fn native_count(&self) -> usize {
+        self.natives.len()
     }
     pub fn fingerprint(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
@@ -264,15 +247,6 @@ impl Program {
         }
         digest.finalize().into()
     }
-}
-
-#[derive(Clone, Debug)]
-pub struct LedgerRow {
-    pub builtin: Builtin,
-    pub sites: usize,
-    pub reachable_sites: usize,
-    pub first_site: Option<Location>,
-    pub bound: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -295,6 +269,7 @@ enum Global {
     SelfRef,
     Level,
     Game,
+    Anim,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -427,6 +402,37 @@ pub(crate) struct Runtime {
     suspended_frames: usize,
     /// Endons that fired on a suspended thread; applied when its child yields.
     pending_unwinds: Vec<(u64, usize)>,
+    entities: BTreeMap<u64, entities::ScriptEntity>,
+    hud_slots: BTreeMap<u64, usize>,
+    next_entity_number: i32,
+    tables: Arc<BTreeMap<String, StringTable>>,
+    rng: u32,
+    pending_notifies: Vec<(Value, Arc<str>, Vec<Value>)>,
+    signals: Vec<Arc<str>>,
+    timers: Vec<(i64, Value, Arc<str>)>,
+    engine: entities::EngineState,
+    players: BTreeMap<u32, players::PlayerSlot>,
+    menu_answers: BTreeMap<u32, VecDeque<players::MenuAnswer>>,
+    joined: std::collections::BTreeSet<u32>,
+    current_hit: Option<crate::script_player::Hit>,
+    deaths: VecDeque<(u32, &'static str, Vec<Value>)>,
+    pub(crate) exit_level: bool,
+    shown: BTreeMap<u64, presence::Shown>,
+    retired_presence: Vec<(crate::ScriptModelId, bool)>,
+    next_spawned_presence: u32,
+    blasts: Vec<entity_damage::ScriptBlast>,
+    hits: Vec<entity_damage::ScriptHit>,
+    use_held: std::collections::BTreeSet<u32>,
+    fired_once: std::collections::BTreeSet<u64>,
+    require_look_at: std::collections::BTreeSet<u64>,
+    server_info: std::collections::BTreeSet<String>,
+    missiles: BTreeMap<crate::ProjectileId, u64>,
+    missiles_seen_ms: i32,
+    lingering: Vec<(i64, u64)>,
+    pending_deletes: Vec<u64>,
+    vehicles: BTreeMap<u64, vehicles::Heli>,
+    use_selected: BTreeMap<u32, u64>,
+    t5: natives_t5::T5State,
 }
 
 impl Runtime {

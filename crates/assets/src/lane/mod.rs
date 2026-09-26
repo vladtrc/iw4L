@@ -131,6 +131,7 @@ pub struct MaterialPopulation {
     pub walked: usize,
     pub report: Vec<String>,
     pub cac_tables: Vec<crate::CapturedStringTable>,
+    pub scripts: crate::ScriptSources,
 }
 
 impl Default for MaterialPopulation {
@@ -141,6 +142,7 @@ impl Default for MaterialPopulation {
             walked: 0,
             report: Vec::new(),
             cac_tables: Vec::new(),
+            scripts: crate::ScriptSources::default(),
         }
     }
 }

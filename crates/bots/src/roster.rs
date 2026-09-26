@@ -1,15 +1,9 @@
 use bevy::prelude::Resource;
-use sim::{ClassId, ClientId};
+use sim::{ClientId, LifeSequence};
 
 use crate::controller::HostController;
 
 pub const MAX_HOST_BOTS: u32 = 20;
-
-#[derive(Resource, Debug, Default, Clone)]
-pub struct BotClassPool {
-    pub ready: bool,
-    pub ids: Vec<ClassId>,
-}
 
 #[derive(Resource, Debug, Default)]
 pub struct BotAddQueue(pub Vec<BotAddRequest>);
@@ -99,7 +93,8 @@ pub struct BotSlot {
     pub id: ClientId,
     pub brain: Option<HostController>,
     pub joined: bool,
-    pub class_requested: bool,
+    pub class_picked_in: Option<LifeSequence>,
+    pub class_picks: u32,
 }
 
 #[derive(Resource, Debug)]
@@ -144,7 +139,8 @@ impl BotRoster {
                 id,
                 brain,
                 joined: false,
-                class_requested: false,
+                class_picked_in: None,
+                class_picks: 0,
             });
             added.push(id);
         }
@@ -168,4 +164,12 @@ impl BotRoster {
         }
         None
     }
+}
+
+pub fn default_class_index(seed: u64, client: ClientId, pick: u32) -> u8 {
+    let mix = seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(u64::from(client.0).wrapping_mul(0xBF58_476D_1CE4_E5B9))
+        .wrapping_add(u64::from(pick).wrapping_mul(0x94D0_49BB_1331_11EB));
+    ((mix >> 33) % 5) as u8
 }

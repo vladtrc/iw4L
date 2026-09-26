@@ -19,13 +19,6 @@ pub enum ClientLifecycle {
     Intermission,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct CopyCatLoadout {
-    pub spec: LoadoutSpec,
-    pub in_use: bool,
-    pub owner: ClientId,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassRejectReason {
     UnknownOrStaleClass,
@@ -389,13 +382,32 @@ pub enum MatchEndReason {
     TimeLimit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScriptSeat {
+    pub spectator_client: i32,
+    pub kill_cam_entity: i32,
+    pub look_at_entity: i32,
+    pub archive_ms: i32,
+    pub ps_offset_ms: i32,
+    pub length_ms: i32,
+}
+
+impl Default for ScriptSeat {
+    fn default() -> Self {
+        Self {
+            spectator_client: -1,
+            kill_cam_entity: -1,
+            look_at_entity: -1,
+            archive_ms: 0,
+            ps_offset_ms: 0,
+            length_ms: 0,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KillcamHud {
     pub final_kill: bool,
-
-    pub time_until_respawn_ms: i32,
-
-    pub kc_timer_ms: i32,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -417,10 +429,7 @@ pub struct ClientSnapshotMeta {
     pub kills: i32,
     pub deaths: i32,
     pub kill_streak: i32,
-    pub last_earned_streak: Option<gamemode_iw4::killstreaks::Killstreak>,
-    pub owned_streaks: Vec<gamemode_iw4::killstreaks::Killstreak>,
-    pub radar_until_ms: i32,
-    pub last_combat_weapon: u32,
+    pub radar: RadarMode,
     pub remote_missile: Option<RemoteMissile>,
 
     pub ammo_by_weapon: Vec<(u32, i32, i32)>,
@@ -454,12 +463,32 @@ pub struct ClientSnapshotMeta {
     pub player_card_title: u32,
 
     pub player_card_nameplate: u32,
+
+    pub client_dvars: Vec<(String, String)>,
+
+    pub shellshock: Option<hud_iw4::ShockParams>,
+
+    pub menu_commands: Vec<MenuCommand>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MenuCommand {
+    pub serial: u32,
+    pub kind: MenuCommandKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MenuCommandKind {
+    Open(String),
+    ClosePopup,
+    CloseInGame,
+}
+
+pub const MENU_COMMAND_TAIL: usize = 8;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SnapshotMeta {
     pub objectives: crate::ObjectiveMatch,
-    pub map_doors: Option<crate::MapDoors>,
     pub phase: MatchPhase,
 
     pub match_elapsed_ms: u32,
@@ -471,9 +500,6 @@ pub struct SnapshotMeta {
 
     pub kind: gamemode_iw4::GameModeKind,
     pub clients: Vec<(ClientId, ClientSnapshotMeta)>,
-    pub care_packages: Vec<CarePackage>,
-    pub pave_lows: Vec<PaveLow>,
-    pub uavs: Vec<Uav>,
 
     pub journal: Vec<EventRecord>,
 
@@ -486,6 +512,8 @@ pub struct SnapshotMeta {
     pub effect_names: crate::EffectNameCsOccupied,
 
     pub hud_materials: crate::HudMaterialCsOccupied,
+
+    pub hud_strings: crate::HudStringCsOccupied,
 
     pub rng: RngDebugMeta,
 
@@ -511,73 +539,29 @@ pub struct SnapshotMeta {
     pub item_pickups: Vec<ItemPickupRecord>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct CarePackage {
-    pub id: u32,
-    pub owner: ClientId,
-    pub team: i32,
-    pub origin: [f32; 3],
-    pub path: [[f32; 3]; 3],
-    pub approach_yaw: f32,
-    pub flyby: CareFlybyPhase,
-    pub phase_started_ms: i32,
-    pub bird_speed: f32,
-    pub bird_velocity: [f32; 2],
-    // pitch, roll, pitch velocity, roll velocity
-    pub bird_tilt: [f32; 4],
-    pub bird_health: i32,
-    pub bird_spin: f32,
-    pub bird_crash_ms: i32,
-    pub crate_slung: bool,
-    pub crate_fall_speed: f32,
-    pub contents: gamemode_iw4::killstreaks::CrateContents,
-    pub ready_at_ms: i32,
-    pub expires_at_ms: i32,
-    pub capturer: Option<ClientId>,
-    pub capture_ms: i32,
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RadarMode {
+    #[default]
+    Off,
+    Normal,
+    Fast,
+    Constant,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CareFlybyPhase {
-    Approach,
-    Hover,
-    Leave,
-    Dying,
-    Gone,
-}
-
-impl CareFlybyPhase {
+impl RadarMode {
     pub fn wire_tag(self) -> u8 {
-        match self {
-            Self::Approach => 0,
-            Self::Hover => 1,
-            Self::Leave => 2,
-            Self::Gone => 3,
-            Self::Dying => 4,
-        }
+        self as u8
     }
 
     pub fn from_wire_tag(tag: u8) -> Option<Self> {
         Some(match tag {
-            0 => Self::Approach,
-            1 => Self::Hover,
-            2 => Self::Leave,
-            3 => Self::Gone,
-            4 => Self::Dying,
+            0 => Self::Off,
+            1 => Self::Normal,
+            2 => Self::Fast,
+            3 => Self::Constant,
             _ => return None,
         })
     }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Uav {
-    pub id: u32,
-    pub owner: ClientId,
-    pub team: i32,
-    pub center: [f32; 3],
-    pub origin: [f32; 3],
-    pub started_at_ms: i32,
-    pub expires_at_ms: i32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -589,20 +573,6 @@ pub struct RemoteMissile {
     pub boosted: bool,
     pub attack: bool,
     pub unlink_at_ms: Option<i32>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct PaveLow {
-    pub id: u32,
-    pub owner: ClientId,
-    pub team: i32,
-    pub origin: [f32; 3],
-    pub center: [f32; 3],
-    pub started_at_ms: i32,
-    pub expires_at_ms: i32,
-    pub health: i32,
-    pub next_shot_ms: i32,
-    pub burst_remaining: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -645,6 +615,51 @@ impl SnapshotMeta {
             .iter()
             .filter(move |record| record.audience.projects_to(id))
             .map(|record| &record.event)
+    }
+
+    pub fn script_dvars(&self, id: ClientId) -> ScriptDvars<'_> {
+        ScriptDvars {
+            client: self
+                .for_client(id)
+                .map_or(&[], |m| m.client_dvars.as_slice()),
+            server: &self.objectives.server_info,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScriptDvars<'a> {
+    client: &'a [(String, String)],
+    server: &'a [(String, String)],
+}
+
+impl<'a> ScriptDvars<'a> {
+    pub fn string(&self, name: &str) -> Option<&'a str> {
+        self.client
+            .iter()
+            .chain(self.server)
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    pub fn int(&self, name: &str) -> Option<i32> {
+        let value = self.string(name)?.trim();
+        value
+            .parse::<i32>()
+            .ok()
+            .or_else(|| value.parse::<f32>().ok().map(|v| v as i32))
+    }
+
+    pub fn text(&self, name: &str, localize: impl Fn(&str) -> Option<String>) -> Option<String> {
+        let mut parts = self.string(name)?.split(crate::HUD_PRINT_ARG_SEPARATOR);
+        let head = parts.next().unwrap_or_default();
+        let Some(key) = head.strip_prefix('@') else {
+            return Some(head.to_owned());
+        };
+        let template = localize(key)?;
+        Some(parts.enumerate().fold(template, |line, (i, arg)| {
+            line.replace(&format!("&&{}", i + 1), arg)
+        }))
     }
 }
 
@@ -702,15 +717,9 @@ pub struct ClientMatchState {
 
     pub(crate) rechamber_pending: bool,
 
-    pub(crate) health_regen: gamemode_iw4::PlayerHealthRegenState,
-
-    pub(crate) last_named_sound: gamemode_iw4::HealthRegenSound,
-
     pub(crate) dead_since_tick: Option<u32>,
 
     pub(crate) forced_spawn: Option<crate::SpawnPick>,
-
-    pub(crate) spent_streak_weapon: u32,
 
     pub(crate) look_at_killer_yaw: i32,
 
@@ -720,35 +729,8 @@ pub struct ClientMatchState {
     pub deaths: i32,
     pub score: i32,
     pub kill_streak: i32,
-    pub last_earned_streak: Option<gamemode_iw4::killstreaks::Killstreak>,
-    pub owned_streaks: Vec<gamemode_iw4::killstreaks::Killstreak>,
-    pub radar_until_ms: i32,
-    pub last_combat_weapon: u32,
+    pub radar: RadarMode,
     pub remote_missile: Option<RemoteMissile>,
-
-    pub(crate) cur_death_streak: i32,
-
-    pub(crate) attackers_this_life: Vec<(ClientId, i32)>,
-
-    pub(crate) last_kill: Option<(ClientId, i32)>,
-
-    pub(crate) last_killed_by: Option<ClientId>,
-
-    pub(crate) damaged_players: Vec<(ClientId, i32)>,
-
-    pub(crate) objective_seen: bool,
-
-    pub(crate) combathigh_until_ms: Option<i32>,
-
-    pub(crate) pistoldeath_this_life: bool,
-
-    pub(crate) laststand_until_ms: Option<i32>,
-
-    pub(crate) copycat_this_life: bool,
-
-    pub(crate) copycat_class_this_life: bool,
-
-    pub(crate) copycat_loadout: Option<CopyCatLoadout>,
 
     pub(crate) ffa_team: Option<u8>,
 
@@ -759,6 +741,23 @@ pub struct ClientMatchState {
     pub(crate) player_card_icon: u32,
     pub(crate) player_card_title: u32,
     pub(crate) player_card_nameplate: u32,
+    pub(crate) client_dvars: Vec<(String, String)>,
+    pub(crate) shellshock: Option<hud_iw4::ShockParams>,
+    pub(crate) menu_commands: Vec<MenuCommand>,
+
+    pub(crate) controls: ScriptControls,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct ScriptControls {
+    pub frozen: bool,
+    pub weapons_disabled: bool,
+    pub offhands_disabled: bool,
+    pub switch_disabled: bool,
+    pub jump_disabled: bool,
+    pub usability_disabled: bool,
+    pub linked: bool,
+    pub switch_to: u32,
 }
 
 impl ClientMatchState {
@@ -810,25 +809,6 @@ impl ClientMatchState {
         self.ammo_stock = stock;
     }
 
-    pub fn copycat_stash_defined(&self) -> bool {
-        self.copycat_loadout.is_some()
-    }
-
-    pub(crate) fn take_spawn_loadout(&mut self) -> (LoadoutSpec, bool) {
-        let own = self.loadout.clone().unwrap_or_default();
-        let Some(stash) = self.copycat_loadout.as_ref() else {
-            return (own, false);
-        };
-        if !stash.in_use {
-            return (own, false);
-        }
-        let mut merged = stash.spec.clone();
-        merged.class_id = own.class_id;
-        merged.revision = own.revision;
-        self.loadout = Some(merged.clone());
-        (merged, true)
-    }
-
     pub(crate) fn to_snapshot_meta(&self) -> ClientSnapshotMeta {
         ClientSnapshotMeta {
             weapon_lock: self.weapon_lock,
@@ -844,10 +824,7 @@ impl ClientMatchState {
             kills: self.kills,
             deaths: self.deaths,
             kill_streak: self.kill_streak,
-            last_earned_streak: self.last_earned_streak,
-            owned_streaks: self.owned_streaks.clone(),
-            radar_until_ms: self.radar_until_ms,
-            last_combat_weapon: self.last_combat_weapon,
+            radar: self.radar,
             remote_missile: self.remote_missile,
             ammo_by_weapon: self.ammo_by_weapon.clone(),
             taped_mag_spent: self.taped_mag_spent.clone(),
@@ -866,7 +843,20 @@ impl ClientMatchState {
             player_card_icon: self.player_card_icon,
             player_card_title: self.player_card_title,
             player_card_nameplate: self.player_card_nameplate,
+            client_dvars: self.client_dvars.clone(),
+            shellshock: self.shellshock.clone(),
+            menu_commands: self.menu_commands.clone(),
         }
+    }
+
+    pub(crate) fn push_menu_command(&mut self, kind: MenuCommandKind) {
+        let serial = self
+            .menu_commands
+            .last()
+            .map_or(1, |c| c.serial.wrapping_add(1));
+        self.menu_commands.push(MenuCommand { serial, kind });
+        let excess = self.menu_commands.len().saturating_sub(MENU_COMMAND_TAIL);
+        self.menu_commands.drain(..excess);
     }
 
     pub(crate) fn adopt_snapshot_meta(&mut self, meta: &ClientSnapshotMeta) {
@@ -882,10 +872,7 @@ impl ClientMatchState {
         self.kills = meta.kills;
         self.deaths = meta.deaths;
         self.kill_streak = meta.kill_streak;
-        self.last_earned_streak = meta.last_earned_streak;
-        self.owned_streaks = meta.owned_streaks.clone();
-        self.radar_until_ms = meta.radar_until_ms;
-        self.last_combat_weapon = meta.last_combat_weapon;
+        self.radar = meta.radar;
         self.remote_missile = meta.remote_missile;
         self.ammo_by_weapon = meta.ammo_by_weapon.clone();
         self.taped_mag_spent = meta.taped_mag_spent.clone();
@@ -902,6 +889,9 @@ impl ClientMatchState {
         self.player_card_icon = meta.player_card_icon;
         self.player_card_title = meta.player_card_title;
         self.player_card_nameplate = meta.player_card_nameplate;
+        self.client_dvars = meta.client_dvars.clone();
+        self.shellshock = meta.shellshock.clone();
+        self.menu_commands = meta.menu_commands.clone();
     }
 }
 
@@ -942,6 +932,32 @@ impl ClassDef {
     pub fn weapon_slot_ids(&self) -> [u32; 4] {
         [self.primary, self.secondary, self.lethal, self.tactical]
     }
+}
+
+pub const CLASS_CATALOG_PERKS: [&str; 16] = [
+    "specialty_bulletdamage",
+    "specialty_fastreload",
+    "specialty_coldblooded",
+    "specialty_lightweight",
+    "specialty_scavenger",
+    "specialty_hardline",
+    "specialty_heartbreaker",
+    "specialty_marathon",
+    "specialty_explosivedamage",
+    "specialty_extendedmelee",
+    "specialty_bulletaccuracy",
+    "specialty_bling",
+    "specialty_onemanarmy",
+    "specialty_localjammer",
+    "specialty_detectexplosive",
+    "specialty_pistoldeath",
+];
+
+#[must_use]
+pub fn class_catalog_perk_name(id: u32) -> Option<&'static str> {
+    CLASS_CATALOG_PERKS
+        .get(id.checked_sub(1)? as usize)
+        .copied()
 }
 
 pub const CLASS_CATALOG_STOPPING_POWER: u32 = 1;

@@ -214,6 +214,50 @@ pub(crate) fn execute_chrome_menu_ex(
     frame
 }
 
+pub(crate) fn item_screen_rects(
+    menu: &MenuDef,
+    host: &impl ExprHost,
+    surface: &crate::surface::Hud2dSurface,
+    exprs: &mut MenuExprCache,
+) -> Vec<(usize, [f32; 4])> {
+    if !menu.vis_exp.is_empty() && !matches!(exprs.is_true(&menu.vis_exp, host), Ok(true)) {
+        return Vec::new();
+    }
+    let Ok(parent) = apply_menu_float_rect(&menu.rect, menu, host, exprs) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (index, item) in menu.items.iter().enumerate() {
+        if !matches!(exprs.is_true(&item.vis_exp, host), Ok(true)) {
+            continue;
+        }
+        let Ok(style) = evaluate_item_style(
+            &parent,
+            &menu.rect,
+            item,
+            host,
+            exprs,
+            ChromeMenuAnim::IDENTITY,
+        ) else {
+            continue;
+        };
+        let r = style.rect;
+        let a = surface.apply_rect(r.x, r.y, r.w, r.h, r.horz_align as i32, r.vert_align as i32);
+        let (x0, x1) = if a.w < 0.0 {
+            (a.x + a.w, a.x)
+        } else {
+            (a.x, a.x + a.w)
+        };
+        let (y0, y1) = if a.h < 0.0 {
+            (a.y + a.h, a.y)
+        } else {
+            (a.y, a.y + a.h)
+        };
+        out.push((index, [x0, y0, x1, y1]));
+    }
+    out
+}
+
 fn paint_item(
     menu: &MenuDef,
     index: usize,

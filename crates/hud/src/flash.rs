@@ -1,9 +1,6 @@
 use bevy::prelude::*;
 use frame::{AppScreen, LifeStarted};
-use hud_iw4::{
-    FLASHBANG_SHOT_FADE_MS, FLASHBANG_WHITE_FADE_MS, SCREEN_BLEND_FLASHED, cg_is_flashbanged,
-    cg_shellshock_flash_blend,
-};
+use hud_iw4::{cg_is_flashbanged, cg_shellshock_flash_blend};
 use net::{CgFrameClock, LocalPresentClient, PresentedSnapshot};
 
 use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance, tessellate};
@@ -77,7 +74,7 @@ pub(crate) fn update_flash_whiteout(
         request_hide(&mut job, latch.packed.is_empty());
         return;
     }
-    let Some(ps) = presented.player(local.0) else {
+    let (Some(ps), Some(shock)) = (presented.player(local.0), presented.shellshock(local.0)) else {
         request_hide(&mut job, latch.packed.is_empty());
         return;
     };
@@ -85,10 +82,10 @@ pub(crate) fn update_flash_whiteout(
         cg_clock.time(),
         ps.shellshock_time,
         ps.shellshock_duration,
-        SCREEN_BLEND_FLASHED,
+        shock.screen_type,
     );
     let Some((white, shot)) =
-        cg_shellshock_flash_blend(remaining, FLASHBANG_WHITE_FADE_MS, FLASHBANG_SHOT_FADE_MS)
+        cg_shellshock_flash_blend(remaining, shock.white_fade_ms, shock.shot_fade_ms)
     else {
         latch.last_start = None;
         request_hide(&mut job, latch.packed.is_empty());

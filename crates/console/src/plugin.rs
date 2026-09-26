@@ -300,7 +300,6 @@ impl Plugin for ConsolePlugin {
             .init_resource::<crate::user_settings::PendingMenuBinding>()
             .init_resource::<crate::user_settings::UserSettingsPersistence>()
             .add_message::<ConsoleCommand>()
-            .add_systems(Update, apply_ingame_menu_intents.after(ClientSet::Ui))
             .add_systems(
                 Startup,
                 (setup_console, crate::user_settings::load_user_settings).chain(),
@@ -395,10 +394,17 @@ impl Plugin for ConsolePlugin {
 
 fn drain_startup_queue(
     mut startup: ResMut<crate::ConsoleQueue>,
+    mut menu_exec: MessageReader<frame::UiExecCommand>,
     mut queue: ResMut<ConsoleCommandQueue>,
 ) {
     for command in startup.drain() {
         queue.0.push_back(command);
+    }
+    for exec in menu_exec.read() {
+        for mut command in ConsoleCommand::parse_script(&exec.text) {
+            command.interactive = true;
+            queue.0.push_back(command);
+        }
     }
 }
 
@@ -423,11 +429,14 @@ fn publish_client_action_input(
     mut scripted: ResMut<ConsoleInputState>,
     console: Res<ConsoleState>,
     menu: Res<MenuEnabled>,
+    script_menus: Option<Res<hud::ScriptMenus>>,
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
     mut out: ResMut<ClientActionInput>,
 ) {
     hud_input.menu_open = menu.0;
+    hud_input.console_open = console.open;
+    let script_menu = script_menus.is_some_and(|m| m.captures_input());
     if binds.is_changed() || hud_input.use_key.is_none() {
         hud_input.use_key = binds
             .iter()
@@ -465,7 +474,7 @@ fn publish_client_action_input(
     let now = out.now_msec;
     let frame = out.frame_msec;
 
-    if console.open || menu.0 || keys.just_pressed(KeyCode::Escape) {
+    if console.open || menu.0 || script_menu || keys.just_pressed(KeyCode::Escape) {
         for _ in motion.read() {}
         for key_num in 0..input_iw4::KEY_COUNT {
             if out.client.keys[key_num].down != 0 {
@@ -538,6 +547,7 @@ fn publish_client_action_input(
 fn sync_cursor_grab(
     console: Res<ConsoleState>,
     menu: Option<Res<MenuEnabled>>,
+    script_menus: Option<Res<hud::ScriptMenus>>,
     screen: Option<Res<AppScreen>>,
     mut focused: MessageReader<WindowFocused>,
     mut entered: MessageReader<CursorEntered>,
@@ -549,7 +559,8 @@ fn sync_cursor_grab(
     }
     returned |= entered.read().count() > 0;
 
-    let menu_open = menu.map(|m| m.0).unwrap_or(false);
+    let menu_open =
+        menu.map(|m| m.0).unwrap_or(false) || script_menus.is_some_and(|m| m.captures_input());
     let in_game = screen
         .as_ref()
         .is_some_and(|s| matches!(**s, AppScreen::InGame));
@@ -1759,9 +1770,14 @@ fn dispatch_console_command(
         Option<Res<net::AuthorityClock>>,
     ),
     local: Option<Res<net::LocalPresentClient>>,
-    mut mark_sequence: Local<u64>,
+    (mut mark_sequence, headless): (Local<u64>, Option<Res<frame::Headless>>),
 ) {
     let capacity = settings.log_capacity;
+    let world_up = if headless.is_some() {
+        has_world.as_ref().is_some_and(|h| h.0)
+    } else {
+        scene.as_ref().is_some_and(|s| s.spawned)
+    };
 
     let waiting = dispatch.paused
         || dispatch.wait_world
@@ -1793,7 +1809,7 @@ fn dispatch_console_command(
         return;
     }
     if dispatch.wait_world {
-        if scene.as_ref().is_some_and(|s| s.spawned) {
+        if world_up {
             dispatch.wait_world = false;
             diag::info!(
                 Console,
@@ -2096,7 +2112,7 @@ fn dispatch_console_command(
         if command.name == "wait" {
             match parse_wait_args(&command.args) {
                 WaitKind::World => {
-                    if scene.as_ref().is_some_and(|s| s.spawned) {
+                    if world_up {
                         diag::info!(Console, "wait world: already spawned");
                     } else {
                         dispatch.wait_world = true;
@@ -2302,25 +2318,4 @@ fn suggest_span_bundle(span: &SuggestSpan, font: Handle<Font>) -> impl Bundle {
         }),
         TextBackgroundColor(COLOR_SUGGEST_BG),
     )
-}
-
-fn apply_ingame_menu_intents(
-    mut intents: MessageReader<ui::UiIntent>,
-    mut transition: ResMut<session::SessionSwapRequest>,
-    mut stack: ResMut<ui::RetailMenuStack>,
-) {
-    for intent in intents.read() {
-        if matches!(intent, ui::UiIntent::Disconnect) {
-            match transition.request_menu() {
-                Ok(_) => {
-                    if let Some(index) =
-                        stack.names.iter().position(|name| name == "ingame_options")
-                    {
-                        stack.names.truncate(index);
-                    }
-                }
-                Err(error) => diag::warn!(Ui, "Leave Game: {error}"),
-            }
-        }
-    }
 }

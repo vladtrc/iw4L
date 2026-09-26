@@ -1,6 +1,5 @@
 pub mod adopt;
 pub mod anim_script_gap;
-pub mod barrel_policy;
 pub mod bullet;
 pub mod bullet_collision;
 mod carrier;
@@ -18,41 +17,29 @@ pub mod hudelem;
 pub mod identities;
 pub mod input;
 mod item;
-mod killstreaks;
-pub use killstreaks::{
-    CRATE_MODEL_KIND, LITTLE_BIRD_MODEL_KIND, PAVELOW_MODEL_KIND, UAV_MODEL_KIND,
-    model_source as killstreak_model_source,
-};
 mod mantle_xanim;
 pub mod match_state;
 mod missile;
+mod presence;
+mod remote_missile;
 mod weapon_lock;
 pub use weapon_lock::WeaponLock;
 pub mod player_anim_script;
 pub mod rules;
 mod score;
 pub mod script_gaps;
+mod script_player;
 mod smodel_grid;
 mod snapshot;
 mod sound_alias_cs;
 pub mod spawn;
 mod step;
 pub mod t5_destructible;
-mod use_object;
-mod vehicle_glass;
-mod voice;
 mod world;
 pub mod world_objects;
 
 pub use adopt::{ADOPT_GAP_COUNT, ADOPT_GAPS, AdoptGap, AdoptReport};
 pub use anim_script_gap::PlayerAnimScriptGap;
-pub use barrel_policy::{
-    EXPLODABLE_BARREL_BURN_DRAIN, EXPLODABLE_BARREL_BURN_DRAIN_INTERVAL_MS,
-    EXPLODABLE_BARREL_BURN_LOOP_FX, EXPLODABLE_BARREL_BURN_LOOP_INTERVAL_MS,
-    EXPLODABLE_BARREL_BURN_START_FX, EXPLODABLE_BARREL_DEATH_FX, EXPLODABLE_BARREL_DEATH_SOUND,
-    EXPLODABLE_BARREL_DESTROYED_STATE, EXPLODABLE_BARREL_EXPLODE_DAMAGE,
-    EXPLODABLE_BARREL_EXPLODE_RANGE, EXPLODABLE_BARREL_HEALTH, EXPLODABLE_BARREL_HUSK,
-};
 pub use bullet_collision::{
     AuthorityDObjCollision, AuthorityDObjCollisionBone, AuthorityDObjState, AuthorityModelOwner,
     BulletHitKind, BulletPath, BulletTraceQuery, BulletTraceSegment, COLLISION_COVERAGE,
@@ -88,15 +75,7 @@ pub use equipment::{
     EquipmentRuntimeFacts, ProjectileHitGeometry, ProjectileImpact, ProjectileState,
     projectile_birth_ms,
 };
-pub use gamemode_iw4::{
-    ANIMATED_MODEL_TARGETNAME, FAN_BLADE_AXIS_DOT, FAN_BLADE_FAST_SPEED_MAX,
-    FAN_BLADE_FAST_SPEED_MIN, FAN_BLADE_ROTATE_FAST_TARGETNAME, FAN_BLADE_ROTATE_TARGETNAME,
-    FAN_BLADE_ROTATE_TIME, FAN_BLADE_SLOW_SPEED_MAX, FAN_BLADE_SLOW_SPEED_MIN,
-    FanBladeRotateChannel, TOY_CEILING_FAN_IDLE_MPANIM, TOY_CEILING_FAN_TYPE,
-    TOY_WALL_FAN_IDLE_MPANIM, TOY_WALL_FAN_TYPE, animprop_machine, fan_blade_dots, fan_blade_right,
-    fan_blade_rotate_channel, fan_blade_rotate_delta, fan_blade_speed_bounds,
-    mp_clip_for_animated_model, mp_clip_for_toy_fan,
-};
+pub use gamemode_iw4::{FAN_BLADE_ROTATE_TIME, fan_blade_right, fan_blade_rotate_delta};
 pub use gentity::{
     EntityAllocError, EntityKernel, EntityKernelOccupiedSnapshot, EntityKernelSlotSnapshot,
     EntityKernelSnapshot, EntityKernelSnapshotError, EntityRef, EntityRefError, EntityRelations,
@@ -108,27 +87,29 @@ pub use gentity::{
 };
 pub use hudelem::{
     GameHudElemSlot, HUDELEM_UPDATE_ARCHIVAL, HUDELEM_UPDATE_BOTH, HUDELEM_UPDATE_CURRENT,
-    ensure_damage_feedback_slot, ensure_score_popup_slot, hud_elem_update_client,
-    hud_level_time_ms, pulse_damage_feedback, pulse_score_popup, rebase_hud_archival,
-    tick_score_popup_slots,
+    hud_elem_update_client, rebase_hud_archival,
 };
 pub use identities::{
     ActionSequence, DamageSource, EventSequence, LifeSequence, MatchPhase, MatchRng, PelletId,
     ProjectileId, RNG_DOMAIN_SCHEME, RngDomain, ScriptModelId, ShotId,
 };
-pub use input::{ActionRequestId, ClassId, ClientAction, SpawnPick, TickInput, action_request_id};
+pub use input::{
+    ActionRequestId, ClassId, ClientAction, MENU_RESPONSE_BYTES, SpawnPick, TickInput,
+    action_request_id, menu_response_field, menu_response_text,
+};
 pub use mantle_xanim::MantleXAnimBind;
 pub use match_state::{
     CLASS_CATALOG_BLING, CLASS_CATALOG_COLD_BLOODED, CLASS_CATALOG_DANGER_CLOSE,
     CLASS_CATALOG_LIGHTWEIGHT, CLASS_CATALOG_MARATHON, CLASS_CATALOG_NINJA,
     CLASS_CATALOG_SCAVENGER, CLASS_CATALOG_SCRAMBLER, CLASS_CATALOG_SLEIGHT_OF_HAND,
-    CLASS_CATALOG_STEADY_AIM, CLASS_CATALOG_STOPPING_POWER, CareFlybyPhase, CarePackage, ClassDef,
-    ClassRejectReason, ClientLifecycle, ClientSnapshotMeta, ConfigurationChangeRejectReason,
-    DroppedItemAmmo, EntityEventPayload, EntityEventRecord, EventAudience, EventRecord,
-    GiveRejectReason, HealthRegenCensus, InputReceipt, ItemPickupRecord, KillcamHud, LoadoutSpec,
-    MatchEndReason, PaveLow, PelletFxRecord, RemoteMissile, RngDebugMeta, SIM_EVENT_ROSTER,
-    SimEvent, SimEventRow, SnapshotMeta, UNRELIABLE_SIM_EVENT_COUNT, Uav, class_catalog_has,
-    class_catalog_radar_jam_e_flags, perk_bits_from_class_catalog, sim_event_is_reliable,
+    CLASS_CATALOG_STEADY_AIM, CLASS_CATALOG_STOPPING_POWER, ClassDef, ClassRejectReason,
+    ClientLifecycle, ClientSnapshotMeta, ConfigurationChangeRejectReason, DroppedItemAmmo,
+    EntityEventPayload, EntityEventRecord, EventAudience, EventRecord, GiveRejectReason,
+    HealthRegenCensus, InputReceipt, ItemPickupRecord, KillcamHud, LoadoutSpec, MENU_COMMAND_TAIL,
+    MatchEndReason, MenuCommand, MenuCommandKind, PelletFxRecord, RadarMode, RemoteMissile,
+    RngDebugMeta, SIM_EVENT_ROSTER, ScriptDvars, ScriptSeat, SimEvent, SimEventRow, SnapshotMeta,
+    UNRELIABLE_SIM_EVENT_COUNT, class_catalog_has, class_catalog_radar_jam_e_flags,
+    perk_bits_from_class_catalog, sim_event_is_reliable,
 };
 pub use player_anim_script::{
     AnimConditions, AnimScriptCommand, AnimScriptCondition, AnimScriptItem, PlayerAnimScript,
@@ -142,43 +123,33 @@ pub use snapshot::{
     AreaSectorSnapshot, Snapshot,
 };
 pub use sound_alias_cs::{
-    CS_SOUNDALIASES_SLOTS, EffectNameCs, EffectNameCsOccupied, HudMaterialCs,
-    HudMaterialCsOccupied, REQUIRED_HUD_MATERIALS, SoundAliasCs, SoundAliasCsOccupied,
-    name_in_occupied,
+    CS_LOCALIZED_STRINGS_SLOTS, CS_SOUNDALIASES_SLOTS, EffectNameCs, EffectNameCsOccupied,
+    HUD_PRINT_ARG_SEPARATOR, HUD_STRING_PLAIN, HudMaterialCs, HudMaterialCsOccupied, HudStringCs,
+    HudStringCsOccupied, REQUIRED_HUD_MATERIALS, SoundAliasCs, SoundAliasCsOccupied,
+    hud_string_in_occupied, name_in_occupied,
 };
 pub use spawn::{
-    AuthoredSpawnPoint, DomFlagDescriptor, HostGameModeSelection, MatchBootstrap, SPAWN_BAD_DIST,
-    SPAWN_IDEAL_DIST, SpawnAttemptReport, SpawnDecision, SpawnReject, host_game_mode_kind,
-    pick_ffa_spawn, spawn_candidate_indices, spawn_candidate_indices_for,
+    AuthoredSpawnPoint, HostGameModeSelection, MatchBootstrap, SPAWN_BAD_DIST, SPAWN_IDEAL_DIST,
+    SpawnAttemptReport, SpawnDecision, SpawnReject, host_game_mode_kind, pick_ffa_spawn,
+    spawn_candidate_indices, spawn_candidate_indices_for,
 };
-pub use step::{
-    apply_destructable_death_presentation, apply_explodable_barrel_death_presentation,
-    apply_toy_stage_presentation, phase_materialize_entity_dobjs,
-};
-pub use use_object::{
-    DomFlagInstallError, MapUseBindError, UseCancelReason, UseHoldSession, UseObject,
-    UseObjectEvent, UseObjectInstall, UseTriggerKind, bind_map_use_object,
-    trigger_radius_world_aabb, world_aabb_from_r_box,
-};
+pub use step::phase_materialize_entity_dobjs;
 pub use weapon_iw4::{
     BulletPenFacts, CapturedCombatInput, FireType, HITLOC_COUNT, LOCATION_DAMAGE_IDENTITY,
     MissingCombatFacts, PERK_FASTRELOAD, PenetrationDepthTable, WeaponCombatFacts,
     bake_location_damage, location_damage_is_valid, location_damage_scale,
 };
 pub use world::{
-    ClientId, DamageFeedbackCue, HitvolDumpRow, PendingPlayerCardEvent, PendingPlayerCardKind,
-    PlayerKitCollision, SimBrush, SimClipBsp, SimClipCmodels, SimClipMesh, SimStaticModel, Tick,
-    blank_player_state,
+    ClientId, HitvolDumpRow, PendingPlayerCardEvent, PendingPlayerCardKind, PendingPrint,
+    PlayerKitCollision, SimBrush, SimClipBsp, SimClipCmodels, SimClipMesh, SimStaticModel,
+    SimTriggerHull, Tick, WeaponScriptSounds, blank_player_state,
 };
 pub use world_objects::{
-    DestructableDown, DestructableInstall, DestructibleApplyReport, DestructibleDamageIntent,
-    DestructibleExplodeEvent, DestructibleLoopSound, DestructibleStateIndex, FlammableCrateInstall,
-    GLASS_BLAST_DAMAGE_SCALE, GLASS_BLAST_RADIUS_CAP, GLASS_DAMAGE_TO_DESTROY,
-    GLASS_DAMAGE_TO_WEAKEN, GLASS_FRACTURE_PROFILE_VERSION, GLASS_MELEE_DAMAGE,
-    GLASS_PROJECTILE_PANE_HOPS, GlassBreakRecord, GlassCause, GlassPaneBasis, GlassPieceId,
-    GlassPieceSnapshot, GlassPieceState, GlassShatterSeed, MISSILE_GLASS_SHATTER_VEL,
-    ToyDestructibleKind, VehicleDestructibleKind, VehicleDumpRow, VehicleFxPulse,
-    VehicleSoundPulse, WorldObjectSnapshot, WorldObjectState, glass_blast_integer_damage,
+    DestructibleLoopSound, GLASS_BLAST_DAMAGE_SCALE, GLASS_BLAST_RADIUS_CAP,
+    GLASS_DAMAGE_TO_DESTROY, GLASS_DAMAGE_TO_WEAKEN, GLASS_FRACTURE_PROFILE_VERSION,
+    GLASS_MELEE_DAMAGE, GLASS_PROJECTILE_PANE_HOPS, GlassBreakRecord, GlassCause, GlassPaneBasis,
+    GlassPieceId, GlassPieceSnapshot, GlassPieceState, GlassShatterSeed, MISSILE_GLASS_SHATTER_VEL,
+    WorldObjectSnapshot, WorldObjectState, glass_blast_integer_damage,
 };
 pub use xmodel_runtime::{
     AnimClip, BoneCollision, DObjCompositionDescriptor, DObjModelDescriptor, DObjPoseRequest,
@@ -187,18 +158,7 @@ pub use xmodel_runtime::{
     XAnimSemanticNode, XAnimSemanticNodeKind, XAnimTreeDefinition, XAnimTreeSnapshot,
 };
 
-mod map_conveyer;
-mod map_diggers;
-mod map_doors;
-mod map_lights;
-mod map_moving_diggers;
-pub use map_conveyer::RadiationConveyer;
-pub use map_diggers::RadiationDigger;
-pub use map_doors::{DoorLeaf, DoorSwitch, MapDoors};
-pub use map_lights::RadiationLights;
-pub use map_moving_diggers::RadiationMovingDigger;
-
 mod objectives;
-pub use objectives::{BombSite, ObjectiveFlash, ObjectiveHull, ObjectiveMatch, ObjectiveView};
+pub use objectives::{CompassObjective, ObjectiveMatch, ObjectiveState};
 
 pub use world::{SimContent, SimContentBuilder};

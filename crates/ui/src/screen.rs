@@ -12,7 +12,8 @@ pub fn layers_for_screen(screen: AppScreen, ui_draw: bool, loading: bool) -> &'s
         match (screen, ui_draw) {
             (AppScreen::MainMenu, _) => &[UiLayer::Shell, UiLayer::Overlay],
             (AppScreen::Loading, _) => &[UiLayer::Loading, UiLayer::Overlay],
-            (AppScreen::ClassSelect, _) => &[UiLayer::Shell, UiLayer::Overlay],
+            (AppScreen::ClassSelect, true) => &[UiLayer::Hud, UiLayer::Overlay],
+            (AppScreen::ClassSelect, false) => &[UiLayer::Overlay],
             (AppScreen::InGame, true) => &[UiLayer::Hud, UiLayer::Debug, UiLayer::Overlay],
             (AppScreen::InGame, false) => &[UiLayer::Overlay],
         }

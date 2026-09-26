@@ -10,7 +10,6 @@ use frame::{ClientSet, LaunchIdentity, MatchTornDown, ReturnedToMenu};
 use crate::aliases::movement_prepare_names;
 use crate::ambient::{SoundBankCompose, SoundBankLoadAttempted, SoundBankNamespace};
 use crate::clip_store::{ClipKey, ClipStore, clip_keys_for_alias};
-use crate::map_doors::RADIATION_DOOR_ALIASES;
 use crate::playback::SoundBank;
 
 #[derive(Resource, Default)]
@@ -32,7 +31,7 @@ const MATCH_HUD_PULSE: &[&str] = &["ui_pulse_text_type", "ui_pulse_text_delete"]
 
 const MENU_CODE: [&str; 2] = ["mouse_over", "mouse_click"];
 
-const MATCH_CLOCK: &[&str] = &[gamemode_iw4::match_clock::COUNTDOWN_TICK_ALIAS];
+const MATCH_CLOCK: &[&str] = &["ui_mp_timer_countdown"];
 
 #[derive(Default)]
 struct MatchRequests {
@@ -177,37 +176,14 @@ fn queue_match_clips(
             request_named(clips, &bank.0, ns, &emitter.soundalias, &mut set);
         }
     }
-    let mut destructible_loops: Vec<&str> = Vec::new();
-    for alias in gamemode_iw4::destructible_loop_sound_aliases() {
-        if destructible_loops.contains(&alias) {
-            continue;
-        }
-        destructible_loops.push(alias);
-        aliases += 1;
-        request_named(clips, &bank.0, namespace.namespace, alias, &mut set);
-    }
-    for alias in RADIATION_DOOR_ALIASES {
-        aliases += 1;
-        let ns = match bank.0.index_in(AssetNamespace::T5, alias) {
-            Some(_) => AssetNamespace::T5,
-            None => AssetNamespace::Iw4,
-        };
-        request_named(clips, &bank.0, ns, alias, &mut set);
-    }
     if let Some(identity) = identity.as_deref() {
-        let (allies, axis) = crate::policy::music::voice_prefixes_for_zone(
+        let (allies, axis) = crate::match_voices::voice_prefixes_for_zone(
             catalog.as_deref(),
             Some(bank.as_ref()),
             identity,
         );
         for alias in
-            crate::policy::music::match_script_alias_names(allies.as_deref(), axis.as_deref())
-        {
-            aliases += 1;
-            request_named(clips, &bank.0, AssetNamespace::Iw4, &alias, &mut set);
-        }
-        for alias in
-            crate::policy::music::match_voice_alias_names(allies.as_deref(), axis.as_deref())
+            crate::match_voices::team_voice_aliases(&bank.0, allies.as_deref(), axis.as_deref())
         {
             aliases += 1;
             request_named(clips, &bank.0, AssetNamespace::Iw4, &alias, &mut set);
@@ -229,7 +205,6 @@ fn queue_match_clips(
         .chain(crate::weapon_lock::ALIASES.iter())
         .chain([&gamemode_iw4::damage_feedback::HIT_ALERT_ALIAS])
         .chain(MATCH_CLOCK)
-        .chain(crate::objectives::EFFECTS)
     {
         aliases += 1;
         request_named(clips, &bank.0, AssetNamespace::Iw4, alias, &mut set);

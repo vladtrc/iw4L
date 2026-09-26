@@ -5,16 +5,15 @@ use net::{
     AUTHORITY_MS, AuthorityClock, AuthorityWorld, ClientActionInbox, ClientCommandInbox,
     LocalPresentClient, ReliableEventHub, authority_should_tick, look_angles_from_degrees,
 };
-use sim::{ClassId, ClientAction, ClientLifecycle, SimWorld, Tick};
+use sim::{ClientAction, ClientLifecycle, SimWorld, Tick};
 
 use crate::nav::{self, NAV_HULL, NAV_SCHEMA, NavGraph, RouteStats};
 use crate::query::{Budgeted, QueryCounters, QuerySubsystem, TraceBudget};
 use crate::roster::{
-    BotAddQueue, BotClassPool, BotFireQueue, BotHold, BotRoster, BotTpQueue, BotTpTarget,
-    BotTpWhere,
+    BotAddQueue, BotFireQueue, BotHold, BotRoster, BotTpQueue, BotTpTarget, BotTpWhere,
+    default_class_index,
 };
 use crate::sensor;
-use crate::unique_loadout::pick_class_id;
 use frame::{AuthoritySet, BotNavigationReady, ClientSet, HasWorld, MatchTornDown, RuntimeRole};
 
 const VIEW_PITCH_DOWN: f32 = 85.0;
@@ -101,7 +100,6 @@ pub struct BotsPlugin;
 impl Plugin for BotsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BotRoster>()
-            .init_resource::<BotClassPool>()
             .init_resource::<BotAddQueue>()
             .init_resource::<BotHold>()
             .init_resource::<BotTpQueue>()
@@ -138,7 +136,6 @@ impl Plugin for BotsPlugin {
 fn reset_roster_on_match_torn_down(
     mut torn: MessageReader<MatchTornDown>,
     mut roster: ResMut<BotRoster>,
-    mut pool: ResMut<BotClassPool>,
     mut nav: ResMut<BotNav>,
     mut ready: ResMut<BotNavigationReady>,
 ) {
@@ -146,7 +143,6 @@ fn reset_roster_on_match_torn_down(
         return;
     }
     *roster = BotRoster::default();
-    *pool = BotClassPool::default();
     *nav = BotNav::default();
     ready.0 = false;
 }
@@ -203,9 +199,9 @@ fn boot_bots(
     mut roster: ResMut<BotRoster>,
     mut actions: ResMut<ClientActionInbox>,
     mut request_ids: ResMut<net::ActionRequestIds>,
-    pool: Res<BotClassPool>,
+    installed: Option<Res<HasWorld>>,
 ) {
-    if !pool.ready {
+    if !installed.is_some_and(|installed| installed.0) {
         return;
     }
     let seed = roster.seed;
@@ -213,7 +209,7 @@ fn boot_bots(
         if bot.joined {
             continue;
         }
-        let class_id = pick_class_id(&pool.ids, seed, bot.id.0).unwrap_or(ClassId(0));
+        let index = default_class_index(seed, bot.id, bot.class_picks);
         let join_id = request_ids.allocate();
         let class_request = request_ids.allocate();
         let name_request = request_ids.allocate();
@@ -226,10 +222,9 @@ fn boot_bots(
             ),
             actions.push(
                 bot.id,
-                ClientAction::SelectClass {
+                ClientAction::ChooseDefaultClass {
                     request_id: class_request,
-                    class_id,
-                    revision: 1,
+                    index,
                 },
             ),
             actions.push(
@@ -249,12 +244,11 @@ fn boot_bots(
             continue;
         }
         bot.joined = true;
-        bot.class_requested = true;
+        bot.class_picks += 1;
         diag::info!(
             Sim,
-            "bots: JoinMatch+SelectClass client={} class={} request_id={class_request}",
+            "bots: JoinMatch+changeclass client={} class{index} request_id={class_request}",
             bot.id.0,
-            class_id.0,
         );
     }
 }
@@ -357,6 +351,8 @@ struct ThinkBots<'w> {
     nav: Res<'w, BotNav>,
     roster: ResMut<'w, BotRoster>,
     cmds: ResMut<'w, ClientCommandInbox>,
+    actions: ResMut<'w, ClientActionInbox>,
+    request_ids: ResMut<'w, net::ActionRequestIds>,
     hold: Res<'w, BotHold>,
     fire: ResMut<'w, BotFireQueue>,
     reliable: ResMut<'w, ReliableEventHub>,
@@ -383,6 +379,7 @@ fn think_bots(mut p: ThinkBots) {
     let count = p.roster.bots.len();
     let start = (p.clock.tick as usize / 2) % count.max(1);
     let mut controller_us = 0u64;
+    let seed = p.roster.seed;
     for offset in 0..count {
         let bot = &mut p.roster.bots[(start + offset) % count];
         let Some(meta) = snapshot.meta.for_client(bot.id) else {
@@ -393,6 +390,22 @@ fn think_bots(mut p: ThinkBots) {
                 brain.cancel_navigation();
             }
             continue;
+        }
+        if bot.class_picked_in != Some(meta.life_sequence) {
+            bot.class_picked_in = Some(meta.life_sequence);
+            let index = default_class_index(seed, bot.id, bot.class_picks);
+            let request_id = p.request_ids.allocate();
+            match p.actions.push(
+                bot.id,
+                ClientAction::ChooseDefaultClass { request_id, index },
+            ) {
+                Ok(()) => bot.class_picks += 1,
+                Err(error) => diag::warn!(
+                    Sim,
+                    "bots: client {} class pick not queued — {error}",
+                    bot.id.0
+                ),
+            }
         }
         let mut cmd = if p.hold.0 || bot.brain.is_none() {
             let Some((_, ps)) = snapshot.players.iter().find(|(id, _)| *id == bot.id) else {
@@ -591,12 +604,12 @@ fn bake_navigation(world: &mut SimWorld, graph: &mut NavGraph) {
     }
     let generation = graph.generation.wrapping_add(1);
     let mut seeds = world.authored_spawn_origins();
-    seeds.extend(world.objectives.bombs.iter().map(|site| site.view.origin));
     seeds.extend(
         world
-            .use_objects()
+            .objectives
+            .compass
             .iter()
-            .map(|object| object.script_origin),
+            .map(|objective| objective.origin),
     );
     let Some(bounds) = nav::playable_bounds(world.clip_brushes(), &seeds) else {
         *graph = NavGraph {

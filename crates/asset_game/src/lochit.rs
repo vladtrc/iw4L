@@ -1,30 +1,7 @@
-use weapon_iw4::{HITLOC_COUNT, LOCATION_DAMAGE_IDENTITY, location_damage_is_valid};
+use weapon_iw4::{HITLOC_COUNT, HITLOC_NAMES, LOCATION_DAMAGE_IDENTITY, location_damage_is_valid};
 
 const LOCHIT_MAGIC: &str = "LOCDMGTABLE";
 const LOCHIT_RAWFILE: &str = "info/mp_lochit_dmgtable";
-
-const HITLOC_NAMES: [&str; HITLOC_COUNT] = [
-    "none",
-    "helmet",
-    "head",
-    "neck",
-    "torso_upper",
-    "torso_lower",
-    "right_arm_upper",
-    "left_arm_upper",
-    "right_arm_lower",
-    "left_arm_lower",
-    "right_hand",
-    "left_hand",
-    "right_leg_upper",
-    "left_leg_upper",
-    "right_leg_lower",
-    "left_leg_lower",
-    "right_foot",
-    "left_foot",
-    "gun",
-    "shield",
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LochitTableError {

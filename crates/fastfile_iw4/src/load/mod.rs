@@ -319,6 +319,27 @@ pub trait AssetLinkSink {
         Ok(())
     }
 
+    fn begin_menu_event_branch(
+        &mut self,
+        menu: &str,
+        item: &str,
+        kind: MenuScriptKind,
+        condition: Option<&str>,
+    ) -> Result<()> {
+        let _ = (menu, item, kind, condition);
+        Ok(())
+    }
+
+    fn end_menu_event_branch(
+        &mut self,
+        menu: &str,
+        item: &str,
+        kind: MenuScriptKind,
+    ) -> Result<()> {
+        let _ = (menu, item, kind);
+        Ok(())
+    }
+
     fn begin_menu_script_set(&mut self, body: Ptr) {
         let _ = body;
     }

@@ -77,8 +77,26 @@ impl Iw5Lane {
         }
     }
 
-    fn finish_loaded(path: &Path, mut loaded: LoadedWorld) -> LoadedWorld {
+    fn finish_loaded(
+        scripts: Option<&(String, Option<String>)>,
+        path: &Path,
+        mut loaded: LoadedWorld,
+    ) -> LoadedWorld {
         Self::stamp_map_tree_team_settings(path, &mut loaded);
+        if let Some((entities, stand_in)) = scripts {
+            loaded.scripts.set_entities(entities.clone());
+            let map = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_ascii_lowercase());
+            if let (Some(stand_in), Some(map)) = (stand_in, map) {
+                loaded
+                    .scripts
+                    .insert_source(&format!("maps/mp/{map}"), stand_in.clone());
+                loaded.report.push(format!(
+                    "map script: maps/mp/{map} written from the zone's declarations"
+                ));
+            }
+        }
         loaded
     }
 }
@@ -114,6 +132,7 @@ impl ZoneLane for Iw5Lane {
             Err(e) => {
                 stage.fail();
                 return Self::finish_loaded(
+                    None,
                     path,
                     LoadedWorld::with_gap(
                         WorldDrawPolicy::iw5(),
@@ -141,6 +160,7 @@ impl ZoneLane for Iw5Lane {
             Err(e) => {
                 stage.fail();
                 return Self::finish_loaded(
+                    None,
                     path,
                     LoadedWorld::with_gap(
                         WorldDrawPolicy::iw5(),
@@ -179,6 +199,13 @@ impl ZoneLane for Iw5Lane {
         let exp_fog = sink.exp_fog.take();
         let script_sound = std::mem::take(&mut sink.script_sound).finish();
         let createart_name = sink.createart_name.take();
+        let scripts = crate::map_ents_entity_string_iw5(&stream)
+            .map(crate::iw5_entity_string_named)
+            .map(|entities| {
+                let stand_in =
+                    (!sink.iw5_map.is_empty()).then(|| sink.iw5_map.map_script(&entities));
+                (entities, stand_in)
+            });
         report.push(match &exp_fog {
             Some(fog) => format!(
                 "createart fog: READY start={:.3} half={:.3} maxOpacity={:.3} sun={} name={}",
@@ -242,6 +269,12 @@ impl ZoneLane for Iw5Lane {
             match build_iw5_clip_collision(&stream, geometry) {
                 Ok(mut clip) => {
                     attach_iw5_static_models(&stream, geometry, &sink.xmodel_coll, &mut clip);
+                    clip.trigger_models = asset_world::trigger_models_iw5(&stream);
+                    report.push(format!(
+                        "trigger models: {} ({} with hulls)",
+                        clip.trigger_models.len(),
+                        clip.trigger_models.iter().filter(|h| !h.is_empty()).count()
+                    ));
                     let solid = clip
                         .brushes
                         .iter()
@@ -282,6 +315,7 @@ impl ZoneLane for Iw5Lane {
             report.push("bodies: empty (no GfxWorld; XModel bone capture not reached)".into());
             let dm_spawns = dm_spawn_points_iw5(&stream);
             return Self::finish_loaded(
+                scripts.as_ref(),
                 path,
                 LoadedWorld {
                     sound: map_sound,
@@ -359,7 +393,6 @@ impl ZoneLane for Iw5Lane {
                     scene_assets: map_xmodel_scene_assets,
                     script_instances: script_model_instances,
                     script_brush_models,
-                    map_use_triggers,
                     flag_descriptors,
                     script_structs,
                     ..
@@ -584,6 +617,7 @@ impl ZoneLane for Iw5Lane {
                 }
                 report.push(format!("map xanims: {}", map_xanims.len()));
                 Self::finish_loaded(
+                    scripts.as_ref(),
                     path,
                     LoadedWorld {
                         sound: map_sound,
@@ -597,7 +631,6 @@ impl ZoneLane for Iw5Lane {
                             map_xmodel_scene_assets,
                             script_model_instances,
                             script_brush_models,
-                            map_use_triggers,
                             flag_descriptors,
                             script_structs,
                             intermission_view,
@@ -631,6 +664,7 @@ impl ZoneLane for Iw5Lane {
                 report.push(format!("world draw: {e}"));
                 let dm_spawns = dm_spawn_points_iw5(&stream);
                 Self::finish_loaded(
+                    scripts.as_ref(),
                     path,
                     LoadedWorld {
                         sound: map_sound,
@@ -724,7 +758,7 @@ impl ZoneLane for Iw5Lane {
         ));
         let gun_named = weapons.gun_xmodel_count();
         report.push(format!(
-        "common_mp weapons: {captured} captures → {} unique catalog ids (sorted; not retail bg_weaponIndex); {gun_named} with gunXModel[0]; {} with szXAnims[IDLE]; {} with any szXAnims slot",
+        "common_mp weapons: {captured} captures -> {} unique catalog ids (sorted; not retail bg_weaponIndex); {gun_named} with gunXModel[0]; {} with szXAnims[IDLE]; {} with any szXAnims slot",
         weapons.len(),
         weapons.idle_anim_count(),
         weapons.sz_xanims_count()
@@ -859,6 +893,7 @@ impl ZoneLane for Iw5Lane {
             materials: sink.materials,
             report,
             cac_tables: sink.stats_tables.into_values().collect(),
+            scripts: sink.scripts,
         }
     }
 }

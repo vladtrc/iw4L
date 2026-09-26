@@ -297,7 +297,8 @@ fn run(root: &Path, args: &Args) -> Result<bool, String> {
 
     let cache = prepare_cache(root, &run_dir, args.cache)?;
     manifest["cache"] = cache;
-    manifest["command_line"] = json!([args.bin.display().to_string(), child_args]);
+    let bin = stage_binary(&args.bin, &run_dir)?;
+    manifest["command_line"] = json!([bin.display().to_string(), child_args]);
     manifest["script"] = script.into();
     manifest["phases_declared"] = phases
         .iter()
@@ -314,7 +315,7 @@ fn run(root: &Path, args: &Args) -> Result<bool, String> {
     println!("run: {}", run_dir.display());
 
     let outcome = runner::run(runner::Launch {
-        bin: &args.bin,
+        bin: &bin,
         cwd: &run_dir,
         args: child_args,
         env: vec![
@@ -333,6 +334,23 @@ fn run(root: &Path, args: &Args) -> Result<bool, String> {
         run_dir.join("run.json").display()
     );
     Ok(passed)
+}
+
+/// On Windows the launcher enters the folder holding its executable, so the binary must sit in the run directory.
+fn stage_binary(bin: &Path, run_dir: &Path) -> Result<PathBuf, String> {
+    if !cfg!(windows) {
+        return Ok(bin.to_path_buf());
+    }
+    let exe = bin.with_extension("exe");
+    let bin = if bin.exists() { bin } else { exe.as_path() };
+    let name = bin
+        .file_name()
+        .ok_or_else(|| format!("--bin {} names no file", bin.display()))?;
+    let staged = run_dir.join(name);
+    std::fs::hard_link(bin, &staged)
+        .or_else(|_| std::fs::copy(bin, &staged).map(drop))
+        .map_err(|e| format!("stage {} into {}: {e}", bin.display(), run_dir.display()))?;
+    Ok(staged)
 }
 
 fn prepare_cache(root: &Path, run_dir: &Path, mode: CacheMode) -> Result<Value, String> {
@@ -359,8 +377,11 @@ fn prepare_cache(root: &Path, run_dir: &Path, mode: CacheMode) -> Result<Value, 
             let shared = root.join("iw4l-artifacts/cache");
             std::fs::create_dir_all(&child_artifacts)
                 .map_err(|e| format!("create {}: {e}", child_artifacts.display()))?;
-            std::os::unix::fs::symlink(&shared, &child_cache)
-                .map_err(|e| format!("link {}: {e}", child_cache.display()))?;
+            #[cfg(unix)]
+            let linked = std::os::unix::fs::symlink(&shared, &child_cache);
+            #[cfg(windows)]
+            let linked = std::os::windows::fs::symlink_dir(&shared, &child_cache);
+            linked.map_err(|e| format!("link {}: {e}", child_cache.display()))?;
             Ok(json!({
                 "mode": "shared",
                 "cold_load": false,

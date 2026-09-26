@@ -39,6 +39,7 @@ fn hudelem_font_info(elem_font: i32) -> (i32, f32) {
         5 => (3, HUDELEM_FONT_DEFAULT_BASE_SCALE),
         6 => (9, HUDELEM_FONT_HALF_BASE_SCALE),
         7 => (10, HUDELEM_FONT_THIRD_BASE_SCALE),
+        8 => (8, HUDELEM_FONT_DEFAULT_BASE_SCALE),
         _ => (0, HUDELEM_FONT_DEFAULT_BASE_SCALE),
     }
 }

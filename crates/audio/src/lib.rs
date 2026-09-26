@@ -6,11 +6,9 @@ mod emit;
 mod entity_events;
 mod frontend;
 mod messages;
-mod objectives;
 mod pcm;
 mod playback;
 mod plugin;
-pub mod policy;
 mod rumble;
 mod shellshock;
 mod space;
@@ -40,7 +38,6 @@ pub use playback::{
     world_oneshot_channel_gains, world_oneshot_pan,
 };
 pub use plugin::AudioPlugin;
-pub use policy::music::ScriptMusicHost;
 pub use space::{distance_inches, transform_inches};
 pub use start::{
     SoundClass, StartDecision, StartDecisions, StartFailure, StartOutcome, SuppressReason,
@@ -48,7 +45,7 @@ pub use start::{
 pub use voice::VoiceOccupancy;
 
 mod destructible_loops;
-mod map_doors;
 mod match_set;
+mod match_voices;
 
 mod weapon_lock;

@@ -126,6 +126,13 @@ pub const HE_TYPE_PLAYERNAME: i32 = 3;
 
 pub const HE_TYPE_MATERIAL: i32 = 4;
 
+pub const HE_TYPE_WAYPOINT: i32 = 13;
+
+/// Bits of a waypoint's `value`. No script can set them.
+pub const WAYPOINT_CONSTANT_SIZE: i32 = 0x1;
+pub const WAYPOINT_PULSE_OFFSCREEN: i32 = 0x2;
+pub const WAYPOINT_HIDE_OFFSCREEN: i32 = 0x4;
+
 pub const HORZ_ALIGN_CENTER: i32 = 2;
 
 pub const VERT_ALIGN_MIDDLE: i32 = 2;
@@ -136,18 +143,6 @@ pub const ALIGN_SCREEN_HORZ_SHIFT: i32 = 4;
 pub const fn align_screen(horz: i32, vert: i32) -> i32 {
     (horz << ALIGN_SCREEN_HORZ_SHIFT) | vert
 }
-
-pub const DAMAGE_FEEDBACK_ALIGN_SCREEN: i32 = align_screen(HORZ_ALIGN_CENTER, VERT_ALIGN_MIDDLE);
-
-pub const SCORE_POPUP_ALIGN_SCREEN: i32 = DAMAGE_FEEDBACK_ALIGN_SCREEN;
-
-pub const SCORE_POPUP_ALIGN_ORG: i32 = align_org(ORG_MIDDLE, ORG_MIDDLE);
-
-pub const MATCH_START_ALIGN_SCREEN: i32 = DAMAGE_FEEDBACK_ALIGN_SCREEN;
-
-pub const VERT_ALIGN_TOP: i32 = 1;
-
-pub const OUTCOME_ALIGN_SCREEN: i32 = align_screen(HORZ_ALIGN_CENTER, VERT_ALIGN_TOP);
 
 #[must_use]
 pub const fn color_rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
@@ -250,9 +245,6 @@ pub const ORG_TRAILING: i32 = 2;
 pub const fn align_org(horz: i32, vert: i32) -> i32 {
     (horz << ALIGN_ORG_HORZ_SHIFT) | vert
 }
-
-pub const TEXT_CENTERED_ALIGN_ORG: i32 = align_org(ORG_MIDDLE, ORG_LEADING);
-
 const ALIGN_SCREEN_FIELD: i32 = 15;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -457,33 +449,4 @@ pub fn hud_elem_glow_color(elem: &HudElem, faded: [u8; 4]) -> Option<[f32; 4]> {
         glow[2] as f32 / 255.0,
         glow[3] as f32 / 255.0 * (faded[3] as f32 / 255.0),
     ])
-}
-
-pub const OBJECTIVE_MARKER_ALPHA: f32 = 0.5;
-
-pub const OBJECTIVE_FLASH_DIM: f32 = 0.35;
-
-pub const OBJECTIVE_FLASH_HALF_MS: i32 = 750;
-
-#[must_use]
-pub fn objective_flash_elem(rgb: [u8; 3], base_alpha: f32, start_ms: i32, time: i32) -> HudElem {
-    let period = OBJECTIVE_FLASH_HALF_MS.saturating_mul(2);
-    let elapsed = time.wrapping_sub(start_ms).max(0);
-    let leg = elapsed / OBJECTIVE_FLASH_HALF_MS;
-    let leg_start = start_ms.wrapping_add(leg.saturating_mul(OBJECTIVE_FLASH_HALF_MS));
-    let bright = (base_alpha.clamp(0.0, 1.0) * 255.0) as u8;
-    let dim = (base_alpha.clamp(0.0, 1.0) * OBJECTIVE_FLASH_DIM * 255.0) as u8;
-    let falling = elapsed.rem_euclid(period) < OBJECTIVE_FLASH_HALF_MS;
-    let (from, to) = if falling {
-        (bright, dim)
-    } else {
-        (dim, bright)
-    };
-    HudElem {
-        from_color_rgba: color_rgba(rgb[0], rgb[1], rgb[2], from),
-        color_rgba: color_rgba(rgb[0], rgb[1], rgb[2], to),
-        fade_start_time: leg_start,
-        fade_time: OBJECTIVE_FLASH_HALF_MS,
-        ..HudElem::default()
-    }
 }

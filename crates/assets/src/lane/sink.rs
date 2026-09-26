@@ -60,7 +60,7 @@ fn iw5_cac_table(
     })
 }
 
-fn t5_cac_table(
+fn t5_string_table(
     s: &fastfile_t5::ZoneStream<'_>,
     header: fastfile_t5::Ptr,
 ) -> Option<crate::CapturedStringTable> {
@@ -70,9 +70,6 @@ fn t5_cac_table(
         }
         _ => return None,
     };
-    if !is_cac_table(&name) {
-        return None;
-    }
     let columns = s.i32_at(header, 4).unwrap_or(0).max(0) as usize;
     let rows = s.i32_at(header, 8).unwrap_or(0).max(0) as usize;
     let cells_n = columns.saturating_mul(rows);
@@ -107,14 +104,11 @@ fn t5_cac_table(
     })
 }
 
-fn iw4_cac_table(s: &ZoneStream<'_>, header: Ptr) -> Option<crate::CapturedStringTable> {
+fn iw4_string_table(s: &ZoneStream<'_>, header: Ptr) -> Option<crate::CapturedStringTable> {
     let name = match s.ptr_at(header, 0).ok() {
         Some(ZonePtr::Offset(p)) => s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned(),
         _ => return None,
     };
-    if !is_cac_table(&name) {
-        return None;
-    }
     let columns = s.i32_at(header, s.layout(4, 8)).unwrap_or(0).max(0) as usize;
     let rows = s.i32_at(header, s.layout(8, 12)).unwrap_or(0).max(0) as usize;
     let cells_n = columns.saturating_mul(rows);
@@ -180,6 +174,7 @@ pub(crate) struct ZoneWalkSink {
     pub compass: crate::MapCompassSource,
 
     pub script_sound: crate::MapScriptSoundSource,
+    pub iw5_map: asset_world::Iw5MapDeclarations,
 
     pub t5_teamset: Option<String>,
 
@@ -436,6 +431,7 @@ impl fastfile_iw5::AssetLinkSink for ZoneWalkSink {
     ) -> fastfile_iw5::Result<()> {
         self.script_sound.capture_iw5(name, stack, bytecode);
         self.compass.capture_iw5(name, stack);
+        self.iw5_map.capture(name, stack);
         Ok(())
     }
 
@@ -793,6 +789,7 @@ impl fastfile_t5::AssetLinkSink for CommonWalkSink {
         {
             self.teamsets.insert(key, icons);
         }
+        self.scripts.capture(name, data, zlib_compressed);
         Ok(())
     }
 
@@ -801,8 +798,11 @@ impl fastfile_t5::AssetLinkSink for CommonWalkSink {
         s: &fastfile_t5::ZoneStream<'_>,
         header: fastfile_t5::Ptr,
     ) -> fastfile_t5::Result<()> {
-        if let Some(table) = t5_cac_table(s, header) {
-            self.keep_stats_table(table);
+        if let Some(table) = t5_string_table(s, header) {
+            self.scripts.capture_table(&table);
+            if is_cac_table(&table.name) {
+                self.keep_stats_table(table);
+            }
         }
         Ok(())
     }
@@ -933,6 +933,18 @@ impl fastfile_t5::AssetLinkSink for ZoneWalkSink {
         }
         if let Some(teamset) = crate::t5_teamset_from_rawfile(name, data, zlib_compressed) {
             self.t5_teamset = Some(teamset);
+        }
+        self.scripts.capture(name, data, zlib_compressed);
+        Ok(())
+    }
+
+    fn capture_string_table(
+        &mut self,
+        s: &fastfile_t5::ZoneStream<'_>,
+        header: fastfile_t5::Ptr,
+    ) -> fastfile_t5::Result<()> {
+        if let Some(table) = t5_string_table(s, header) {
+            self.scripts.capture_table(&table);
         }
         Ok(())
     }
@@ -1086,6 +1098,17 @@ impl AssetLinkSink for ZoneWalkSink {
 
     fn linked_asset_name(&self, slot: Ptr) -> Option<&str> {
         self.materials.linked_asset_name(slot)
+    }
+
+    fn capture_string_table(
+        &mut self,
+        s: &ZoneStream<'_>,
+        header: Ptr,
+    ) -> fastfile_iw4::Result<()> {
+        if let Some(table) = iw4_string_table(s, header) {
+            self.scripts.capture_table(&table);
+        }
+        Ok(())
     }
 
     fn capture_raw_file(
@@ -1265,6 +1288,12 @@ impl AssetLinkSink for CommonWalkSink {
                         | "vehicle_little_bird_armed"
                         | "com_plasticcase_friendly"
                         | "com_plasticcase_enemy"
+                        | "com_plasticcase_rangers"
+                        | "com_plasticcase_arab"
+                        | "com_plasticcase_ussr"
+                        | "com_plasticcase_militia"
+                        | "com_plasticcase_taskforce141"
+                        | "com_plasticcase_seals"
                         | "vehicle_pavelow"
                         | "vehicle_pavelow_opfor"
                 )
@@ -1363,8 +1392,11 @@ impl AssetLinkSink for CommonWalkSink {
         s: &ZoneStream<'_>,
         header: Ptr,
     ) -> fastfile_iw4::Result<()> {
-        if let Some(table) = iw4_cac_table(s, header) {
-            self.keep_stats_table(table);
+        if let Some(table) = iw4_string_table(s, header) {
+            self.scripts.capture_table(&table);
+            if is_cac_table(&table.name) {
+                self.keep_stats_table(table);
+            }
         }
         Ok(())
     }
@@ -1429,6 +1461,7 @@ pub(crate) struct MaterialPopulationSink {
     pub materials: MaterialCatalog,
 
     pub stats_tables: BTreeMap<String, crate::CapturedStringTable>,
+    pub scripts: crate::ScriptSources,
 
     pub sound: Option<asset_audio::ZoneSoundCapture>,
 }
@@ -1524,6 +1557,7 @@ impl AssetLinkSink for MaterialPopulationSink {
         if let Some(sound) = self.sound.as_mut() {
             sound.raw_file(name, data, zlib_compressed);
         }
+        self.scripts.capture(name, data, zlib_compressed);
         Ok(())
     }
 
@@ -1532,7 +1566,11 @@ impl AssetLinkSink for MaterialPopulationSink {
         s: &ZoneStream<'_>,
         header: Ptr,
     ) -> fastfile_iw4::Result<()> {
-        self.keep_stats_table(iw4_cac_table(s, header));
+        let table = iw4_string_table(s, header);
+        if let Some(table) = &table {
+            self.scripts.capture_table(table);
+        }
+        self.keep_stats_table(table.filter(|t| is_cac_table(&t.name)));
         Ok(())
     }
 
@@ -1692,6 +1730,7 @@ impl fastfile_t5::AssetLinkSink for MaterialPopulationSink {
         if let Some(sound) = self.sound.as_mut() {
             sound.raw_file(name, data, zlib_compressed);
         }
+        self.scripts.capture(name, data, zlib_compressed);
         Ok(())
     }
 
@@ -1700,7 +1739,11 @@ impl fastfile_t5::AssetLinkSink for MaterialPopulationSink {
         s: &fastfile_t5::ZoneStream<'_>,
         header: fastfile_t5::Ptr,
     ) -> fastfile_t5::Result<()> {
-        self.keep_stats_table(t5_cac_table(s, header));
+        let table = t5_string_table(s, header);
+        if let Some(table) = &table {
+            self.scripts.capture_table(table);
+        }
+        self.keep_stats_table(table.filter(|t| is_cac_table(&t.name)));
         Ok(())
     }
 

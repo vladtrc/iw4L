@@ -82,14 +82,10 @@ pub use client::runtime::{
     publish_presented, receive_ticks, reconcile_prediction, register_client_runtime,
     register_listen_prediction_arm, sample_client_input, send_pending_commands,
 };
-pub use entity_iw4::EntityEventKind;
+pub use entity_iw4::{EntityEventKind, LOCAL_SOUND_ENTITY};
 pub use gaps::{NetGap, NetGapCause, NetIdentityGaps, ScriptNotify};
 pub use master_protocol::{AdvertId, ContentFlags, SessionCloseReason};
 pub use plugin::NetPlugin;
-pub use policy::killcam::{
-    ActiveKillcamSkips, PendingDeathTimelines, ScriptKillcamEmitStats, session_from_start_killcam,
-    session_from_window_plan, time_until_spawn_seconds, use_button_pressed,
-};
 pub use policy::seat::{
     ActiveKillcams, KillcamSession, SeatSample, apply_seat_to_snapshot, killcam_seconds_to_ms,
     sample_killcam_seat, snapshot_and_sample_for_viewer, snapshot_for_viewer,
@@ -117,7 +113,8 @@ pub use signon::{
     phase_from_udp_link,
 };
 pub use svc_gamenotify::{
-    PendingGameNotify, SVC_DISCONNECT_NOTIFY, SVC_PRINT, SvcGameNotify, client_name_string,
+    PendingGameNotify, SVC_DISCONNECT_NOTIFY, SVC_PRINT, SVC_PRINT_BOLD, SvcGameNotify,
+    client_name_string,
 };
 pub use svc_playercard::{
     PendingPlayerCard, SVC_CARD_SLOT, SVC_OPEN_MENU, SvcCardSlot, SvcCardSlotCmd, SvcHudSplash,

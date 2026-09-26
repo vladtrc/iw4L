@@ -1,10 +1,4 @@
-use crate::visuals::WEAPONDEF_EXPLOSION_EFFECT_NAME;
-
-pub const RADIUS_AREA_HALF_SCALE: f32 = f32::from_bits(0x3fb5_04f3);
-
-pub const EV_RADIUS_DAMAGE: &str = "EV_RADIUSDAMAGE";
-
-pub const EXPLOSION_EFFECT_FIELD: &str = WEAPONDEF_EXPLOSION_EFFECT_NAME;
+pub(crate) const RADIUS_AREA_HALF_SCALE: f32 = f32::from_bits(0x3fb5_04f3);
 
 pub fn radius_damage_distance_to_aabb(origin: [f32; 3], center: [f32; 3], half: [f32; 3]) -> f32 {
     let mut sum = 0.0f32;
@@ -40,13 +34,13 @@ pub fn g_radius_damage_amount(
 
 pub const G_CAN_DAMAGE_CONTENTS_MASK: u32 = 0x802011;
 
-pub const G_CAN_DAMAGE_HALF_WIDTH: f32 = 15.0;
+pub(crate) const G_CAN_DAMAGE_HALF_WIDTH: f32 = 15.0;
 
-pub const G_CAN_DAMAGE_HALF_HEIGHT_SCALE: f32 = 0.5;
+pub(crate) const G_CAN_DAMAGE_HALF_HEIGHT_SCALE: f32 = 0.5;
 
-pub const G_CAN_DAMAGE_PARTIAL_DIVISOR: f32 = 3.0;
+pub(crate) const G_CAN_DAMAGE_PARTIAL_DIVISOR: f32 = 3.0;
 
-pub fn g_can_damage_player_sample_points(
+pub(crate) fn g_can_damage_player_sample_points(
     origin: [f32; 3],
     view_height: f32,
     right: [f32; 3],
@@ -75,7 +69,7 @@ pub fn g_can_damage_player_sample_points(
     ]
 }
 
-pub fn g_can_damage_hits_to_scale(hits: u32) -> f32 {
+pub(crate) fn g_can_damage_hits_to_scale(hits: u32) -> f32 {
     if hits == 0 {
         0.0
     } else if hits < 4 {

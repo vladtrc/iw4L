@@ -17,6 +17,7 @@ entity_iw4.workspace = true
 movement_iw4 = { path = "../movement_iw4" }
 weapon_iw4 = { path = "../weapon_iw4" }
 math_iw4 = { path = "../math_iw4" }
+trace_iw4.workspace = true
 glam.workspace = true
 gamemode_iw4.workspace = true
 

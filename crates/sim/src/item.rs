@@ -29,8 +29,6 @@ pub const ITEM_MAXS: [f32; 3] = [1.0, 1.0, 1.0];
 
 pub const PLAYER_DROP_Z: f32 = (PLAYER_MAXS[2] - PLAYER_MINS[2]) * 0.5;
 
-pub const SCAVENGER_BAG_SCRIPT: &str = "scavenger_bag_mp";
-
 pub const PERK_SCAVENGER: u32 = 1 << 22;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -311,53 +309,46 @@ fn launch_dropped_from_ps(
     )
 }
 
-pub(crate) fn try_drop_scavenger_for_death(
+pub(crate) fn drop_weapon(
     world: &mut FrameWorld,
     tick: Tick,
-    victim: ClientId,
-    attacker: Option<ClientId>,
-) {
-    let Some(attacker) = attacker else {
-        return;
-    };
-    if attacker == victim {
-        return;
-    }
-    let Some(weapon) = world.weapon_index_by_script_name(SCAVENGER_BAG_SCRIPT) else {
-        return;
-    };
-    let Some(ps) = world.player(victim).copied() else {
-        return;
-    };
-    let _ = launch_dropped_from_ps(world, tick, &ps, victim.0 as i32, weapon, 0, 0, 0, true);
-}
-
-pub(crate) fn try_drop_weapon_for_death(world: &mut FrameWorld, tick: Tick, victim: ClientId) {
-    let Some(ps) = world.player(victim).copied() else {
-        return;
-    };
-    let weapon = ps.weapon;
-    if !may_drop_weapon(world, &ps, weapon) {
-        return;
+    player: ClientId,
+    weapon: u32,
+) -> Option<i32> {
+    let ps = world.player(player).copied()?;
+    if !ps.weapons.contains(&(weapon as i32)) || !may_drop_weapon(world, &ps, weapon) {
+        return None;
     }
     let (clip_r, clip_l, stock) = ammo_from_ps(world, &ps, weapon);
-    if launch_dropped_from_ps(
+    let number = launch_dropped_from_ps(
         world,
         tick,
         &ps,
-        victim.0 as i32,
+        player.0 as i32,
         weapon,
         clip_r,
         clip_l,
         stock,
         false,
-    ) == ENTITYNUM_NONE
-    {
-        return;
+    );
+    if number == ENTITYNUM_NONE {
+        return None;
     }
-    if let Some(ps) = world.player_mut(victim) {
+    if let Some(ps) = world.player_mut(player) {
         take_player_weapon(ps, weapon);
     }
+    Some(number)
+}
+
+pub(crate) fn drop_scavenger_item(
+    world: &mut FrameWorld,
+    tick: Tick,
+    player: ClientId,
+    weapon: u32,
+) -> Option<i32> {
+    let ps = world.player(player).copied()?;
+    let number = launch_dropped_from_ps(world, tick, &ps, player.0 as i32, weapon, 0, 0, 0, true);
+    (number != ENTITYNUM_NONE).then_some(number)
 }
 
 pub(crate) fn think_item_move(world: &mut FrameWorld, time_ms: i32, number: i32) {
@@ -610,11 +601,6 @@ fn grab_scavenger(world: &mut FrameWorld, walker: ClientId, number: i32) {
     let weapon = u32::try_from(item.state.index).unwrap_or(0);
     world.remove_dropped_item_by_number(number);
     world.free_dynamic_entity_number(item.state.number);
-    let mut next = ps;
-    apply_scavenger_stock(world, &mut next);
-    if let Some(slot) = world.player_mut(walker) {
-        *slot = next;
-    }
     world.item_pickups_mut().push(ItemPickupRecord {
         picker: walker.0 as i32,
         weapon,
@@ -626,33 +612,6 @@ fn grab_scavenger(world: &mut FrameWorld, walker: ClientId, number: i32) {
         picker_pm_type,
     });
     perf::pickup(picker_pm_type);
-}
-
-fn apply_scavenger_stock(world: &FrameWorld, ps: &mut PlayerState) {
-    let held: Vec<u32> = ps
-        .weapons
-        .iter()
-        .copied()
-        .filter(|&w| w > 0)
-        .map(|w| w as u32)
-        .collect();
-    for weapon in held {
-        let Some(facts) = world.combat_facts_for(weapon) else {
-            continue;
-        };
-        if facts.inventory_type != WEAP_INVENTORY_PRIMARY {
-            continue;
-        }
-        let (clip_r, clip_l, stock) = ammo_from_ps(world, ps, weapon);
-        set_ammo_on_ps(
-            world,
-            ps,
-            weapon,
-            clip_r,
-            clip_l,
-            stock + facts.clip_size.max(0),
-        );
-    }
 }
 
 fn drop_current_primary_at(
@@ -789,19 +748,6 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
         return None;
     }
 
-    if world
-        .map_doors
-        .as_ref()
-        .is_some_and(|d| d.hints.contains(&walker))
-        || world.use_hold().is_some_and(|h| h.client == walker)
-        || world
-            .objectives
-            .bombs
-            .iter()
-            .any(|b| !b.destroyed && b.view.users.contains(&walker))
-    {
-        return None;
-    }
     let eye = [
         ps.origin[0],
         ps.origin[1],

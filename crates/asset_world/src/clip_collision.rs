@@ -50,6 +50,8 @@ pub struct ClipCollision {
 
     pub cmodels: Vec<ClipCmodel>,
 
+    pub trigger_models: Vec<Vec<crate::MapTriggerHull>>,
+
     pub static_models: Vec<ClipPlacedStaticModel>,
 }
 

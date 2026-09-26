@@ -416,7 +416,7 @@ fn find_zone_stem(
     match find_stem_file(root, game, &prefixed) {
         Ok(mut found) => {
             let note = format!(
-                "zone alias: `{stem}` → `{prefixed}` (MP stem preferred over bare `{stem}.ff`)"
+                "zone alias: `{stem}` -> `{prefixed}` (MP stem preferred over bare `{stem}.ff`)"
             );
             found.alias_note = Some(note.clone());
             match std::fs::metadata(&found.path) {
@@ -594,7 +594,7 @@ pub fn games_content_report(root: &GamesRoot) -> Vec<String> {
 }
 
 pub fn list_mp_maps(root: &GamesRoot) -> Vec<String> {
-    let mut maps = Vec::new();
+    let mut zones = Vec::new();
     for entry in game_files(&root.0) {
         let path = match entry {
             Ok(path) => path,
@@ -610,13 +610,26 @@ pub fn list_mp_maps(root: &GamesRoot) -> Vec<String> {
         let is_ff = path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("ff"));
-        if !(is_ff && stem.starts_with("mp_") && !stem.ends_with("_load")) {
+        if !(is_ff && stem.starts_with("mp_")) {
             continue;
         }
         if let Some(game) = zone_game_for_path(&path) {
-            maps.push(format!("{}:{stem}", game.prefix()));
+            zones.push((game.prefix(), stem));
         }
     }
+    let loads: std::collections::HashSet<(&str, &str)> = zones
+        .iter()
+        .filter_map(|(game, stem)| stem.strip_suffix("_load").map(|map| (*game, map)))
+        .collect();
+    let mut maps: Vec<String> = zones
+        .iter()
+        .filter(|(game, stem)| {
+            !stem.ends_with("_load")
+                && (loads.contains(&(*game, stem.as_str()))
+                    || !loads.iter().any(|(g, _)| g == game))
+        })
+        .map(|(game, stem)| format!("{game}:{stem}"))
+        .collect();
     maps.sort();
     maps.dedup();
     maps

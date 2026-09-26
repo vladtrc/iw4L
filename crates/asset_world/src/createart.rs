@@ -204,7 +204,7 @@ fn decode_createart_bytes(data: &[u8], zlib_compressed: bool) -> Option<Vec<u8>>
     if std::str::from_utf8(trimmed).is_ok() {
         return Some(trimmed.to_vec());
     }
-    decode_t5_packed_gsc(data)
+    decode_packed_rawfile(data)
 }
 
 pub fn decode_rawfile_text(data: &[u8], zlib_compressed: bool) -> Option<String> {
@@ -214,7 +214,7 @@ pub fn decode_rawfile_text(data: &[u8], zlib_compressed: bool) -> Option<String>
         .map(|s| s.trim_end_matches('\0').to_owned())
 }
 
-fn decode_t5_packed_gsc(data: &[u8]) -> Option<Vec<u8>> {
+pub fn decode_packed_rawfile(data: &[u8]) -> Option<Vec<u8>> {
     let data = data.strip_suffix(&[0]).unwrap_or(data);
     if data.len() < 8 {
         return None;

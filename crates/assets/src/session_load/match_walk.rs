@@ -55,7 +55,8 @@ pub(super) async fn walk_prepared_match(
 
     let cloning = std::time::Instant::now();
     let CommonProducts {
-        mut scripts,
+        scripts: iw4_scripts,
+        t5_scripts,
         material_seed,
         shared_surfaces,
         scene_models: common_scene_models,
@@ -167,6 +168,10 @@ pub(super) async fn walk_prepared_match(
         mut report,
         gaps,
     } = loaded;
+    let mut scripts = match map_namespace {
+        Some(crate::AssetNamespace::T5) => t5_scripts,
+        _ => iw4_scripts,
+    };
     scripts.overlay(map_scripts);
     report.push(format!(
         "GSC source assets: {} (map overrides common_mp)",

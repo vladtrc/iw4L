@@ -26,6 +26,8 @@ use crate::occupancy::third_person::{
 use render_scene::{FlyCamera, FpvLens, SimCamera, transform_from_iw_view};
 use render_scene::{WorldCameraPose, WorldScriptModelInstance};
 
+const MISSILE_CAM_FOV: f32 = 15.0;
+
 fn kick_params(k: &WeaponKickFacts) -> KickParams {
     KickParams {
         f_ads_view_kick_center_speed: k.f_ads_view_kick_center_speed,
@@ -294,7 +296,7 @@ pub fn sync_camera_from_presented(
             transform.translation = eye.translation;
             transform.rotation = eye.rotation;
         }
-        let horiz = gamemode_iw4::killstreaks::PREDATOR_FOV;
+        let horiz = MISSILE_CAM_FOV;
         if let Some(actions) = actions.as_deref_mut() {
             actions.fov_scale = cg_zoom_sensitivity(horiz) * actions.shellshock_look_scale;
         }

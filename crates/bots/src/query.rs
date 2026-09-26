@@ -390,33 +390,17 @@ impl WorldQuery for SimWorld {
     }
 
     fn hull_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
-        let hit = self.trace_world(start, end, PLAYER_MINS, PLAYER_MAXS, MASK_PLAYER_SOLID);
-        Ok(HullTrace {
-            normal: hit.normal,
-            fraction: hit.fraction,
-            endpos: hit.endpos,
-            startsolid: hit.allsolid != 0 || hit.startsolid != 0,
-        })
+        Ok(crate::nav::BakeTraces::bake_hull(self, start, end))
     }
 
     fn navigation_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
-        let hit = self.trace_navigation(start, end, PLAYER_MINS, PLAYER_MAXS, MASK_PLAYER_SOLID);
-        Ok(HullTrace {
-            normal: hit.normal,
-            fraction: hit.fraction,
-            endpos: hit.endpos,
-            startsolid: hit.allsolid != 0 || hit.startsolid != 0,
-        })
+        Ok(crate::nav::BakeTraces::bake_navigation(self, start, end))
     }
 
     fn objective_contains(&self, obj: ModeObjective, feet: [f32; 3]) -> bool {
-        self.objective_position_in_volume(obj.id, feet)
-            .unwrap_or_else(|| {
-                let dx = feet[0] - obj.origin[0];
-                let dy = feet[1] - obj.origin[1];
-                dx * dx + dy * dy <= obj.radius * obj.radius
-                    && (feet[2] - obj.origin[2]).abs() <= 44.0
-            })
+        let dx = feet[0] - obj.origin[0];
+        let dy = feet[1] - obj.origin[1];
+        dx * dx + dy * dy <= obj.radius * obj.radius && (feet[2] - obj.origin[2]).abs() <= 44.0
     }
 
     fn weapon_class(&self, weapon: u16) -> WeaponClass {
@@ -437,6 +421,25 @@ impl WorldQuery for SimWorld {
             reload_time_ms: facts.reload_time_ms,
             reload_empty_time_ms: facts.reload_empty_time_ms,
         })
+    }
+}
+
+impl crate::nav::BakeTraces for SimWorld {
+    fn bake_hull(&self, start: [f32; 3], end: [f32; 3]) -> HullTrace {
+        hull(self.trace_world(start, end, PLAYER_MINS, PLAYER_MAXS, MASK_PLAYER_SOLID))
+    }
+
+    fn bake_navigation(&self, start: [f32; 3], end: [f32; 3]) -> HullTrace {
+        hull(self.trace_navigation(start, end, PLAYER_MINS, PLAYER_MAXS, MASK_PLAYER_SOLID))
+    }
+}
+
+fn hull(hit: trace_iw4::Trace) -> HullTrace {
+    HullTrace {
+        normal: hit.normal,
+        fraction: hit.fraction,
+        endpos: hit.endpos,
+        startsolid: hit.allsolid != 0 || hit.startsolid != 0,
     }
 }
 

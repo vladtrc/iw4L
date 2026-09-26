@@ -96,9 +96,11 @@ pub(super) fn register(registry: &mut NativeRegistry) {
         "ambientplay",
         "ambientstop",
     ];
-    registry.register(Function, "getmapcustom", |_, _, args| {
-        string(args, 0)?;
-        Ok(Value::string(""))
+    registry.register(Function, "getmapcustom", |world, _, args| {
+        let key = string(args, 0)?;
+        Ok(Value::string(
+            crate::frame::FrameWorld::from_world(world).map_custom(&key),
+        ))
     });
     registry.register(Function, "loadfx", |world, _, args| {
         let name = string(args, 0)?;
@@ -109,14 +111,19 @@ pub(super) fn register(registry: &mut NativeRegistry) {
     });
     registry.register(Function, "makedvarserverinfo", |world, _, args| {
         let name = string(args, 0)?.to_ascii_lowercase();
-        if let std::collections::btree_map::Entry::Vacant(slot) = runtime(world).dvars.entry(name) {
-            slot.insert(dvar_value(args)?);
-        }
+        let value = if args.len() > 1 {
+            dvar_value(args)?
+        } else {
+            String::new()
+        };
+        let mut runtime = runtime(world);
+        runtime.server_info.insert(name.clone());
+        runtime.dvars.entry(name).or_insert(value);
         Ok(Value::Undefined)
     });
 }
 
-fn precache(world: &mut World, kind: &'static str, name: String) -> Result<i32, String> {
+pub(super) fn precache(world: &mut World, kind: &'static str, name: String) -> Result<i32, String> {
     let mut runtime = runtime(world);
     if let Some(&index) = runtime.precached.get(&(kind, name.clone())) {
         return Ok(index);
@@ -172,8 +179,8 @@ fn dvar_name(args: &[Value]) -> Result<String, String> {
 }
 
 fn dvar_value(args: &[Value]) -> Result<String, String> {
-    if let Some(Value::LocalizedString(_)) = args.get(1) {
-        return Err("localized dvar values are not supported".into());
+    if let Some(Value::LocalizedString(reference)) = args.get(1) {
+        return Ok(reference.to_string());
     }
     string(args, 1)
 }

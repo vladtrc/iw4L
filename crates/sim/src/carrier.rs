@@ -126,8 +126,9 @@ impl SimWorld {
         &mut self,
         program: crate::gsc_ir::Program,
         natives: crate::gsc_ir::NativeRegistry,
+        level: crate::gsc_ir::LevelData,
     ) -> Result<(), crate::gsc_ir::Fault> {
-        crate::gsc_ir::install(&mut self.ecs, program, natives)
+        crate::gsc_ir::install(&mut self.ecs, program, natives, level)
     }
 
     pub fn start_gsc(
@@ -153,6 +154,18 @@ impl SimWorld {
         self.ecs.resource::<crate::gsc_ir::Runtime>().fault.as_ref()
     }
 
+    pub fn gsc_players(&mut self) -> Vec<String> {
+        crate::gsc_ir::describe_players(&mut self.ecs)
+    }
+
+    pub fn script_seats(&self) -> Vec<(ClientId, crate::ScriptSeat)> {
+        crate::gsc_ir::script_seats(&self.ecs)
+    }
+
+    pub fn take_script_exit_level(&mut self) -> bool {
+        std::mem::take(&mut self.ecs.resource_mut::<crate::gsc_ir::Runtime>().exit_level)
+    }
+
     pub fn spawn_script_mover(
         &mut self,
         id: ScriptModelId,
@@ -160,6 +173,22 @@ impl SimWorld {
         angles: [f32; 3],
     ) -> Result<i32, crate::EntityAllocError> {
         self.frame().spawn_script_mover(id, origin, angles)
+    }
+
+    pub fn spawn_brush_mover(
+        &mut self,
+        id: ScriptModelId,
+        cmodel: u32,
+        origin: [f32; 3],
+        angles: [f32; 3],
+    ) -> Result<i32, crate::EntityAllocError> {
+        let mut frame = self.frame();
+        let number = frame.spawn_script_mover(id, origin, angles)?;
+        if let Some(mover) = frame.script_mover_mut_by_number(number) {
+            mover.state.index = cmodel as i32;
+            mover.state.solid = entity_iw4::SCRIPT_MOVER_BMODEL_SOLID;
+        }
+        Ok(number)
     }
 
     pub fn gentity_number(&self, id: ScriptModelId) -> Option<i32> {
@@ -188,34 +217,6 @@ impl SimWorld {
     ) -> usize {
         self.frame()
             .begin_script_movers_rotate_velocity_supplied(speed, level_time_ms)
-    }
-
-    pub fn install_use_object_from_ent(
-        &mut self,
-        classname: &str,
-        number: i32,
-        use_time_seconds: f32,
-    ) -> Result<u32, crate::use_object::MapUseBindError> {
-        self.frame()
-            .install_use_object_from_ent(classname, number, use_time_seconds)
-    }
-
-    pub fn install_dom_flags(
-        &mut self,
-        ents: &[gamemode_iw4::DomFlagMapEnt<'_>],
-    ) -> Result<Vec<u32>, crate::use_object::DomFlagInstallError> {
-        self.frame().install_dom_flags(ents)
-    }
-
-    pub fn install_trigger_radius_on_ent(
-        &mut self,
-        number: i32,
-        radius: Option<f32>,
-        height: Option<f32>,
-        use_time_seconds: f32,
-    ) -> Result<u32, crate::use_object::MapUseBindError> {
-        self.frame()
-            .install_trigger_radius_on_ent(number, radius, height, use_time_seconds)
     }
 
     pub fn set_script_mover_r_box(

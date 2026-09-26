@@ -9,6 +9,16 @@ pub enum GameModeKind {
     Demolition = 1,
 
     Domination = 2,
+
+    TeamDeathmatch = 3,
+
+    SearchAndDestroy = 4,
+
+    CaptureTheFlag = 5,
+
+    Headquarters = 6,
+
+    Sabotage = 7,
 }
 
 impl GameModeKind {
@@ -20,6 +30,11 @@ impl GameModeKind {
 
             b"dd" | b"dem" | b"demolition" => Some(Self::Demolition),
             b"dom" | b"domination" => Some(Self::Domination),
+            b"war" | b"tdm" | b"teamdeathmatch" | b"team_deathmatch" => Some(Self::TeamDeathmatch),
+            b"sd" | b"searchanddestroy" | b"search_and_destroy" => Some(Self::SearchAndDestroy),
+            b"ctf" | b"capturetheflag" | b"capture_the_flag" => Some(Self::CaptureTheFlag),
+            b"koth" | b"hq" | b"headquarters" => Some(Self::Headquarters),
+            b"sab" | b"sabotage" => Some(Self::Sabotage),
             _ => None,
         }
     }
@@ -41,6 +56,24 @@ impl GameModeKind {
             Self::FreeForAll => ffa::GAMETYPE_TOKEN,
             Self::Demolition => dd::GAMETYPE_TOKEN,
             Self::Domination => dom::GAMETYPE_TOKEN,
+            Self::TeamDeathmatch => "war",
+            Self::SearchAndDestroy => "sd",
+            Self::CaptureTheFlag => "ctf",
+            Self::Headquarters => "koth",
+            Self::Sabotage => "sab",
+        }
+    }
+
+    pub fn script_tokens(self) -> &'static [&'static str] {
+        match self {
+            Self::FreeForAll => &[ffa::GAMETYPE_TOKEN],
+            Self::Demolition => &[dd::GAMETYPE_TOKEN, "dem"],
+            Self::Domination => &[dom::GAMETYPE_TOKEN],
+            Self::TeamDeathmatch => &["war", "tdm"],
+            Self::SearchAndDestroy => &["sd"],
+            Self::CaptureTheFlag => &["ctf"],
+            Self::Headquarters => &["koth"],
+            Self::Sabotage => &["sab"],
         }
     }
 
@@ -53,6 +86,11 @@ impl GameModeKind {
             0 => Some(Self::FreeForAll),
             1 => Some(Self::Demolition),
             2 => Some(Self::Domination),
+            3 => Some(Self::TeamDeathmatch),
+            4 => Some(Self::SearchAndDestroy),
+            5 => Some(Self::CaptureTheFlag),
+            6 => Some(Self::Headquarters),
+            7 => Some(Self::Sabotage),
             _ => None,
         }
     }
@@ -62,6 +100,11 @@ impl GameModeKind {
             Self::FreeForAll => ffa::DISPLAY_NAME,
             Self::Demolition => dd::DISPLAY_NAME,
             Self::Domination => dom::DISPLAY_NAME,
+            Self::TeamDeathmatch => "TEAM DEATHMATCH",
+            Self::SearchAndDestroy => "SEARCH AND DESTROY",
+            Self::CaptureTheFlag => "CAPTURE THE FLAG",
+            Self::Headquarters => "HEADQUARTERS",
+            Self::Sabotage => "SABOTAGE",
         }
     }
 
@@ -71,7 +114,12 @@ impl GameModeKind {
 
     pub fn team_start_classname(self, axis: bool) -> Option<&'static str> {
         match self {
-            Self::FreeForAll => None,
+            Self::FreeForAll
+            | Self::TeamDeathmatch
+            | Self::SearchAndDestroy
+            | Self::CaptureTheFlag
+            | Self::Headquarters
+            | Self::Sabotage => None,
             Self::Domination => Some(if axis {
                 dom::START_SPAWN_AXIS
             } else {
@@ -87,7 +135,12 @@ impl GameModeKind {
 
     pub fn team_grid_classnames(self, axis: bool) -> &'static [&'static str] {
         match self {
-            Self::FreeForAll => &[],
+            Self::FreeForAll
+            | Self::TeamDeathmatch
+            | Self::SearchAndDestroy
+            | Self::CaptureTheFlag
+            | Self::Headquarters
+            | Self::Sabotage => &[],
             Self::Domination => &[dom::SPAWN_CLASSNAME],
             Self::Demolition => {
                 if axis {
@@ -105,9 +158,5 @@ impl GameModeKind {
                 }
             }
         }
-    }
-
-    pub fn gameobjects_allowed(self) -> &'static [&'static str] {
-        crate::gameobjects::allowed_after_main(self)
     }
 }

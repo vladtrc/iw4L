@@ -28,6 +28,7 @@ pub enum MenuScriptKind {
     Accept,
     OnFocus,
     LeaveFocus,
+    ExecKey,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -896,14 +897,21 @@ fn load_event_handler(
         EVENT_IF => {
             if s.begin_body(data.at(0))? {
                 let c = s.alloc_load(4, s.layout(sz::CONDITIONAL_SCRIPT, 16))?;
-                if s.begin_body(c.at(s.layout(4, 8)))? {
-                    load_statement(s, cache)?;
-                }
+                let mut condition_buf = [0u8; ITEM_STATEMENT_DUMP];
+                let mut condition_len = 0;
+                capture_expr_body_or_alias(s, c, s.layout(4, 8), cache, |dump| {
+                    condition_len = copy_into(dump, &mut condition_buf).len();
+                })?;
+                let condition = core::str::from_utf8(&condition_buf[..condition_len]).unwrap_or("");
+                links.begin_menu_event_branch(menu, item, kind, Some(condition))?;
                 follow_handler_set(s, links, c, 0, menu, item, kind, cache)?;
+                links.end_menu_event_branch(menu, item, kind)?;
             }
         }
         EVENT_ELSE => {
+            links.begin_menu_event_branch(menu, item, kind, None)?;
             follow_handler_set(s, links, data, 0, menu, item, kind, cache)?;
+            links.end_menu_event_branch(menu, item, kind)?;
         }
         t if (EVENT_SET_LOCAL_VAR_FIRST..=EVENT_SET_LOCAL_VAR_LAST).contains(&t) => {
             if s.begin_body(data.at(0))? {
@@ -940,7 +948,7 @@ fn load_item_key_handler(
             s.layout(4, 8),
             menu,
             "",
-            MenuScriptKind::Accept,
+            MenuScriptKind::ExecKey,
             cache,
         )?;
         more = s.begin_body(p.at(s.layout(8, 16)))?;

@@ -21,7 +21,6 @@ entity_iw4.workspace = true
 anim_iw4.workspace = true
 fx_iw4.workspace = true
 xmodel_runtime.workspace = true
-sound_iw4.workspace = true
 glam.workspace = true
 perf.workspace = true
 

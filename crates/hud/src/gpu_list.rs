@@ -171,7 +171,6 @@ pub struct HudTessPass {
     pub compass: TessJob,
     pub scorebar: TessJob,
     pub splash: TessJob,
-    pub score_popup: TessJob,
     pub killfeed: TessJob,
     pub playercard: TessJob,
     pub weaponbar: TessJob,
@@ -179,7 +178,9 @@ pub struct HudTessPass {
     pub killcam_skip: TessJob,
     pub mantle_hint: TessJob,
     pub use_hint: TessJob,
-    pub match_start: TessJob,
+    pub hud_elems: TessJob,
+    pub hud_elems_back: TessJob,
+    pub script_menus: TessJob,
 }
 
 /// What the HUD tess flush systems' own bodies cost this frame.

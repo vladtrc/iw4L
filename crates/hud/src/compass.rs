@@ -31,10 +31,6 @@ const OWNER_DRAW_PLAYER: i32 = 150;
 
 const OWNER_DRAW_ENEMIES: i32 = 175;
 
-const HELI_ICON_SIZE: f32 = 40.0;
-
-const HELI_ICON_FRAME_MS: i32 = 33;
-
 #[derive(Component)]
 pub(crate) struct CompassRaster;
 
@@ -116,6 +112,7 @@ pub(crate) fn update_compass(
     mut pass: ResMut<HudTessPass>,
     view: Option<Res<frame::ViewSubject>>,
     local_vars: Res<crate::playercard::UiLocalVars>,
+    hud_input: Option<Res<frame::HudInputView>>,
 ) {
     take_fire_pings(
         &mut ping_bus,
@@ -127,7 +124,9 @@ pub(crate) fn update_compass(
     let killed_by_showing = (crate::scorebar::sys_milliseconds() as i32)
         .wrapping_sub(local_vars.int("ui_show_killedBy"))
         < 4000;
-    if !surface.is_ready() || killed_by_showing || view.is_some_and(|v| v.in_killcam()) {
+    let ui_active = hud_input.is_some_and(|i| i.menu_open || i.script_menu_open);
+    if !surface.is_ready() || killed_by_showing || ui_active || view.is_some_and(|v| v.in_killcam())
+    {
         hide(&mut pass);
         return;
     }
@@ -256,56 +255,6 @@ pub(crate) fn update_compass(
         radar,
         jam_fade,
     );
-    if let Some(snapshot) = presented.snapshot() {
-        let size = map_item.rect.h * COMPASS_SIZE_DEFAULT;
-        for package in &snapshot.meta.care_packages {
-            if cg_clock.time() < package.ready_at_ms {
-                continue;
-            }
-            let offset = cg_world_pos_to_compass_partial(
-                north,
-                player_xy,
-                [package.origin[0], package.origin[1]],
-                size,
-                drawable.max_range,
-            );
-            let offset =
-                compass_clamp_offset(offset, [map_item.rect.w * COMPASS_SIZE_DEFAULT, size]);
-            let cx = map_item.rect.x + map_item.rect.w * COMPASS_SIZE_DEFAULT * 0.5 + offset[0];
-            let cy = map_item.rect.y + size * 0.5 + offset[1];
-            let rect = surface.apply_rect(
-                cx - 8.0,
-                cy - 8.0,
-                16.0,
-                16.0,
-                map_item.rect.horz_align as i32,
-                map_item.rect.vert_align as i32,
-            );
-            let friendly = package.owner == local.0
-                || (snapshot.meta.kind.is_team() && package.team == local_team);
-            list.cmds.push(Draw2dCmd {
-                x: rect.x,
-                y: rect.y,
-                w: rect.w,
-                h: rect.h,
-                s0: 0.0,
-                t0: 0.0,
-                s1: 1.0,
-                t1: 1.0,
-                color: [1.0, 1.0, 1.0, jam_fade],
-                material: if friendly {
-                    "compass_objpoint_ammo_friendly"
-                } else {
-                    "compass_objpoint_ammo_enemy"
-                }
-                .to_owned(),
-                material_namespace: crate::images::HUD_CHROME_NAMESPACE,
-                op: Draw2dOp::StretchPic,
-                provenance: Draw2dProvenance::Objective,
-                layer: 1,
-            });
-        }
-    }
 
     let map_ns = hud_images.map_namespace();
     if hud_images
@@ -328,11 +277,14 @@ pub(crate) fn update_compass(
             .for_client(local.0)
             .map(|m| m.client_state_team)
             .unwrap_or(0);
-        let state = &snapshot.meta.objectives;
-        let objectives = state
-            .flags
+        let team =
+            gamemode_iw4::Team::from_retail_u8(team as u8).unwrap_or(gamemode_iw4::Team::Free);
+        let objectives = snapshot
+            .meta
+            .objectives
+            .compass
             .iter()
-            .chain(state.bombs.iter().filter(|b| !b.destroyed).map(|b| &b.view));
+            .filter(|o| o.shows_to(team) && !o.icon.is_empty());
         let size = map_item.rect.h * COMPASS_SIZE_DEFAULT;
         for objective in objectives {
             let offset = cg_world_pos_to_compass_partial(
@@ -364,13 +316,7 @@ pub(crate) fn update_compass(
                 s1: 1.0,
                 t1: 1.0,
                 color: [1.0, 1.0, 1.0, jam_fade],
-                material: crate::objectives::marker_material(
-                    snapshot.meta.kind,
-                    state,
-                    objective,
-                    gamemode_iw4::Team::from_retail_u8(team as u8)
-                        .unwrap_or(gamemode_iw4::Team::Free),
-                ),
+                material: objective.icon.clone(),
                 material_namespace: crate::images::HUD_CHROME_NAMESPACE,
                 op: Draw2dOp::StretchPic,
                 provenance: Draw2dProvenance::Objective,
@@ -421,67 +367,6 @@ pub(crate) fn update_compass(
                 "compassping_friendly_mp",
                 [0.0, 0.0, 1.0, 1.0],
                 Draw2dProvenance::OwnerDraw(158),
-            ));
-        }
-        let size = map_item.rect.h * COMPASS_SIZE_DEFAULT;
-        let frame = (cg_clock.time().max(0) / HELI_ICON_FRAME_MS) as u32 % 16;
-        let st = [
-            (frame % 8) as f32 / 8.0,
-            (frame / 8) as f32 / 2.0,
-            (frame % 8 + 1) as f32 / 8.0,
-            (frame / 8 + 1) as f32 / 2.0,
-        ];
-        let friendly = |owner: ClientId, team: i32| {
-            owner == local.0 || (snapshot.meta.kind.is_team() && team == local_team)
-        };
-        let mut helis = Vec::new();
-        for package in &snapshot.meta.care_packages {
-            let source = sim::killstreak_model_source(sim::LITTLE_BIRD_MODEL_KIND, package.id);
-            if let Some(mover) = snapshot
-                .meta
-                .script_movers
-                .iter()
-                .find(|m| m.id.to_wire() == source)
-            {
-                let material = if friendly(package.owner, package.team) {
-                    "compass_objpoint_helicopter_friendly"
-                } else {
-                    "compass_objpoint_helicopter_busy"
-                };
-                helis.push((mover.state.tr_base, mover.state.apos_tr_base[1], material));
-            }
-        }
-        for heli in &snapshot.meta.pave_lows {
-            let radial = [
-                heli.origin[0] - heli.center[0],
-                heli.origin[1] - heli.center[1],
-            ];
-            let yaw = radial[1].atan2(radial[0]).to_degrees() + 90.0;
-            let material = if friendly(heli.owner, heli.team) {
-                "compass_objpoint_pavelow_green"
-            } else {
-                "compass_objpoint_pavelow_red"
-            };
-            helis.push((heli.origin, yaw, material));
-        }
-        for (origin, yaw, material) in helis {
-            let offset = cg_world_pos_to_compass_partial(
-                north,
-                player_xy,
-                [origin[0], origin[1]],
-                size,
-                drawable.max_range,
-            );
-            quads.push(friendly_quad(
-                &surface,
-                map_item,
-                offset,
-                [HELI_ICON_SIZE * COMPASS_SIZE_DEFAULT; 2],
-                ps.viewangles[1] - yaw,
-                jam_fade,
-                material,
-                st,
-                Draw2dProvenance::Objective,
             ));
         }
     }
@@ -764,11 +649,11 @@ fn take_radar_pings(
     latch: &mut CompassPingLatch,
 ) -> Option<[f32; 3]> {
     let snapshot = presented.snapshot()?;
-    let radar_on = snapshot
+    let radar = snapshot
         .meta
         .for_client(local)
-        .is_some_and(|meta| now_ms < meta.radar_until_ms);
-    if !radar_on {
+        .map_or(sim::RadarMode::Off, |meta| meta.radar);
+    if radar == sim::RadarMode::Off {
         latch.radar_progress = 0.0;
         latch.radar_last_ms = None;
         return None;
@@ -778,7 +663,11 @@ fn take_radar_pings(
         .map_or(0, |last| now_ms.saturating_sub(last).max(0));
     latch.radar_last_ms = Some(now_ms);
     let old = latch.radar_progress;
-    let new = old + frametime as f32 / (COMPASS_RADAR_UPDATE_TIME_DEFAULT * 1000.0);
+    let sweep = match radar {
+        sim::RadarMode::Fast => COMPASS_RADAR_UPDATE_TIME_DEFAULT * 0.5,
+        _ => COMPASS_RADAR_UPDATE_TIME_DEFAULT,
+    };
+    let new = old + frametime as f32 / (sweep * 1000.0);
     let new = new - new.floor();
     latch.radar_progress = new;
     let line = radar_line(bounds, max_range, new);

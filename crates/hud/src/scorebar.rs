@@ -5,9 +5,7 @@ use assets::{
 };
 use bevy::prelude::*;
 use bevy::ui::{Display, FocusPolicy};
-use hud_iw4::{
-    ExprHost, Operand, ScorebarStatus, match_time_remaining_ms, scorebar_gametype_loc_key,
-};
+use hud_iw4::{ExprHost, Operand, ScorebarStatus, scorebar_gametype_loc_key};
 use net::{LocalPresentClient, PresentedSnapshot};
 
 use crate::chrome::{ChromeAssets, ChromeFrame, execute_chrome_menu};
@@ -49,8 +47,7 @@ struct ScorebarExprHost<'a> {
     rank1: i32,
     rank2: i32,
     time_left: i32,
-    objectives: &'a sim::ObjectiveMatch,
-    objective_time_ms: u32,
+    dvars: sim::ScriptDvars<'a>,
     time_limit_minutes: i32,
     localize: Option<&'a assets::LocalizeCatalog>,
     score_limit: i32,
@@ -61,6 +58,7 @@ struct ScorebarExprHost<'a> {
     menu: &'a MenuDef,
     icons: &'a MapTeamSettings,
     local_vars: &'a UiLocalVars,
+    vis: crate::weaponbar::HudPlayerVis,
 }
 
 fn ffa_ui_team(ffa_team: Option<u8>) -> &'static str {
@@ -82,42 +80,38 @@ impl ExprHost for ScorebarExprHost<'_> {
             .ok_or(hud_iw4::ExprError::Host("scorebar static dvar name"))?;
         self.dvar_int(name)
     }
+    fn ui_active(&self) -> Result<i32, hud_iw4::ExprError> {
+        Ok(i32::from(self.vis.ui_active))
+    }
+    fn flashbanged(&self) -> Result<i32, hud_iw4::ExprError> {
+        Ok(i32::from(self.vis.flashbanged))
+    }
+    fn weapon_name(&self) -> Result<Operand, hud_iw4::ExprError> {
+        Ok(Operand::Str(self.vis.weapon_script.clone()))
+    }
+    fn weapon_lock(&self) -> Result<hud_iw4::WeaponLockView, hud_iw4::ExprError> {
+        Ok(hud_iw4::WeaponLockView {
+            ads_javelin: self.vis.ads_javelin,
+            ..hud_iw4::WeaponLockView::default()
+        })
+    }
+    fn missilecam(&self) -> Result<i32, hud_iw4::ExprError> {
+        Ok(i32::from(self.vis.missilecam))
+    }
+    fn emp_jammed(&self) -> Result<i32, hud_iw4::ExprError> {
+        Ok(i32::from(self.vis.emp_jammed))
+    }
     fn dvar_int(&self, name: &str) -> Result<i32, hud_iw4::ExprError> {
+        if let Some(value) = self.dvars.int(name) {
+            return Ok(value);
+        }
         match name.to_ascii_lowercase().as_str() {
             "ui_scorelimit" => Ok(self.score_limit),
             "ui_timelimit" => Ok(self.time_limit_minutes),
-            "ui_halftime" | "ui_overtime" | "splitscreen" => Ok(0),
-            "ui_bomb_timer" => {
-                let count = self
-                    .objectives
-                    .bombs
-                    .iter()
-                    .filter(|b| b.planted_at_ms.is_some() && !b.destroyed)
-                    .count();
-                Ok(if count == 0 { 0 } else { count as i32 + 1 })
-            }
-            "ui_bombtimer_a" | "ui_bombtimer_b" => {
-                let label = if name.eq_ignore_ascii_case("ui_bombtimer_a") {
-                    "A"
-                } else {
-                    "B"
-                };
-                Ok(self
-                    .objectives
-                    .bombs
-                    .iter()
-                    .find(|b| b.view.label == label && !b.destroyed)
-                    .and_then(|b| b.planted_at_ms)
-                    .map(|at| {
-                        let elapsed = self.objective_time_ms.saturating_sub(at);
-                        (gamemode_iw4::dd::BOMB_FUSE_MS
-                            .saturating_sub(elapsed)
-                            .div_ceil(1000) as i32
-                            - 1)
-                        .max(0)
-                    })
-                    .unwrap_or(-1))
-            }
+            "ui_halftime" | "ui_overtime" | "splitscreen" | "g_hardcore" => Ok(0),
+            "scr_gameended" => Ok(i32::from(self.vis.game_ended)),
+            "ui_bomb_timer" => Ok(0),
+            "ui_bombtimer_a" | "ui_bombtimer_b" => Ok(-1),
             _ => Err(hud_iw4::ExprError::Host("scorebar dvarint")),
         }
     }
@@ -233,14 +227,20 @@ impl ExprHost for ScorebarExprHost<'_> {
         }
     }
     fn gametype_name(&self) -> Result<Operand, hud_iw4::ExprError> {
-        match scorebar_gametype_loc_key(self.kind.token()) {
-            Some(key) => Ok(Operand::Str(key.to_owned())),
-            None => Err(hud_iw4::ExprError::Host("gametype loc")),
-        }
+        gametype_display_name(self.kind, self.localize)
     }
-    fn weapon_lock(&self) -> Result<hud_iw4::WeaponLockView, hud_iw4::ExprError> {
-        Err(hud_iw4::ExprError::Host("weapon lock"))
-    }
+}
+
+pub(crate) fn gametype_display_name(
+    kind: gamemode_iw4::GameModeKind,
+    localize: Option<&assets::LocalizeCatalog>,
+) -> Result<Operand, hud_iw4::ExprError> {
+    let key =
+        scorebar_gametype_loc_key(kind.token()).ok_or(hud_iw4::ExprError::Host("gametype loc"))?;
+    let text = localize
+        .and_then(|l| l.text(key))
+        .ok_or(hud_iw4::ExprError::Host("gametype localization"))?;
+    Ok(Operand::Str(text.to_owned()))
 }
 
 fn status_of_item(text_key: &str, text_exp: &str) -> Option<ScorebarStatus> {
@@ -295,6 +295,7 @@ pub(crate) fn update_scorebar(
     mut pass: ResMut<HudTessPass>,
     mut exprs: ResMut<crate::expr_cache::MenuExprCache>,
     view: Option<Res<frame::ViewSubject>>,
+    vis_input: crate::weaponbar::HudPlayerVisInput,
 ) {
     if !surface.is_ready() {
         return;
@@ -323,12 +324,8 @@ pub(crate) fn update_scorebar(
             n_others += 1;
         }
     }
-    let remaining_ms = if snap.meta.kind == gamemode_iw4::GameModeKind::Demolition {
-        snap.meta.objectives.round_remaining_ms as i32
-    } else {
-        match_time_remaining_ms(snap.meta.time_limit_ms, snap.meta.match_elapsed_ms)
-    };
-    let remaining_s = remaining_ms.max(0) / 1000;
+    let now_ms = snap.tick.0.saturating_mul(sim::MATCH_TICK_MS) as i32;
+    let remaining_s = snap.meta.objectives.time_left_ms(now_ms).div_euclid(1000);
     let sys_ms = sys_milliseconds();
 
     let mut rank_scores = [0i32; 18];
@@ -359,8 +356,7 @@ pub(crate) fn update_scorebar(
         rank1,
         rank2,
         time_left: remaining_s,
-        objectives: &snap.meta.objectives,
-        objective_time_ms: snap.tick.0.saturating_mul(sim::MATCH_TICK_MS),
+        dvars: snap.meta.script_dvars(local.0),
         time_limit_minutes: (snap.meta.time_limit_ms / 60_000) as i32,
         localize: strings.as_ref().map(|s| &s.0),
         score_limit: snap.meta.score_limit,
@@ -371,6 +367,7 @@ pub(crate) fn update_scorebar(
         menu,
         icons: &teams.0,
         local_vars: &local_vars,
+        vis: vis_input.read(&presented, local.0),
     };
 
     match eval_scorebar_status(menu, &host, &mut exprs) {

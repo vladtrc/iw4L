@@ -19,6 +19,7 @@ impl Default for NativeRegistry {
                     .entity_kernel()
                     .resolve(*entity)
                     .is_ok(),
+                Value::Object(id) => world.resource::<Runtime>().objects.contains_key(id),
                 _ => true,
             };
             Ok(Value::Int(i32::from(defined)))
@@ -33,40 +34,6 @@ impl Default for NativeRegistry {
                 .map(Value::Int)
                 .map_err(|_| "gettime overflow".into())
         });
-        registry.register(Namespace::Method, "setorigin", |world, receiver, args| {
-            let Value::Entity(entity) = receiver else {
-                return Err("setorigin requires an entity receiver".into());
-            };
-            let [Value::Vector(origin)] = args else {
-                return Err("setorigin expects one vector".into());
-            };
-            let mut frame = crate::frame::FrameWorld::from_world(world);
-            frame
-                .entity_kernel()
-                .resolve(*entity)
-                .map_err(|e| format!("invalid entity receiver: {e:?}"))?;
-            if !frame.set_script_mover_origin(entity.number(), *origin) {
-                return Err("setorigin receiver is not a script mover".into());
-            }
-            Ok(Value::Undefined)
-        });
-        registry.register(Namespace::Method, "delete", |world, receiver, args| {
-            if !args.is_empty() {
-                return Err("delete expects no arguments".into());
-            }
-            let Value::Entity(entity) = receiver else {
-                return Err("delete requires an entity receiver".into());
-            };
-            let mut frame = crate::frame::FrameWorld::from_world(world);
-            frame
-                .entity_kernel()
-                .resolve(*entity)
-                .map_err(|e| format!("invalid entity receiver: {e:?}"))?;
-            if !frame.remove_script_mover_by_number(entity.number()) {
-                return Err("delete receiver is not a script mover".into());
-            }
-            Ok(Value::Undefined)
-        });
         registry.register(Namespace::Function, "spawnstruct", |world, _, args| {
             if !args.is_empty() {
                 return Err("spawnstruct expects no arguments".into());
@@ -78,6 +45,14 @@ impl Default for NativeRegistry {
             Ok(Value::Object(id))
         });
         super::iw4_natives::register(&mut registry);
+        super::natives_math::register(&mut registry);
+        super::natives_engine::register(&mut registry);
+        super::natives_player::register(&mut registry);
+        super::objectives::register(&mut registry);
+        super::weapons::register(&mut registry);
+        super::vehicles::register(&mut registry);
+        super::physics::register(&mut registry);
+        super::natives_t5::register(&mut registry);
         registry
     }
 }
@@ -92,7 +67,7 @@ impl NativeRegistry {
 }
 
 impl Runtime {
-    fn symbol(&mut self, name: &str) -> u32 {
+    pub(super) fn symbol(&mut self, name: &str) -> u32 {
         let program = self.program.as_ref().unwrap();
         if let Some(&id) = program.symbol_ids.get(name) {
             return id;
@@ -127,6 +102,7 @@ pub(crate) fn install(
     world: &mut World,
     program: Program,
     natives: NativeRegistry,
+    level: LevelData,
 ) -> Result<(), Fault> {
     let location = Location {
         module: "<runtime>".into(),
@@ -158,15 +134,87 @@ pub(crate) fn install(
         .iter()
         .map(|b| natives.get(b.namespace, b.name).unwrap())
         .collect();
+    let program = Arc::new(program);
     let mut runtime = world.resource_mut::<Runtime>();
-    runtime.program = Some(Arc::new(program));
+    runtime.program = Some(program.clone());
     runtime.natives = bound;
     runtime.objects.insert(0, BTreeMap::new());
     runtime.objects.insert(1, BTreeMap::new());
-    runtime.next_object = 2;
+    runtime.objects.insert(2, BTreeMap::new());
+    runtime.next_object = 3;
+    runtime.next_entity_number = playerstate_iw4::GENTITY_SPAWN_BASE;
+    runtime.tables = Arc::new(level.tables);
+    runtime.rng = u32::from_le_bytes(program.fingerprint()[..4].try_into().unwrap()) | 1;
     runtime.loading = true;
     world.insert_resource(natives);
+    if let Some(&function) = program.names.get(STRUCT_INIT) {
+        let mut thread = new_thread(world, &program, function, Value::Object(0), Vec::new())
+            .map_err(|m| Fault::at(&location, m))?;
+        world.resource_mut::<Runtime>().budget = INSTRUCTION_BUDGET;
+        thread.state = ThreadState::Runnable;
+        execute(world, &program, &mut thread, 0);
+        let mut runtime = world.resource_mut::<Runtime>();
+        if let Some(fault) = runtime.fault.clone() {
+            return Err(fault);
+        }
+        if thread.state != ThreadState::Complete {
+            return Err(Fault::at(&location, format!("{STRUCT_INIT} must not wait")));
+        }
+        runtime.started = false;
+    }
+    world
+        .resource_mut::<Runtime>()
+        .spawn_map_entities(&level.entities)
+        .map_err(|m| Fault::at(&location, m))?;
     Ok(())
+}
+
+/// Runs during install, before the map's `script_struct` blocks are appended to `level.struct`.
+pub const STRUCT_INIT: &str = "codescripts/struct::initstructs";
+/// Level startup runs in one frame and needs over a million instructions on the larger maps.
+const INSTRUCTION_BUDGET: usize = 16 * 1_000_000;
+
+pub(crate) fn take_signals(world: &mut World) -> Vec<Arc<str>> {
+    std::mem::take(&mut world.resource_mut::<Runtime>().signals)
+}
+
+pub(super) fn raise(world: &mut World, receiver: Value, name: &str, args: Vec<Value>) {
+    world
+        .resource_mut::<Runtime>()
+        .pending_notifies
+        .push((receiver, name.into(), args));
+}
+
+fn deliver_pending(world: &mut World, thread: &mut Thread, now: i64) -> Result<(), String> {
+    loop {
+        let pending = std::mem::take(&mut world.resource_mut::<Runtime>().pending_notifies);
+        if pending.is_empty() {
+            return Ok(());
+        }
+        for (receiver, name, args) in pending {
+            notify(world, thread, &receiver, &name, &args, now)?;
+        }
+    }
+}
+
+fn deliver_external(world: &mut World, now: i64) {
+    let mut carrier = Thread {
+        serial: u64::MAX,
+        frames: Vec::new(),
+        stack: Vec::new(),
+        state: ThreadState::Complete,
+    };
+    if let Err(message) = deliver_pending(world, &mut carrier, now) {
+        world.resource_mut::<Runtime>().fault = Some(Fault::at(
+            &Location {
+                module: "<engine>".into(),
+                function: "notify".into(),
+                line: 0,
+                column: 0,
+            },
+            message,
+        ));
+    }
 }
 
 fn frame(
@@ -190,12 +238,7 @@ fn frame(
     }
 }
 
-pub(crate) fn start(
-    world: &mut World,
-    name: &str,
-    receiver: Value,
-    args: Vec<Value>,
-) -> Result<u64, Fault> {
+fn entry(world: &World, name: &str) -> Result<(Arc<Program>, usize, Location), Fault> {
     let location = Location {
         module: "<runtime>".into(),
         function: name.into(),
@@ -215,7 +258,40 @@ pub(crate) fn start(
         .names
         .get(&name.replace('\\', "/").to_ascii_lowercase())
         .ok_or_else(|| Fault::at(&location, "unknown script entry point"))?;
+    Ok((program, function, location))
+}
+
+pub(crate) fn start(
+    world: &mut World,
+    name: &str,
+    receiver: Value,
+    args: Vec<Value>,
+) -> Result<u64, Fault> {
+    let (program, function, location) = entry(world, name)?;
     spawn_thread(world, &program, function, receiver, args).map_err(|m| Fault::at(&location, m))
+}
+
+pub(super) fn run_now(
+    world: &mut World,
+    name: &str,
+    receiver: Value,
+    args: Vec<Value>,
+    now: i64,
+) -> Result<(), Fault> {
+    let (program, function, location) = entry(world, name)?;
+    let mut thread = new_thread(world, &program, function, receiver, args)
+        .map_err(|m| Fault::at(&location, m))?;
+    thread.state = ThreadState::Runnable;
+    execute(world, &program, &mut thread, now);
+    if thread.state == ThreadState::Complete {
+        retire(&mut world.resource_mut::<Runtime>(), thread.serial);
+    } else {
+        world.spawn(thread);
+    }
+    match world.resource::<Runtime>().fault.clone() {
+        Some(fault) => Err(fault),
+        None => Ok(()),
+    }
 }
 
 fn spawn_thread(
@@ -265,7 +341,6 @@ fn frame_room(world: &World, thread: &Thread) -> Result<(), String> {
     Ok(())
 }
 
-/// Runs a new thread until its first yield while the spawner waits.
 fn run_inline(
     world: &mut World,
     program: &Program,
@@ -313,7 +388,7 @@ fn pop(thread: &mut Thread) -> Result<Value, String> {
         .ok_or_else(|| "invalid IR: stack underflow".into())
 }
 
-fn type_name(value: &Value) -> &'static str {
+pub(super) fn type_name(value: &Value) -> &'static str {
     match value {
         Value::Undefined => "undefined",
         Value::Int(_) => "int",
@@ -573,6 +648,7 @@ fn instruction(
             Global::SelfRef => thread.frames.last().unwrap().receiver.clone(),
             Global::Level => Value::Object(0),
             Global::Game => Value::Object(1),
+            Global::Anim => Value::Object(2),
         }),
         Op::Load(slot) => {
             let value = thread.frames.last().unwrap().locals[slot as usize].clone();
@@ -871,6 +947,7 @@ fn instruction(
                     let value = native(world, &receiver, &args)
                         .map_err(|m| format!("{}: {m}", program.natives[index as usize].name))?;
                     thread.stack.push(value);
+                    deliver_pending(world, thread, now)?;
                 }
                 Callee::Unlinked(_) => return Err("invalid IR: unlinked call".into()),
             }
@@ -951,6 +1028,13 @@ fn instruction(
                     type_name(&receiver)
                 ));
             };
+            if let Some(client) = world.resource::<Runtime>().player_client(id)
+                && let Some(value) =
+                    super::players::load_field(world, client, &program.symbols[field as usize])
+            {
+                thread.stack.push(value);
+                return Ok(());
+            }
             let runtime = world.resource::<Runtime>();
             let fields = runtime
                 .objects
@@ -966,6 +1050,17 @@ fn instruction(
             let Value::Object(id) = receiver else {
                 return Err("native entity fields are not bound".into());
             };
+            if let Some(client) = world.resource::<Runtime>().player_client(id)
+                && super::players::store_field(
+                    world,
+                    client,
+                    &program.symbols[field as usize],
+                    &value,
+                )?
+            {
+                return Ok(());
+            }
+            super::hud::store_field(world, id, &program.symbols[field as usize], &value)?;
             let mut runtime = world.resource_mut::<Runtime>();
             let fields = runtime
                 .objects
@@ -1166,6 +1261,9 @@ fn notify(
     arguments: &[Value],
     now: i64,
 ) -> Result<(), String> {
+    if *receiver == Value::Object(0) {
+        world.resource_mut::<Runtime>().signals.push(name.clone());
+    }
     loop {
         let runtime = world.resource::<Runtime>();
         let Some(index) = runtime.waiters.iter().position(|w| {
@@ -1226,7 +1324,7 @@ fn kill(world: &mut World, entity: Entity, serial: u64) {
 
 pub(crate) fn advance_scheduler(world: &mut World) {
     let request = world.resource::<crate::step::StepRequest>();
-    if request.reason == crate::StepReason::PredictNew {
+    if !request.reason.advances_authority_world() {
         return;
     }
     let tick = request.tick;
@@ -1254,6 +1352,8 @@ pub(crate) fn advance_scheduler(world: &mut World) {
     }
     world.resource_mut::<Runtime>().last_tick = Some(tick);
     let now = i64::from(tick.0) * i64::from(crate::MATCH_TICK_MS);
+    super::natives_engine::advance_motions(world, now);
+    deliver_external(world, now);
     let threads: Vec<_> = world
         .query::<(Entity, &Thread)>()
         .iter(world)
@@ -1279,7 +1379,7 @@ pub(crate) fn advance_scheduler(world: &mut World) {
         }
         runtime.buckets.insert(now, current);
     }
-    world.resource_mut::<Runtime>().budget = 100_000;
+    world.resource_mut::<Runtime>().budget = INSTRUCTION_BUDGET;
     loop {
         let next = world
             .resource_mut::<Runtime>()
@@ -1309,6 +1409,10 @@ pub(crate) fn advance_scheduler(world: &mut World) {
             break;
         }
     }
+    let deletes = std::mem::take(&mut world.resource_mut::<Runtime>().pending_deletes);
+    for object in deletes {
+        world.resource_mut::<Runtime>().delete_entity(object);
+    }
     let mut runtime = world.resource_mut::<Runtime>();
     if runtime.buckets.get(&now).is_some_and(VecDeque::is_empty) {
         runtime.buckets.remove(&now);
@@ -1328,10 +1432,6 @@ fn execute(world: &mut World, program: &Program, thread: &mut Thread, now: i64) 
             ));
             break;
         };
-        let native = matches!(
-            op,
-            Op::Call(Callee::Native(_), ..) | Op::Indirect(..) | Op::Spawn(..)
-        );
         let result = if world.resource::<Runtime>().budget == 0 {
             Err("script instruction budget exhausted".into())
         } else {
@@ -1339,13 +1439,6 @@ fn execute(world: &mut World, program: &Program, thread: &mut Thread, now: i64) 
             thread.frames.last_mut().unwrap().pc += 1;
             instruction(world, program, thread, op, now)
         };
-        if result.is_ok() && native && {
-            let receivers = entity_receivers(world, thread);
-            any_deleted(world, &receivers)
-        } {
-            thread.state = ThreadState::Complete;
-            break;
-        }
         if let Err(message) = result {
             if world.resource::<Runtime>().fault.is_some() {
                 break;
@@ -1382,9 +1475,7 @@ pub(crate) fn preflight(
     if let Some(fault) = &runtime.fault {
         return Err(fault.clone());
     }
-    if reason != crate::StepReason::PredictNew
-        && runtime.last_tick.is_some_and(|last| last.0 >= tick.0)
-    {
+    if reason.advances_authority_world() && runtime.last_tick.is_some_and(|last| last.0 >= tick.0) {
         return Err(Fault::at(
             &Location {
                 module: "<scheduler>".into(),
@@ -1395,7 +1486,7 @@ pub(crate) fn preflight(
             "authority script ticks must increase; restore the runtime before replaying",
         ));
     }
-    if reason != crate::StepReason::PredictNew && (!runtime.started || runtime.program.is_none()) {
+    if reason.advances_authority_world() && (!runtime.started || runtime.program.is_none()) {
         return Err(Fault::at(
             &Location {
                 module: "<runtime>".into(),
@@ -1470,30 +1561,44 @@ fn copy_value(world: &mut World, value: Value) -> Result<Value, String> {
     copy(world, value, 0, &mut 100_000)
 }
 
-fn entity_receivers(world: &World, thread: &Thread) -> Vec<crate::EntityRef> {
-    let runtime = world.resource::<Runtime>();
-    let waiters = runtime.waiters.iter().filter(|w| w.thread == thread.serial);
-    thread
-        .frames
+/// Deleting a waited-on object ends the thread; a thread whose self is deleted keeps running.
+fn entity_receivers(world: &World, thread: &Thread) -> Vec<Value> {
+    world
+        .resource::<Runtime>()
+        .waiters
         .iter()
-        .map(|f| &f.receiver)
-        .chain(waiters.map(|w| &w.receiver))
-        .filter_map(|value| match value {
-            Value::Entity(entity) => Some(*entity),
-            _ => None,
-        })
+        .filter(|w| w.thread == thread.serial)
+        .map(|w| &w.receiver)
+        .filter(|value| matches!(value, Value::Entity(_) | Value::Object(_)))
+        .cloned()
         .collect()
 }
 
-fn any_deleted(world: &mut World, entities: &[crate::EntityRef]) -> bool {
-    let frame = crate::frame::FrameWorld::from_world(world);
-    entities
+/// A receiver is gone once its kernel entity is freed or its script entity deleted.
+fn any_deleted(world: &mut World, receivers: &[Value]) -> bool {
+    let objects = &world.resource::<Runtime>().objects;
+    if receivers
         .iter()
-        .any(|entity| frame.entity_kernel().resolve(*entity).is_err())
+        .any(|value| matches!(value, Value::Object(id) if !objects.contains_key(id)))
+    {
+        return true;
+    }
+    let frame = crate::frame::FrameWorld::from_world(world);
+    receivers.iter().any(|value| match value {
+        Value::Entity(entity) => frame.entity_kernel().resolve(*entity).is_err(),
+        _ => false,
+    })
 }
 
 fn collect_heap(world: &mut World) {
-    let mut pending = vec![Value::Object(0), Value::Object(1)];
+    let mut pending = vec![Value::Object(0), Value::Object(1), Value::Object(2)];
+    pending.extend(
+        world
+            .resource::<Runtime>()
+            .entities
+            .keys()
+            .map(|id| Value::Object(*id)),
+    );
     for thread in world.query::<&Thread>().iter(world) {
         pending.extend(thread.stack.iter().cloned());
         for frame in &thread.frames {

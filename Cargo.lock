@@ -576,7 +576,6 @@ dependencies = [
  "perf",
  "playerstate_iw4",
  "sim",
- "sound_iw4",
  "symphonia",
  "weapon_iw4",
 ]
@@ -1939,6 +1938,7 @@ dependencies = [
  "bots",
  "console",
  "diag",
+ "frame",
  "hud",
  "libc",
  "net",
@@ -1969,6 +1969,7 @@ dependencies = [
  "net",
  "playerstate_iw4",
  "sim",
+ "trace_iw4",
  "weapon_iw4",
 ]
 
@@ -5501,6 +5502,7 @@ dependencies = [
  "diag",
  "frame",
  "gamemode_iw4",
+ "hud_iw4",
  "net",
  "perf",
  "render",
@@ -5553,7 +5555,6 @@ dependencies = [
  "perf",
  "playerstate_iw4",
  "sha2",
- "sound_iw4",
  "trace_iw4",
  "weapon_iw4",
  "xmodel_runtime",
@@ -5664,13 +5665,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "sound_iw4"
-version = "0.1.0"
-dependencies = [
- "killcam_iw4",
 ]
 
 [[package]]

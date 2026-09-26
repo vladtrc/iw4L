@@ -27,6 +27,7 @@ use crate::plugins::{add_runtime_plugins, add_runtime_plugins_with_role};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Role {
     Listen,
+    Dedicated,
     Client,
     Replay,
 }
@@ -135,6 +136,7 @@ pub fn launch(
             run_menu(games, artifacts);
         }
         LaunchMode::Map(zone) => run_map(games, artifacts, zone, acceptance, Role::Listen, None),
+        LaunchMode::Serve(zone) => run_map(games, artifacts, zone, None, Role::Dedicated, None),
         LaunchMode::ExportGltf(zone) => {
             if acceptance.is_some() {
                 fatal("render acceptance is not available for export-gltf");
@@ -457,12 +459,22 @@ fn run_map(
         app.insert_resource(ui::PresentModeOverride(present_mode));
     }
     app.insert_resource(master_intent);
+    let dedicated = config.role == Role::Dedicated;
+    if dedicated {
+        app.insert_resource(bevy::winit::WinitSettings::continuous())
+            .insert_resource(frame::Headless);
+    }
     app.add_plugins(crate::plugins::default_plugins_with_quiet_log(
         WindowPlugin {
-            primary_window: Some(Window {
+            exit_condition: if dedicated {
+                bevy::window::ExitCondition::DontExit
+            } else {
+                bevy::window::ExitCondition::OnAllClosed
+            },
+            primary_window: (!dedicated).then(|| Window {
                 title: match config.role {
                     Role::Replay => format!("iw4l — play {}", config.zone),
-                    Role::Listen => format!("iw4l — {}", config.zone),
+                    Role::Listen | Role::Dedicated => format!("iw4l — {}", config.zone),
                     Role::Client => format!("iw4l — join {}", config.zone),
                 },
                 resolution: (ACCEPTANCE_WIDTH, ACCEPTANCE_HEIGHT).into(),
@@ -525,7 +537,7 @@ fn run_map(
     }
     match config.role {
         Role::Replay => add_runtime_plugins_with_role(&mut app, net::RuntimeRole::Replay),
-        Role::Listen => add_runtime_plugins(&mut app),
+        Role::Listen | Role::Dedicated => add_runtime_plugins(&mut app),
         Role::Client => add_runtime_plugins_with_role(&mut app, net::RuntimeRole::Client),
     }
     // The demo, before the playback moves into the world: it names the workload
@@ -598,6 +610,7 @@ fn queue_launch_capture(app: &mut App, request: CaptureRequest) {
 const fn role_name(role: Role) -> &'static str {
     match role {
         Role::Listen => "listen",
+        Role::Dedicated => "dedicated",
         Role::Client => "client",
         Role::Replay => "replay",
     }

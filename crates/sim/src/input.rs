@@ -81,6 +81,34 @@ pub enum ClientAction {
     UseCopycat {
         request_id: ActionRequestId,
     },
+
+    ChooseDefaultClass {
+        request_id: ActionRequestId,
+        index: u8,
+    },
+
+    MenuResponse {
+        request_id: ActionRequestId,
+        menu: [u8; MENU_RESPONSE_BYTES],
+        response: [u8; MENU_RESPONSE_BYTES],
+    },
+}
+
+pub const MENU_RESPONSE_BYTES: usize = 48;
+
+pub fn menu_response_field(text: &str) -> Option<[u8; MENU_RESPONSE_BYTES]> {
+    let bytes = text.as_bytes();
+    if bytes.len() > MENU_RESPONSE_BYTES {
+        return None;
+    }
+    let mut field = [0u8; MENU_RESPONSE_BYTES];
+    field[..bytes.len()].copy_from_slice(bytes);
+    Some(field)
+}
+
+pub fn menu_response_text(field: &[u8; MENU_RESPONSE_BYTES]) -> &str {
+    let len = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+    std::str::from_utf8(&field[..len]).unwrap_or("")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,6 +155,8 @@ pub fn action_request_id(action: &ClientAction) -> ActionRequestId {
         | ClientAction::BeginScriptMoverRotateVelocity { request_id, .. }
         | ClientAction::DebugDamage { request_id, .. }
         | ClientAction::SetName { request_id, .. }
-        | ClientAction::UseCopycat { request_id } => request_id,
+        | ClientAction::UseCopycat { request_id }
+        | ClientAction::ChooseDefaultClass { request_id, .. }
+        | ClientAction::MenuResponse { request_id, .. } => request_id,
     }
 }

@@ -10,7 +10,7 @@ use crate::{
     build_iw5_static_model_instances, build_iw5_xmodel_mesh, build_static_model_instances,
     build_t5_static_model_instances, build_t5_xmodel_mesh, build_xmodel_mesh, flag_descriptors,
     flag_descriptors_iw5, flag_descriptors_t5, map_script_structs, map_script_structs_iw5,
-    map_script_structs_t5, map_use_triggers, map_use_triggers_iw5, map_use_triggers_t5,
+    map_script_structs_t5, map_use_triggers_iw5, map_use_triggers_t5,
     script_brush_model_placements, script_brush_model_placements_iw5,
     script_brush_model_placements_t5, script_model_placements, script_model_placements_iw5,
     script_model_placements_t5,
@@ -444,7 +444,6 @@ pub(crate) fn build_static_model_draw(
     };
     let scripts = script_model_placements(stream);
     let brushes = script_brush_model_placements(stream);
-    let use_triggers = map_use_triggers(stream);
     let descriptors = flag_descriptors(stream);
     let structs = map_script_structs(stream);
     link_model_placements(
@@ -452,7 +451,6 @@ pub(crate) fn build_static_model_draw(
         static_error,
         &scripts,
         brushes,
-        use_triggers,
         descriptors,
         structs,
         catalog,
@@ -476,11 +474,10 @@ pub(crate) fn build_t5_static_model_draw(
     };
     let mut scripts = script_model_placements_t5(stream);
     let mut brushes = script_brush_model_placements_t5(stream);
-    let mut use_triggers = map_use_triggers_t5(stream);
     normalize_bomb_sites(
         &mut scripts,
         &mut brushes,
-        &mut use_triggers,
+        &map_use_triggers_t5(stream),
         "bombzone_dem",
     );
     let descriptors = flag_descriptors_t5(stream);
@@ -490,7 +487,6 @@ pub(crate) fn build_t5_static_model_draw(
         static_error,
         &scripts,
         brushes,
-        use_triggers,
         descriptors,
         structs,
         catalog,
@@ -514,8 +510,12 @@ pub(crate) fn build_iw5_static_model_draw(
     };
     let mut scripts = script_model_placements_iw5(stream);
     let mut brushes = script_brush_model_placements_iw5(stream);
-    let mut use_triggers = map_use_triggers_iw5(stream);
-    normalize_bomb_sites(&mut scripts, &mut brushes, &mut use_triggers, "dd_bombzone");
+    normalize_bomb_sites(
+        &mut scripts,
+        &mut brushes,
+        &map_use_triggers_iw5(stream),
+        "dd_bombzone",
+    );
     let descriptors = flag_descriptors_iw5(stream);
     let structs = map_script_structs_iw5(stream);
     link_model_placements(
@@ -523,7 +523,6 @@ pub(crate) fn build_iw5_static_model_draw(
         static_error,
         &scripts,
         brushes,
-        use_triggers,
         descriptors,
         structs,
         catalog,
@@ -534,7 +533,7 @@ pub(crate) fn build_iw5_static_model_draw(
 fn normalize_bomb_sites(
     scripts: &mut [crate::ScriptModelPlacement],
     brushes: &mut [crate::ScriptBrushModelPlacement],
-    triggers: &mut [crate::MapUseTrigger],
+    triggers: &[crate::MapUseTrigger],
     demolition_tag: &str,
 ) {
     let has_dedicated_sites = ["a", "b"].into_iter().all(|label| {
@@ -564,23 +563,6 @@ fn normalize_bomb_sites(
     for brush in brushes {
         normalize(&mut brush.gameobject);
     }
-    for trigger in triggers {
-        normalize(&mut trigger.gameobject);
-        if trigger.targetname == demolition_tag {
-            trigger.targetname = if trigger
-                .script_label
-                .trim_start_matches('_')
-                .eq_ignore_ascii_case("c")
-            {
-                "dd_overtime_bombzone"
-            } else {
-                "bombzone"
-            }
-            .to_owned();
-        } else if trigger.targetname == "bombzone" && has_dedicated_sites {
-            trigger.targetname = "sd_bombzone".to_owned();
-        }
-    }
 }
 
 pub(crate) fn link_model_placements(
@@ -588,7 +570,6 @@ pub(crate) fn link_model_placements(
     mut static_error: Option<StaticModelDrawError>,
     scripts: &[ScriptModelPlacement],
     script_brush_models: Vec<crate::ScriptBrushModelPlacement>,
-    map_use_triggers: Vec<crate::MapUseTrigger>,
     flag_descriptors: Vec<crate::FlagDescriptor>,
     script_structs: Vec<crate::MapScriptStruct>,
     mut catalog: MapXModelCatalog,
@@ -735,7 +716,6 @@ pub(crate) fn link_model_placements(
         scene_assets: catalog.scene_assets,
         script_instances,
         script_brush_models,
-        map_use_triggers,
         flag_descriptors,
         script_structs,
         script_gaps,

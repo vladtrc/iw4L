@@ -180,7 +180,6 @@ pub fn place(
     let mut script_ready = 0usize;
     let mut script_unavailable = 0usize;
     let mut script_gameobject_tagged = 0usize;
-    let mut script_exploder_hidden = 0usize;
     for instance in script_model_instances {
         match map_xmodel_scene_assets.get(&instance.current_model) {
             Some(assets::MapXModelSceneAsset::Iw4(_))
@@ -192,21 +191,9 @@ pub fn place(
         if !instance.metadata.gameobject.is_empty() {
             script_gameobject_tagged += 1;
         }
-        let hide = gamemode_iw4::setup_exploders_hides(
-            &instance.current_model.0,
-            &instance.metadata.targetname,
-            &instance.metadata.script_exploder,
-        );
-        if hide {
-            script_exploder_hidden += 1;
-        }
         let transform = instance.transform;
         let gameobject = instance.metadata.gameobject.clone();
-        let visibility = if hide {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
-        };
+        let visibility = Visibility::Inherited;
         let mut entity = commands.spawn((
             transform,
             visibility,
@@ -221,11 +208,10 @@ pub fn place(
     }
     diag::info!(
         World,
-        "script models: ready={} unavailable={} gameobject-tagged={} setupExploders-hide={} script_smodel_placements=0",
+        "script models: ready={} unavailable={} gameobject-tagged={} script_smodel_placements=0",
         script_ready,
         script_unavailable,
         script_gameobject_tagged,
-        script_exploder_hidden,
     );
 
     let mut dyn_ready = 0usize;

@@ -23,6 +23,19 @@ impl HudElemSoundLatch {
     }
 }
 
+pub(crate) fn resolve_hud_text(
+    strings: &assets::PreparedLocalizedStrings,
+    raw: &str,
+) -> Option<String> {
+    if let Some(plain) = raw.strip_prefix(sim::HUD_STRING_PLAIN) {
+        return Some(plain.to_owned());
+    }
+    if raw.is_empty() {
+        return Some(String::new());
+    }
+    strings.0.text(raw).map(str::to_owned)
+}
+
 pub(crate) fn hudelem_pulse_sound(
     elem: &HudElem,
     text: &str,

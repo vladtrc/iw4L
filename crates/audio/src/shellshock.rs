@@ -1,7 +1,7 @@
 use assets::AssetNamespace;
 use bevy::{audio::Volume, prelude::*};
 use frame::{AppScreen, LifeEnded, MatchTornDown};
-use hud_iw4::{shellshock_remaining_ms, shellshock_sound_parms};
+use hud_iw4::shellshock_remaining_ms;
 use net::{CgFrameClock, LocalPresentClient, PresentedSnapshot};
 
 use crate::{
@@ -59,10 +59,14 @@ pub(crate) fn update_shellshock_tinnitus(
             shellshock_remaining_ms(cg_clock.time(), ps.shellshock_time, ps.shellshock_duration)
         })
         .unwrap_or(0);
-    let parms = presented
-        .player(local.0)
-        .map(|ps| shellshock_sound_parms(ps.shellshock_index))
-        .unwrap_or_else(|| shellshock_sound_parms(0));
+    let Some(parms) = presented
+        .shellshock(local.0)
+        .map(|shock| shock.sound.clone())
+    else {
+        stop_loop(&mut commands, &playing);
+        *was_active = false;
+        return;
+    };
     let want = remaining > 0 && parms.affect && alive && !died;
     if want {
         ensure_loop(
@@ -73,7 +77,7 @@ pub(crate) fn update_shellshock_tinnitus(
             &mut looping_assets,
             &mut gaps,
             epoch.0,
-            parms.loop_alias,
+            &parms.loop_alias,
         );
         *was_active = true;
         return;
@@ -81,9 +85,9 @@ pub(crate) fn update_shellshock_tinnitus(
     if *was_active {
         stop_loop(&mut commands, &playing);
         let alias = if died || !alive {
-            parms.abort_alias
+            &parms.abort_alias
         } else {
-            parms.end_alias
+            &parms.end_alias
         };
         play.write(crate::AliasCommand::Play(PlayAlias {
             namespace: AssetNamespace::Iw4,

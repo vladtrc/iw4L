@@ -628,6 +628,10 @@ pub struct ScriptMoverGentity {
     pub link_mid: [f32; 3],
 
     pub link_half: [f32; 3],
+
+    pub nonsolid: bool,
+
+    pub shown_to: u64,
 }
 
 impl Default for ScriptMoverGentity {
@@ -639,6 +643,8 @@ impl Default for ScriptMoverGentity {
             box_half: [0.0; 3],
             link_mid: [0.0; 3],
             link_half: [0.0; 3],
+            nonsolid: false,
+            shown_to: 0,
         }
     }
 }

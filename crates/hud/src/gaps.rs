@@ -35,7 +35,7 @@ pub enum HudGap {
 
     FlashWhiteout,
 
-    Hitmarker,
+    HudElemMaterial,
 
     AdsOverlay,
 
@@ -76,7 +76,7 @@ impl ledger::Gap for HudGap {
         HudGap::Scoreboard,
         HudGap::BloodOverlay,
         HudGap::FlashWhiteout,
-        HudGap::Hitmarker,
+        HudGap::HudElemMaterial,
         HudGap::AdsOverlay,
         HudGap::DeathIcons,
         HudGap::RetailFont,
@@ -106,7 +106,7 @@ impl ledger::Gap for HudGap {
             HudGap::Scoreboard => "scoreboard",
             HudGap::BloodOverlay => "blood-overlay",
             HudGap::FlashWhiteout => "flash-whiteout",
-            HudGap::Hitmarker => "hitmarker",
+            HudGap::HudElemMaterial => "hudelem-material",
             HudGap::AdsOverlay => "ads-overlay",
             HudGap::DeathIcons => "death-icons",
             HudGap::RetailFont => "retail-font",
@@ -131,7 +131,7 @@ impl ledger::Gap for HudGap {
                 | HudGap::CompassMap
                 | HudGap::BloodOverlay
                 | HudGap::FlashWhiteout
-                | HudGap::Hitmarker
+                | HudGap::HudElemMaterial
                 | HudGap::AdsOverlay
                 | HudGap::MenuVisExp
                 | HudGap::RetailFont
@@ -242,7 +242,7 @@ pub enum GapCause {
         miss: ImageMiss,
     },
 
-    HitmarkerImageMissing {
+    HudElemImageMissing {
         name: String,
         miss: ImageMiss,
     },
@@ -449,8 +449,8 @@ impl ledger::GapCause for GapCause {
             GapCause::BloodOverlayImageMissing { .. }
             | GapCause::BloodOverlayMaterialUnsupported { .. } => HudGap::BloodOverlay,
             GapCause::FlashWhiteoutImageMissing { .. } => HudGap::FlashWhiteout,
-            GapCause::HitmarkerImageMissing { .. } | GapCause::HudElemMaterialUnbound { .. } => {
-                HudGap::Hitmarker
+            GapCause::HudElemImageMissing { .. } | GapCause::HudElemMaterialUnbound { .. } => {
+                HudGap::HudElemMaterial
             }
             GapCause::AdsOverlayNamesNoImage { .. }
             | GapCause::AdsOverlayImageMissing { .. }
@@ -562,8 +562,8 @@ impl fmt::Display for GapCause {
                 f,
                 "HudElem materialIndex {material_index} resolves to no CS_HUDMATERIALS name"
             ),
-            GapCause::HitmarkerImageMissing { name, miss } => {
-                write!(f, "hitmarker image `{name}` is {miss}")
+            GapCause::HudElemImageMissing { name, miss } => {
+                write!(f, "hud elem material `{name}` is {miss}")
             }
             GapCause::AdsOverlayNamesNoImage { material } => match material {
                 Some(name) => write!(f, "overlay material `{name}` names no image"),

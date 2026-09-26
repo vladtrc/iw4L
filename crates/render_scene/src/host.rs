@@ -152,6 +152,7 @@ pub struct ScriptMoverBmodelClaim {
     pub origin: [f32; 3],
     pub angles: [f32; 3],
     pub entnum: u32,
+    pub hidden: bool,
 }
 
 pub fn occupy_add_bmodel(scene: &mut GfxScene, surf_id: i16, pose: AddBModelPose) {
@@ -186,6 +187,9 @@ pub fn occupy_script_brushes(
         let surf_id = surf_id_for_model(models, brush.cmodel_handle);
         if let Some(claim) = claims.get(&brush.cmodel_handle) {
             used.insert(claim.model_index);
+            if claim.hidden {
+                continue;
+            }
             occupy_add_bmodel(
                 scene,
                 surf_id,
@@ -210,7 +214,7 @@ pub fn occupy_script_brushes(
         }
     }
     for claim in claims.values() {
-        if !used.insert(claim.model_index) {
+        if !used.insert(claim.model_index) || claim.hidden {
             continue;
         }
         occupy_add_bmodel(

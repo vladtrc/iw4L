@@ -26,11 +26,17 @@ pub(crate) struct UiLocalVars {
 
 impl UiLocalVars {
     pub(crate) fn set_int(&mut self, name: &str, value: i32) {
+        self.strings.remove(name);
         self.ints.insert(name.to_owned(), value);
     }
 
-    fn set_string(&mut self, name: &str, value: String) {
+    pub(crate) fn set_string(&mut self, name: &str, value: String) {
         self.strings.insert(name.to_owned(), value);
+    }
+
+    pub(crate) fn set_float(&mut self, name: &str, value: f32) {
+        self.ints.insert(name.to_owned(), value as i32);
+        self.strings.insert(name.to_owned(), format!("{value}"));
     }
 
     pub(crate) fn int(&self, name: &str) -> i32 {
@@ -85,6 +91,7 @@ struct PlayerCardExprHost<'a> {
     in_killcam: bool,
     game_ended: bool,
     own_team: i32,
+    dvars: sim::ScriptDvars<'a>,
     local_vars: &'a UiLocalVars,
     cache: &'a PlayerCardCache,
     catalog: Option<&'a MenuCatalog>,
@@ -147,6 +154,9 @@ impl ExprHost for PlayerCardExprHost<'_> {
         Err(ExprError::Host("weapon lock"))
     }
     fn dvar_int(&self, name: &str) -> Result<i32, ExprError> {
+        if let Some(value) = self.dvars.int(name) {
+            return Ok(value);
+        }
         if name.eq_ignore_ascii_case("hiDef") {
             return Ok(1);
         }
@@ -464,6 +474,10 @@ pub(crate) fn update_playercard(
             )
         }),
         own_team,
+        dvars: presented
+            .snapshot()
+            .map(|s| s.meta.script_dvars(local.0))
+            .unwrap_or_default(),
         local_vars: &local_vars,
         cache: &cache,
         catalog: Some(catalog),

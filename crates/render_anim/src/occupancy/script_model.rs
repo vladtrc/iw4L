@@ -33,12 +33,12 @@ struct PersistentScriptDobj {
     reuse_key: assets::dobj::DObjReuseKey,
 }
 
+const SPAWNED_PRESENCE: std::ops::Range<u32> = 0x4000_0000..0x8000_0000;
+
 #[derive(Component)]
-struct KillstreakSceneModel {
+struct SpawnedSceneModel {
     source: u32,
 }
-
-const KILLSTREAK_TARGETNAME: &str = "iw4l_killstreak";
 
 #[derive(Clone, Copy, Debug)]
 struct ScriptMoverCentitySample {
@@ -241,7 +241,7 @@ pub fn register_script_model_systems(app: &mut App) {
         .add_systems(
             Update,
             (
-                sync_killstreak_scene_models,
+                sync_spawned_scene_models,
                 apply_presented_script_model_dobjs,
                 apply_script_mover_centity_pose,
                 occupy_script_model_scene_ents,
@@ -265,161 +265,65 @@ pub fn register_script_model_systems(app: &mut App) {
         );
 }
 
-fn sync_killstreak_scene_models(
+fn sync_spawned_scene_models(
     mut commands: Commands,
     presented: Option<Res<net::PresentedSnapshot>>,
-    local: Option<Res<net::LocalPresentClient>>,
-    assets: Option<Res<assets::MapXModelSceneCatalog>>,
-    mut existing: Query<(
-        Entity,
-        &KillstreakSceneModel,
-        &mut WorldScriptModelInstance,
-        &mut Transform,
-        &mut Visibility,
-    )>,
+    mut existing: Query<(Entity, &SpawnedSceneModel, &mut WorldScriptModelInstance)>,
 ) {
     let Some(snapshot) = presented.as_ref().and_then(|p| p.snapshot()) else {
-        for (entity, _, _, _, _) in &mut existing {
+        for (entity, _, _) in &mut existing {
             commands.entity(entity).despawn();
         }
         return;
     };
-    let Some(assets) = assets else {
-        return;
-    };
-    let local_id = local.as_ref().map(|l| l.0);
-    let local_team = local_id
-        .and_then(|id| snapshot.meta.for_client(id))
-        .map_or(entity_iw4::TEAM_FREE, |m| m.client_state_team);
-    let mut desired = Vec::new();
-    for package in &snapshot.meta.care_packages {
-        let source = sim::killstreak_model_source(sim::LITTLE_BIRD_MODEL_KIND, package.id);
-        if let Some(mover) = snapshot
-            .meta
-            .script_movers
-            .iter()
-            .find(|m| m.id.to_wire() == source)
-        {
-            desired.push((
-                sim::LITTLE_BIRD_MODEL_KIND,
-                package.id,
-                gamemode_iw4::killstreaks::LITTLE_BIRD_MODEL,
-                mover.state.tr_base,
-            ));
-        }
-        let source = sim::killstreak_model_source(sim::CRATE_MODEL_KIND, package.id);
-        let Some(mover) = snapshot
-            .meta
-            .script_movers
-            .iter()
-            .find(|m| m.id.to_wire() == source)
-        else {
-            continue;
-        };
-        let friendly = Some(package.owner) == local_id
-            || (snapshot.meta.kind.is_team() && package.team == local_team);
-        desired.push((
-            sim::CRATE_MODEL_KIND,
-            package.id,
-            if friendly {
-                gamemode_iw4::killstreaks::CRATE_FRIENDLY_MODEL
-            } else {
-                gamemode_iw4::killstreaks::CRATE_ENEMY_MODEL
-            },
-            mover.state.tr_base,
-        ));
-    }
-    for heli in &snapshot.meta.pave_lows {
-        desired.push((
-            sim::PAVELOW_MODEL_KIND,
-            heli.id,
-            if heli.team == entity_iw4::TEAM_AXIS {
-                gamemode_iw4::killstreaks::PAVELOW_MODELS[0]
-            } else {
-                gamemode_iw4::killstreaks::PAVELOW_MODELS[1]
-            },
-            heli.origin,
-        ));
-    }
-    for uav in &snapshot.meta.uavs {
-        if Some(uav.owner) == local_id || (snapshot.meta.kind.is_team() && uav.team == local_team) {
-            continue;
-        }
-        desired.push((
-            sim::UAV_MODEL_KIND,
-            uav.id,
-            gamemode_iw4::killstreaks::UAV_MODEL,
-            uav.origin,
-        ));
-    }
-    let desired_sources: std::collections::HashSet<u32> = desired
+    let movers: std::collections::HashMap<u32, &sim::ScriptMoverGentity> = snapshot
+        .meta
+        .script_movers
         .iter()
-        .map(|(kind, id, _, _)| sim::killstreak_model_source(*kind, *id))
+        .filter(|m| SPAWNED_PRESENCE.contains(&m.id.to_wire()))
+        .map(|m| (m.id.to_wire(), m))
         .collect();
-    for (entity, marker, _, _, _) in &mut existing {
-        if !desired_sources.contains(&marker.source) {
-            commands.entity(entity).despawn();
+    for (entity, marker, mut owner) in &mut existing {
+        match movers.get(&marker.source) {
+            Some(mover) => owner.gentity_number = u16::try_from(mover.state.number).ok(),
+            None => commands.entity(entity).despawn(),
         }
     }
-    for (kind, id, name, origin) in desired {
-        let source = sim::killstreak_model_source(kind, id);
-        let mover = snapshot
-            .meta
-            .script_movers
-            .iter()
-            .find(|m| m.id.to_wire() == source);
-        let Some(entnum) = mover.and_then(|m| u16::try_from(m.state.number).ok()) else {
+    let known: std::collections::HashSet<u32> = existing
+        .iter()
+        .map(|(_, marker, _)| marker.source)
+        .collect();
+    for (owner, state) in &snapshot.meta.entity_dobjs {
+        let Some(id) = owner.script_model() else {
             continue;
         };
-        let key = assets::MapXModelAssetKey(name.to_owned());
-        if !matches!(
-            assets.get(&key),
-            Some(
-                assets::MapXModelSceneAsset::Iw4(_)
-                    | assets::MapXModelSceneAsset::Iw5(_)
-                    | assets::MapXModelSceneAsset::T5(_)
-            )
-        ) {
+        let source = id.to_wire();
+        if known.contains(&source) {
             continue;
         }
-        let pos = Vec3::from_array(origin);
-        if let Some((_, _, mut owner, mut transform, mut visibility)) = existing
-            .iter_mut()
-            .find(|(_, marker, _, _, _)| marker.source == source)
-        {
-            if owner.current_model != key {
-                owner.current_model = key;
-                owner.dobj_state =
-                    assets::dobj::DObjSemanticState::bind_pose(name.to_owned(), source, 1);
-            }
-            owner.gentity_number = Some(entnum);
-            transform.translation = pos;
-            *visibility = Visibility::Inherited;
-        } else {
-            let transform = Transform::from_translation(pos);
-            commands.spawn((
-                KillstreakSceneModel { source },
+        let Some(mover) = movers.get(&source) else {
+            continue;
+        };
+        let Some(base) = state.composition.models.first() else {
+            continue;
+        };
+        let origin = mover.state.tr_base;
+        let transform = Transform::from_translation(Vec3::from_array(origin));
+        commands.spawn((
+            SpawnedSceneModel { source },
+            transform,
+            Visibility::Hidden,
+            WorldScriptModelInstance {
+                id: assets::ScriptModelId::from_source_ordinal(source),
+                authority_owner: Some(*owner),
+                current_model: assets::MapXModelAssetKey(base.model.clone()),
                 transform,
-                Visibility::Inherited,
-                WorldScriptModelInstance {
-                    id: assets::ScriptModelId::from_source_ordinal(source),
-                    authority_owner: None,
-                    current_model: key,
-                    transform,
-                    lighting_origin: origin,
-                    dobj_state: assets::dobj::DObjSemanticState::bind_pose(
-                        name.to_owned(),
-                        source,
-                        1,
-                    ),
-                    metadata: assets::ScriptModelMetadata {
-                        targetname: KILLSTREAK_TARGETNAME.to_owned(),
-                        ..Default::default()
-                    },
-                    gentity_number: Some(entnum),
-                },
-            ));
-        }
+                lighting_origin: origin,
+                dobj_state: state.clone(),
+                metadata: assets::ScriptModelMetadata::default(),
+                gentity_number: u16::try_from(mover.state.number).ok(),
+            },
+        ));
     }
 }
 
@@ -438,53 +342,6 @@ fn apply_presented_script_model_dobjs(
         by_owner.entry(*owner).or_insert(state);
     }
     for (mut owner, mut visibility) in &mut owners {
-        if owner.metadata.targetname == KILLSTREAK_TARGETNAME {
-            *visibility = Visibility::Inherited;
-            continue;
-        }
-        let source = owner.id.source_ordinal();
-        if let Some(flag) = snapshot
-            .meta
-            .objectives
-            .flags
-            .iter()
-            .find(|f| f.model_source == source)
-        {
-            let model = &snapshot.meta.objectives.flag_models[flag.owner as usize];
-            if !model.is_empty() {
-                if owner.current_model.0 != *model {
-                    owner.current_model = assets::MapXModelAssetKey(model.clone());
-                    owner.dobj_state = assets::dobj::DObjSemanticState::bind_pose(
-                        model.clone(),
-                        flag.owner as u32 + 1,
-                        1,
-                    );
-                }
-                *visibility = Visibility::Inherited;
-            } else {
-                *visibility = Visibility::Hidden;
-            }
-            continue;
-        }
-        if let Some(bomb) = snapshot
-            .meta
-            .objectives
-            .bombs
-            .iter()
-            .find(|b| b.view.model_source == source)
-        {
-            *visibility = if bomb.planted_at_ms.is_some() {
-                Visibility::Inherited
-            } else {
-                Visibility::Hidden
-            };
-            continue;
-        }
-        let objective_visible = snapshot.meta.objectives.model_visible(source);
-        if objective_visible == Some(false) {
-            *visibility = Visibility::Hidden;
-            continue;
-        }
         let Some(authority_owner) = owner.authority_owner else {
             *visibility = Visibility::Hidden;
             continue;
@@ -504,16 +361,7 @@ fn apply_presented_script_model_dobjs(
             owner.dobj_state = state.clone();
         }
 
-        *visibility = if objective_visible != Some(true)
-            && gamemode_iw4::setup_exploders_hides(
-                &owner.current_model.0,
-                &owner.metadata.targetname,
-                &owner.metadata.script_exploder,
-            ) {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
-        };
+        *visibility = Visibility::Inherited;
     }
 }
 
@@ -553,29 +401,7 @@ fn apply_script_mover_centity_pose(
     let at_time = presented.trajectory_time_ms(at_time);
     for (owner, mut transform) in &mut owners {
         let mapent = owner.id.source_ordinal();
-        if let Some(bomb) = snapshot
-            .meta
-            .objectives
-            .bombs
-            .iter()
-            .find(|b| b.view.model_source == mapent)
-        {
-            transform.translation = Vec3::from_array(bomb.bomb_origin);
-            let [pitch, yaw, roll] = bomb.bomb_angles.map(f32::to_radians);
-            transform.rotation = Quat::from_euler(EulerRot::ZYX, yaw, pitch, roll);
-            persist
-                .mover_pose
-                .insert(mapent, ScriptMoverCentitySample::posed(bomb.bomb_angles));
-            continue;
-        }
-        let is_fan = owner.metadata.targetname == sim::FAN_BLADE_ROTATE_TARGETNAME
-            || owner.metadata.targetname == sim::FAN_BLADE_ROTATE_FAST_TARGETNAME;
         let Some(number) = owner.gentity_number else {
-            if is_fan {
-                persist
-                    .mover_pose
-                    .insert(mapent, ScriptMoverCentitySample::skip("no_number"));
-            }
             continue;
         };
         let Some(entity) = slots.entity_for_number(number) else {
@@ -733,11 +559,7 @@ fn pose_script_models(
         let owner_id = owner
             .authority_owner
             .and_then(|owner| owner.script_model())
-            .map(|id| id.to_wire())
-            .or_else(|| {
-                (owner.metadata.targetname == KILLSTREAK_TARGETNAME)
-                    .then_some(owner.id.source_ordinal())
-            });
+            .map(|id| id.to_wire());
         let focused_owner_id = focus_id.filter(|wanted| owner_id == Some(*wanted));
         if let Some(id) = focused_owner_id {
             focus.refuse(id, &owner.current_model.0, "unclassified_branch");

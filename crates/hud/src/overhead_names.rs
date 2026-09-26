@@ -147,7 +147,9 @@ fn update_overhead_names(
         now,
         ps.shellshock_time,
         ps.shellshock_duration,
-        SCREEN_BLEND_FLASHED,
+        presented
+            .shellshock(local.0)
+            .map_or(SCREEN_BLEND_BLURRED, |shock| shock.screen_type),
     ) != 0
     {
         memory.seen.clear();

@@ -1,4 +1,15 @@
+extern crate alloc;
+
+use alloc::borrow::ToOwned;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+
+pub const SCREEN_BLEND_BLURRED: i32 = 0;
+
 pub const SCREEN_BLEND_FLASHED: i32 = 1;
+
+pub const SCREEN_BLEND_NONE: i32 = 2;
 
 #[must_use]
 pub fn cg_is_flashbanged(cg_time: i32, start_time: i32, duration: i32, screen_type: i32) -> i32 {
@@ -11,10 +22,6 @@ pub fn cg_is_flashbanged(cg_time: i32, start_time: i32, duration: i32, screen_ty
         remaining
     }
 }
-
-pub const FLASHBANG_WHITE_FADE_MS: i32 = 3500;
-
-pub const FLASHBANG_SHOT_FADE_MS: i32 = 1000;
 
 const FLASH_FADE_HALF: f32 = 0.5;
 
@@ -52,10 +59,6 @@ pub fn cg_shellshock_flash_blend(
     ))
 }
 
-pub const HOST_SHOCK_FLASHBANG_MP: i32 = 0;
-
-pub const HOST_SHOCK_CONCUSSION_GRENADE_MP: i32 = 1;
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellshockLookParms {
     pub affect: bool,
@@ -68,22 +71,6 @@ pub struct ShellshockLookParms {
 
     pub max_yaw_speed: f32,
 }
-
-pub const FLASHBANG_LOOK_PARMS: ShellshockLookParms = ShellshockLookParms {
-    affect: false,
-    fade_ms: 2000,
-    mouse_sensitivity: 0.5,
-    max_pitch_speed: 90.0,
-    max_yaw_speed: 90.0,
-};
-
-pub const CONCUSSION_LOOK_PARMS: ShellshockLookParms = ShellshockLookParms {
-    affect: true,
-    fade_ms: 2000,
-    mouse_sensitivity: 0.1,
-    max_pitch_speed: 75.0,
-    max_yaw_speed: 75.0,
-};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ShellshockLookState {
@@ -100,35 +87,6 @@ const LOOK_ENDED: ShellshockLookState = ShellshockLookState {
     max_yaw_speed: 0.0,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ShellshockSoundParms {
-    pub affect: bool,
-
-    pub loop_alias: &'static str,
-
-    pub end_alias: &'static str,
-
-    pub abort_alias: &'static str,
-}
-
-pub const FLASHBANG_SOUND_PARMS: ShellshockSoundParms = ShellshockSoundParms {
-    affect: true,
-    loop_alias: "flashbang_tinnitus_loop",
-    end_alias: "flashbang_tinnitus_end",
-    abort_alias: "flashbang_tinnitus_abort",
-};
-
-pub const CONCUSSION_SOUND_PARMS: ShellshockSoundParms = FLASHBANG_SOUND_PARMS;
-
-#[must_use]
-pub fn shellshock_sound_parms(shellshock_index: i32) -> ShellshockSoundParms {
-    if shellshock_index == HOST_SHOCK_CONCUSSION_GRENADE_MP {
-        CONCUSSION_SOUND_PARMS
-    } else {
-        FLASHBANG_SOUND_PARMS
-    }
-}
-
 #[must_use]
 pub fn shellshock_remaining_ms(cg_time: i32, start_time: i32, duration: i32) -> i32 {
     if start_time == 0 {
@@ -140,15 +98,6 @@ pub fn shellshock_remaining_ms(cg_time: i32, start_time: i32, duration: i32) -> 
     }
     let remaining = duration.wrapping_sub(elapsed);
     if remaining < 1 { 0 } else { remaining }
-}
-
-#[must_use]
-pub fn shellshock_look_parms(shellshock_index: i32) -> ShellshockLookParms {
-    if shellshock_index == HOST_SHOCK_CONCUSSION_GRENADE_MP {
-        CONCUSSION_LOOK_PARMS
-    } else {
-        FLASHBANG_LOOK_PARMS
-    }
 }
 
 #[must_use]
@@ -186,5 +135,88 @@ pub fn update_shellshock_look_control(
             max_pitch_speed: parms.max_pitch_speed,
             max_yaw_speed: parms.max_yaw_speed,
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellshockSoundParms {
+    pub affect: bool,
+
+    pub loop_alias: String,
+
+    pub end_alias: String,
+
+    pub abort_alias: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShockParams {
+    pub screen_type: i32,
+
+    pub white_fade_ms: i32,
+
+    pub shot_fade_ms: i32,
+
+    pub look: ShellshockLookParms,
+
+    pub sound: ShellshockSoundParms,
+
+    pub movement: bool,
+}
+
+impl ShockParams {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let mut values = BTreeMap::new();
+        for line in text.lines() {
+            let line = line.trim();
+            let Some((key, value)) = line.split_once(char::is_whitespace) else {
+                continue;
+            };
+            let value = value.trim().trim_matches('"');
+            values.insert(key.to_ascii_lowercase(), value.to_owned());
+        }
+        let text = |key: &str| {
+            values
+                .get(&format!("bg_shock_{}", key.to_ascii_lowercase()))
+                .cloned()
+                .ok_or_else(|| format!("bg_shock_{key} is missing"))
+        };
+        let number = |key: &str| -> Result<f32, String> {
+            let value = text(key)?;
+            value
+                .parse::<f32>()
+                .map_err(|_| format!("bg_shock_{key} \"{value}\" is not a number"))
+        };
+        let ms = |key: &str| number(key).map(|seconds| libm::roundf(seconds * 1000.0) as i32);
+        let flag = |key: &str| number(key).map(|value| value != 0.0);
+        let screen_type = match text("screenType")?.to_ascii_lowercase().as_str() {
+            "blurred" => SCREEN_BLEND_BLURRED,
+            "flashed" => SCREEN_BLEND_FLASHED,
+            "none" => SCREEN_BLEND_NONE,
+            other => {
+                return Err(format!(
+                    "bg_shock_screenType \"{other}\" is not blurred, flashed or none"
+                ));
+            }
+        };
+        Ok(Self {
+            screen_type,
+            white_fade_ms: ms("screenFlashWhiteFadeTime")?,
+            shot_fade_ms: ms("screenFlashShotFadeTime")?,
+            look: ShellshockLookParms {
+                affect: flag("lookControl")?,
+                fade_ms: ms("lookControl_fadeTime")?,
+                mouse_sensitivity: number("lookControl_mousesensitivityscale")?,
+                max_pitch_speed: number("lookControl_maxpitchspeed")?,
+                max_yaw_speed: number("lookControl_maxyawspeed")?,
+            },
+            sound: ShellshockSoundParms {
+                affect: flag("sound")?,
+                loop_alias: text("soundLoop")?,
+                end_alias: text("soundEnd")?,
+                abort_alias: text("soundEndAbort")?,
+            },
+            movement: flag("movement")?,
+        })
     }
 }

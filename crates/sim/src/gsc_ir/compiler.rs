@@ -313,6 +313,7 @@ impl Parser {
             "self" => Op::Global(Global::SelfRef),
             "level" => Op::Global(Global::Level),
             "game" => Op::Global(Global::Game),
+            "anim" => Op::Global(Global::Anim),
             _ => Op::Load(self.slot(name)),
         }
     }
@@ -464,12 +465,18 @@ impl Parser {
                 name: name.into(),
             }));
         } else if self.eat("#") {
-            self.expect("animtree")?;
-            let tree = self
-                .animtree
-                .clone()
-                .ok_or_else(|| self.error("animation tree is not declared"))?;
-            self.emit(Op::Constant(Value::AnimationTree(tree.into())));
+            if self.tokens[self.pos].string {
+                let text = self.tokens[self.pos].text.clone();
+                self.pos += 1;
+                self.emit(Op::Constant(Value::String(text.into())));
+            } else {
+                self.expect("animtree")?;
+                let tree = self
+                    .animtree
+                    .clone()
+                    .ok_or_else(|| self.error("animation tree is not declared"))?;
+                self.emit(Op::Constant(Value::AnimationTree(tree.into())));
+            }
         } else if self.eat("::") {
             let name = self.ident()?.to_ascii_lowercase();
             let id = self.unlinked(name, CallSite::Reference);
@@ -1139,12 +1146,15 @@ impl Parser {
             if !self.is(")") {
                 loop {
                     let parameter = self.ident()?.to_ascii_lowercase();
-                    if self.slots.contains_key(&parameter)
-                        || ["self", "level", "game"].contains(&parameter.as_str())
-                    {
-                        return Err(self.error("duplicate parameter"));
+                    if ["self", "level", "game"].contains(&parameter.as_str()) {
+                        return Err(self.error("reserved parameter name"));
                     }
-                    self.slot(&parameter);
+                    if self.slots.contains_key(&parameter) {
+                        // Scripts repeat parameter names; the name keeps its first slot.
+                        self.slot(&format!("\0{parameters}"));
+                    } else {
+                        self.slot(&parameter);
+                    }
                     parameters += 1;
                     if !self.eat(",") {
                         break;
@@ -1230,7 +1240,7 @@ pub(super) fn compile(
         pending.extend(parser.dependencies);
         modules.push(ModuleIdentity {
             site: Site::Server,
-            realm: Realm::Iw4,
+            realm: catalog.realm(),
             module,
             sha256: Sha256::digest(&bytes).into(),
         });

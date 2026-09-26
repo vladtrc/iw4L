@@ -15,6 +15,7 @@ pub fn update_admission(
     scene: Option<Res<WorldScene>>,
     audio: Option<Res<audio::AudioReady>>,
     mut live: Option<ResMut<LiveWorldIdentity>>,
+    headless: Option<Res<frame::Headless>>,
 ) {
     if let (Some(live), Some(installed)) = (live.as_mut(), admission.core.installed())
         && live.load_key.local_load_request_id == installed.local_load_request_id
@@ -23,7 +24,8 @@ pub fn update_admission(
         live.load_key = installed;
     }
     let audio_ready = audio.is_none_or(|ready| ready.0);
-    let presentation_ready = scene.is_some_and(|scene| scene.spawned) && audio_ready;
+    let presentation_ready =
+        headless.is_some() || (scene.is_some_and(|scene| scene.spawned) && audio_ready);
     if presentation_ready && let Some(live) = live.as_ref() {
         admission.core.apply_presentation(live.load_key);
     }

@@ -787,12 +787,13 @@ pub fn sample_client_input(
             mouse
         });
     let look_state = ps
-        .map(|ps| {
+        .zip(presented.shellshock(local.0))
+        .map(|(ps, shock)| {
             hud_iw4::update_shellshock_look_control(
                 clock.time(),
                 ps.shellshock_time,
                 ps.shellshock_duration,
-                hud_iw4::shellshock_look_parms(ps.shellshock_index),
+                shock.look,
             )
         })
         .unwrap_or(hud_iw4::ShellshockLookState {

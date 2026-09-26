@@ -122,7 +122,6 @@ impl Plugin for MenuPlugin {
                 Update,
                 (
                     (
-                        sync_class_select_shell,
                         tear_down_menu_when_disabled,
                         ensure_main_open,
                         follow_public_join.run_if(resource_exists::<net::PendingMasterMenuAction>),
@@ -147,7 +146,6 @@ impl Plugin for MenuPlugin {
                         play_focus_sound,
                         handle_menu_back,
                         handle_retail_clicks,
-                        drive_ingame_class,
                         crate::options::edit_player_name,
                         crate::class_setup::edit_class_name,
                         crate::class_setup::drive_cac_pages,
@@ -323,27 +321,6 @@ fn upload_menu_background(
     commands.remove_resource::<PendingMenuBgPixels>();
 }
 
-fn sync_class_select_shell(
-    overlay: Res<crate::ClassSelectOverlayOpen>,
-    highlight: Res<crate::ClassSelectHighlight>,
-    mut enabled: ResMut<MenuEnabled>,
-    mut stack: ResMut<RetailMenuStack>,
-    mut focus: ResMut<Focus>,
-    mut owned: Local<bool>,
-) {
-    if overlay.0 && !*owned {
-        stack.names.clear();
-        stack.names.push("ingame_class".into());
-        focus.widget = Some(format!("class_setup/slot/{}", highlight.0));
-        enabled.0 = true;
-        *owned = true;
-    } else if !overlay.0 && *owned {
-        stack.names.clear();
-        enabled.0 = false;
-        *owned = false;
-    }
-}
-
 fn tear_down_menu_when_disabled(
     enabled: Res<MenuEnabled>,
     mut commands: Commands,
@@ -512,10 +489,7 @@ fn paint_cac_preview(
     mut painted: Query<(&crate::render::PaintedWidget, &mut Visibility)>,
 ) {
     use crate::screens::CacRevealGroup;
-    if !matches!(
-        stack.names.last().map(String::as_str),
-        Some("class_setup" | "ingame_class")
-    ) {
+    if stack.names.last().map(String::as_str) != Some("class_setup") {
         return;
     }
     let focused = focus.widget.as_deref();
@@ -547,51 +521,6 @@ fn paint_cac_preview(
         };
         if *visibility != wanted {
             *visibility = wanted;
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn drive_ingame_class(
-    mut intents: MessageReader<crate::UiIntent>,
-    mut store: ResMut<SessionClassStore>,
-    mut highlight: ResMut<crate::ClassSelectHighlight>,
-    mut phase: ResMut<crate::ClassSelectPhase>,
-    mut pending: ResMut<crate::PendingClassEquip>,
-    mut status: ResMut<crate::ClassSelectStatus>,
-    mut seq: ResMut<net::ActionRequestIds>,
-    allowed: Res<crate::ClassChangeAllowed>,
-    mut stack: ResMut<RetailMenuStack>,
-    mut enabled: ResMut<MenuEnabled>,
-    mut waiting: Local<bool>,
-) {
-    if *waiting && !phase.is_pending() {
-        *waiting = false;
-        if status.0.is_none()
-            && let Some(index) = stack.names.iter().position(|name| name == "ingame_options")
-        {
-            stack.names.truncate(index);
-            enabled.0 = false;
-        }
-    }
-    for intent in intents.read() {
-        if let crate::UiIntent::SelectClass(index) = intent
-            && allowed.0
-            && stack.names.last().map(String::as_str) == Some("ingame_class")
-        {
-            if let Err(error) = crate::commit_class_equip(
-                *index as usize,
-                &mut store,
-                &mut highlight,
-                &mut phase,
-                &mut pending,
-                &mut status,
-                &mut seq,
-            ) {
-                diag::warn!(Ui, "choose class: {error}");
-            } else {
-                *waiting = true;
-            }
         }
     }
 }
