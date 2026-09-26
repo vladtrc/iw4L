@@ -190,7 +190,6 @@ impl Plugin for PlayerSoundPlugin {
                     play_weapon_sound_messages,
                     play_bound_weapon_sounds.after(drain_pending_oneshots),
                     play_land_sound_messages,
-                    crate::map_doors::update.before(crate::ambient::update_map_emitter_gain),
                     crate::destructible_loops::update
                         .before(crate::ambient::update_map_emitter_gain),
                     crate::ambient::update_map_emitter_gain,

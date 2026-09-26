@@ -200,12 +200,23 @@ fn play_cs_sound_alias(
         );
         return;
     };
+    let local = payload.payload.number == net::LOCAL_SOUND_ENTITY;
+    diag::event!(
+        Audio,
+        Debug,
+        "cs_sound",
+        "audio: cs sound `{alias}` local={local}"
+    );
     play.write(crate::AliasCommand::Play(PlayAlias {
         namespace: assets::AssetNamespace::Iw4,
         alias,
         fallback: None,
-        origin_inches: Some(payload.payload.origin),
-        snd_ent: snd_ent_from_number(payload.payload.number),
+        origin_inches: (!local).then_some(payload.payload.origin),
+        snd_ent: if local {
+            None
+        } else {
+            snd_ent_from_number(payload.payload.number)
+        },
     }));
 }
 

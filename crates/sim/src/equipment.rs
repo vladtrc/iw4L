@@ -3,7 +3,6 @@ use crate::damage::DamageAttempt;
 use crate::frame::FrameWorld;
 use crate::identities::{DamageSource, LifeSequence, PelletId};
 use crate::match_state::{ClientLifecycle, EventAudience};
-use crate::world_objects::DestructibleDamageIntent;
 use crate::{
     BulletTraceQuery, ClientId, ColliderId, MASK_BULLET_WORLD, ProjectileId, Tick, TraceOutcome,
     bullet_trace_with_entity_models, level_time_ms,
@@ -87,6 +86,7 @@ pub struct ProjectileState {
     pub travel_distance: f32,
     pub live: bool,
     pub stuck_pane: Option<u32>,
+    pub grounded: bool,
 }
 
 impl ProjectileState {
@@ -104,6 +104,7 @@ impl ProjectileState {
 }
 
 pub const GRENADE_FUSE_CAP_MS: i32 = 60_000;
+const OFFHAND_CLASS_SMOKE: i32 = 2;
 pub const GRENADE_DEFAULT_FUSE_MS: i32 = 30_000;
 pub const ROCKET_CLEANUP_MS: i32 = 60_000;
 pub const BOUNCE_EVENT_SPEED_DELTA: f32 = 100.0;
@@ -113,6 +114,27 @@ const WEAPCLASS_THROWINGKNIFE: i32 = 9;
 pub(crate) enum GrenadeLaunchKind {
     Thrown { remaining_fuse_ms: Option<i32> },
     Launcher,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum WeaponNote {
+    Pullback {
+        owner: ClientId,
+        weapon: u32,
+    },
+    Fired {
+        owner: ClientId,
+    },
+    ReloadStarted {
+        owner: ClientId,
+    },
+    Detonated {
+        id: crate::ProjectileId,
+        origin: [f32; 3],
+    },
+    Stuck {
+        id: crate::ProjectileId,
+    },
 }
 
 pub fn projectile_birth_ms(projectile: &ProjectileState) -> i32 {
@@ -182,6 +204,14 @@ fn grenade_launch_velocity(
 
 fn grenade_fuse_due(now_ms: i32, detonate_at_ms: Option<i32>, live: bool) -> bool {
     detonate_at_ms.is_some_and(|deadline| live && deadline <= now_ms)
+}
+
+pub(crate) const AIRDROP_MARKER_WEAPON: &str = "airdrop_marker_mp";
+
+// The airdrop marker's fuse would otherwise pop the flare midair on a steep throw.
+fn waits_for_ground(world: &FrameWorld, facts: &EquipmentRuntimeFacts, weapon: u32) -> bool {
+    facts.offhand_class == OFFHAND_CLASS_SMOKE
+        || world.weapon_script_name(weapon) == AIRDROP_MARKER_WEAPON
 }
 
 fn grenade_deadlines(
@@ -288,6 +318,7 @@ pub(crate) fn spawn_grenade_projectile(
         travel_distance: 0.0,
         live: true,
         stuck_pane: None,
+        grounded: false,
     });
     true
 }
@@ -353,10 +384,10 @@ pub(crate) fn explode_offhand_in_hand(
     if facts.projectile_explosion_type == 2 {
         crate::damage::apply_flashbang_blast(
             world,
-            tick,
             origin,
             facts.explosion_radius.max(0) as f32,
             facts.explosion_radius_min.max(0) as f32,
+            id,
         );
     }
     if radius <= 0.0 || facts.explosion_inner_damage <= 0 {
@@ -374,14 +405,6 @@ pub(crate) fn explode_offhand_in_hand(
         killcam_entity_start_time: level_time_ms(tick),
     };
     crate::damage::apply_explosion_blast(world, tick, &blast);
-    let chain = crate::damage::apply_explosion_destructibles(world, &blast, None);
-    for explode in &chain {
-        crate::damage::apply_explosion_blast(
-            world,
-            tick,
-            &crate::damage::ExplosionBlast::from_destructible(explode),
-        );
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -460,7 +483,7 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
     }
     let mut detonated = Vec::new();
     let mut direct_hits = Vec::new();
-    let mut destructible_intents = Vec::new();
+    let mut entity_hits = Vec::new();
     let mut impacts = Vec::new();
     let Some(mut projectile) = world.projectile_by_number(entnum) else {
         return;
@@ -659,7 +682,11 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
     if let Some((_end, _normal, _collider, fraction)) = hit {
         contact_time = prev.saturating_add(((eval_time - prev) as f32 * fraction) as i32);
     }
-    let fuse_due = grenade_fuse_due(time, projectile.detonate_at_ms, projectile.live);
+    let mut fuse_due = grenade_fuse_due(time, projectile.detonate_at_ms, projectile.live);
+    if fuse_due && !projectile.grounded && waits_for_ground(world, &facts, projectile.weapon) {
+        fuse_due = false;
+        projectile.detonate_at_ms = Some(time.saturating_add(crate::MATCH_TICK_MS as i32));
+    }
     let cleanup_due = time >= projectile.cleanup_at_ms;
     let contact_before_fuse = hit.is_some()
         && projectile
@@ -831,16 +858,24 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
                             | ColliderId::EntityLinkedBrush { owner, .. } => owner.script_model(),
                             _ => None,
                         } {
-                            destructible_intents.push(DestructibleDamageIntent {
-                                source: DamageSource::Projectile(projectile.id),
-                                pellet: PelletId(0),
-                                attacker: projectile.owner,
-                                attacker_life: projectile.owner_life,
-                                target,
-                                amount: facts.impact_damage.max(0) as u32,
-                                splash: false,
-                                epoch,
-                            });
+                            let bone = match collider {
+                                ColliderId::EntityDObjBone { bone, .. } => Some(usize::from(bone)),
+                                _ => None,
+                            };
+                            entity_hits.push((
+                                DamageSource::Projectile(projectile.id),
+                                crate::gsc_ir::EntityHit {
+                                    target,
+                                    amount: facts.impact_damage.max(0),
+                                    attacker: Some(projectile.owner),
+                                    means: "",
+                                    weapon: projectile.weapon,
+                                    point: end,
+                                    dir: projectile.velocity,
+                                    bone,
+                                    flags: 0,
+                                },
+                            ));
                         }
                         pending_detonation = Some(PendingDetonation {
                             projectile,
@@ -1042,44 +1077,16 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
             };
             let _ = crate::damage::apply_damage_attempt(world, tick, &intent);
         }
-        let destructible = world
-            .world_objects_mut()
-            .apply_destructible_damage_batch(&destructible_intents);
-        for explode in &destructible.explodes {
-            crate::damage::apply_explosion_blast(
-                world,
-                tick,
-                &crate::damage::ExplosionBlast::from_destructible(explode),
-            );
-            crate::damage::apply_explode_glass_blast(world, tick, explode);
+        for (source, mut hit) in std::mem::take(&mut entity_hits) {
+            hit.means = crate::script_player::means(world, source, hit.weapon, 0, false);
+            crate::gsc_ir::damage_entity(world.ecs(), &hit);
         }
     }
     for info in detonated {
-        if world.weapon_script_name(info.projectile.weapon)
-            == gamemode_iw4::killstreaks::AIRDROP_MARKER_WEAPON
-        {
-            crate::killstreaks::marker_impact(
-                world,
-                tick,
-                info.projectile.owner,
-                info.projectile.id.0,
-                info.origin,
-            );
-            continue;
-        }
-        if info.splash {
-            let facts = required_projectile_facts(world, info.projectile.weapon);
-            crate::killstreaks::blast_pave_lows(
-                world,
-                info.projectile.owner,
-                info.origin,
-                facts
-                    .explosion_radius
-                    .max(facts.explosion_radius_min)
-                    .max(0) as f32,
-                facts.explosion_inner_damage.max(facts.impact_damage),
-            );
-        }
+        world.weapon_notes.push(WeaponNote::Detonated {
+            id: info.projectile.id,
+            origin: info.origin,
+        });
         if !info.splash {
             continue;
         }
@@ -1110,10 +1117,10 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         if facts.projectile_explosion_type == 2 {
             crate::damage::apply_flashbang_blast(
                 world,
-                tick,
                 info.origin,
                 facts.explosion_radius.max(0) as f32,
                 facts.explosion_radius_min.max(0) as f32,
+                info.projectile.owner,
             );
         }
         let radius = facts
@@ -1136,14 +1143,6 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
             killcam_entity_start_time: projectile_birth_ms(&info.projectile),
         };
         crate::damage::apply_explosion_blast(world, tick, &blast);
-        let chain = crate::damage::apply_explosion_destructibles(world, &blast, None);
-        for explode in &chain {
-            crate::damage::apply_explosion_blast(
-                world,
-                tick,
-                &crate::damage::ExplosionBlast::from_destructible(explode),
-            );
-        }
         crate::damage::apply_shared_glass_blast(
             world,
             tick,
@@ -1178,6 +1177,9 @@ fn push_grenade_bounce(
 }
 
 fn push_grenade_stick(world: &mut FrameWorld, tick: Tick, projectile: &ProjectileState) {
+    world
+        .weapon_notes
+        .push(WeaponNote::Stuck { id: projectile.id });
     world.push_entity_event(
         tick,
         EventAudience::All,
@@ -1338,6 +1340,7 @@ fn bounce_missile(
     let time = level_time_ms(tick);
     let prev = time.saturating_sub(crate::MATCH_TICK_MS as i32);
     let hit_time = prev.saturating_add(((time - prev) as f32 * fraction) as i32);
+    projectile.grounded |= normal[2] > 0.7;
     projectile.velocity = projectile.velocity_at(hit_time);
     let incoming = projectile.velocity;
     let facts = required_projectile_facts(world, projectile.weapon);

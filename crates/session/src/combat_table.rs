@@ -118,7 +118,8 @@ pub fn from_registry(
     weapons: &WeaponRegistry,
     global_location: Option<[f32; HITLOC_COUNT]>,
 ) -> Vec<WeaponCombatFacts> {
-    (0..=weapons.len())
+    let mut refused = Vec::new();
+    let rows = (0..=weapons.len())
         .map(|i| {
             if i == 0 {
                 return WeaponCombatFacts::none();
@@ -139,10 +140,54 @@ pub fn from_registry(
                 .and_then(|t| t.get(8))
                 .and_then(|s| s.as_ref())
                 .is_some_and(|s| !s.is_empty());
-            let mut facts = validated_facts(f, charge_anim, global_location)
-                .unwrap_or_else(|_| WeaponCombatFacts::none());
+            let mut facts =
+                validated_facts(f, charge_anim, global_location).unwrap_or_else(|reason| {
+                    refused.push(format!("{}({reason:?})", weapons.name_of(i as u32)));
+                    WeaponCombatFacts::none()
+                });
             facts.alternate_weapon = weapons.alternate_of(i as u32);
             facts
+        })
+        .collect();
+    if !refused.is_empty() {
+        diag::info!(
+            Sim,
+            "combat facts refused for {} weapons: {}",
+            refused.len(),
+            refused.join(" ")
+        );
+    }
+    rows
+}
+
+const T5_WEAPTYPE_MELEE: i32 = 7;
+
+pub fn melee_only_from_registry(weapons: &WeaponRegistry) -> Vec<bool> {
+    (0..=weapons.len())
+        .map(|i| {
+            weapons.facts_of(i as u32).is_some_and(|f| {
+                f.weap_type == T5_WEAPTYPE_MELEE
+                    && f.fire_time_ms <= 0
+                    && f.raise_time_ms <= 0
+                    && f.clip_size <= 0
+            })
+        })
+        .collect()
+}
+
+pub fn script_sounds_from_registry(weapons: &WeaponRegistry) -> Vec<sim::WeaponScriptSounds> {
+    (0..=weapons.len())
+        .map(|i| {
+            weapons
+                .sounds_of(i as u32)
+                .map(|s| sim::WeaponScriptSounds {
+                    fire: s.fire.clone(),
+                    fire_player: s.fire_player.clone(),
+                    pickup: s.pickup.clone(),
+                    pickup_player: s.pickup_player.clone(),
+                    proj_explosion: s.proj_explosion.clone(),
+                })
+                .unwrap_or_default()
         })
         .collect()
 }

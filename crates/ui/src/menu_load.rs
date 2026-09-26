@@ -178,15 +178,11 @@ pub(crate) fn restore_menu_on_return(
     mut app_screen: ResMut<AppScreen>,
     chrome: Query<Entity, Or<(With<LoadingRoot>, With<LoadingCamera>)>>,
     overlay_cams: Query<Entity, With<OverlayUiCamera>>,
-    mut stack: ResMut<crate::RetailMenuStack>,
 ) {
     if returned.read().count() == 0 {
         return;
     }
     class_overlay.0 = false;
-    if let Some(index) = stack.names.iter().position(|name| name == "ingame_options") {
-        stack.names.truncate(index);
-    }
     *app_screen = AppScreen::MainMenu;
     menu_enabled.0 = true;
 

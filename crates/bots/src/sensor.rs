@@ -245,90 +245,30 @@ fn probe_visible(
 }
 
 fn public_objectives(snapshot: &Snapshot, bot: ClientId, team: i32) -> Vec<ModeObjective> {
-    use crate::observation::{ObjectiveAction, TeamRole};
-    use gamemode_iw4::dd;
-    let state = &snapshot.meta.objectives;
-    let mut result: Vec<_> = state
-        .flags
+    let Some(team) = gamemode_iw4::Team::from_retail_u8(team as u8) else {
+        return Vec::new();
+    };
+    let feet = snapshot
+        .players
         .iter()
-        .filter(|f| f.owner as i32 != team)
-        .map(|f| ModeObjective {
-            id: f.id,
-            origin: f.origin,
-            touching: f.users.contains(&bot),
-            progress: f.progress,
-            ..ModeObjective::at(f.origin)
+        .find(|(id, _)| *id == bot)
+        .map(|(_, p)| p.origin);
+    snapshot
+        .meta
+        .objectives
+        .compass
+        .iter()
+        .filter(|o| o.shows_to(team) && !o.icon.contains("defend"))
+        .map(|o| ModeObjective {
+            id: u32::from(o.index),
+            origin: o.origin,
+            touching: feet.is_some_and(|f| {
+                dist2([f[0], f[1], 0.0], [o.origin[0], o.origin[1], 0.0])
+                    <= DEFAULT_OBJECTIVE_RADIUS * DEFAULT_OBJECTIVE_RADIUS
+            }),
+            ..ModeObjective::at(o.origin)
         })
-        .collect();
-    if state.round_end_at_ms.is_some() || state.match_over {
-        return result;
-    }
-    for b in state.bombs.iter().filter(|b| !b.destroyed) {
-        let attack = state.attackers as i32 == team;
-        let action = match (attack, b.planted_at_ms.is_some()) {
-            (true, false) => ObjectiveAction::Plant,
-            (false, true) => ObjectiveAction::Defuse,
-            _ => ObjectiveAction::Defend,
-        };
-        // Public teammates only; keep an active user assigned until interrupted.
-        let actor = b
-            .user
-            .filter(|id| {
-                snapshot.meta.for_client(*id).is_some_and(|m| {
-                    m.lifecycle == ClientLifecycle::Alive && m.client_state_team == team
-                })
-            })
-            .or_else(|| {
-                snapshot
-                    .players
-                    .iter()
-                    .filter(|(id, _)| {
-                        snapshot.meta.for_client(*id).is_some_and(|m| {
-                            m.lifecycle == ClientLifecycle::Alive && m.client_state_team == team
-                        })
-                    })
-                    .min_by(|(ia, a), (ib, c)| {
-                        (!b.view.users.contains(ia))
-                            .cmp(&(!b.view.users.contains(ib)))
-                            .then_with(|| {
-                                dist2(a.origin, b.view.origin)
-                                    .total_cmp(&dist2(c.origin, b.view.origin))
-                            })
-                            .then_with(|| ia.0.cmp(&ib.0))
-                    })
-                    .map(|(id, _)| *id)
-            });
-        let interaction_ms = match action {
-            ObjectiveAction::Plant => dd::PLANT_MS,
-            ObjectiveAction::Defuse => dd::DEFUSE_MS,
-            _ => 0,
-        };
-        result.push(ModeObjective {
-            id: b.view.id,
-            round: state.round,
-            action,
-            active_user: b.user,
-            role: if actor == Some(bot) {
-                TeamRole::Actor
-            } else {
-                TeamRole::Cover
-            },
-            origin: b.view.origin,
-            touching: b.view.users.contains(&bot),
-            use_button: interaction_ms > 0 && actor == Some(bot),
-            remaining_ms: Some(b.planted_at_ms.map_or(state.round_remaining_ms, |at| {
-                dd::fuse_remaining_ms(snapshot.tick.0.saturating_mul(50).saturating_sub(at))
-            })),
-            interaction_ms,
-            progress: if b.user == Some(bot) {
-                b.view.progress
-            } else {
-                0.0
-            },
-            radius: DEFAULT_OBJECTIVE_RADIUS,
-        });
-    }
-    result
+        .collect()
 }
 
 fn dist2(a: [f32; 3], b: [f32; 3]) -> f32 {

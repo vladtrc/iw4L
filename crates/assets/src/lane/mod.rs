@@ -27,6 +27,7 @@ pub struct LaneGap {
 
 #[derive(Default)]
 pub struct LoadedWorld {
+    pub scripts: crate::ScriptSources,
     pub world: PreparedWorld,
     /// What the map zone itself captured. The local material indices in
     /// `world` are indices into this pool until the match finalizes one.
@@ -84,6 +85,7 @@ impl LoadedWorld {
 
 #[derive(Default)]
 pub struct CommonCensus {
+    pub scripts: crate::ScriptSources,
     pub scene_models: crate::MapXModelSceneCatalog,
     pub shared_surfaces: asset_model::SharedXModelSurfaces,
     pub weapons: WeaponBuild,
@@ -129,6 +131,7 @@ pub struct MaterialPopulation {
     pub walked: usize,
     pub report: Vec<String>,
     pub cac_tables: Vec<crate::CapturedStringTable>,
+    pub scripts: crate::ScriptSources,
 }
 
 impl Default for MaterialPopulation {
@@ -139,6 +142,7 @@ impl Default for MaterialPopulation {
             walked: 0,
             report: Vec::new(),
             cac_tables: Vec::new(),
+            scripts: crate::ScriptSources::default(),
         }
     }
 }

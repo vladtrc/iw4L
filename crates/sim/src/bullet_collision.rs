@@ -188,7 +188,6 @@ pub struct AuthorityDObjState {
     pub apos: Option<entity_iw4::Trajectory>,
 
     pub(crate) t5_destructible: Option<crate::t5_destructible::State>,
-    pub(crate) pickup_glass: Option<[gamemode_iw4::VehicleBodyState; 6]>,
     /// Capabilities for the models this script model can swap to: husks and
     /// the intermediate stages of a destructible.
     pub swap_capabilities: Vec<(
@@ -328,7 +327,6 @@ impl AuthorityDObjState {
             materialize_error: None,
             play_anim: None,
             apos: None,
-            pickup_glass: None,
             t5_destructible: None,
             swap_capabilities: Vec::new(),
         }
@@ -342,6 +340,35 @@ impl AuthorityDObjState {
             .iter()
             .find(|(name, _)| name == model)
             .and_then(|(_, capability)| capability.clone())
+    }
+
+    pub fn at_pose(
+        model: &str,
+        capability: Option<std::sync::Arc<xmodel_runtime::RetainedModelCapability>>,
+        origin: [f32; 3],
+        angles: [f32; 3],
+    ) -> Self {
+        Self::new_dirty(
+            model.to_owned(),
+            capability,
+            iw_angles_to_mat4(glam::Vec3::from_array(origin), angles),
+        )
+    }
+
+    pub fn replace_model(
+        &mut self,
+        model: &str,
+        capability: Option<std::sync::Arc<xmodel_runtime::RetainedModelCapability>>,
+    ) {
+        self.play_anim = None;
+        self.set_model(model.to_owned(), capability);
+        self.pose_revision = self.pose_revision.wrapping_add(1);
+        self.semantic_state = xmodel_runtime::DObjSemanticState::bind_pose(
+            model.to_owned(),
+            self.model_revision,
+            self.pose_revision,
+        );
+        self.pose_request = xmodel_runtime::DObjPoseRequest::bind_pose();
     }
 
     /// Put the model a destructible state asks for on this dobj.
@@ -390,6 +417,75 @@ impl AuthorityDObjState {
         self.materialized_pose_revision = None;
     }
 
+    pub fn set_world_pose(&mut self, origin: [f32; 3], angles: [f32; 3]) {
+        let world_from_model = iw_angles_to_mat4(glam::Vec3::from_array(origin), angles);
+        if world_from_model == self.world_from_model {
+            return;
+        }
+        self.world_from_model = world_from_model;
+        self.current_collision = None;
+        self.materialized_pose_revision = None;
+    }
+
+    pub fn bone_name(&self, bone: usize) -> Option<&str> {
+        self.capability
+            .as_ref()?
+            .pose
+            .bone_names
+            .get(bone)
+            .map(String::as_str)
+    }
+
+    pub fn set_tag_hidden(&mut self, tag: &str, hidden: bool) -> bool {
+        let Some(bone) = self.capability.as_ref().and_then(|capability| {
+            capability
+                .pose
+                .bone_names
+                .iter()
+                .position(|name| name.eq_ignore_ascii_case(tag))
+        }) else {
+            return false;
+        };
+        let mut words = *self.semantic_state.hide_part_bits.words();
+        let bit = 0x8000_0000 >> (bone % 32);
+        if hidden {
+            words[bone / 32] |= bit;
+        } else {
+            words[bone / 32] &= !bit;
+        }
+        let hide = xmodel_runtime::HidePartBits::from_words(words);
+        if hide != self.semantic_state.hide_part_bits {
+            self.semantic_state.hide_part_bits = hide;
+            self.pose_request.hide_part_bits = hide;
+            self.pose_revision = self.pose_revision.wrapping_add(1);
+            self.semantic_state.pose_revision = self.pose_revision;
+            self.current_collision = None;
+            self.materialized_pose_revision = None;
+        }
+        true
+    }
+
+    pub fn clear_script_model_play_anim(&mut self) {
+        if self.play_anim.take().is_none() {
+            return;
+        }
+        self.pose_revision = self.pose_revision.wrapping_add(1);
+        self.semantic_state = xmodel_runtime::DObjSemanticState {
+            hide_part_bits: self.semantic_state.hide_part_bits,
+            ..xmodel_runtime::DObjSemanticState::bind_pose(
+                self.current_model.clone(),
+                self.model_revision,
+                self.pose_revision,
+            )
+        };
+        self.pose_request = xmodel_runtime::DObjPoseRequest {
+            hide_part_bits: self.semantic_state.hide_part_bits,
+            ..xmodel_runtime::DObjPoseRequest::bind_pose()
+        };
+        self.current_collision = None;
+        self.materialized_pose_revision = None;
+    }
+
     pub fn set_model(
         &mut self,
         current_model: String,
@@ -404,51 +500,6 @@ impl AuthorityDObjState {
         self.materialized_model_revision = None;
         self.materialized_pose_revision = None;
         self.materialize_error = None;
-    }
-
-    pub fn begin_destructible_death(&mut self, husk: &str, clip: &str) {
-        self.play_anim = None;
-        self.pickup_glass = None;
-        self.set_model(husk.to_owned(), self.swap_capability(husk));
-        self.pose_revision = self.pose_revision.wrapping_add(1);
-        self.semantic_state = xmodel_runtime::DObjSemanticState::one_leaf(
-            husk.to_owned(),
-            clip.to_owned(),
-            self.model_revision,
-            self.pose_revision,
-            0.0,
-        );
-        self.pose_request = xmodel_runtime::DObjPoseRequest::bind_pose();
-        self.current_collision = None;
-        self.materialized_pose_revision = None;
-        self.materialize_error = None;
-    }
-
-    pub fn advance_destructible_death(&mut self, dt_seconds: f32) -> f32 {
-        let Some(tree) = self.semantic_state.tree.as_mut() else {
-            return 0.0;
-        };
-        let Some(leaf) = tree.nodes.first_mut() else {
-            return 0.0;
-        };
-        leaf.state.old_time = leaf.state.time;
-        leaf.state.old_cycle_count = leaf.state.cycle_count;
-        let (time, cycle) = anim_iw4::xanim_advance_leaf_time(
-            leaf.state.old_time,
-            leaf.state.cycle_count,
-            leaf.state.rate,
-            1.0,
-            dt_seconds,
-            false,
-        );
-        leaf.state.time = time;
-        leaf.state.cycle_count = cycle;
-        tree.state_revision = tree.state_revision.wrapping_add(1);
-        self.pose_revision = self.pose_revision.wrapping_add(1);
-        self.semantic_state.pose_revision = self.pose_revision;
-        self.current_collision = None;
-        self.materialized_pose_revision = None;
-        leaf.state.time
     }
 
     pub fn begin_script_model_play_anim(&mut self, clip: &str, looping: bool, frequency: f32) {
@@ -598,7 +649,7 @@ impl AuthorityDObjState {
         let direction = if forward.length_squared() > 1e-8 {
             forward.normalize().to_array()
         } else {
-            gamemode_iw4::VEHICLE_DEATH_FX_FORWARD
+            [0.0, 0.0, 1.0]
         };
         Some((origin, direction))
     }
@@ -671,6 +722,9 @@ pub struct EntityCollisionCapabilities {
     epoch: EntityCollisionEpoch,
     pub dobj: Option<AuthorityDObjState>,
     pub linked_brushes: Vec<LinkedBrushCollisionBrush>,
+    pub hidden: bool,
+    pub solid: bool,
+    pub followed_pose: Option<([f32; 3], [f32; 3])>,
 }
 
 impl EntityCollisionCapabilities {
@@ -684,6 +738,9 @@ impl EntityCollisionCapabilities {
             epoch: EntityCollisionEpoch::CurrentTick,
             dobj,
             linked_brushes,
+            hidden: false,
+            solid: true,
+            followed_pose: None,
         }
     }
 
@@ -691,7 +748,25 @@ impl EntityCollisionCapabilities {
         self.epoch
     }
 
+    pub fn solid_brushes(&self) -> &[LinkedBrushCollisionBrush] {
+        if self.solid {
+            &self.linked_brushes
+        } else {
+            &[]
+        }
+    }
+
     pub fn trace_geom(&self) -> EntityCollisionTraceGeom {
+        if !self.solid {
+            return EntityCollisionTraceGeom {
+                owner: self.owner,
+                epoch: self.epoch,
+                collision: None,
+                dobj_contents: None,
+                model_key: None,
+                linked_brushes: Vec::new(),
+            };
+        }
         EntityCollisionTraceGeom {
             owner: self.owner,
             epoch: self.epoch,

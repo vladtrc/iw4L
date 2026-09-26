@@ -1,5 +1,3 @@
-use sim::ClassId;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum UniqueGroup {
     Assault,
@@ -326,45 +324,6 @@ pub const UNIQUE_WEAPONS: &[UniqueWeapon] = &[
         group: UniqueGroup::Projectile,
     },
 ];
-
-pub const MAX_BOT_CLASS_PAIRS: usize = 96;
-
-#[must_use]
-pub fn pair_unique_loadouts(primaries: &[u32], secondaries: &[u32]) -> Vec<(u32, u32)> {
-    if primaries.is_empty() || secondaries.is_empty() {
-        return Vec::new();
-    }
-    if primaries.len().saturating_mul(secondaries.len()) <= MAX_BOT_CLASS_PAIRS {
-        let mut out = Vec::with_capacity(primaries.len() * secondaries.len());
-        for &primary in primaries {
-            for &secondary in secondaries {
-                out.push((primary, secondary));
-            }
-        }
-        return out;
-    }
-    let per = (MAX_BOT_CLASS_PAIRS / primaries.len())
-        .max(1)
-        .min(secondaries.len());
-    let mut out = Vec::with_capacity(primaries.len() * per);
-    for (i, &primary) in primaries.iter().enumerate() {
-        for k in 0..per {
-            out.push((primary, secondaries[(i + k) % secondaries.len()]));
-        }
-    }
-    out
-}
-
-#[must_use]
-pub fn pick_class_id(ids: &[ClassId], seed: u64, client: u32) -> Option<ClassId> {
-    if ids.is_empty() {
-        return None;
-    }
-    let mix = seed
-        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        .wrapping_add(u64::from(client).wrapping_mul(0xBF58_476D_1CE4_E5B9));
-    Some(ids[(mix as usize) % ids.len()])
-}
 
 #[must_use]
 pub fn family_stem(name: &str) -> String {

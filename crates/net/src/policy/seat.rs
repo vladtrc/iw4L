@@ -18,10 +18,6 @@ pub struct KillcamSession {
 
     pub ends_at_ms: i32,
 
-    pub kc_info_tus_ms: i32,
-
-    pub kc_timer_ends_at_ms: i32,
-
     pub final_kill: bool,
 
     pub started_at_ms: i32,
@@ -166,6 +162,40 @@ pub fn snapshot_and_sample_for_viewer(
     viewer: ClientId,
     now_ms: i32,
 ) -> (Snapshot, Option<SeatSample>) {
+    let (mut out, sample) = seat_snapshot(archive, seats, live, viewer, now_ms);
+    reveal_shown_movers(&mut out, viewer);
+    (out, sample)
+}
+
+fn reveal_shown_movers(out: &mut Snapshot, viewer: ClientId) {
+    let Some(bit) = 1u64.checked_shl(viewer.0) else {
+        return;
+    };
+    let Snapshot { meta, .. } = out;
+    for mover in &mut meta.script_movers {
+        if mover.shown_to == 0 || mover.state.e_flags & entity_iw4::CG_SCRIPT_MOVER_NODRAW == 0 {
+            continue;
+        }
+        if mover.shown_to & bit == 0 {
+            meta.entity_dobjs
+                .retain(|(owner, _)| owner.script_model() != Some(mover.id));
+            continue;
+        }
+        let hidden = mover.state.clone();
+        mover.state.e_flags &= !entity_iw4::CG_SCRIPT_MOVER_NODRAW;
+        for es in meta.entities.iter_mut().filter(|es| **es == hidden) {
+            *es = mover.state.clone();
+        }
+    }
+}
+
+fn seat_snapshot(
+    archive: &FrameArchive,
+    seats: &ActiveKillcams,
+    live: &Snapshot,
+    viewer: ClientId,
+    now_ms: i32,
+) -> (Snapshot, Option<SeatSample>) {
     let Some(session) = seats.get(viewer) else {
         return (live.clone(), None);
     };
@@ -192,7 +222,6 @@ pub fn snapshot_and_sample_for_viewer(
         viewer,
         session,
         sample.as_ref().map(|s| s.rebase_ms).unwrap_or(0),
-        now_ms,
     );
     (out, sample)
 }
@@ -217,6 +246,8 @@ fn overlay_archived_world(
     out.meta.score_limit = live.meta.score_limit;
     out.meta.time_limit_ms = live.meta.time_limit_ms;
     out.meta.kind = live.meta.kind;
+    out.meta.hud_strings = live.meta.hud_strings.clone();
+    out.meta.hud_materials = live.meta.hud_materials.clone();
 
     let archived_viewer = archived
         .players
@@ -251,21 +282,29 @@ fn overlay_archived_world(
     out
 }
 
+fn rebase_entity_state(es: &mut entity_iw4::EntityState, delta_ms: i32) {
+    if es.tr_time != 0 {
+        es.tr_time = es.tr_time.wrapping_add(delta_ms);
+    }
+    if es.apos_tr_time != 0 {
+        es.apos_tr_time = es.apos_tr_time.wrapping_add(delta_ms);
+    }
+    if es.time2 != 0 {
+        es.time2 = es.time2.wrapping_add(delta_ms);
+    }
+    // General's data[0] and missile launchTime share one union slot.
+    if es.e_type == entity_iw4::ET_GENERAL || es.e_type == entity_iw4::ET_MISSILE {
+        es.set_launch_time(es.launch_time().wrapping_add(delta_ms));
+    }
+}
+
 fn rebase_archived_world(out: &mut Snapshot, viewer: ClientId, delta_ms: i32) {
     for es in &mut out.meta.entities {
-        if es.tr_time != 0 {
-            es.tr_time = es.tr_time.wrapping_add(delta_ms);
-        }
-        if es.apos_tr_time != 0 {
-            es.apos_tr_time = es.apos_tr_time.wrapping_add(delta_ms);
-        }
-        if es.time2 != 0 {
-            es.time2 = es.time2.wrapping_add(delta_ms);
-        }
-        // General's data[0] and missile launchTime share one union slot.
-        if es.e_type == entity_iw4::ET_GENERAL || es.e_type == entity_iw4::ET_MISSILE {
-            es.set_launch_time(es.launch_time().wrapping_add(delta_ms));
-        }
+        rebase_entity_state(es, delta_ms);
+    }
+    // Adopt requires each typed mover to equal its entityState row.
+    for mover in &mut out.meta.script_movers {
+        rebase_entity_state(&mut mover.state, delta_ms);
     }
     for p in &mut out.projectiles {
         if p.pos.tr_time != 0 {
@@ -293,7 +332,6 @@ fn overlay_killcam_hud(
     viewer: ClientId,
     session: &KillcamSession,
     rebase_ms: i32,
-    now_ms: i32,
 ) {
     let current = live
         .meta
@@ -313,8 +351,6 @@ fn overlay_killcam_hud(
     if let Some((_, meta)) = out.meta.clients.iter_mut().find(|(id, _)| *id == viewer) {
         meta.killcam_hud = Some(sim::KillcamHud {
             final_kill: session.final_kill,
-            time_until_respawn_ms: session.kc_info_tus_ms,
-            kc_timer_ms: session.kc_timer_ends_at_ms.saturating_sub(now_ms).max(0),
         });
         meta.hud_current = current;
         meta.hud_archival = archival;

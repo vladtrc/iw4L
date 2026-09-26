@@ -7,7 +7,6 @@ pub mod cleanup;
 pub mod final_killcam;
 pub mod focus;
 pub mod log;
-pub mod lower_message;
 pub mod notify;
 pub mod round_end;
 pub mod task;
@@ -29,11 +28,6 @@ pub use focus::{
     Entity, FIRST_RECHECK_DELAY_SECONDS, FocusDelay, FocusRule, Inflictor, NO_KILLCAM_ENTITY,
     archive_clock_ms, focus_first_check, focus_second_check, get_killcam_entity,
     killcam_entity_index,
-};
-pub use lower_message::{
-    KC_INFO_PRESS_TO_RESPAWN, KC_INFO_PRESS_TO_SKIP, KC_INFO_WAITING_TO_SPAWN, KC_TIMER_FONT_SCALE,
-    KC_TIMER_GREY, KC_TIMER_HUDELEM_FONT, KC_TIMER_Y, LOWER_MESSAGE_ALPHA, LOWER_TEXT_FONT_SIZE,
-    LOWER_TEXT_Y, kc_info_loc_key, kc_timer_fields,
 };
 pub use notify::NotifyKind;
 pub use round_end::{

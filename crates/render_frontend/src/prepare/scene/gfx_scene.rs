@@ -84,12 +84,18 @@ pub(crate) fn occupy_script_brush_scene(
     for (cent, runtime) in &runtimes {
         let entnum = u32::from(cent.number());
         let dobj_present = gfx_scene.scene.scene_ent_live(entnum);
-        if !entity_iw4::cg_script_mover_add_bmodel(
-            runtime.next_state.e_type,
-            runtime.next_state.e_flags,
-            runtime.next_state.solid,
-            dobj_present,
-        ) {
+        let hidden = !dobj_present
+            && runtime.next_state.e_type == entity_iw4::ET_SCRIPTMOVER
+            && runtime.next_state.solid == entity_iw4::SCRIPT_MOVER_BMODEL_SOLID
+            && runtime.next_state.e_flags & entity_iw4::CG_SCRIPT_MOVER_NODRAW != 0;
+        if !hidden
+            && !entity_iw4::cg_script_mover_add_bmodel(
+                runtime.next_state.e_type,
+                runtime.next_state.e_flags,
+                runtime.next_state.solid,
+                dobj_present,
+            )
+        {
             continue;
         }
         let Ok(model_index) = u32::try_from(runtime.next_state.index) else {
@@ -102,6 +108,7 @@ pub(crate) fn occupy_script_brush_scene(
             origin,
             angles,
             entnum,
+            hidden,
         });
     }
     occupy_script_brushes(

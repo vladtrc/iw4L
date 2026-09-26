@@ -48,10 +48,10 @@ impl WorldObjectSyncEncoder {
             self.baseline = current;
             self.force_full = false;
         } else {
-            let (destructibles, glass) = world_object_delta(&self.baseline, &current);
+            let glass = world_object_delta(&self.baseline, &current);
             let loops_spoke =
                 self.baseline.destructible_loop_sounds != current.destructible_loop_sounds;
-            if destructibles.is_empty() && glass.is_empty() && !loops_spoke {
+            if glass.is_empty() && !loops_spoke {
                 out.put_u8(0);
                 self.baseline.as_of_ms = current.as_of_ms;
                 self.baseline.map_round_epoch = current.map_round_epoch;
@@ -159,14 +159,8 @@ fn pair_delta<K: Copy + Eq + Ord + Hash, V: Copy + Eq>(
 fn world_object_delta(
     baseline: &WorldObjectSnapshot,
     current: &WorldObjectSnapshot,
-) -> (
-    PairDelta<ScriptModelId, u8>,
-    PairDelta<u32, GlassPieceSnapshot>,
-) {
-    (
-        pair_delta(&baseline.destructible_stages, &current.destructible_stages),
-        pair_delta(&baseline.glass_pieces, &current.glass_pieces),
-    )
+) -> PairDelta<u32, GlassPieceSnapshot> {
+    pair_delta(&baseline.glass_pieces, &current.glass_pieces)
 }
 
 fn canonical_world_object_snapshot(
@@ -177,13 +171,7 @@ fn canonical_world_object_snapshot(
 }
 
 fn encode_world_object_full(out: &mut WireWriter, snap: &WorldObjectSnapshot) {
-    debug_assert!(snap.destructible_stages.len() <= u16::MAX as usize);
     debug_assert!(snap.glass_pieces.len() <= u16::MAX as usize);
-    out.put_u16(snap.destructible_stages.len() as u16);
-    for (id, stage) in &snap.destructible_stages {
-        out.put_u32(id.to_wire());
-        out.put_u8(*stage);
-    }
     out.put_u16(snap.glass_pieces.len() as u16);
     for (id, row) in &snap.glass_pieces {
         out.put_u32(*id);
@@ -197,20 +185,9 @@ fn encode_world_object_delta(
     baseline: &WorldObjectSnapshot,
     current: &WorldObjectSnapshot,
 ) {
-    let (destructibles, glass) = world_object_delta(baseline, current);
-    debug_assert!(destructibles.changed.len() <= u16::MAX as usize);
-    debug_assert!(destructibles.removed.len() <= u16::MAX as usize);
+    let glass = world_object_delta(baseline, current);
     debug_assert!(glass.changed.len() <= u16::MAX as usize);
     debug_assert!(glass.removed.len() <= u16::MAX as usize);
-    out.put_u16(destructibles.changed.len() as u16);
-    for (id, stage) in &destructibles.changed {
-        out.put_u32(id.to_wire());
-        out.put_u8(*stage);
-    }
-    out.put_u16(destructibles.removed.len() as u16);
-    for id in &destructibles.removed {
-        out.put_u32(id.to_wire());
-    }
     out.put_u16(glass.changed.len() as u16);
     for (id, row) in &glass.changed {
         out.put_u32(*id);
@@ -223,8 +200,6 @@ fn encode_world_object_delta(
     encode_destructible_loop_sounds(out, &current.destructible_loop_sounds);
 }
 
-/// The loops are a handful of rows that only move when a stage does, so they
-/// ride whole rather than as a delta of their own.
 fn encode_destructible_loop_sounds(out: &mut WireWriter, rows: &[DestructibleLoopSound]) {
     debug_assert!(rows.len() <= u16::MAX as usize);
     out.put_u16(rows.len() as u16);
@@ -282,19 +257,6 @@ fn decode_world_object_sync(
     match input.get_u8()? {
         0 => {}
         1 => {
-            let destructible_changed = input.get_u16()? as usize;
-            let mut destructibles = PairDelta::<ScriptModelId, u8>::default();
-            for _ in 0..destructible_changed {
-                destructibles
-                    .changed
-                    .push((ScriptModelId::from_wire(input.get_u32()?), input.get_u8()?));
-            }
-            let destructible_removed = input.get_u16()? as usize;
-            for _ in 0..destructible_removed {
-                destructibles
-                    .removed
-                    .push(ScriptModelId::from_wire(input.get_u32()?));
-            }
             let glass_changed = input.get_u16()? as usize;
             let mut glass = PairDelta::<u32, GlassPieceSnapshot>::default();
             for _ in 0..glass_changed {
@@ -307,17 +269,11 @@ fn decode_world_object_sync(
                 glass.removed.push(input.get_u32()?);
             }
             let destructible_loop_sounds = decode_destructible_loop_sounds(input)?;
-            apply_pair_delta(&mut state.destructible_stages, &destructibles);
+
             apply_pair_delta(&mut state.glass_pieces, &glass);
             state.destructible_loop_sounds = destructible_loop_sounds;
         }
         2 => {
-            let destructible_count = input.get_u16()? as usize;
-            let mut destructible_stages = Vec::with_capacity(destructible_count.min(4096));
-            for _ in 0..destructible_count {
-                destructible_stages
-                    .push((ScriptModelId::from_wire(input.get_u32()?), input.get_u8()?));
-            }
             let glass_count = input.get_u16()? as usize;
             let mut glass_pieces = Vec::with_capacity(glass_count.min(4096));
             for _ in 0..glass_count {
@@ -328,7 +284,6 @@ fn decode_world_object_sync(
                 as_of_ms: state.as_of_ms,
                 map_round_epoch: state.map_round_epoch,
                 fracture_profile_version: state.fracture_profile_version,
-                destructible_stages,
                 glass_pieces,
                 destructible_loop_sounds,
             };
@@ -517,6 +472,21 @@ pub(crate) fn encode_action(out: &mut WireWriter, action: &ClientAction) {
             out.put_u8(13);
             out.put_u32(request_id);
         }
+        ClientAction::ChooseDefaultClass { request_id, index } => {
+            out.put_u8(16);
+            out.put_u32(request_id);
+            out.put_u8(index);
+        }
+        ClientAction::MenuResponse {
+            request_id,
+            menu,
+            response,
+        } => {
+            out.put_u8(17);
+            out.put_u32(request_id);
+            out.put_bytes(&menu);
+            out.put_bytes(&response);
+        }
     }
 }
 
@@ -577,6 +547,22 @@ pub(crate) fn decode_action(input: &mut WireReader<'_>) -> Result<ClientAction, 
         13 => Ok(ClientAction::UseCopycat {
             request_id: input.get_u32()?,
         }),
+        16 => Ok(ClientAction::ChooseDefaultClass {
+            request_id: input.get_u32()?,
+            index: input.get_u8()?,
+        }),
+        17 => {
+            let request_id = input.get_u32()?;
+            let mut menu = [0u8; sim::MENU_RESPONSE_BYTES];
+            input.get_bytes(&mut menu)?;
+            let mut response = [0u8; sim::MENU_RESPONSE_BYTES];
+            input.get_bytes(&mut response)?;
+            Ok(ClientAction::MenuResponse {
+                request_id,
+                menu,
+                response,
+            })
+        }
         14 => {
             let request_id = input.get_u32()?;
             let pick = match input.get_u8()? {
@@ -609,7 +595,6 @@ pub struct SnapshotMetaSectionBytes {
     pub entity_kernel: usize,
     pub item_tables: usize,
     pub area_entities: usize,
-    pub map_doors: usize,
     pub objectives: usize,
     pub world_objects: usize,
 }
@@ -626,7 +611,6 @@ impl SnapshotMetaSectionBytes {
             + self.entity_kernel
             + self.item_tables
             + self.area_entities
-            + self.map_doors
             + self.objectives
             + self.world_objects
     }
@@ -665,51 +649,6 @@ pub fn encode_snapshot_meta_sections(
         out.put_u32(client.0);
         encode_client_meta(out, row);
     }
-    out.put_u16(meta.care_packages.len() as u16);
-    for package in &meta.care_packages {
-        out.put_u32(package.id);
-        out.put_u32(package.owner.0);
-        out.put_i32(package.team);
-        for value in package.origin {
-            out.put_f32(value);
-        }
-        out.put_u8(package.contents.wire_tag());
-        out.put_i32(package.ready_at_ms);
-        out.put_i32(package.expires_at_ms);
-        out.put_i32(package.capturer.map_or(-1, |id| id.0 as i32));
-        out.put_i32(package.capture_ms);
-    }
-    out.put_u16(meta.pave_lows.len() as u16);
-    for heli in &meta.pave_lows {
-        out.put_u32(heli.id);
-        out.put_u32(heli.owner.0);
-        out.put_i32(heli.team);
-        for value in heli.origin {
-            out.put_f32(value);
-        }
-        for value in heli.center {
-            out.put_f32(value);
-        }
-        out.put_i32(heli.started_at_ms);
-        out.put_i32(heli.expires_at_ms);
-        out.put_i32(heli.health);
-        out.put_i32(heli.next_shot_ms);
-        out.put_u32(heli.burst_remaining);
-    }
-    out.put_u16(meta.uavs.len() as u16);
-    for uav in &meta.uavs {
-        out.put_u32(uav.id);
-        out.put_u32(uav.owner.0);
-        out.put_i32(uav.team);
-        for value in uav.center {
-            out.put_f32(value);
-        }
-        for value in uav.origin {
-            out.put_f32(value);
-        }
-        out.put_i32(uav.started_at_ms);
-        out.put_i32(uav.expires_at_ms);
-    }
     sizes.match_header = section_span(out, mark);
     mark = out.len();
     debug_assert!(meta.journal.len() <= u16::MAX as usize);
@@ -732,6 +671,7 @@ pub fn encode_snapshot_meta_sections(
     encode_sound_alias_cs(out, &meta.sound_aliases);
     encode_sound_alias_cs(out, &meta.effect_names);
     encode_sound_alias_cs(out, &meta.hud_materials);
+    encode_hud_strings(out, &meta.hud_strings);
     encode_rng_debug(out, &meta.rng);
     sizes.aliases = section_span(out, mark);
     mark = out.len();
@@ -756,9 +696,6 @@ pub fn encode_snapshot_meta_sections(
     mark = out.len();
     encode_area_entities(out, meta.area_entities.as_ref());
     sizes.area_entities = section_span(out, mark);
-    mark = out.len();
-    encode_map_doors(out, meta.map_doors.as_ref());
-    sizes.map_doors = section_span(out, mark);
     mark = out.len();
     encode_objectives(out, &meta.objectives);
     sizes.objectives = section_span(out, mark);
@@ -794,55 +731,6 @@ pub fn decode_snapshot_meta(
         let client = ClientId(input.get_u32()?);
         clients.push((client, decode_client_meta(input)?));
     }
-    let package_count = input.get_u16()? as usize;
-    let mut care_packages = Vec::with_capacity(package_count.min(16));
-    for _ in 0..package_count {
-        care_packages.push(sim::CarePackage {
-            id: input.get_u32()?,
-            owner: ClientId(input.get_u32()?),
-            team: input.get_i32()?,
-            origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
-            contents: gamemode_iw4::killstreaks::CrateContents::from_wire_tag(input.get_u8()?)
-                .ok_or(WireError::Malformed("bad care package contents"))?,
-            ready_at_ms: input.get_i32()?,
-            expires_at_ms: input.get_i32()?,
-            capturer: match input.get_i32()? {
-                -1 => None,
-                value if value >= 0 => Some(ClientId(value as u32)),
-                _ => return Err(WireError::Malformed("bad care package capturer")),
-            },
-            capture_ms: input.get_i32()?,
-        });
-    }
-    let heli_count = input.get_u16()? as usize;
-    let mut pave_lows = Vec::with_capacity(heli_count.min(4));
-    for _ in 0..heli_count {
-        pave_lows.push(sim::PaveLow {
-            id: input.get_u32()?,
-            owner: ClientId(input.get_u32()?),
-            team: input.get_i32()?,
-            origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
-            center: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
-            started_at_ms: input.get_i32()?,
-            expires_at_ms: input.get_i32()?,
-            health: input.get_i32()?,
-            next_shot_ms: input.get_i32()?,
-            burst_remaining: input.get_u32()?,
-        });
-    }
-    let uav_count = input.get_u16()? as usize;
-    let mut uavs = Vec::with_capacity(uav_count.min(16));
-    for _ in 0..uav_count {
-        uavs.push(sim::Uav {
-            id: input.get_u32()?,
-            owner: ClientId(input.get_u32()?),
-            team: input.get_i32()?,
-            center: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
-            origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
-            started_at_ms: input.get_i32()?,
-            expires_at_ms: input.get_i32()?,
-        });
-    }
     let journal_count = input.get_u16()? as usize;
     let mut journal = Vec::with_capacity(journal_count.min(64));
     for _ in 0..journal_count {
@@ -861,6 +749,7 @@ pub fn decode_snapshot_meta(
     let sound_aliases = decode_sound_alias_cs(input)?;
     let effect_names = decode_sound_alias_cs(input)?;
     let hud_materials = decode_sound_alias_cs(input)?;
+    let hud_strings = decode_hud_strings(input)?;
     let rng = decode_rng_debug(input)?;
     let entity_dobjs = decode_entity_dobjs(input)?;
     let corpses = decode_corpse_pool(input)?;
@@ -870,7 +759,6 @@ pub fn decode_snapshot_meta(
     let item_ammo = decode_item_ammo(input)?;
     let item_pickups = decode_item_pickups(input)?;
     let area_entities = decode_area_entities(input)?;
-    let map_doors = decode_map_doors(input)?;
     let objectives = decode_objectives(input)?;
     let wire_len = input.get_u16()? as usize;
     let mut wire = vec![0u8; wire_len];
@@ -885,19 +773,16 @@ pub fn decode_snapshot_meta(
             time_limit_ms,
             kind,
             clients,
-            care_packages,
-            pave_lows,
-            uavs,
             journal,
             entity_events,
             pellet_fx,
             sound_aliases,
             effect_names,
             hud_materials,
+            hud_strings,
             rng,
             world_objects,
             area_entities,
-            map_doors,
             objectives,
             entity_dobjs,
             entities,
@@ -1045,6 +930,37 @@ fn encode_sound_alias_cs(out: &mut WireWriter, occupied: &[(u8, String)]) {
         out.put_u8(bytes.len() as u8);
         out.put_bytes(bytes);
     }
+}
+
+fn encode_hud_strings(out: &mut WireWriter, occupied: &[(u16, String)]) {
+    debug_assert!(occupied.len() <= u16::MAX as usize);
+    out.put_u16(occupied.len() as u16);
+    for (index, text) in occupied {
+        out.put_u16(*index);
+        let bytes = text.as_bytes();
+        debug_assert!(bytes.len() <= u16::MAX as usize);
+        out.put_u16(bytes.len() as u16);
+        out.put_bytes(bytes);
+    }
+}
+
+fn decode_hud_strings(input: &mut WireReader<'_>) -> Result<Vec<(u16, String)>, WireError> {
+    let count = input.get_u16()? as usize;
+    if count >= sim::CS_LOCALIZED_STRINGS_SLOTS {
+        return Err(WireError::Malformed(
+            "hud string count exceeds its configstrings",
+        ));
+    }
+    let mut occupied = Vec::with_capacity(count);
+    for _ in 0..count {
+        let index = input.get_u16()?;
+        let mut bytes = vec![0u8; input.get_u16()? as usize];
+        input.get_bytes(&mut bytes)?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| WireError::Malformed("hud string is not utf-8"))?;
+        occupied.push((index, text));
+    }
+    Ok(occupied)
 }
 
 fn decode_sound_alias_cs(input: &mut WireReader<'_>) -> Result<Vec<(u8, String)>, WireError> {
@@ -1237,11 +1153,7 @@ fn decode_audience(input: &mut WireReader<'_>) -> Result<EventAudience, WireErro
 fn encode_client_meta(out: &mut WireWriter, meta: &ClientSnapshotMeta) {
     match meta.killcam_hud {
         None => out.put_u8(0),
-        Some(hud) => {
-            out.put_u8(if hud.final_kill { 2 } else { 1 });
-            out.put_i32(hud.time_until_respawn_ms);
-            out.put_i32(hud.kc_timer_ms);
-        }
+        Some(hud) => out.put_u8(if hud.final_kill { 2 } else { 1 }),
     }
     out.put_u8(lifecycle_tag(meta.lifecycle));
     out.put_u32(meta.life_sequence.0);
@@ -1253,13 +1165,7 @@ fn encode_client_meta(out: &mut WireWriter, meta: &ClientSnapshotMeta) {
     out.put_i32(meta.kills);
     out.put_i32(meta.deaths);
     out.put_i32(meta.kill_streak);
-    out.put_u8(meta.last_earned_streak.map_or(0xff, |s| s.wire_tag()));
-    out.put_u8(meta.owned_streaks.len().min(u8::MAX as usize) as u8);
-    for streak in meta.owned_streaks.iter().take(u8::MAX as usize) {
-        out.put_u8(streak.wire_tag());
-    }
-    out.put_i32(meta.radar_until_ms);
-    out.put_u32(meta.last_combat_weapon);
+    out.put_u8(meta.radar.wire_tag());
     match &meta.remote_missile {
         None => out.put_u8(0),
         Some(remote) => {
@@ -1325,6 +1231,26 @@ fn encode_client_meta(out: &mut WireWriter, meta: &ClientSnapshotMeta) {
     out.put_u32(meta.player_card_icon);
     out.put_u32(meta.player_card_title);
     out.put_u32(meta.player_card_nameplate);
+    debug_assert!(meta.client_dvars.len() <= u16::MAX as usize);
+    out.put_u16(meta.client_dvars.len() as u16);
+    for (name, value) in &meta.client_dvars {
+        put_text(out, name);
+        put_text(out, value);
+    }
+    encode_shock(out, meta.shellshock.as_ref());
+    debug_assert!(meta.menu_commands.len() <= sim::MENU_COMMAND_TAIL);
+    out.put_u8(meta.menu_commands.len() as u8);
+    for command in &meta.menu_commands {
+        out.put_u32(command.serial);
+        match &command.kind {
+            sim::MenuCommandKind::Open(menu) => {
+                out.put_u8(0);
+                put_text(out, menu);
+            }
+            sim::MenuCommandKind::ClosePopup => out.put_u8(1),
+            sim::MenuCommandKind::CloseInGame => out.put_u8(2),
+        }
+    }
     let lock = meta.weapon_lock;
     out.put_u32(lock.weapon);
     out.put_u32(lock.life);
@@ -1344,8 +1270,6 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
         0 => None,
         tag @ (1 | 2) => Some(sim::KillcamHud {
             final_kill: tag == 2,
-            time_until_respawn_ms: input.get_i32()?,
-            kc_timer_ms: input.get_i32()?,
         }),
         _ => return Err(WireError::Malformed("bad killcam HUD tag")),
     };
@@ -1359,23 +1283,8 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
     let kills = input.get_i32()?;
     let deaths = input.get_i32()?;
     let kill_streak = input.get_i32()?;
-    let last_earned_streak = match input.get_u8()? {
-        0xff => None,
-        tag => Some(
-            gamemode_iw4::killstreaks::Killstreak::from_wire_tag(tag)
-                .ok_or(WireError::Malformed("bad last earned streak"))?,
-        ),
-    };
-    let owned_len = input.get_u8()? as usize;
-    let mut owned_streaks = Vec::with_capacity(owned_len);
-    for _ in 0..owned_len {
-        owned_streaks.push(
-            gamemode_iw4::killstreaks::Killstreak::from_wire_tag(input.get_u8()?)
-                .ok_or(WireError::Malformed("bad owned streak"))?,
-        );
-    }
-    let radar_until_ms = input.get_i32()?;
-    let last_combat_weapon = input.get_u32()?;
+    let radar = sim::RadarMode::from_wire_tag(input.get_u8()?)
+        .ok_or(WireError::Malformed("bad radar mode"))?;
     let remote_missile = match input.get_u8()? {
         0 => None,
         1 => {
@@ -1438,6 +1347,22 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
     let player_card_icon = input.get_u32()?;
     let player_card_title = input.get_u32()?;
     let player_card_nameplate = input.get_u32()?;
+    let mut client_dvars = Vec::new();
+    for _ in 0..input.get_u16()? {
+        client_dvars.push((get_text(input)?, get_text(input)?));
+    }
+    let shellshock = decode_shock(input)?;
+    let mut menu_commands = Vec::new();
+    for _ in 0..input.get_u8()? {
+        let serial = input.get_u32()?;
+        let kind = match input.get_u8()? {
+            0 => sim::MenuCommandKind::Open(get_text(input)?),
+            1 => sim::MenuCommandKind::ClosePopup,
+            2 => sim::MenuCommandKind::CloseInGame,
+            _ => return Err(WireError::Malformed("bad menu command tag")),
+        };
+        menu_commands.push(sim::MenuCommand { serial, kind });
+    }
     let weapon_lock = sim::WeaponLock {
         weapon: input.get_u32()?,
         life: input.get_u32()?,
@@ -1464,10 +1389,7 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
         kills,
         deaths,
         kill_streak,
-        last_earned_streak,
-        owned_streaks,
-        radar_until_ms,
-        last_combat_weapon,
+        radar,
         remote_missile,
         ammo_by_weapon,
         taped_mag_spent,
@@ -1486,9 +1408,57 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
         player_card_icon,
         player_card_title,
         player_card_nameplate,
+        client_dvars,
+        shellshock,
+        menu_commands,
     })
 }
 
+fn encode_shock(out: &mut WireWriter, shock: Option<&hud_iw4::ShockParams>) {
+    let Some(shock) = shock else {
+        out.put_u8(0);
+        return;
+    };
+    out.put_u8(1);
+    out.put_i32(shock.screen_type);
+    out.put_i32(shock.white_fade_ms);
+    out.put_i32(shock.shot_fade_ms);
+    out.put_u8(u8::from(shock.look.affect));
+    out.put_i32(shock.look.fade_ms);
+    out.put_f32(shock.look.mouse_sensitivity);
+    out.put_f32(shock.look.max_pitch_speed);
+    out.put_f32(shock.look.max_yaw_speed);
+    out.put_u8(u8::from(shock.sound.affect));
+    put_text(out, &shock.sound.loop_alias);
+    put_text(out, &shock.sound.end_alias);
+    put_text(out, &shock.sound.abort_alias);
+    out.put_u8(u8::from(shock.movement));
+}
+
+fn decode_shock(input: &mut WireReader<'_>) -> Result<Option<hud_iw4::ShockParams>, WireError> {
+    if input.get_u8()? == 0 {
+        return Ok(None);
+    }
+    Ok(Some(hud_iw4::ShockParams {
+        screen_type: input.get_i32()?,
+        white_fade_ms: input.get_i32()?,
+        shot_fade_ms: input.get_i32()?,
+        look: hud_iw4::ShellshockLookParms {
+            affect: input.get_u8()? != 0,
+            fade_ms: input.get_i32()?,
+            mouse_sensitivity: input.get_f32()?,
+            max_pitch_speed: input.get_f32()?,
+            max_yaw_speed: input.get_f32()?,
+        },
+        sound: hud_iw4::ShellshockSoundParms {
+            affect: input.get_u8()? != 0,
+            loop_alias: get_text(input)?,
+            end_alias: get_text(input)?,
+            abort_alias: get_text(input)?,
+        },
+        movement: input.get_u8()? != 0,
+    }))
+}
 fn encode_hud_bank(out: &mut WireWriter, bank: &[hud_iw4::HudElem]) {
     let n = bank.len().min(hud_iw4::HUDELEM_BANK_CAPACITY);
     out.put_u8(n as u8);
@@ -1686,6 +1656,10 @@ pub(crate) fn encode_event(out: &mut WireWriter, event: &SimEvent) {
             out.put_u32(life_sequence.0);
         }
         SimEvent::AttackReleased => out.put_u8(5),
+        SimEvent::WeaponSwitchRequested { weapon } => {
+            out.put_u8(18);
+            out.put_u32(weapon);
+        }
         SimEvent::Died {
             victim,
             life_sequence,
@@ -1862,6 +1836,9 @@ pub(crate) fn decode_event(input: &mut WireReader<'_>) -> Result<SimEvent, WireE
             from: input.get_u32()?,
             to: input.get_u32()?,
             reason: configuration_change_reject_reason_from_tag(input.get_u8()?)?,
+        }),
+        18 => Ok(SimEvent::WeaponSwitchRequested {
+            weapon: input.get_u32()?,
         }),
         _ => Err(WireError::Malformed("unknown SimEvent tag")),
     }
@@ -2190,6 +2167,7 @@ fn encode_script_movers(out: &mut WireWriter, movers: &[sim::ScriptMoverGentity]
     out.put_u16(movers.len() as u16);
     for mover in movers {
         out.put_u32(mover.id.to_wire());
+        out.put_u8(u8::from(mover.nonsolid));
         encode_entity_state(out, &mover.state);
     }
 }
@@ -2200,9 +2178,12 @@ fn decode_script_movers(
     let count = input.get_u16()? as usize;
     let mut movers = Vec::with_capacity(count.min(256));
     for _ in 0..count {
+        let id = ScriptModelId::from_wire(input.get_u32()?);
+        let nonsolid = input.get_u8()? != 0;
         movers.push(sim::ScriptMoverGentity {
-            id: ScriptModelId::from_wire(input.get_u32()?),
+            id,
             state: decode_entity_state(input)?,
+            nonsolid,
             ..Default::default()
         });
     }
@@ -2659,385 +2640,56 @@ fn get_optional_text(input: &mut WireReader<'_>) -> Result<Option<String>, WireE
     }
 }
 
-fn encode_map_doors(out: &mut WireWriter, doors: Option<&sim::MapDoors>) {
-    out.put_u8(u8::from(doors.is_some()));
-    let Some(d) = doors else {
-        return;
-    };
-    for s in &d.switches {
-        out.put_u32(s.cmodel);
-        for v in s.origin.into_iter().chain(s.half) {
-            out.put_f32(v);
-        }
-    }
-    for l in &d.leaves {
-        out.put_u32(l.model);
-        out.put_u32(l.brush);
-        out.put_u32(l.cmodel);
-        for v in l.origin.into_iter().chain(l.angles).chain(l.model_angles) {
-            out.put_f32(v);
-        }
-    }
-    for v in d.sound_origin {
-        out.put_f32(v);
-    }
-    for at in [d.startup_at, d.started_at] {
-        out.put_u8(u8::from(at.is_some()));
-        if let Some(at) = at {
-            out.put_u32(at);
-        }
-    }
-    out.put_u8(u8::from(d.open));
-    out.put_u8(u8::from(d.completed));
-    out.put_u8(d.alarm_count);
-    out.put_u32(d.activations);
-    for clients in [&d.hints, &d.held] {
-        out.put_u16(clients.len() as u16);
-        for id in clients {
-            out.put_u32(id.0);
-        }
-    }
-}
-fn decode_map_doors(input: &mut WireReader<'_>) -> Result<Option<sim::MapDoors>, WireError> {
-    if input.get_u8()? == 0 {
-        return Ok(None);
-    }
-    let mut d = sim::MapDoors::default();
-    for s in &mut d.switches {
-        s.cmodel = input.get_u32()?;
-        for v in s.origin.iter_mut().chain(&mut s.half) {
-            *v = input.get_f32()?;
-        }
-    }
-    for l in &mut d.leaves {
-        l.model = input.get_u32()?;
-        l.brush = input.get_u32()?;
-        l.cmodel = input.get_u32()?;
-        for v in l
-            .origin
-            .iter_mut()
-            .chain(&mut l.angles)
-            .chain(&mut l.model_angles)
-        {
-            *v = input.get_f32()?;
-        }
-    }
-    for v in &mut d.sound_origin {
-        *v = input.get_f32()?;
-    }
-    for at in [&mut d.startup_at, &mut d.started_at] {
-        if input.get_u8()? != 0 {
-            *at = Some(input.get_u32()?);
-        }
-    }
-    d.open = input.get_u8()? != 0;
-    d.completed = input.get_u8()? != 0;
-    d.alarm_count = input.get_u8()?;
-    d.activations = input.get_u32()?;
-    for clients in [&mut d.hints, &mut d.held] {
-        let count = input.get_u16()?;
-        if count > 64 {
-            return Err(WireError::Malformed("map door client count"));
-        }
-        for _ in 0..count {
-            clients.push(ClientId(input.get_u32()?));
-        }
-    }
-    Ok(Some(d))
-}
-
-fn encode_objective_view(out: &mut WireWriter, v: &sim::ObjectiveView) {
-    out.put_u32(v.id);
-    out.put_u32(v.model_source);
-    put_text(out, &v.label);
-    for x in v.origin {
-        out.put_f32(x);
-    }
-    out.put_u8(v.owner as u8);
-    out.put_f32(v.progress);
-    out.put_u8(v.capturing as u8);
-    out.put_u8(u8::from(v.contested));
-    out.put_u16(v.users.len() as u16);
-    for id in &v.users {
-        out.put_u32(id.0);
-    }
-    match v.flash {
-        Some(flash) => {
-            out.put_u8(flash.teams);
-            out.put_u32(flash.start_ms);
-            objective_optional(out, flash.stop_ms);
-        }
-        None => out.put_u8(0),
-    }
-}
-fn objective_team(input: &mut WireReader<'_>) -> Result<gamemode_iw4::Team, WireError> {
-    gamemode_iw4::Team::from_retail_u8(input.get_u8()?)
-        .ok_or(WireError::Malformed("objective team"))
-}
-fn decode_objective_view(input: &mut WireReader<'_>) -> Result<sim::ObjectiveView, WireError> {
-    let id = input.get_u32()?;
-    let model_source = input.get_u32()?;
-    let label = get_text(input)?;
-    let origin = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
-    let owner = objective_team(input)?;
-    let progress = input.get_f32()?;
-    let capturing = objective_team(input)?;
-    let contested = input.get_u8()? != 0;
-    let count = input.get_u16()?;
-    if count > 64
-        || !progress.is_finite()
-        || !(0.0..=1.0).contains(&progress)
-        || origin.iter().any(|x| !x.is_finite())
-    {
-        return Err(WireError::Malformed("objective view"));
-    }
-    let mut users = Vec::new();
-    for _ in 0..count {
-        users.push(ClientId(input.get_u32()?));
-    }
-    let teams = input.get_u8()?;
-    let flash = match teams {
-        0 => None,
-        teams if teams & !(sim::ObjectiveFlash::AXIS | sim::ObjectiveFlash::ALLIES) == 0 => {
-            Some(sim::ObjectiveFlash {
-                teams,
-                start_ms: input.get_u32()?,
-                stop_ms: read_objective_optional(input)?,
-            })
-        }
-        _ => return Err(WireError::Malformed("objective flash")),
-    };
-    Ok(sim::ObjectiveView {
-        id,
-        model_source,
-        label,
-        origin,
-        owner,
-        progress,
-        capturing,
-        contested,
-        users,
-        flash,
-    })
-}
-fn objective_optional(out: &mut WireWriter, value: Option<u32>) {
-    out.put_u8(u8::from(value.is_some()));
-    if let Some(v) = value {
-        out.put_u32(v);
-    }
-}
-fn read_objective_optional(input: &mut WireReader<'_>) -> Result<Option<u32>, WireError> {
-    match input.get_u8()? {
-        0 => Ok(None),
-        1 => Ok(Some(input.get_u32()?)),
-        _ => Err(WireError::Malformed("objective optional")),
-    }
-}
 fn encode_objectives(out: &mut WireWriter, state: &sim::ObjectiveMatch) {
-    for model in &state.flag_models {
-        put_text(out, model);
-    }
-    for weapon in state.use_weapons {
-        out.put_u32(weapon);
-    }
-    out.put_u16(state.restoring.len() as u16);
-    for (id, weapon, temporary) in &state.restoring {
-        out.put_u32(id.0);
-        out.put_u32(*weapon);
-        out.put_u32(*temporary);
-    }
-    out.put_u16(state.flags.len() as u16);
-    for flag in &state.flags {
-        encode_objective_view(out, flag);
-    }
-    out.put_u16(state.bombs.len() as u16);
-    for b in &state.bombs {
-        encode_objective_view(out, &b.view);
-        for sources in [&b.intact_sources, &b.destroyed_sources] {
-            out.put_u16(sources.len() as u16);
-            for id in sources {
-                out.put_u32(*id);
-            }
-        }
-        out.put_u16(b.hulls.len() as u16);
-        for h in &b.hulls {
-            for x in h.mid.into_iter().chain(h.half) {
-                out.put_f32(x);
-            }
-            out.put_u16(h.slabs.len() as u16);
-            for (dir, mid, half) in &h.slabs {
-                for x in *dir {
-                    out.put_f32(x);
-                }
-                out.put_f32(*mid);
-                out.put_f32(*half);
-            }
-        }
-        for x in b
-            .mins
-            .into_iter()
-            .chain(b.maxs)
-            .chain(b.bomb_origin)
-            .chain(b.bomb_angles)
-        {
-            out.put_f32(x);
-        }
-        objective_optional(out, b.planted_at_ms);
-        objective_optional(out, b.planter.map(|id| id.0));
-        out.put_u8(u8::from(b.destroyed));
-        objective_optional(out, b.user.map(|id| id.0));
-        objective_optional(out, b.return_weapon);
-        out.put_i32(b.hold.cur_progress);
-        out.put_f32(b.hold.use_rate);
-        out.put_u8(u8::from(b.hold.wait_for_weapon));
-        out.put_i32(b.hold.timed_out_ms);
-        out.put_u8(u8::from(b.hold.in_use));
-    }
     for score in state.scores {
         out.put_i32(score);
     }
-    out.put_u8(state.attackers as u8);
-    out.put_u32(state.round);
-    out.put_u32(state.round_remaining_ms);
-    objective_optional(out, state.round_end_at_ms);
-    objective_optional(out, state.winner.map(|t| t as u32));
-    out.put_u8(u8::from(state.match_over));
+    debug_assert!(state.compass.len() <= u8::MAX as usize);
+    out.put_u8(state.compass.len() as u8);
+    for objective in &state.compass {
+        out.put_u8(objective.index);
+        out.put_u8(objective.state as u8);
+        for v in objective.origin {
+            out.put_f32(v);
+        }
+        out.put_u8(objective.team as u8);
+        put_text(out, &objective.icon);
+    }
+    debug_assert!(state.server_info.len() <= u16::MAX as usize);
+    out.put_u16(state.server_info.len() as u16);
+    for (name, value) in &state.server_info {
+        put_text(out, name);
+        put_text(out, value);
+    }
+    out.put_i32(state.game_end_time);
 }
+
 fn decode_objectives(input: &mut WireReader<'_>) -> Result<sim::ObjectiveMatch, WireError> {
     let mut state = sim::ObjectiveMatch::default();
-    for model in &mut state.flag_models {
-        *model = get_text(input)?;
-    }
-    for weapon in &mut state.use_weapons {
-        *weapon = input.get_u32()?;
-    }
-    let count = input.get_u16()?;
-    if count > 64 {
-        return Err(WireError::Malformed("too many objective restores"));
-    }
-    for _ in 0..count {
-        state.restoring.push((
-            ClientId(input.get_u32()?),
-            input.get_u32()?,
-            input.get_u32()?,
-        ));
-    }
-    let count = input.get_u16()?;
-    if count > 16 {
-        return Err(WireError::Malformed("too many flags"));
-    }
-    for _ in 0..count {
-        state.flags.push(decode_objective_view(input)?);
-    }
-    let count = input.get_u16()?;
-    if count > 2 {
-        return Err(WireError::Malformed("too many bomb sites"));
-    }
-    for _ in 0..count {
-        let view = decode_objective_view(input)?;
-        let mut sources = [Vec::new(), Vec::new()];
-        for list in &mut sources {
-            let count = input.get_u16()?;
-            if count > 1024 {
-                return Err(WireError::Malformed("too many objective visuals"));
-            }
-            for _ in 0..count {
-                list.push(input.get_u32()?);
-            }
-        }
-        let [intact_sources, destroyed_sources] = sources;
-        let count = input.get_u16()?;
-        if count > 1024 {
-            return Err(WireError::Malformed("too many objective hulls"));
-        }
-        let mut hulls = Vec::new();
-        for _ in 0..count {
-            let mid = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
-            let half = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
-            let count = input.get_u16()?;
-            if count > 1024 {
-                return Err(WireError::Malformed("too many objective slabs"));
-            }
-            let mut slabs = Vec::new();
-            for _ in 0..count {
-                slabs.push((
-                    [input.get_f32()?, input.get_f32()?, input.get_f32()?],
-                    input.get_f32()?,
-                    input.get_f32()?,
-                ));
-            }
-            if mid.iter().any(|v| !v.is_finite())
-                || half.iter().any(|v| !v.is_finite() || *v < 0.0)
-                || slabs.iter().any(|(dir, center, extent)| {
-                    dir.iter().any(|v| !v.is_finite())
-                        || !center.is_finite()
-                        || !extent.is_finite()
-                        || *extent < 0.0
-                })
-            {
-                return Err(WireError::Malformed("objective hull"));
-            }
-            hulls.push(sim::ObjectiveHull { mid, half, slabs });
-        }
-        let mins = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
-        let maxs = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
-        let bomb_origin = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
-        let bomb_angles = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
-        let planted_at_ms = read_objective_optional(input)?;
-        let planter = read_objective_optional(input)?.map(ClientId);
-        let destroyed = input.get_u8()? != 0;
-        let user = read_objective_optional(input)?.map(ClientId);
-        let return_weapon = read_objective_optional(input)?;
-        let hold = gamemode_iw4::UseHoldLoopState {
-            cur_progress: input.get_i32()?,
-            use_rate: input.get_f32()?,
-            wait_for_weapon: input.get_u8()? != 0,
-            timed_out_ms: input.get_i32()?,
-            in_use: input.get_u8()? != 0,
-        };
-        if mins
-            .iter()
-            .chain(&maxs)
-            .chain(&bomb_origin)
-            .chain(&bomb_angles)
-            .any(|x| !x.is_finite())
-            || !hold.use_rate.is_finite()
-            || (0..3).any(|i| mins[i] > maxs[i])
-        {
-            return Err(WireError::Malformed("bomb bounds/hold"));
-        }
-        state.bombs.push(sim::BombSite {
-            view,
-            intact_sources,
-            destroyed_sources,
-            hulls,
-            mins,
-            maxs,
-            bomb_origin,
-            bomb_angles,
-            planted_at_ms,
-            planter,
-            destroyed,
-            user,
-            return_weapon,
-            hold,
-        });
-    }
     for score in &mut state.scores {
         *score = input.get_i32()?;
     }
-    state.attackers = objective_team(input)?;
-    state.round = input.get_u32()?;
-    state.round_remaining_ms = input.get_u32()?;
-    state.round_end_at_ms = read_objective_optional(input)?;
-    state.winner = read_objective_optional(input)?
-        .map(|n| {
-            u8::try_from(n)
-                .ok()
-                .and_then(gamemode_iw4::Team::from_retail_u8)
-                .ok_or(WireError::Malformed("objective winner"))
-        })
-        .transpose()?;
-    state.match_over = input.get_u8()? != 0;
+    let count = input.get_u8()?;
+    for _ in 0..count {
+        let index = input.get_u8()?;
+        let objective_state = sim::ObjectiveState::from_u8(input.get_u8()?)
+            .ok_or(WireError::Malformed("objective state"))?;
+        let origin = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
+        let team = gamemode_iw4::Team::from_retail_u8(input.get_u8()?)
+            .ok_or(WireError::Malformed("objective team"))?;
+        let icon = get_text(input)?;
+        state.compass.push(sim::CompassObjective {
+            index,
+            state: objective_state,
+            origin,
+            team,
+            icon,
+        });
+    }
+    let count = input.get_u16()?;
+    for _ in 0..count {
+        state.server_info.push((get_text(input)?, get_text(input)?));
+    }
+    state.game_end_time = input.get_i32()?;
     Ok(state)
 }

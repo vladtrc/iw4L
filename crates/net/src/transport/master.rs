@@ -1221,14 +1221,6 @@ fn apply_master_lifecycle(
                 Some(admission.connection_id),
                 client.map(|client| client.0).unwrap_or(0),
             );
-
-            if admission.first_commit
-                && let Some(client) = client
-                && let Some(authority) = authority.as_ref()
-                && let Some(pending) = pending_notify.as_mut()
-            {
-                pending.push_connected(crate::client_name_string(&authority.0, client));
-            }
         }
     }
     for fact in bridge.drain_facts() {

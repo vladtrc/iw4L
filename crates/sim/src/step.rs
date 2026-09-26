@@ -13,27 +13,23 @@ use trace_iw4::{HITTYPE_ENTITY, Trace};
 
 use crate::bullet_collision::{LinkedBrushCollisionBrush, PLAYER_MAXS, PLAYER_MINS};
 use crate::combat::{advance_weapon_command, phase_emit, phase_trace};
-use crate::damage::{ExplosionBlast, apply_explode_glass_blast, apply_explosion_blast};
 use crate::identities::MatchPhase;
 use crate::input::{ClientAction, TickInput};
-use crate::match_state::{
-    ClientLifecycle, EntityEventPayload, EventAudience, LoadoutSpec, SimEvent,
-};
+use crate::match_state::{ClientLifecycle, EventAudience, SimEvent};
 use crate::snapshot::Snapshot;
-use crate::spawn::{SpawnReject, decide_spawn_seeded_report};
 use crate::world::{
     ClientId, SimBrush, SimClipBsp, SimClipMesh, SimState, Tick, clip_move_to_bmodels, clip_trace,
-    give_weapon_to_ps_akimbo, gsc_give_weapon_is_akimbo, inventory_add_weapon, spawn_player_state,
+    give_weapon_to_ps_akimbo, gsc_give_weapon_is_akimbo, inventory_add_weapon,
 };
 use playerstate_iw4::PlayerState;
 use playerstate_iw4::buttons;
 
 #[derive(Resource)]
-struct StepRequest {
-    tick: Tick,
+pub(crate) struct StepRequest {
+    pub(crate) tick: Tick,
     input: TickInput,
     msec: i32,
-    reason: crate::StepReason,
+    pub(crate) reason: crate::StepReason,
     output: Option<Snapshot>,
 }
 
@@ -43,13 +39,22 @@ pub(crate) fn schedule() -> Schedule {
         (
             advance_time_system,
             expire_transient_events_system,
-            apply_actions_system,
-            run_players_system,
-            record_collision_state_system,
-            run_entity_types_system,
-            dispatch_touches_system,
-            finalize_system,
-            publish_snapshot_system,
+            crate::gsc_ir::advance_scheduler,
+            (
+                apply_script_signals_system,
+                apply_actions_system,
+                crate::gsc_ir::sync_players,
+                crate::gsc_ir::sync_presence,
+                run_players_system,
+                record_collision_state_system,
+                run_entity_types_system,
+                dispatch_touches_system,
+                crate::gsc_ir::sync_engine_events,
+                finalize_system,
+                publish_snapshot_system,
+            )
+                .chain()
+                .run_if(crate::gsc_ir::healthy),
         )
             .chain(),
     );
@@ -63,7 +68,8 @@ pub(crate) fn run_schedule(
     input: &TickInput,
     msec: i32,
     reason: crate::StepReason,
-) -> Snapshot {
+) -> Result<Snapshot, crate::gsc_ir::Fault> {
+    crate::gsc_ir::preflight(ecs, tick, reason)?;
     assert!(
         !ecs.contains_resource::<StepRequest>(),
         "simulation schedule already has a pending frame"
@@ -76,209 +82,49 @@ pub(crate) fn run_schedule(
         output: None,
     });
     schedule.run(ecs);
-    ecs.remove_resource::<StepRequest>()
-        .and_then(|request| request.output)
-        .expect("simulation schedule did not publish a snapshot")
+    let request = ecs
+        .remove_resource::<StepRequest>()
+        .expect("simulation request missing");
+    if let Some(fault) = ecs.resource::<crate::gsc_ir::Runtime>().fault.as_ref() {
+        return Err(fault.clone());
+    }
+    Ok(request
+        .output
+        .expect("simulation schedule did not publish a snapshot"))
 }
 
 fn frame_world(world: &mut World) -> FrameWorld<'_> {
     crate::frame::FrameWorld::from_world(world)
 }
 
+fn apply_script_signals_system(world: &mut World) {
+    let signals = crate::gsc_ir::take_signals(world);
+    if signals.is_empty() {
+        return;
+    }
+    let mut frame = frame_world(world);
+    for signal in signals {
+        match &*signal {
+            "prematch_over" if frame.phase() == MatchPhase::Warmup => {
+                crate::score::finish_prematch(&mut frame);
+            }
+            crate::gsc_ir::EXIT_LEVEL
+                if !matches!(
+                    frame.phase(),
+                    MatchPhase::Intermission | MatchPhase::PostGame
+                ) =>
+            {
+                frame.set_phase(MatchPhase::Intermission);
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn phase_materialize_entity_dobjs(world: &mut SimState) {
     for capabilities in world.entity_collision_capabilities_mut() {
         if let Some(dobj) = &mut capabilities.dobj {
             dobj.materialize();
-        }
-    }
-    let toy_ids: Vec<crate::ScriptModelId> = world
-        .world_objects()
-        .toy_bodies()
-        .iter()
-        .map(|(id, _, _)| *id)
-        .collect();
-    if toy_ids.is_empty() {
-        return;
-    }
-    for capabilities in world.entity_collision_capabilities_mut() {
-        let Some(id) = capabilities.owner.script_model() else {
-            continue;
-        };
-        if !toy_ids.iter().any(|have| *have == id) {
-            continue;
-        }
-        if let Some(dobj) = capabilities.dobj.as_mut() {
-            dobj.ensure_bounds_collision();
-        }
-    }
-}
-
-fn phase_destructible_death_presentation(world: &mut FrameWorld, msec: i32) {
-    let dt = msec as f32 / 1000.0;
-    let deaths: Vec<(crate::ScriptModelId, &'static str, &'static str)> = world
-        .world_objects()
-        .vehicle_bodies()
-        .iter()
-        .filter(|(_, kind, body)| body.state_index >= kind.destroyed_state())
-        .map(|(id, kind, _)| {
-            let death = kind.definition().death;
-            (*id, death.husk, death.clip)
-        })
-        .collect();
-    let mut started = Vec::new();
-    let mut times = Vec::new();
-    for (id, husk, clip) in deaths {
-        for capabilities in world.entity_collision_capabilities_mut() {
-            if capabilities.owner.script_model() != Some(id) {
-                continue;
-            }
-            let Some(dobj) = capabilities.dobj.as_mut() else {
-                continue;
-            };
-            let already = dobj
-                .semantic_state
-                .tree
-                .as_ref()
-                .and_then(|tree| tree.nodes.first())
-                .and_then(|node| node.clip.as_deref())
-                == Some(clip);
-            if !already {
-                dobj.begin_destructible_death(husk, clip);
-                started.push(id);
-            } else {
-                times.push((id, dobj.advance_destructible_death(dt)));
-            }
-        }
-    }
-    for id in started {
-        world.world_objects_mut().note_death_anim_started(id);
-    }
-    for (id, time) in times {
-        world.world_objects_mut().set_death_anim_time(id, time);
-    }
-    apply_explodable_barrel_death_presentation(world);
-    apply_toy_stage_presentation(world);
-    apply_flammable_crate_death_presentation(world);
-    apply_destructable_death_presentation(world);
-}
-
-pub fn apply_explodable_barrel_death_presentation(world: &mut SimState) {
-    let downs = world.world_objects_mut().take_explodable_barrel_downs();
-    for id in &downs {
-        world
-            .script_gaps_mut()
-            .raise(gamemode_iw4::ScriptGapCause::ExplodableBarrelPhysics {
-                source_ordinal: id.to_wire(),
-            });
-    }
-    let ids: Vec<crate::ScriptModelId> = world
-        .world_objects()
-        .explodable_barrel_bodies()
-        .iter()
-        .filter(|(_, body)| body.state_index >= crate::EXPLODABLE_BARREL_DESTROYED_STATE)
-        .map(|(id, _)| *id)
-        .collect();
-    for id in ids {
-        for capabilities in world.entity_collision_capabilities_mut() {
-            if capabilities.owner.script_model() != Some(id) {
-                continue;
-            }
-            capabilities.linked_brushes.clear();
-            if let Some(dobj) = capabilities.dobj.as_mut() {
-                dobj.set_stage_model(crate::EXPLODABLE_BARREL_HUSK);
-            }
-        }
-    }
-}
-
-pub fn apply_toy_stage_presentation(world: &mut SimState) {
-    for id in world.world_objects_mut().take_toy_part_launches() {
-        world
-            .script_gaps_mut()
-            .raise(gamemode_iw4::ScriptGapCause::DestructiblePartLaunch {
-                source_ordinal: id.to_wire(),
-            });
-    }
-    let stages: Vec<(
-        crate::ScriptModelId,
-        Option<&'static str>,
-        Vec<&'static str>,
-    )> = world
-        .world_objects()
-        .toy_bodies()
-        .iter()
-        .map(|(id, kind, body)| {
-            let def = kind.definition();
-            (
-                *id,
-                def.stage_model(body.state_index),
-                def.hidden_tags(body.state_index).collect(),
-            )
-        })
-        .collect();
-    for (id, model, hidden) in stages {
-        for capabilities in world.entity_collision_capabilities_mut() {
-            if capabilities.owner.script_model() != Some(id) {
-                continue;
-            }
-            let Some(dobj) = capabilities.dobj.as_mut() else {
-                continue;
-            };
-            if let Some(model) = model {
-                dobj.set_stage_model(model);
-            }
-            dobj.hide_tags(&hidden);
-        }
-    }
-}
-
-pub fn apply_flammable_crate_death_presentation(world: &mut SimState) {
-    let downs = world.world_objects_mut().take_flammable_crate_downs();
-    for id in &downs {
-        world
-            .script_gaps_mut()
-            .raise(gamemode_iw4::ScriptGapCause::FlammableCrateFx {
-                source_ordinal: id.to_wire(),
-            });
-        world
-            .script_gaps_mut()
-            .raise(gamemode_iw4::ScriptGapCause::FlammableCratePhysics {
-                source_ordinal: id.to_wire(),
-            });
-    }
-    let ids = world.world_objects().destroyed_flammable_crate_ids();
-    for id in ids {
-        for capabilities in world.entity_collision_capabilities_mut() {
-            if capabilities.owner.script_model() != Some(id) {
-                continue;
-            }
-            capabilities.linked_brushes.clear();
-            if let Some(dobj) = capabilities.dobj.as_mut() {
-                dobj.set_stage_model(gamemode_iw4::FLAMMABLE_CRATE_HUSK);
-            }
-        }
-    }
-}
-
-pub fn apply_destructable_death_presentation(world: &mut SimState) {
-    let downs = world.world_objects_mut().take_destructable_downs();
-    for down in &downs {
-        if down.play_fx {
-            world
-                .script_gaps_mut()
-                .raise(gamemode_iw4::ScriptGapCause::DestructablePlayFx {
-                    source_ordinal: down.id.to_wire(),
-                });
-        }
-    }
-    let ids: Vec<crate::ScriptModelId> = world.world_objects().destroyed_destructable_ids();
-    for id in ids {
-        for capabilities in world.entity_collision_capabilities_mut() {
-            if capabilities.owner.script_model() != Some(id) {
-                continue;
-            }
-            capabilities.linked_brushes.clear();
-            capabilities.dobj = None;
         }
     }
 }
@@ -313,108 +159,6 @@ fn phase_animated_map_models(world: &mut FrameWorld, tick: Tick, msec: i32) {
     }
 }
 
-fn emit_vehicle_fx_events(world: &mut FrameWorld, tick: Tick) {
-    let (death_fx, death_sounds) = world.world_objects_mut().take_new_death_fx_pulses();
-    let (stage_fx, stage_sounds) = world.world_objects_mut().take_new_stage_pulses();
-    let loop_fx = world
-        .world_objects_mut()
-        .tick_vehicle_loopfx(crate::MATCH_TICK_MS);
-    for pulse in death_sounds.into_iter().chain(stage_sounds) {
-        let origin = pulse_world_origin(world, pulse.owner, pulse.tag, pulse.origin);
-        let event_parm = i32::from(world.sound_alias_index(pulse.alias));
-        world.push_entity_event(
-            tick,
-            EventAudience::All,
-            entity_iw4::EntityEventKind::SOUND_ALIAS,
-            EntityEventPayload {
-                number: i32::from(trace_iw4::ENTITYNUM_WORLD),
-                event_parm,
-                origin,
-                correlation: pulse.owner.to_wire(),
-                ..Default::default()
-            },
-        );
-    }
-    for pulse in death_fx.into_iter().chain(loop_fx).chain(stage_fx) {
-        let (origin, direction) = pulse_world_pose(world, &pulse);
-        let event_parm = i32::from(world.effect_name_index(pulse.def_name));
-        world.push_entity_event(
-            tick,
-            EventAudience::All,
-            entity_iw4::EntityEventKind::PLAY_FX,
-            EntityEventPayload {
-                number: i32::from(trace_iw4::ENTITYNUM_WORLD),
-                event_parm,
-                origin,
-                direction,
-                correlation: pulse.owner.to_wire(),
-                ..Default::default()
-            },
-        );
-    }
-}
-
-/// Publishes the loops the destructibles are speaking, aliases interned into
-/// the configstring the client resolves them through.
-fn publish_destructible_loop_sounds(world: &mut FrameWorld) {
-    let speaking = world.world_objects().speaking_loop_sounds();
-    let rows = speaking
-        .into_iter()
-        .map(
-            |(owner, alias, origin)| crate::world_objects::DestructibleLoopSound {
-                owner,
-                alias_index: world.sound_alias_index(alias),
-                origin,
-            },
-        )
-        .collect();
-    world.world_objects_mut().set_destructible_loop_sounds(rows);
-}
-
-fn pulse_world_pose(
-    world: &FrameWorld,
-    pulse: &crate::world_objects::VehicleFxPulse,
-) -> ([f32; 3], [f32; 3]) {
-    let Some(tag) = pulse.tag else {
-        return (pulse.origin, gamemode_iw4::VEHICLE_DEATH_FX_FORWARD);
-    };
-    let pose = script_model_dobj(world, pulse.owner)
-        .and_then(|dobj| dobj.tag_world_pose(tag))
-        .unwrap_or((pulse.origin, gamemode_iw4::VEHICLE_DEATH_FX_FORWARD));
-    if pulse.use_tag_angles {
-        pose
-    } else {
-        (pose.0, gamemode_iw4::VEHICLE_DEATH_FX_FORWARD)
-    }
-}
-
-fn pulse_world_origin(
-    world: &FrameWorld,
-    owner: crate::ScriptModelId,
-    tag: Option<&str>,
-    fallback: [f32; 3],
-) -> [f32; 3] {
-    let Some(tag) = tag else {
-        return fallback;
-    };
-    script_model_dobj(world, owner)
-        .and_then(|dobj| dobj.tag_world_pose(tag))
-        .map(|(origin, _)| origin)
-        .unwrap_or(fallback)
-}
-
-fn script_model_dobj<'a>(
-    world: &'a FrameWorld,
-    id: crate::ScriptModelId,
-) -> Option<&'a crate::bullet_collision::AuthorityDObjState> {
-    world
-        .entity_collision_capabilities()
-        .iter()
-        .find(|row| row.owner.script_model() == Some(id))?
-        .dobj
-        .as_ref()
-}
-
 fn phase_stuck_in_client(world: &mut FrameWorld) {
     let mut ids: Vec<ClientId> = world.client_ids_sorted();
     ids.retain(|id| {
@@ -446,72 +190,6 @@ fn phase_stuck_in_client(world: &mut FrameWorld) {
         }
     }
     world.set_stuck_ejects(pairs);
-}
-
-fn phase_health_regen(world: &mut FrameWorld, tick: Tick) {
-    let now_ms = crate::corpse::level_time_ms(tick);
-    let ids: Vec<ClientId> = world.client_ids_sorted();
-    for id in ids {
-        if !world
-            .client_meta(id)
-            .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive)
-        {
-            continue;
-        }
-        let Some(ps) = world.player(id) else {
-            continue;
-        };
-        if ps.health <= 0 {
-            continue;
-        }
-        let health = ps.health;
-        let max_health = ps.max_health;
-        let mut regen = world
-            .client_meta(id)
-            .map(|m| m.health_regen)
-            .unwrap_or_default();
-        let step = gamemode_iw4::player_health_regen_tick(health, max_health, now_ms, &mut regen);
-        {
-            let meta = world.client_meta_mut(id);
-            meta.health_regen = regen;
-            meta.last_named_sound = step.sound;
-        }
-        if let Some(next) = step.health {
-            if let Some(ps) = world.player_mut(id) {
-                ps.health = next;
-            }
-        }
-    }
-}
-
-pub(crate) fn phase_finalstand_timer(world: &mut FrameWorld, tick: Tick) {
-    let now_ms = crate::hudelem::hud_level_time_ms(tick);
-    let ids: Vec<ClientId> = world.client_ids_sorted();
-    for id in ids {
-        let Some(until) = world.client_meta(id).and_then(|m| m.laststand_until_ms) else {
-            continue;
-        };
-        if now_ms < until {
-            continue;
-        }
-        if !world
-            .client_meta(id)
-            .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive)
-        {
-            continue;
-        }
-        let max_health = world.player(id).map(|ps| ps.max_health).unwrap_or(0);
-        if let Some(ps) = world.player_mut(id) {
-            ps.pm_type = 0;
-            ps.view_height_target = movement_iw4::view_height::CROUCH;
-            ps.pm_flags &= !playerstate_iw4::pm_flags::LAST_STAND;
-            ps.perks[0] &= !playerstate_iw4::PERK_PISTOLDEATH;
-            ps.health = max_health;
-        }
-        let meta = world.client_meta_mut(id);
-        meta.pistoldeath_this_life = false;
-        meta.laststand_until_ms = None;
-    }
 }
 
 fn stuck_row(ps: &PlayerState) -> gamemode_iw4::StuckClient {
@@ -571,19 +249,16 @@ fn apply_actions_system(world: &mut World) {
 
     frame.enter_kernel_phase(crate::gentity::KernelPhase::ApplyActions);
     apply_actions(&mut frame, tick, &actions);
-    advance_death_timers(&mut frame, tick);
-    resolve_pending_spawns(&mut frame, tick);
 }
 
 fn run_players_system(ecs: &mut World) {
     let tick = ecs.resource::<StepRequest>().tick;
     let level_time = crate::level_time_ms(tick);
-    let mut input = ecs.resource::<StepRequest>().input.clone();
+    let input = ecs.resource::<StepRequest>().input.clone();
     let mut world = frame_world(ecs);
-    world.objectives.constrain_cmds(&mut input.cmds);
     world.enter_kernel_phase(crate::gentity::KernelPhase::RunPlayers);
 
-    let allow_move = world.phase() == MatchPhase::Playing;
+    let allow_move = matches!(world.phase(), MatchPhase::Playing | MatchPhase::Warmup);
     let content = world.content();
     let cmodel_models = &content.clip_cmodels().models;
     let (brushes, bsp, mesh) = (
@@ -657,14 +332,18 @@ fn run_players_system(ecs: &mut World) {
                 melee_delay_ms,
                 melee_charge_delay_ms,
                 overlay_reticle,
-                crate::damage::shellshock_dump_affects_movement(ps.shellshock_index),
+                world
+                    .client_meta(*id)
+                    .and_then(|m| m.shellshock.as_ref())
+                    .is_some_and(|shock| shock.movement),
             );
             let mut cmd = *cmd;
+            crate::script_player::constrain_cmd(&mut world, *id, &mut cmd);
             if world
                 .client_meta(*id)
                 .is_some_and(|m| m.remote_missile.is_some())
             {
-                crate::killstreaks::steer_remote_missile(&mut world, *id, &cmd, delta.min(200));
+                crate::remote_missile::steer(&mut world, *id, &cmd, delta.min(200));
                 cmd.forwardmove = 0;
                 cmd.rightmove = 0;
                 cmd.buttons &= playerstate_iw4::buttons::CROUCH | playerstate_iw4::buttons::PRONE;
@@ -673,8 +352,7 @@ fn run_players_system(ecs: &mut World) {
             let linked_brushes: Vec<LinkedBrushCollisionBrush> = world
                 .entity_collision_capabilities()
                 .iter()
-                .filter(|c| world.objectives.collision_active(c.owner))
-                .flat_map(|c| c.linked_brushes.iter().cloned())
+                .flat_map(|c| c.solid_brushes().iter().cloned())
                 .collect();
             let bodies = alive_body_clips(&world);
             let glass_damage = world.world_objects().glass_damage_pairs();
@@ -757,8 +435,6 @@ fn run_players_system(ecs: &mut World) {
 
             crate::weapon_lock::update(&mut world, *id, level_time);
             let shots = advance_weapon_command(&mut world, tick, *id, cmd, delta.min(200));
-            crate::killstreaks::remember_combat_weapon(&mut world, *id);
-            crate::killstreaks::use_selected(&mut world, tick, *id);
             for shot in shots {
                 crate::missile::fire_accepted_shot(&mut world, tick, &shot);
 
@@ -774,7 +450,6 @@ fn run_players_system(ecs: &mut World) {
                 }
                 let emissions = phase_emit(&world, core::slice::from_ref(&shot));
                 phase_trace(&mut world, tick, &emissions);
-                crate::killstreaks::trace_pave_low_shots(&mut world, &emissions);
             }
             crate::equipment::phase_offhand(&mut world, tick, &[(*id, cmd)]);
             world.set_old_cmd(*id, cmd.buttons, cmd.angles);
@@ -831,55 +506,13 @@ fn run_entity_types_system(ecs: &mut World) {
             world.record_entity_collision_history(tick);
         }
 
-        crate::killstreaks::advance_remote_missiles(&mut world, tick);
+        crate::remote_missile::advance(&mut world, tick);
         crate::entity_run::phase_run_entity_thinks(&mut world, tick);
         if world.publishes_snapshot() {
-            let drain = world
-                .world_objects_mut()
-                .tick_vehicle_healthdrain(crate::MATCH_TICK_MS);
             world.world_objects_mut().glass_update(
                 i32::try_from(tick.0.saturating_mul(crate::MATCH_TICK_MS)).unwrap_or(i32::MAX),
             );
-            let burn = world
-                .world_objects_mut()
-                .tick_explodable_barrel_burn(crate::MATCH_TICK_MS);
-            let crate_burn = world
-                .world_objects_mut()
-                .tick_flammable_crate_burn(crate::MATCH_TICK_MS);
-            let toy_drain = world
-                .world_objects_mut()
-                .tick_toy_healthdrain(crate::MATCH_TICK_MS);
-            let mut drain_explodes = drain.explodes;
-            drain_explodes.extend(burn.explodes);
-            drain_explodes.extend(crate_burn.explodes);
-            drain_explodes.extend(toy_drain.explodes);
-            let drain_chain_intents = world
-                .world_objects()
-                .destructible_radius_intents(&drain_explodes);
-            let drain_chain = world
-                .world_objects_mut()
-                .apply_destructible_damage_batch(&drain_chain_intents);
-            drain_explodes.extend(drain_chain.explodes);
-            for explode in &drain_explodes {
-                apply_explosion_blast(
-                    &mut world,
-                    tick,
-                    &ExplosionBlast::from_destructible(explode),
-                );
-                apply_explode_glass_blast(&mut world, tick, explode);
-            }
-            phase_health_regen(&mut world, tick);
-            crate::killstreaks::advance_pave_lows(&mut world, tick);
-            crate::killstreaks::advance_uavs(&mut world, tick);
-            phase_finalstand_timer(&mut world, tick);
-            emit_vehicle_fx_events(&mut world, tick);
-            publish_destructible_loop_sounds(&mut world);
-            phase_destructible_death_presentation(&mut world, msec);
             phase_animated_map_models(&mut world, tick, msec);
-        } else {
-            // A client presents the stages it adopted; the effects that go
-            // with them arrive as entity events from the host.
-            phase_destructible_death_presentation(&mut world, msec);
         }
     } else {
         crate::entity_run::phase_walk_entity_thinks(&mut world);
@@ -888,7 +521,6 @@ fn run_entity_types_system(ecs: &mut World) {
 
 fn dispatch_touches_system(ecs: &mut World) {
     let tick = ecs.resource::<StepRequest>().tick;
-    let msec = ecs.resource::<StepRequest>().msec;
     let input = ecs.resource::<StepRequest>().input.clone();
     let mut world = frame_world(ecs);
     let allow_move = world.phase() == MatchPhase::Playing;
@@ -913,26 +545,15 @@ fn dispatch_touches_system(ecs: &mut World) {
         .map(|(id, bits)| (id.0, *bits))
         .collect();
     let presses = crate::collect_use_presses(&command_buttons, &old);
-    crate::map_doors::advance(&mut world, tick, &latest_cmds);
-    crate::map_lights::advance(&mut world, tick);
-    crate::map_diggers::advance(&mut world, tick);
-    crate::map_moving_diggers::advance(&mut world, tick);
-    crate::map_conveyer::advance(&mut world);
     world.stamp_use_presses(presses.clone());
     if allow_move && world.publishes_snapshot() {
-        crate::use_object::phase_use_objects(&mut world, tick, msec as u32, &presses, &cmds);
-    }
-    crate::objectives::advance(&mut world, tick, &cmds);
-    if allow_move && world.publishes_snapshot() {
         crate::item::phase_use_items(&mut world, tick, &presses, &cmds);
-        crate::killstreaks::advance_crates(&mut world, tick, msec, &latest_cmds);
     }
 }
 
 fn finalize_system(ecs: &mut World) {
     let tick = ecs.resource::<StepRequest>().tick;
     let input = ecs.resource::<StepRequest>().input.clone();
-    let reason = ecs.resource::<StepRequest>().reason;
     let mut world = frame_world(ecs);
     world.enter_kernel_phase(crate::gentity::KernelPhase::Finalize);
     for &(id, cmd) in &input.cmds {
@@ -948,13 +569,6 @@ fn finalize_system(ecs: &mut World) {
         }
     }
 
-    if reason.advances_authority_world() {
-        crate::voice::tick_delayed(&mut world, tick);
-        crate::damage::tick_delayed_concussion(&mut world, tick);
-        crate::score::finish_recent_kills(&mut world, tick);
-        crate::score::advance_match_clock(&mut world, tick);
-    }
-
     let mut old_buttons = std::mem::take(world.old_buttons_mut());
     old_buttons.retain(|(id, _)| {
         world
@@ -967,9 +581,6 @@ fn finalize_system(ecs: &mut World) {
     *world.old_cmd_angles_mut() = old_angles;
 
     harvest_predictable_events(&mut world, tick);
-    if reason.advances_authority_world() {
-        world.tick_scripted_hud(tick);
-    }
     world.script_gaps_mut().report();
 }
 
@@ -1049,16 +660,7 @@ fn lifecycle_label(life: ClientLifecycle) -> &'static str {
     }
 }
 
-fn emit_snapshot_events(world: &FrameWorld, snapshot: &Snapshot) {
-    for row in world.world_objects().vehicle_dump_rows() {
-        perf::truck(
-            row.id.to_wire(),
-            Some(i64::from(row.body.state_index)),
-            Some(i64::from(row.body.health)),
-            row.death_clip,
-            None,
-        );
-    }
+fn emit_snapshot_events(_world: &FrameWorld, snapshot: &Snapshot) {
     for slot in &snapshot.meta.corpses.slots {
         perf::corpse(
             i64::from(slot.occupied),
@@ -1127,6 +729,8 @@ fn action_needs_player_row(action: &ClientAction) -> bool {
             | ClientAction::LeaveMatch { .. }
             | ClientAction::SetName { .. }
             | ClientAction::UseCopycat { .. }
+            | ClientAction::ChooseDefaultClass { .. }
+            | ClientAction::MenuResponse { .. }
     )
 }
 
@@ -1138,7 +742,25 @@ fn apply_actions(world: &mut FrameWorld, tick: Tick, actions: &[(ClientId, Clien
                 if meta.lifecycle == ClientLifecycle::Connecting {
                     meta.lifecycle = ClientLifecycle::ChoosingClass;
                 }
-                assign_team(world, *id);
+            }
+            ClientAction::ChooseDefaultClass {
+                request_id: _,
+                index,
+            } => {
+                crate::gsc_ir::answer_join(world.ecs(), id.0);
+                crate::gsc_ir::choose_default_class(world.ecs(), id.0, index);
+            }
+            ClientAction::MenuResponse {
+                request_id: _,
+                menu,
+                response,
+            } => {
+                let menu = crate::menu_response_text(&menu);
+                let response = crate::menu_response_text(&response);
+                crate::gsc_ir::note_team_answer(world.ecs(), id.0, menu);
+                if !answer_custom_class(world, *id, menu, response) {
+                    crate::gsc_ir::answer_menu(world.ecs(), id.0, menu, response);
+                }
             }
             ClientAction::LeaveMatch { request_id: _ } => {
                 world.retire_client(*id);
@@ -1149,9 +771,7 @@ fn apply_actions(world: &mut FrameWorld, tick: Tick, actions: &[(ClientId, Clien
             } => {
                 world.client_meta_mut(*id).name = name;
             }
-            ClientAction::UseCopycat { request_id: _ } => {
-                apply_use_copycat(world, *id);
-            }
+            ClientAction::UseCopycat { .. } | ClientAction::SpawnClient { .. } => {}
             ClientAction::SelectClass {
                 request_id,
                 class_id,
@@ -1169,9 +789,6 @@ fn apply_actions(world: &mut FrameWorld, tick: Tick, actions: &[(ClientId, Clien
             } => {
                 apply_configuration_change(world, tick, *id, request_id, from, to);
             }
-            ClientAction::SpawnClient { request_id: _ } => {
-                apply_spawn_client(world, *id);
-            }
             ClientAction::ForceSpawn {
                 request_id: _,
                 pick,
@@ -1188,33 +805,7 @@ fn apply_actions(world: &mut FrameWorld, tick: Tick, actions: &[(ClientId, Clien
                 if !world.bootstrap_ref().allow_debug_actions {
                     continue;
                 }
-                let life = {
-                    let meta = world.client_meta_mut(*id);
-                    if meta.lifecycle != ClientLifecycle::Alive {
-                        continue;
-                    }
-                    let life = meta.life_sequence;
-                    meta.lifecycle = ClientLifecycle::Dead;
-                    meta.dead_since_tick = Some(tick.0);
-                    life
-                };
-                world.unlink_player_area(*id);
-                world.push_event(
-                    tick,
-                    EventAudience::All,
-                    SimEvent::Died {
-                        victim: *id,
-                        life_sequence: life,
-                        attacker: None,
-                        attacker_life: None,
-                        source: None,
-                        weapon: 0,
-                        killcam_entity_start_time: 0,
-                    },
-                );
-                crate::score::apply_death_score(world, tick, *id, None, None);
-                crate::damage::apply_player_killed(world, tick, *id, None, None);
-                crate::damage::push_suicide_obituary(world, tick, *id);
+                crate::gsc_ir::force_death(world.ecs(), tick, id.0);
             }
             ClientAction::SetMatchPhase {
                 request_id: _,
@@ -1224,7 +815,7 @@ fn apply_actions(world: &mut FrameWorld, tick: Tick, actions: &[(ClientId, Clien
                     continue;
                 }
                 if phase == MatchPhase::Playing && world.phase() == MatchPhase::Warmup {
-                    crate::score::finish_prematch(world, tick);
+                    crate::score::finish_prematch(world);
                 } else {
                     world.set_phase(phase);
                 }
@@ -1258,46 +849,15 @@ fn apply_actions(world: &mut FrameWorld, tick: Tick, actions: &[(ClientId, Clien
     }
 }
 
-fn apply_spawn_client(world: &mut FrameWorld, id: ClientId) {
-    let meta = world.client_meta_mut(id);
-    if meta.lifecycle != ClientLifecycle::Dead {
-        return;
-    }
-    meta.lifecycle = ClientLifecycle::RespawnPending;
-    meta.dead_since_tick = None;
-}
-
 fn apply_force_spawn(world: &mut FrameWorld, id: ClientId, pick: crate::SpawnPick) {
-    let was_alive = {
-        let meta = world.client_meta_mut(id);
-        if meta.loadout.is_none() {
-            diag::info!(
-                Sim,
-                "spawn: forced client={} refused — no class selected",
-                id.0
-            );
-            return;
-        }
-        let was_alive = meta.lifecycle == ClientLifecycle::Alive;
-        meta.lifecycle = ClientLifecycle::RespawnPending;
-        meta.dead_since_tick = None;
-        meta.forced_spawn = Some(pick);
-        was_alive
-    };
-    if was_alive {
-        world.unlink_player_area(id);
+    if world
+        .client_meta(id)
+        .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive)
+    {
+        crate::script_player::move_to_forced_spawn(world, id, pick);
+    } else {
+        world.client_meta_mut(id).forced_spawn = Some(pick);
     }
-}
-
-fn apply_use_copycat(world: &mut FrameWorld, id: ClientId) {
-    let meta = world.client_meta_mut(id);
-    if meta.lifecycle != ClientLifecycle::Dead {
-        return;
-    }
-    let Some(stash) = meta.copycat_loadout.as_mut() else {
-        return;
-    };
-    stash.in_use = true;
 }
 
 fn apply_spawn_intermission(world: &mut FrameWorld, id: ClientId) {
@@ -1406,43 +966,7 @@ fn apply_debug_damage(world: &mut FrameWorld, tick: Tick, id: ClientId, amount: 
     {
         return;
     }
-    let health_after = {
-        let Some(ps) = world.player_mut(id) else {
-            return;
-        };
-
-        movement_iw4::pm_update_damage_timer(ps, amount, None);
-        ps.health = (ps.health - amount).max(0);
-        ps.damage_count = ps.damage_count.saturating_add(1);
-        ps.damage_event = ps.damage_event.wrapping_add(1);
-        ps.health
-    };
-    if health_after > 0 {
-        return;
-    }
-    let life = {
-        let meta = world.client_meta_mut(id);
-        meta.lifecycle = ClientLifecycle::Dead;
-        meta.dead_since_tick = Some(tick.0);
-        meta.life_sequence
-    };
-    world.unlink_player_area(id);
-    world.push_event(
-        tick,
-        EventAudience::All,
-        SimEvent::Died {
-            victim: id,
-            life_sequence: life,
-            attacker: None,
-            attacker_life: None,
-            source: None,
-            weapon: 0,
-            killcam_entity_start_time: 0,
-        },
-    );
-    crate::score::apply_death_score(world, tick, id, None, None);
-    crate::damage::apply_player_killed(world, tick, id, None, None);
-    crate::damage::push_suicide_obituary(world, tick, id);
+    crate::script_player::debug_damage(world, tick, id, amount);
 }
 
 fn configuration_change_ammo(
@@ -1761,27 +1285,6 @@ fn apply_give_weapon(
         reject(world, crate::GiveRejectReason::UnknownWeaponId);
         return;
     }
-    if let Some(streak) = gamemode_iw4::killstreaks::Killstreak::ALL
-        .into_iter()
-        .find(|streak| streak.weapon() == world.weapon_script_name(weapon))
-    {
-        world.client_meta_mut(id).owned_streaks.insert(0, streak);
-        crate::killstreaks::sync_inventory(world, id);
-        if !world
-            .player(id)
-            .is_some_and(|ps| ps.action_slot_param[3] == weapon as i32)
-        {
-            world.client_meta_mut(id).owned_streaks.remove(0);
-            reject(world, crate::GiveRejectReason::UnsupportedWeapon);
-            return;
-        }
-        world.push_event(
-            tick,
-            EventAudience::Client(id),
-            SimEvent::GiveAccepted { request_id, weapon },
-        );
-        return;
-    }
     if !world.weapon_runnable(weapon) {
         reject(world, crate::GiveRejectReason::UnsupportedWeapon);
         return;
@@ -1812,8 +1315,6 @@ fn apply_give_weapon(
             reject(world, crate::GiveRejectReason::InvalidWeapon);
             return;
         }
-        ps.action_slot_type[3] = 1;
-        ps.action_slot_param[3] = weapon as i32;
         let (clip, clip_alt, stock) = weapon_iw4::spawn_clip_stock(&facts, 0);
         seed_ps_ammo_tables(ps, weapon, &facts, clip, clip_alt, false, stock);
         world.client_meta_mut(id).set_ammo(weapon, clip, stock);
@@ -1966,6 +1467,32 @@ fn apply_give_offhand(
     );
 }
 
+fn answer_custom_class(world: &mut FrameWorld, id: ClientId, menu: &str, response: &str) -> bool {
+    if !menu.eq_ignore_ascii_case("changeclass") {
+        return false;
+    }
+    let Some(slot) = response
+        .strip_prefix("custom")
+        .and_then(|n| n.parse::<u32>().ok())
+        .and_then(|n| n.checked_sub(1))
+    else {
+        return false;
+    };
+    let Some(def) = world
+        .bootstrap_ref()
+        .class(crate::ClassId(slot))
+        .filter(|def| !def.locked)
+        .cloned()
+    else {
+        return false;
+    };
+    if validate_class_content(world, &def).is_err() {
+        return false;
+    }
+    crate::gsc_ir::choose_class(world.ecs(), id.0, &def);
+    true
+}
+
 fn apply_select_class(
     world: &mut FrameWorld,
     tick: Tick,
@@ -2043,45 +1570,8 @@ fn apply_select_class(
         return;
     }
 
-    if world.bootstrap_ref().spawns.is_empty() {
-        diag::info!(
-            Sim,
-            "class select: rejected client={} id={} rev={} reason=no_spawn_available (empty pool)",
-            id.0,
-            class_id.0,
-            revision
-        );
-        world.push_event(
-            tick,
-            EventAudience::Client(id),
-            SimEvent::ClassRejected {
-                request_id,
-                class_id,
-                revision,
-                reason: crate::ClassRejectReason::NoSpawnAvailable,
-            },
-        );
-        return;
-    }
-
-    let loadout = LoadoutSpec {
-        class_id: def.id,
-        revision: def.revision,
-        primary: def.primary,
-        secondary: def.secondary,
-        primary_attachments: def.primary_attachments,
-        secondary_attachments: def.secondary_attachments,
-        lethal: def.lethal,
-        tactical: def.tactical,
-        perks: def.perks,
-    };
-
-    {
-        let meta = world.client_meta_mut(id);
-        meta.loadout = Some(loadout);
-        meta.dead_since_tick = None;
-        meta.lifecycle = ClientLifecycle::SpawnPending;
-    }
+    crate::gsc_ir::answer_join(world.ecs(), id.0);
+    crate::gsc_ir::choose_class(world.ecs(), id.0, &def);
     world.push_event(
         tick,
         EventAudience::Client(id),
@@ -2091,73 +1581,6 @@ fn apply_select_class(
             revision,
         },
     );
-    let _ = world.ensure_player(id);
-    assign_team(world, id);
-}
-
-fn assign_team(world: &mut FrameWorld, id: ClientId) {
-    if world.bootstrap_ref().kind.is_team() {
-        assign_session_team(world, id);
-    } else {
-        assign_ffa_team(world, id);
-    }
-}
-
-fn assign_ffa_team(world: &mut FrameWorld, id: ClientId) {
-    world.client_meta_mut(id).client_state_team = entity_iw4::TEAM_FREE;
-    if world.client_meta(id).is_some_and(|m| m.ffa_team.is_some()) {
-        return;
-    }
-    let pick = {
-        let rng = world.spawn_rng_mut();
-        rng.next_index(2) as u8
-    };
-    world.client_meta_mut(id).ffa_team = Some(pick);
-}
-
-fn assign_session_team(world: &mut FrameWorld, id: ClientId) {
-    let sticky = world
-        .client_meta(id)
-        .map(|m| m.client_state_team)
-        .unwrap_or(entity_iw4::TEAM_FREE);
-    if sticky == entity_iw4::TEAM_AXIS || sticky == entity_iw4::TEAM_ALLIES {
-        world.client_meta_mut(id).ffa_team = None;
-        return;
-    }
-    let session = count_players_assignment(world, id);
-    let meta = world.client_meta_mut(id);
-    meta.client_state_team = entity_iw4::client_state_team_from_sessionteam(true, session);
-    meta.ffa_team = None;
-}
-
-fn count_players_assignment(world: &mut FrameWorld, self_id: ClientId) -> &'static str {
-    let mut allies = 0u32;
-    let mut axis = 0u32;
-    for cid in world.client_ids_sorted() {
-        if cid == self_id {
-            continue;
-        }
-        let Some(m) = world.client_meta(cid) else {
-            continue;
-        };
-        let pers = if m.client_state_team == entity_iw4::TEAM_ALLIES {
-            Some("allies")
-        } else if m.client_state_team == entity_iw4::TEAM_AXIS {
-            Some("axis")
-        } else {
-            None
-        };
-        gamemode_iw4::count_players_inc(&mut allies, &mut axis, pers);
-    }
-    let scores = world.team_scores();
-    match gamemode_iw4::team_assignment_from_counts(allies, axis, scores.allies, scores.axis) {
-        gamemode_iw4::TeamAssignment::Allies => "allies",
-        gamemode_iw4::TeamAssignment::Axis => "axis",
-        gamemode_iw4::TeamAssignment::CoinToss => {
-            let pick = world.spawn_rng_mut().next_index(2);
-            ["allies", "axis"][pick]
-        }
-    }
 }
 
 fn validate_class_content(
@@ -2204,29 +1627,7 @@ fn validate_class_content(
     Ok(())
 }
 
-fn advance_death_timers(world: &mut FrameWorld, tick: Tick) {
-    if world.bootstrap_ref().host_owns_respawn {
-        return;
-    }
-    let delay = world.bootstrap_ref().respawn_delay_ticks;
-    let ids = world.client_ids_sorted();
-    for id in ids {
-        let meta = world.client_meta_mut(id);
-        if meta.lifecycle != ClientLifecycle::Dead {
-            continue;
-        }
-        let Some(since) = meta.dead_since_tick else {
-            meta.dead_since_tick = Some(tick.0);
-            continue;
-        };
-        if tick.0.saturating_sub(since) >= delay {
-            meta.lifecycle = ClientLifecycle::RespawnPending;
-            meta.dead_since_tick = None;
-        }
-    }
-}
-
-fn log_forced_spawn(
+pub(crate) fn log_forced_spawn(
     id: ClientId,
     pick: crate::SpawnPick,
     report: &crate::spawn::SpawnAttemptReport,
@@ -2266,293 +1667,6 @@ fn log_forced_spawn(
             id.0,
             report.tried
         ),
-    }
-}
-
-fn resolve_pending_spawns(world: &mut FrameWorld, tick: Tick) {
-    if matches!(
-        world.phase(),
-        MatchPhase::Intermission | MatchPhase::PostGame
-    ) {
-        return;
-    }
-
-    let pending: Vec<ClientId> = world
-        .client_ids_sorted()
-        .into_iter()
-        .filter(|id| {
-            world.client_meta(*id).is_some_and(|m| {
-                matches!(
-                    m.lifecycle,
-                    ClientLifecycle::SpawnPending | ClientLifecycle::RespawnPending
-                )
-            })
-        })
-        .collect();
-
-    if pending.is_empty() {
-        return;
-    }
-
-    let mut avoid = world.alive_origins();
-
-    for id in pending {
-        let client_state_team = world
-            .client_meta(id)
-            .map(|m| m.client_state_team)
-            .unwrap_or(entity_iw4::TEAM_FREE);
-        let forced = world.client_meta_mut(id).forced_spawn.take();
-        let report = if let Some(pick) = forced {
-            let report = crate::spawn::decide_forced_spawn(world, pick, &avoid, client_state_team);
-            log_forced_spawn(id, pick, &report);
-            report
-        } else {
-            let mut rng = crate::identities::MatchRng::new(0);
-            core::mem::swap(&mut rng, world.spawn_rng_mut());
-            let report = decide_spawn_seeded_report(world, &mut rng, &avoid, client_state_team);
-            core::mem::swap(&mut rng, world.spawn_rng_mut());
-            report
-        };
-
-        let Some(decision) = report.accepted else {
-            let (class_id, revision, request_id) = {
-                let meta = world.client_meta(id);
-                let (class_id, revision) = meta
-                    .and_then(|m| m.loadout.as_ref().map(|l| (l.class_id, l.revision)))
-                    .unwrap_or((crate::ClassId(0), 0));
-                let request_id = world
-                    .journal()
-                    .iter()
-                    .rev()
-                    .find_map(|record| match record.event {
-                        SimEvent::ClassAccepted { request_id, .. }
-                            if record.audience.projects_to(id) =>
-                        {
-                            Some(request_id)
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or(0);
-                (class_id, revision, request_id)
-            };
-            let summary = if report.rejected.is_empty() {
-                SpawnReject::NoAuthoredCandidates.as_str().to_owned()
-            } else {
-                let mut parts = Vec::new();
-                for reason in [
-                    SpawnReject::NoGroundHit,
-                    SpawnReject::StartSolid,
-                    SpawnReject::Occupied,
-                    SpawnReject::UnsupportedCoverage,
-                    SpawnReject::AllRejected,
-                    SpawnReject::NoAuthoredCandidates,
-                ] {
-                    let n = report.rejected.iter().filter(|(_, r)| *r == reason).count();
-                    if n > 0 {
-                        parts.push(format!("{}×{}", reason.as_str(), n));
-                    }
-                }
-                parts.join(", ")
-            };
-            diag::info!(
-                Sim,
-                "spawn: refused client={} class={} tried={} — {summary}",
-                id.0,
-                class_id.0,
-                report.tried
-            );
-            world.client_meta_mut(id).lifecycle = ClientLifecycle::ChoosingClass;
-            world.push_event(
-                tick,
-                EventAudience::Client(id),
-                SimEvent::ClassRejected {
-                    request_id,
-                    class_id,
-                    revision,
-                    reason: crate::ClassRejectReason::NoSpawnAvailable,
-                },
-            );
-            continue;
-        };
-        if forced.is_none() {
-            diag::info!(
-                Sim,
-                "spawn: grounded client={} at [{:.1}, {:.1}, {:.1}] source={} tried={}",
-                id.0,
-                decision.traced_origin[0],
-                decision.traced_origin[1],
-                decision.traced_origin[2],
-                decision.source_index,
-                report.tried
-            );
-        }
-
-        let (loadout, using_copycat) = world.client_meta_mut(id).take_spawn_loadout();
-        let class_id = loadout.class_id;
-
-        let mut ps = spawn_player_state(decision.traced_origin, decision.raw_angles);
-        ps.action_slot_type[1] = 2;
-        if let Some(cmd) = world.old_cmd_angles(id) {
-            ps.delta_angles = std::array::from_fn(|axis| {
-                decision.raw_angles[axis] - cmd[axis] as f32 * SHORT2ANGLE
-            });
-        }
-        ps.perks = crate::match_state::perk_bits_from_class_catalog(loadout.perks);
-        ps.move_speed_scale_multiplier = gamemode_iw4::lightweight_move_speed_scale(
-            crate::match_state::class_catalog_has(loadout.perks, crate::CLASS_CATALOG_LIGHTWEIGHT),
-        );
-        ps.perk_slots = [0; 8];
-        for id in loadout.perks {
-            if let Some(slot) = crate::match_state::perk_slot_from_class_catalog(id) {
-                ps.perk_slots[slot] = crate::match_state::perk_table_code_from_class_catalog(id);
-            }
-        }
-        if loadout.primary != 0 {
-            let akimbo = gsc_give_weapon_is_akimbo(world.weapon_script_name(loadout.primary));
-            give_weapon_to_ps_akimbo(&mut ps, loadout.primary, akimbo);
-        }
-        if loadout.secondary != 0 {
-            let akimbo = gsc_give_weapon_is_akimbo(world.weapon_script_name(loadout.secondary));
-            inventory_add_weapon(&mut ps, loadout.secondary, akimbo);
-        }
-        for equipment in [loadout.lethal, loadout.tactical] {
-            if equipment != 0 && !ps.weapons.iter().any(|&slot| slot == equipment as i32) {
-                if let Some(slot) = ps.weapons.iter_mut().find(|slot| **slot == 0) {
-                    *slot = equipment as i32;
-                }
-            }
-        }
-        if let Some(eq) = world.offhand_loadout_row(loadout.lethal) {
-            ps.offhand_primary = eq.offhand_class;
-        }
-        if let Some(eq) = world.offhand_loadout_row(loadout.tactical) {
-            ps.offhand_secondary = eq.offhand_class;
-        }
-
-        let prev_teleport = world
-            .player(id)
-            .map(|p| p.e_flags & playerstate_iw4::eflags::TELEPORT)
-            .unwrap_or(0);
-        ps.e_flags = (ps.e_flags & !playerstate_iw4::eflags::TELEPORT) | prev_teleport;
-        ps.e_flags ^= playerstate_iw4::eflags::TELEPORT;
-        ps.e_flags |= crate::match_state::class_catalog_radar_jam_e_flags(loadout.perks);
-        *world.ensure_player(id) = ps;
-        avoid.push(decision.traced_origin);
-
-        let facts = world
-            .combat_facts_for(loadout.primary)
-            .unwrap_or_else(weapon_iw4::WeaponCombatFacts::none);
-        let (clip, stock) = if let Some(ps_mut) = world.player_mut(id) {
-            arm_held_weapon(ps_mut, loadout.primary, &facts)
-        } else {
-            (0, 0)
-        };
-
-        let secondary_facts = if loadout.secondary != 0 {
-            world
-                .combat_facts_for(loadout.secondary)
-                .unwrap_or_else(weapon_iw4::WeaponCombatFacts::none)
-        } else {
-            weapon_iw4::WeaponCombatFacts::none()
-        };
-        let lethal_ammo = world
-            .offhand_loadout_row(loadout.lethal)
-            .map(crate::equipment::EquipmentRuntimeFacts::spawn_clip_count)
-            .unwrap_or(0);
-        let tactical_ammo = world
-            .offhand_loadout_row(loadout.tactical)
-            .map(crate::equipment::EquipmentRuntimeFacts::spawn_clip_count)
-            .unwrap_or(0);
-
-        let lethal_combat = world.weapon_combat_row(loadout.lethal);
-        let tactical_combat = world.weapon_combat_row(loadout.tactical);
-        if let Some(ps_mut) = world.player_mut(id) {
-            if loadout.lethal != 0 {
-                if let Some(facts) = lethal_combat.as_ref() {
-                    seed_ps_ammo_tables(ps_mut, loadout.lethal, facts, lethal_ammo, 0, false, 0);
-                }
-            }
-            if loadout.tactical != 0 {
-                if let Some(facts) = tactical_combat.as_ref() {
-                    seed_ps_ammo_tables(
-                        ps_mut,
-                        loadout.tactical,
-                        facts,
-                        tactical_ammo,
-                        0,
-                        false,
-                        0,
-                    );
-                }
-            }
-        }
-
-        let max_health = world.player(id).map(|p| p.max_health).unwrap_or(0);
-        let now_ms = crate::hudelem::hud_level_time_ms(tick);
-        let deathstreak = if using_copycat {
-            String::from(gamemode_iw4::COPYCAT_PERK)
-        } else {
-            world
-                .bootstrap_ref()
-                .class(class_id)
-                .map(|c| c.deathstreak.clone())
-                .unwrap_or_default()
-        };
-        let life_sequence = {
-            let meta = world.client_meta_mut(id);
-            meta.life_sequence = meta.life_sequence.next();
-            let life_sequence = meta.life_sequence;
-            meta.lifecycle = ClientLifecycle::Alive;
-            meta.dead_since_tick = None;
-            meta.item_use_spawn_ms = crate::corpse::level_time_ms(tick);
-            meta.item_use_entity = None;
-            meta.clear_ammo_inventory();
-            meta.set_ammo(loadout.primary, clip, stock);
-            if loadout.secondary != 0 {
-                let sec = weapon_iw4::spawn_weapon_hand(loadout.secondary, &secondary_facts);
-                meta.set_ammo(loadout.secondary, sec.clip, sec.stock);
-            }
-            meta.set_ammo(loadout.lethal, lethal_ammo, 0);
-            meta.set_ammo(loadout.tactical, tactical_ammo, 0);
-            meta.mirror_held_ammo(loadout.primary);
-            meta.last_combat_weapon = loadout.primary;
-            meta.weapon_shot_count = 0;
-            meta.burst_latch = false;
-            meta.rechamber_pending = false;
-            meta.health_regen = gamemode_iw4::PlayerHealthRegenState::spawned(max_health);
-            meta.last_named_sound = gamemode_iw4::HealthRegenSound::None;
-            meta.combathigh_until_ms =
-                gamemode_iw4::combathigh_until_ms(&deathstreak, meta.cur_death_streak, now_ms);
-            meta.pistoldeath_this_life =
-                gamemode_iw4::finalstand_should_give(&deathstreak, meta.cur_death_streak);
-            meta.copycat_this_life =
-                gamemode_iw4::copycat_should_give(&deathstreak, meta.cur_death_streak);
-            meta.copycat_class_this_life = using_copycat;
-            meta.laststand_until_ms = None;
-            life_sequence
-        };
-        if world
-            .client_meta(id)
-            .is_some_and(|m| m.pistoldeath_this_life)
-        {
-            if let Some(ps) = world.player_mut(id) {
-                ps.perks[0] |= playerstate_iw4::PERK_PISTOLDEATH;
-            }
-        }
-        crate::killstreaks::sync_inventory(world, id);
-        world.push_player_card_open(id, hud_iw4::SCRIPT_MENU_KILLEDBY_HIDE);
-        world.push_player_card_open(id, hud_iw4::SCRIPT_MENU_PERK_DISPLAY);
-        world.push_spawn_music(id);
-        world.push_event(
-            tick,
-            EventAudience::Client(id),
-            SimEvent::Spawned {
-                class_id,
-                spawn_index: decision.source_index as u32,
-                life_sequence,
-            },
-        );
-        world.link_player_standing_area(id);
     }
 }
 
@@ -2782,7 +1896,7 @@ pub(crate) fn seed_ps_ammo_tables(
     }
 }
 
-fn arm_held_weapon(
+pub(crate) fn arm_held_weapon(
     ps: &mut PlayerState,
     weapon: u32,
     facts: &weapon_iw4::WeaponCombatFacts,

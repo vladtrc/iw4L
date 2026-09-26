@@ -229,6 +229,103 @@ fn facts(event: &Event) -> Value {
     })
 }
 
+fn event_json(event: &Event) -> Value {
+    let mut v = json!({ "ns": event.ns(), "controller_ms": event.at_ms });
+    for (k, val) in &event.fields {
+        if k != "ns" && k != "pid" {
+            v[k] = val.clone().into();
+        }
+    }
+    v
+}
+
+struct ScriptMap {
+    map: String,
+    installed: Option<Event>,
+    refused: Option<Event>,
+}
+
+impl ScriptMap {
+    fn gather(events: &[Event], map: &str) -> Self {
+        let named = |name: &str| {
+            events
+                .iter()
+                .find(|e| e.name == name && e.get("map") == Some(map))
+                .cloned()
+        };
+        Self {
+            map: map.to_owned(),
+            installed: named("installed"),
+            refused: named("refused"),
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "map": self.map,
+            "installed": self.installed.as_ref().map(event_json),
+            "refused": self.refused.as_ref().map(event_json),
+        })
+    }
+}
+
+struct ScriptEvidence {
+    a: ScriptMap,
+    b: ScriptMap,
+    execution_fault: Option<String>,
+}
+
+impl ScriptEvidence {
+    fn gather(run_dir: &Path, events: &[Event], map_a: &str, map_b: &str) -> Self {
+        let execution_fault = std::fs::read_to_string(run_dir.join("child_stderr.txt"))
+            .ok()
+            .and_then(|text| {
+                text.lines().find_map(|line| {
+                    line.find("GSC execution failed:")
+                        .map(|at| line[at..].to_owned())
+                })
+            });
+        Self {
+            a: ScriptMap::gather(events, map_a),
+            b: ScriptMap::gather(events, map_b),
+            execution_fault,
+        }
+    }
+
+    fn failure(&self, events: &[Event]) -> Option<String> {
+        refused_since(events, 0).or_else(|| self.execution_fault.clone())
+    }
+
+    fn to_json(&self, events: &[Event]) -> Value {
+        json!({
+            "a": self.a.to_json(),
+            "b": self.b.to_json(),
+            "execution_fault": self.execution_fault,
+            "events": events.iter().map(|e| {
+                let mut v = event_json(e);
+                v["event"] = e.name.clone().into();
+                v
+            }).collect::<Vec<_>>(),
+        })
+    }
+}
+
+fn refused_since(events: &[Event], from: u128) -> Option<String> {
+    events
+        .iter()
+        .find(|e| e.name == "refused" && e.ns().unwrap_or(0) >= from)
+        .map(refusal_text)
+}
+
+fn refusal_text(event: &Event) -> String {
+    format!(
+        "GSC {} refused on {}: {}",
+        event.get("stage").unwrap_or("?"),
+        event.get("map").unwrap_or("?"),
+        event.get("fault").unwrap_or("")
+    )
+}
+
 struct Assertions(Vec<Value>);
 
 impl Assertions {
@@ -246,6 +343,8 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
     let (log, unphased) = read_log(&child.join("logs/latest.log"));
     let marks = &outcome.marks;
     let lifecycle = &outcome.lifecycle;
+    let map_b = manifest["maps"]["b"].as_str().unwrap_or("").to_owned();
+    let script = ScriptEvidence::gather(run_dir, &outcome.script, SCENARIO.map_a, &map_b);
 
     let (end_json, exit_ms, exited_clean) = match &outcome.end {
         End::Exited { code, at_ms } => (
@@ -265,12 +364,19 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
         ),
     };
     manifest["process"] = end_json;
-    let failure_reason = match &outcome.end {
-        End::Exited { code, .. } => {
-            format!("process exited (code {code:?}) before this phase ended")
+    let failure_reason = |begin: Option<&Event>| {
+        let from = begin.and_then(Event::ns).unwrap_or(0);
+        if let Some(refused) = refused_since(&outcome.script, from) {
+            return refused;
         }
-        End::Timeout { waiting_for, .. } => format!("timeout waiting for {waiting_for}"),
-        End::SpawnFailed(reason) => reason.clone(),
+        match &outcome.end {
+            End::Exited { code, .. } => match &script.execution_fault {
+                Some(fault) => format!("process exited (code {code:?}): {fault}"),
+                None => format!("process exited (code {code:?}) before this phase ended"),
+            },
+            End::Timeout { waiting_for, .. } => format!("timeout waiting for {waiting_for}"),
+            End::SpawnFailed(reason) => reason.clone(),
+        }
     };
 
     manifest["render"] = match &outcome.runtime {
@@ -295,11 +401,11 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
         let (status, reason, completed_ms) = match (begin, end, phase.name.as_str()) {
             (Some(_), _, "quit") => match exit_ms {
                 Some(ms) if exited_clean => ("completed", None, Some(ms)),
-                Some(ms) => ("failed", Some(failure_reason.clone()), Some(ms)),
-                None => ("failed", Some(failure_reason.clone()), None),
+                Some(ms) => ("failed", Some(failure_reason(begin)), Some(ms)),
+                None => ("failed", Some(failure_reason(begin)), None),
             },
             (Some(_), Some(e), _) => ("completed", None, Some(e.at_ms)),
-            (Some(_), None, _) => ("failed", Some(failure_reason.clone()), None),
+            (Some(_), None, _) => ("failed", Some(failure_reason(begin)), None),
             (None, _, _) => ("not_reached", None, None),
         };
         let warnings = log
@@ -334,17 +440,7 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
             .iter()
             .find(|e| e.name == name && e.ns().unwrap_or(0) >= from)
     };
-    let boundary = |e: Option<&Event>| {
-        e.map(|e| {
-            let mut v = json!({ "ns": e.ns(), "controller_ms": e.at_ms });
-            for (k, val) in &e.fields {
-                if k != "ns" && k != "pid" {
-                    v[k] = val.clone().into();
-                }
-            }
-            v
-        })
-    };
+    let boundary = |e: Option<&Event>| e.map(event_json);
     let revoked = after("local_session_revoked");
     let menu = after("menu_interactive");
     let teardown = after("old_runtime_teardown_complete");
@@ -510,6 +606,11 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
         "a.cold_load.end mark",
     );
     asserts.check(
+        "a.gsc_installed",
+        script.a.installed.is_some(),
+        script.a.to_json(),
+    );
+    asserts.check(
         "a.players",
         a_clients.is_some_and(|c| c >= players),
         json!({ "clients": a_clients, "target": players }),
@@ -540,9 +641,19 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
         "b.load.end mark",
     );
     asserts.check(
+        "b.gsc_installed",
+        script.b.installed.is_some(),
+        script.b.to_json(),
+    );
+    asserts.check(
         "b.players",
         b_clients.is_some_and(|c| c >= players),
         json!({ "clients": b_clients, "target": players }),
+    );
+    asserts.check(
+        "gsc.no_execution_fault",
+        script.execution_fault.is_none(),
+        json!(script.execution_fault),
     );
     asserts.check("quit.requested", quit.is_some(), "lifecycle quit_requested");
     asserts.check(
@@ -583,8 +694,12 @@ pub fn finish(run_dir: &Path, manifest: &mut Value, phases: &[Phase], outcome: &
         "child_stderr": run_dir.join("child_stderr.txt").display().to_string(),
     });
     manifest["log_outside_phases"] = unphased.to_json();
+    manifest["gsc"] = script.to_json(&outcome.script);
 
     let passed = asserts.all_passed() && exited_clean;
+    if !passed && let Some(failure) = script.failure(&outcome.script) {
+        manifest["failure"] = failure.into();
+    }
     manifest["assertions"] = asserts.0.into();
     manifest["result"] = match (&outcome.end, passed) {
         (_, true) => "passed",

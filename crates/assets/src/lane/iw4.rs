@@ -154,6 +154,10 @@ impl ZoneLane for Iw4Lane {
         ));
 
         let compass = std::mem::take(&mut sink.compass).resolve(&materials);
+        let mut scripts = std::mem::take(&mut sink.scripts);
+        if let Some(entities) = map_ents_entity_string(&stream) {
+            scripts.set_entities(entities.to_owned());
+        }
         let script_sound = std::mem::take(&mut sink.script_sound).finish();
         let exp_fog = sink.exp_fog.take();
         let createart_name = sink.createart_name.take();
@@ -292,6 +296,12 @@ impl ZoneLane for Iw4Lane {
                             &sink.xmodel_coll,
                             &mut clip,
                         );
+                        clip.trigger_models = asset_world::trigger_models(&stream);
+                        clip_report.push(format!(
+                            "trigger models: {} ({} with hulls)",
+                            clip.trigger_models.len(),
+                            clip.trigger_models.iter().filter(|h| !h.is_empty()).count()
+                        ));
                         clip_report.push(format!(
                     "clipmap: planes={} brushes={} leaves={} nodes={} cmodels={} verts={} tris={} smodels={}",
                     geometry.plane_count,
@@ -401,6 +411,7 @@ impl ZoneLane for Iw4Lane {
                 arena_bytes as f64 / (1024.0 * 1024.0),
             ));
             return LoadedWorld {
+                scripts,
                 sound: map_sound,
                 materials,
                 world: PreparedWorld {
@@ -506,7 +517,6 @@ impl ZoneLane for Iw4Lane {
                     scene_assets: map_xmodel_scene_assets,
                     script_instances: script_model_instances,
                     script_brush_models,
-                    map_use_triggers,
                     flag_descriptors,
                     script_structs,
                     ..
@@ -595,6 +605,7 @@ impl ZoneLane for Iw4Lane {
                 let intermission_view = intermission_view(&stream);
                 let minimap_corners = minimap_corners(&stream);
                 let north_yaw = worldspawn_north_yaw(&stream);
+                let airstrike_height = crate::airstrike_height(&stream);
                 let dm_spawns = dm_spawn_points(&stream);
                 push_mapents_key_census(&mut report, &stream);
                 drop(stream);
@@ -751,6 +762,7 @@ impl ZoneLane for Iw4Lane {
                 let world_bounds = draw.stats.bounds;
                 handoff.done();
                 LoadedWorld {
+                    scripts,
                     sound: map_sound,
                     materials: map_materials,
                     world: PreparedWorld {
@@ -761,7 +773,6 @@ impl ZoneLane for Iw4Lane {
                         map_xmodel_scene_assets,
                         script_model_instances,
                         script_brush_models,
-                        map_use_triggers,
                         flag_descriptors,
                         script_structs,
                         dyn_ents,
@@ -790,6 +801,7 @@ impl ZoneLane for Iw4Lane {
                     facts: crate::MapFacts {
                         minimap_corners,
                         north_yaw,
+                        airstrike_height,
                         compass,
                         script_sound,
                         ..Default::default()
@@ -807,6 +819,7 @@ impl ZoneLane for Iw4Lane {
                 let arena_bytes = memory.total_bytes();
                 drop(memory);
                 LoadedWorld {
+                    scripts,
                     sound: map_sound,
                     materials: crate::MaterialCatalog::default(),
                     world: PreparedWorld {
@@ -1211,6 +1224,7 @@ impl ZoneLane for Iw4Lane {
                 xmodel_walk: sink.models.walk_census(),
                 s1_common_bytes,
                 teamsets: std::collections::HashMap::new(),
+                scripts: sink.scripts,
                 film_visions: sink.film_visions,
             }
         } else {
@@ -1246,6 +1260,7 @@ impl ZoneLane for Iw4Lane {
                 xmodel_walk: sink.models.walk_census(),
                 s1_common_bytes,
                 teamsets: std::collections::HashMap::new(),
+                scripts: sink.scripts,
                 film_visions: sink.film_visions,
             }
         }
@@ -1324,6 +1339,7 @@ impl ZoneLane for Iw4Lane {
             materials: sink.materials,
             report,
             cac_tables: sink.stats_tables.into_values().collect(),
+            scripts: sink.scripts,
         }
     }
 }

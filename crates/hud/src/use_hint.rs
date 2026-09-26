@@ -4,7 +4,7 @@ use crate::gpu_list::{HudTessPass, TessJob};
 use crate::images::HudImages;
 use assets::{MenuCatalog, PreparedWeapons};
 use bevy::prelude::*;
-use net::{CgFrameClock, LocalPresentClient, PresentedSnapshot};
+use net::{LocalPresentClient, PresentedSnapshot};
 use std::collections::HashMap;
 
 #[derive(Component)]
@@ -26,10 +26,8 @@ pub(crate) fn update(
     strings: Option<Res<assets::PreparedLocalizedStrings>>,
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
-    cg_clock: Res<CgFrameClock>,
     input: Res<frame::HudInputView>,
     mut pass: ResMut<HudTessPass>,
-    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     weapons: Option<Res<PreparedWeapons>>,
     mut gaps: ResMut<HudPresentationGaps>,
     mut hud_images: ResMut<HudImages>,
@@ -47,24 +45,6 @@ pub(crate) fn update(
         memory.caption = None;
         return;
     };
-    if let Some(catalog) = catalog.as_deref() {
-        let previous = presented
-            .interpolation_pair()
-            .map(|(before, _, phase)| (before, phase));
-        let quads = crate::objectives::draw(
-            &surface,
-            catalog,
-            strings.as_ref().map(|s| &s.0),
-            snapshot,
-            previous,
-            local.0,
-            cg_clock.time(),
-            cameras.iter().find(|(c, _)| c.is_active),
-        );
-        if !quads.is_empty() {
-            pass.use_hint = TessJob::Quads(quads);
-        }
-    }
     if snapshot.meta.phase != sim::MatchPhase::Playing {
         memory.caption = None;
         return;
@@ -74,19 +54,7 @@ pub(crate) fn update(
         return;
     };
     let result = (|| {
-        if ps.cursor_hint <= 4
-            && !snapshot
-                .meta
-                .map_doors
-                .as_ref()
-                .is_some_and(|d| d.hints.contains(&local.0))
-            && !snapshot
-                .meta
-                .objectives
-                .bombs
-                .iter()
-                .any(|b| !b.destroyed && b.view.users.contains(&local.0))
-        {
+        if ps.cursor_hint <= 0 {
             return Ok(None);
         }
         let bind = input
@@ -94,47 +62,25 @@ pub(crate) fn update(
             .as_deref()
             .or_else(|| strings.as_ref()?.0.text(hud_iw4::KEY_UNBOUND))
             .ok_or_else(|| "KEY_UNBOUND localization missing".to_owned())?;
-        if let Some(doors) = &snapshot.meta.map_doors
-            && doors.hints.contains(&local.0)
-        {
-            let (text, key) = if doors.unavailable(snapshot.tick.0.saturating_mul(50)) {
-                (
-                    "Door Switch is Unavailable".to_owned(),
-                    "MP_HOLD_DOOR_SWITCH_UNAVAILABLE",
-                )
-            } else {
-                (
-                    format!("Hold ^3{bind}^7 to Operate Doors"),
-                    "MP_HOLD_TO_OPERATE_DOORS",
-                )
-            };
-            return Ok(Some((text, key.to_owned(), None)));
-        }
-        if snapshot.meta.kind == gamemode_iw4::GameModeKind::Demolition
-            && let Some(site) = snapshot
-                .meta
-                .objectives
-                .bombs
-                .iter()
-                .find(|b| !b.destroyed && b.view.users.contains(&local.0))
-        {
-            if site.user == Some(local.0) {
+        if ps.cursor_hint <= 4 {
+            if ps.cursor_hint_string < 0 {
                 return Ok(None);
             }
-            let key = if site.planted_at_ms.is_some() {
-                "PLATFORM_HOLD_TO_DEFUSE_EXPLOSIVES"
-            } else {
-                "PLATFORM_HOLD_TO_PLANT_EXPLOSIVES"
-            };
-            let template = strings
+            let strings = strings
                 .as_ref()
-                .and_then(|s| s.0.text(key))
-                .ok_or_else(|| format!("missing {key}"))?;
+                .ok_or_else(|| "localized strings missing".to_owned())?;
+            let raw =
+                sim::hud_string_in_occupied(&snapshot.meta.hud_strings, ps.cursor_hint_string)
+                    .ok_or_else(|| {
+                        format!("hint string {} not published", ps.cursor_hint_string)
+                    })?;
+            let localized = crate::hudelem::resolve_hud_text(strings, raw)
+                .ok_or_else(|| format!("missing {raw}"))?;
             let unbound = strings
-                .as_ref()
-                .and_then(|s| s.0.text(hud_iw4::KEY_UNBOUND))
+                .0
+                .text(hud_iw4::KEY_UNBOUND)
                 .ok_or_else(|| "KEY_UNBOUND localization missing".to_owned())?;
-            let text = hud_iw4::replace_directive(template, |cmd| {
+            let hint = hud_iw4::replace_directive(&localized, |cmd| {
                 if matches!(cmd, "+activate" | "+usereload") {
                     bind.to_owned()
                 } else {
@@ -142,10 +88,7 @@ pub(crate) fn update(
                 }
             })
             .replace("&&1", bind);
-            return Ok(Some((text, key.to_owned(), None)));
-        }
-        if ps.cursor_hint <= 4 {
-            return Ok(None);
+            return Ok(Some((hint, raw.to_owned(), None)));
         }
         let weapon = (ps.cursor_hint - 4) as u32;
         let weapons = weapons

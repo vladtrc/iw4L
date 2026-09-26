@@ -840,7 +840,7 @@ impl UdpAuthorityHub {
                 frame.svc_hud_splashes = splashes;
             }
             if let Some(pending) = pending_gamenotify.as_mut() {
-                frame.svc_game_notifies = pending.take_broadcast();
+                frame.svc_game_notifies = pending.take_for(client);
             }
 
             frame

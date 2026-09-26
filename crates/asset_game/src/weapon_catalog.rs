@@ -7075,6 +7075,21 @@ impl WeaponRegistry {
         gsc_weapon_script_name(self.name_of(index))
     }
 
+    pub fn world_models_table(&self) -> Vec<(String, Vec<String>)> {
+        (0..self.rows.len() as u32)
+            .map(|i| {
+                let model = self.world_model_of(i).unwrap_or_default().to_owned();
+                (model, self.hide_tags_of(i).to_vec())
+            })
+            .collect()
+    }
+
+    pub fn projectile_models_table(&self) -> Vec<String> {
+        (0..self.rows.len() as u32)
+            .map(|i| self.projectile_model_of(i).unwrap_or_default().to_owned())
+            .collect()
+    }
+
     pub fn script_names_table(&self) -> Vec<String> {
         (0..self.rows.len())
             .map(|i| self.script_name_of(i as u32))

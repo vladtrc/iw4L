@@ -181,7 +181,7 @@ pub use animtree::{
 };
 pub use arena::{
     ArenaCharsets, FACTION_ICON_COL, MapTeamSettings, SessionTeamSettings, arena_charsets,
-    load_iw5_team_sources, parse_arena, read_basemaps_arena, read_iwd_named,
+    arena_entry, load_iw5_team_sources, parse_arena, read_basemaps_arena, read_iwd_named,
     t5_settings_from_teamset_gsc, t5_settings_from_teamset_rawfile, t5_teamset_from_map_gsc,
     t5_teamset_from_rawfile, t5_teamset_key_from_rawfile, team_settings, team_settings_for_zone,
 };
@@ -299,16 +299,18 @@ pub use localize::{
 pub use map_entities::{
     FlagDescriptor, IntermissionView, MapEntsKeyCensus, MapScriptStruct, MapUseTrigger,
     MinimapCorners, ScriptBrushModelLink, ScriptBrushModelPlacement, ScriptModelId,
-    ScriptModelPlacement, SpawnPoint, census_entity_string_keys, dm_spawn_points,
-    dm_spawn_points_iw5, dm_spawn_points_t5, exploding_prop_machine, flag_descriptors,
-    flag_descriptors_iw5, flag_descriptors_t5, intermission_view, intermission_view_iw5,
-    intermission_view_t5, map_ents_entity_string, map_script_structs, map_script_structs_iw5,
-    map_script_structs_t5, map_use_triggers, map_use_triggers_iw5, map_use_triggers_t5,
-    minimap_corners, minimap_corners_iw5, minimap_corners_t5, parse_flag_descriptors,
-    parse_map_script_structs, parse_map_use_triggers, script_brush_model_placements,
-    script_brush_model_placements_iw5, script_brush_model_placements_t5, script_model_placements,
-    script_model_placements_iw5, script_model_placements_t5, worldspawn_north_yaw,
-    worldspawn_north_yaw_iw5, worldspawn_north_yaw_t5,
+    ScriptModelPlacement, SpawnPoint, airstrike_height, airstrike_height_iw5,
+    census_entity_string_keys, dm_spawn_points, dm_spawn_points_iw5, dm_spawn_points_t5,
+    exploding_prop_machine, flag_descriptors, flag_descriptors_iw5, flag_descriptors_t5,
+    intermission_view, intermission_view_iw5, intermission_view_t5, iw5_entity_string_named,
+    map_ents_entity_string, map_ents_entity_string_iw5, map_ents_entity_string_t5,
+    map_script_structs, map_script_structs_iw5, map_script_structs_t5, map_use_triggers_iw5,
+    map_use_triggers_t5, minimap_corners, minimap_corners_iw5, minimap_corners_t5,
+    parse_flag_descriptors, parse_map_script_structs, parse_map_use_triggers,
+    script_brush_model_placements, script_brush_model_placements_iw5,
+    script_brush_model_placements_t5, script_model_placements, script_model_placements_iw5,
+    script_model_placements_t5, worldspawn_north_yaw, worldspawn_north_yaw_iw5,
+    worldspawn_north_yaw_t5,
 };
 pub use map_script_sound::{
     MapScriptSoundFacts, MapScriptSoundSource, SessionMapScriptSound, ambient_play_alias,
@@ -347,8 +349,9 @@ pub use material_images::{
 };
 pub use menu_catalog::{
     CapturedStringTable, FontDef, HUD_CHROME_MENUS, HudMaterialPlan, HudMaterialTextureBinding,
-    ITEM_TYPE_BUTTON, ITEM_TYPE_TEXT, MenuCatalog, MenuDef, MenuItem, MenuRect, MenuSetLocalVar,
-    UI_MENU_ZONES, ZoneUiImage, load_menu_catalog, load_ui_menu_catalog, ui_games_root,
+    ITEM_TYPE_BUTTON, ITEM_TYPE_TEXT, ItemHandlers, MenuCatalog, MenuDef, MenuEvent, MenuHandlers,
+    MenuItem, MenuRect, MenuSetLocalVar, UI_MENU_ZONES, ZoneUiImage, load_menu_catalog,
+    load_ui_menu_catalog, ui_games_root,
 };
 pub use model_lighting::{
     BlockedReason, GridView, LitFragmentTileCensus, OwnedLightGrid, SampledLighting,
@@ -516,3 +519,6 @@ pub use asset_material::vertex_layout::{T5_WORLD_LAYER_HOST_STRIDE, VertexLayout
 pub use asset_material::{material_alpha_test, t5_smodel_camera_emits};
 
 pub mod image_handles;
+
+mod script_sources;
+pub use script_sources::{ScriptSources, ScriptTable};

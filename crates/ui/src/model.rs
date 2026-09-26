@@ -201,7 +201,6 @@ pub enum UiIntent {
     CommitPlayerNameEdit(String),
     CancelPlayerNameEdit,
     Quit,
-    Disconnect,
 
     CacSelectSlot(u32),
 

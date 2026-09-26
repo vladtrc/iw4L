@@ -6,7 +6,7 @@ use assets::{
 use bevy::prelude::*;
 use bevy::ui::{Display, FocusPolicy};
 use hud_iw4::{
-    ExprError, ExprHost, LowAmmoWarningQuery, Operand, PERKS_INFO_HD_MENU, SCREEN_BLEND_FLASHED,
+    ExprError, ExprHost, LowAmmoWarningQuery, Operand, PERKS_INFO_HD_MENU, SCREEN_BLEND_BLURRED,
     SPECIALTY_NULL, WEAPON_NAME_FADE_DURATION_MS, WEAPON_NAME_FADE_TAIL_MS, WEAPONBAR_HD_MENU,
     bg_get_perk_slot_index, bg_perk_code_key, cg_draw_player_weapon_low_ammo_warning,
     cg_fade_color, cg_is_flashbanged, cg_low_ammo_warning_color_pair,
@@ -80,10 +80,12 @@ struct WeaponbarExprHost<'a> {
     input: Option<&'a frame::HudInputView>,
     ms: i32,
     cg_time: i32,
+    shock_screen_type: i32,
     in_killcam: bool,
     missilecam: bool,
     game_ended: bool,
     spectating_client: bool,
+    dvars: sim::ScriptDvars<'a>,
     local_vars: &'a UiLocalVars,
     catalog: Option<&'a MenuCatalog>,
     menu: Option<&'a assets::MenuDef>,
@@ -105,7 +107,10 @@ impl WeaponbarExprHost<'_> {
 
 impl ExprHost for WeaponbarExprHost<'_> {
     fn ui_active(&self) -> Result<i32, ExprError> {
-        Ok(i32::from(self.input.is_some_and(|i| i.menu_open)))
+        Ok(i32::from(
+            self.input
+                .is_some_and(|i| i.menu_open || i.script_menu_open),
+        ))
     }
     fn action_slot_usable(&self, slot: i32) -> Result<i32, ExprError> {
         if self
@@ -191,7 +196,9 @@ impl ExprHost for WeaponbarExprHost<'_> {
         ))
     }
     fn dvar_int(&self, name: &str) -> Result<i32, ExprError> {
-        if name.eq_ignore_ascii_case("scr_gameended") {
+        if let Some(value) = self.dvars.int(name) {
+            Ok(value)
+        } else if name.eq_ignore_ascii_case("scr_gameended") {
             Ok(i32::from(self.game_ended))
         } else if name.eq_ignore_ascii_case("g_hardcore")
             || name.eq_ignore_ascii_case("onlinegame")
@@ -259,7 +266,7 @@ impl ExprHost for WeaponbarExprHost<'_> {
             self.cg_time,
             ps.shellshock_time,
             ps.shellshock_duration,
-            SCREEN_BLEND_FLASHED,
+            self.shock_screen_type,
         ))
     }
     fn weapon_name(&self) -> Result<Operand, ExprError> {
@@ -498,6 +505,79 @@ fn background_stem(background: &str) -> Option<String> {
 
 const WEAPOVERLAYINTERFACE_JAVELIN: i32 = 1;
 
+fn ads_javelin(ps: &PlayerState, weapons: &PreparedWeapons) -> bool {
+    let viewmodel = bg_get_viewmodel_weapon_index(ps);
+    viewmodel > 0
+        && ps.f_weapon_pos_frac == 1.0
+        && weapons
+            .0
+            .facts_of(viewmodel)
+            .is_some_and(|facts| facts.overlay_interface == WEAPOVERLAYINTERFACE_JAVELIN)
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct HudPlayerVis {
+    pub ui_active: bool,
+    pub flashbanged: bool,
+    pub weapon_script: String,
+    pub ads_javelin: bool,
+    pub missilecam: bool,
+    pub emp_jammed: bool,
+    pub game_ended: bool,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct HudPlayerVisInput<'w> {
+    input: Option<Res<'w, frame::HudInputView>>,
+    weapons: Option<Res<'w, PreparedWeapons>>,
+    cg_clock: Res<'w, CgFrameClock>,
+}
+
+impl HudPlayerVisInput<'_> {
+    pub(crate) fn read(&self, presented: &PresentedSnapshot, local: sim::ClientId) -> HudPlayerVis {
+        let ui_active = self
+            .input
+            .as_ref()
+            .is_some_and(|i| i.menu_open || i.script_menu_open);
+        let Some(ps) = presented.player(local) else {
+            return HudPlayerVis {
+                ui_active,
+                ..HudPlayerVis::default()
+            };
+        };
+        let snapshot = presented.snapshot();
+        let weapons = self.weapons.as_deref();
+        HudPlayerVis {
+            ui_active,
+            flashbanged: cg_is_flashbanged(
+                self.cg_clock.time(),
+                ps.shellshock_time,
+                ps.shellshock_duration,
+                presented
+                    .shellshock(local)
+                    .map_or(SCREEN_BLEND_BLURRED, |shock| shock.screen_type),
+            ) != 0,
+            weapon_script: weapons
+                .map(|w| {
+                    w.0.script_name_of(bg_get_viewmodel_weapon_index(ps))
+                        .to_owned()
+                })
+                .unwrap_or_default(),
+            ads_javelin: weapons.is_some_and(|w| ads_javelin(ps, w)),
+            missilecam: snapshot
+                .and_then(|s| s.meta.for_client(local))
+                .is_some_and(|m| m.remote_missile.is_some()),
+            emp_jammed: ps.other_flags & 0x400 != 0,
+            game_ended: snapshot.is_some_and(|s| {
+                matches!(
+                    s.meta.phase,
+                    sim::MatchPhase::Intermission | sim::MatchPhase::PostGame
+                )
+            }),
+        }
+    }
+}
+
 fn weapon_lock_view(
     ps: &PlayerState,
     weapons: &PreparedWeapons,
@@ -506,13 +586,7 @@ fn weapon_lock_view(
     projection: Option<&Projection>,
     surface: &crate::surface::Hud2dSurface,
 ) -> hud_iw4::WeaponLockView {
-    let viewmodel = bg_get_viewmodel_weapon_index(ps);
-    let ads_javelin = viewmodel > 0
-        && ps.f_weapon_pos_frac == 1.0
-        && weapons
-            .0
-            .facts_of(viewmodel)
-            .is_some_and(|facts| facts.overlay_interface == WEAPOVERLAYINTERFACE_JAVELIN);
+    let ads_javelin = ads_javelin(ps, weapons);
     let lock = meta
         .map(|m| m.weapon_lock)
         .filter(|lock| lock.weapon == ps.weapon && ps.health > 0)
@@ -628,6 +702,9 @@ pub(crate) fn update_weaponbar(
         input: client_input.input.as_deref(),
         ms: sys_milliseconds() as i32,
         cg_time: cg_clock.time(),
+        shock_screen_type: presented
+            .shellshock(local.0)
+            .map_or(SCREEN_BLEND_BLURRED, |shock| shock.screen_type),
         in_killcam: view.as_deref().is_some_and(|v| v.in_killcam()),
         missilecam: meta.is_some_and(|m| m.remote_missile.is_some()),
         game_ended: presented.snapshot().is_some_and(|s| {
@@ -637,6 +714,10 @@ pub(crate) fn update_weaponbar(
             )
         }),
         spectating_client: false,
+        dvars: presented
+            .snapshot()
+            .map(|s| s.meta.script_dvars(local.0))
+            .unwrap_or_default(),
         local_vars: &local_vars,
         catalog: Some(catalog),
         menu: None,

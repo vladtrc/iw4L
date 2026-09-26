@@ -7,6 +7,8 @@ pub const SVC_DISCONNECT_NOTIFY: u8 = 0x65;
 
 pub const SVC_PRINT: u8 = 0x66;
 
+pub const SVC_PRINT_BOLD: u8 = 0x67;
+
 #[derive(Message, Clone, Debug, PartialEq, Eq)]
 pub struct SvcGameNotify {
     pub id: u32,
@@ -21,31 +23,61 @@ pub struct SvcGameNotify {
 #[derive(Resource, Debug, Default)]
 pub struct PendingGameNotify {
     next_id: u32,
-    rows: Vec<SvcGameNotify>,
+    rows: Vec<(Option<ClientId>, SvcGameNotify)>,
+}
+
+fn clip(mut text: String) -> String {
+    if text.len() > u8::MAX as usize {
+        let mut end = u8::MAX as usize;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
 }
 
 impl PendingGameNotify {
-    pub fn push_connected(&mut self, name: String) {
-        self.push(SVC_PRINT, name, hud_iw4::MP_CONNECTED);
-    }
-
     pub fn push_left(&mut self, name: String) {
-        self.push(SVC_DISCONNECT_NOTIFY, name, hud_iw4::EXE_LEFTGAME);
+        self.push(
+            None,
+            SVC_DISCONNECT_NOTIFY,
+            name,
+            hud_iw4::EXE_LEFTGAME.to_owned(),
+        );
     }
 
-    fn push(&mut self, tag: u8, name: String, key: &'static str) {
+    pub fn adopt_from_world(&mut self, world: &mut sim::SimWorld) {
+        for print in world.take_pending_prints() {
+            let tag = if print.bold {
+                SVC_PRINT_BOLD
+            } else {
+                SVC_PRINT
+            };
+            self.push(print.recipient, tag, print.arg, print.template);
+        }
+    }
+
+    fn push(&mut self, recipient: Option<ClientId>, tag: u8, name: String, key: String) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        self.rows.push(SvcGameNotify {
-            id,
-            tag,
-            name,
-            key: key.to_owned(),
-        });
+        self.rows.push((
+            recipient,
+            SvcGameNotify {
+                id,
+                tag,
+                name: clip(name),
+                key: clip(key),
+            },
+        ));
     }
 
-    pub fn take_broadcast(&self) -> Vec<SvcGameNotify> {
-        self.rows.clone()
+    pub fn take_for(&self, client: ClientId) -> Vec<SvcGameNotify> {
+        self.rows
+            .iter()
+            .filter(|(recipient, _)| recipient.is_none_or(|r| r == client))
+            .map(|(_, row)| row.clone())
+            .collect()
     }
 
     pub fn clear_after_fanout(&mut self) {
@@ -84,8 +116,10 @@ pub fn decode_svc_game_notifies(
     for _ in 0..count {
         let id = input.get_u32()?;
         let tag = input.get_u8()?;
-        if tag != SVC_DISCONNECT_NOTIFY && tag != SVC_PRINT {
-            return Err(WireError::Malformed("gamenotify tag is not 'e' or 'f'"));
+        if !matches!(tag, SVC_DISCONNECT_NOTIFY | SVC_PRINT | SVC_PRINT_BOLD) {
+            return Err(WireError::Malformed(
+                "gamenotify tag is not 'e', 'f' or 'g'",
+            ));
         }
         let mut name = vec![0; input.get_u8()? as usize];
         input.get_bytes(&mut name)?;

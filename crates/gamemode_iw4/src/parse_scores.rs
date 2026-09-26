@@ -2,7 +2,7 @@ use crate::Score;
 
 pub const PARSE_SCORES_CAP: usize = 0x12;
 
-pub const SCORE_TOKENS_PER_CLIENT: usize = 8;
+pub(crate) const SCORE_TOKENS_PER_CLIENT: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParsedScores {

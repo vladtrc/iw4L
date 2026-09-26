@@ -235,6 +235,33 @@ pub fn arena_charsets(text: &str, map: &str) -> Option<ArenaCharsets> {
 }
 
 #[must_use]
+pub fn arena_entry(text: &str, map: &str) -> Option<std::collections::BTreeMap<String, String>> {
+    for block in text.split('{').skip(1) {
+        let body = block.split('}').next().unwrap_or(block);
+        let mut entry = std::collections::BTreeMap::new();
+        for raw in body.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let Some(key) = parts.next() else {
+                continue;
+            };
+            let value = unquote(parts.collect::<Vec<_>>().join(" ").as_str());
+            entry.insert(key.to_ascii_lowercase(), value);
+        }
+        if entry
+            .get("map")
+            .is_some_and(|name| name.eq_ignore_ascii_case(map))
+        {
+            return Some(entry);
+        }
+    }
+    None
+}
+
+#[must_use]
 pub fn parse_arena(text: &str) -> Vec<ArenaCharsets> {
     let mut rows = Vec::new();
     for block in text.split('{').skip(1) {

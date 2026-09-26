@@ -74,6 +74,10 @@ impl DerefMut for FrameWorld<'_> {
 }
 
 impl FrameWorld<'_> {
+    pub(crate) fn ecs(&mut self) -> &mut World {
+        self.ecs
+    }
+
     pub(crate) fn projectile_by_number(&self, entnum: i32) -> Option<ProjectileState> {
         let entity = entity_by_number(self.ecs, entnum)?;
         Some(self.ecs.get::<ProjectileRow>(entity)?.0)
@@ -167,57 +171,6 @@ impl FrameWorld<'_> {
         begin_script_movers_rotate_velocity_supplied(self, speed, level_time_ms)
     }
 
-    pub fn install_use_object_from_ent(
-        &mut self,
-        classname: &str,
-        number: i32,
-        use_time_seconds: f32,
-    ) -> Result<u32, crate::use_object::MapUseBindError> {
-        let mover = self
-            .script_mover_by_number(number)
-            .ok_or(crate::use_object::MapUseBindError::UnknownEnt)?;
-        self.install_map_use_object(
-            classname,
-            mover.state.tr_base,
-            mover.state.apos_tr_base,
-            None,
-            None,
-            Some(mover.box_mid),
-            Some(mover.box_half),
-            Some(number),
-            use_time_seconds,
-            "",
-        )
-    }
-
-    pub fn install_trigger_radius_on_ent(
-        &mut self,
-        number: i32,
-        radius: Option<f32>,
-        height: Option<f32>,
-        use_time_seconds: f32,
-    ) -> Result<u32, crate::use_object::MapUseBindError> {
-        let (box_mid, box_half) = gamemode_iw4::trigger_radius_box(radius, height)?;
-        if !self.set_script_mover_r_box(number, box_mid, box_half) {
-            return Err(crate::use_object::MapUseBindError::UnknownEnt);
-        }
-        let mover = self
-            .script_mover_by_number(number)
-            .ok_or(crate::use_object::MapUseBindError::UnknownEnt)?;
-        self.install_map_use_object(
-            gamemode_iw4::TRIGGER_RADIUS,
-            mover.state.tr_base,
-            mover.state.apos_tr_base,
-            radius,
-            height,
-            None,
-            None,
-            Some(number),
-            use_time_seconds,
-            "",
-        )
-    }
-
     pub fn set_script_mover_r_box(
         &mut self,
         number: i32,
@@ -236,7 +189,56 @@ impl FrameWorld<'_> {
         let Some(mover) = self.script_mover_mut_by_number(number) else {
             return false;
         };
+        mover.state.tr_type = entity_iw4::TR_STATIONARY;
+        mover.state.tr_delta = [0.0; 3];
         mover.state.tr_base = origin;
+        true
+    }
+
+    // Clients evaluate the trajectory between snapshots; a bare base write draws as a 20 Hz step.
+    pub fn set_script_mover_pose(
+        &mut self,
+        number: i32,
+        time_ms: i32,
+        origin: [f32; 3],
+        angles: [f32; 3],
+    ) -> bool {
+        let Some(mover) = self.script_mover_mut_by_number(number) else {
+            return false;
+        };
+        let state = &mut mover.state;
+        let per_sec = 1000.0 / crate::MATCH_TICK_MS as f32;
+        let consecutive = time_ms - crate::MATCH_TICK_MS as i32;
+        let delta: [f32; 3] = if state.tr_time == consecutive {
+            core::array::from_fn(|i| (origin[i] - state.tr_base[i]) * per_sec)
+        } else {
+            [0.0; 3]
+        };
+        let apos_delta: [f32; 3] = if state.apos_tr_time == consecutive {
+            core::array::from_fn(|i| {
+                math_iw4::angle_subtract(angles[i], state.apos_tr_base[i]) * per_sec
+            })
+        } else {
+            [0.0; 3]
+        };
+        state.tr_type = if delta == [0.0; 3] {
+            entity_iw4::TR_STATIONARY
+        } else {
+            entity_iw4::TR_LINEAR
+        };
+        state.tr_time = time_ms;
+        state.tr_duration = 0;
+        state.tr_base = origin;
+        state.tr_delta = delta;
+        state.apos_tr_type = if apos_delta == [0.0; 3] {
+            entity_iw4::TR_STATIONARY
+        } else {
+            entity_iw4::TR_LINEAR
+        };
+        state.apos_tr_time = time_ms;
+        state.apos_tr_duration = 0;
+        state.apos_tr_base = angles;
+        state.apos_tr_delta = apos_delta;
         true
     }
 

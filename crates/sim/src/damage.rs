@@ -1,11 +1,8 @@
 use crate::frame::FrameWorld;
 use crate::identities::{DamageSource, LifeSequence, PelletId};
-use crate::match_state::{
-    CLASS_CATALOG_DANGER_CLOSE, CLASS_CATALOG_STOPPING_POWER, ClientLifecycle, EventAudience,
-    SimEvent, class_catalog_has,
-};
+use crate::match_state::ClientLifecycle;
 use crate::world::{ClientId, Tick};
-use crate::world_objects::{DestructibleExplodeEvent, GlassPaneBasis, GlassPieceId};
+use crate::world_objects::{GlassPaneBasis, GlassPieceId};
 use gamemode_iw4::{
     G_CAN_DAMAGE_CONTENTS_MASK, g_can_damage_player_vis_scale, g_radius_damage_amount,
     radius_damage_distance_to_aabb,
@@ -13,29 +10,7 @@ use gamemode_iw4::{
 
 const AREA_ENTITY_CAPACITY: usize = 0x800;
 
-const CONCUSSION_GSC_WEAPON: &str = "concussion_grenade_mp";
-
-const CONCUSSION_GSC_RADIUS: f32 = 512.0;
-
-const CONCUSSION_GSC_WAIT_TICKS: u32 = 1;
 const _: () = assert!(crate::MATCH_TICK_MS == 50);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct DelayedConcussion {
-    pub due_tick: u32,
-    pub target: ClientId,
-    pub target_life: LifeSequence,
-    pub duration_ms: i32,
-}
-
-pub(crate) const HOST_SHOCK_FLASHBANG_MP: i32 = hud_iw4::HOST_SHOCK_FLASHBANG_MP;
-
-pub(crate) const HOST_SHOCK_CONCUSSION_GRENADE_MP: i32 = hud_iw4::HOST_SHOCK_CONCUSSION_GRENADE_MP;
-
-#[must_use]
-pub(crate) fn shellshock_dump_affects_movement(shellshock_index: i32) -> bool {
-    shellshock_index == HOST_SHOCK_CONCUSSION_GRENADE_MP
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DamageAttempt {
@@ -99,22 +74,6 @@ pub(crate) struct ExplosionBlast {
     pub killcam_entity_start_time: i32,
 }
 
-impl ExplosionBlast {
-    pub(crate) fn from_destructible(explode: &DestructibleExplodeEvent) -> Self {
-        Self {
-            origin: explode.origin,
-            radius: explode.explode_range_mp as f32,
-            inner_damage: explode.explode_damage.1 as f32,
-            outer_damage: explode.explode_damage.0 as f32,
-            weapon: 0,
-            source: explode.source,
-            attacker: explode.attacker,
-            attacker_life: explode.attacker_life,
-            killcam_entity_start_time: 0,
-        }
-    }
-}
-
 struct GlassBlastHit {
     id: GlassPieceId,
     amount: u32,
@@ -132,35 +91,177 @@ pub(crate) fn apply_explosion_blast(world: &mut FrameWorld, tick: Tick, blast: &
         let _ = apply_damage_attempt(world, tick, attempt);
     }
     apply_glass_blast_hits(world, tick, glass);
+    apply_entity_blast(world, blast);
 }
 
-pub(crate) fn apply_explosion_destructibles(
-    world: &mut FrameWorld,
-    blast: &ExplosionBlast,
-    skip_owner: Option<crate::ScriptModelId>,
-) -> Vec<DestructibleExplodeEvent> {
-    if !world.publishes_snapshot() {
-        return Vec::new();
+fn apply_entity_blast(world: &mut FrameWorld, blast: &ExplosionBlast) {
+    if blast.radius <= 0.0 {
+        return;
     }
-    let explode = DestructibleExplodeEvent {
-        owner: skip_owner.unwrap_or(crate::ScriptModelId::from_wire(u32::MAX)),
-        origin: blast.origin,
-        attacker: blast.attacker,
-        attacker_life: blast.attacker_life,
-        source: blast.source,
-        explode_range_mp: blast.radius.max(0.0) as u32,
-        explode_damage: (
-            blast.outer_damage.max(0.0) as u32,
-            blast.inner_damage.max(0.0) as u32,
-        ),
+    let means = crate::script_player::means(world, blast.source, blast.weapon, 0, true);
+    for (target, mid, dist) in
+        crate::gsc_ir::radius_targets(world.ecs(), blast.origin, blast.radius)
+    {
+        let amount = g_radius_damage_amount(
+            blast.inner_damage,
+            blast.outer_damage,
+            blast.radius,
+            dist,
+            1.0,
+        );
+        if amount <= 0 {
+            continue;
+        }
+        crate::gsc_ir::damage_entity(
+            world.ecs(),
+            &crate::gsc_ir::EntityHit {
+                target,
+                amount,
+                attacker: Some(blast.attacker),
+                means,
+                weapon: blast.weapon,
+                point: mid,
+                dir: std::array::from_fn(|i| mid[i] - blast.origin[i]),
+                bone: None,
+                flags: IDFLAGS_RADIUS,
+            },
+        );
+    }
+}
+
+const IDFLAGS_RADIUS: i32 = 1;
+
+pub(crate) fn apply_script_blast(
+    world: &mut FrameWorld,
+    tick: Tick,
+    blast: &crate::gsc_ir::ScriptBlast,
+) {
+    if blast.radius <= 0.0 {
+        return;
+    }
+    for target in radius_player_candidates(world, blast.origin, blast.radius) {
+        let Some(meta) = world.client_meta(target) else {
+            continue;
+        };
+        if meta.lifecycle != ClientLifecycle::Alive {
+            continue;
+        }
+        let victim_life = meta.life_sequence;
+        let Some(bounds) = world.player_area_bounds(target) else {
+            continue;
+        };
+        let dist = radius_damage_distance_to_aabb(blast.origin, bounds.mid(), bounds.half());
+        let vis_scale = player_radius_vis_scale(world, blast.origin, target);
+        let amount = g_radius_damage_amount(blast.max, blast.min, blast.radius, dist, vis_scale);
+        if amount <= 0 {
+            continue;
+        }
+        let victim_origin = world.player(target).map_or(bounds.mid(), |ps| ps.origin);
+        let dir: [f32; 3] = std::array::from_fn(|i| victim_origin[i] - blast.origin[i]);
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        let commit = blast.attacker.and_then(|attacker| {
+            Some(DeathCommit {
+                victim: target,
+                victim_life,
+                attacker,
+                attacker_life: world.client_meta(attacker)?.life_sequence,
+                source: DamageSource::Radius(
+                    blast
+                        .inflictor
+                        .unwrap_or(crate::ScriptModelId::from_wire(u32::MAX)),
+                ),
+                pellet: PelletId(0),
+                weapon: blast.weapon,
+                amount,
+                killcam_entity_start_time: 0,
+                inflictor_origin: Some(blast.origin),
+                hitloc: 0,
+            })
+        });
+        let hit = crate::script_player::Hit {
+            victim: target,
+            attacker: blast.attacker,
+            amount,
+            flags: IDFLAGS_RADIUS,
+            means: blast.means,
+            weapon: blast.weapon,
+            point: blast.origin,
+            dir: if len > 0.0 {
+                dir.map(|c| c / len)
+            } else {
+                [0.0; 3]
+            },
+            hitloc: 0,
+            inflictor: None,
+            commit,
+        };
+        crate::gsc_ir::player_damage(world.ecs(), tick, &hit);
+    }
+    apply_shared_glass_blast(
+        world,
+        tick,
+        blast.origin,
+        blast.max as i32,
+        blast.min as i32,
+        blast.radius,
+    );
+}
+
+pub(crate) fn apply_script_hit(world: &mut FrameWorld, tick: Tick, hit: &crate::gsc_ir::ScriptHit) {
+    let crate::gsc_ir::HitTarget::Player(target) = hit.target else {
+        return;
     };
-    let intents = world
-        .world_objects()
-        .destructible_radius_intents(&[explode]);
-    world
-        .world_objects_mut()
-        .apply_destructible_damage_batch(&intents)
-        .explodes
+    if hit.amount <= 0 {
+        return;
+    }
+    let Some(meta) = world.client_meta(target) else {
+        return;
+    };
+    if meta.lifecycle != ClientLifecycle::Alive {
+        return;
+    }
+    let victim_life = meta.life_sequence;
+    let Some(victim_origin) = world.player(target).map(|ps| ps.origin) else {
+        return;
+    };
+    let dir: [f32; 3] = std::array::from_fn(|i| victim_origin[i] - hit.origin[i]);
+    let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+    let commit = hit.attacker.and_then(|attacker| {
+        Some(DeathCommit {
+            victim: target,
+            victim_life,
+            attacker,
+            attacker_life: world.client_meta(attacker)?.life_sequence,
+            source: DamageSource::Radius(
+                hit.inflictor
+                    .unwrap_or(crate::ScriptModelId::from_wire(u32::MAX)),
+            ),
+            pellet: PelletId(0),
+            weapon: hit.weapon,
+            amount: hit.amount,
+            killcam_entity_start_time: 0,
+            inflictor_origin: Some(hit.origin),
+            hitloc: hit.hitloc,
+        })
+    });
+    let player_hit = crate::script_player::Hit {
+        victim: target,
+        attacker: hit.attacker,
+        amount: hit.amount,
+        flags: hit.flags,
+        means: hit.means,
+        weapon: hit.weapon,
+        point: hit.origin,
+        dir: if len > 0.0 {
+            dir.map(|c| c / len)
+        } else {
+            [0.0; 3]
+        },
+        hitloc: hit.hitloc,
+        inflictor: None,
+        commit,
+    };
+    crate::gsc_ir::player_damage(world.ecs(), tick, &player_hit);
 }
 
 fn radius_player_attempts(world: &FrameWorld, blast: &ExplosionBlast) -> Vec<DamageAttempt> {
@@ -332,21 +433,6 @@ pub(crate) fn apply_shared_glass_blast(
     *world.stuck_holdrand_mut() = holdrand;
 }
 
-pub(crate) fn apply_explode_glass_blast(
-    world: &mut FrameWorld,
-    tick: Tick,
-    explode: &DestructibleExplodeEvent,
-) {
-    apply_shared_glass_blast(
-        world,
-        tick,
-        explode.origin,
-        explode.explode_damage.1 as i32,
-        explode.explode_damage.0 as i32,
-        explode.explode_range_mp as f32,
-    );
-}
-
 fn player_radius_vis_scale(world: &FrameWorld, inflictor: [f32; 3], target: ClientId) -> f32 {
     let Some(ps) = world.player(target) else {
         return 1.0;
@@ -371,10 +457,10 @@ fn t_trace_passed(trace: &trace_iw4::Trace) -> bool {
 
 pub(crate) fn apply_flashbang_blast(
     world: &mut FrameWorld,
-    tick: Tick,
     origin: [f32; 3],
     radius_max: f32,
     radius_min: f32,
+    attacker: ClientId,
 ) {
     let min_r = radius_min.max(1.0);
     let max_r = if radius_max < min_r {
@@ -382,7 +468,6 @@ pub(crate) fn apply_flashbang_blast(
     } else {
         radius_max
     };
-    let time_ms = crate::level_time_ms(tick);
     let mut hits = Vec::new();
     for target in radius_player_candidates(world, origin, max_r) {
         let Some(meta) = world.client_meta(target) else {
@@ -429,94 +514,18 @@ pub(crate) fn apply_flashbang_blast(
         } else {
             flashbang_amount_angle(1.0)
         };
-        let Some(duration_ms) = flashbang_gsc_duration_ms(amount_distance, amount_angle) else {
-            continue;
-        };
-        hits.push((target, duration_ms));
+        hits.push((target, amount_distance, amount_angle));
     }
-    for (target, duration_ms) in hits {
-        let Some(ps) = world.player_mut(target) else {
-            continue;
-        };
-        let duration_ms = if ps.shellshock_time == time_ms {
-            duration_ms.max(ps.shellshock_duration)
-        } else {
-            duration_ms
-        };
-        ps.shellshock_index = HOST_SHOCK_FLASHBANG_MP;
-        ps.shellshock_time = time_ms;
-        ps.shellshock_duration = duration_ms;
-        ps.pm_flags |= playerstate_iw4::pm_flags::SHELLSHOCKED;
+    for (target, amount_distance, amount_angle) in hits {
+        crate::gsc_ir::flashbang(
+            world.ecs(),
+            target,
+            origin,
+            amount_distance,
+            amount_angle,
+            attacker,
+        );
     }
-}
-
-pub(crate) fn apply_concussion_leftover(
-    world: &mut FrameWorld,
-    tick: Tick,
-    intent: &DamageAttempt,
-) {
-    if world.weapon_script_name(intent.weapon) != CONCUSSION_GSC_WEAPON {
-        return;
-    }
-    let Some(origin) = intent.inflictor_origin else {
-        return;
-    };
-    let Some(ps) = world.player(intent.target) else {
-        return;
-    };
-    let dist = {
-        let dx = ps.origin[0] - origin[0];
-        let dy = ps.origin[1] - origin[1];
-        let dz = ps.origin[2] - origin[2];
-        (dx * dx + dy * dy + dz * dz).sqrt()
-    };
-    let duration_ms = concussion_gsc_duration_ms(dist);
-    world.pending_concussion_mut().push(DelayedConcussion {
-        due_tick: tick.0.saturating_add(CONCUSSION_GSC_WAIT_TICKS),
-        target: intent.target,
-        target_life: intent.target_life,
-        duration_ms,
-    });
-}
-
-pub(crate) fn tick_delayed_concussion(world: &mut FrameWorld, tick: Tick) {
-    let due: Vec<DelayedConcussion> = {
-        let pending = world.pending_concussion_mut();
-        let mut due = Vec::new();
-        pending.retain(|row| {
-            if row.due_tick <= tick.0 {
-                due.push(*row);
-                false
-            } else {
-                true
-            }
-        });
-        due
-    };
-    let time_ms = crate::level_time_ms(tick);
-    for row in due {
-        let Some(meta) = world.client_meta(row.target) else {
-            continue;
-        };
-        if meta.lifecycle == ClientLifecycle::Dead {
-            continue;
-        }
-        if meta.life_sequence != row.target_life {
-            continue;
-        }
-        let Some(ps) = world.player_mut(row.target) else {
-            continue;
-        };
-        ps.shellshock_index = HOST_SHOCK_CONCUSSION_GRENADE_MP;
-        ps.shellshock_time = time_ms;
-        ps.shellshock_duration = row.duration_ms;
-        ps.pm_flags |= playerstate_iw4::pm_flags::SHELLSHOCKED;
-    }
-}
-
-fn concussion_gsc_duration_ms(dist: f32) -> i32 {
-    let scale = (1.0 - dist / CONCUSSION_GSC_RADIUS).max(0.0);
-    ((2.0 + 4.0 * scale) * 1000.0).round() as i32
 }
 
 fn flashbang_amount_distance(dist: f32, min_r: f32, max_r: f32) -> f32 {
@@ -529,36 +538,6 @@ fn flashbang_amount_distance(dist: f32, min_r: f32, max_r: f32) -> f32 {
 
 fn flashbang_amount_angle(dot: f32) -> f32 {
     (dot + 1.0) * 0.5
-}
-
-fn flashbang_gsc_duration_ms(amount_distance: f32, amount_angle: f32) -> Option<i32> {
-    let angle = if amount_angle < 0.5 {
-        0.5
-    } else if amount_angle > 0.8 {
-        1.0
-    } else {
-        amount_angle
-    };
-    let duration_s = amount_distance * angle * 6.0;
-    if duration_s < 0.25 {
-        None
-    } else {
-        Some((duration_s * 1000.0).round() as i32)
-    }
-}
-
-fn flinch_damage_dir(world: &FrameWorld, intent: &DamageAttempt) -> Option<[f32; 3]> {
-    let victim = world.player(intent.target)?.origin;
-    let from = intent.inflictor_origin.or_else(|| {
-        matches!(intent.source, crate::DamageSource::Shot(_))
-            .then(|| world.player(intent.attacker).map(|ps| ps.origin))
-            .flatten()
-    })?;
-    Some([
-        victim[0] - from[0],
-        victim[1] - from[1],
-        victim[2] - from[2],
-    ])
 }
 
 pub(crate) fn apply_damage_attempt(
@@ -575,297 +554,31 @@ pub(crate) fn apply_damage_attempt(
     if meta.lifecycle != ClientLifecycle::Alive {
         return DamageOutcome::Refused(DamageRefusal::TargetNotAlive);
     }
-
-    if world.bootstrap_ref().kind.is_team()
-        && intent.attacker != intent.target
-        && world.client_meta(intent.attacker).is_some_and(|attacker| {
-            attacker.client_state_team != entity_iw4::TEAM_FREE
-                && attacker.client_state_team == meta.client_state_team
-        })
-    {
-        return DamageOutcome::Refused(DamageRefusal::FriendlyFire);
-    }
     if meta.life_sequence != intent.target_life {
         return DamageOutcome::Refused(DamageRefusal::StaleLife);
     }
-
-    let mut incoming = intent.amount;
+    let mut amount = intent.amount;
     if !matches!(intent.source, crate::DamageSource::Melee) {
         let scale = world
             .combat_facts_for(intent.weapon)
             .map(|facts| facts.location_scale(intent.hitloc))
             .unwrap_or(1.0);
-        incoming = (incoming as f32 * scale) as i32;
-        if incoming <= 0 {
-            return DamageOutcome::Refused(DamageRefusal::NonPositive);
-        }
+        amount = (amount as f32 * scale) as i32;
     }
-
-    let attacker_perks = world
-        .client_meta(intent.attacker)
-        .and_then(|m| m.loadout.as_ref())
-        .map(|loadout| loadout.perks)
-        .unwrap_or([0; 3]);
-    let inherits_perks = world
-        .combat_facts_for(intent.weapon)
-        .map(|facts| facts.inherits_perks)
-        .unwrap_or(false);
-    let means = match intent.source {
-        crate::DamageSource::Shot(_) => gamemode_iw4::CacDamageMeans::Primary,
-        crate::DamageSource::Projectile(_) | crate::DamageSource::Radius(_) => {
-            gamemode_iw4::CacDamageMeans::Explosive
-        }
-        crate::DamageSource::Melee => gamemode_iw4::CacDamageMeans::Other,
-    };
-    let amount = gamemode_iw4::cac_modified_damage(
-        incoming,
-        means,
-        inherits_perks,
-        class_catalog_has(attacker_perks, CLASS_CATALOG_STOPPING_POWER),
-        class_catalog_has(attacker_perks, CLASS_CATALOG_DANGER_CLOSE),
-        {
-            let now = crate::hudelem::hud_level_time_ms(tick);
-            world
-                .client_meta(intent.target)
-                .is_some_and(|m| gamemode_iw4::combathigh_is_active(m.combathigh_until_ms, now))
-        },
-        gamemode_iw4::cac_weapon_is_throwingknife(world.weapon_script_name(intent.weapon)),
-    );
     if amount <= 0 {
         return DamageOutcome::Refused(DamageRefusal::NonPositive);
     }
-
-    if intent.attacker != intent.target {
-        let now = crate::hudelem::hud_level_time_ms(tick);
-        let fresh = world
-            .player(intent.target)
-            .is_some_and(|ps| ps.health >= ps.max_health)
-            && meta_not_down(world, intent.target);
-        let meta = world.client_meta_mut(intent.target);
-        if fresh {
-            meta.attackers_this_life.clear();
-        }
-        if !meta
-            .attackers_this_life
-            .iter()
-            .any(|&(a, _)| a == intent.attacker)
-        {
-            meta.attackers_this_life.push((intent.attacker, now));
-        }
-        let damaged = &mut world.client_meta_mut(intent.attacker).damaged_players;
-        match damaged.iter_mut().find(|(v, _)| *v == intent.target) {
-            Some(row) => row.1 = now,
-            None => damaged.push((intent.target, now)),
-        }
-    }
-
-    let damage_dir = flinch_damage_dir(world, intent);
-    let health_after = {
-        let Some(ps) = world.player_mut(intent.target) else {
-            return DamageOutcome::Refused(DamageRefusal::MissingTarget);
-        };
-        movement_iw4::pm_update_damage_timer(ps, amount, damage_dir);
-        ps.health = (ps.health - amount).max(0);
-        ps.damage_count = ps.damage_count.saturating_add(1);
-        ps.damage_event = ps.damage_event.wrapping_add(1);
-        ps.health
-    };
-
-    if intent.attacker != intent.target {
-        world.record_damage_feedback(
-            intent.attacker,
-            intent.target,
-            gamemode_iw4::TypeHit::Standard,
-            amount,
-            crate::hudelem::hud_level_time_ms(tick),
-        );
-    }
-
-    if health_after > 0 {
-        apply_concussion_leftover(world, tick, intent);
-        return DamageOutcome::Nonlethal { health_after };
-    }
-
-    let now = crate::hudelem::hud_level_time_ms(tick);
-    let already_down = world
-        .client_meta(intent.target)
-        .is_some_and(|m| m.laststand_until_ms.is_some());
-    let armed = world
-        .client_meta(intent.target)
-        .is_some_and(|m| m.pistoldeath_this_life);
-    let knife = gamemode_iw4::cac_weapon_is_throwingknife(world.weapon_script_name(intent.weapon));
-    if !already_down
-        && armed
-        && gamemode_iw4::may_do_laststand(
-            means,
-            hud_iw4::obituary_is_headshot(intent.hitloc),
-            knife,
-        )
-    {
-        if let Some(ps) = world.player_mut(intent.target) {
-            ps.health = 1;
-            ps.pm_type = playerstate_iw4::PM_TYPE_LAST_STAND;
-            ps.view_height_target = movement_iw4::view_height::LAST_STAND;
-            ps.pm_flags |= playerstate_iw4::pm_flags::LAST_STAND;
-        }
-        world.client_meta_mut(intent.target).laststand_until_ms =
-            Some(now.saturating_add(gamemode_iw4::FINALSTAND_DURATION_MS));
-        apply_concussion_leftover(world, tick, intent);
-        return DamageOutcome::Nonlethal { health_after: 1 };
-    }
-
-    let commit = DeathCommit {
-        victim: intent.target,
-        victim_life: intent.target_life,
-        attacker: intent.attacker,
-        attacker_life: intent.attacker_life,
-        source: intent.source,
-        pellet: intent.pellet,
-        weapon: intent.weapon,
-        amount,
-        killcam_entity_start_time: intent.killcam_entity_start_time,
-        inflictor_origin: intent.inflictor_origin,
-        hitloc: intent.hitloc,
-    };
-    {
-        let meta = world.client_meta_mut(intent.target);
-        meta.lifecycle = ClientLifecycle::Dead;
-        meta.dead_since_tick = Some(tick.0);
-    }
-    world.unlink_player_area(intent.target);
-    world.push_event(
-        tick,
-        EventAudience::All,
-        SimEvent::Died {
-            victim: commit.victim,
-            life_sequence: commit.victim_life,
-            attacker: Some(commit.attacker),
-            attacker_life: Some(commit.attacker_life),
-            source: Some(commit.source),
-            weapon: commit.weapon,
-            killcam_entity_start_time: commit.killcam_entity_start_time,
-        },
-    );
-    let event_parm = pack_obituary_parm(world, &commit);
-    world.push_entity_event(
-        tick,
-        EventAudience::All,
-        entity_iw4::EntityEventKind::OBITUARY,
-        crate::EntityEventPayload {
-            number: commit.victim.0 as i32,
-            other_entity_num: commit.victim.0 as i32,
-            attacker_entity_num: commit.attacker.0 as i32,
-            event_parm,
-            weapon: commit.weapon,
-            ..Default::default()
-        },
-    );
-    let facts = kill_facts(world, &commit, already_down, now);
-    crate::score::apply_death_score(
-        world,
-        tick,
-        commit.victim,
-        Some(commit.attacker),
-        Some(facts),
-    );
-    apply_player_killed(
-        world,
-        tick,
-        commit.victim,
-        Some(commit.attacker),
-        Some(&commit),
-    );
-    DamageOutcome::Died(commit)
+    crate::script_player::damage(world, tick, intent, amount)
 }
 
-fn meta_not_down(world: &FrameWorld, client: ClientId) -> bool {
-    world
-        .client_meta(client)
-        .is_some_and(|m| m.laststand_until_ms.is_none())
-}
-
-fn kill_facts(
-    world: &FrameWorld,
-    commit: &DeathCommit,
-    already_down: bool,
-    now: i32,
-) -> crate::score::KillFacts {
-    let shot = matches!(commit.source, crate::DamageSource::Shot(_));
-    let headshot = shot && hud_iw4::obituary_is_headshot(commit.hitloc);
-    let sniper = world
-        .combat_facts_for(commit.weapon)
-        .is_some_and(|f| f.weap_class == 1);
-    let one_shot = sniper
-        && !matches!(commit.source, crate::DamageSource::Melee)
-        && world
-            .client_meta(commit.victim)
-            .is_some_and(|m| m.attackers_this_life == [(commit.attacker, now)]);
-    let attacker = world.client_meta(commit.attacker);
-    let attacker_alive = attacker.is_some_and(|m| m.lifecycle == ClientLifecycle::Alive);
-    let posthumous = attacker
-        .and_then(|m| m.dead_since_tick)
-        .is_some_and(|t| crate::hudelem::hud_level_time_ms(Tick(t)) + 800 < now);
-    let longshot = shot
-        && attacker_alive
-        && match (world.player(commit.attacker), world.player(commit.victim)) {
-            (Some(a), Some(v)) => {
-                let d = [0, 1, 2].map(|i| a.origin[i] - v.origin[i]);
-                d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 1536.0 * 1536.0
-            }
-            _ => false,
-        };
-    crate::score::KillFacts {
-        one_shot,
-        headshot: headshot && !already_down,
-        execution: headshot && already_down,
-        posthumous,
-        longshot,
-        throwing_knife: gamemode_iw4::cac_weapon_is_throwingknife(
-            world.weapon_script_name(commit.weapon),
-        ),
-    }
-}
-
-fn pack_obituary_parm(world: &FrameWorld, commit: &DeathCommit) -> i32 {
-    let (weap_type, weap_class) = world
-        .combat_facts_for(commit.weapon)
-        .map(|f| (f.weap_type, f.weap_class))
-        .unwrap_or((0, 0));
-    let means = match commit.source {
-        crate::DamageSource::Shot(_) if hud_iw4::obituary_is_headshot(commit.hitloc) => {
-            hud_iw4::MOD_HEAD_SHOT
-        }
-        crate::DamageSource::Melee => hud_iw4::MOD_MELEE,
-        _ => 0,
-    };
-    hud_iw4::pack_obituary_event_parm(commit.weapon, means, weap_type, weap_class)
-}
-
-pub(crate) fn push_suicide_obituary(world: &mut FrameWorld, tick: Tick, victim: ClientId) {
-    world.push_entity_event(
-        tick,
-        EventAudience::All,
-        entity_iw4::EntityEventKind::OBITUARY,
-        crate::EntityEventPayload {
-            number: victim.0 as i32,
-            other_entity_num: victim.0 as i32,
-            attacker_entity_num: victim.0 as i32,
-            event_parm: hud_iw4::pack_obituary_event_parm(0, hud_iw4::MOD_SUICIDE, 0, 0),
-            weapon: 0,
-            ..Default::default()
-        },
-    );
-}
-
-pub(crate) fn apply_player_killed(
+pub(crate) fn play_death(
     world: &mut FrameWorld,
-    tick: Tick,
     victim: ClientId,
     attacker: Option<ClientId>,
     commit: Option<&DeathCommit>,
-) {
+) -> bool {
     let Some(self_ps) = world.player(victim).copied() else {
-        return;
+        return false;
     };
     let attacker_origin = attacker
         .filter(|&id| id != victim)
@@ -931,44 +644,8 @@ pub(crate) fn apply_player_killed(
         ps.pm_type = playerstate_iw4::PM_TYPE_DEAD;
     }
     world.set_anim_event_seed(seed);
-    crate::item::try_drop_scavenger_for_death(world, tick, victim, attacker);
-    crate::item::try_drop_weapon_for_death(world, tick, victim);
-
-    let Some(self_ps) = world.player(victim).copied() else {
-        return;
-    };
-    let slot = {
-        let time_ms = crate::corpse::level_time_ms(tick);
-        crate::corpse::occupy_player_clone(world, victim, &self_ps, time_ms)
-    };
-    if let Some(ps) = world.player_mut(victim) {
-        ps.corpse_index = i32::from(slot);
-        ps.e_flags |= 0x20000;
-        ps.health = 0;
-    }
     world.client_meta_mut(victim).look_at_killer_yaw = yaw;
-    crate::voice::play_death_sound(world, tick, victim);
-    if let Some(attacker) = attacker {
-        crate::voice::schedule_killfirm(world, tick, attacker, victim);
-    }
-    queue_death_player_cards(world, victim, attacker);
-}
-
-fn queue_death_player_cards(world: &mut FrameWorld, victim: ClientId, attacker: Option<ClientId>) {
-    match attacker {
-        Some(att) if att != victim => {
-            world.push_player_card_slot(att, victim, hud_iw4::PLAYER_CARD_SLOT_YOUKILLED);
-            world.push_player_card_open(att, hud_iw4::SCRIPT_MENU_YOUKILLED_DISPLAY);
-            world.push_player_card_slot(victim, att, hud_iw4::PLAYER_CARD_SLOT_KILLEDBY);
-            world.push_player_card_open(victim, hud_iw4::SCRIPT_MENU_KILLEDBY_DISPLAY);
-            world.push_player_card_open(victim, hud_iw4::SCRIPT_MENU_PERK_HIDE);
-        }
-        _ => {
-            world.push_player_card_slot(victim, victim, hud_iw4::PLAYER_CARD_SLOT_KILLEDBY);
-            world.push_player_card_open(victim, hud_iw4::SCRIPT_MENU_KILLEDBY_DISPLAY);
-            world.push_player_card_open(victim, hud_iw4::SCRIPT_MENU_PERK_HIDE);
-        }
-    }
+    true
 }
 
 fn anim_script_damagetype(

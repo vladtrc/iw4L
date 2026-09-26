@@ -23,6 +23,9 @@ impl RuntimeRole {
     }
 }
 
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Headless;
+
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum AppScreen {
     #[default]
@@ -423,6 +426,8 @@ impl Default for HostClassLoadouts {
 pub struct HudInputView {
     pub use_key: Option<String>,
     pub menu_open: bool,
+    pub console_open: bool,
+    pub script_menu_open: bool,
     pub action_slot_keys: [Option<String>; 4],
 }
 

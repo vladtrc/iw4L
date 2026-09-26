@@ -260,9 +260,11 @@ fn latch_authority_load_hold(
     navigation: Option<Res<frame::BotNavigationReady>>,
     scene: Option<Res<WorldScene>>,
     mut hold: Option<ResMut<AuthorityLoadHold>>,
+    headless: Option<Res<frame::Headless>>,
 ) {
     if let Some(hold) = hold.as_mut() {
-        hold.0 = (scene.is_some() && !scene.as_ref().is_some_and(|scene| scene.spawned))
+        let presenting = headless.is_none() && scene.is_some();
+        hold.0 = (presenting && !scene.as_ref().is_some_and(|scene| scene.spawned))
             || navigation.is_some_and(|ready| !ready.0);
     }
 }
@@ -2611,7 +2613,7 @@ fn cg_explosion(
     sync_combat_dump(&cursor, &mut combat);
 }
 
-const KILLCAM_FX_REMOVAL_WEAPONS: [&str; 1] = [gamemode_iw4::killstreaks::PREDATOR_PROJECTILE];
+const KILLCAM_FX_REMOVAL_WEAPONS: [&str; 1] = ["remotemissile_projectile_mp"];
 
 fn stop_killcam_explosion_fx(
     _transition: On<net::KillcamFxTransition>,

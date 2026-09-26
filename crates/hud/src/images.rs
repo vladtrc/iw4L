@@ -10,7 +10,7 @@ use bevy::image::ImageSampler;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use gamemode_iw4::DAMAGE_FEEDBACK_SHADER;
-use hud_iw4::COMPASS_ENEMY_FIRING_PING_IMAGE;
+use hud_iw4::{COMPASS_ENEMY_FIRING_PING_IMAGE, COMPASS_RADAR_LINE_IMAGE};
 
 use crate::gaps::ImageMiss;
 
@@ -345,6 +345,7 @@ impl HudImages {
             ),
             (DAMAGE_FEEDBACK_SHADER, HudSampling::Color, None),
             (COMPASS_ENEMY_FIRING_PING_IMAGE, HudSampling::Color, None),
+            (COMPASS_RADAR_LINE_IMAGE, HudSampling::Color, None),
         ] {
             let _ = self.get_sampled_with_sampler(
                 HUD_CHROME_NAMESPACE,

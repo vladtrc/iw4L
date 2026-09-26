@@ -67,6 +67,8 @@ pub const OP_GETPERK: i32 = 0x32;
 pub const OP_SELECTINGLOCATION: i32 = 0x33;
 pub const OP_TEAMFIELD: i32 = 0x35;
 pub const OP_OTHERTEAMFIELD: i32 = 0x36;
+pub const OP_MARINESFIELD: i32 = 0x37;
+pub const OP_OPFORFIELD: i32 = 0x38;
 
 pub const OP_ADSJAVELIN: i32 = 0x40;
 
@@ -103,6 +105,8 @@ pub const OP_SPECTATINGCLIENT: i32 = 0x5A;
 
 pub const OP_SPECTATINGFREE: i32 = 0x5B;
 
+pub const OP_GETPLAYERDATA: i32 = 0x6C;
+
 pub const OP_IS_ITEM_UNLOCKED: i32 = 0x70;
 
 pub const OP_WEAPONNAME: i32 = 0x75;
@@ -120,6 +124,50 @@ pub const OP_SPLASHHASICON: i32 = 0x92;
 pub const OP_SPLASHROWNUM: i32 = 0x93;
 
 pub const OP_GETPLAYERCARDINFO: i32 = 0xA5;
+
+pub const OP_STRING: i32 = 0x1C;
+
+pub const OP_FLOAT: i32 = 0x1D;
+
+pub const OP_DVARSTRING: i32 = 0x26;
+
+pub const OP_INLOBBY: i32 = 0x3B;
+
+pub const OP_INPRIVATEPARTY: i32 = 0x3C;
+
+pub const OP_PRIVATEPARTYHOST: i32 = 0x3D;
+
+pub const OP_PRIVATEPARTYHOSTINLOBBY: i32 = 0x3E;
+
+pub const OP_LOCALVARBOOL: i32 = 0x4F;
+
+pub const OP_LOCALVARFLOAT: i32 = 0x50;
+
+pub const OP_GAMETYPEDESCRIPTION: i32 = 0x57;
+
+pub const OP_RADARISJAMMED: i32 = 0x87;
+
+pub const OP_RADARJAMINTENSITY: i32 = 0x88;
+
+pub const OP_GETFOCUSEDITEMX: i32 = 0x95;
+
+pub const OP_GETFOCUSEDITEMY: i32 = 0x96;
+
+pub const OP_GETFOCUSEDITEMWIDTH: i32 = 0x97;
+
+pub const OP_GETFOCUSEDITEMHEIGHT: i32 = 0x98;
+
+pub const OP_GETMAPNAME: i32 = 0xA1;
+
+pub const OP_SCOREBOARDEXTERNALMUTENOTICE: i32 = 0x9E;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartyFlag {
+    InLobby,
+    InPrivateParty,
+    PrivatePartyHost,
+    PrivatePartyHostInLobby,
+}
 
 const PRECEDENCE: [i32; 81] = [
     2147483647, 0, 11, 11, 11, 13, 13, 9, 15, 15, 15, 15, 16, 16, 25, 25, 99, 80, 17, 18, 9, 14,
@@ -178,6 +226,14 @@ pub trait ExprHost {
     fn team_field(&self, field: &str) -> Result<Operand, ExprError>;
     fn player_field(&self, field: &str) -> Result<Operand, ExprError>;
     fn other_team_field(&self, field: &str) -> Result<Operand, ExprError>;
+    fn side_team_field(&self, allies: bool, field: &str) -> Result<Operand, ExprError> {
+        let _ = (allies, field);
+        Err(ExprError::UnsupportedOp(if allies {
+            OP_MARINESFIELD
+        } else {
+            OP_OPFORFIELD
+        }))
+    }
     fn local_var_string(&self, name: &str) -> Result<Operand, ExprError>;
 
     fn local_var_int(&self, name: &str) -> Result<i32, ExprError> {
@@ -236,6 +292,15 @@ pub trait ExprHost {
     fn table_lookup_by_row(&self, table: &str, row: i32, col: i32) -> Result<Operand, ExprError> {
         let _ = (table, row, col);
         Err(ExprError::UnsupportedOp(OP_TABLELOOKUPBYROW))
+    }
+
+    fn external_mute_notice(&self) -> Result<f32, ExprError> {
+        Ok(0.0)
+    }
+
+    fn player_data(&self, path: &[Operand]) -> Result<Operand, ExprError> {
+        let _ = path;
+        Err(ExprError::UnsupportedOp(OP_GETPLAYERDATA))
     }
 
     fn player_card_info(&self, field: i32, lookup: i32, slot: i32) -> Result<Operand, ExprError> {
@@ -308,6 +373,32 @@ pub trait ExprHost {
 
     fn emp_jammed(&self) -> Result<i32, ExprError> {
         Ok(0)
+    }
+
+    fn dvar_string(&self, name: &str) -> Result<String, ExprError> {
+        let _ = name;
+        Err(ExprError::UnsupportedOp(OP_DVARSTRING))
+    }
+
+    fn party_flag(&self, flag: PartyFlag) -> Result<i32, ExprError> {
+        let _ = flag;
+        Err(ExprError::Host("party"))
+    }
+
+    fn gametype_description(&self) -> Result<Operand, ExprError> {
+        Err(ExprError::UnsupportedOp(OP_GAMETYPEDESCRIPTION))
+    }
+
+    fn radar_jam_intensity(&self) -> Result<f32, ExprError> {
+        Err(ExprError::UnsupportedOp(OP_RADARJAMINTENSITY))
+    }
+
+    fn focused_item_rect(&self) -> Result<[f32; 4], ExprError> {
+        Err(ExprError::UnsupportedOp(OP_GETFOCUSEDITEMY))
+    }
+
+    fn map_name(&self) -> Result<Operand, ExprError> {
+        Err(ExprError::UnsupportedOp(OP_GETMAPNAME))
     }
 }
 
@@ -545,6 +636,14 @@ fn run_op(
             data.push(Operand::Str(host.localize_string(&args)?));
             Ok(())
         }
+        OP_GETPLAYERDATA => {
+            if operand_base > data.len() {
+                return Err(ExprError::StackUnderflow);
+            }
+            let path = data.split_off(operand_base);
+            data.push(host.player_data(&path)?);
+            Ok(())
+        }
         OP_NOOP | OP_COMMA => Ok(()),
         OP_LEFTPAREN => Ok(()),
         OP_RIGHTPAREN => {
@@ -747,6 +846,11 @@ fn run_op(
             data.push(host.other_team_field(&name)?);
             Ok(())
         }
+        OP_MARINESFIELD | OP_OPFORFIELD => {
+            let name = source_str(&pop_data(data)?);
+            data.push(host.side_team_field(op == OP_MARINESFIELD, &name)?);
+            Ok(())
+        }
         OP_LOCALVARSTRING => {
             let name = source_str(&pop_data(data)?);
             data.push(host.local_var_string(&name)?);
@@ -840,6 +944,69 @@ fn run_op(
             data.push(host.get_perk(&name)?);
             Ok(())
         }
+        OP_STRING => {
+            let v = pop_data(data)?;
+            data.push(Operand::Str(source_str(&v)));
+            Ok(())
+        }
+        OP_FLOAT => {
+            let v = pop_data(data)?;
+            data.push(Operand::Float(source_float(&v)));
+            Ok(())
+        }
+        OP_DVARSTRING => {
+            let name = source_str(&pop_data(data)?);
+            data.push(Operand::Str(host.dvar_string(&name)?));
+            Ok(())
+        }
+        OP_INLOBBY | OP_INPRIVATEPARTY | OP_PRIVATEPARTYHOST | OP_PRIVATEPARTYHOSTINLOBBY => {
+            let flag = match op {
+                OP_INLOBBY => PartyFlag::InLobby,
+                OP_INPRIVATEPARTY => PartyFlag::InPrivateParty,
+                OP_PRIVATEPARTYHOST => PartyFlag::PrivatePartyHost,
+                _ => PartyFlag::PrivatePartyHostInLobby,
+            };
+            data.push(Operand::Int(host.party_flag(flag)?));
+            Ok(())
+        }
+        OP_LOCALVARBOOL => {
+            let name = source_str(&pop_data(data)?);
+            data.push(Operand::Int(i32::from(host.local_var_int(&name)? != 0)));
+            Ok(())
+        }
+        OP_LOCALVARFLOAT => {
+            let name = source_str(&pop_data(data)?);
+            data.push(Operand::Float(source_float(&host.local_var_string(&name)?)));
+            Ok(())
+        }
+        OP_GAMETYPEDESCRIPTION => {
+            data.push(host.gametype_description()?);
+            Ok(())
+        }
+        OP_RADARISJAMMED => {
+            data.push(Operand::Int(i32::from(host.radar_jam_intensity()? > 0.0)));
+            Ok(())
+        }
+        OP_RADARJAMINTENSITY => {
+            data.push(Operand::Float(host.radar_jam_intensity()?));
+            Ok(())
+        }
+        OP_GETFOCUSEDITEMX
+        | OP_GETFOCUSEDITEMY
+        | OP_GETFOCUSEDITEMWIDTH
+        | OP_GETFOCUSEDITEMHEIGHT => {
+            let rect = host.focused_item_rect()?;
+            data.push(Operand::Float(rect[(op - OP_GETFOCUSEDITEMX) as usize]));
+            Ok(())
+        }
+        OP_GETMAPNAME => {
+            data.push(host.map_name()?);
+            Ok(())
+        }
+        OP_SCOREBOARDEXTERNALMUTENOTICE => {
+            data.push(Operand::Float(host.external_mute_notice()?));
+            Ok(())
+        }
         other => Err(ExprError::UnsupportedOp(other)),
     }
 }
@@ -903,7 +1070,7 @@ fn logic_op(op: i32, a: Operand, b: Operand) -> Result<Operand, ExprError> {
     Ok(r)
 }
 
-fn source_int(v: &Operand) -> i32 {
+pub fn source_int(v: &Operand) -> i32 {
     match v {
         Operand::Int(n) => *n,
         Operand::Float(f) => *f as i32,
@@ -911,7 +1078,7 @@ fn source_int(v: &Operand) -> i32 {
     }
 }
 
-fn source_float(v: &Operand) -> f32 {
+pub fn source_float(v: &Operand) -> f32 {
     match v {
         Operand::Int(n) => *n as f32,
         Operand::Float(f) => *f,
@@ -919,7 +1086,7 @@ fn source_float(v: &Operand) -> f32 {
     }
 }
 
-fn source_str(v: &Operand) -> String {
+pub fn source_str(v: &Operand) -> String {
     match v {
         Operand::Str(s) => s.clone(),
         Operand::Int(n) => {

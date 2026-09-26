@@ -298,6 +298,15 @@ impl PresentedSnapshot {
         })
     }
 
+    pub fn shellshock(&self, id: ClientId) -> Option<&hud_iw4::ShockParams> {
+        self.inner
+            .as_ref()?
+            .meta
+            .for_client(id)?
+            .shellshock
+            .as_ref()
+    }
+
     pub fn alive_player(&self, id: ClientId) -> Option<&PlayerState> {
         let alive = self.inner.as_ref().and_then(|snap| {
             snap.meta
@@ -387,7 +396,8 @@ fn fpv_cues_from_events(
             | SimEvent::ConfigurationChangeAccepted { .. }
             | SimEvent::ConfigurationChangeRejected { .. }
             | SimEvent::ScoreChanged { .. }
-            | SimEvent::MatchEnded { .. } => {}
+            | SimEvent::MatchEnded { .. }
+            | SimEvent::WeaponSwitchRequested { .. } => {}
         }
     }
     cues.shot_accepted = fire_weapon_count_in(entity_events, subject) > 0;

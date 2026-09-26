@@ -24,6 +24,7 @@ assets.workspace = true
 audio.workspace = true
 console.workspace = true
 diag.workspace = true
+frame.workspace = true
 render.workspace = true
 render_frontend.workspace = true
 sim.workspace = true

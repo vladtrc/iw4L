@@ -195,6 +195,10 @@ impl ZoneLane for T5Lane {
         let createart_name = sink.createart_name.clone();
         let t5_teamset = sink.t5_teamset.clone();
         let script_sound = std::mem::take(&mut sink.script_sound).finish();
+        let mut scripts = std::mem::take(&mut sink.scripts);
+        if let Some(entities) = crate::map_ents_entity_string_t5(&stream) {
+            scripts.set_entities(entities.to_owned());
+        }
         match (&createart_name, exp_fog) {
             (Some(name), Some(fog)) => report.push(format!(
                 "t5 createart: {name} fog=ready start={:.1} half={:.1}",
@@ -261,6 +265,7 @@ impl ZoneLane for T5Lane {
             report.push("no GfxWorld retained — nothing to draw".into());
             let dm_spawns = dm_spawn_points_t5(&stream);
             let mut loaded = LoadedWorld {
+                scripts,
                 sound: map_sound,
                 world: PreparedWorld {
                     policy: WorldDrawPolicy::t5(),
@@ -309,14 +314,7 @@ impl ZoneLane for T5Lane {
                         draw.sky_model.is_some()
                     ));
                 }
-                let mut map_models =
-                    super::build_t5_static_model_draw(&stream, geometry, map_xmodels);
-                if let Some(clip) = &clip {
-                    asset_world::capture_brush_trigger_hulls(
-                        &mut map_models.map_use_triggers,
-                        clip,
-                    );
-                }
+                let map_models = super::build_t5_static_model_draw(&stream, geometry, map_xmodels);
                 if let Some(error) = map_models.static_error.as_ref() {
                     report.push(format!("static models: {error}"));
                 }
@@ -346,7 +344,6 @@ impl ZoneLane for T5Lane {
                     scene_assets: map_xmodel_scene_assets,
                     script_instances: script_model_instances,
                     script_brush_models,
-                    map_use_triggers,
                     flag_descriptors,
                     script_structs,
                     ..
@@ -550,6 +547,7 @@ impl ZoneLane for T5Lane {
                 let min = draw.stats.min;
                 let max = draw.stats.max;
                 LoadedWorld {
+                    scripts,
                     sound: map_sound,
                     materials: map_materials,
                     world: PreparedWorld {
@@ -560,7 +558,6 @@ impl ZoneLane for T5Lane {
                         map_xmodel_scene_assets,
                         script_model_instances,
                         script_brush_models,
-                        map_use_triggers,
                         flag_descriptors,
                         script_structs,
                         dyn_ents: crate::DynEntCatalog::default(),
@@ -603,6 +600,7 @@ impl ZoneLane for T5Lane {
                 report.push(format!("T5 world mesh: {e}"));
                 let dm_spawns = dm_spawn_points_t5(&stream);
                 let mut loaded = LoadedWorld {
+                    scripts,
                     sound: map_sound,
                     world: PreparedWorld {
                         policy: WorldDrawPolicy::t5(),
@@ -777,6 +775,7 @@ impl ZoneLane for T5Lane {
             fx_models: sink.fx_models,
             report,
             teamsets: sink.teamsets,
+            scripts: sink.scripts,
             film_visions: std::collections::BTreeMap::new(),
             ..Default::default()
         }
@@ -849,6 +848,7 @@ impl ZoneLane for T5Lane {
             materials: sink.materials,
             report,
             cac_tables: sink.stats_tables.into_values().collect(),
+            scripts: sink.scripts,
         }
     }
 }

@@ -18,7 +18,7 @@ pub struct SvcOpenMenu {
     pub cs_index: i32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum PendingKind {
     CardSlot {
         source: ClientId,
@@ -28,13 +28,13 @@ enum PendingKind {
         cs_index: i32,
     },
     Splash {
-        key: &'static str,
+        key: String,
         slot: i32,
         optional: i32,
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingRow {
     recipient: ClientId,
     kind: PendingKind,
@@ -100,26 +100,28 @@ impl PendingPlayerCard {
             if row.recipient != client {
                 return true;
             }
-            match row.kind {
+            match &row.kind {
                 PendingKind::Splash {
                     key,
                     slot,
                     optional,
                 } => {
                     splashes.push(SvcHudSplash {
-                        key: key.into(),
-                        slot,
-                        optional,
+                        key: key.clone(),
+                        slot: *slot,
+                        optional: *optional,
                     });
                 }
                 PendingKind::CardSlot { source, slot } => {
                     slots.push(SvcCardSlot {
                         client: source.0,
-                        slot,
+                        slot: *slot,
                     });
                 }
                 PendingKind::OpenMenu { cs_index } => {
-                    menus.push(SvcOpenMenu { cs_index });
+                    menus.push(SvcOpenMenu {
+                        cs_index: *cs_index,
+                    });
                 }
             }
             false

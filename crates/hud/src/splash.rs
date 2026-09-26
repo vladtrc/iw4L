@@ -37,6 +37,7 @@ struct SplashExprHost<'a> {
     slots: &'a [SplashSlot; SPLASH_SLOT_COUNT],
     table: Option<&'a CapturedStringTable>,
     localize: Option<&'a assets::LocalizeCatalog>,
+    input: Option<&'a frame::HudInputView>,
 }
 
 impl SplashExprHost<'_> {
@@ -65,6 +66,33 @@ impl SplashExprHost<'_> {
         }
 
         String::from(key)
+    }
+
+    fn key_for(&self, command: &str) -> String {
+        let bound = self.input.and_then(|input| {
+            if matches!(command, "+activate" | "+usereload") {
+                return input.use_key.clone();
+            }
+            let slot = command
+                .strip_prefix("+actionslot ")?
+                .trim()
+                .parse::<usize>()
+                .ok()?
+                .checked_sub(1)?;
+            input.action_slot_keys.get(slot)?.clone()
+        });
+        bound.unwrap_or_else(|| {
+            let unbound = self
+                .localize
+                .and_then(|t| t.text(hud_iw4::KEY_UNBOUND))
+                .unwrap_or(hud_iw4::KEY_UNBOUND);
+            hud_iw4::unbound_directive(unbound, command)
+        })
+    }
+
+    fn cell_text(&self, cell: &str, optional_number: i32) -> String {
+        let translated = hud_iw4::replace_directive(&self.loc(cell), |cmd| self.key_for(cmd));
+        splash_replace_optional(&translated, optional_number)
     }
 }
 
@@ -119,11 +147,7 @@ impl ExprHost for SplashExprHost<'_> {
             Some(t) => t.cell(s.row, SPLASH_COL_TEXT),
             None => "",
         };
-        let translated = self.loc(cell);
-        Ok(Operand::Str(splash_replace_optional(
-            &translated,
-            s.optional_number,
-        )))
+        Ok(Operand::Str(self.cell_text(cell, s.optional_number)))
     }
     fn splash_description(&self, slot: i32) -> Result<Operand, ExprError> {
         let Some(s) = self.slot(slot) else {
@@ -136,11 +160,7 @@ impl ExprHost for SplashExprHost<'_> {
             Some(t) => t.cell(s.row, SPLASH_COL_DESCRIPTION),
             None => "",
         };
-        let translated = self.loc(cell);
-        Ok(Operand::Str(splash_replace_optional(
-            &translated,
-            s.optional_number,
-        )))
+        Ok(Operand::Str(self.cell_text(cell, s.optional_number)))
     }
     fn splash_material(&self, slot: i32) -> Result<Operand, ExprError> {
         let Some(s) = self.slot(slot) else {
@@ -247,6 +267,7 @@ pub(crate) fn update_splash(
     mut pending: ResMut<PendingSplash>,
     mut slots: ResMut<SplashSlots>,
     mut received: MessageReader<net::SvcHudSplash>,
+    input: Option<Res<frame::HudInputView>>,
 ) {
     if !surface.is_ready() {
         return;
@@ -312,6 +333,7 @@ pub(crate) fn update_splash(
         slots: &slots.slots,
         table: Some(table),
         localize: strings.as_ref().map(|s| &s.0),
+        input: input.as_deref(),
     };
     let lerp = item_run_script_lerp(&menu.on_open, live.start_ms);
     for command in &lerp.leftover {

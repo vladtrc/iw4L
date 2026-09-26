@@ -36,6 +36,9 @@ pub struct MapFacts {
 
     pub north_yaw: Option<f32>,
 
+    /// Absolute z of the `airstrikeheight` script_origin.
+    pub airstrike_height: Option<f32>,
+
     pub compass: crate::MapCompassDeclaration,
 
     pub script_sound: crate::MapScriptSoundFacts,

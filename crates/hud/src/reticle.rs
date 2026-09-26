@@ -4,7 +4,7 @@ use bevy::ui::Display;
 use frame::{LifeStarted, ViewSubject};
 use hud_iw4::{
     CG_CROSSHAIR_ALPHA_DEFAULT, CG_CROSSHAIR_ALPHA_MIN_DEFAULT, CgHipCrosshairGate,
-    SCREEN_BLEND_FLASHED, WeaponAdsCrosshairFacts, WeaponReticleFacts, cg_calc_reticle_alpha,
+    SCREEN_BLEND_BLURRED, WeaponAdsCrosshairFacts, WeaponReticleFacts, cg_calc_reticle_alpha,
     cg_calc_reticle_spread, cg_hip_crosshair_trans_scale, cg_hip_crosshair_visible,
     cg_is_flashbanged, cg_reticle_draw_size,
 };
@@ -254,7 +254,9 @@ pub(crate) fn update_reticle(
             cg_clock.time(),
             ps.shellshock_time,
             ps.shellshock_duration,
-            SCREEN_BLEND_FLASHED,
+            presented
+                .shellshock(local.0)
+                .map_or(SCREEN_BLEND_BLURRED, |shock| shock.screen_type),
         ) != 0,
         draw_hud: true,
         dvars_allow: true,

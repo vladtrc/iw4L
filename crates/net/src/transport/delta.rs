@@ -279,6 +279,7 @@ fn encode_projectile(out: &mut WireWriter, projectile: &ProjectileState) {
             .map(|p| p.saturating_add(1))
             .unwrap_or(0),
     );
+    out.put_u32(u32::from(projectile.grounded));
 }
 
 fn encode_trajectory(out: &mut WireWriter, tr: &entity_iw4::Trajectory) {
@@ -327,6 +328,7 @@ fn decode_projectile(input: &mut WireReader<'_>) -> Result<ProjectileState, Wire
             let encoded = input.get_u32()?;
             (encoded != 0).then(|| encoded.saturating_sub(1))
         },
+        grounded: input.get_u32()? != 0,
     })
 }
 

@@ -56,14 +56,16 @@ pub use cg::Cg;
 pub use compass::{
     COMPASS_ENEMY_FIRING_PING_IMAGE, COMPASS_FRIENDLY_HEIGHT_DEFAULT,
     COMPASS_FRIENDLY_WIDTH_DEFAULT, COMPASS_MAX_RANGE_DEFAULT_MP, COMPASS_PLAYER_HEIGHT_DEFAULT,
-    COMPASS_PLAYER_IMAGE, COMPASS_PLAYER_WIDTH_DEFAULT, COMPASS_SIZE_DEFAULT,
-    COMPASS_SOUND_PING_FADE_TIME_DEFAULT, CompassMapBounds, CompassMapUvWindow, RADARJAM_DIST_MAX,
-    RADARJAM_DIST_MIN, RADARJAM_DIST_NONE, REQUIRED_MAP_ASPECT_RATIO_DEFAULT,
-    cg_compass_fade_alpha, cg_compass_friendly_size, cg_compass_player_size,
-    cg_compass_sound_ping_fade, cg_compass_up_yaw_vector, cg_radar_jam_intensity,
-    cg_radar_jam_nearest_distance, cg_world_pos_to_compass_partial, compass_clamp_offset,
-    compass_map_bounds_from_corners, compass_map_bounds_from_minimap_corners,
-    compass_partial_map_uv, radar_contact_trail_visible, setup_mini_map_frame,
+    COMPASS_PLAYER_IMAGE, COMPASS_PLAYER_WIDTH_DEFAULT, COMPASS_RADAR_LINE_IMAGE,
+    COMPASS_RADAR_LINE_THICKNESS_DEFAULT, COMPASS_RADAR_PING_FADE_TIME_DEFAULT,
+    COMPASS_RADAR_UPDATE_TIME_DEFAULT, COMPASS_SIZE_DEFAULT, COMPASS_SOUND_PING_FADE_TIME_DEFAULT,
+    CompassMapBounds, CompassMapUvWindow, RADARJAM_DIST_MAX, RADARJAM_DIST_MIN, RADARJAM_DIST_NONE,
+    REQUIRED_MAP_ASPECT_RATIO_DEFAULT, cg_compass_fade_alpha, cg_compass_friendly_size,
+    cg_compass_player_size, cg_compass_sound_ping_fade, cg_compass_up_yaw_vector,
+    cg_radar_jam_intensity, cg_radar_jam_nearest_distance, cg_world_pos_to_compass_partial,
+    compass_clamp_offset, compass_map_bounds_from_corners, compass_map_bounds_from_minimap_corners,
+    compass_partial_map_uv, radar_contact_trail_visible, radar_line, radar_line_texture_center_s,
+    radar_lines_surround_point, setup_mini_map_frame,
 };
 pub use crosshair::{
     AIM_SPREAD_SCALE_MAX, CG_CROSSHAIR_ALPHA_DEFAULT, CG_CROSSHAIR_ALPHA_MIN_DEFAULT,
@@ -87,17 +89,15 @@ pub use draw_text_cmd::{
 pub use expr::{
     ExprError, ExprHost, OP_GETSPLASHDESCRIPTION, OP_GETSPLASHMATERIAL, OP_GETSPLASHTEXT,
     OP_INKILLCAM, OP_MENUISOPEN, OP_MILLISECONDS, OP_SCOREBOARD_VISIBLE, OP_SECONDSASCOUNTDOWN,
-    OP_SPLASHHASICON, OP_SPLASHROWNUM, OP_TEAMFIELD, OP_UIACTIVE, Operand, Statement,
+    OP_SPLASHHASICON, OP_SPLASHROWNUM, OP_TEAMFIELD, OP_UIACTIVE, Operand, PartyFlag, Statement,
     WeaponLockView, evaluate as evaluate_expression, evaluate_float, evaluate_string,
-    is_expression_true,
+    is_expression_true, source_int, source_str,
 };
 pub use flashbang::{
-    CONCUSSION_LOOK_PARMS, CONCUSSION_SOUND_PARMS, FLASHBANG_LOOK_PARMS, FLASHBANG_SHOT_FADE_MS,
-    FLASHBANG_SOUND_PARMS, FLASHBANG_WHITE_FADE_MS, HOST_SHOCK_CONCUSSION_GRENADE_MP,
-    HOST_SHOCK_FLASHBANG_MP, SCREEN_BLEND_FLASHED, ShellshockLookParms, ShellshockLookState,
-    ShellshockSoundParms, cg_is_flashbanged, cg_shellshock_flash_blend,
-    cg_shellshock_flash_fade_sin_cos, shellshock_look_parms, shellshock_remaining_ms,
-    shellshock_sound_parms, update_shellshock_look_control,
+    SCREEN_BLEND_BLURRED, SCREEN_BLEND_FLASHED, SCREEN_BLEND_NONE, ShellshockLookParms,
+    ShellshockLookState, ShellshockSoundParms, ShockParams, cg_is_flashbanged,
+    cg_shellshock_flash_blend, cg_shellshock_flash_fade_sin_cos, shellshock_remaining_ms,
+    update_shellshock_look_control,
 };
 pub use font::{
     G_COLOR_TABLE, HUDELEM_FONT_DEFAULT_BASE_SCALE, HUDELEM_FONT_HALF_BASE_SCALE,
@@ -127,19 +127,16 @@ pub use gamemsg::{
     obituary_mod, obituary_mod_killicon, pack_obituary_event_parm,
 };
 pub use hudelem::{
-    ALIGN_SCREEN_HORZ_SHIFT, DAMAGE_FEEDBACK_ALIGN_SCREEN, GAME_HUDELEM_ARCHIVED,
-    GAME_HUDELEM_CAPACITY, GAME_HUDELEM_STRIDE, GameHudElem, HE_TYPE_FREE, HE_TYPE_MATERIAL,
-    HE_TYPE_PLAYERNAME, HE_TYPE_TEXT, HE_TYPE_VALUE, HORZ_ALIGN_CENTER,
-    HUDELEM_ARCHIVAL_REMAPPED_TIMES, HUDELEM_BANK_CAPACITY, HUDELEM_STRIDE, HUDELEM_TYPE_NAMES,
-    HudElem, HudElemPlacement, MATCH_START_ALIGN_SCREEN, OBJECTIVE_FLASH_DIM,
-    OBJECTIVE_FLASH_HALF_MS, OBJECTIVE_MARKER_ALPHA, ORG_LEADING, ORG_MIDDLE, ORG_TRAILING,
-    OUTCOME_ALIGN_SCREEN, PLAYERSTATE_HUD_ARCHIVAL, PLAYERSTATE_HUD_BANKS_END,
-    PLAYERSTATE_HUD_CURRENT, SCORE_POPUP_ALIGN_ORG, SCORE_POPUP_ALIGN_SCREEN,
-    TEXT_CENTERED_ALIGN_ORG, VERT_ALIGN_MIDDLE, VERT_ALIGN_TOP, align_org, align_screen,
-    bg_lerp_hud_colors, color_rgba, copy_in_use_prefix, flags, hud_elem_glow_color,
-    hud_elem_lerp_font_scale, hud_elem_material_size, hud_elem_movement_frac, hud_elem_origin,
-    hud_elem_placement, hud_elem_position, hud_elem_scale_frac, hud_elem_screen_align,
-    objective_flash_elem, rebase_archival_times, unpack_rgba,
+    ALIGN_SCREEN_HORZ_SHIFT, GAME_HUDELEM_ARCHIVED, GAME_HUDELEM_CAPACITY, GAME_HUDELEM_STRIDE,
+    GameHudElem, HE_TYPE_FREE, HE_TYPE_MATERIAL, HE_TYPE_PLAYERNAME, HE_TYPE_TEXT, HE_TYPE_VALUE,
+    HE_TYPE_WAYPOINT, HORZ_ALIGN_CENTER, HUDELEM_ARCHIVAL_REMAPPED_TIMES, HUDELEM_BANK_CAPACITY,
+    HUDELEM_STRIDE, HUDELEM_TYPE_NAMES, HudElem, HudElemPlacement, ORG_LEADING, ORG_MIDDLE,
+    ORG_TRAILING, PLAYERSTATE_HUD_ARCHIVAL, PLAYERSTATE_HUD_BANKS_END, PLAYERSTATE_HUD_CURRENT,
+    VERT_ALIGN_MIDDLE, WAYPOINT_CONSTANT_SIZE, WAYPOINT_HIDE_OFFSCREEN, WAYPOINT_PULSE_OFFSCREEN,
+    align_org, align_screen, bg_lerp_hud_colors, color_rgba, copy_in_use_prefix, flags,
+    hud_elem_glow_color, hud_elem_lerp_font_scale, hud_elem_material_size, hud_elem_movement_frac,
+    hud_elem_origin, hud_elem_placement, hud_elem_position, hud_elem_scale_frac,
+    hud_elem_screen_align, rebase_archival_times, unpack_rgba,
 };
 pub use iris::{
     ADS_IRIS_ZOOM_ACTIVE_MIN, ADS_OVERLAY_FOUR_QUAD_LETTERBOX_SCALE, ADS_OVERLAY_ONE_QUAD_HALF,

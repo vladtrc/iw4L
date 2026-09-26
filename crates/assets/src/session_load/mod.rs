@@ -97,8 +97,6 @@ pub struct PreparedWorld {
 
     pub script_brush_models: Vec<crate::ScriptBrushModelPlacement>,
 
-    pub map_use_triggers: Vec<crate::MapUseTrigger>,
-
     pub flag_descriptors: Vec<crate::FlagDescriptor>,
 
     pub script_structs: Vec<crate::MapScriptStruct>,
@@ -135,6 +133,7 @@ pub struct PreparedWorld {
 
 #[derive(Default, Clone)]
 pub struct PreparedMatch {
+    pub scripts: crate::ScriptSources,
     pub world: PreparedWorld,
 
     pub fx: crate::FxDefinitions,

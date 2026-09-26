@@ -44,9 +44,43 @@ impl From<MenuRectCapture> for MenuRect {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum MenuEvent {
+    Script(String),
+    If {
+        condition: String,
+        then: Vec<MenuEvent>,
+    },
+    Else(Vec<MenuEvent>),
+    SetLocalVar {
+        kind: i32,
+        name: String,
+        expr: String,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MenuHandlers {
+    pub open: Vec<MenuEvent>,
+    pub close: Vec<MenuEvent>,
+    pub close_request: Vec<MenuEvent>,
+    pub esc: Vec<MenuEvent>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ItemHandlers {
+    pub action: Vec<MenuEvent>,
+    pub accept: Vec<MenuEvent>,
+    pub mouse_enter: Vec<MenuEvent>,
+    pub mouse_exit: Vec<MenuEvent>,
+    pub focus: Vec<MenuEvent>,
+    pub leave_focus: Vec<MenuEvent>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct MenuItem {
     pub name: String,
+    pub handlers: ItemHandlers,
 
     pub text_key: String,
     pub item_type: i32,
@@ -106,6 +140,7 @@ pub struct MenuDef {
 
     pub on_close_request: Vec<String>,
     pub on_esc: Vec<String>,
+    pub handlers: MenuHandlers,
 
     pub vis_exp: String,
 
@@ -489,6 +524,7 @@ fn load_menu_catalog_with_iwd(path: &Path, games: Option<&Path>) -> Result<MenuC
         names: HashMap::new(),
         script_sets: HashMap::new(),
         script_set_stack: Vec::new(),
+        branches: Vec::new(),
         image_links: HashMap::new(),
         images: Vec::new(),
         technique_links: HashMap::new(),
@@ -522,11 +558,20 @@ struct CapturedZoneImage {
     payload: Vec<u8>,
 }
 
+#[derive(Clone)]
+enum RecordedEvent {
+    Script(String),
+    Begin(Option<String>),
+    End,
+    SetLocalVar(i32, String, String),
+}
+
 struct MenuSink {
     catalog: MenuCatalog,
     names: HashMap<(u8, u32), String>,
-    script_sets: HashMap<(u8, u32), Vec<String>>,
+    script_sets: HashMap<(u8, u32), Vec<RecordedEvent>>,
     script_set_stack: Vec<Ptr>,
+    branches: Vec<(Option<String>, Vec<MenuEvent>)>,
     image_links: HashMap<Ptr, ImageLink>,
     images: Vec<CapturedZoneImage>,
 
@@ -600,13 +645,48 @@ impl MenuSink {
         self.names.insert(ptr_key(slot), name.to_owned());
     }
 
-    fn record_script_set(&mut self, script: &str) {
+    fn record_script_set(&mut self, event: RecordedEvent) {
         for body in &self.script_set_stack {
             self.script_sets
                 .entry(ptr_key(*body))
                 .or_default()
-                .push(script.to_owned());
+                .push(event.clone());
         }
+    }
+
+    fn push_event(&mut self, menu: &str, kind: MenuScriptKind, event: MenuEvent) {
+        if let Some((_, body)) = self.branches.last_mut() {
+            body.push(event);
+            return;
+        }
+        let Some(def) = self.catalog.menus.get_mut(menu) else {
+            return;
+        };
+        let list = match kind {
+            MenuScriptKind::OnOpen => &mut def.handlers.open,
+            MenuScriptKind::OnClose => &mut def.handlers.close,
+            MenuScriptKind::OnCloseRequest => &mut def.handlers.close_request,
+            MenuScriptKind::OnEsc => &mut def.handlers.esc,
+            MenuScriptKind::ExecKey => return,
+            item_kind => {
+                let Some(row) = def.items.last_mut() else {
+                    return;
+                };
+                match item_kind {
+                    MenuScriptKind::Action => &mut row.handlers.action,
+                    MenuScriptKind::Accept => &mut row.handlers.accept,
+                    MenuScriptKind::MouseEnter | MenuScriptKind::MouseEnterText => {
+                        &mut row.handlers.mouse_enter
+                    }
+                    MenuScriptKind::MouseExit | MenuScriptKind::MouseExitText => {
+                        &mut row.handlers.mouse_exit
+                    }
+                    MenuScriptKind::OnFocus => &mut row.handlers.focus,
+                    _ => &mut row.handlers.leave_focus,
+                }
+            }
+        };
+        list.push(event);
     }
 
     fn bind_image(&mut self, slot: Ptr, link: ImageLink) {
@@ -1201,7 +1281,8 @@ impl AssetLinkSink for MenuSink {
         kind: MenuScriptKind,
         script: &str,
     ) -> fastfile_iw4::Result<()> {
-        self.record_script_set(script);
+        self.record_script_set(RecordedEvent::Script(script.to_owned()));
+        self.push_event(menu, kind, MenuEvent::Script(script.to_owned()));
         let Some(def) = self.catalog.menus.get_mut(menu) else {
             return Ok(());
         };
@@ -1238,6 +1319,20 @@ impl AssetLinkSink for MenuSink {
         name: &str,
         expr: &str,
     ) -> fastfile_iw4::Result<()> {
+        self.record_script_set(RecordedEvent::SetLocalVar(
+            var_kind,
+            name.to_owned(),
+            expr.to_owned(),
+        ));
+        self.push_event(
+            menu,
+            kind,
+            MenuEvent::SetLocalVar {
+                kind: var_kind,
+                name: name.to_owned(),
+                expr: expr.to_owned(),
+            },
+        );
         if !item.is_empty() || kind != MenuScriptKind::OnOpen {
             return Ok(());
         }
@@ -1275,12 +1370,57 @@ impl AssetLinkSink for MenuSink {
         item: &str,
         kind: MenuScriptKind,
     ) -> fastfile_iw4::Result<()> {
-        let Some(scripts) = self.script_sets.get(&ptr_key(body)).cloned() else {
+        let Some(events) = self.script_sets.get(&ptr_key(body)).cloned() else {
             return Ok(());
         };
-        for script in scripts {
-            self.capture_menu_script(menu, item, kind, &script)?;
+        for event in events {
+            match event {
+                RecordedEvent::Script(script) => {
+                    self.capture_menu_script(menu, item, kind, &script)?
+                }
+                RecordedEvent::Begin(condition) => {
+                    self.begin_menu_event_branch(menu, item, kind, condition.as_deref())?
+                }
+                RecordedEvent::End => self.end_menu_event_branch(menu, item, kind)?,
+                RecordedEvent::SetLocalVar(var_kind, name, expr) => {
+                    self.capture_menu_set_local_var(menu, item, kind, var_kind, &name, &expr)?
+                }
+            }
         }
+        Ok(())
+    }
+
+    fn begin_menu_event_branch(
+        &mut self,
+        _menu: &str,
+        _item: &str,
+        _kind: MenuScriptKind,
+        condition: Option<&str>,
+    ) -> fastfile_iw4::Result<()> {
+        self.record_script_set(RecordedEvent::Begin(condition.map(str::to_owned)));
+        self.branches
+            .push((condition.map(str::to_owned), Vec::new()));
+        Ok(())
+    }
+
+    fn end_menu_event_branch(
+        &mut self,
+        menu: &str,
+        _item: &str,
+        kind: MenuScriptKind,
+    ) -> fastfile_iw4::Result<()> {
+        self.record_script_set(RecordedEvent::End);
+        let Some((condition, body)) = self.branches.pop() else {
+            return Ok(());
+        };
+        let event = match condition {
+            Some(condition) => MenuEvent::If {
+                condition,
+                then: body,
+            },
+            None => MenuEvent::Else(body),
+        };
+        self.push_event(menu, kind, event);
         Ok(())
     }
 
@@ -1315,7 +1455,10 @@ impl AssetLinkSink for MenuSink {
             || n.rsplit('/')
                 .next()
                 .is_some_and(|leaf| leaf.eq_ignore_ascii_case("basemaps.arena"));
-        if !is_arena {
+        let lower = n.to_ascii_lowercase();
+        let is_config = lower.ends_with(".cfg");
+        let is_shock = lower.starts_with("shock/") && lower.ends_with(".shock");
+        if !is_arena && !is_config && !is_shock {
             return Ok(());
         }
         let bytes = if zlib_compressed {

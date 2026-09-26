@@ -26,6 +26,8 @@ impl Default for SimWorld {
         let state_entity = ecs.spawn(SimState::default()).id();
         ecs.entity_mut(state_entity).insert(PayloadIndex::default());
         install_state_entity(&mut ecs, state_entity);
+        ecs.insert_resource(crate::gsc_ir::Runtime::default());
+        ecs.insert_resource(crate::gsc_ir::NativeRegistry::default());
         Self {
             ecs,
             state_entity,
@@ -47,6 +49,7 @@ impl Clone for SimWorld {
             collect_script_movers(&self.ecs),
             collect_dropped_items(&self.ecs),
         );
+        crate::gsc_ir::copy_state(&self.ecs, &mut ecs);
         Self {
             ecs,
             state_entity,
@@ -89,7 +92,13 @@ impl SimWorld {
         FrameWorld::new(&mut self.ecs, self.state_entity)
     }
 
-    fn run(&mut self, tick: Tick, input: &TickInput, msec: i32, reason: StepReason) -> Snapshot {
+    fn run(
+        &mut self,
+        tick: Tick,
+        input: &TickInput,
+        msec: i32,
+        reason: StepReason,
+    ) -> Result<Snapshot, crate::gsc_ir::Fault> {
         crate::step::run_schedule(&mut self.ecs, &mut self.schedule, tick, input, msec, reason)
     }
 
@@ -113,6 +122,50 @@ impl SimWorld {
         crate::frame::script_mover_by_id(&self.ecs, id)
     }
 
+    pub fn install_gsc_program(
+        &mut self,
+        program: crate::gsc_ir::Program,
+        natives: crate::gsc_ir::NativeRegistry,
+        level: crate::gsc_ir::LevelData,
+    ) -> Result<(), crate::gsc_ir::Fault> {
+        crate::gsc_ir::install(&mut self.ecs, program, natives, level)
+    }
+
+    pub fn start_gsc(
+        &mut self,
+        name: &str,
+        receiver: crate::gsc_ir::Value,
+        arguments: Vec<crate::gsc_ir::Value>,
+    ) -> Result<u64, crate::gsc_ir::Fault> {
+        crate::gsc_ir::start(&mut self.ecs, name, receiver, arguments)
+    }
+
+    pub fn set_gsc_dvar(&mut self, name: &str, value: &str) {
+        crate::gsc_ir::set_dvar(&mut self.ecs, name, value);
+    }
+
+    pub fn gsc_program_fingerprint(&self) -> Option<[u8; 32]> {
+        self.ecs
+            .resource::<crate::gsc_ir::Runtime>()
+            .program_fingerprint()
+    }
+
+    pub fn gsc_fault(&self) -> Option<&crate::gsc_ir::Fault> {
+        self.ecs.resource::<crate::gsc_ir::Runtime>().fault.as_ref()
+    }
+
+    pub fn gsc_players(&mut self) -> Vec<String> {
+        crate::gsc_ir::describe_players(&mut self.ecs)
+    }
+
+    pub fn script_seats(&self) -> Vec<(ClientId, crate::ScriptSeat)> {
+        crate::gsc_ir::script_seats(&self.ecs)
+    }
+
+    pub fn take_script_exit_level(&mut self) -> bool {
+        std::mem::take(&mut self.ecs.resource_mut::<crate::gsc_ir::Runtime>().exit_level)
+    }
+
     pub fn spawn_script_mover(
         &mut self,
         id: ScriptModelId,
@@ -120,6 +173,22 @@ impl SimWorld {
         angles: [f32; 3],
     ) -> Result<i32, crate::EntityAllocError> {
         self.frame().spawn_script_mover(id, origin, angles)
+    }
+
+    pub fn spawn_brush_mover(
+        &mut self,
+        id: ScriptModelId,
+        cmodel: u32,
+        origin: [f32; 3],
+        angles: [f32; 3],
+    ) -> Result<i32, crate::EntityAllocError> {
+        let mut frame = self.frame();
+        let number = frame.spawn_script_mover(id, origin, angles)?;
+        if let Some(mover) = frame.script_mover_mut_by_number(number) {
+            mover.state.index = cmodel as i32;
+            mover.state.solid = entity_iw4::SCRIPT_MOVER_BMODEL_SOLID;
+        }
+        Ok(number)
     }
 
     pub fn gentity_number(&self, id: ScriptModelId) -> Option<i32> {
@@ -148,34 +217,6 @@ impl SimWorld {
     ) -> usize {
         self.frame()
             .begin_script_movers_rotate_velocity_supplied(speed, level_time_ms)
-    }
-
-    pub fn install_use_object_from_ent(
-        &mut self,
-        classname: &str,
-        number: i32,
-        use_time_seconds: f32,
-    ) -> Result<u32, crate::use_object::MapUseBindError> {
-        self.frame()
-            .install_use_object_from_ent(classname, number, use_time_seconds)
-    }
-
-    pub fn install_dom_flags(
-        &mut self,
-        ents: &[gamemode_iw4::DomFlagMapEnt<'_>],
-    ) -> Result<Vec<u32>, crate::use_object::DomFlagInstallError> {
-        self.frame().install_dom_flags(ents)
-    }
-
-    pub fn install_trigger_radius_on_ent(
-        &mut self,
-        number: i32,
-        radius: Option<f32>,
-        height: Option<f32>,
-        use_time_seconds: f32,
-    ) -> Result<u32, crate::use_object::MapUseBindError> {
-        self.frame()
-            .install_trigger_radius_on_ent(number, radius, height, use_time_seconds)
     }
 
     pub fn set_script_mover_r_box(
@@ -251,6 +292,10 @@ impl SimWorld {
     }
 
     pub fn adopt_snapshot(&mut self, snapshot: &Snapshot) -> crate::AdoptReport {
+        assert!(
+            self.gsc_program_fingerprint().is_none(),
+            "snapshot lacks GSC state; restore a full SimWorld checkpoint"
+        );
         self.frame().adopt_snapshot(snapshot)
     }
 
@@ -259,11 +304,16 @@ impl SimWorld {
         snapshot: &Snapshot,
         local: ClientId,
     ) -> crate::AdoptReport {
+        assert!(
+            self.gsc_program_fingerprint().is_none(),
+            "prediction snapshots cannot restore authority GSC state"
+        );
         self.frame().adopt_prediction_snapshot(snapshot, local)
     }
 
     pub fn shutdown_game(&mut self) {
         self.frame().shutdown_game();
+        crate::gsc_ir::reset(&mut self.ecs);
     }
 
     pub fn hitvol_dump(&self) -> Vec<crate::world::HitvolDumpRow> {
@@ -308,5 +358,16 @@ pub fn step(
     msec: i32,
     reason: StepReason,
 ) -> Snapshot {
+    try_step(world, tick, input, msec, reason)
+        .unwrap_or_else(|fault| panic!("GSC execution failed: {fault}"))
+}
+
+pub fn try_step(
+    world: &mut SimWorld,
+    tick: Tick,
+    input: &TickInput,
+    msec: i32,
+    reason: StepReason,
+) -> Result<Snapshot, crate::gsc_ir::Fault> {
     world.run(tick, input, msec, reason)
 }

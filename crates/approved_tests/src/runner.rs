@@ -43,6 +43,7 @@ pub struct Outcome {
     pub end: End,
     pub marks: Vec<Event>,
     pub lifecycle: Vec<Event>,
+    pub script: Vec<Event>,
     pub runtime: Option<Event>,
 }
 
@@ -51,6 +52,7 @@ pub fn run(launch: Launch<'_>) -> Outcome {
         end: End::SpawnFailed(String::new()),
         marks: Vec::new(),
         lifecycle: Vec::new(),
+        script: Vec::new(),
         runtime: None,
     };
     let stdout_file = std::fs::File::create(launch.cwd.join("child_stdout.txt"));
@@ -113,6 +115,10 @@ pub fn run(launch: Launch<'_>) -> Outcome {
                     }
                     println!("[{:>7.1}s] {}", at_ms as f64 / 1000.0, line);
                     outcome.lifecycle.push(event);
+                } else if let Some(event) = parse(&line, "gsc:", at_ms) {
+                    last_progress = Instant::now();
+                    println!("[{:>7.1}s] {}", at_ms as f64 / 1000.0, line);
+                    outcome.script.push(event);
                 } else if let Some(event) = parse(&line, "runtime:", at_ms) {
                     println!("[{:>7.1}s] {}", at_ms as f64 / 1000.0, line);
                     outcome.runtime.get_or_insert(event);
@@ -130,6 +136,8 @@ pub fn run(launch: Launch<'_>) -> Outcome {
                     outcome.marks.push(event);
                 } else if let Some(event) = parse(&line, "lifecycle:", at_ms) {
                     outcome.lifecycle.push(event);
+                } else if let Some(event) = parse(&line, "gsc:", at_ms) {
+                    outcome.script.push(event);
                 }
             }
             outcome.end = end;

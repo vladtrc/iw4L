@@ -116,8 +116,14 @@ fn link_latest(path: &Path) -> Option<PathBuf> {
     }
     #[cfg(not(unix))]
     {
-        let _ = link;
-        None
+        // A symlink needs a privilege Windows withholds by default; a hard link does not.
+        match std::fs::remove_file(&link) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+        std::fs::hard_link(path, &link).ok()?;
+        Some(link)
     }
 }
 
@@ -370,8 +376,16 @@ pub fn process_elapsed_ns() -> u128 {
 }
 
 pub fn lifecycle_boundary(name: &str, detail: &str) {
+    controller_line("lifecycle", name, detail);
+}
+
+pub fn script_boundary(name: &str, detail: &str) {
+    controller_line("gsc", name, detail);
+}
+
+fn controller_line(prefix: &str, name: &str, detail: &str) {
     let line = format!(
-        "lifecycle: {name} pid={} ns={}{detail}",
+        "{prefix}: {name} pid={} ns={}{detail}",
         std::process::id(),
         process_elapsed_ns()
     );

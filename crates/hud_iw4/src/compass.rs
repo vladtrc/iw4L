@@ -265,6 +265,54 @@ pub fn cg_compass_sound_ping_fade(
     Some(1.0 - (cg_time_ms - begin_fade_time_ms) as f32 / duration_ms)
 }
 
+pub const COMPASS_RADAR_LINE_IMAGE: &str = "compass_radarline";
+
+pub const COMPASS_RADAR_UPDATE_TIME_DEFAULT: f32 = 4.0;
+
+pub const COMPASS_RADAR_PING_FADE_TIME_DEFAULT: f32 = 4.0;
+
+pub const COMPASS_RADAR_LINE_THICKNESS_DEFAULT: f32 = 0.4;
+
+pub const CG_HUD_MAP_RADAR_LINE_THICKNESS_DEFAULT: f32 = 0.15;
+
+#[must_use]
+pub fn radar_line_margin(bounds: CompassMapBounds, compass_max_range: f32) -> f32 {
+    let for_radar = compass_max_range * core::f32::consts::SQRT_2
+        + COMPASS_RADAR_LINE_THICKNESS_DEFAULT * compass_max_range;
+    let for_map = CG_HUD_MAP_RADAR_LINE_THICKNESS_DEFAULT * bounds.world_size[0];
+    for_radar.max(for_map) * 0.5
+}
+
+/// `GetRadarLine`: `dot(pos, line.xy) - line[2]` changes sign as the sweep passes `pos`.
+#[must_use]
+pub fn radar_line(bounds: CompassMapBounds, compass_max_range: f32, progress: f32) -> [f32; 3] {
+    let margin = radar_line_margin(bounds, compass_max_range);
+    let dir = [bounds.north[1], -bounds.north[0]];
+    let origin = dir[0] * bounds.upper_left[0] + dir[1] * bounds.upper_left[1];
+    [
+        dir[0],
+        dir[1],
+        (margin * 2.0 + bounds.world_size[0]) * progress + origin - margin,
+    ]
+}
+
+#[must_use]
+pub fn radar_lines_surround_point(a: [f32; 3], b: [f32; 3], pos: [f32; 2]) -> bool {
+    let side = |l: [f32; 3]| pos[0] * l[0] + pos[1] * l[1] - l[2] < 0.0;
+    side(a) != side(b)
+}
+
+/// `CG_CompassDrawRadarEffects` partial compass: S of the line texture at the compass centre.
+#[must_use]
+pub fn radar_line_texture_center_s(
+    line: [f32; 3],
+    view_xy: [f32; 2],
+    compass_max_range: f32,
+) -> f32 {
+    let rel = (view_xy[0] * line[0] + view_xy[1] * line[1] - line[2]) / compass_max_range;
+    rel / COMPASS_RADAR_LINE_THICKNESS_DEFAULT + 0.5
+}
+
 #[must_use]
 pub fn radar_contact_trail_visible(perks0: u32) -> bool {
     (perks0 & 1) == 0 && (perks0 & 0x0800_0000) == 0

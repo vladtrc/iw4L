@@ -1,10 +1,11 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use sim::SimBrush;
+use sim::{ClientId, SimBrush};
 
 use crate::observation::ModeObjective;
-use crate::query::{QueryResult, QuerySubsystem, WalkSample, WorldQuery};
+use crate::query::{HullTrace, QueryResult, QuerySubsystem, SightSample, WalkSample, WorldQuery};
 
 pub const NAV_SCHEMA: u32 = 8;
 pub const GRID_IN: f32 = 48.0;
@@ -316,36 +317,196 @@ fn aabb_of(brush: &SimBrush) -> Option<([f32; 3], [f32; 3])> {
     (axes[0] && axes[1] && axes[2]).then_some((mins, maxs))
 }
 
-pub fn bake(world: &mut impl WorldQuery, bounds: ([f32; 3], [f32; 3]), digest: u64) -> NavGraph {
+pub fn bake(world: &impl BakeTraces, bounds: ([f32; 3], [f32; 3]), digest: u64) -> NavGraph {
     bake_seeded(world, bounds, digest, &[])
 }
 
-pub fn bake_seeded(
+pub trait BakeTraces: Sync {
+    fn bake_hull(&self, start: [f32; 3], end: [f32; 3]) -> HullTrace;
+    fn bake_navigation(&self, start: [f32; 3], end: [f32; 3]) -> HullTrace;
+}
+
+struct Baker<'a, W>(&'a W);
+
+impl<W: BakeTraces> WorldQuery for Baker<'_, W> {
+    fn sight_ray(&mut self, _: [f32; 3], _: [f32; 3], _: ClientId) -> QueryResult<SightSample> {
+        Ok(SightSample::Unknown)
+    }
+
+    fn shot_ray(&mut self, _: [f32; 3], _: [f32; 3], _: ClientId) -> QueryResult<SightSample> {
+        Ok(SightSample::Unknown)
+    }
+
+    fn hull_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
+        Ok(self.0.bake_hull(start, end))
+    }
+
+    fn navigation_trace(&mut self, start: [f32; 3], end: [f32; 3]) -> QueryResult<HullTrace> {
+        Ok(self.0.bake_navigation(start, end))
+    }
+}
+
+/// Results come back in index order, so a parallel pass merges as the serial loop would.
+fn par_map<T: Send>(len: usize, work: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    const CHUNK: usize = 64;
+    let lanes = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(len.div_ceil(CHUNK))
+        .max(1);
+    let next = AtomicUsize::new(0);
+    let mut done: Vec<(usize, T)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..lanes)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut out = Vec::new();
+                    loop {
+                        let start = next.fetch_add(CHUNK, Ordering::Relaxed);
+                        if start >= len {
+                            return out;
+                        }
+                        out.extend((start..(start + CHUNK).min(len)).map(|i| (i, work(i))));
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
+    done.sort_unstable_by_key(|(i, _)| *i);
+    done.into_iter().map(|(_, value)| value).collect()
+}
+
+struct Floor {
+    feet: [f32; 3],
+    standable: bool,
+    boundary: bool,
+}
+
+/// Which floors become nodes is the merge's decision: dedupe depends on the columns merged before.
+fn column_floors(
     world: &mut impl WorldQuery,
+    at: [f32; 3],
+    z_top: f32,
+    z_bot: f32,
+    find_boundary: bool,
+) -> Vec<Floor> {
+    let step = GRID_IN;
+    let mut floors = Vec::new();
+    let mut top = z_top;
+    while top > z_bot && floors.len() < u16::MAX as usize {
+        let Ok(drop) = world.navigation_trace([at[0], at[1], top], [at[0], at[1], z_bot]) else {
+            break;
+        };
+        if drop.startsolid {
+            top -= 32.0;
+            continue;
+        }
+        if drop.fraction >= 1.0 {
+            break;
+        }
+        let feet = drop.endpos;
+        let Ok(stand) = world.navigation_trace(feet, feet) else {
+            break;
+        };
+        let standable = drop.normal[2] >= 0.7 && !stand.startsolid;
+        let boundary = find_boundary
+            && standable
+            && [(-step, 0.0), (step, 0.0), (0.0, -step), (0.0, step)]
+                .into_iter()
+                .any(|(dx, dy)| {
+                    let Ok(hit) = world.navigation_trace(
+                        [feet[0] + dx, feet[1] + dy, feet[2] + STEP_Z_IN],
+                        [feet[0] + dx, feet[1] + dy, feet[2] - STEP_Z_IN],
+                    ) else {
+                        return false;
+                    };
+                    hit.startsolid || hit.fraction >= 1.0 || hit.normal[2] < 0.7
+                });
+        floors.push(Floor {
+            feet,
+            standable,
+            boundary,
+        });
+        top = feet[2] - 32.0;
+    }
+    floors
+}
+
+fn merge_column(nodes: &mut Vec<[f32; 3]>, dedupe: &mut Buckets, floors: &[Floor]) -> bool {
+    let before = nodes.len();
+    let mut boundary = false;
+    for floor in floors {
+        if nodes.len() >= u16::MAX as usize {
+            break;
+        }
+        let feet = floor.feet;
+        if floor.standable
+            && !neighbors(dedupe, feet, DEDUPE_IN).into_iter().any(|i| {
+                dist_xy(nodes[i], feet) < DEDUPE_IN && (nodes[i][2] - feet[2]).abs() < DEDUPE_IN
+            })
+        {
+            dedupe
+                .entry(cell(feet, DEDUPE_IN))
+                .or_default()
+                .push(nodes.len());
+            nodes.push(feet);
+            boundary |= floor.boundary;
+        }
+    }
+    boundary || nodes.len() == before
+}
+
+/// Columns are traced in parallel batches so a cap wastes at most one batch.
+fn sample_columns(
+    world: &impl BakeTraces,
+    positions: &[[f32; 3]],
+    (z_top, z_bot): (f32, f32),
+    find_boundary: bool,
+    nodes: &mut Vec<[f32; 3]>,
+    dedupe: &mut Buckets,
+    columns: &mut usize,
+    mut boundary: impl FnMut([f32; 3]),
+) -> bool {
+    const BATCH: usize = 4096;
+    for batch in positions.chunks(BATCH) {
+        let floors = par_map(batch.len(), |i| {
+            column_floors(&mut Baker(world), batch[i], z_top, z_bot, find_boundary)
+        });
+        for (at, floors) in batch.iter().zip(&floors) {
+            if *columns >= COLUMN_CAP || nodes.len() >= u16::MAX as usize {
+                return false;
+            }
+            let edge = merge_column(nodes, dedupe, floors);
+            *columns += 1;
+            if edge {
+                boundary(*at);
+            }
+        }
+    }
+    true
+}
+
+pub fn bake_seeded(
+    world: &impl BakeTraces,
     bounds: ([f32; 3], [f32; 3]),
     digest: u64,
     seeds: &[[f32; 3]],
 ) -> NavGraph {
-    world.enter(QuerySubsystem::Connector);
     let (mins, maxs) = bounds;
     let step = GRID_IN;
     let mut nodes = Vec::new();
     let z_top = maxs[2] + 72.0;
     let z_bot = mins[2] - 8.0;
-    let mut sampled = BTreeSet::new();
     let mut dedupe = Buckets::new();
-    let mut columns = 0;
-    let mut refinements = Vec::new();
-    let mut truncated = false;
     for seed in seeds {
-        push_column(
-            world,
-            &mut nodes,
-            &mut dedupe,
-            *seed,
-            seed[2] + STEP_Z_IN,
-            z_bot,
-        );
+        let floors = column_floors(&mut Baker(world), *seed, seed[2] + STEP_Z_IN, z_bot, false);
+        merge_column(&mut nodes, &mut dedupe, &floors);
     }
     // Stable world-space tiles keep a distant bounds change from shifting doors
     // between samples. Multi-source breadth-first order gives every seed coverage
@@ -363,7 +524,8 @@ pub fn bake_seeded(
             queue.push_back(tile);
         }
     }
-    'scan: while let Some((tx, ty)) = queue.pop_front() {
+    let mut scan = Vec::new();
+    while let Some((tx, ty)) = queue.pop_front() {
         for ix in 0..TILE_CELLS {
             for iy in 0..TILE_CELLS {
                 let x = (tx * TILE_CELLS + ix) as f32 * step;
@@ -371,30 +533,7 @@ pub fn bake_seeded(
                 if x < mins[0] || x > maxs[0] || y < mins[1] || y > maxs[1] {
                     continue;
                 }
-                if columns >= COLUMN_CAP || nodes.len() >= u16::MAX as usize {
-                    truncated = true;
-                    break 'scan;
-                }
-                let before = nodes.len();
-                push_column(world, &mut nodes, &mut dedupe, [x, y, 0.0], z_top, z_bot);
-                columns += 1;
-                let boundary = nodes.len() == before
-                    || nodes[before..].iter().any(|p| {
-                        [(-step, 0.0), (step, 0.0), (0.0, -step), (0.0, step)]
-                            .into_iter()
-                            .any(|(dx, dy)| {
-                                let Ok(hit) = world.navigation_trace(
-                                    [p[0] + dx, p[1] + dy, p[2] + STEP_Z_IN],
-                                    [p[0] + dx, p[1] + dy, p[2] - STEP_Z_IN],
-                                ) else {
-                                    return false;
-                                };
-                                hit.startsolid || hit.fraction >= 1.0 || hit.normal[2] < 0.7
-                            })
-                    });
-                if boundary {
-                    refinements.push([x, y]);
-                }
+                scan.push([x, y, 0.0]);
             }
         }
         for (dx, dy) in [(-1, 0), (0, -1), (0, 1), (1, 0)] {
@@ -409,33 +548,55 @@ pub fn bake_seeded(
             }
         }
     }
+    let mut columns = 0;
+    let mut refinements = Vec::new();
+    let mut truncated = !sample_columns(
+        world,
+        &scan,
+        (z_top, z_bot),
+        true,
+        &mut nodes,
+        &mut dedupe,
+        &mut columns,
+        |at| refinements.push([at[0], at[1]]),
+    );
     // Finish base coverage before refinement can consume the node/column cap.
     // Refine in the same seed-first tile order, with the remaining bake budget.
-    'refine: for [x, y] in refinements {
-        for dx in [-0.5, 0.5] {
-            for dy in [-0.5, 0.5] {
-                let at = [x + dx * step, y + dy * step, 0.0];
-                if at[0] < mins[0]
-                    || at[0] > maxs[0]
-                    || at[1] < mins[1]
-                    || at[1] > maxs[1]
-                    || !sampled.insert(cell(at, step * 0.5))
-                {
-                    continue;
+    if !truncated {
+        let mut sampled = BTreeSet::new();
+        let mut refine = Vec::new();
+        for [x, y] in refinements {
+            for dx in [-0.5, 0.5] {
+                for dy in [-0.5, 0.5] {
+                    let at = [x + dx * step, y + dy * step, 0.0];
+                    if at[0] < mins[0]
+                        || at[0] > maxs[0]
+                        || at[1] < mins[1]
+                        || at[1] > maxs[1]
+                        || !sampled.insert(cell(at, step * 0.5))
+                    {
+                        continue;
+                    }
+                    refine.push(at);
                 }
-                if columns >= COLUMN_CAP || nodes.len() >= u16::MAX as usize {
-                    truncated = true;
-                    break 'refine;
-                }
-                push_column(world, &mut nodes, &mut dedupe, at, z_top, z_bot);
-                columns += 1;
             }
         }
+        truncated = !sample_columns(
+            world,
+            &refine,
+            (z_top, z_bot),
+            false,
+            &mut nodes,
+            &mut dedupe,
+            &mut columns,
+            |_| {},
+        );
     }
     let n = nodes.len();
-    let mut adj = vec![Vec::new(); n];
     let buckets = node_buckets(&nodes, step);
-    for i in 0..n {
+    let mut adj = par_map(n, |i| {
+        let mut probe = Baker(world);
+        let mut edges = Vec::new();
         for j in neighbors(&buckets, nodes[i], step) {
             if i == j {
                 continue;
@@ -450,12 +611,12 @@ pub fn bake_seeded(
             if dz > STEP_Z_IN.max(planar * 0.75) {
                 continue;
             }
-            let kind = match supported_walk(world, a, b) {
+            let kind = match supported_walk(&mut probe, a, b) {
                 Ok(WalkSample::Clear) => TraversalKind::Walk,
                 Ok(WalkSample::BreakGlass) => TraversalKind::BreakGlass,
                 _ => continue,
             };
-            adj[i].push(NavEdge {
+            edges.push(NavEdge {
                 to: j as u16,
                 cost: planar
                     + dz
@@ -467,9 +628,10 @@ pub fn bake_seeded(
                 kind,
             });
         }
-    }
+        edges
+    });
     let component = label_components(n, &adj);
-    let drops = link_drops(world, &nodes, &mut adj, step);
+    let drops = link_drops(world, &nodes, &mut adj, &buckets, step);
     let mut component_links = vec![
         Vec::new();
         component
@@ -502,47 +664,6 @@ pub fn bake_seeded(
     }
 }
 
-fn push_column(
-    world: &mut impl WorldQuery,
-    nodes: &mut Vec<[f32; 3]>,
-    dedupe: &mut Buckets,
-    at: [f32; 3],
-    z_top: f32,
-    z_bot: f32,
-) {
-    let mut top = z_top;
-    while top > z_bot && nodes.len() < u16::MAX as usize {
-        let Ok(drop) = world.navigation_trace([at[0], at[1], top], [at[0], at[1], z_bot]) else {
-            break;
-        };
-        if drop.startsolid {
-            top -= 32.0;
-            continue;
-        }
-        if drop.fraction >= 1.0 {
-            break;
-        }
-        let feet = drop.endpos;
-        let Ok(stand) = world.navigation_trace(feet, feet) else {
-            break;
-        };
-        if drop.normal[2] >= 0.7
-            && !stand.startsolid
-            && !neighbors(dedupe, feet, DEDUPE_IN).into_iter().any(|i| {
-                dist_xy(nodes[i], feet) < DEDUPE_IN && (nodes[i][2] - feet[2]).abs() < DEDUPE_IN
-            })
-        {
-            dedupe
-                .entry(cell(feet, DEDUPE_IN))
-                .or_default()
-                .push(nodes.len());
-            nodes.push(feet);
-        }
-        // Continue below this floor, including rooms beneath roofs and bridges.
-        top = feet[2] - 32.0;
-    }
-}
-
 fn dist_xy(a: [f32; 3], b: [f32; 3]) -> f32 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
@@ -550,17 +671,18 @@ fn dist_xy(a: [f32; 3], b: [f32; 3]) -> f32 {
 }
 
 fn link_drops(
-    world: &mut impl WorldQuery,
+    world: &impl BakeTraces,
     nodes: &[[f32; 3]],
     adj: &mut [Vec<NavEdge>],
+    buckets: &Buckets,
     step: f32,
 ) -> u32 {
-    let n = nodes.len();
     let planar_max = step * 2.0;
-    let mut drops = 0u32;
-    let buckets = node_buckets(nodes, step);
-    for i in 0..n {
-        for j in neighbors(&buckets, nodes[i], step) {
+    let walks: &[Vec<NavEdge>] = adj;
+    let found = par_map(nodes.len(), |i| {
+        let mut probe = Baker(world);
+        let mut out = Vec::new();
+        for j in neighbors(buckets, nodes[i], step) {
             if i == j {
                 continue;
             }
@@ -574,10 +696,10 @@ fn link_drops(
             if dz <= STEP_Z_IN || dz > DROP_Z_MAX {
                 continue;
             }
-            if adj[i].iter().any(|e| e.to as usize == j) {
+            if walks[i].iter().any(|e| e.to as usize == j) {
                 continue;
             }
-            let Ok(horiz) = world.hull_trace([a[0], a[1], a[2] + 2.0], [b[0], b[1], a[2] + 2.0])
+            let Ok(horiz) = probe.hull_trace([a[0], a[1], a[2] + 2.0], [b[0], b[1], a[2] + 2.0])
             else {
                 continue;
             };
@@ -585,7 +707,7 @@ fn link_drops(
                 continue;
             }
             let from = [b[0], b[1], a[2] + 2.0];
-            let Ok(land) = world.hull_trace(from, [from[0], from[1], b[2] - 8.0]) else {
+            let Ok(land) = probe.hull_trace(from, [from[0], from[1], b[2] - 8.0]) else {
                 continue;
             };
             if land.startsolid || land.normal[2] < 0.7 || land.fraction >= 1.0 {
@@ -597,13 +719,18 @@ fn link_drops(
             if (land.endpos[2] - b[2]).abs() > STEP_Z_IN {
                 continue;
             }
-            adj[i].push(NavEdge {
+            out.push(NavEdge {
                 to: j as u16,
                 cost: planar + dz,
                 kind: TraversalKind::Drop,
             });
-            drops += 1;
         }
+        out
+    });
+    let mut drops = 0u32;
+    for (edges, found) in adj.iter_mut().zip(found) {
+        drops += found.len() as u32;
+        edges.extend(found);
     }
     drops
 }

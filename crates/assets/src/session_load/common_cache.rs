@@ -63,6 +63,8 @@ pub(super) struct CommonCounts {
 
 #[derive(Clone)]
 pub(super) struct CommonProducts {
+    pub(super) scripts: crate::ScriptSources,
+    pub(super) t5_scripts: crate::ScriptSources,
     pub(super) material_seed: MaterialCatalog,
     pub(super) shared_surfaces: asset_model::SharedXModelSurfaces,
     pub(super) scene_models: crate::MapXModelSceneCatalog,
@@ -345,7 +347,8 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
         })
     };
 
-    let (material_seed, mut common_report, iw4_stats, startup_light_defs) = startup_walk.await;
+    let (material_seed, mut common_report, iw4_stats, startup_light_defs, startup_scripts) =
+        startup_walk.await;
     let startup_count = material_seed.materials.len();
 
     let t5_weapon_walk = {
@@ -365,6 +368,7 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
         fx: t5_fx,
         projectiles: t5_projectiles,
         teamsets: t5_teamsets,
+        scripts: t5_scripts,
         images: t5_images,
         stats_tables: t5_stats,
         report: t5_report,
@@ -409,6 +413,7 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
     let mut xmodel_walk = crate::PreparedXModelWalkCensus::default();
     let mut s1_common_bytes = 0;
     let mut teamsets = t5_teamsets;
+    let mut scripts = startup_scripts;
     let mut common_film_visions = std::collections::BTreeMap::new();
     let mut fpv_plan = None;
     let mut iw4_census_stats = Vec::new();
@@ -443,6 +448,12 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
             s1_common_bytes = census.s1_common_bytes;
             teamsets.extend(census.teamsets);
             common_film_visions = census.film_visions;
+            // patch_mp loads after common_mp, so its scripts win.
+            scripts = {
+                let mut ordered = census.scripts;
+                ordered.overlay(std::mem::take(&mut scripts));
+                ordered
+            };
             iw4_census_stats = census.cac_tables;
             (
                 census.weapons,
@@ -635,6 +646,8 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
         id: NEXT_COMMON_PROFILE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         key,
         products: CommonProducts {
+            scripts,
+            t5_scripts,
             material_seed,
             shared_surfaces,
             scene_models: common_scene_models,

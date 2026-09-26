@@ -40,7 +40,6 @@ members = [
     "crates/hud",
     "crates/hud_iw4",
     "crates/killcam_iw4",
-    "crates/sound_iw4",
     "crates/input_iw4",
     "crates/launcher",
     "crates/lighting_iw4",
@@ -141,7 +140,6 @@ gamemode_iw4 = { path = "crates/gamemode_iw4" }
 hud = { path = "crates/hud" }
 hud_iw4 = { path = "crates/hud_iw4" }
 killcam_iw4 = { path = "crates/killcam_iw4" }
-sound_iw4 = { path = "crates/sound_iw4" }
 input_iw4 = { path = "crates/input_iw4" }
 launcher = { path = "crates/launcher" }
 lighting_iw4 = { path = "crates/lighting_iw4" }
