@@ -137,6 +137,10 @@ pub use world_objects::{
     WorldObjectSnapshot, WorldObjectState, glass_blast_integer_damage,
 };
 
+mod scene_effects;
+pub use scene_effects::{
+    MAX_SCRIPT_EARTHQUAKES, ScriptEarthquake, ScriptFog, ScriptFogParams, ScriptSunFog,
+};
 mod objectives;
 pub use objectives::{
     CompassObjective, CompassVehicle, ObjectiveMatch, ObjectiveState, ScriptEffect,

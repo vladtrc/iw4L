@@ -24,6 +24,14 @@ settings do not suppress explicit script effects. State resets with the match.
   `r_exposure` (stops), `r_saturation` (1 is neutral), `r_blur`,
   `r_brightness` and `r_contrast`. These are dvars, not new GSC natives.
 
+* `SetExpFog(start, halfway, r, g, b, [opacity,] seconds)` changes map fog.
+  The 14-argument sun-fog form is supported. Transitions blend density and
+  packed color from the current state; the first call applies immediately.
+* `Earthquake(scale, seconds, origin, radius)` adds a timed camera shake.
+  Calls overlap, attenuate linearly with distance and fade over their duration.
+  Zero radius applies globally; each call clamps scale to 1 for camera angles.
+  Shake is presentation only and does not change player aim or collision.
+
 ```c
 self SetClientDvars("r_filmBrightness", 0.1, "r_hue", 90, "r_gamma", 1.2);
 self SetClientDvar("r_filmLightTint", (1, 0.5, 0.25));
@@ -32,4 +40,4 @@ self SetBlurForPlayer(6, 0.5);
 
 The render chain grades color, blurs the scene, then applies film, DoF and bloom.
 HUD remains readable. Bloom preserves the material's authored sRGB writes.
-Snapshots use protocol 84; host and client must share that protocol.
+Snapshots use protocol 85; host and client must share that protocol.

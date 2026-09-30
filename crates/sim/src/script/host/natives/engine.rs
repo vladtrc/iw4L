@@ -1704,9 +1704,9 @@ fn register_level(registry: &mut NativeRegistry) {
             });
         )*};
     }
+    registry.register(Function, "earthquake", super::scene_effects::earthquake);
     presented![
         "obituary",
-        "earthquake",
         "playfxontagforclients",
         "stopfxontag",
         "setslowmotion",

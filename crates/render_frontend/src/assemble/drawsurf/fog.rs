@@ -86,47 +86,97 @@ impl MapFrameFog {
     }
 
     pub fn sample(&self, time_ms: i32) -> ExpFog {
-        let elapsed = time_ms.saturating_sub(self.start_ms);
-        if self.duration_ms <= 0 || elapsed >= self.duration_ms {
-            return self.fog;
+        let sampled = sim::ScriptFog {
+            from: fog_params(self.previous),
+            to: fog_params(self.fog),
+            start_ms: self.start_ms,
+            duration_ms: self.duration_ms,
         }
-        let t = elapsed as f32 / self.duration_ms as f32;
-        let lerp = |a: f32, b: f32| a + t * (b - a);
-        let color = |a: [f32; 3], b: [f32; 3]| {
-            std::array::from_fn(|i| {
-                let pack = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5).floor();
-                lerp(pack(a[i]), pack(b[i])).round() / 255.0
-            })
-        };
-        let a = self.previous;
-        let b = self.fog;
-        let mut result = b;
-        result.start_dist = lerp(a.start_dist, b.start_dist);
-        let density = lerp(a.density(), b.density());
-        result.halfway_dist = if density == 0.0 {
-            0.0
-        } else {
-            std::f32::consts::LN_2 / density
-        };
-        result.max_opacity = lerp(a.max_opacity, b.max_opacity);
-        result.color_rgb = color(a.color_rgb, b.color_rgb);
-
-        if let Some(bs) = b.sun {
-            let as_ = a.sun.unwrap_or(SunFog {
-                color_rgb: a.color_rgb,
-                sun_dir: [0.0; 3],
-                begin_angle_deg: 0.0,
-                end_angle_deg: 0.0,
-                scale: 1.0,
-            });
-            result.sun = Some(SunFog {
-                color_rgb: color(as_.color_rgb, bs.color_rgb),
-                sun_dir: std::array::from_fn(|i| lerp(as_.sun_dir[i], bs.sun_dir[i])),
-                begin_angle_deg: lerp(as_.begin_angle_deg, bs.begin_angle_deg),
-                end_angle_deg: lerp(as_.end_angle_deg, bs.end_angle_deg),
-                scale: lerp(as_.scale, bs.scale),
-            });
-        }
+        .sample(time_ms);
+        let mut result = exp_fog(sampled);
+        result.transition_time = self.fog.transition_time;
+        result.volumetric = self.fog.volumetric;
         result
     }
+}
+
+fn fog_params(fog: ExpFog) -> sim::ScriptFogParams {
+    sim::ScriptFogParams {
+        start_dist: fog.start_dist,
+        halfway_dist: fog.halfway_dist,
+        color_rgb: fog.color_rgb,
+        max_opacity: fog.max_opacity,
+        sun: fog.sun.map(|sun| sim::ScriptSunFog {
+            color_rgb: sun.color_rgb,
+            sun_dir: sun.sun_dir,
+            begin_angle_deg: sun.begin_angle_deg,
+            end_angle_deg: sun.end_angle_deg,
+            scale: sun.scale,
+        }),
+    }
+}
+
+fn exp_fog(fog: sim::ScriptFogParams) -> ExpFog {
+    ExpFog {
+        start_dist: fog.start_dist,
+        halfway_dist: fog.halfway_dist,
+        color_rgb: fog.color_rgb,
+        max_opacity: fog.max_opacity,
+        transition_time: 0.0,
+        volumetric: None,
+        sun: fog.sun.map(|sun| SunFog {
+            color_rgb: sun.color_rgb,
+            sun_dir: sun.sun_dir,
+            begin_angle_deg: sun.begin_angle_deg,
+            end_angle_deg: sun.end_angle_deg,
+            scale: sun.scale,
+        }),
+    }
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct ScriptFogPresentation {
+    applied: Option<sim::ScriptFog>,
+    baseline: Option<MapFrameFog>,
+}
+
+pub(crate) fn sync_script_fog(
+    scene: Res<crate::prepare::scene::world::WorldScene>,
+    presented: Res<net::PresentedSnapshot>,
+    mut state: ResMut<ScriptFogPresentation>,
+    mut map_fog: Option<ResMut<MapFrameFog>>,
+    mut commands: Commands,
+) {
+    if !scene.spawned {
+        return;
+    }
+    let fog = presented
+        .snapshot()
+        .and_then(|snapshot| snapshot.meta.objectives.fog);
+    if fog == state.applied {
+        return;
+    }
+    if let Some(fog) = fog {
+        if state.applied.is_none() {
+            state.baseline = map_fog.as_deref().copied();
+        }
+        let mut target = MapFrameFog::new(exp_fog(fog.to));
+        target.previous = exp_fog(fog.from);
+        target.start_ms = fog.start_ms;
+        target.duration_ms = fog.duration_ms;
+        if let Some(map_fog) = map_fog.as_deref_mut() {
+            *map_fog = target;
+        } else {
+            commands.insert_resource(target);
+        }
+    } else if let Some(baseline) = state.baseline.take() {
+        if let Some(map_fog) = map_fog.as_deref_mut() {
+            *map_fog = baseline;
+        } else {
+            commands.insert_resource(baseline);
+        }
+    } else {
+        commands.remove_resource::<MapFrameFog>();
+    }
+    state.applied = fog;
 }

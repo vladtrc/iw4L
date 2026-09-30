@@ -23,6 +23,7 @@ pub(crate) fn reset_world_draw_plans_on_teardown(
         return;
     }
     commands.remove_resource::<super::drawsurf::MapFrameFog>();
+    commands.insert_resource(super::drawsurf::fog::ScriptFogPresentation::default());
     dfog.0 = false;
     *draw_list = DrawSurfList::default();
     *glass = GfxGlassMeshPlan::default();

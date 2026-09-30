@@ -85,12 +85,8 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             });
         )*};
     }
-    presented![
-        "setexpfog",
-        "setthermalbodymaterial",
-        "ambientplay",
-        "ambientstop",
-    ];
+    registry.register(Function, "setexpfog", super::scene_effects::set_exp_fog);
+    presented!["setthermalbodymaterial", "ambientplay", "ambientstop"];
     registry.register(Function, "getmapcustom", |world, _, args| {
         let key = string(args, 0)?;
         Ok(Value::string(

@@ -2785,6 +2785,111 @@ fn get_optional_text(input: &mut WireReader<'_>) -> Result<Option<String>, WireE
     }
 }
 
+fn encode_fog_params(out: &mut WireWriter, fog: sim::ScriptFogParams) {
+    out.put_f32(fog.start_dist);
+    out.put_f32(fog.halfway_dist);
+    for value in fog.color_rgb {
+        out.put_f32(value);
+    }
+    out.put_f32(fog.max_opacity);
+    out.put_u8(u8::from(fog.sun.is_some()));
+    if let Some(sun) = fog.sun {
+        for value in sun.color_rgb.into_iter().chain(sun.sun_dir) {
+            out.put_f32(value);
+        }
+        out.put_f32(sun.begin_angle_deg);
+        out.put_f32(sun.end_angle_deg);
+        out.put_f32(sun.scale);
+    }
+}
+
+fn decode_fog_params(input: &mut WireReader<'_>) -> Result<sim::ScriptFogParams, WireError> {
+    let fog = sim::ScriptFogParams {
+        start_dist: input.get_f32()?,
+        halfway_dist: input.get_f32()?,
+        color_rgb: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+        max_opacity: input.get_f32()?,
+        sun: match input.get_u8()? {
+            0 => None,
+            1 => Some(sim::ScriptSunFog {
+                color_rgb: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+                sun_dir: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+                begin_angle_deg: input.get_f32()?,
+                end_angle_deg: input.get_f32()?,
+                scale: input.get_f32()?,
+            }),
+            _ => return Err(WireError::Malformed("invalid fog sun tag")),
+        },
+    };
+    if !fog.valid() {
+        return Err(WireError::Malformed("invalid fog parameters"));
+    }
+    Ok(fog)
+}
+
+fn encode_scene_effects(out: &mut WireWriter, state: &sim::ObjectiveMatch) {
+    out.put_u8(u8::from(state.fog.is_some()));
+    if let Some(fog) = state.fog {
+        encode_fog_params(out, fog.from);
+        encode_fog_params(out, fog.to);
+        out.put_i32(fog.start_ms);
+        out.put_i32(fog.duration_ms);
+    }
+    debug_assert!(state.earthquakes.len() <= sim::MAX_SCRIPT_EARTHQUAKES);
+    out.put_u8(state.earthquakes.len() as u8);
+    for quake in &state.earthquakes {
+        out.put_u32(quake.id);
+        for value in quake.origin {
+            out.put_f32(value);
+        }
+        out.put_f32(quake.scale);
+        out.put_f32(quake.radius);
+        out.put_i32(quake.start_ms);
+        out.put_i32(quake.duration_ms);
+    }
+}
+
+fn decode_scene_effects(
+    input: &mut WireReader<'_>,
+    state: &mut sim::ObjectiveMatch,
+) -> Result<(), WireError> {
+    state.fog = match input.get_u8()? {
+        0 => None,
+        1 => {
+            let fog = sim::ScriptFog {
+                from: decode_fog_params(input)?,
+                to: decode_fog_params(input)?,
+                start_ms: input.get_i32()?,
+                duration_ms: input.get_i32()?,
+            };
+            if fog.duration_ms < 0 {
+                return Err(WireError::Malformed("negative fog duration"));
+            }
+            Some(fog)
+        }
+        _ => return Err(WireError::Malformed("invalid fog tag")),
+    };
+    let count = input.get_u8()? as usize;
+    if count > sim::MAX_SCRIPT_EARTHQUAKES {
+        return Err(WireError::Malformed("too many earthquakes"));
+    }
+    for _ in 0..count {
+        let quake = sim::ScriptEarthquake {
+            id: input.get_u32()?,
+            origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],
+            scale: input.get_f32()?,
+            radius: input.get_f32()?,
+            start_ms: input.get_i32()?,
+            duration_ms: input.get_i32()?,
+        };
+        if !quake.valid() {
+            return Err(WireError::Malformed("invalid earthquake"));
+        }
+        state.earthquakes.push(quake);
+    }
+    Ok(())
+}
+
 fn encode_objectives(out: &mut WireWriter, state: &sim::ObjectiveMatch) {
     for score in state.scores {
         out.put_i32(score);
@@ -2826,6 +2931,7 @@ fn encode_objectives(out: &mut WireWriter, state: &sim::ObjectiveMatch) {
     encode_vision(out, state.missile_vision.as_ref());
     encode_vision(out, state.night_vision.as_ref());
     encode_vision(out, state.pain_vision.as_ref());
+    encode_scene_effects(out, state);
     out.put_u16(state.vehicles.len() as u16);
     for vehicle in &state.vehicles {
         for v in vehicle.origin {
@@ -2897,6 +3003,7 @@ fn decode_objectives(input: &mut WireReader<'_>) -> Result<sim::ObjectiveMatch, 
     state.missile_vision = decode_vision(input)?;
     state.night_vision = decode_vision(input)?;
     state.pain_vision = decode_vision(input)?;
+    decode_scene_effects(input, &mut state)?;
     for _ in 0..input.get_u16()? {
         state.vehicles.push(sim::CompassVehicle {
             origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],

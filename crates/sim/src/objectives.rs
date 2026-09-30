@@ -9,6 +9,8 @@ pub struct ObjectiveMatch {
     pub game_end_time: i32,
     pub scripted_effects: bool,
     pub effects: Vec<ScriptEffect>,
+    pub fog: Option<crate::ScriptFog>,
+    pub earthquakes: Vec<crate::ScriptEarthquake>,
     pub naked_vision: Option<crate::VisionChange>,
     pub thermal_vision: Option<crate::VisionChange>,
     pub missile_vision: Option<crate::VisionChange>,

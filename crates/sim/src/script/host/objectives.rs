@@ -180,6 +180,8 @@ pub(crate) fn publish(world: &mut World) {
     let missile_vision = runtime.engine.missile_vision.clone();
     let night_vision = runtime.engine.night_vision.clone();
     let pain_vision = runtime.engine.pain_vision.clone();
+    let fog = runtime.engine.fog;
+    let now = crate::level_time_ms(world.resource::<crate::step::StepRequest>().tick);
     let rows: Vec<(u64, super::entities::PersistentFx)> = runtime
         .engine
         .effects
@@ -192,6 +194,8 @@ pub(crate) fn publish(world: &mut World) {
         .engine
         .effects
         .retain(|id, _| rows.iter().any(|(row, _)| row == id));
+    runtime.engine.earthquakes.retain(|quake| quake.active(now));
+    let earthquakes = runtime.engine.earthquakes.clone();
     let mut frame = FrameWorld::from_world(world);
     let effects = rows
         .into_iter()
@@ -214,6 +218,8 @@ pub(crate) fn publish(world: &mut World) {
         game_end_time,
         scripted_effects,
         effects,
+        fog,
+        earthquakes,
         naked_vision,
         thermal_vision,
         missile_vision,

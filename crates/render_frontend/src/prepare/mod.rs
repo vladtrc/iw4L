@@ -77,6 +77,7 @@ impl Plugin for RenderPreparePlugin {
             .init_resource::<crate::assemble::drawsurf::DistortionSettings>()
             .init_resource::<crate::assemble::drawsurf::SunProduct>()
             .init_resource::<crate::assemble::drawsurf::SpotProduct>()
+            .init_resource::<crate::assemble::drawsurf::fog::ScriptFogPresentation>()
             .init_resource::<FpvDrawPlan>()
             .init_resource::<crate::assemble::drawsurf::RemoteBodyDrawPlan>()
             .init_resource::<crate::assemble::drawsurf::ScriptModelDrawPlan>()
@@ -97,6 +98,9 @@ impl Plugin for RenderPreparePlugin {
                     crate::assemble::drawsurf::tess::glass::apply_cg_glass_tess
                         .after(spawn_world)
                         .after(WorkerCmdSet::FxNonDependent),
+                    crate::assemble::drawsurf::fog::sync_script_fog
+                        .after(spawn_world_finish)
+                        .before(stamp_prepared_scene_view),
                     fly_camera,
                     stamp_prepared_scene_view
                         .after(fly_camera)
