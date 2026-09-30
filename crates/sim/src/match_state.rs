@@ -23,7 +23,8 @@ mod snapshot_meta;
 
 pub use client_view::{
     KillcamHud, LocationSelection, MENU_COMMAND_TAIL, MenuCommand, MenuCommandKind, RadarMode,
-    RemoteMissile, ScriptDepthOfField, ScriptSeat, ViewEffects, VisionChange,
+    RemoteMissile, ScriptBlur, ScriptDepthOfField, ScriptSeat, ViewEffects, VisionChange,
+    is_postfx_dvar,
 };
 pub use events::{
     EntityEventPayload, EntityEventRecord, EventAudience, EventRecord, PelletFxRecord,

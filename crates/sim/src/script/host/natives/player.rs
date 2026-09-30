@@ -46,6 +46,7 @@ pub(crate) fn text(value: &Value) -> Result<Arc<str>, String> {
     match value {
         Value::String(s) | Value::LocalizedString(s) => Ok(s.clone()),
         Value::Int(n) => Ok(n.to_string().into()),
+        Value::Vector(v) => Ok(format!("{} {} {}", v[0], v[1], v[2]).into()),
         Value::Float(f) => Ok(runtime::to_text(&Value::Float(*f))
             .unwrap_or_default()
             .into()),

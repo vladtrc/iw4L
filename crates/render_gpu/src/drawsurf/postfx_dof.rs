@@ -77,6 +77,15 @@ pub fn film_sources(
         CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0,
         code_transpose_matrix_rows(Mat4::from_cols_array(&projection)),
     );
+    sources.set_constant_rows(
+        22,
+        &[float4_bits([
+            width as f32,
+            height as f32,
+            1.0 / width as f32,
+            1.0 / height as f32,
+        ])],
+    );
     let authored = vision.unwrap_or_default();
     let vision = if authored.enable {
         authored
@@ -183,13 +192,30 @@ impl DepthOfField {
     }
 }
 
-#[derive(Resource, Clone, Copy, Debug, Default)]
+#[derive(Resource, Clone, Copy, Debug)]
 pub struct DofFrame {
     pub dof: DepthOfField,
     pub bias: f32,
     pub scene_near: f32,
     pub view_model_near: f32,
     pub glow: GlowFrame,
+    pub blur: f32,
+    /// Hue in radians, gamma, exposure in stops, saturation.
+    pub grading: [f32; 4],
+}
+
+impl Default for DofFrame {
+    fn default() -> Self {
+        Self {
+            dof: DepthOfField::default(),
+            bias: 0.0,
+            scene_near: 0.0,
+            view_model_near: 0.0,
+            glow: GlowFrame::default(),
+            blur: 0.0,
+            grading: [0.0, 1.0, 0.0, 1.0],
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

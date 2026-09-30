@@ -166,4 +166,4 @@ pub use transport::udp_session::{CommittedAdmission, UdpAuthorityHub, UdpClientL
 pub use transport::udp_socket::{DEFAULT_RECV_BUDGET_PER_TICK, UdpDatagramSocket, UdpSendError};
 pub use transport::wire::{WireError, WireReader, WireWriter};
 
-pub const PROTOCOL_VERSION: u32 = 83;
+pub const PROTOCOL_VERSION: u32 = 84;

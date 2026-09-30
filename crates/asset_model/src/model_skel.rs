@@ -1333,7 +1333,6 @@ fn decode_surface_skin_t5(
         _ => return None,
     };
 
-    const WEIGHT_SCALE: f32 = 1.0 / 65535.0;
     let mut cursor = 0usize;
     let mut vertex = 0usize;
     let take = |cursor: &mut usize, n: usize| -> Option<()> {
@@ -1353,9 +1352,11 @@ fn decode_surface_skin_t5(
             for extra in 1..influences {
                 let off = start + 1 + (extra - 1) * 2;
                 let b = stream.u16_at(blend_ptr, off * 2).ok()?;
-                let w = stream.u16_at(blend_ptr, off * 2 + 2).ok()? as f32 * WEIGHT_SCALE;
+                let raw = stream.u16_at(blend_ptr, off * 2 + 2).ok()?;
+                let w = dpvs_iw4::skin_blend_weight(raw);
                 skin.bones[extra] = bone_at(b)?;
                 skin.weights[extra] = w;
+                skin.weight_u16[extra] = raw;
                 remaining -= w;
             }
             skin.weights[0] = remaining;
@@ -1808,7 +1809,6 @@ fn decode_surface_skin_iw5(
         _ => return None,
     };
 
-    const WEIGHT_SCALE: f32 = 1.0 / 65535.0;
     let mut cursor = 0usize;
     let mut vertex = rigid_assigned;
     let take = |cursor: &mut usize, n: usize| -> Option<()> {
@@ -1828,9 +1828,11 @@ fn decode_surface_skin_iw5(
             for extra in 1..influences {
                 let off = start + 1 + (extra - 1) * 2;
                 let b = stream.u16_at(blend_ptr, off * 2).ok()?;
-                let w = stream.u16_at(blend_ptr, off * 2 + 2).ok()? as f32 * WEIGHT_SCALE;
+                let raw = stream.u16_at(blend_ptr, off * 2 + 2).ok()?;
+                let w = dpvs_iw4::skin_blend_weight(raw);
                 skin.bones[extra] = bone_at(b)?;
                 skin.weights[extra] = w;
+                skin.weight_u16[extra] = raw;
                 remaining -= w;
             }
             skin.weights[0] = remaining;

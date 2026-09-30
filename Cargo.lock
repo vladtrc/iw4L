@@ -5101,6 +5101,7 @@ dependencies = [
  "naga",
  "net",
  "perf",
+ "playerstate_iw4",
  "render_anim",
  "render_frame",
  "render_fx",

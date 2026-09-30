@@ -148,6 +148,8 @@ pub mod pm_flags {
 }
 
 pub mod weap_flags {
+    pub const NIGHT_VISION: u32 = 0x40;
+
     pub const OFFHAND_VIEW: u32 = 0x2;
 
     pub const NO_ADS: u32 = 0x20;

@@ -180,6 +180,23 @@ impl XAnimCatalog {
         self.clip_at(self.index_by_name(ns, name)?)
     }
 
+    pub fn body_clip(
+        &self,
+        namespace: AssetNamespace,
+        name: &str,
+        body_bones: &[String],
+    ) -> Option<Arc<AnimClip>> {
+        if let Some(clip) = self.clip(namespace, name) {
+            return Some(clip);
+        }
+        if namespace == AssetNamespace::Iw4 {
+            return None;
+        }
+        let mut clip = (*self.clip(AssetNamespace::Iw4, name)?).clone();
+        clip.tracks.retain(|track| body_bones.contains(&track.name));
+        Some(Arc::new(clip))
+    }
+
     pub fn decode(&self, ns: AssetNamespace, name: &str) -> Option<AnimClip> {
         let captured = self.get(ns, name)?;
         AnimClip::from_parts(&captured.parts).ok()

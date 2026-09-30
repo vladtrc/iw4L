@@ -65,6 +65,9 @@ enum Image {
     Small,
     Ping,
     Output,
+    Graded,
+    ScreenBlur,
+    ScreenPing,
 }
 struct FilterStep {
     name: &'static str,
@@ -73,7 +76,8 @@ struct FilterStep {
     gaussian: Option<GaussianPass>,
     composite: bool,
 }
-fn filter_plan(frame: DofFrame, height: u32, quarter: UVec2, glow_ready: bool) -> Vec<FilterStep> {
+fn filter_plan(frame: DofFrame, size: UVec2, quarter: UVec2, glow_ready: bool) -> Vec<FilterStep> {
+    let height = size.y;
     let step = |name, target, images| FilterStep {
         name,
         target,
@@ -137,6 +141,37 @@ fn filter_plan(frame: DofFrame, height: u32, quarter: UVec2, glow_ready: bool) -
     if glow_ready {
         append_glow(&mut steps, height, quarter, frame.glow.radius);
     }
+    let mut blur_steps = Vec::new();
+    let mut source = Image::Scene;
+    for (i, pass) in postfx_dof::gaussian_chain(frame.blur * height as f32 / 480.0, size.x, size.y)
+        .into_iter()
+        .enumerate()
+    {
+        let target = if i % 2 == 0 {
+            Image::ScreenBlur
+        } else {
+            Image::ScreenPing
+        };
+        blur_steps.push(FilterStep {
+            name: POSTFX_MATERIALS[4 + pass.half_taps],
+            target,
+            images: vec![(8, source)],
+            gaussian: Some(pass),
+            composite: false,
+        });
+        source = target;
+    }
+    if source != Image::Scene {
+        for step in &mut steps {
+            for (_, image) in &mut step.images {
+                if *image == Image::Scene {
+                    *image = source;
+                }
+            }
+        }
+    }
+    blur_steps.append(&mut steps);
+    steps = blur_steps;
     steps
 }
 
@@ -182,6 +217,7 @@ fn append_glow(steps: &mut Vec<FilterStep>, height: u32, quarter: UVec2, radius:
 struct Intermediate {
     _texture: Texture,
     view: TextureView,
+    srgb_view: TextureView,
 }
 struct PostFxTargets {
     size: UVec2,
@@ -191,13 +227,14 @@ struct PostFxTargets {
 impl PostFxTargets {
     fn new(device: &RenderDevice, size: UVec2) -> Self {
         let quarter = UVec2::new((size.x / 4).max(1), (size.y / 4).max(1));
-        let images = (0..5)
-            .map(|_| {
+        let images = (0..8)
+            .map(|index| {
+                let image_size = if index >= 5 { size } else { quarter };
                 let texture = device.create_texture(&TextureDescriptor {
                     label: Some("iw4_dof_intermediate"),
                     size: Extent3d {
-                        width: quarter.x,
-                        height: quarter.y,
+                        width: image_size.x,
+                        height: image_size.y,
                         depth_or_array_layers: 1,
                     },
                     mip_level_count: 1,
@@ -205,12 +242,17 @@ impl PostFxTargets {
                     dimension: TextureDimension::D2,
                     format: TextureFormat::Rgba8Unorm,
                     usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
+                    view_formats: &[TextureFormat::Rgba8UnormSrgb],
                 });
                 let view = texture.create_view(&TextureViewDescriptor::default());
+                let srgb_view = texture.create_view(&TextureViewDescriptor {
+                    format: Some(TextureFormat::Rgba8UnormSrgb),
+                    ..default()
+                });
                 Intermediate {
                     _texture: texture,
                     view,
+                    srgb_view,
                 }
             })
             .collect();
@@ -220,16 +262,25 @@ impl PostFxTargets {
             images,
         }
     }
-    fn view(&self, image: Image) -> &TextureView {
+    fn intermediate(&self, image: Image) -> &Intermediate {
         &self.images[match image {
             Image::Downsample => 0,
             Image::Blurred => 1,
             Image::Coc => 2,
             Image::Small => 3,
             Image::Ping => 4,
+            Image::Graded => 5,
+            Image::ScreenBlur => 6,
+            Image::ScreenPing => 7,
             _ => unreachable!("external image"),
         }]
-        .view
+    }
+    fn view(&self, image: Image) -> &TextureView {
+        &self.intermediate(image).view
+    }
+    fn attachment(&self, image: Image, srgb: bool) -> &TextureView {
+        let image = self.intermediate(image);
+        if srgb { &image.srgb_view } else { &image.view }
     }
 }
 
@@ -240,6 +291,7 @@ struct ExactPostFxGpu {
     steps: Vec<FilterStep>,
     targets: Option<PostFxTargets>,
     depth_sampler: Option<bevy::render::render_resource::Sampler>,
+    grade: Option<super::script_grade::GradeGpu>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PostFxGpuRefusal {
@@ -253,6 +305,7 @@ enum PostFxGpuRefusal {
 }
 fn prepare_postfx_gpu(
     extracted: Res<ExtractedPostFx>,
+    grade_shader: Res<super::script_grade::GradeShader>,
     mut gpu: ResMut<ExactPostFxGpu>,
     device: Res<RenderDevice>,
     cache: Res<PipelineCache>,
@@ -273,6 +326,13 @@ fn prepare_postfx_gpu(
         return;
     };
     let size = UVec2::new(view.viewport.z, view.viewport.w);
+    if gpu.grade.is_none() {
+        gpu.grade = Some(super::script_grade::GradeGpu::new(
+            &device,
+            &cache,
+            grade_shader.0.clone(),
+        ));
+    }
     if gpu.targets.as_ref().is_none_or(|t| t.size != size) {
         gpu.targets = Some(PostFxTargets::new(&device, size));
     }
@@ -288,7 +348,7 @@ fn prepare_postfx_gpu(
     let (steps, prepared) = loop {
         let steps = filter_plan(
             extracted.frame,
-            size.y,
+            size,
             gpu.targets.as_ref().unwrap().quarter,
             glow_ready,
         );
@@ -453,7 +513,11 @@ fn create_postfx_gpu(
             shader_defs: Vec::new(),
             entry_point: Some(PASS_FRAGMENT_ENTRY.into()),
             targets: vec![Some(ColorTargetState {
-                format: TextureFormat::Rgba8Unorm,
+                format: if state.srgb_write_enable() {
+                    TextureFormat::Rgba8UnormSrgb
+                } else {
+                    TextureFormat::Rgba8Unorm
+                },
                 blend: host_state.blend.blend_state(),
                 write_mask: host_state.colour_writes(),
             })],
@@ -571,6 +635,7 @@ fn draw_postfx(
         return;
     }
     let active = extracted.frame.dof.active();
+    let graded = extracted.frame.grading != [0.0, 1.0, 0.0, 1.0];
     let prepare = || -> Result<Vec<Vec<u8>>, PostFxSubmitRefusal> {
         if target.main_texture_format() != TextureFormat::Rgba8Unorm {
             return Err(PostFxSubmitRefusal::TargetFormat(
@@ -591,12 +656,23 @@ fn draw_postfx(
         {
             return Err(PostFxSubmitRefusal::FloatZNotResolvedForFrame);
         }
+        if graded
+            && gpu
+                .grade
+                .as_ref()
+                .is_none_or(|grade| cache.get_render_pipeline(grade.pipeline).is_none())
+        {
+            return Err(PostFxSubmitRefusal::PipelinePending);
+        }
         let mut uploads = Vec::new();
         for (ready, step) in gpu.prepared.iter().zip(&gpu.steps) {
             if cache.get_render_pipeline(ready.pipeline).is_none() {
                 return Err(PostFxSubmitRefusal::PipelinePending);
             }
-            let size = if step.target == Image::Output {
+            let size = if matches!(
+                step.target,
+                Image::Output | Image::Graded | Image::ScreenBlur | Image::ScreenPing
+            ) {
                 targets.size
             } else {
                 targets.quarter
@@ -614,6 +690,13 @@ fn draw_postfx(
                 film_sources(size.x, size.y, extracted.vision)
                     .map_err(PostFxSubmitRefusal::FilmSource)?
             };
+            for (index, _) in &step.images {
+                sources
+                    .set_texture(*index, if *index == 15 { 0x61 } else { 0x62 })
+                    .map_err(|cause| {
+                        PostFxSubmitRefusal::FilmSource(PostFxSourceRefusal::CodeSource(cause))
+                    })?;
+            }
             if let Some(gaussian) = &step.gaussian {
                 for (i, row) in gaussian.taps.iter().enumerate() {
                     sources.set_constant_rows(10 + i as u16, &[row.map(f32::to_bits)]);
@@ -700,8 +783,22 @@ fn draw_postfx(
     let diagnostics = diagnostics.as_deref();
     let encoder = context.command_encoder();
     let span = diagnostics.time_span(encoder, GPU_SPAN_POSTFX);
+    if graded {
+        gpu.grade.as_ref().expect("grade prepared").draw(
+            &device,
+            &queue,
+            &cache,
+            encoder,
+            post.source,
+            targets.view(Image::Graded),
+            extracted.frame.grading,
+        );
+    }
     for ((ready, step), bytes) in gpu.prepared.iter().zip(&gpu.steps).zip(&uploads) {
-        let size = if step.target == Image::Output {
+        let size = if matches!(
+            step.target,
+            Image::Output | Image::Graded | Image::ScreenBlur | Image::ScreenPing
+        ) {
             targets.size
         } else {
             targets.quarter
@@ -716,7 +813,13 @@ fn draw_postfx(
             .images
             .iter()
             .map(|(_, image)| match image {
-                Image::Scene => post.source,
+                Image::Scene => {
+                    if graded {
+                        targets.view(Image::Graded)
+                    } else {
+                        post.source
+                    }
+                }
                 Image::Depth => floatz.view().expect("preflight checked depth"),
                 image => targets.view(*image),
             })
@@ -737,7 +840,8 @@ fn draw_postfx(
         let destination = if step.target == Image::Output {
             post.destination
         } else {
-            targets.view(step.target)
+            let state = super::state::GfxPassState::from_bits(ready.film.shell.passes[0].state);
+            targets.attachment(step.target, state.srgb_write_enable())
         };
         let attachments = [Some(RenderPassColorAttachment {
             view: destination,
@@ -791,10 +895,21 @@ fn draw_postfx(
 pub(super) struct PostFxSet;
 
 pub(super) fn register(app: &mut App) {
+    if app.get_sub_app(RenderApp).is_none() {
+        return;
+    }
+    let shader = app
+        .world_mut()
+        .resource_mut::<Assets<Shader>>()
+        .add(Shader::from_wgsl(
+            include_str!("script_grade.wgsl"),
+            "script_grade.wgsl",
+        ));
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
     render_app
+        .insert_resource(super::script_grade::GradeShader(shader))
         .init_resource::<ExtractedPostFx>()
         .init_resource::<ExactPostFxGpu>()
         .add_systems(Render, prepare_postfx_gpu.in_set(RenderSystems::Prepare))

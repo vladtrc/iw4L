@@ -1288,6 +1288,15 @@ fn encode_client_meta(out: &mut WireWriter, meta: &ClientSnapshotMeta) {
     encode_vision(out, meta.view_effects.naked_vision.as_ref());
     encode_vision(out, meta.view_effects.thermal_vision.as_ref());
     encode_vision(out, meta.view_effects.missile_vision.as_ref());
+    encode_vision(out, meta.view_effects.night_vision.as_ref());
+    encode_vision(out, meta.view_effects.pain_vision.as_ref());
+    out.put_u8(u8::from(meta.view_effects.blur.is_some()));
+    if let Some(blur) = meta.view_effects.blur {
+        out.put_f32(blur.from);
+        out.put_f32(blur.to);
+        out.put_i32(blur.set_ms);
+        out.put_i32(blur.duration_ms);
+    }
     let dof = &meta.view_effects.depth_of_field;
     for v in [
         dof.near_start,
@@ -1434,6 +1443,18 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
         naked_vision: decode_vision(input)?,
         thermal_vision: decode_vision(input)?,
         missile_vision: decode_vision(input)?,
+        night_vision: decode_vision(input)?,
+        pain_vision: decode_vision(input)?,
+        blur: match input.get_u8()? {
+            0 => None,
+            1 => Some(sim::ScriptBlur {
+                from: input.get_f32()?,
+                to: input.get_f32()?,
+                set_ms: input.get_i32()?,
+                duration_ms: input.get_i32()?,
+            }),
+            _ => return Err(WireError::Malformed("bad blur tag")),
+        },
         depth_of_field: sim::ScriptDepthOfField {
             near_start: input.get_f32()?,
             near_end: input.get_f32()?,
@@ -2803,6 +2824,8 @@ fn encode_objectives(out: &mut WireWriter, state: &sim::ObjectiveMatch) {
     encode_vision(out, state.naked_vision.as_ref());
     encode_vision(out, state.thermal_vision.as_ref());
     encode_vision(out, state.missile_vision.as_ref());
+    encode_vision(out, state.night_vision.as_ref());
+    encode_vision(out, state.pain_vision.as_ref());
     out.put_u16(state.vehicles.len() as u16);
     for vehicle in &state.vehicles {
         for v in vehicle.origin {
@@ -2872,6 +2895,8 @@ fn decode_objectives(input: &mut WireReader<'_>) -> Result<sim::ObjectiveMatch, 
     state.naked_vision = decode_vision(input)?;
     state.thermal_vision = decode_vision(input)?;
     state.missile_vision = decode_vision(input)?;
+    state.night_vision = decode_vision(input)?;
+    state.pain_vision = decode_vision(input)?;
     for _ in 0..input.get_u16()? {
         state.vehicles.push(sim::CompassVehicle {
             origin: [input.get_f32()?, input.get_f32()?, input.get_f32()?],

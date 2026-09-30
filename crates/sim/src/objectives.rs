@@ -12,6 +12,8 @@ pub struct ObjectiveMatch {
     pub naked_vision: Option<crate::VisionChange>,
     pub thermal_vision: Option<crate::VisionChange>,
     pub missile_vision: Option<crate::VisionChange>,
+    pub night_vision: Option<crate::VisionChange>,
+    pub pain_vision: Option<crate::VisionChange>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

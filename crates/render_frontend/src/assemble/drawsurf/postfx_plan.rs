@@ -58,7 +58,6 @@ pub enum PostFxAdmissionRefusal {
     PortMissing { port: PortId },
     ShaderHandleMissing { port: PortId },
     StateBitsMismatch { actual: [u32; 2] },
-    SrgbWriteEnabled,
     AlphaTestEnabled,
     SamplerAbiMismatch,
     CodeSource(PostFxSourceRefusal),
@@ -162,6 +161,15 @@ pub fn film_sources(
     sources.set_constant(
         super::CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0,
         super::code_transpose_matrix_rows(Mat4::from_cols_array(&projection)),
+    );
+    sources.set_constant_rows(
+        22,
+        &[float4_bits([
+            width as f32,
+            height as f32,
+            1.0 / width as f32,
+            1.0 / height as f32,
+        ])],
     );
     let authored = vision.unwrap_or_default();
     let vision = if authored.enable {
@@ -366,9 +374,6 @@ fn admit_unlit_2d(
         });
     }
     let host_state = super::state::GfxPassState::from_bits(pass.state);
-    if host_state.srgb_write_enable() {
-        return Err(PostFxAdmissionRefusal::SrgbWriteEnabled);
-    }
     if host_state.authored_alpha_test().is_some() {
         return Err(PostFxAdmissionRefusal::AlphaTestEnabled);
     }
@@ -439,14 +444,7 @@ pub(crate) fn build_runtime_postfx(
         }
     }
     for &name in GLOW_MATERIALS {
-        match build_postfx_material(
-            catalog,
-            prepared,
-            programs,
-            shaders,
-            name,
-            name != GLOW_APPLY_MATERIAL,
-        ) {
+        match build_postfx_material(catalog, prepared, programs, shaders, name, false) {
             RuntimePostFxResources::Ready(mut ready) => passes.append(&mut ready),
             RuntimePostFxResources::Refused(PostFxAdmissionRefusal::MaterialMissing) => {}
             refused => {

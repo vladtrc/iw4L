@@ -23,6 +23,7 @@ pub const BODY_SPINE_BONES: &[&str] = &[
 #[derive(Clone, Debug)]
 pub struct BodyMeshEntry {
     pub skel: ModelSkel,
+    pub namespace: asset_core::AssetNamespace,
 
     pub material_keys: Vec<Option<asset_core::MaterialKey>>,
 
@@ -30,11 +31,16 @@ pub struct BodyMeshEntry {
 }
 
 impl BodyMeshEntry {
-    fn from_skel(skel: ModelSkel, materials: Option<&MaterialCatalog>) -> Self {
+    fn from_skel(
+        skel: ModelSkel,
+        materials: Option<&MaterialCatalog>,
+        namespace: asset_core::AssetNamespace,
+    ) -> Self {
         let (material_keys, material_edges) =
             capture_xmodel_material_slots(&skel.surface_materials, materials.map(|c| &**c));
         Self {
             skel,
+            namespace,
             material_keys,
             material_edges,
         }
@@ -110,7 +116,7 @@ impl BodyMeshBuild {
         };
         self.insert_entry(
             skel.name.clone(),
-            BodyMeshEntry::from_skel(skel, Some(materials)),
+            BodyMeshEntry::from_skel(skel, Some(materials), asset_core::AssetNamespace::Iw4),
         );
     }
 
@@ -128,7 +134,7 @@ impl BodyMeshBuild {
         };
         self.insert_entry(
             skel.name.clone(),
-            BodyMeshEntry::from_skel(skel, Some(materials)),
+            BodyMeshEntry::from_skel(skel, Some(materials), asset_core::AssetNamespace::T5),
         );
     }
 
@@ -146,7 +152,7 @@ impl BodyMeshBuild {
         };
         self.insert_entry(
             skel.name.clone(),
-            BodyMeshEntry::from_skel(skel, Some(materials)),
+            BodyMeshEntry::from_skel(skel, Some(materials), asset_core::AssetNamespace::Iw5),
         );
     }
 
@@ -160,7 +166,10 @@ impl BodyMeshBuild {
     }
 
     pub fn insert_captured(&mut self, skel: crate::ModelSkel, materials: Option<&MaterialCatalog>) {
-        self.insert_entry(skel.name.clone(), BodyMeshEntry::from_skel(skel, materials));
+        self.insert_entry(
+            skel.name.clone(),
+            BodyMeshEntry::from_skel(skel, materials, asset_core::AssetNamespace::Iw4),
+        );
     }
 
     pub fn resolve_materials(&mut self, materials: &MaterialDefinitions) {

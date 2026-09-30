@@ -780,15 +780,18 @@ pub fn extract_postfx(
             near_blur: frame.dof.near_blur,
             far_blur: frame.dof.far_blur,
         },
+        blur: film.blur,
+        grading: film.grading,
         bias: frame.bias,
         scene_near: frame.scene_near,
         view_model_near: frame.view_model_near,
         glow: render_gpu::GlowFrame {
-            r_glow: glow_dvars.enable,
-            r_fullbright: matches!(
-                **draw_method,
-                render_frontend::assemble::drawsurf::ColourDrawMethod::Fullbright
-            ),
+            r_glow: glow_dvars.enable || film.script_forced,
+            r_fullbright: !film.script_forced
+                && matches!(
+                    **draw_method,
+                    render_frontend::assemble::drawsurf::ColourDrawMethod::Fullbright
+                ),
             ..render_gpu::GlowFrame::from_vision(extracted.vision)
         },
     };

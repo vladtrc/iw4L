@@ -14,6 +14,7 @@ use crate::anim::xmodel_pose::PosedSmodelSurface;
 #[derive(Clone, Debug)]
 pub struct PersistentRemoteTree {
     pub runtime: xmodel_runtime::XAnimTreeRuntime,
+    pub namespace: asset_core::AssetNamespace,
     pub dobj: Option<std::sync::Arc<xmodel_runtime::DObj>>,
     pub reuse_key: Option<xmodel_runtime::DObjReuseKey>,
     pub legs: u16,
@@ -137,6 +138,7 @@ pub fn advance_remote_tree(
     tree: &asset_anim::CompiledAnimTreeDefinition,
     script: &asset_anim::ParsedPlayerAnimScript,
     catalog: &asset_anim::XAnimCatalog,
+    body: &asset_model::BodyMeshEntry,
     legs: PlayerAnimValue,
     torso: PlayerAnimValue,
     persist_key: u32,
@@ -157,17 +159,18 @@ pub fn advance_remote_tree(
         .as_ref()
         .is_some_and(|slot| slot.torso_restart != torso_restart);
     let reused = prev.as_ref().is_some_and(|slot| {
-        tree_clips_unchanged(
-            slot.cloned,
-            slot.legs,
-            slot.torso,
-            slot.legs_restart,
-            slot.torso_restart,
-            legs_index,
-            torso_index,
-            legs_restart,
-            torso_restart,
-        )
+        slot.namespace == body.namespace
+            && tree_clips_unchanged(
+                slot.cloned,
+                slot.legs,
+                slot.torso,
+                slot.legs_restart,
+                slot.torso_restart,
+                legs_index,
+                torso_index,
+                legs_restart,
+                torso_restart,
+            )
     });
 
     let mut clips = None;
@@ -179,11 +182,11 @@ pub fn advance_remote_tree(
         slot.torso_restart = torso_restart;
         slot
     } else {
-        let clip = decode_leaf_clip(tree, catalog, legs_index)?;
+        let clip = decode_leaf_clip(tree, catalog, body, legs_index)?;
         let (legs_for_tree, torso_clip) = if torso_index == 0 {
             (Arc::clone(&clip), None)
         } else {
-            let torso_clip = decode_leaf_clip(tree, catalog, torso_index)?;
+            let torso_clip = decode_leaf_clip(tree, catalog, body, torso_index)?;
             let overlayed = overlay_legs_clip(&clip, &torso_clip);
             (Arc::new(overlayed), Some(torso_clip))
         };
@@ -196,7 +199,9 @@ pub fn advance_remote_tree(
             .as_ref()
             .is_some_and(|slot| slot.torso_rate_sample.move_speed > 0.0);
         let mut bound: HashMap<u16, Arc<xmodel_runtime::AnimClip>> = HashMap::new();
-        if let Some(slot) = &prev {
+        if let Some(slot) = &prev
+            && slot.namespace == body.namespace
+        {
             for (index, state) in slot.runtime.states().iter().enumerate() {
                 if state.weight > 0.0 || state.goal_weight > 0.0 {
                     if let Some(clip) = slot
@@ -224,6 +229,7 @@ pub fn advance_remote_tree(
             }
             Some(_) | None => PersistentRemoteTree {
                 runtime: xmodel_runtime::XAnimTreeRuntime::new(definition),
+                namespace: body.namespace,
                 dobj: None,
                 reuse_key: None,
                 legs: 0,
@@ -236,6 +242,7 @@ pub fn advance_remote_tree(
                 torso_rate_sample: ClientAnimSample::default(),
             },
         };
+        slot.namespace = body.namespace;
         let legs_properties = script.animation_properties(legs_index);
         let torso_properties = script.animation_properties(torso_index);
         slot.legs_rate_sample.move_speed = if legs_properties.stationary {
@@ -484,12 +491,13 @@ pub fn tree_clips_unchanged(
 fn decode_leaf_clip(
     tree: &asset_anim::CompiledAnimTreeDefinition,
     catalog: &asset_anim::XAnimCatalog,
+    body: &asset_model::BodyMeshEntry,
     leaf_index: u16,
 ) -> Result<Arc<xmodel_runtime::AnimClip>, String> {
     let leaf = tree
         .node(leaf_index)
         .ok_or_else(|| format!("packed index {leaf_index} missing from compiled tree"))?;
-    match catalog.clip(asset_core::AssetNamespace::Iw4, &leaf.name) {
+    match catalog.body_clip(body.namespace, &leaf.name, &body.skel.bone_names) {
         Some(clip) => Ok(clip),
         None => {
             let detail = match catalog.get(asset_core::AssetNamespace::Iw4, &leaf.name) {

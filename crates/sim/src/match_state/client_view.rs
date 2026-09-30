@@ -58,7 +58,10 @@ pub struct ViewEffects {
     pub naked_vision: Option<VisionChange>,
     pub thermal_vision: Option<VisionChange>,
     pub missile_vision: Option<VisionChange>,
+    pub night_vision: Option<crate::VisionChange>,
+    pub pain_vision: Option<crate::VisionChange>,
     pub depth_of_field: ScriptDepthOfField,
+    pub blur: Option<ScriptBlur>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -116,4 +119,43 @@ pub struct RemoteMissile {
     pub boosted: bool,
     pub attack: bool,
     pub unlink_at_ms: Option<i32>,
+}
+
+/// Script transition in the authoritative level clock, replicated in snapshots.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScriptBlur {
+    pub from: f32,
+    pub to: f32,
+    pub set_ms: i32,
+    pub duration_ms: i32,
+}
+
+impl ScriptBlur {
+    pub fn sample(self, now_ms: i32) -> f32 {
+        let fraction = if self.duration_ms <= 0 {
+            1.0
+        } else {
+            (now_ms.wrapping_sub(self.set_ms) as f32 / self.duration_ms as f32).clamp(0.0, 1.0)
+        };
+        self.from + (self.to - self.from) * fraction
+    }
+}
+
+/// Rendering dvars authored by GSC are delivered to clients without console gates.
+pub fn is_postfx_dvar(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.starts_with("r_film")
+        || name.starts_with("r_glow")
+        || name.starts_with("r_dof")
+        || matches!(
+            name.as_str(),
+            "r_blur"
+                | "r_hue"
+                | "r_brightness"
+                | "r_contrast"
+                | "r_saturation"
+                | "r_gamma"
+                | "r_exposure"
+                | "nightvision"
+        )
 }

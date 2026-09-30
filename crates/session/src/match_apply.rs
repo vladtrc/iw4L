@@ -301,7 +301,11 @@ pub fn apply_prepared_match(
         );
         if let Some(Ok(tree)) = player_anim_sources.compiled() {
             if let Ok(definition) = tree.to_runtime_definition(|_, name| {
-                xanims.0.clip(asset_core::AssetNamespace::Iw4, name)
+                let kit = bodies.0.kits().kit(false)?;
+                let body = bodies.0.get(&kit.body)?;
+                xanims
+                    .0
+                    .body_clip(body.namespace, name, &body.skel.bone_names)
             }) {
                 let names = tree.nodes().iter().map(|node| node.name.clone()).collect();
                 content.set_player_anim_tree(Some(definition), names);
