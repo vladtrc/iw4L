@@ -493,7 +493,7 @@ fn deliver_answers(world: &mut World, client: u32) {
         return;
     };
     let in_game = matches!(&*slot.sessionstate, "playing" | "dead");
-    if slot.menu.is_none() && !(in_game && &*next.menu == CLASS_MENU) {
+    if slot.menu.is_none() && !in_game {
         return;
     }
     let object = slot.object;
