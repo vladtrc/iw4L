@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use asset_audio::load_mp_sound_bank;
-use asset_game::{load_mp_localized_strings, load_ui_menu_catalog};
+use asset_game::{MenuCatalog, load_mp_localized_strings, load_ui_menu_catalog};
 use asset_transport::{LoadProgress, find_runtime_common_mp, find_zone_file, list_mp_map_packs};
 use assets::{
     LoadingPreviewSource, LoadingScreen, MatchLoadRequest, NamespaceSoundIwd, NamespaceTrees,
@@ -104,6 +104,26 @@ fn install_class_catalog(
     strings.absorb(common.strings);
     commands.insert_resource(class_catalog);
     commands.remove_resource::<ShellCommonTask>();
+}
+
+#[derive(Resource)]
+struct MenuCatalogTask {
+    task: bevy::tasks::Task<(MenuCatalog, Vec<String>)>,
+}
+
+fn install_menu_catalog(mut commands: Commands, task: Option<ResMut<MenuCatalogTask>>) {
+    use bevy::tasks::futures_lite::future;
+    let Some(mut task) = task else {
+        return;
+    };
+    let Some((menus, menu_report)) = future::block_on(future::poll_once(&mut task.task)) else {
+        return;
+    };
+    for line in &menu_report {
+        diag::info!(Launch, "{line}");
+    }
+    commands.insert_resource(menus);
+    commands.remove_resource::<MenuCatalogTask>();
 }
 
 fn launch_identity(config: &LaunchConfig) -> LaunchIdentity {
@@ -432,11 +452,20 @@ fn run_map(
         artifacts,
     };
     start_perf(Some(zone.clone()), role_name(config.role));
-    let (mut menus, menu_report) = load_ui_menu_catalog(&games);
-    ui::install_frontend_menus(&mut menus).unwrap_or_else(|error| fatal(&error));
-    for line in &menu_report {
-        diag::info!(Launch, "{line}");
-    }
+    // Building the catalog decodes every UI icon it needs from the install's
+    // IWDs — on a slow drive that's seconds to minutes of single-threaded work.
+    // Done inline here, it blocks winit's message pump before the window even
+    // exists (Windows marks the process "Not Responding" for the whole span).
+    // Background it, same pattern as `ShellCommonTask` above, so the loading
+    // screen shows up immediately and the catalog installs once it's ready.
+    let menu_catalog_task = {
+        let games = games.clone();
+        assets::load_pool().spawn(async move {
+            let (mut menus, menu_report) = load_ui_menu_catalog(&games);
+            ui::install_frontend_menus(&mut menus).unwrap_or_else(|error| fatal(&error));
+            (menus, menu_report)
+        })
+    };
     let progress = LoadProgress::default();
     let acceptance_run = acceptance
         .map(|a| AcceptanceRun {
@@ -485,7 +514,11 @@ fn run_map(
     let ui_games_root = asset_game::ui_games_root(&games).ok().map(|root| root.0);
     app.insert_resource(launch_identity(&config))
         .insert_resource(probe)
-        .insert_resource(menus)
+        .insert_resource(MenuCatalog::default())
+        .insert_resource(MenuCatalogTask {
+            task: menu_catalog_task,
+        })
+        .add_systems(Update, install_menu_catalog)
         .insert_resource(MatchLoadRequest {
             request_id: 0,
             load_key: Default::default(),

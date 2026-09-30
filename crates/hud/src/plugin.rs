@@ -258,7 +258,10 @@ fn sync_zone_atlases(
     if hud_images.zone_installed() {
         return;
     }
-    let Some(catalog) = catalog else {
+    // See the matching comment in `HudImages::warm_present_stems`: the
+    // default `MenuCatalog` inserted before the background load finishes
+    // must not be mistaken for "the real catalog, just empty".
+    let Some(catalog) = catalog.filter(|catalog| !catalog.fonts.is_empty()) else {
         return;
     };
     hud_images.install_zone_catalog(&catalog);

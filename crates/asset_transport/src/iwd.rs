@@ -129,6 +129,22 @@ impl IwdIndex {
             .collect::<Vec<_>>();
         archives.sort();
 
+        // The archive scan itself is one-time-per-install work (thousands of
+        // small seeky zip central-directory reads per archive) that a spinning
+        // disk pays for on every single launch unless it is cached — the
+        // decoded pixel data already gets this treatment (`load_or_decode_mips`),
+        // this is the same idea for the name index that decoding depends on.
+        let cache_key = index_cache_key(&archives);
+        if let Some(key) = &cache_key
+            && let Some(bytes) = crate::artifact_cache::cache_get(INDEX_CACHE_KIND, key)
+            && let Some(images) = decode_index(&bytes, &archives)
+        {
+            return Ok(Self {
+                images,
+                archives: archives.len(),
+            });
+        }
+
         type IndexedArchive = (usize, Result<Vec<(String, IwdFile)>, String>);
         let next = std::sync::atomic::AtomicUsize::new(0);
         let done: Mutex<Vec<IndexedArchive>> = Mutex::new(Vec::with_capacity(archives.len()));
@@ -164,11 +180,110 @@ impl IwdIndex {
                 images.entry(name).or_default().push(file);
             }
         }
+        if let Some(key) = &cache_key {
+            let blob = encode_index(&archives, &images);
+            if let Err(error) = crate::artifact_cache::cache_put(INDEX_CACHE_KIND, key, &blob) {
+                diag::warn!(Zone, "iwd index cache store {key}: {error}");
+            }
+        }
         Ok(Self {
             images,
             archives: archives.len(),
         })
     }
+}
+
+const INDEX_CACHE_KIND: &str = "iwdidx";
+const INDEX_CACHE_MAGIC: &[u8; 8] = b"IW4LIDX1";
+
+/// A fingerprint of the archive set (name, size, mtime of every `.iwd` under
+/// the directory) so a changed install invalidates the cache instead of
+/// silently serving a stale name index. `archives` is already sorted, so the
+/// same file set always produces the same fingerprint and the same
+/// archive-index ordering the encoded entries reference.
+fn index_cache_key(archives: &[PathBuf]) -> Option<String> {
+    let mut hash = crate::artifact_cache::fnv1a64(b"iwd-index-v1");
+    for archive in archives {
+        let meta = std::fs::metadata(archive).ok()?;
+        let modified = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs();
+        hash = crate::artifact_cache::fnv1a64_more(
+            hash,
+            archive.file_name()?.to_string_lossy().as_bytes(),
+        );
+        hash = crate::artifact_cache::fnv1a64_more(hash, &meta.len().to_le_bytes());
+        hash = crate::artifact_cache::fnv1a64_more(hash, &modified.to_le_bytes());
+    }
+    Some(format!("{hash:016x}"))
+}
+
+fn encode_index(archives: &[PathBuf], images: &HashMap<String, Vec<IwdFile>>) -> Vec<u8> {
+    let entry_count: usize = images.values().map(Vec::len).sum();
+    let mut out = Vec::with_capacity(16 + entry_count * 32);
+    out.extend_from_slice(INDEX_CACHE_MAGIC);
+    out.extend_from_slice(&(archives.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(entry_count as u32).to_le_bytes());
+    for (name, files) in images {
+        for file in files {
+            let Some(archive_index) = archives.iter().position(|path| *path == file.archive)
+            else {
+                continue;
+            };
+            out.extend_from_slice(&(archive_index as u16).to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&(file.entry.len() as u16).to_le_bytes());
+            out.extend_from_slice(file.entry.as_bytes());
+            out.extend_from_slice(&file.crc32.to_le_bytes());
+            out.extend_from_slice(&file.size.to_le_bytes());
+        }
+    }
+    out
+}
+
+fn decode_index(bytes: &[u8], archives: &[PathBuf]) -> Option<HashMap<String, Vec<IwdFile>>> {
+    if bytes.len() < 16 || &bytes[..8] != INDEX_CACHE_MAGIC {
+        return None;
+    }
+    let archive_count = u32::from_le_bytes(bytes[8..12].try_into().ok()?) as usize;
+    if archive_count != archives.len() {
+        return None;
+    }
+    let entry_count = u32::from_le_bytes(bytes[12..16].try_into().ok()?) as usize;
+    let mut at = 16;
+    let mut images: HashMap<String, Vec<IwdFile>> = HashMap::new();
+    for _ in 0..entry_count {
+        let archive_index = u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as usize;
+        at += 2;
+        let name_len = u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as usize;
+        at += 2;
+        let name = std::str::from_utf8(bytes.get(at..at + name_len)?)
+            .ok()?
+            .to_owned();
+        at += name_len;
+        let entry_len = u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as usize;
+        at += 2;
+        let entry = std::str::from_utf8(bytes.get(at..at + entry_len)?)
+            .ok()?
+            .to_owned();
+        at += entry_len;
+        let crc32 = u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?);
+        at += 4;
+        let size = u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?);
+        at += 8;
+        let archive = archives.get(archive_index)?.clone();
+        images.entry(name).or_default().push(IwdFile {
+            archive,
+            entry,
+            crc32,
+            size,
+        });
+    }
+    Some(images)
 }
 
 fn index_image_entries(path: &Path) -> Result<Vec<(String, IwdFile)>, String> {

@@ -368,6 +368,14 @@ impl HudImages {
         if self.trees.is_empty() {
             return;
         }
+        // `MenuCatalog` is inserted as an empty default before the real one
+        // loads on a background task (see `bootstrap::launch::run_map`), so
+        // an empty catalog means "not ready yet", not "no fonts exist" —
+        // latching `iwd_warmed` on it would skip font/menu image uploads
+        // permanently once the real catalog replaces the default.
+        let Some(catalog) = catalog.filter(|catalog| !catalog.fonts.is_empty()) else {
+            return;
+        };
 
         let blood = self.blood_material_binding().ok();
         for (name, sampling, sampler) in [
@@ -400,23 +408,21 @@ impl HudImages {
                 self.ensure_rgba(ns, name);
             }
         }
-        if let Some(catalog) = catalog {
-            for font in catalog.fonts.values() {
-                if !font.material.is_empty() {
-                    let _ = self.get(HUD_CHROME_NAMESPACE, &font.material, images);
-                }
+        for font in catalog.fonts.values() {
+            if !font.material.is_empty() {
+                let _ = self.get(HUD_CHROME_NAMESPACE, &font.material, images);
             }
-            for menu_name in HUD_CHROME_MENUS {
-                let Some(menu) = catalog.get(menu_name) else {
-                    continue;
-                };
-                if !menu.window_background.is_empty() {
-                    let _ = self.get(HUD_CHROME_NAMESPACE, &menu.window_background, images);
-                }
-                for item in &menu.items {
-                    if !item.background.is_empty() {
-                        let _ = self.get(HUD_CHROME_NAMESPACE, &item.background, images);
-                    }
+        }
+        for menu_name in HUD_CHROME_MENUS {
+            let Some(menu) = catalog.get(menu_name) else {
+                continue;
+            };
+            if !menu.window_background.is_empty() {
+                let _ = self.get(HUD_CHROME_NAMESPACE, &menu.window_background, images);
+            }
+            for item in &menu.items {
+                if !item.background.is_empty() {
+                    let _ = self.get(HUD_CHROME_NAMESPACE, &item.background, images);
                 }
             }
         }
