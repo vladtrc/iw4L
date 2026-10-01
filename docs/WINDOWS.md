@@ -9,7 +9,7 @@ iw4l-portable/
 ├── iw4launcher.exe       from the archive
 ├── iw4l.exe              from the archive; replaced only by `iw4launcher update`
 ├── iw4l-ca.pem           public trust anchor
-├── LICENSE NOTICE OFL-Oxanium.txt COPYING-FreeFont.txt
+├── LICENSE NOTICE OFL-Oxanium.txt OFL-FiraMono.txt
 ├── .env                  from the archive; player edits win forever
 ├── Modern Warfare 2.lnk  target: game folder or title .exe
 ├── Black Ops.lnk         optional
@@ -19,8 +19,8 @@ iw4l-portable/
 
 The four licence files are not decoration: `iw4l.exe` has both fonts compiled in
 with `include_bytes!`, so an archive carrying the binary carries their licences
-too. `release.rs::LEGAL_FILES` is the list; a build shipping without them is a
-bug.
+too. `xtask/src/legal.rs` is the shared list. `iw4launcher.exe update` installs
+these files before the game binary and verifies their sizes and SHA-256 hashes.
 
 Extract into any dedicated folder and add ordinary Windows `.lnk` shortcuts to
 installed Call of Duty title folders or executables. MW2 **Multiplayer** files

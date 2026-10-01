@@ -12,6 +12,7 @@ use master_protocol::Channel;
 
 use crate::certs::{Ca, San};
 use crate::dotenv::Env;
+use crate::legal;
 use crate::release::build_master;
 use crate::shell::{Res, Ssh, Step, capture, require_tools};
 use crate::windows;
@@ -138,6 +139,13 @@ fn upload_binary(root: &Path, env: &Env, ssh: &Ssh) -> Res<()> {
     let bin = build_master(root, &profile)?;
     let step = Step::start("master.upload", ssh.target());
     ssh.run(&format!("install -d -m 0755 '{REMOTE_LIB}'"))?;
+    for (source, name) in legal::FILES {
+        ssh.rsync(
+            &["--chmod=F644"],
+            &root.join(source),
+            &format!("{REMOTE_LIB}/{name}"),
+        )?;
+    }
     ssh.rsync(&["--chmod=F755"], &bin, &remote_bin())?;
     step.done("");
     Ok(())
@@ -241,12 +249,17 @@ pub fn logs(env: &Env, args: &[String]) -> Res<()> {
 /// already pinned.
 pub fn uninstall(env: &Env, args: &[String]) -> Res<()> {
     let Args { ssh, channel, .. } = parse(env, args)?;
+    let legal_paths = legal::FILES
+        .iter()
+        .map(|(_, name)| format!("'{REMOTE_LIB}/{name}'"))
+        .collect::<Vec<_>>()
+        .join(" ");
     ssh.run(&format!(
         "set -eu
         systemctl disable --now '{unit}' 2>/dev/null || true
         rm -f '/etc/systemd/system/{unit}'
         systemctl daemon-reload
-        rm -f '{bin}'
+        rm -f '{bin}' {legal_paths}
         rmdir '{REMOTE_LIB}' 2>/dev/null || true",
         unit = channel.unit(),
         bin = remote_bin(),

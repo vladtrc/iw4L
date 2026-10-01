@@ -44,7 +44,14 @@ known limitations. A target that merely compiled is not a verified platform, and
 a Linux release waits for no unstarted Windows archive, nor the reverse.
 
 Every archive carries `LICENSE`, `NOTICE` and the two font licences
-(`release.rs::LEGAL_FILES`) and no game data. Check the archive, not just
-`git ls-files`: `make publish-check` reads the tracked tree and cannot see what
+(`xtask/src/legal.rs`) and no game data. Update manifests carry the same files;
+their hashes also contribute to the release ID. The remote filenames include
+their hashes so an older manifest still downloads its matching notices after
+a newer release is published. The master directory carries the same notices,
+also under content-addressed filenames; `cargo xtask master install|update`
+copies them beside the standalone relay under their ordinary names.
+
+Check the archive, not just `git ls-files`: `make publish-check` reads the tracked
+tree and cannot see what
 was staged into a ZIP. Published tags are never moved, and history is never
 recreated once anything has been pushed.

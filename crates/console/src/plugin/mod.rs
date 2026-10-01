@@ -34,7 +34,7 @@ pub use dispatch_state::{ConsoleCommandQueue, ConsoleDispatch, WaitMovePose};
 use dispatch_state::{WAIT_WORLD_TIMEOUT_SECS, WaitKind, parse_wait_args};
 pub use state::{ConsoleFont, ConsoleSettings, ConsoleState};
 
-const EMBEDDED_FONT: &[u8] = include_bytes!("../../assets/FreeMono.otf");
+const EMBEDDED_FONT: &[u8] = include_bytes!("../../assets/FiraMono-Regular.ttf");
 const PROMPT: &str = "> ";
 const FONT_SIZE: f32 = 15.0;
 const COLOR_BODY: Color = Color::srgb(0.82, 0.92, 0.82);

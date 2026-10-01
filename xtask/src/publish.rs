@@ -114,7 +114,7 @@ fn rows_of(descriptor: &Value, channel: Channel, path: &Path) -> Res<Vec<Row>> {
         .map(|entry| {
             let role = str_field(entry, "role", path)?;
             let remote = str_field(entry, "remote", path)?;
-            let remote = if role == "master" {
+            let remote = if matches!(role.as_str(), "master" | "master-legal") {
                 remote
             } else {
                 format!("releases/{channel}/{remote}")

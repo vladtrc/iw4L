@@ -11,6 +11,7 @@ use master_protocol::{Channel, PROTOCOL_VERSION};
 use serde_json::{Value, json};
 
 use crate::dotenv::Env;
+use crate::legal;
 use crate::shell::{Res, Step, capture, require_tools, run};
 use crate::windows;
 
@@ -226,7 +227,34 @@ fn client_manifest(
     release_id: &str,
     ca_path: &Path,
     blob: &GameBlob,
+    legal_dir: &Path,
 ) -> Res<Value> {
+    let mut files = Vec::new();
+    // Install the notices before replacing the executable, even with an older updater.
+    for (_, name) in legal::FILES {
+        let path = legal_dir.join(name);
+        files.push(json!({
+            "path": name,
+            "sha256": file_sha256(&path)?,
+            "size": file_size(&path)?,
+            "download": legal::download_name(legal_dir, name)?,
+        }));
+    }
+    files.extend([
+        json!({
+            "path": "iw4l.exe",
+            "sha256": blob.exe_sha,
+            "size": blob.exe_size,
+            "download": blob.name,
+            "download_sha256": blob.blob_sha,
+            "download_size": blob.blob_size,
+        }),
+        json!({
+            "path": "iw4l-ca.pem",
+            "sha256": file_sha256(ca_path)?,
+            "size": file_size(ca_path)?,
+        }),
+    ]);
     Ok(json!({
         "id": release_id,
         "channel": channel.as_str(),
@@ -237,21 +265,7 @@ fn client_manifest(
             "IW4L_MASTER_SERVER_NAME": channel.server_name(),
             "IW4L_MASTER_CA_CERT": "iw4l-ca.pem",
         },
-        "files": [
-            {
-                "path": "iw4l.exe",
-                "sha256": blob.exe_sha,
-                "size": blob.exe_size,
-                "download": blob.name,
-                "download_sha256": blob.blob_sha,
-                "download_size": blob.blob_size,
-            },
-            {
-                "path": "iw4l-ca.pem",
-                "sha256": file_sha256(ca_path)?,
-                "size": file_size(ca_path)?,
-            },
-        ],
+        "files": files,
     }))
 }
 
@@ -294,7 +308,7 @@ fn release_descriptor(stage: &Path, meta: &Meta<'_>, blob: &GameBlob) -> Res<Val
         false,
     )?;
     manifest["live"] = json!("manifest.json");
-    Ok(json!({
+    let mut descriptor = json!({
         "id": release_id,
         "channel": channel.as_str(),
         "profile": profile,
@@ -335,7 +349,30 @@ fn release_descriptor(stage: &Path, meta: &Meta<'_>, blob: &GameBlob) -> Res<Val
                 true,
             )?,
         ],
-    }))
+    });
+    let files = descriptor["files"]
+        .as_array_mut()
+        .ok_or("invalid release file list")?;
+    for (_, name) in legal::FILES {
+        files.push(entry(
+            "legal",
+            &format!("client/{name}"),
+            legal::download_name(&stage.join("client"), name)?,
+            stage,
+            true,
+        )?);
+        files.push(entry(
+            "master-legal",
+            &format!("master/{name}"),
+            format!(
+                "masters/{master_sha}/{}",
+                legal::download_name(&stage.join("master"), name)?
+            ),
+            stage,
+            true,
+        )?);
+    }
+    Ok(descriptor)
 }
 
 pub fn prepare(root: &Path, env: &Env, channel: Channel, profile: &str) -> Res<PathBuf> {
@@ -365,6 +402,8 @@ pub fn prepare(root: &Path, env: &Env, channel: Channel, profile: &str) -> Res<P
     let staged_master = stage.join("master/iw4l-master");
     copy(&master_bin, &staged_master)?;
     set_mode(&staged_master, 0o755)?;
+    legal::copy_to(root, &client_dir)?;
+    legal::copy_to(root, &stage.join("master"))?;
     let master_sha = file_sha256(&staged_master)?;
 
     // The release id is a hash of exactly what makes this release different
@@ -382,6 +421,7 @@ pub fn prepare(root: &Path, env: &Env, channel: Channel, profile: &str) -> Res<P
             "game_blob": blob.blob_sha,
             "game_exe": blob.exe_sha,
             "launcher": file_sha256(&client_dir.join("iw4launcher.exe"))?,
+            "legal": legal::inventory(&client_dir)?,
         },
     });
     let compact =
@@ -395,6 +435,7 @@ pub fn prepare(root: &Path, env: &Env, channel: Channel, profile: &str) -> Res<P
         &release_id,
         &client_dir.join("iw4l-ca.pem"),
         &blob,
+        &client_dir,
     )?;
     write_json(&client_dir.join("manifest.json"), &manifest)?;
 
@@ -428,19 +469,6 @@ pub fn prepare(root: &Path, env: &Env, channel: Channel, profile: &str) -> Res<P
     Ok(dest)
 }
 
-/// What every archive carries beside the binaries, as `(repo path, name in the
-/// archive)`. `iw4l.exe` embeds both fonts, so a build is never distributed
-/// without their licence texts.
-const LEGAL_FILES: &[(&str, &str)] = &[
-    ("LICENSE", "LICENSE"),
-    ("NOTICE", "NOTICE"),
-    ("crates/ui/assets/OFL-Oxanium.txt", "OFL-Oxanium.txt"),
-    (
-        "crates/console/assets/COPYING-FreeFont.txt",
-        "COPYING-FreeFont.txt",
-    ),
-];
-
 /// `make launcher windows`: the two portable ZIPs. Not a deploy — no master is
 /// built and nothing is uploaded.
 pub fn bundles(root: &Path, env: &Env, profile: &str) -> Res<()> {
@@ -464,11 +492,7 @@ pub fn bundles(root: &Path, env: &Env, profile: &str) -> Res<()> {
         // launcher fetches a build only when asked (`iw4launcher update`).
         copy(&bins.game, &stage.join("iw4l.exe"))?;
         copy(&ca_cert, &stage.join("iw4l-ca.pem"))?;
-        // Apache-2.0 asks that a distribution carry LICENSE and NOTICE; the two
-        // fonts are `include_bytes!`d into iw4l.exe, so their licences ship too.
-        for (from, to) in LEGAL_FILES {
-            copy(&root.join(from), &stage.join(to))?;
-        }
+        legal::copy_to(root, &stage)?;
         std::fs::write(
             stage.join(".env"),
             format!(
@@ -483,7 +507,7 @@ pub fn bundles(root: &Path, env: &Env, profile: &str) -> Res<()> {
         .map_err(|error| format!("writing {}/.env: {error}", stage.display()))?;
         let archive = out.join(format!("iw4l-windows-{channel}.zip"));
         let mut names = vec![".env", "iw4l-ca.pem", "iw4launcher.exe", "iw4l.exe"];
-        names.extend(LEGAL_FILES.iter().map(|(_, to)| *to));
+        names.extend(legal::FILES.iter().map(|(_, to)| *to));
         let files = names
             .into_iter()
             .map(|name| stage.join(name).display().to_string())

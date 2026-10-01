@@ -5,6 +5,7 @@ pub mod dotenv;
 pub mod duo;
 pub mod fmt;
 pub mod frame_budget;
+mod legal;
 pub mod live;
 pub mod loc;
 pub mod master;
