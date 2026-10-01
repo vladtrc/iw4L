@@ -207,7 +207,7 @@ pub fn remote_control_axes(input: &ClientActionInput, mouse_x: f32, mouse_y: f32
         input.fov_scale,
     );
     let axis = |v: f32| (v.clamp(-1.0, 1.0) * 127.0).round() as i8 as u8;
-    [axis(input.m_pitch * my), axis(-input.m_yaw * mx)]
+    [axis(-input.m_pitch * my), axis(input.m_yaw * mx)]
 }
 
 pub fn idle_usercmd(server_time: i32) -> UserCmd {
