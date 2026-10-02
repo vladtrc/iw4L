@@ -12,3 +12,9 @@ iw4l-artifacts
 # Agent working memory. None of it is the product: the artifacts, the externals,
 # the agent clones and the RE tooling and its bases all stay on this machine.
 /context/
+
+# Code-graph output. The graph, its cache and its before/after backups are
+# machine-local; only the human-readable audit report is tracked.
+/graphify-out/*
+!/graphify-out/GRAPH_REPORT.md
+/crates/graphify-out/
