@@ -28,6 +28,8 @@ pub enum ClientAction {
     GiveWeapon {
         request_id: ActionRequestId,
         weapon: u32,
+        /// The model to show it with: 0 plain, else a camouflage slot.
+        model: u8,
     },
 
     ChangeWeaponConfiguration {

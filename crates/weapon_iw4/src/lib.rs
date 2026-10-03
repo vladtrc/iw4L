@@ -38,7 +38,7 @@ pub use ammo::{
     get_clip_index, get_total_ammo_in_clips, get_weapon_dual_wield_byte,
     has_akimbo_viewmodel_anims, latch_weapon_dual_wield, num_hands, num_hands_for_held,
     player_weapons_find_slot, set_ammo_not_in_clip, set_clip_for_hand, set_weapon_dual_wield_byte,
-    spend_clip_for_hand,
+    set_weapon_model_for_held, spend_clip_for_hand, weapon_model_for_held,
 };
 pub use event_sound::{
     EV_RELOAD, EV_RELOAD_END, EV_RELOAD_FROM_EMPTY, EV_RELOAD_START, begin_reload_event,

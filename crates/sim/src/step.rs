@@ -831,11 +831,23 @@ fn apply_actions(world: &mut FrameWorld, tick: Tick, actions: &[(ClientId, Clien
             } => {
                 apply_select_class(world, tick, *id, request_id, class_id, revision, loadout);
             }
-            ClientAction::GiveWeapon { request_id, weapon } => {
+            ClientAction::GiveWeapon {
+                request_id,
+                weapon,
+                model,
+            } => {
                 if !world.bootstrap_ref().allow_debug_actions {
                     continue;
                 }
                 apply_give_weapon(world, tick, *id, request_id, weapon);
+                if let Some(ps) = world.player_mut(*id) {
+                    weapon_iw4::set_weapon_model_for_held(
+                        &ps.weapons,
+                        &mut ps.weapon_data,
+                        weapon,
+                        model,
+                    );
+                }
             }
             ClientAction::ChangeWeaponConfiguration {
                 request_id,

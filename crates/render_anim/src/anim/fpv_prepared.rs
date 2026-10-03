@@ -62,6 +62,20 @@ pub struct FpvWeaponView {
     pub idle_name: Option<String>,
     pub rigs: FpvRigSet,
     pub census: FpvViewCensus,
+    /// Per camouflage slot, the material each of the gun's authored
+    /// materials becomes: a camouflage model shares the gun's surfaces.
+    pub camos: Vec<(u8, Arc<HashMap<usize, SmodelPassMaterial>>)>,
+}
+
+impl FpvWeaponView {
+    /// The gun's material swaps for camouflage `slot`; `None` for the plain
+    /// gun or a slot it has no model for.
+    pub fn camo(&self, slot: u8) -> Option<&Arc<HashMap<usize, SmodelPassMaterial>>> {
+        self.camos
+            .iter()
+            .find(|(own, _)| *own == slot)
+            .map(|(_, swaps)| swaps)
+    }
 }
 
 pub enum FpvWeaponSlot {
@@ -409,6 +423,17 @@ impl FpvPreparationJob {
                 }
             }
         }
+        // Camouflage models only lend their materials to the gun's surfaces.
+        for id in 1..=weapon_n {
+            for (_, edge) in registry.camo_view_edges_of(id) {
+                if let Some(order) = edge.bound_index()
+                    && fpv.get_at(order).is_some()
+                    && seen_models.insert(order)
+                {
+                    models.push(order);
+                }
+            }
+        }
         let work_total =
             (models.len() + layouts_queue.len() + registry.alternate_fpv_pairs().count()) as u64
                 + u64::from(weapon_n);
@@ -634,6 +659,62 @@ impl FpvPreparationJob {
         census
     }
 
+    /// For each camouflage model of weapon `id`, the admitted material of
+    /// each of its surfaces, keyed by the gun's authored material of the same
+    /// surface. A model whose surfaces do not line up with the gun's is left
+    /// out.
+    fn camo_swaps(
+        &self,
+        fpv: &FpvMeshCatalog,
+        id: u32,
+        gun: FpvMeshIndex,
+    ) -> Vec<(u8, Arc<HashMap<usize, SmodelPassMaterial>>)> {
+        let Some(base) = fpv.get_at(gun.order()) else {
+            return Vec::new();
+        };
+        let authored = |entry: &asset_model::FpvMeshEntry, surface: usize| {
+            entry
+                .skel
+                .surface_materials
+                .get(surface)
+                .copied()
+                .flatten()
+                .map(|index| index.get())
+        };
+        let mut out = Vec::new();
+        for (slot, edge) in self.owner.weapons.camo_view_edges_of(id) {
+            let Some(order) = edge.bound_index() else {
+                continue;
+            };
+            let Some(camo) = fpv.get_at(order) else {
+                continue;
+            };
+            if camo.skel.surfaces_for_lod(0) != base.skel.surfaces_for_lod(0) {
+                continue;
+            }
+            let mut swaps = HashMap::new();
+            for surface in base.skel.surfaces_for_lod(0) {
+                let (Some(from), Some(to)) = (authored(base, surface), authored(camo, surface))
+                else {
+                    continue;
+                };
+                if from == to {
+                    continue;
+                }
+                if let Some(FpvSurfaceVerdict::Admitted(row)) =
+                    self.admission.verdict(order, surface)
+                    && let Some(material) = self.admission.materials.get(*row as usize)
+                {
+                    swaps.entry(from).or_insert_with(|| material.clone());
+                }
+            }
+            if !swaps.is_empty() {
+                out.push((*slot, Arc::new(swaps)));
+            }
+        }
+        out
+    }
+
     fn prepare_next_weapon(&mut self, fpv: &FpvMeshCatalog, xanims: &XAnimCatalog) {
         let registry = Arc::clone(&self.owner.weapons);
         let (id, parent) = if self.next_weapon as usize > registry.len() {
@@ -707,6 +788,7 @@ impl FpvPreparationJob {
             .map(|entry| entry.skel.name.clone())
             .unwrap_or_else(String::new);
         let census = self.census_of(fpv, gun_index);
+        let camos = self.camo_swaps(fpv, id, gun_index);
         let right_orders: Vec<Option<usize>> = right.clip_orders().to_vec();
         let left_orders: Vec<Option<usize>> = left
             .as_ref()
@@ -802,6 +884,7 @@ impl FpvPreparationJob {
                 idle_name: idle_name.clone(),
                 rigs,
                 census: census.clone(),
+                camos: camos.clone(),
             }))
         });
         for (axis, side) in sides.iter().enumerate() {

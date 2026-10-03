@@ -278,6 +278,9 @@ pub struct FpvDrawPlan {
     /// once; a frame that still answers this generation publishes vertices.
     pub rig_generation: u64,
 
+    /// The camouflage slot the rows' materials were published for.
+    pub camo: u8,
+
     pub(crate) packed_vertices: asset_world::PackedVertexPayload,
 }
 

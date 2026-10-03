@@ -776,8 +776,15 @@ impl<'a> RemotePoseFrame<'a> {
         let world_gun_gap = &mut self.world_gun_gap;
         let result = (|| {
             let origin = transform.translation.to_array();
-            let model_set =
-                select_remote_models(bodies, weapons, world_weapons, axis, weapon, remote.shield)?;
+            let model_set = select_remote_models(
+                bodies,
+                weapons,
+                world_weapons,
+                axis,
+                weapon,
+                sample.weapon_model,
+                remote.shield,
+            )?;
             let advanced = advance_remote_tree(
                 tree,
                 self.script,

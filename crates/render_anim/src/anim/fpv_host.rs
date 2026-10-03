@@ -103,6 +103,8 @@ pub struct FpvPosedFrame {
 pub struct FpvPoseProduct {
     pub drawgun: Option<i32>,
     pub kind: FpvPoseKind,
+    /// The camouflage slot of the held gun (0 for none).
+    pub camo: u8,
 }
 
 pub struct FpvGenerateArgs<'a> {

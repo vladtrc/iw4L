@@ -237,6 +237,32 @@ pub fn latch_weapon_dual_wield(
     set_weapon_dual_wield_byte(data, slot, dual);
 }
 
+/// The model a held weapon shows (`PlayerEquippedWeaponState::weaponModel`):
+/// 0 is its plain model, others its camouflage. 0 when it is not held.
+pub fn weapon_model_for_held(weapons: &[i32; 15], weapon_data: &[u8], weapon: u32) -> u8 {
+    let slot = player_weapons_find_slot(weapons, weapon as i32);
+    if slot < 0 {
+        return 0;
+    }
+    weapon_data.get(slot as usize * 5 + 2).copied().unwrap_or(0)
+}
+
+/// Sets the model a held weapon shows; nothing when it is not held.
+pub fn set_weapon_model_for_held(
+    weapons: &[i32; 15],
+    weapon_data: &mut [u8],
+    weapon: u32,
+    model: u8,
+) {
+    let slot = player_weapons_find_slot(weapons, weapon as i32);
+    if slot < 0 {
+        return;
+    }
+    if let Some(byte) = weapon_data.get_mut(slot as usize * 5 + 2) {
+        *byte = model;
+    }
+}
+
 pub fn num_hands(dual_wield_byte: u8) -> i32 {
     if dual_wield_byte != 0 { 1 } else { 0 }
 }

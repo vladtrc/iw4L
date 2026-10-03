@@ -149,7 +149,12 @@ impl MenuHost<'_> {
                 };
                 match field(4).to_ascii_lowercase().as_str() {
                     "weapon" => base(weapon),
-                    "camo" => String::from("none"),
+                    "camo" => slot
+                        .camos
+                        .get(usize::try_from(int(3)).unwrap_or(usize::MAX))
+                        .filter(|camo| !camo.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| String::from("none")),
                     "attachment" => attachments
                         .get(usize::try_from(int(5)).unwrap_or(usize::MAX))
                         .map(|attachment| {

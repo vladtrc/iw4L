@@ -32,8 +32,8 @@ pub use events::{
 };
 pub use loadout::{
     CLASS_CATALOG_DEATHSTREAKS, CLASS_CATALOG_PERKS, ClassDef, ClassRejectReason,
-    ConfigurationChangeRejectReason, GiveRejectReason, LoadoutSpec, PERSONAL_CLASS_SLOTS,
-    PersonalClass,
+    ConfigurationChangeRejectReason, GiveRejectReason, IW4_CAMOS, LoadoutSpec,
+    PERSONAL_CLASS_SLOTS, PersonalClass, iw4_camo_index,
 };
 pub fn class_catalog_perk_name(id: u32) -> Option<&'static str> {
     CLASS_CATALOG_PERKS

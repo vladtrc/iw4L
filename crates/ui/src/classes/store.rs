@@ -45,6 +45,7 @@ impl SessionClassStore {
                         "specialty_bulletaccuracy".into(),
                     ],
                     deathstreak: "specialty_copycat".into(),
+                    camos: Default::default(),
                 };
                 if available(&slot) {
                     slots.push(slot);
@@ -90,6 +91,7 @@ impl From<&ClassSlotState> for HostClassSlot {
             tactical: slot.tactical.clone(),
             perks: [slot.perk1.clone(), slot.perk2.clone(), slot.perk3.clone()],
             deathstreak: slot.deathstreak.clone(),
+            camos: slot.camos.clone(),
         }
     }
 }
@@ -142,6 +144,14 @@ fn encode_slots(slots: &[ClassSlotState]) -> String {
             clean_field(&slot.deathstreak),
         ];
         out.push_str(&fields.join("\t"));
+        // Camouflage trails the row, and only when there is some: a file
+        // without it reads in builds that predate it.
+        if slot.camos.iter().any(|camo| !camo.is_empty()) {
+            for camo in &slot.camos {
+                out.push('\t');
+                out.push_str(&clean_field(camo));
+            }
+        }
         out.push('\n');
     }
     out
@@ -161,7 +171,15 @@ fn decode_slots(text: &str) -> Option<Vec<ClassSlotState>> {
     };
     let mut slots = Vec::new();
     for line in lines.filter(|line| !line.is_empty()) {
-        let fields: Vec<&str> = line.split('\t').collect();
+        let mut fields: Vec<&str> = line.split('\t').collect();
+        let camos = match fields.as_slice() {
+            [.., primary, secondary] if fields.len() == 13 => {
+                let camos = [(*primary).to_owned(), (*secondary).to_owned()];
+                fields.truncate(11);
+                camos
+            }
+            _ => Default::default(),
+        };
         let [
             name,
             primary,
@@ -193,6 +211,7 @@ fn decode_slots(text: &str) -> Option<Vec<ClassSlotState>> {
             perk2: (*perk2).to_owned(),
             perk3: (*perk3).to_owned(),
             deathstreak: (*deathstreak).to_owned(),
+            camos,
             lock_reason: None,
         });
     }

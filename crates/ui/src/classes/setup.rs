@@ -428,6 +428,8 @@ pub struct ClassSlotState {
     pub perk2: String,
     pub perk3: String,
     pub deathstreak: String,
+    /// The primary's and secondary's camouflage; empty for none.
+    pub camos: [String; 2],
 
     pub lock_reason: Option<String>,
 }
@@ -446,6 +448,7 @@ impl ClassSlotState {
             perk2: slot.perks[1].clone(),
             perk3: slot.perks[2].clone(),
             deathstreak: slot.deathstreak.clone(),
+            camos: slot.camos.clone(),
             lock_reason: None,
         }
     }
@@ -475,6 +478,7 @@ impl ClassSlotState {
             perk2: perk(1),
             perk3: perk(2),
             deathstreak: preset.deathstreak.to_owned(),
+            camos: Default::default(),
             lock_reason: None,
         }
     }

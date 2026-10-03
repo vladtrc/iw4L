@@ -287,6 +287,8 @@ pub struct PreparedFpvGeometry {
     pub index_n: usize,
     pub surface_ranges: Vec<(u32, u32)>,
     pub materials: Vec<SmodelPassMaterial>,
+    /// The authored material each of `materials` was admitted for.
+    pub material_authored: Vec<usize>,
     pub draws: Vec<FpvSurfaceDraw>,
     pub dest_n: usize,
     pub packed_ok: bool,
@@ -376,6 +378,7 @@ impl PreparedFpvRig {
             index_n: 0,
             surface_ranges: Vec::new(),
             materials: Vec::new(),
+            material_authored: Vec::new(),
             draws: Vec::new(),
             dest_n: 0,
             packed_ok: true,
@@ -410,6 +413,7 @@ impl PreparedFpvRig {
                 let material_index = *material_key.entry(surface.authored).or_insert_with(|| {
                     let index = geometry.materials.len() as u32;
                     geometry.materials.push(material.clone());
+                    geometry.material_authored.push(surface.authored);
                     index
                 });
                 geometry.draws.push(FpvSurfaceDraw {

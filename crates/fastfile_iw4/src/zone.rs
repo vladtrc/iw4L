@@ -929,9 +929,15 @@ pub struct WeaponGeometry {
 
     pub gun_xmodel_name: Option<Ptr>,
 
+    /// Every `gunXModel` slot: 0 is `gun_xmodel_name`, the others camouflage.
+    pub gun_xmodel_names: [Option<Ptr>; 16],
+
     pub hand_xmodel_name: Option<Ptr>,
 
     pub world_model_name: Option<Ptr>,
+
+    /// Every `worldModel` slot, as `gun_xmodel_names`.
+    pub world_model_names: [Option<Ptr>; 16],
 
     pub projectile_model_name: Option<Ptr>,
 

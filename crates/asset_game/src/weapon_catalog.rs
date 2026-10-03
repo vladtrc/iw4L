@@ -454,6 +454,20 @@ pub fn cac_offhand_bucket(offhand_class: i32) -> Option<CacOffhandBucket> {
     }
 }
 
+/// A weapon's camouflage models: `(slot, model)` for each filled `gunXModel` /
+/// `worldModel` slot past 0. A script gives the weapon with its slot.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WeaponCamoModels {
+    pub view: Vec<(u8, String)>,
+    pub world: Vec<(u8, String)>,
+}
+
+impl WeaponCamoModels {
+    pub fn is_empty(&self) -> bool {
+        self.view.is_empty() && self.world.is_empty()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CatalogWeapon {
     pub namespace: crate::AssetNamespace,
@@ -523,6 +537,8 @@ pub struct CatalogWeapon {
     pub dual_wield_weapon: Option<String>,
 
     pub world_model: Option<String>,
+
+    pub camo_models: WeaponCamoModels,
 
     pub projectile_model: Option<String>,
 
@@ -1325,6 +1341,18 @@ impl WeaponCatalog {
             .and_then(|ptr| stream.cstr(ptr).ok())
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
+        let camo = |names: &[Option<Ptr>; 16]| -> Vec<(u8, String)> {
+            (1..16u8)
+                .filter_map(|slot| {
+                    let name = stream.cstr(names[usize::from(slot)]?).ok()?;
+                    (!name.is_empty()).then(|| (slot, name.to_owned()))
+                })
+                .collect()
+        };
+        let camo_models = WeaponCamoModels {
+            view: camo(&geometry.gun_xmodel_names),
+            world: camo(&geometry.world_model_names),
+        };
         let projectile_model = geometry
             .projectile_model_name
             .and_then(|ptr| stream.cstr(ptr).ok())
@@ -1409,6 +1437,7 @@ impl WeaponCatalog {
             gun_xmodel,
             hand_xmodel,
             world_model,
+            camo_models,
             projectile_model,
             rocket_model,
             knife_xmodel: None,
@@ -2191,6 +2220,7 @@ impl WeaponCatalog {
             gun_xmodel,
             hand_xmodel,
             world_model,
+            camo_models: WeaponCamoModels::default(),
             projectile_model: geometry
                 .projectile_model_name
                 .and_then(|ptr| leftover_cstr_iw5(stream, ptr)),
@@ -2351,6 +2381,7 @@ impl WeaponCatalog {
             gun_xmodel,
             hand_xmodel,
 
+            camo_models: WeaponCamoModels::default(),
             world_model: geometry
                 .world_model_name
                 .and_then(|ptr| stream.cstr(ptr).ok())
@@ -5003,6 +5034,12 @@ struct WeaponRow {
 
     world_model_edge: AssetEdge<WorldWeaponSpace>,
 
+    camo_models: WeaponCamoModels,
+
+    /// The first-person and world camouflage models, by slot.
+    camo_view_edges: Vec<(u8, AssetEdge<FpvMeshSpace>)>,
+    camo_world_edges: Vec<(u8, AssetEdge<WorldWeaponSpace>)>,
+
     attachment_world_model_edges: Vec<AssetEdge<WorldWeaponSpace>>,
 
     attachment_world_mounts: Vec<Option<String>>,
@@ -5106,6 +5143,9 @@ impl Default for WeaponRow {
             fpv_assemblies: [None, None],
             world_model: None,
             world_model_edge: AssetEdge::Absent,
+            camo_models: WeaponCamoModels::default(),
+            camo_view_edges: Vec::new(),
+            camo_world_edges: Vec::new(),
             attachment_world_model_edges: Vec::new(),
             attachment_world_mounts: Vec::new(),
             projectile_model: None,
@@ -5581,6 +5621,12 @@ impl WeaponBuild {
     pub fn resolve_fpv_mesh_edges(&mut self, fpv: &crate::FpvMeshCatalog) {
         for row in &mut self.registry.rows {
             row.gun_xmodel_edge = fpv_model_edge(row.gun_xmodel.as_deref(), row.namespace, fpv);
+            row.camo_view_edges = row
+                .camo_models
+                .view
+                .iter()
+                .map(|(slot, name)| (*slot, fpv_model_edge(Some(name), row.namespace, fpv)))
+                .collect();
             row.hand_xmodel_edge = fpv_model_edge(row.hand_xmodel.as_deref(), row.namespace, fpv);
             row.rocket_model_edge = fpv_model_edge(row.rocket_model.as_deref(), row.namespace, fpv);
             row.attachment_view_model_edges = row
@@ -5815,6 +5861,12 @@ impl WeaponBuild {
         for row in &mut self.registry.rows {
             row.world_model_edge =
                 world_model_edge(row.world_model.as_deref(), row.namespace, catalog);
+            row.camo_world_edges = row
+                .camo_models
+                .world
+                .iter()
+                .map(|(slot, name)| (*slot, world_model_edge(Some(name), row.namespace, catalog)))
+                .collect();
             row.attachment_world_model_edges = row
                 .attachment_world_models
                 .iter()
@@ -5894,6 +5946,7 @@ impl WeaponBuild {
         let mut gun_by_def: HashMap<(u8, u32), String> = HashMap::new();
         let mut hand_by_def: HashMap<(u8, u32), String> = HashMap::new();
         let mut world_by_def: HashMap<(u8, u32), String> = HashMap::new();
+        let mut camo_by_def: HashMap<(u8, u32), WeaponCamoModels> = HashMap::new();
         let mut projectile_by_def: HashMap<(u8, u32), String> = HashMap::new();
         let mut knife_by_def: HashMap<(u8, u32), String> = HashMap::new();
         let mut rocket_by_def: HashMap<(u8, u32), String> = HashMap::new();
@@ -5913,6 +5966,11 @@ impl WeaponBuild {
             }
             if let (Some(key), Some(world)) = (entry.weap_def, entry.world_model.as_ref()) {
                 world_by_def.entry(key).or_insert_with(|| world.clone());
+            }
+            if let Some(key) = entry.weap_def.filter(|_| !entry.camo_models.is_empty()) {
+                camo_by_def
+                    .entry(key)
+                    .or_insert_with(|| entry.camo_models.clone());
             }
             if let (Some(key), Some(proj)) = (entry.weap_def, entry.projectile_model.as_ref()) {
                 projectile_by_def.entry(key).or_insert_with(|| proj.clone());
@@ -5957,6 +6015,11 @@ impl WeaponBuild {
                 if let Some(key) = entry.weap_def {
                     entry.world_model = world_by_def.get(&key).cloned();
                 }
+            }
+            if entry.camo_models.is_empty()
+                && let Some(shared) = entry.weap_def.and_then(|key| camo_by_def.get(&key))
+            {
+                entry.camo_models = shared.clone();
             }
             if entry.projectile_model.is_none() {
                 if let Some(key) = entry.weap_def {
@@ -6022,6 +6085,9 @@ impl WeaponBuild {
                     }
                     if existing.world_model.is_none() {
                         existing.world_model = entry.world_model;
+                    }
+                    if existing.camo_models.is_empty() {
+                        existing.camo_models = entry.camo_models;
                     }
                     if existing.projectile_model.is_none() {
                         existing.projectile_model = entry.projectile_model;
@@ -6139,6 +6205,9 @@ impl WeaponBuild {
                 fpv_assemblies: [None, None],
                 world_model: entry.world_model,
                 world_model_edge: AssetEdge::Absent,
+                camo_models: entry.camo_models,
+                camo_view_edges: Vec::new(),
+                camo_world_edges: Vec::new(),
                 attachment_world_model_edges: Vec::new(),
                 attachment_world_mounts: Vec::new(),
                 projectile_model: entry.projectile_model,
@@ -6777,6 +6846,28 @@ impl WeaponRegistry {
         self.rows.get(index as usize).map(|row| row.gun_xmodel_edge)
     }
 
+    /// The first-person camouflage models of a weapon, by slot.
+    pub fn camo_view_edges_of(&self, index: u32) -> &[(u8, AssetEdge<FpvMeshSpace>)] {
+        self.rows
+            .get(index as usize)
+            .map_or(&[], |row| row.camo_view_edges.as_slice())
+    }
+
+    /// The world model a weapon given with camouflage `slot` shows, if it
+    /// has one of its own.
+    pub fn camo_world_edge_of(&self, index: u32, slot: u8) -> Option<AssetEdge<WorldWeaponSpace>> {
+        let row = self.rows.get(index as usize)?;
+        row.camo_world_edges
+            .iter()
+            .find(|(own, _)| *own == slot)
+            .map(|(_, edge)| *edge)
+    }
+
+    /// The camouflage models a weapon names, by slot.
+    pub fn camo_models_of(&self, index: u32) -> Option<&WeaponCamoModels> {
+        self.rows.get(index as usize).map(|row| &row.camo_models)
+    }
+
     pub fn fpv_hands_of(
         &self,
         index: u32,
@@ -7037,6 +7128,26 @@ impl WeaponRegistry {
             return None;
         }
         catalog.get_at(self.world_model_edge_of(index)?.bound_index()?)
+    }
+
+    /// The world model a weapon given with camouflage `camo` shows: its
+    /// camouflage model when it has one bound, else its plain one.
+    pub fn world_model_entry_for<'a>(
+        &self,
+        index: u32,
+        camo: u8,
+        catalog: &'a crate::WorldWeaponCatalog,
+    ) -> Option<&'a crate::WorldWeaponEntry> {
+        if camo != 0
+            && self.world_catalog_identity == catalog.identity()
+            && let Some(entry) = self
+                .camo_world_edge_of(index, camo)
+                .and_then(|edge| edge.bound_index())
+                .and_then(|order| catalog.get_at(order))
+        {
+            return Some(entry);
+        }
+        self.world_model_entry(index, catalog)
     }
 
     pub fn authored_weapon_sound(&self, index: u32, slot: WeaponSoundSlot) -> Option<&str> {
@@ -7486,6 +7597,28 @@ impl WeaponRegistry {
                 )
             })
             .collect()
+    }
+
+    /// Weapons with camouflage models, and how many of those bound.
+    pub fn camo_census(&self) -> (usize, usize, usize) {
+        let with = self
+            .rows
+            .iter()
+            .filter(|row| !row.camo_models.view.is_empty())
+            .count();
+        let view_bound = self
+            .rows
+            .iter()
+            .flat_map(|row| &row.camo_view_edges)
+            .filter(|(_, edge)| edge.is_bound())
+            .count();
+        let world_bound = self
+            .rows
+            .iter()
+            .flat_map(|row| &row.camo_world_edges)
+            .filter(|(_, edge)| edge.is_bound())
+            .count();
+        (with, view_bound, world_bound)
     }
 
     pub fn gun_xmodel_count(&self) -> usize {

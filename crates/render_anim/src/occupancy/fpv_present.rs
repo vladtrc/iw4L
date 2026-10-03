@@ -719,6 +719,15 @@ pub fn tick_fpv_viewmodel(
         None
     };
     let weapon_id = session.weapon_id;
+    // An alternate mode shows its parent gun, given with the parent's model.
+    let held = if session.parent_weapon != 0 {
+        session.parent_weapon
+    } else {
+        weapon_id
+    };
+    product.camo = presented.viewweapon_player(local.0).map_or(0, |ps| {
+        weapon_iw4::weapon_model_for_held(&ps.weapons, &ps.weapon_data, held)
+    });
     let SessionFpvMeshesHandles {
         fpv: equipped,
         active_rig,
@@ -817,9 +826,16 @@ fn skin_fpv_geometry(
                 crate::clear_fpv_draw_plan(&mut fpv_plan, handle);
                 return;
             }
-            if fpv_plan.rig_generation != rig.generation() {
-                crate::install_prepared_fpv_plan(&mut fpv_plan, &rig.geometry, handle);
+            if fpv_plan.rig_generation != rig.generation() || fpv_plan.camo != product.camo {
+                let camo = session.and_then(|session| session.view.camo(product.camo));
+                crate::install_prepared_fpv_plan(
+                    &mut fpv_plan,
+                    &rig.geometry,
+                    camo.map(|swaps| &**swaps),
+                    handle,
+                );
                 fpv_plan.rig_generation = rig.generation();
+                fpv_plan.camo = product.camo;
             }
             if let Some(rows) = fpv_plan.packed_rows_mut() {
                 rig.skin_into(&catalog.0, &frame.poses, rows);

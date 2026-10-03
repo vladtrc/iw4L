@@ -543,7 +543,14 @@ fn class_profile_data(world: &mut World, class: &crate::ClassDef) -> Vec<(Vec<Va
         put(format!("{key}.weapon"), &base);
         put(format!("{key}.attachment.0"), &attachments[0]);
         put(format!("{key}.attachment.1"), &attachments[1]);
-        put(format!("{key}.camo"), "none");
+        let camo = class.camos.get(setup_index).copied().unwrap_or(0);
+        put(
+            format!("{key}.camo"),
+            crate::match_state::IW4_CAMOS
+                .get(usize::from(camo))
+                .copied()
+                .unwrap_or("none"),
+        );
     }
     let lethal = if lethal == 0 {
         "specialty_null".to_owned()

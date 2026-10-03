@@ -421,11 +421,18 @@ pub(crate) fn encode_action(out: &mut WireWriter, action: &ClientAction) {
                 out.put_u32(perk);
             }
             out.put_u8(loadout.deathstreak);
+            out.put_u8(loadout.camos[0]);
+            out.put_u8(loadout.camos[1]);
         }
-        ClientAction::GiveWeapon { request_id, weapon } => {
+        ClientAction::GiveWeapon {
+            request_id,
+            weapon,
+            model,
+        } => {
             out.put_u8(6);
             out.put_u32(request_id);
             out.put_u32(weapon);
+            out.put_u8(model);
         }
         ClientAction::ChangeWeaponConfiguration {
             request_id,
@@ -568,6 +575,7 @@ pub(crate) fn decode_action(input: &mut WireReader<'_>) -> Result<ClientAction, 
                 ],
                 perks: [input.get_u32()?, input.get_u32()?, input.get_u32()?],
                 deathstreak: input.get_u8()?,
+                camos: [input.get_u8()?, input.get_u8()?],
             },
         }),
         2 => Ok(ClientAction::JoinMatch {
@@ -592,6 +600,7 @@ pub(crate) fn decode_action(input: &mut WireReader<'_>) -> Result<ClientAction, 
         6 => Ok(ClientAction::GiveWeapon {
             request_id: input.get_u32()?,
             weapon: input.get_u32()?,
+            model: input.get_u8()?,
         }),
         15 => Ok(ClientAction::ChangeWeaponConfiguration {
             request_id: input.get_u32()?,

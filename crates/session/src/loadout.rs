@@ -12,6 +12,8 @@ pub struct ClassRow {
     pub attachments: [Vec<String>; 2],
     pub perks: [String; 3],
     pub deathstreak: String,
+    /// The primary's and secondary's camouflage; empty for none.
+    pub camos: [String; 2],
 }
 
 pub fn resolve_class_weapon(
@@ -153,6 +155,7 @@ impl From<&frame::HostClassSlot> for ClassRow {
             ],
             perks: slot.perks.clone(),
             deathstreak: slot.deathstreak.clone(),
+            camos: slot.camos.clone(),
         }
     }
 }
@@ -161,7 +164,13 @@ pub fn resolve_personal_class(
     row: &ClassRow,
     registry: &WeaponRegistry,
 ) -> Result<sim::PersonalClass, String> {
-    let mut loadout = sim::PersonalClass::default();
+    let mut loadout = sim::PersonalClass {
+        camos: row
+            .camos
+            .each_ref()
+            .map(|camo| sim::match_state::iw4_camo_index(camo)),
+        ..Default::default()
+    };
     let rules = asset_game::LoadoutRules::for_class(&row.perks[0]);
     for (slot, weapon) in loadout.weapons.iter_mut().enumerate() {
         *weapon = resolve_class_weapon(

@@ -494,6 +494,13 @@ pub(crate) fn give_weapon(
     Ok(())
 }
 
+/// Shows a held weapon with model `model` (0 plain, else its camouflage).
+pub(crate) fn set_weapon_model(world: &mut FrameWorld, id: ClientId, weapon: u32, model: u8) {
+    if let Some(ps) = world.player_mut(id) {
+        weapon_iw4::set_weapon_model_for_held(&ps.weapons, &mut ps.weapon_data, weapon, model);
+    }
+}
+
 pub(crate) fn take_weapon(world: &mut FrameWorld, id: ClientId, weapon: u32) {
     let Some(ps) = world.player_mut(id) else {
         return;

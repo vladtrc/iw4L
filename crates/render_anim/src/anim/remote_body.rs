@@ -525,6 +525,7 @@ impl PreparedRemoteKits {
                     Some(world_weapons),
                     axis,
                     weapon,
+                    0,
                     None,
                 )
                 .ok()
@@ -802,6 +803,7 @@ pub fn select_remote_models<'a>(
     world_weapons: Option<&'a assets::PreparedWorldWeapons>,
     axis: bool,
     weapon: u32,
+    camo: u8,
     shield: Option<sim::ShieldAttachment>,
 ) -> Result<RemoteModelSet<'a>, String> {
     let kits = bodies.0.kits();
@@ -879,7 +881,7 @@ pub fn select_remote_models<'a>(
                 });
                 None
             };
-            match registry.0.world_model_entry(index, &catalog.0) {
+            match registry.0.world_model_entry_for(index, camo, &catalog.0) {
                 None => refuse_gun(leftover),
                 Some(entry) => {
                     let name = entry.skel.name.as_str();

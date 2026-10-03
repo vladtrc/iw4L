@@ -645,9 +645,13 @@ pub fn append_dynent_asset(
 /// its materials and its draws, plus a packed vertex buffer sized to the layout
 /// it laid out. This runs when the composition changes. A pose writes into the
 /// buffer below and touches nothing else here.
+///
+/// `camo` swaps the gun's materials for those of the camouflage it is shown
+/// with, by authored material.
 pub fn install_prepared_fpv_plan(
     plan: &mut FpvDrawPlan,
     geometry: &crate::anim::fpv_rig::PreparedFpvGeometry,
+    camo: Option<&std::collections::HashMap<usize, SmodelPassMaterial>>,
     lighting_handle: u32,
 ) {
     geometry.write_indices(&mut plan.indices);
@@ -655,7 +659,17 @@ pub fn install_prepared_fpv_plan(
     plan.surface_ranges
         .extend_from_slice(&geometry.surface_ranges);
     plan.materials.clear();
-    plan.materials.extend_from_slice(&geometry.materials);
+    plan.materials.extend(
+        geometry
+            .materials
+            .iter()
+            .zip(&geometry.material_authored)
+            .map(|(material, authored)| {
+                camo.and_then(|swaps| swaps.get(authored))
+                    .unwrap_or(material)
+                    .clone()
+            }),
+    );
     plan.draws.clear();
     plan.draws.extend_from_slice(&geometry.draws);
     plan.decoded_n = geometry.dest_n;

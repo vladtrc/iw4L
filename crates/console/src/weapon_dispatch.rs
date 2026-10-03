@@ -218,12 +218,21 @@ pub(crate) fn route_weapon_commands(
                     );
                     continue;
                 }
-                match resolve_give_id(&weapons.0, arg, &cmd.args[1..]) {
-                    Ok(weapon) => {
+                let (camo, attachments) = split_camo(&cmd.args[1..]);
+                match resolve_give_id(&weapons.0, arg, &attachments).and_then(|weapon| {
+                    let model = camo.map_or(Ok(0), |camo| camo_slot(&weapons.0, weapon, camo))?;
+                    Ok((weapon, model))
+                }) {
+                    Ok((weapon, model)) => {
                         let request_id = seq.allocate();
-                        if let Err(error) =
-                            inbox.push(local.0, ClientAction::GiveWeapon { request_id, weapon })
-                        {
+                        if let Err(error) = inbox.push(
+                            local.0,
+                            ClientAction::GiveWeapon {
+                                request_id,
+                                weapon,
+                                model,
+                            },
+                        ) {
                             echo(format!("give: {error}"), &mut console, &mut line);
                             continue;
                         }
@@ -315,7 +324,56 @@ pub(crate) fn route_weapon_commands(
     }
 }
 
-const GIVE_USAGE: &str = "give ammo | give killstreak/<name> | give weapon/<game:weapon> [attachment...] — resupply ammo, acquire a reward, or equip a weapon";
+const GIVE_USAGE: &str = "give ammo | give killstreak/<name> | give weapon/<game:weapon> [attachment...] [camo=<name|slot>] — resupply ammo, acquire a reward, or equip a weapon";
+
+/// A `camo=<name|slot>` argument apart from the attachments.
+pub(crate) fn split_camo(args: &[String]) -> (Option<&str>, Vec<String>) {
+    let mut camo = None;
+    let mut attachments = Vec::new();
+    for arg in args {
+        match arg.strip_prefix("camo=") {
+            Some(value) => camo = Some(value),
+            None => attachments.push(arg.clone()),
+        }
+    }
+    (camo, attachments)
+}
+
+/// The camouflage slot of `weapon` a name (`woodland`, by its number in
+/// IW4's camouflage table) or a slot number names.
+pub(crate) fn camo_slot(
+    registry: &asset_game::WeaponRegistry,
+    weapon: u32,
+    camo: &str,
+) -> Result<u8, String> {
+    if camo.eq_ignore_ascii_case("none") {
+        return Ok(0);
+    }
+    let models = registry
+        .camo_models_of(weapon)
+        .filter(|models| !models.view.is_empty())
+        .ok_or_else(|| format!("{} has no camouflage", registry.name_of(weapon)))?;
+    let slot = match camo.parse::<u8>() {
+        Ok(slot) => slot,
+        Err(_) => match sim::match_state::iw4_camo_index(camo) {
+            0 => return Err(format!("no camouflage `{camo}`")),
+            slot => slot,
+        },
+    };
+    models
+        .view
+        .iter()
+        .any(|(own, _)| *own == slot)
+        .then_some(slot)
+        .ok_or_else(|| {
+            let names: Vec<&str> = models
+                .view
+                .iter()
+                .filter_map(|(own, _)| sim::match_state::IW4_CAMOS.get(usize::from(*own)).copied())
+                .collect();
+            format!("no camouflage `{camo}` (has {})", names.join(", "))
+        })
+}
 
 #[derive(Debug, PartialEq)]
 enum GiveTarget<'a> {
