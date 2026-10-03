@@ -384,6 +384,16 @@ impl MenuCatalog {
         Ok(())
     }
 
+    /// Like [`load_definitions`], but menus whose `base` is absent — a base
+    /// defined only by game menu content — are skipped. Returns one
+    /// line per skipped menu.
+    pub fn load_definitions_lenient(&mut self, source: &str) -> Result<Vec<String>, String> {
+        let (definitions, warnings) = crate::menu_source::load_lenient(source, self)?;
+        self.menus
+            .extend(definitions.into_iter().map(|def| (def.name.clone(), def)));
+        Ok(warnings)
+    }
+
     pub fn get(&self, name: &str) -> Option<&MenuDef> {
         self.menus.get(name).or_else(|| {
             self.menus

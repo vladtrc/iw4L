@@ -949,9 +949,6 @@ pub fn prepare_fpv_compositions(inputs: PrepareFpvInputs, mut prepared: ResMut<P
         }
         return;
     };
-    if tess.material_images.is_empty() {
-        return;
-    }
     let sorted_ready = matches!(
         tess.catalog.sorted_materials,
         RuntimeSortedMaterialTable::Ready { .. }
@@ -977,7 +974,15 @@ pub fn prepare_fpv_compositions(inputs: PrepareFpvInputs, mut prepared: ResMut<P
         .is_none_or(|job| !job.owner.same(&owner));
     if restart {
         prepared.clear();
-        let shared_refusal = if !sorted_ready {
+        // A world that produced no material images has no first-person content
+        // to prepare at all: every weapon is refused up front so the spawn
+        // gate can settle instead of holding for images that never arrive.
+        let shared_refusal = if tess.material_images.is_empty() {
+            Some((
+                RenderGapCause::FpvCatalogMissing,
+                "the world has no material images",
+            ))
+        } else if !sorted_ready {
             Some((
                 RenderGapCause::FpvCatalogMissing,
                 "the material generation has no sorted table",

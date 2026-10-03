@@ -103,61 +103,97 @@ fn merge(target: &mut Value, fields: BTreeMap<String, Value>) -> Result<(), Stri
     Ok(())
 }
 
-pub(crate) fn load(source: &str, catalog: &MenuCatalog) -> Result<Vec<MenuDef>, String> {
-    let definitions: Vec<Definition> =
-        serde_json::from_str(source).map_err(|error| format!("Menu definitions: {error}"))?;
-    let mut resolved = BTreeMap::<String, MenuDef>::new();
-    for definition in definitions {
-        let def = match definition {
-            Definition::Complete(def) => def,
-            Definition::Variant(variant) => {
-                let base = resolved
-                    .get(&variant.base)
-                    .or_else(|| catalog.get(&variant.base))
-                    .ok_or_else(|| {
-                        format!(
-                            "Menu `{}` requires missing base `{}`",
-                            variant.name, variant.base
-                        )
-                    })?;
-                let mut value = serde_json::to_value(base).map_err(|error| error.to_string())?;
-                merge(&mut value, variant.fields)?;
-                let mut def: MenuDef = serde_json::from_value(value)
-                    .map_err(|error| format!("Menu `{}`: {error}", variant.name))?;
-                def.name = variant.name;
-                for item in variant.item_overrides {
-                    let Some(index) = item.resolve(&def)? else {
-                        continue;
-                    };
-                    let target = &mut def.items[index];
-                    let mut value =
-                        serde_json::to_value(&*target).map_err(|error| error.to_string())?;
-                    merge(&mut value, item.fields)?;
-                    *target = serde_json::from_value(value)
-                        .map_err(|error| format!("Menu `{}` item {index}: {error}", def.name))?;
-                }
-                for copy in variant.item_copies {
-                    let Some(index) = copy.resolve(base)? else {
-                        continue;
-                    };
-                    let source = &base.items[index];
-                    let mut value =
-                        serde_json::to_value(source).map_err(|error| error.to_string())?;
-                    merge(&mut value, copy.fields)?;
-                    def.items
-                        .push(serde_json::from_value(value).map_err(|error| {
-                            format!("Menu `{}` copied item: {error}", def.name)
-                        })?);
-                }
-                def.items.extend(variant.append_items);
-                def.handlers.open.splice(0..0, variant.open_prefix);
-                def
+fn resolve_definition(
+    definition: Definition,
+    resolved: &BTreeMap<String, MenuDef>,
+    catalog: &MenuCatalog,
+) -> Result<MenuDef, String> {
+    let def = match definition {
+        Definition::Complete(def) => def,
+        Definition::Variant(variant) => {
+            let base = resolved
+                .get(&variant.base)
+                .or_else(|| catalog.get(&variant.base))
+                .ok_or_else(|| {
+                    format!(
+                        "Menu `{}` requires missing base `{}`",
+                        variant.name, variant.base
+                    )
+                })?;
+            let mut value = serde_json::to_value(base).map_err(|error| error.to_string())?;
+            merge(&mut value, variant.fields)?;
+            let mut def: MenuDef = serde_json::from_value(value)
+                .map_err(|error| format!("Menu `{}`: {error}", variant.name))?;
+            def.name = variant.name;
+            for item in variant.item_overrides {
+                let Some(index) = item.resolve(&def)? else {
+                    continue;
+                };
+                let target = &mut def.items[index];
+                let mut value =
+                    serde_json::to_value(&*target).map_err(|error| error.to_string())?;
+                merge(&mut value, item.fields)?;
+                *target = serde_json::from_value(value)
+                    .map_err(|error| format!("Menu `{}` item {index}: {error}", def.name))?;
             }
-        };
-        if def.name.is_empty() || resolved.contains_key(&def.name) {
-            return Err(format!("Empty or duplicate menu name `{}`", def.name));
+            for copy in variant.item_copies {
+                let Some(index) = copy.resolve(base)? else {
+                    continue;
+                };
+                let source = &base.items[index];
+                let mut value = serde_json::to_value(source).map_err(|error| error.to_string())?;
+                merge(&mut value, copy.fields)?;
+                def.items.push(
+                    serde_json::from_value(value)
+                        .map_err(|error| format!("Menu `{}` copied item: {error}", def.name))?,
+                );
+            }
+            def.items.extend(variant.append_items);
+            def.handlers.open.splice(0..0, variant.open_prefix);
+            def
         }
+    };
+    if def.name.is_empty() || resolved.contains_key(&def.name) {
+        return Err(format!("Empty or duplicate menu name `{}`", def.name));
+    }
+    Ok(def)
+}
+
+fn parse(source: &str) -> Result<Vec<Definition>, String> {
+    serde_json::from_str(source).map_err(|error| format!("Menu definitions: {error}"))
+}
+
+pub(crate) fn load(source: &str, catalog: &MenuCatalog) -> Result<Vec<MenuDef>, String> {
+    let mut resolved = BTreeMap::<String, MenuDef>::new();
+    for definition in parse(source)? {
+        let def = resolve_definition(definition, &resolved, catalog)?;
         resolved.insert(def.name.clone(), def);
     }
     Ok(resolved.into_values().collect())
+}
+
+/// Like [`load`], but a variant whose base menu is absent — a base defined
+/// only by game menu content, for example — is skipped with a warning
+/// instead of failing the whole source. Every other failure stays fatal.
+pub(crate) fn load_lenient(
+    source: &str,
+    catalog: &MenuCatalog,
+) -> Result<(Vec<MenuDef>, Vec<String>), String> {
+    let mut resolved = BTreeMap::<String, MenuDef>::new();
+    let mut warnings = Vec::new();
+    for definition in parse(source)? {
+        if let Definition::Variant(variant) = &definition
+            && resolved.get(&variant.base).is_none()
+            && catalog.get(&variant.base).is_none()
+        {
+            warnings.push(format!(
+                "Menu `{}` requires missing base `{}`",
+                variant.name, variant.base
+            ));
+            continue;
+        }
+        let def = resolve_definition(definition, &resolved, catalog)?;
+        resolved.insert(def.name.clone(), def);
+    }
+    Ok((resolved.into_values().collect(), warnings))
 }

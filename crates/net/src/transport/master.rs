@@ -54,6 +54,8 @@ pub fn content_required_by_map(map: &str) -> Result<ContentFlags> {
         "iw4" => CONTENT_IW4,
         "iw5" => CONTENT_IW5,
         "t5" => CONTENT_T5,
+        // `iw4l:` maps ship inside the runtime; a client needs nothing installed.
+        "iw4l" => 0,
         other => return Err(format!("unknown content namespace `{other}` in map `{map}`").into()),
     }))
 }

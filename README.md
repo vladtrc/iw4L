@@ -54,6 +54,9 @@ make map mp_boneyard CMDS='wait world; spawn 0; force_match_start; bot add 3'
 This builds the optimized `play` profile and starts a local match with three bots.
 `force_match_start` skips the warmup that otherwise freezes movement.
 
+Just checking whether it runs on your PC? A debug map is included for that:
+`make map ZONE=iw4l:field` needs no game files, only an empty `IW4L_GAMES` folder.
+
 ## Inside the engine
 
 | Area | Implementation |

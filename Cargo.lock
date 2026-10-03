@@ -449,6 +449,7 @@ dependencies = [
  "bevy",
  "clipmap_iw4",
  "diag",
+ "dpvs_iw4",
  "fastfile_iw4",
  "fastfile_iw5",
  "fastfile_t5",

@@ -366,11 +366,17 @@ pub(crate) fn consume_gpu_load_progress(
         demand.overlay_gpu_wait,
         world_gen,
     );
-    ready.pipelines = job_phase_live
-        && progress.warmup.initialized
-        && progress.generation == world_gen
-        && progress.warmup.ready == progress.warmup.total
-        && progress.waiting_n == 0
-        && progress.working_hits > 0
-        && progress.working_not_ready == 0;
+    // A world whose surfaces carry no material never produces colour pipeline
+    // demand: nothing is kicked, the warmup stays uninitialized and the
+    // working set can never record a hit. With no demand the cache just has
+    // to be quiet.
+    let colour_demand =
+        !demand.pipeline_world_materials.is_empty() || !demand.pipeline_smodel_materials.is_empty();
+    let warmed = !colour_demand
+        || (progress.warmup.initialized
+            && progress.generation == world_gen
+            && progress.warmup.ready == progress.warmup.total
+            && progress.working_hits > 0);
+    ready.pipelines =
+        job_phase_live && progress.waiting_n == 0 && progress.working_not_ready == 0 && warmed;
 }

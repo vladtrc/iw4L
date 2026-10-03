@@ -306,6 +306,7 @@ pub(crate) fn capture_frame(
     has_world: Option<Res<HasWorld>>,
     stats: Option<Res<DpvsFrameStats>>,
     working: Option<Res<render_gpu::ColourWorkingSet>>,
+    demand: Option<Res<render_frontend::prepare::scene::world_gpu::GpuSubmitDemand>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let submitted_batches = stats.as_ref().map(|s| s.submitted_batches).unwrap_or(0);
@@ -321,8 +322,14 @@ pub(crate) fn capture_frame(
         g0_world,
     };
 
-    let pipelines_ready =
-        !facts.has_world || working.is_some_and(|set| set.hits > 0 && set.pipeline_not_ready == 0);
+    // A world that demands no colour pipelines can never record a working-set
+    // hit; for it "ready" is just that nothing demanded is still compiling.
+    let colour_demand = demand.is_some_and(|demand| {
+        !demand.pipeline_world_materials.is_empty() || !demand.pipeline_smodel_materials.is_empty()
+    });
+    let pipelines_ready = !facts.has_world
+        || working
+            .is_some_and(|set| set.pipeline_not_ready == 0 && (set.hits > 0 || !colour_demand));
     queue.settled_frames = if facts.content_up() && pipelines_ready {
         queue.settled_frames.saturating_add(1)
     } else {

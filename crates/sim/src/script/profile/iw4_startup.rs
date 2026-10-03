@@ -8,7 +8,9 @@ pub struct Iw4Startup {
 impl Iw4Startup {
     pub fn new(resolver: &impl SourceResolver, gametype: &str, map: &str) -> Self {
         let gametype = format!("maps/mp/gametypes/{gametype}");
-        let map = format!("maps/mp/{map}");
+        // `map` is a zone name: `:` is not legal in a module name, so a
+        // namespaced key (`iw4l:field`) loads its map script under the stem.
+        let map = format!("maps/mp/{}", map.rsplit(':').next().unwrap_or(map));
         let callbacks = "maps/mp/gametypes/_callbacksetup";
         let mut roots = vec![
             "codescripts/delete".to_owned(),

@@ -55,12 +55,21 @@ impl Plugin for MenuPlugin {
 }
 
 pub fn install_frontend_menus(catalog: &mut asset_game::MenuCatalog) -> Result<(), String> {
-    catalog.load_definitions(include_str!("../menus/frontend.json"))?;
-    catalog.load_definitions(include_str!("../menus/connection_error.json"))?;
-    catalog.load_definitions(include_str!("../menus/classes.json"))?;
-    catalog.load_definitions(include_str!("../menus/barracks.json"))?;
-    catalog.load_definitions(include_str!("../menus/settings.json"))?;
-    catalog.load_definitions(include_str!("../menus/controller.json"))?;
+    // Frontend menus may inherit bases defined by game menu content
+    // (`menu_xboxlive_privatelobby`, `popup_cac_weapon_primary`, …); without a
+    // games root those menus are skipped and the rest of the catalog installs.
+    for source in [
+        include_str!("../menus/frontend.json"),
+        include_str!("../menus/connection_error.json"),
+        include_str!("../menus/classes.json"),
+        include_str!("../menus/barracks.json"),
+        include_str!("../menus/settings.json"),
+        include_str!("../menus/controller.json"),
+    ] {
+        for skipped in catalog.load_definitions_lenient(source)? {
+            diag::warn!(Ui, "menus: {skipped}");
+        }
+    }
     let slider = catalog
         .get("pc_options_video")
         .and_then(|menu| {

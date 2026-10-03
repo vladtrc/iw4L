@@ -24,6 +24,7 @@ fastfile_t5.workspace = true
 fastfile_iw5.workspace = true
 asset_iw4.workspace = true
 clipmap_iw4.workspace = true
+dpvs_iw4.workspace = true
 # Light-grid CPU sample chain for authored smodel `$model_lighting` tiles.
 lighting_iw4.workspace = true
 bevy.workspace = true

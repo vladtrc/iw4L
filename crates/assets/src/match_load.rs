@@ -132,10 +132,18 @@ fn start_match_load(
         cancel_handle.clone(),
     ));
 
+    let builtin = crate::builtin_map::is_builtin_zone(&zone);
     let games = identity.map(|identity| asset_transport::GamesRoot(identity.games_root.clone()));
     let task = crate::session_load::load_pool().spawn(async move {
         let sound_path = zone_ff.clone();
-        match load_prepared_match(zone_ff, common_mp, progress.clone()).await {
+        // Built-in maps have no zone file; the whole prepared match is
+        // synthesized in memory instead of walked from disk.
+        let outcome = if builtin {
+            MatchLoadOutcome::Ready(crate::builtin_map::builtin_prepared_match(&zone))
+        } else {
+            load_prepared_match(zone_ff, common_mp, progress.clone()).await
+        };
+        match outcome {
             MatchLoadOutcome::Ready(mut prepared) => {
                 if progress.is_canceled() {
                     return None;
@@ -206,22 +214,33 @@ fn approve_map_load(
             );
             continue;
         }
-        let games = asset_transport::GamesRoot(identity.games_root.clone());
-        let found = asset_transport::find_zone_file(&games, &request.zone);
-        let zone = found
-            .as_ref()
-            .map(|zone| zone.zone_name.clone())
-            .unwrap_or_else(|_| request.zone.clone());
-        let zone_ff = found.map(|zone| zone.path);
-        let common_mp = match &zone_ff {
-            Ok(path) => asset_transport::find_runtime_common_mp(&games, path).map(|zone| zone.path),
-            Err(error) => Err(error.clone()),
-        };
-        let error = zone_ff
-            .as_ref()
-            .err()
-            .or_else(|| common_mp.as_ref().err())
-            .cloned();
+        // `iw4l:` zone keys name built-in content, not a zone file — nothing
+        // to find on disk, and the synthetic prepared match replaces the walk.
+        let (zone, zone_ff, common_mp, error) =
+            if crate::builtin_map::is_builtin_zone(&request.zone) {
+                let gap = format!("`{}` is a built-in map, not a zone file", request.zone);
+                (request.zone.clone(), Err(gap.clone()), Err(gap), None)
+            } else {
+                let games = asset_transport::GamesRoot(identity.games_root.clone());
+                let found = asset_transport::find_zone_file(&games, &request.zone);
+                let zone = found
+                    .as_ref()
+                    .map(|zone| zone.zone_name.clone())
+                    .unwrap_or_else(|_| request.zone.clone());
+                let zone_ff = found.map(|zone| zone.path);
+                let common_mp = match &zone_ff {
+                    Ok(path) => {
+                        asset_transport::find_runtime_common_mp(&games, path).map(|zone| zone.path)
+                    }
+                    Err(error) => Err(error.clone()),
+                };
+                let error = zone_ff
+                    .as_ref()
+                    .err()
+                    .or_else(|| common_mp.as_ref().err())
+                    .cloned();
+                (zone, zone_ff, common_mp, error)
+            };
         if let Some(error) = error {
             failed.write(MapLoadFailed {
                 request_id: request.request_id,

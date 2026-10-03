@@ -1,5 +1,6 @@
 mod artifact_cache;
 mod asset_graph;
+mod builtin_map;
 mod gltf_export;
 mod iwd;
 mod lane;
@@ -14,6 +15,7 @@ pub mod session_load;
 mod teardown;
 
 pub use artifact_cache::{cache_flight, cache_get, cache_put, fnv1a64, fnv1a64_more};
+pub use builtin_map::{BUILTIN_ZONE_PREFIX, builtin_prepared_match, is_builtin_zone};
 pub(crate) use asset_graph::stamp_match_destructible_death;
 pub use asset_graph::{
     AssetEdge, AssetEdgeCensus, AssetEdgeReason, AssetGraphCensus, DESTRUCTIBLE_DEATH_HINTS,

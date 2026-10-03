@@ -16,6 +16,13 @@ write `make map ZONE=iw5:mp_overwatch` or use `cargo run`. Recipes: `make
 scenario`, `chaos`, `bench` ([`BENCH.md`](BENCH.md)), `bench-live`, `lifecycle-*`
 (`*_CMDS` in the `Makefile`). Live recipes use `[profile.play]`; LTO is `PROFILE=release`.
 
+**`iw4l:` is the built-in namespace.** `map iw4l:field` loads the bundled
+paintball field — synthesized geometry, clip, spawns and GSC, no zone file
+and no game tree ([MAP-LOAD.md](MAP-LOAD.md#built-in-zones-iw4l)).
+`IW4L_GAMES` still has to name a directory; an empty one is enough. The
+player is spawned by script at join, and the surfaces shade through the
+diagnostic overlay rather than game materials.
+
 **Cheats are on by default.** The host accepts the debug
 actions: `move`, `look`, `tp`, `nudge`, `god`, `kill`, `damage`, `force_spawn`,
 `force_match_start`, `rotatevelocity` and the `give` supply commands. `--no-cheats`

@@ -7,6 +7,7 @@ use render_scene::{SmodelPassMaterial, TessMaterials, WorldModelLightingAtlas};
 
 type ModelMaterialsOwner = (
     Arc<RuntimeMaterialCatalog>,
+    Arc<Vec<Option<Handle<Image>>>>,
     Option<bevy::asset::AssetId<Image>>,
     Option<usize>,
     Option<u64>,
@@ -26,11 +27,12 @@ impl PreparedModelMaterials {
     fn owns(&self, owner: &ModelMaterialsOwner) -> bool {
         self.owner
             .as_ref()
-            .is_some_and(|(catalog, atlas, bodies, world)| {
+            .is_some_and(|(catalog, images, atlas, bodies, world)| {
                 Arc::ptr_eq(catalog, &owner.0)
-                    && *atlas == owner.1
-                    && *bodies == owner.2
-                    && *world == owner.3
+                    && Arc::ptr_eq(images, &owner.1)
+                    && *atlas == owner.2
+                    && *bodies == owner.3
+                    && *world == owner.4
             })
     }
 
@@ -165,11 +167,9 @@ pub fn prepare_model_materials(
     projectiles: Option<Res<assets::PreparedProjectileMeshes>>,
     mut prepared: ResMut<PreparedModelMaterials>,
 ) {
-    if tess.material_images.is_empty() {
-        return;
-    }
     let owner: ModelMaterialsOwner = (
         Arc::clone(&tess.catalog),
+        Arc::clone(&tess.material_images),
         atlas.as_ref().map(|atlas| atlas.image.id()),
         bodies
             .as_ref()

@@ -52,6 +52,26 @@ Remote kits and dropped-item compositions are built at install.
 `load ledger:` in the log is one line per load of
 what was handed over or compiled new against what an earlier load left behind.
 
+## Built-in zones: `iw4l:`
+
+`iw4l:field` is a map that exists only in `assets::builtin_map`. The load task
+short-circuits zone discovery and builds a `PreparedMatch` in memory — field
+boxes as both `WorldDraw` surfaces and `ClipCollision` brushes, DM spawn
+points and an intermission in the entity string, one DPVS cell that admits
+every surface, and the GSC startup set (`_callbacksetup`, a `dm` gametype
+stub, minimal stats/player-data sources). No zone file is opened and no game
+tree is read; the transport key keeps the `iw4l:` prefix while the map's
+manifest entry claims an `iw4` namespace key so the session content manifest
+has a legal descriptor, and `net` maps the `iw4l` namespace to zero required
+content flags.
+
+The surfaces carry no material: they draw through the diagnostic overlay
+(normal/checker shading, no technique set), so the world demands zero colour
+pipelines and zero material images. The GPU quiet gate, the first-person and
+model-material settle checks, and screenshot capture all treat empty pipeline
+demand as ready — a material-less world can never produce the working-set
+hits those gates otherwise wait for.
+
 ## Cache, and poking it: `iw4l-artifacts/cache/<kind>/<prefix>/<key>`
 
 Content-addressed leaf in `asset_transport::artifact_cache` (`cache_get` /
