@@ -601,7 +601,18 @@ impl PreparedFpvRig {
             .collect();
         let assembly = &self.composition.assembly;
         let world = assembly.dobj.pose(&instances, &self.parts, Mat4::IDENTITY);
-        let skin = assembly.dobj.skin_matrices(&world);
+        let mut skin = assembly.dobj.skin_matrices(&world);
+        // A hidden T6 gun bone takes its vertices to a point.
+        for &bone in &assembly.collapsed_bones {
+            if let (Some(skin), Some(world)) = (skin.get_mut(bone), world.get(bone)) {
+                *skin = Mat4::from_cols(
+                    bevy::math::Vec4::ZERO,
+                    bevy::math::Vec4::ZERO,
+                    bevy::math::Vec4::ZERO,
+                    world.w_axis,
+                );
+            }
+        }
         let eye_from_world = tag_view_to_bevy_camera() * world[assembly.view_bone].inverse();
         let lens = assembly
             .camera_bone

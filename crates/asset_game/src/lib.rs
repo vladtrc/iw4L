@@ -30,6 +30,11 @@ mod weapon_anim_dispatch;
 mod weapon_animations;
 mod weapon_catalog;
 mod weapon_families;
+mod weapon_t6;
+pub use weapon_t6::{
+    MELEE_WEAPON as T6_MELEE_WEAPON, T6_EFFECTS, T6_EQUIPMENT_SOUNDS, capture_t6_string_table,
+    planted_model as t6_planted_model, stand_in_for as t6_stand_in_for,
+};
 
 pub use arena::*;
 pub use attachment_hide::*;

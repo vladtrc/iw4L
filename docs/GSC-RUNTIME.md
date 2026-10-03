@@ -150,6 +150,11 @@ resolve case-insensitively; imported aliases use an explicit `t5:` or `iw5:`
 prefix. A missing catalog reports an unavailable native error. Arguments use the usual
 script string conversion.
 
+`Objective_Team(index, player)` is an extension: given a player instead of a team
+name, the objective shows to that player alone, in team and free-for-all modes
+(T6 sensor grenade pings, `iw4l_t6/equipment`). The compass draws objectives in
+free-for-all only when they are addressed this way.
+
 `AmbientPlay(alias, [fadeSeconds])`, `AmbientStop([fadeSeconds])` and
 `SetAC130Ambience(alias, [fadeSeconds])` update persistent sound state in
 snapshots. The client prepares changed aliases, selects authored variants and

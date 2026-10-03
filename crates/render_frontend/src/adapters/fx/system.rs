@@ -2683,6 +2683,7 @@ fn sync_script_fx(
     mut host: ResMut<HostFxSystem>,
     camera: Option<Res<FxCameraOrigin>>,
     fx_world: FxSceneAccess,
+    local: Res<LocalPresentClient>,
     mut rows: Local<HashMap<u32, ScriptFxRow>>,
 ) {
     let (Some(adopted), Some(catalog)) = (adopted, catalog) else {
@@ -2691,7 +2692,15 @@ fn sync_script_fx(
     let Some(snap) = adopted.next() else {
         return;
     };
-    let effects = &snap.meta.objectives.effects;
+    // An effect hidden from this client (shown to other players only)
+    // does not play here.
+    let effects: Vec<&sim::ScriptEffect> = snap
+        .meta
+        .objectives
+        .effects
+        .iter()
+        .filter(|fx| fx.plays_for(local.0.0))
+        .collect();
     rows.retain(|id, row| {
         let keep = effects
             .iter()

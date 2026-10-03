@@ -6,6 +6,7 @@ pub enum AssetNamespace {
     Iw4,
     T5,
     Iw5,
+    T6,
 }
 
 impl AssetNamespace {
@@ -14,6 +15,7 @@ impl AssetNamespace {
             Self::Iw4 => "iw4",
             Self::T5 => "t5",
             Self::Iw5 => "iw5",
+            Self::T6 => "t6",
         }
     }
 
@@ -22,6 +24,17 @@ impl AssetNamespace {
             ZoneGame::Iw4 => Self::Iw4,
             ZoneGame::T5 => Self::T5,
             ZoneGame::Iw5 => Self::Iw5,
+            ZoneGame::T6 => Self::T6,
+        }
+    }
+
+    /// The namespace this namespace's weapons resolve their models,
+    /// animations, sounds and icons in. T6 content is not loaded yet, so T6
+    /// weapons carry IW4 stand-in names and resolve them there.
+    pub const fn content(self) -> Self {
+        match self {
+            Self::T6 => Self::Iw4,
+            other => other,
         }
     }
 
@@ -30,6 +43,7 @@ impl AssetNamespace {
             "iw4" => Some(Self::Iw4),
             "t5" => Some(Self::T5),
             "iw5" => Some(Self::Iw5),
+            "t6" => Some(Self::T6),
             _ => None,
         }
     }

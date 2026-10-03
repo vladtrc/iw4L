@@ -1,4 +1,5 @@
 mod alloc_count;
+pub mod exit;
 pub mod gap;
 pub mod wgsl_dump;
 

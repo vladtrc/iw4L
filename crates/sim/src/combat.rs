@@ -432,6 +432,20 @@ pub(crate) fn advance_weapon_command(
                     .map(|f| f.quick_raise_time_ms)
                     .unwrap_or(0)
             },
+            switch_first_raise_time_ms: {
+                let w = if cmd.weapon != 0 {
+                    u32::from(cmd.weapon)
+                } else {
+                    ps.weapon
+                };
+                if weapon_used_before(&ps, w) {
+                    0
+                } else {
+                    world
+                        .combat_facts_for(w)
+                        .map_or(0, |f| f.first_raise_time_ms.max(0))
+                }
+            },
             perks0: ps.perks[0],
             perk_weap_reload_multiplier: weapon_iw4::PERK_WEAP_RELOAD_MULTIPLIER_DEFAULT,
             offhand: {
@@ -889,10 +903,19 @@ pub(crate) fn advance_weapon_command(
                     }
                 }
                 WeaponTickEvent::RaiseStarted => {
+                    let hand = &hands[_hand_i as usize];
+                    let first = hand.weap_anim as u32 & weapon_iw4::WEAP_ANIM_EVENT_MASK
+                        == weapon_iw4::weap_anim_event::FIRST_RAISE;
+                    let weapon = hand.weapon;
                     if let Some(ps) = world.player_mut(*id) {
+                        mark_weapon_used(ps, weapon);
                         movement_iw4::add_predictable_event(
                             ps,
-                            entity_iw4::EntityEventKind::RAISE_WEAPON.0,
+                            if first {
+                                entity_iw4::EntityEventKind::FIRST_RAISE_WEAPON.0
+                            } else {
+                                entity_iw4::EntityEventKind::RAISE_WEAPON.0
+                            },
                             0,
                         );
                     }
@@ -1786,5 +1809,42 @@ fn spend_ps_offhand_round(ps: &mut PlayerState, weapon: u32, facts: weapon_iw4::
         if stock > 0 {
             let _ = set_ammo_not_in_clip(&mut ps.ammo, ammo_key, stock - 1);
         }
+    }
+}
+
+/// IW4's `usedBefore`, the first byte of a held weapon's equipped state: it
+/// has been raised since it was given.
+fn weapon_used_before(ps: &PlayerState, weapon: u32) -> bool {
+    ps.weapons
+        .iter()
+        .position(|&held| held == weapon as i32)
+        .is_none_or(|slot| ps.weapon_data[slot * WEAPON_DATA_STRIDE] != 0)
+}
+
+pub(crate) fn mark_weapon_used(ps: &mut PlayerState, weapon: u32) {
+    if let Some(slot) = ps.weapons.iter().position(|&held| held == weapon as i32) {
+        ps.weapon_data[slot * WEAPON_DATA_STRIDE] = 1;
+    }
+}
+
+/// Bytes of equipped state per held weapon in `weapon_data`.
+const WEAPON_DATA_STRIDE: usize = 5;
+
+/// A weapon put straight into the hand is used from then on; its first
+/// raise sounds as one.
+pub(crate) fn raise_given_weapon(
+    ps: &mut PlayerState,
+    weapon: u32,
+    hand: &weapon_iw4::WeaponHandState,
+) {
+    mark_weapon_used(ps, weapon);
+    if hand.weap_anim as u32 & weapon_iw4::WEAP_ANIM_EVENT_MASK
+        == weapon_iw4::weap_anim_event::FIRST_RAISE
+    {
+        movement_iw4::add_predictable_event(
+            ps,
+            entity_iw4::EntityEventKind::FIRST_RAISE_WEAPON.0,
+            0,
+        );
     }
 }

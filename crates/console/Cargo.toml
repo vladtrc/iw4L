@@ -30,6 +30,7 @@ bots = { path = "../bots" }
 hud = { path = "../hud" }
 entity_iw4.workspace = true
 perf.workspace = true
+rfd = "0.17"
 
 [lints]
 workspace = true

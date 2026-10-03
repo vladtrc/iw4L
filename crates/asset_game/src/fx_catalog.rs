@@ -2299,3 +2299,182 @@ fn leftover_resolve_material_t5(
         authored: AuthoredRef::from_ptrs(Some(slot_iw4), alias),
     }
 }
+
+/// A T6 `FxEffectDef` as read from its zone: its 76-byte header and each
+/// element with its samples and the names its visuals and child effects
+/// name. A T6 element is laid out as a T5 one.
+#[derive(Clone, Debug, Default)]
+pub struct T6FxCapture {
+    pub name: String,
+    pub header: Vec<u8>,
+    pub elems: Vec<T6FxElemCapture>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct T6FxElemCapture {
+    pub raw: Vec<u8>,
+    pub vel_samples: Vec<u8>,
+    pub vis_samples: Vec<u8>,
+    /// The material, model, runner or sound each visual names.
+    pub visuals: Vec<String>,
+    pub effect_on_impact: String,
+    pub effect_on_death: String,
+    pub effect_emitted: String,
+}
+
+/// T6 `FxEffectDef`: `flags` (u16), the element counts (i16) and the looping
+/// life.
+const T6_FX_EFFECT_DEF: usize = 76;
+const T6_FX_EFFECT_DEF_FLAGS_OFF: usize = 4;
+const T6_FX_EFFECT_DEF_LOOPING_OFF: usize = 8;
+const T6_FX_EFFECT_DEF_ONESHOT_OFF: usize = 10;
+const T6_FX_EFFECT_DEF_EMISSION_OFF: usize = 12;
+const T6_FX_EFFECT_DEF_MSEC_LOOPING_LIFE_OFF: usize = 20;
+/// T6's line, drawn along the effect's forward axis; IW4 draws it as a
+/// tail along its velocity.
+const T6_FX_ELEM_LINE: u8 = 4;
+/// `size[2]` in a visual state, after its colour and two rotations.
+const T6_FX_VIS_SIZE_OFF: usize = 12;
+
+impl FxCatalog {
+    /// Captures a T6 effect as an IW4 one in `namespace`, its materials
+    /// named for [`Self::resolve_materials`] to bind.
+    pub fn capture_t6(&mut self, fx: &T6FxCapture, namespace: crate::AssetNamespace) {
+        let h = &fx.header;
+        if fx.name.is_empty() || h.len() < T6_FX_EFFECT_DEF {
+            self.capture_gaps += 1;
+            return;
+        }
+        let i16_at = |at: usize| i32::from(i16::from_le_bytes([h[at], h[at + 1]]));
+        let view = FxEffectDefView {
+            flags: i16_at(T6_FX_EFFECT_DEF_FLAGS_OFF) & 0xffff,
+            msec_looping_life: i32::from_le_bytes(
+                h[T6_FX_EFFECT_DEF_MSEC_LOOPING_LIFE_OFF
+                    ..T6_FX_EFFECT_DEF_MSEC_LOOPING_LIFE_OFF + 4]
+                    .try_into()
+                    .expect("header extent"),
+            ),
+            looping_count: i16_at(T6_FX_EFFECT_DEF_LOOPING_OFF),
+            one_shot_count: i16_at(T6_FX_EFFECT_DEF_ONESHOT_OFF),
+            emission_count: i16_at(T6_FX_EFFECT_DEF_EMISSION_OFF),
+        };
+        if view.total_elem_defs() as usize != fx.elems.len() {
+            self.capture_gaps += 1;
+            return;
+        }
+        let mut elems = Vec::with_capacity(fx.elems.len());
+        for elem in &fx.elems {
+            match capture_elem_t6(elem, namespace) {
+                Some(elem) => elems.push(elem),
+                None => {
+                    self.capture_gaps += 1;
+                    return;
+                }
+            }
+        }
+        self.insert_owned(OwnedFxEffectDef {
+            namespace,
+            name: fx.name.clone(),
+            view,
+            header_raw: leftover_pack_iw4_effect_header(&view),
+            elems,
+        });
+    }
+}
+
+fn capture_elem_t6(
+    elem: &T6FxElemCapture,
+    namespace: crate::AssetNamespace,
+) -> Option<OwnedFxElemDef> {
+    use fastfile_t5::size as sz_t5;
+    let (mut view, atlas) = leftover_t5_elem_view(&elem.raw)?;
+    let vel_count = view.vel_interval_count as usize + 1;
+    let mut vel_samples = elem.vel_samples.clone();
+    if elem.raw[sz_t5::FX_ELEM_TYPE_OFF] == T6_FX_ELEM_LINE {
+        // A tail runs from its velocity back to the particle: one pointing
+        // down the effect's forward axis draws the line up it, unmoving.
+        vel_samples = vec![0; vel_count * sz_t5::FX_ELEM_VEL_STATE_SAMPLE];
+        for sample in vel_samples.chunks_mut(sz_t5::FX_ELEM_VEL_STATE_SAMPLE) {
+            sample[0..4].copy_from_slice(&(-1.0e-3f32).to_le_bytes());
+        }
+        view.flags = (view.flags & !fx_iw4::FX_ELEM_VEL_WORLD) | fx_iw4::FX_ELEM_VEL_LOCAL;
+    }
+    let vel_graph_local = parse_vel_graph_channel(&vel_samples, vel_count, false);
+    let vel_graph_world = parse_vel_graph_channel(&vel_samples, vel_count, true);
+    let t = view.elem_type;
+    let authored = AuthoredRef {
+        slot: true,
+        alias: false,
+    };
+    let visuals =
+        if matches!(t, elem_type::OMNI_LIGHT | elem_type::SPOT_LIGHT) || elem.visuals.is_empty() {
+            vec![OwnedFxVisual::None]
+        } else if fx_elem::is_sprite(t) {
+            elem.visuals
+                .iter()
+                .map(|name| OwnedFxVisual::Material {
+                    material: authored.unresolved(),
+                    hint: Some(name.clone()).filter(|name| !name.is_empty()),
+                    material_namespace: namespace,
+                    authored,
+                })
+                .collect()
+        } else if t == elem_type::MODEL {
+            elem.visuals
+                .iter()
+                .map(|name| model_visual(Some(name.clone())))
+                .collect()
+        } else if t == elem_type::RUNNER {
+            elem.visuals
+                .iter()
+                .map(|name| runner_visual(name.clone()))
+                .collect()
+        } else if t == elem_type::SOUND {
+            elem.visuals
+                .iter()
+                .map(|name| sound_visual(name.clone()))
+                .collect()
+        } else {
+            vec![OwnedFxVisual::None]
+        };
+    let (effect_on_impact, effect_on_impact_hint) =
+        capture_named_child(elem.effect_on_impact.clone());
+    let (effect_on_death, effect_on_death_hint) = capture_named_child(elem.effect_on_death.clone());
+    let (effect_emitted, effect_emitted_hint) = capture_named_child(elem.effect_emitted.clone());
+    // T6 keeps a sample's base and amplitude colours as RGBA, IW4 as BGRA.
+    // A line's sizes are its full width and length; a tail is drawn twice
+    // its sizes.
+    let line = elem.raw[sz_t5::FX_ELEM_TYPE_OFF] == T6_FX_ELEM_LINE;
+    let mut vis_samples = elem.vis_samples.clone();
+    for sample in vis_samples.chunks_mut(sz_t5::FX_ELEM_VIS_STATE_SAMPLE) {
+        for state in [0, sz_t5::FX_ELEM_VIS_STATE_SAMPLE / 2] {
+            if let Some(rgba) = sample.get_mut(state..state + 4) {
+                rgba.swap(0, 2);
+            }
+            for size in [state + T6_FX_VIS_SIZE_OFF, state + T6_FX_VIS_SIZE_OFF + 4] {
+                if line && let Some(bytes) = sample.get_mut(size..size + 4) {
+                    let half = f32::from_le_bytes(bytes.try_into().expect("size extent")) * 0.5;
+                    bytes.copy_from_slice(&half.to_le_bytes());
+                }
+            }
+        }
+    }
+    Some(OwnedFxElemDef {
+        view,
+        raw: leftover_pack_iw4_elem_raw(&view, atlas),
+        vel_samples,
+        vel_graph_local,
+        vel_graph_world,
+        vis_samples,
+        visuals,
+        effect_on_impact,
+        effect_on_impact_hint,
+        effect_on_death,
+        effect_on_death_hint,
+        effect_emitted,
+        effect_emitted_hint,
+        has_extended: false,
+        trail_def: None,
+        spark_fountain_def: None,
+    })
+}

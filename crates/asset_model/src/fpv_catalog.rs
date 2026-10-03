@@ -36,7 +36,7 @@ impl FpvMeshKey {
 
 const fn game_default_hands_name(ns: AssetNamespace) -> &'static str {
     match ns {
-        AssetNamespace::Iw4 | AssetNamespace::Iw5 => VIEWHANDS_NAME,
+        AssetNamespace::Iw4 | AssetNamespace::Iw5 | AssetNamespace::T6 => VIEWHANDS_NAME,
         AssetNamespace::T5 => VIEWHANDS_NAME_T5,
     }
 }
@@ -501,6 +501,7 @@ impl FpvMeshCatalog {
                 AssetNamespace::Iw4 => 1,
                 AssetNamespace::T5 => 2,
                 AssetNamespace::Iw5 => 4,
+                AssetNamespace::T6 => 8,
             };
         }
         seen.values().filter(|bits| bits.count_ones() >= 2).count()
@@ -565,6 +566,20 @@ pub struct FpvMountPlan {
     pub secondary_gun: Option<FpvMeshIndex>,
     pub attachments: Vec<FpvMount>,
     pub rocket: Option<FpvMount>,
+    /// Attachments drawn as another model while aiming: the index in
+    /// `attachments` and the model (a T6 optic's `viewModelADS`).
+    pub ads_swaps: Vec<(usize, FpvMeshIndex)>,
+}
+
+impl FpvMountPlan {
+    /// The attachment models drawn, while aiming (`ads`) or not.
+    pub fn attachment_models(&self, ads: bool) -> impl Iterator<Item = FpvMeshIndex> + '_ {
+        self.attachments.iter().enumerate().map(move |(at, mount)| {
+            ads.then(|| self.ads_swaps.iter().find(|(swap, _)| *swap == at))
+                .flatten()
+                .map_or(mount.model, |&(_, model)| model)
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -607,11 +622,15 @@ fn scope_attach_tag_name<'a>(gun_bones: &'a [String], scope_bones: &[String]) ->
     })
 }
 
+/// Where each of a gun's attachments mounts. `on_gun_root` mounts them all
+/// on the gun's root bone, where T6 places its attached models (by an offset
+/// baked into each model's root rest) whatever their root bones are named.
 pub fn plan_fpv_mounts(
     catalog: &FpvMeshCatalog,
     gun: FpvMeshIndex,
     attachments: &[FpvMeshIndex],
     rocket: Option<FpvMeshIndex>,
+    on_gun_root: bool,
 ) -> Result<FpvMountPlan, FpvMountError> {
     let gun_entry = catalog.get_at(gun.order()).ok_or_else(|| FpvMountError {
         model: format!("#{}", gun.order()),
@@ -652,7 +671,24 @@ pub fn plan_fpv_mounts(
                 .iter()
                 .any(|name| name.eq_ignore_ascii_case(root))
         });
-        let joint = if root_on_gun {
+        // A T6 attachment hangs from the gun bone it names, else the root.
+        let gun_root = || {
+            let tag = skel.mount_tag.as_deref().and_then(|tag| {
+                gun_skel
+                    .bone_names
+                    .iter()
+                    .find(|name| name.eq_ignore_ascii_case(tag))
+            });
+            on_gun_root
+                .then(|| {
+                    tag.or(gun_skel.bone_names.first())
+                        .map(|bone| (1, bone.as_str()))
+                })
+                .flatten()
+        };
+        let joint = if on_gun_root {
+            gun_root()
+        } else if root_on_gun {
             on_gun()
         } else {
             on_attachment.or_else(on_gun)
@@ -699,5 +735,6 @@ pub fn plan_fpv_mounts(
         secondary_gun: None,
         attachments: selected,
         rocket,
+        ads_swaps: Vec::new(),
     })
 }

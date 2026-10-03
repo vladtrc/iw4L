@@ -738,6 +738,10 @@ pub fn tick_fpv_viewmodel(
                 Ok(weapon_iw4::WeaponState::MeleeInit | weapon_iw4::WeaponState::MeleeFire)
             )
         }),
+        // T6 swaps an optic's model once the gun is fully raised to the eye.
+        ads: presented
+            .viewweapon_player(local.0)
+            .is_some_and(|ps| ps.f_weapon_pos_frac >= 1.0),
         sample,
         predicted_fire,
         dual,

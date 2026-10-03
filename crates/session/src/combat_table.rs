@@ -27,6 +27,7 @@ pub(crate) fn validated_facts(
     }
     WeaponCombatFacts::try_from_captured(CapturedCombatInput {
         dual_wield: f.dual_wield,
+        fire_melees: f.fire_melees,
         fire_time_ms: f.fire_time_ms,
         fire_delay_ms: f.fire_delay_ms,
         raise_time_ms: f.raise_time_ms,
@@ -34,6 +35,7 @@ pub(crate) fn validated_facts(
         alternate_weapon: 0,
         alternate_raise_time_ms: f.alternate_raise_time_ms,
         alternate_drop_time_ms: f.alternate_drop_time_ms,
+        first_raise_time_ms: f.first_raise_time_ms,
         reload_time_ms: f.reload_time_ms,
         reload_empty_time_ms: f.reload_empty_time_ms,
         clip_size: f.clip_size,
@@ -274,6 +276,8 @@ pub fn equipment_from_registry(weapons: &WeaponRegistry) -> Vec<sim::EquipmentRu
                 projectile_speed: f.projectile_speed,
                 projectile_speed_up: f.projectile_speed_up,
                 projectile_speed_forward: f.projectile_speed_forward,
+                projectile_speed_relative_up: f.projectile_speed_relative_up,
+                refuses_pickup: f.refuses_pickup,
                 projectile_activate_dist: f.projectile_activate_dist,
                 projectile_explosion_type: f.projectile_explosion_type,
                 weap_type: f.weap_type,

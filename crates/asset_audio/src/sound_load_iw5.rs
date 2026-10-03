@@ -415,6 +415,7 @@ impl Iw5SoundCapture {
                 .f32_at(row, s.layout(sz::SND_ALIAS_VELOCITY_MIN_OFF, 80))
                 .unwrap_or(0.0),
             flags: s.u32_at(row, s.layout(sz::SND_ALIAS_FLAGS_OFF, 84)).ok(),
+            looping: None,
             slave_percentage: s
                 .f32_at(row, s.layout(sz::SND_ALIAS_SLAVE_PERCENTAGE_OFF, 96))
                 .unwrap_or(0.0),

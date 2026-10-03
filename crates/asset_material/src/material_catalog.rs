@@ -72,6 +72,15 @@ pub struct AuthoredImage {
     pub pending_decode: Option<u64>,
 }
 
+/// Texels for [`MaterialCatalog::stand_in_material`]: `(image name, texture,
+/// sRGB reads)` per slot; `None` keeps the donor's image.
+#[derive(Clone, Debug, Default)]
+pub struct StandInTextures {
+    pub color: Option<(String, Arc<Image>, bool)>,
+    pub normal: Option<(String, Arc<Image>, bool)>,
+    pub specular: Option<(String, Arc<Image>, bool)>,
+}
+
 #[derive(Clone, Debug)]
 pub struct MaterialTextureBinding {
     pub name_hash: u32,
@@ -574,6 +583,53 @@ impl MaterialCatalog {
         self.link_reused_images = 0;
     }
 
+    /// A material of another game drawn with `donor`'s technique set, state
+    /// bits and constants: the donor's colour, normal and specular slots take
+    /// the given texels, in this catalog's namespace, under `name`. The
+    /// donor's other slots (detail, reflection) stay as they are.
+    pub fn stand_in_material(
+        &mut self,
+        donor: usize,
+        name: &str,
+        textures: StandInTextures,
+    ) -> Option<usize> {
+        let mut material = self.materials.get(donor)?.clone();
+        material.name = AssetRef::Real(name.to_owned());
+        let namespace = material.namespace;
+        for binding in &mut material.textures {
+            let slot = match binding.semantic {
+                TS_COLOR_MAP => &textures.color,
+                TS_NORMAL_MAP => &textures.normal,
+                TS_SPECULAR_MAP => &textures.specular,
+                _ => continue,
+            };
+            let Some((image_name, image, srgb)) = slot else {
+                continue;
+            };
+            let incoming = AuthoredImage {
+                namespace,
+                name: AssetRef::Real(image_name.clone()),
+                map_type: 3,
+                semantic: binding.semantic,
+                category: 0,
+                use_srgb_reads: *srgb,
+                width: image.width() as u16,
+                height: image.height() as u16,
+                depth: 1,
+                level_count: image.texture_descriptor.mip_level_count as u8,
+                format: 0,
+                payload: Arc::new(Vec::new()),
+                decoded: Some(image.clone()),
+                common_owned: false,
+                decoded_variant: None,
+                decoded_by: None,
+                pending_decode: None,
+            };
+            binding.image = Some(self.link_image(incoming));
+        }
+        Some(self.link_material(material))
+    }
+
     pub fn link_image(&mut self, incoming: AuthoredImage) -> usize {
         if let Some(index) = self.images.iter().position(|owned| {
             owned.namespace == incoming.namespace && owned.name.same_name(&incoming.name)
@@ -658,7 +714,7 @@ impl MaterialCatalog {
         }
     }
 
-    fn link_shader(&mut self, incoming: AuthoredShader) -> usize {
+    pub(crate) fn link_shader(&mut self, incoming: AuthoredShader) -> usize {
         if let Some(index) = self.shaders.iter().position(|owned| {
             owned.namespace == incoming.namespace
                 && owned.kind == incoming.kind
@@ -687,7 +743,7 @@ impl MaterialCatalog {
         }
     }
 
-    fn link_vertex_decl(&mut self, incoming: AuthoredVertexDecl) -> usize {
+    pub(crate) fn link_vertex_decl(&mut self, incoming: AuthoredVertexDecl) -> usize {
         if let Some(index) = self.vertex_decls.iter().position(|owned| {
             owned.family == incoming.family
                 && if incoming.name.is_empty() {

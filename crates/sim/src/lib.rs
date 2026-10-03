@@ -135,6 +135,15 @@ pub use spawn::{
     pick_ffa_spawn, spawn_candidate_indices, spawn_candidate_indices_for,
 };
 pub use step::phase_materialize_entity_dobjs;
+
+/// A script model attachment standing for a weapon's thrown model
+/// (`#weapon:<index>`), which the renderer draws from its own catalog.
+pub const WEAPON_MODEL_PREFIX: &str = "#weapon:";
+
+/// The weapon a [`WEAPON_MODEL_PREFIX`] attachment stands for.
+pub fn weapon_model_attachment(model: &str) -> Option<u32> {
+    model.strip_prefix(WEAPON_MODEL_PREFIX)?.parse().ok()
+}
 pub use world::{
     ClientId, HitvolDumpRow, PendingLocalSound, PendingPlayerCardEvent, PendingPlayerCardKind,
     PendingPrint, PlayerKitCollision, SimBrush, SimClipBsp, SimClipCmodels, SimClipMesh,

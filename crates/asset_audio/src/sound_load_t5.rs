@@ -375,6 +375,7 @@ impl T5SoundCapture {
             dist_max,
             velocity_min: 0.0,
             flags: s.u32_at(row, sz::SND_ALIAS_FLAGS_OFF).ok(),
+            looping: None,
             slave_percentage: 0.0,
             probability,
             lfe_percentage: 0.0,

@@ -34,6 +34,16 @@ pub struct ScriptEffect {
     pub start_ms: Option<i32>,
     pub repeat_ms: i32,
     pub cull_distance: f32,
+    /// Hidden (`hide()`), it plays only for the clients in this mask
+    /// (`showToPlayer`); `None` plays it for everyone.
+    pub viewers: Option<u64>,
+}
+
+impl ScriptEffect {
+    pub fn plays_for(&self, client: u32) -> bool {
+        self.viewers
+            .is_none_or(|mask| client < 64 && mask & (1 << client) != 0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -85,6 +95,8 @@ pub struct CompassObjective {
     pub origin: [f32; 3],
     pub team: Team,
     pub icon: String,
+    /// The one client it shows to, when `objective_team` was given a player.
+    pub viewer: Option<u32>,
 }
 
 impl ObjectiveMatch {
@@ -101,8 +113,10 @@ impl ObjectiveMatch {
 }
 
 impl CompassObjective {
-    pub fn shows_to(&self, team: Team) -> bool {
-        self.state.drawn() && (self.team == Team::Free || self.team == team)
+    pub fn shows_to(&self, team: Team, client: u32) -> bool {
+        self.state.drawn()
+            && (self.team == Team::Free || self.team == team)
+            && self.viewer.is_none_or(|viewer| viewer == client)
     }
 }
 

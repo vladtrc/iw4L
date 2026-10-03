@@ -484,6 +484,9 @@ impl HudImages {
         if cache_key(name) == "white" {
             return Some((1, 1, vec![255; 4]));
         }
+        if let Some((width, height, rgba)) = asset_material::zone_ui_image(ns, name) {
+            return Some((width, height, rgba.as_ref().clone()));
+        }
         let main = self.trees.main_for(ns)?;
         let mapped = (ns == HUD_CHROME_NAMESPACE)
             .then(|| {

@@ -173,4 +173,4 @@ pub use transport::wire::{WireError, WireReader, WireWriter};
 
 pub use svc_script_audio::SvcScriptAudio;
 
-pub const PROTOCOL_VERSION: u32 = 102;
+pub const PROTOCOL_VERSION: u32 = 104;

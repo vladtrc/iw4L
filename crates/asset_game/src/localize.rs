@@ -15,8 +15,27 @@ pub struct LocalizeCatalog {
 }
 
 impl LocalizeCatalog {
+    /// `key` is a bare string name (`WEAPON_AN94`) or a namespaced one
+    /// (`t6:localize/WEAPON_AN94`), which reads that game's string before
+    /// any game's.
     pub fn text(&self, key: &str) -> Option<&str> {
+        if let Ok(asset) = asset_core::AssetKey::parse(key)
+            && asset.kind == asset_core::AssetKind::Localize
+        {
+            return self.text_in(asset.namespace, &asset.name);
+        }
         self.entries.get(&key.to_uppercase()).map(String::as_str)
+    }
+
+    /// `key` as `namespace` defines it, else as the first game defining it.
+    /// Games reuse names for different strings (`WEAPON_HATCHET` is T5's
+    /// Tomahawk and T6's Combat Axe).
+    pub fn text_in(&self, namespace: asset_core::AssetNamespace, key: &str) -> Option<&str> {
+        let key = key.to_uppercase();
+        self.by_namespace
+            .get(&(namespace, key.clone()))
+            .or_else(|| self.entries.get(&key))
+            .map(String::as_str)
     }
 
     pub fn raw_text(&self, key: &str) -> Option<&[u8]> {
@@ -267,7 +286,41 @@ pub fn load_localize_catalog_t5(path: &Path) -> Result<LocalizeCatalog, String> 
     Ok(sink.catalog)
 }
 
-const LOCALIZE_CACHE_FORMAT: u32 = 2;
+/// Every `LocalizeEntry` (`{ const char* value; const char* name; }`) of a
+/// T6 zone.
+pub fn load_localize_catalog_t6(path: &Path) -> Result<LocalizeCatalog, String> {
+    let image = asset_transport::open_t6_zone(path).map_err(|e| format!("{e:?}"))?;
+    let schema = fastfile_t6::schema::parse().map_err(|e| format!("T6 load plan: {e:?}"))?;
+    let (load, walked) = fastfile_t6::load_zone(&schema, &image.bytes, |_, _| true);
+    let text = |at: usize, header: &[u8]| {
+        let raw = u32::from_le_bytes(header.get(at..at + 4)?.try_into().ok()?);
+        let p = (raw != 0 && raw < 0xFFFF_FFFE).then(|| fastfile_t6::Ptr {
+            block: ((raw - 1) >> 29) as u8,
+            offset: (raw - 1) & 0x1FFF_FFFF,
+        })?;
+        load.blocks.cstr(p).ok()
+    };
+    let mut catalog = LocalizeCatalog::default();
+    for asset in &load.assets {
+        if asset.ty != fastfile_t6::AssetType::LocalizeEntry {
+            continue;
+        }
+        if let (Some(value), Some(name)) = (text(0, &asset.header), text(4, &asset.header)) {
+            catalog.insert_bytes(&String::from_utf8_lossy(name), value);
+        }
+    }
+    if let Err(e) = walked {
+        diag::info!(
+            Zone,
+            "localize t6: {} stopped ({} strings): {e:?}",
+            path.display(),
+            catalog.len()
+        );
+    }
+    Ok(catalog)
+}
+
+const LOCALIZE_CACHE_FORMAT: u32 = 3;
 const LOCALIZE_CACHE_MAGIC: u32 = 0x4c_4f_43_31;
 
 fn localize_cache_key(path: &Path) -> Option<String> {
@@ -366,6 +419,7 @@ pub fn load_localize_catalog_in_lane(path: &Path) -> Result<LocalizeCatalog, Str
         Some(ZoneGame::Iw4) | None => load_localize_catalog(path),
         Some(ZoneGame::Iw5) => load_localize_catalog_iw5(path),
         Some(ZoneGame::T5) => load_localize_catalog_t5(path),
+        Some(ZoneGame::T6) => load_localize_catalog_t6(path),
     }?;
     if let Some(key) = &key
         && let Err(error) = asset_transport::cache_put("localize", key, &catalog.cache_encode())

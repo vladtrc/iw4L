@@ -463,20 +463,21 @@ impl ViewmodelController {
             self.tree
                 .set_time(WeaponAnimSlot::AdsDown.index(), time)
                 .expect("ads down index is within tree");
-            if self.weapon.ads_overlay == AdsOverlayConvention::PlayAdsAnim {
-                let ads_down_weight = if aiming {
+            // The lowered pose stays on at the hip (see `new`); a melee
+            // turned it off, and the scrub alone would leave it so.
+            let ads_down_weight =
+                if self.weapon.ads_overlay == AdsOverlayConvention::PlayAdsAnim && aiming {
                     INACTIVE_GOAL_WEIGHT
                 } else {
                     ACTIVE_GOAL_WEIGHT
                 };
-                self.tree
-                    .set_goal_weight(
-                        WeaponAnimSlot::AdsDown.index(),
-                        ads_down_weight,
-                        ACTION_GOAL_TIME_SECS,
-                    )
-                    .expect("ads down index is within tree");
-            }
+            self.tree
+                .set_goal_weight(
+                    WeaponAnimSlot::AdsDown.index(),
+                    ads_down_weight,
+                    ACTION_GOAL_TIME_SECS,
+                )
+                .expect("ads down index is within tree");
         }
     }
 

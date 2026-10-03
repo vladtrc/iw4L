@@ -51,6 +51,11 @@ pub(crate) struct Runtime {
     pub(crate) menu_answers: BTreeMap<u32, VecDeque<host::players::MenuAnswer>>,
     pub(crate) personal_classes: BTreeMap<(u32, u32), crate::ClassDef>,
     pub(crate) weapon_bridge: BTreeMap<u32, Vec<(u32, u32)>>,
+    /// The model and grenade of each client's foreign tactical insertion
+    /// thrown and not yet planted; see `players::dress_insertion_glow`.
+    pub(crate) thrown_insertions: BTreeMap<u32, (Arc<str>, u64)>,
+    /// Where foreign tactical insertions were planted, with their model.
+    pub(crate) insertion_spots: Vec<([f32; 3], Arc<str>)>,
     pub(crate) disconnects: std::collections::BTreeSet<u32>,
     pub(crate) kicks: BTreeMap<u32, String>,
     pub(crate) joined: std::collections::BTreeSet<u32>,

@@ -1106,6 +1106,7 @@ impl ZoneLane for Iw4Lane {
                 teamsets: std::collections::HashMap::new(),
                 scripts: sink.scripts,
                 film_visions: sink.film_visions,
+                t6_content: None,
             }
         } else {
             let memory = sink.materials.image_memory();
@@ -1142,6 +1143,7 @@ impl ZoneLane for Iw4Lane {
                 teamsets: std::collections::HashMap::new(),
                 scripts: sink.scripts,
                 film_visions: sink.film_visions,
+                t6_content: None,
             }
         }
     }

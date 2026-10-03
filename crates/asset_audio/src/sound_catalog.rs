@@ -183,6 +183,9 @@ pub struct CapturedAlias {
 
     pub flags: Option<u32>,
 
+    /// Looping as read without an IW4 flag word (T6 aliases).
+    pub looping: Option<bool>,
+
     pub slave_percentage: f32,
 
     pub probability: f32,
@@ -238,6 +241,14 @@ impl CapturedAlias {
             .then(|| self.loaded_name.as_deref())
             .flatten()
             .filter(|name| !name.is_empty())
+    }
+
+    /// Whether it loops: its flags say, else what the capture read
+    /// (T6 aliases carry no IW4 flag word).
+    pub fn is_looping(&self) -> Option<bool> {
+        self.decoded_flags()
+            .map(SndAliasFlags::looping)
+            .or(self.looping)
     }
 
     pub fn decoded_flags(&self) -> Option<SndAliasFlags> {
@@ -338,7 +349,7 @@ pub struct CapturedSound {
 impl CapturedSound {
     pub fn ent_channel(&self, variant: usize) -> Option<u32> {
         match self.game {
-            ZoneGame::T5 => None,
+            ZoneGame::T5 | ZoneGame::T6 => None,
             ZoneGame::Iw4 | ZoneGame::Iw5 => self
                 .aliases
                 .get(variant)
@@ -714,11 +725,7 @@ impl SoundCatalog {
             .flat_map(|sound| {
                 let namespace = ns_of(sound.game);
                 let name = sound.name.to_ascii_lowercase();
-                let looping = sound
-                    .aliases
-                    .first()
-                    .and_then(CapturedAlias::decoded_flags)
-                    .map(SndAliasFlags::looping);
+                let looping = sound.aliases.first().and_then(CapturedAlias::is_looping);
                 let qualified = format!("{}:{name}", namespace.as_str());
                 std::iter::once((qualified, looping))
                     .chain((namespace == AssetNamespace::Iw4).then_some((name, looping)))
@@ -1690,6 +1697,7 @@ impl AssetLinkSink for SoundCatalog {
                     .f32_at(row, s.layout(SND_ALIAS_VELOCITY_MIN, 76))
                     .unwrap_or(0.0),
                 flags,
+                looping: None,
                 slave_percentage: s
                     .f32_at(row, s.layout(SND_ALIAS_SLAVE_PERCENTAGE, 84))
                     .unwrap_or(0.0),

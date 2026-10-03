@@ -27,6 +27,7 @@ pub enum MissingCombatFacts {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CapturedCombatInput {
     pub dual_wield: bool,
+    pub fire_melees: bool,
     pub fire_time_ms: i32,
     pub fire_delay_ms: i32,
     pub raise_time_ms: i32,
@@ -34,6 +35,8 @@ pub struct CapturedCombatInput {
     pub alternate_weapon: u32,
     pub alternate_raise_time_ms: i32,
     pub alternate_drop_time_ms: i32,
+    /// The raise of a weapon not raised since it was given.
+    pub first_raise_time_ms: i32,
     pub reload_time_ms: i32,
     pub reload_empty_time_ms: i32,
     pub clip_size: i32,
@@ -162,6 +165,8 @@ impl AimAssistRanges {
 pub struct WeaponCombatFacts {
     pub aim_assist: AimAssistRanges,
     pub dual_wield: bool,
+    /// The fire button melees (a T6 riot shield bashes with it).
+    pub fire_melees: bool,
     pub fire_time_ms: i32,
     pub fire_delay_ms: i32,
     pub raise_time_ms: i32,
@@ -169,6 +174,8 @@ pub struct WeaponCombatFacts {
     pub alternate_weapon: u32,
     pub alternate_raise_time_ms: i32,
     pub alternate_drop_time_ms: i32,
+    /// The raise of a weapon not raised since it was given.
+    pub first_raise_time_ms: i32,
     pub reload_time_ms: i32,
     pub reload_empty_time_ms: i32,
     pub clip_size: i32,
@@ -301,6 +308,7 @@ impl WeaponCombatFacts {
         Self {
             aim_assist: AimAssistRanges::NONE,
             dual_wield: false,
+            fire_melees: false,
             fire_time_ms: 0,
             fire_delay_ms: 0,
             raise_time_ms: 0,
@@ -308,6 +316,7 @@ impl WeaponCombatFacts {
             alternate_weapon: 0,
             alternate_raise_time_ms: 0,
             alternate_drop_time_ms: 0,
+            first_raise_time_ms: 0,
             reload_time_ms: 0,
             reload_empty_time_ms: 0,
             clip_size: 0,
@@ -414,6 +423,7 @@ impl WeaponCombatFacts {
         Ok(Self {
             aim_assist: AimAssistRanges::NONE,
             dual_wield: input.dual_wield,
+            fire_melees: input.fire_melees,
             fire_time_ms: input.fire_time_ms,
             fire_delay_ms: input.fire_delay_ms,
             raise_time_ms: input.raise_time_ms,
@@ -421,6 +431,7 @@ impl WeaponCombatFacts {
             alternate_weapon: input.alternate_weapon,
             alternate_raise_time_ms: input.alternate_raise_time_ms,
             alternate_drop_time_ms: input.alternate_drop_time_ms,
+            first_raise_time_ms: input.first_raise_time_ms,
             reload_time_ms: input.reload_time_ms,
             reload_empty_time_ms: input.reload_empty_time_ms,
             clip_size: input.clip_size,
@@ -671,6 +682,9 @@ pub struct WeaponCmd {
     pub alternate_switch: bool,
 
     pub switch_quick_raise_time_ms: i32,
+    /// The weapon switched to is raised for the first time since it was
+    /// given: its first raise, when it has one.
+    pub switch_first_raise_time_ms: i32,
 
     pub offhand: crate::offhand::OffhandCmd,
 
@@ -708,6 +722,7 @@ impl Default for WeaponCmd {
             switch_alternate_raise_time_ms: 0,
             alternate_switch: false,
             switch_quick_raise_time_ms: 0,
+            switch_first_raise_time_ms: 0,
             offhand: crate::offhand::OffhandCmd::default(),
             perks0: 0,
             perk_weap_reload_multiplier: PERK_WEAP_RELOAD_MULTIPLIER_DEFAULT,
@@ -1163,7 +1178,8 @@ fn finish_weapon_tick(
             }
         };
 
-        if trigger {
+        // Its fire button melees instead (see `weapon_try_melee`).
+        if trigger && !facts.fire_melees {
             if hand.clip <= 0 {
                 hand.shot_count = 0;
                 if hand.stock > 0 && begin_weapon_reload(hand, facts) {
@@ -1427,11 +1443,19 @@ pub fn weapon_hands(
     cmd.melee_charge.pm_flags = cmd.pm_flags;
     cmd.melee_charge.pm_type = cmd.pm_type;
     cmd.melee_charge.e_flags = cmd.e_flags;
+    // A weapon that melees with the fire button presses melee with it.
+    let melee_buttons = |buttons: u32| {
+        if facts.fire_melees && buttons & BUTTON_ATTACK != 0 {
+            buttons | crate::BUTTON_MELEE
+        } else {
+            buttons
+        }
+    };
     cmd.melee_started = crate::melee::weapon_try_melee(
         hands,
         &facts.melee_facts(),
-        cmd.buttons,
-        cmd.old_buttons,
+        melee_buttons(cmd.buttons),
+        melee_buttons(cmd.old_buttons),
         cmd.f_weapon_pos_frac,
         cmd.last_weapon_hand,
         &mut cmd.melee_charge,
@@ -1535,7 +1559,9 @@ pub fn spawn_clip_stock(facts: &WeaponCombatFacts, last_hand: i32) -> (i32, i32,
     (clip0, clip1, stock)
 }
 
-pub fn spawn_weapon_hand(weapon: u32, facts: &WeaponCombatFacts) -> WeaponHandState {
+/// A hand holding `weapon` as it is put in it, raising; `first` for a
+/// weapon just given, which takes its first raise when it has one.
+pub fn spawn_weapon_hand(weapon: u32, facts: &WeaponCombatFacts, first: bool) -> WeaponHandState {
     let total = facts.start_ammo.max(0);
     let clip = if facts.clip_size > 0 {
         total.min(facts.clip_size)
@@ -1543,16 +1569,21 @@ pub fn spawn_weapon_hand(weapon: u32, facts: &WeaponCombatFacts) -> WeaponHandSt
         0
     };
     let stock = (total - clip).max(0);
-    let raise = if facts.raise_time_ms > 0 {
-        facts.raise_time_ms
+    let first = first && facts.first_raise_time_ms > 0;
+    let raise = if first {
+        facts.first_raise_time_ms
     } else {
-        0
+        facts.raise_time_ms.max(0)
     };
     let mut weap_anim = 0;
     if raise > 0 {
         crate::weap_anim::start_weapon_anim(
             &mut weap_anim,
-            crate::weap_anim::weap_anim_event::RAISE,
+            if first {
+                crate::weap_anim::weap_anim_event::FIRST_RAISE
+            } else {
+                crate::weap_anim::weap_anim_event::RAISE
+            },
         );
     }
     WeaponHandState {

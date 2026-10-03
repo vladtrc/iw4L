@@ -742,3 +742,19 @@ pub fn terrain_scorch_binding_hash(layer: usize) -> u32 {
     let name = format!("iw4l_t5_terrain_scorch_{layer}");
     crate::fnv1a64(name.as_bytes()) as u32
 }
+
+/// The IW4 code constant named `name` (`VIEW_PROJECTION_MATRIX`).
+pub fn iw4_code_const_index(name: &str) -> Option<u16> {
+    IW4_CODE_CONST
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, index)| *index)
+}
+
+/// The IW4 code texture named `name` (`SHADOWMAP_SUN`).
+pub fn iw4_code_texture_index(name: &str) -> Option<u32> {
+    IW4_CODE_TEXTURE
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, index)| u32::from(*index))
+}

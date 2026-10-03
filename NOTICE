@@ -68,6 +68,13 @@ KisakCOD — https://github.com/SwagSoftware/KisakCOD
   engine structure. IW4L targets IW4, so this is a neighbouring generation of
   the same engine family, not the same codebase.
 
+t6-scripts (Plutonium) — https://github.com/plutoniummod/t6-scripts
+  Decompiled Black Ops II multiplayer scripts. Read for how Black Ops II
+  equipment behaves (Bouncing Betty, Shock Charge, Trophy System, Sensor
+  Grenade, EMP Grenade, C4, Tactical Insertion) and for its constants. IW4L's
+  `crates/assets/src/t6_equipment.gsc.txt` is written for IW4L, not copied
+  from it.
+
 Ghidra — https://github.com/NationalSecurityAgency/ghidra
   The software reverse engineering framework the original game binaries were
   read with. A development tool: none of it, and none of its output, is

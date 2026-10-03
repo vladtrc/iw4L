@@ -283,6 +283,7 @@ fn namespace_tag(namespace: asset_core::AssetNamespace) -> u8 {
         asset_core::AssetNamespace::Iw4 => 1,
         asset_core::AssetNamespace::Iw5 => 2,
         asset_core::AssetNamespace::T5 => 3,
+        asset_core::AssetNamespace::T6 => 4,
     }
 }
 

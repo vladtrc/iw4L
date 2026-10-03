@@ -270,12 +270,10 @@ pub(crate) fn update_compass(
     }
 
     let mut fonts = HashMap::new();
-    if let Some(snapshot) = presented.snapshot()
-        && snapshot.meta.kind.is_team()
-        && let Some(font) = catalog
-            .as_ref()
-            .and_then(|c| c.font(crate::font_overlay::HUD_SMALL_FONT))
-    {
+    if let Some(snapshot) = presented.snapshot() {
+        // Free-for-all shows only the objectives addressed to this player
+        // (a T6 sensor grenade's pings).
+        let team_mode = snapshot.meta.kind.is_team();
         let team = snapshot
             .meta
             .for_client(local.0)
@@ -283,12 +281,9 @@ pub(crate) fn update_compass(
             .unwrap_or(0);
         let team =
             gamemode_iw4::Team::from_packed_u8(team as u8).unwrap_or(gamemode_iw4::Team::Free);
-        let objectives = snapshot
-            .meta
-            .objectives
-            .compass
-            .iter()
-            .filter(|o| o.shows_to(team) && !o.icon.is_empty());
+        let objectives = snapshot.meta.objectives.compass.iter().filter(|o| {
+            o.shows_to(team, local.0.0) && !o.icon.is_empty() && (team_mode || o.viewer.is_some())
+        });
         let size = map_item.rect.h * COMPASS_SIZE_DEFAULT;
         for objective in objectives {
             let offset = world_pos_to_compass_partial(
@@ -327,8 +322,14 @@ pub(crate) fn update_compass(
                 layer: 1,
             });
         }
-        fonts.insert(crate::font_overlay::HUD_SMALL_FONT.to_owned(), font);
-        gaps.clear(HudGap::CompassObjectives);
+        if team_mode
+            && let Some(font) = catalog
+                .as_ref()
+                .and_then(|c| c.font(crate::font_overlay::HUD_SMALL_FONT))
+        {
+            fonts.insert(crate::font_overlay::HUD_SMALL_FONT.to_owned(), font);
+            gaps.clear(HudGap::CompassObjectives);
+        }
     }
     list.cmds.extend(enemy_ping_cmds(
         &surface,

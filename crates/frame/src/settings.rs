@@ -23,6 +23,43 @@ impl core::fmt::Display for DisplayResolution {
     }
 }
 
+/// A title whose content is borrowed from its own install folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OtherGame {
+    BlackOps,
+    BlackOps2,
+    ModernWarfare3,
+}
+
+impl OtherGame {
+    pub const ALL: [Self; 3] = [Self::BlackOps, Self::BlackOps2, Self::ModernWarfare3];
+
+    /// The settings key and menu dvar suffix.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::BlackOps => "black_ops",
+            Self::BlackOps2 => "black_ops_2",
+            Self::ModernWarfare3 => "modern_warfare_3",
+        }
+    }
+
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::BlackOps => "Black Ops",
+            Self::BlackOps2 => "Black Ops II",
+            Self::ModernWarfare3 => "Modern Warfare 3",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|game| game.key() == key)
+    }
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub struct GameSettings {
     pub resolution: DisplayResolution,
@@ -38,6 +75,10 @@ pub struct GameSettings {
     pub sensitivity: f32,
     pub invert_mouse: bool,
     pub player_name: String,
+    /// The install folder chosen for each [`OtherGame`], by
+    /// [`OtherGame::ALL`] order; empty when the game is looked for beside
+    /// the MW2 folder. Read at startup.
+    pub game_folders: [String; 3],
 
     pub pad_layout: u8,
     pub pad_stick_layout: u8,
@@ -72,6 +113,7 @@ impl Default for GameSettings {
             sensitivity: 5.0,
             invert_mouse: false,
             player_name: "Player".to_owned(),
+            game_folders: Default::default(),
             pad_layout: 0,
             pad_stick_layout: 0,
             pad_sensitivity_preset: 0,
@@ -106,6 +148,14 @@ impl GameSettings {
     }
 
     pub const PAD_LAYOUT_CUSTOM: u8 = 255;
+
+    pub fn game_folder(&self, game: OtherGame) -> &str {
+        &self.game_folders[game.index()]
+    }
+
+    pub fn set_game_folder(&mut self, game: OtherGame, folder: String) {
+        self.game_folders[game.index()] = folder;
+    }
 
     pub fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);

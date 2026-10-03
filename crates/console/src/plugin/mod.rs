@@ -93,6 +93,8 @@ impl Plugin for ConsolePlugin {
             .init_resource::<crate::weapon_dispatch::WeaponArgCompletions>()
             .init_resource::<crate::user_settings::PendingMenuBinding>()
             .init_resource::<crate::user_settings::UserSettingsPersistence>()
+            .init_resource::<crate::game_folders::FolderPicks>()
+            .init_resource::<crate::saved_position::SavedPosition>()
             .init_resource::<sim::LocalPlayerProfile>()
             .init_resource::<crate::local_profile::ProfilePersistence>()
             .init_resource::<crate::local_account::AccountPersistence>()
@@ -183,7 +185,10 @@ impl Plugin for ConsolePlugin {
                             crate::weapon_dispatch::echo_configuration_change_results,
                         )
                             .chain(),
-                        crate::debug_move::route_debug_move_commands,
+                        (
+                            crate::debug_move::route_debug_move_commands,
+                            crate::saved_position::route_saved_position_commands,
+                        ),
                         crate::debug_script_mover::route_debug_script_mover_commands,
                         crate::debug_draw_method::route_debug_draw_method_commands,
                         crate::debug_view_proj::route_view_proj_commands,
@@ -205,6 +210,7 @@ impl Plugin for ConsolePlugin {
                         (
                             crate::user_settings::native_menu_settings,
                             crate::user_settings::consume_menu_binding,
+                            crate::game_folders::game_folder_menu,
                         )
                             .chain(),
                         crate::user_settings::sync_binding_view,
@@ -222,6 +228,7 @@ impl Plugin for ConsolePlugin {
                 Last,
                 (
                     paint_scrollback_selection,
+                    crate::feature_dispatch::request_exit,
                     crate::local_profile::save,
                     crate::local_account::save,
                     crate::feature_dispatch::exit_process,
@@ -734,6 +741,7 @@ fn setup_console(
     }
     crate::weapon_dispatch::register_weapon_commands(&mut registry, &weapon_completions);
     crate::debug_move::register_debug_move_commands(&mut registry);
+    crate::saved_position::register_saved_position_commands(&mut registry);
     crate::debug_script_mover::register_debug_script_mover_commands(&mut registry);
     crate::debug_draw_method::register_debug_draw_method_commands(&mut registry);
     crate::debug_view_proj::register_view_proj_commands(&mut registry);

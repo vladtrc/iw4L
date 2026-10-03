@@ -322,8 +322,25 @@ fn adopt_fired(world: &mut World) {
                 continue;
             }
         };
-        let weapon = super::players::script_weapon(world, projectile.owner.0, projectile.weapon);
+        let weapon = super::players::event_weapon(world, projectile.owner.0, projectile.weapon);
+        super::players::note_insertion_throw(
+            world,
+            projectile.owner.0,
+            weapon,
+            projectile.weapon,
+            object,
+        );
         let name = weapon_name(world, weapon);
+        // What the T6 equipment script keys on: the name the throw was
+        // reported as, and a model showing the thrown weapon itself.
+        let model = format!("{}{}", crate::WEAPON_MODEL_PREFIX, projectile.weapon);
+        let native = weapon_name(world, projectile.weapon);
+        {
+            let mut runtime = world.resource_mut::<Runtime>();
+            runtime.set_object_field(object, "nativename", native);
+            runtime.set_object_field(object, "weaponname", name.clone());
+            runtime.set_object_field(object, "weaponmodel", Value::string(&model));
+        }
         raise(world, player, notify, vec![Value::Object(object), name]);
     }
 }

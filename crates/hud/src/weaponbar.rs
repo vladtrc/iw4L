@@ -468,7 +468,7 @@ fn paint_offhand(
         image.to_owned(),
         weapons
             .0
-            .namespace_of(index)
+            .hud_icon_namespace_of(index)
             .expect("owned weapon has a namespace"),
         args.color,
         Draw2dOp::StretchPic,

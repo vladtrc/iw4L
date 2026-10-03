@@ -3,6 +3,7 @@ mod iw4;
 mod iw5;
 mod sink;
 mod t5;
+pub(crate) mod t6;
 
 use std::path::Path;
 
@@ -128,6 +129,10 @@ pub struct CommonCensus {
     >,
 
     pub pending_images: Option<asset_material::material_images::ImageDemandPlan>,
+
+    /// Models and material texels of a T6 walk, still to be bound to the IW4
+    /// pool's materials; see [`t6::T6Content`].
+    pub t6_content: Option<t6::T6Content>,
 }
 
 pub struct MaterialPopulation {
@@ -194,6 +199,7 @@ pub fn lane(game: ZoneGame) -> &'static dyn ZoneLane {
         ZoneGame::Iw4 => &iw4::Iw4Lane,
         ZoneGame::T5 => &t5::T5Lane,
         ZoneGame::Iw5 => &iw5::Iw5Lane,
+        ZoneGame::T6 => &t6::T6Lane,
     }
 }
 
@@ -210,5 +216,6 @@ pub const LANE_GAPS: &[&str] = &[
     "assets::lane::iw5::load_world/zone_arenas",
     "assets::lane::iw5::load_world/no_gfx_world",
     "assets::lane::iw5::load_world/world_mesh",
+    "assets::lane::t6::load_world/no_decoder",
     "assets::session_load::load_prepared_match/zone_open",
 ];

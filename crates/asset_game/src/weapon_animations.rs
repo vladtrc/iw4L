@@ -27,7 +27,10 @@ impl AdsOverlayConvention {
     pub const fn from_namespace(ns: crate::AssetNamespace) -> Self {
         match ns {
             crate::AssetNamespace::T5 => Self::PlayAdsAnim,
-            crate::AssetNamespace::Iw4 | crate::AssetNamespace::Iw5 => Self::WeightIsFrac,
+            // T6 weapons play IW4 stand-in animations.
+            crate::AssetNamespace::Iw4 | crate::AssetNamespace::Iw5 | crate::AssetNamespace::T6 => {
+                Self::WeightIsFrac
+            }
         }
     }
 }

@@ -7,6 +7,8 @@ const T5_ZONE_VERSION: u32 = 0x1D9;
 
 const IW5_ZONE_VERSION: u32 = 1;
 
+const T6_ZONE_VERSION: u32 = fastfile_t6::ZONE_VERSION_PC;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GamesRoot(pub PathBuf);
 
@@ -70,9 +72,95 @@ fn default_games_root() -> Result<PathBuf, String> {
     Err("IW4L_GAMES is not set — copy .env.example to .env and set the games root".to_owned())
 }
 
+/// Install folders of the other titles as Steam names them. One of them next
+/// to the games root is searched as if a shortcut pointed at it.
+const SIBLING_TITLES: [&str; 3] = [
+    "Call of Duty Black Ops",
+    "Call of Duty Black Ops II",
+    "Call of Duty Modern Warfare 3",
+];
+
+/// Install folders the player chose for the other titles, searched before
+/// the ones found beside the games root.
+static GAME_FOLDERS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
+
+/// Sets the chosen install folders. Only folders with a `zone/` directory
+/// are searched, as with the ones beside the games root: every search walks
+/// a root whole. Content already loaded keeps the folders it was found in.
+pub fn set_game_folders(folders: Vec<PathBuf>) {
+    let folders = folders
+        .into_iter()
+        .filter(|folder| folder.join("zone").is_dir())
+        .collect();
+    *GAME_FOLDERS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = folders;
+}
+
+/// The install folder a picked folder belongs to: the folder itself, or the
+/// nearest one above it holding `zone/` (a pick inside `zone/all`).
+pub fn game_install_root(picked: &Path) -> PathBuf {
+    picked
+        .ancestors()
+        .take(3)
+        .find(|dir| dir.join("zone").is_dir())
+        .unwrap_or(picked)
+        .to_path_buf()
+}
+
+/// Whether `folder` holds `game`'s zones: a FastFile of its envelope version
+/// within two levels under `zone/`.
+pub fn folder_holds_game(folder: &Path, game: crate::ZoneGame) -> bool {
+    let version = zone_version(game);
+    let mut pending = vec![(folder.join("zone"), 0)];
+    while let Some((dir, depth)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            if path.is_dir() {
+                if depth < 2 {
+                    pending.push((path, depth + 1));
+                }
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("ff"))
+                && peek_zone_version(&path) == Some(version)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The folder `game` is found in when searching from `root`: a chosen one or
+/// one beside it.
+pub fn find_game_install(root: &Path, game: crate::ZoneGame) -> Option<PathBuf> {
+    search_roots(root)
+        .into_iter()
+        .find(|folder| folder_holds_game(folder, game))
+}
+
 pub fn search_roots(root: &Path) -> Vec<PathBuf> {
-    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut roots = vec![root.to_path_buf()];
+    for folder in GAME_FOLDERS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+    {
+        if !roots.contains(folder) {
+            roots.push(folder.clone());
+        }
+    }
+    if let Some(library) = root.parent() {
+        for title in SIBLING_TITLES {
+            let sibling = library.join(title);
+            if sibling != root && sibling.join("zone").is_dir() && !roots.contains(&sibling) {
+                roots.push(sibling);
+            }
+        }
+    }
     #[cfg(windows)]
     {
         let Ok(entries) = std::fs::read_dir(root) else {
@@ -152,7 +240,7 @@ fn read_zone_version(path: &Path) -> Result<u32, String> {
     use std::io::Read;
     file.read_exact(&mut header)
         .map_err(|error| error.to_string())?;
-    if &header[0..4] != b"IWff" {
+    if &header[0..4] != b"IWff" && &header[0..8] != fastfile_t6::MAGIC_SIGNED {
         return Err(format!("not an IWff envelope: {:02x?}", &header[..8]));
     }
     Ok(u32::from_le_bytes(header[8..12].try_into().unwrap()))
@@ -212,6 +300,7 @@ pub fn zone_game_for_path(path: &Path) -> Option<crate::ZoneGame> {
         IW4_ZONE_VERSION => Some(crate::ZoneGame::Iw4),
         T5_ZONE_VERSION => Some(crate::ZoneGame::T5),
         IW5_ZONE_VERSION => Some(crate::ZoneGame::Iw5),
+        T6_ZONE_VERSION => Some(crate::ZoneGame::T6),
         _ => None,
     }
 }
@@ -368,6 +457,7 @@ pub fn group_mp_maps(maps: &[String]) -> [Vec<&str>; 3] {
             Some(crate::ZoneGame::Iw4) | None => 0,
             Some(crate::ZoneGame::Iw5) => 1,
             Some(crate::ZoneGame::T5) => 2,
+            Some(crate::ZoneGame::T6) => continue,
         };
         cols[col].push(map.as_str());
     }
@@ -388,6 +478,7 @@ pub fn zone_version(game: crate::ZoneGame) -> u32 {
         crate::ZoneGame::Iw4 => IW4_ZONE_VERSION,
         crate::ZoneGame::T5 => T5_ZONE_VERSION,
         crate::ZoneGame::Iw5 => IW5_ZONE_VERSION,
+        crate::ZoneGame::T6 => T6_ZONE_VERSION,
     }
 }
 
@@ -480,8 +571,17 @@ pub fn find_zone_for_tree(zone_ff: &Path, zone: &str) -> Result<ZoneFile, String
     find_named_zone_for_tree(zone_ff, zone)
 }
 
+/// The `zone` of the same title as `zone_ff`: titles share zone names
+/// (`code_post_gfx_mp`, `common_mp`), and the search from one title's tree
+/// reaches the others' install folders too.
 fn find_named_zone_for_tree(zone_ff: &Path, zone: &str) -> Result<ZoneFile, String> {
-    find_zone_file_under(&game_root_for_zone(zone_ff)?, zone)
+    let tree = game_root_for_zone(zone_ff)?;
+    if let Some(version) = peek_zone_version(zone_ff)
+        && let Ok(found) = find_zone_file_version(&GamesRoot(tree.clone()), zone, version)
+    {
+        return Ok(found);
+    }
+    find_zone_file_under(&tree, zone)
 }
 
 pub fn game_root_for_zone(zone_ff: &Path) -> Result<PathBuf, String> {
@@ -628,7 +728,8 @@ pub fn list_mp_map_packs(root: &GamesRoot) -> Vec<MapPack> {
         if !(is_ff && stem.starts_with("mp_")) {
             continue;
         }
-        if let Some(game) = zone_game_for_path(&path) {
+        // T6 zones are read for their weapons; a T6 map does not load.
+        if let Some(game) = zone_game_for_path(&path).filter(|&g| g != crate::ZoneGame::T6) {
             zones.push((game.prefix(), stem, map_pack_folder(&path)));
         }
     }
@@ -691,7 +792,7 @@ pub fn find_t5_localized_zones(
     anchor: &Path,
     language: Option<&str>,
 ) -> Result<Vec<ZoneFile>, String> {
-    let (dir, prefix) = t5_language_archive(anchor, language)?;
+    let (dir, prefix) = language_archive(anchor, language, crate::ZoneGame::T5)?;
     Ok(["code_post_gfx_mp", "common_mp", "ui_mp"]
         .into_iter()
         .filter_map(|stem| t5_localized_zone(&dir, &prefix, stem))
@@ -703,8 +804,22 @@ pub fn find_t5_localized_zone(
     language: Option<&str>,
     stem: &str,
 ) -> Result<Option<ZoneFile>, String> {
-    let (dir, prefix) = t5_language_archive(anchor, language)?;
+    let (dir, prefix) = language_archive(anchor, language, crate::ZoneGame::T5)?;
     Ok(t5_localized_zone(&dir, &prefix, stem))
+}
+
+/// The T6 language zones holding localized strings, `patch_mp` first: it
+/// restates strings `code_post_gfx_mp` shipped with, and the first
+/// definition of a string wins.
+pub fn find_t6_localized_zones(
+    anchor: &Path,
+    language: Option<&str>,
+) -> Result<Vec<ZoneFile>, String> {
+    let (dir, prefix) = language_archive(anchor, language, crate::ZoneGame::T6)?;
+    Ok(["patch_mp", "ui_mp", "code_post_gfx_mp"]
+        .into_iter()
+        .filter_map(|stem| t5_localized_zone(&dir, &prefix, stem))
+        .collect())
 }
 
 fn t5_localized_zone(dir: &Path, prefix: &str, stem: &str) -> Option<ZoneFile> {
@@ -717,7 +832,13 @@ fn t5_localized_zone(dir: &Path, prefix: &str, stem: &str) -> Option<ZoneFile> {
     })
 }
 
-fn t5_language_archive(anchor: &Path, language: Option<&str>) -> Result<(PathBuf, String), String> {
+/// The language directory and zone prefix (`english/`, `en_`) of `game`'s
+/// tree above `anchor`, preferring `language`.
+fn language_archive(
+    anchor: &Path,
+    language: Option<&str>,
+    game: crate::ZoneGame,
+) -> Result<(PathBuf, String), String> {
     let root = game_root_for_zone(anchor)?.join("zone");
     let mut choices: Vec<_> = files_under(vec![root])
         .filter_map(Result::ok)
@@ -725,7 +846,7 @@ fn t5_language_archive(anchor: &Path, language: Option<&str>) -> Result<(PathBuf
             path.file_name()
                 .and_then(|s| s.to_str())
                 .is_some_and(|name| name.ends_with("_code_post_gfx_mp.ff"))
-                && zone_game_for_path(path) == Some(crate::ZoneGame::T5)
+                && zone_game_for_path(path) == Some(game)
         })
         .collect();
     choices.sort();
@@ -741,7 +862,8 @@ fn t5_language_archive(anchor: &Path, language: Option<&str>) -> Result<(PathBuf
         None if choices.len() == 1 => &choices[0],
         _ => {
             return Err(format!(
-                "T5 language archive selection is ambiguous or missing: {} candidates",
+                "{} language archive selection is ambiguous or missing: {} candidates",
+                game.prefix().to_uppercase(),
                 choices.len()
             ));
         }
@@ -749,10 +871,10 @@ fn t5_language_archive(anchor: &Path, language: Option<&str>) -> Result<(PathBuf
     let name = chosen
         .file_name()
         .and_then(|s| s.to_str())
-        .ok_or("T5 language archive name")?;
+        .ok_or("language archive name")?;
     let prefix = name
         .strip_suffix("code_post_gfx_mp.ff")
-        .ok_or("T5 language prefix")?;
-    let dir = chosen.parent().ok_or("T5 language directory")?;
+        .ok_or("language prefix")?;
+    let dir = chosen.parent().ok_or("language directory")?;
     Ok((dir.to_path_buf(), prefix.to_owned()))
 }

@@ -6,6 +6,8 @@ pub enum ZoneGame {
     T5,
 
     Iw5,
+
+    T6,
 }
 
 impl ZoneGame {
@@ -14,6 +16,7 @@ impl ZoneGame {
             Self::Iw4 => "iw4",
             Self::Iw5 => "iw5",
             Self::T5 => "t5",
+            Self::T6 => "t6",
         }
     }
 
@@ -22,6 +25,7 @@ impl ZoneGame {
             "iw4" => Some(Self::Iw4),
             "iw5" => Some(Self::Iw5),
             "t5" => Some(Self::T5),
+            "t6" => Some(Self::T6),
             _ => None,
         }
     }

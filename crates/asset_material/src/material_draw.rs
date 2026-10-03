@@ -92,6 +92,8 @@ pub fn material_alpha_test(namespace: crate::AssetNamespace, bits: [u32; 2]) -> 
         crate::AssetNamespace::Iw4 | crate::AssetNamespace::Iw5 => {
             alpha_test_from_state_bits(bits).map(Gfxs0AlphaTest::d3d)
         }
+        // No T6 material is drawn from its own state bits.
+        crate::AssetNamespace::T6 => None,
     }
 }
 

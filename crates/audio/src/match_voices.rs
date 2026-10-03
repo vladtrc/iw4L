@@ -149,7 +149,7 @@ impl AnnouncerRoutes {
         let lines: &[(&str, &str)] = match namespace {
             AssetNamespace::Iw4 => return Self::default(),
             AssetNamespace::T5 => T5_LINES,
-            AssetNamespace::Iw5 => &[],
+            AssetNamespace::Iw5 | AssetNamespace::T6 => &[],
         };
         let Some(native) = native else {
             return Self::default();

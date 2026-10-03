@@ -30,7 +30,7 @@ pub use session::{
     MapLoadFailed, MatchInstalled, MatchKey, MatchTornDown, ReturnedToMenu, RuntimeRole,
     TeardownReason, UiCamera, UiDraw, ViewSubject, WorldGeneration, WorldProducts,
 };
-pub use settings::{DisplayResolution, GameSettings};
+pub use settings::{DisplayResolution, GameSettings, OtherGame};
 pub use ui::{
     HostMatchRules, UiBindRequest, UiBindingCapture, UiExecCommand, UiMenuDvars, UiMenuKey,
     UiMenuRequest, UiPartyState, UiPlayMusic, UiPlaySound, UiStopMusic, register_ui_contracts,

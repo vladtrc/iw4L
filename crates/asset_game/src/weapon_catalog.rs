@@ -32,6 +32,7 @@ pub struct WeaponBodyFacts {
     pub drop_time_ms: i32,
     pub alternate_raise_time_ms: i32,
     pub alternate_drop_time_ms: i32,
+    pub first_raise_time_ms: i32,
 
     pub fire_delay_ms: i32,
 
@@ -259,6 +260,10 @@ pub struct WeaponBodyFacts {
     pub projectile_speed: i32,
     pub projectile_speed_up: i32,
     pub projectile_speed_forward: i32,
+    /// T5/T6's upward speed along the thrower's view (IW4 has none).
+    pub projectile_speed_relative_up: i32,
+    /// T6 equipment its owner cannot pick back up (not `bRetrievable`).
+    pub refuses_pickup: bool,
     pub projectile_activate_dist: i32,
     pub projectile_explosion_type: i32,
     pub parallel_bounce: Option<[f32; 31]>,
@@ -280,6 +285,8 @@ pub struct WeaponBodyFacts {
 
     pub no_dual_wield: bool,
     pub dual_wield: bool,
+    /// The fire button melees: a T6 riot shield bashes with it.
+    pub fire_melees: bool,
 }
 
 impl WeaponBodyFacts {
@@ -446,6 +453,9 @@ pub enum CacOffhandBucket {
     Tactical,
 }
 
+/// IW4's `smoke` offhand class, thrown with the tactical button.
+const OFFHAND_CLASS_SMOKE: i32 = 2;
+
 pub fn cac_offhand_bucket(offhand_class: i32) -> Option<CacOffhandBucket> {
     match offhand_class {
         1 | 4 | 5 => Some(CacOffhandBucket::Lethal),
@@ -482,6 +492,16 @@ pub struct CatalogWeapon {
     pub scope_rows: [Iw5ScopeRow; 6],
 
     pub iw5_attachment_slots: [Option<String>; fastfile_iw5::size::WEAPON_ATTACHMENT_SLOT_COUNT],
+    /// Models a T6 weapon attaches to its first-person and world guns (its
+    /// magazine, a sniper's scope).
+    pub attached_models: [Vec<String>; 2],
+    /// Of those, the magazine (attachment slot 6), which a fast-mag
+    /// attachment replaces.
+    pub t6_clip_models: [Option<String>; 2],
+    /// What each T6 attachment the weapon takes does to it.
+    pub t6_attachments: Vec<T6Attachment>,
+    /// How each T6 attachment the weapon takes changes its numbers.
+    pub t6_attachment_stats: Vec<T6AttachmentStats>,
     pub iw5_reload_overrides: Vec<fastfile_iw5::ReloadOverride>,
     pub iw5_anim_overrides: Vec<LeftoverAnimOverride>,
     pub iw5_fx_overrides: Vec<Iw5FxOverride>,
@@ -1378,6 +1398,10 @@ impl WeaponCatalog {
             scope_name: None,
             scope_rows: Default::default(),
             iw5_attachment_slots: std::array::from_fn(|_| None),
+            attached_models: Default::default(),
+            t6_clip_models: Default::default(),
+            t6_attachments: Vec::new(),
+            t6_attachment_stats: Vec::new(),
             iw5_reload_overrides: Vec::new(),
             iw5_anim_overrides: Vec::new(),
             iw5_fx_overrides: Vec::new(),
@@ -1578,6 +1602,7 @@ impl WeaponCatalog {
                 drop_time_ms: geometry.drop_time_ms,
                 alternate_raise_time_ms: geometry.alternate_raise_time_ms,
                 alternate_drop_time_ms: geometry.alternate_drop_time_ms,
+                first_raise_time_ms: geometry.first_raise_time_ms,
                 fire_delay_ms: geometry.fire_delay_ms,
                 hold_fire_time_ms: geometry.hold_fire_time_ms,
                 weap_type: geometry.weap_type,
@@ -1710,6 +1735,8 @@ impl WeaponCatalog {
                 projectile_speed: geometry.projectile_speed,
                 projectile_speed_up: geometry.projectile_speed_up,
                 projectile_speed_forward: geometry.projectile_speed_forward,
+                projectile_speed_relative_up: 0,
+                refuses_pickup: false,
                 projectile_activate_dist: geometry.projectile_activate_dist,
                 projectile_explosion_type: geometry.projectile_explosion_type,
                 parallel_bounce: geometry.parallel_bounce,
@@ -1725,6 +1752,7 @@ impl WeaponCatalog {
                 sway: WeaponSwayFacts::from_capture(geometry.sway),
                 dual_wield_view_model_offset: geometry.dual_wield_view_model_offset,
                 dual_wield: false,
+                fire_melees: false,
                 no_dual_wield: geometry.no_dual_wield,
             },
         });
@@ -2142,6 +2170,10 @@ impl WeaponCatalog {
             scope_name,
             scope_rows,
             iw5_attachment_slots,
+            attached_models: Default::default(),
+            t6_clip_models: Default::default(),
+            t6_attachments: Vec::new(),
+            t6_attachment_stats: Vec::new(),
             iw5_reload_overrides,
             iw5_anim_overrides: leftover_anim_overrides,
             iw5_fx_overrides,
@@ -2295,6 +2327,10 @@ impl WeaponCatalog {
             scope_name: None,
             scope_rows: Default::default(),
             iw5_attachment_slots: std::array::from_fn(|_| None),
+            attached_models: Default::default(),
+            t6_clip_models: Default::default(),
+            t6_attachments: Vec::new(),
+            t6_attachment_stats: Vec::new(),
             iw5_reload_overrides: Vec::new(),
             iw5_anim_overrides: Vec::new(),
             iw5_fx_overrides: Vec::new(),
@@ -2394,6 +2430,118 @@ impl WeaponCatalog {
             last.facts.weap_class = 9;
             last.facts.stick_to_players = true;
         }
+    }
+
+    /// A T6 weapon: its name, display key and gameplay facts. Everything it
+    /// shows or plays is left empty here and borrowed from an IW4 stand-in by
+    /// [`WeaponBuild::dress_t6_stand_ins`].
+    pub fn capture_t6(&mut self, weapon: fastfile_t6::weapon::WeaponView<'_>) {
+        use fastfile_t6::weapon::variant as v;
+        let Some(name) = weapon.name().filter(|name| !name.is_empty()) else {
+            return;
+        };
+        if crate::weapon_t6::stand_in_for(name).is_none() {
+            return;
+        }
+        self.entries.push(CatalogWeapon {
+            namespace: self.capture_ns,
+            name: name.to_owned(),
+            alternate_weapon: weapon
+                .variant_str(v::ALT_WEAPON_NAME)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
+            weap_def: None,
+            display_name_key: weapon
+                .variant_str(v::DISPLAY_NAME)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
+            reticle: WeaponReticleAssets::default(),
+            hud_material_edges: WeaponHudMaterialEdges::default(),
+            reticle_center_slot: None,
+            reticle_side_slot: None,
+            // T6 UI images are keyed by material name.
+            overlay_material: weapon
+                .variant_asset_name(v::OVERLAY_MATERIAL)
+                .map(str::to_owned),
+            overlay_image: weapon
+                .variant_asset_name(v::OVERLAY_MATERIAL)
+                .map(str::to_owned),
+            overlay_material_slot: None,
+            scope_name: None,
+            scope_rows: Default::default(),
+            iw5_attachment_slots: std::array::from_fn(|_| None),
+            attached_models: [true, false].map(|view| t6_attached_models(weapon, view)),
+            t6_clip_models: [true, false].map(|view| {
+                weapon
+                    .attached_model(T6_CLIP_SLOT, view)
+                    .map(|(name, _, _)| t6_model_name(name))
+            }),
+            t6_attachments: weapon
+                .attachment_uniques()
+                .filter_map(|unique| capture_t6_attachment(unique))
+                .collect(),
+            t6_attachment_stats: weapon
+                .attachments()
+                .map(capture_t6_attachment_stats)
+                .collect(),
+            iw5_reload_overrides: Vec::new(),
+            iw5_anim_overrides: Vec::new(),
+            iw5_fx_overrides: Vec::new(),
+            iw5_notetrack_overrides: Vec::new(),
+            hud_icon: weapon
+                .def_loaded_asset_name(fastfile_t6::weapon::def::HUD_ICON)
+                .map(t6_model_name),
+            hud_icon_slot: None,
+            pickup_icon: None,
+            pickup_icon_slot: None,
+            pickup_icon_image: None,
+            pickup_icon_ratio: 0,
+            hud_icon_ratio: 0,
+            hud_icon_image: None,
+            dpad_icon: None,
+            dpad_icon_image: None,
+            dpad_icon_atlas: None,
+            dpad_icon_ratio: 0,
+            kill_icon: None,
+            kill_icon_slot: None,
+            kill_icon_image: None,
+            proj_trail: None,
+            proj_trail_slot: None,
+            proj_beacon: None,
+            proj_beacon_slot: None,
+            proj_ignition: None,
+            proj_ignition_slot: None,
+            projectile_fx: WeaponProjectileFx::default(),
+            gun_xmodel: weapon
+                .def_asset_array_name(fastfile_t6::weapon::def::GUN_XMODEL, 0)
+                .map(t6_model_name),
+            hand_xmodel: None,
+            knife_xmodel: None,
+            world_model: weapon
+                .def_asset_array_name(fastfile_t6::weapon::def::WORLD_MODEL, 0)
+                .map(t6_model_name),
+            projectile_model: weapon
+                .def_asset_name(fastfile_t6::weapon::def::PROJECTILE_MODEL)
+                .map(t6_model_name)
+                .or_else(|| crate::weapon_t6::planted_model(name).map(str::to_owned)),
+            rocket_model: None,
+            sz_xanims: t6_sz_xanims(weapon),
+            // Paired by name when the rows are dressed (`X_dw` with `X_lh`).
+            dual_wield_weapon: None,
+            impact_payload: None,
+            sz_xanims_right: [const { None }; WEAPON_ANIM_SLOTS],
+            sz_xanims_left: t6_sz_xanims_left(weapon),
+            hide_tags: Vec::new(),
+            sounds: capture_t6_sounds(weapon),
+            combat_fx: WeaponCombatFx {
+                explosion_hint: weapon
+                    .def_asset_name(fastfile_t6::weapon::def::PROJ_EXPLOSION_EFFECT)
+                    .map(str::to_owned),
+                ..WeaponCombatFx::default()
+            },
+            combat_slots: CombatFxSlots::default(),
+            facts: capture_t6_body_facts(weapon),
+        });
     }
 
     pub fn push(&mut self, entry: CatalogWeapon) {
@@ -2704,6 +2852,113 @@ fn remap_t5_sz_xanims(t5: &[Option<String>]) -> [Option<String>; WEAPON_ANIM_SLO
         }
     }
     out
+}
+
+/// T6 clips share names with IW4's (`viewmodel_scar_idle`,
+/// `viewmodel_m67_throw`), and both live in the IW4 namespace where T6
+/// weapons resolve their content; T6's are kept under this prefix.
+pub const T6_XANIM_PREFIX: &str = "t6_";
+
+/// The weapon's `szXAnims` in IW4 slots, as [`remap_t5_sz_xanims`] does
+/// for T5, named with [`T6_XANIM_PREFIX`]. A T6 row keeps these only when it shows its own first-person
+/// model, see [`WeaponBuild::dress_t6_stand_ins`].
+fn t6_sz_xanims(w: fastfile_t6::weapon::WeaponView<'_>) -> [Option<String>; WEAPON_ANIM_SLOTS] {
+    t6_sz_xanims_by(|slot| w.xanim(slot))
+}
+
+/// [`t6_sz_xanims`] over any T6 `szXAnims` (a weapon's or an attachment's).
+fn t6_sz_xanims_by<'a>(
+    xanim: impl Fn(u32) -> Option<&'a str>,
+) -> [Option<String>; WEAPON_ANIM_SLOTS] {
+    use fastfile_t6::weapon::weap_anim as t6_anim;
+    const PAIRS: [(usize, usize); 33] = [
+        (t6_anim::IDLE, weap_anim::IDLE),
+        (t6_anim::EMPTY_IDLE, weap_anim::EMPTY_IDLE),
+        (t6_anim::FIRE, weap_anim::FIRE),
+        (t6_anim::HOLD_FIRE, weap_anim::HOLD_FIRE),
+        (t6_anim::LASTSHOT, weap_anim::LASTSHOT),
+        (t6_anim::RECHAMBER, weap_anim::RECHAMBER),
+        (t6_anim::MELEE, weap_anim::MELEE),
+        (t6_anim::MELEE_CHARGE, weap_anim::MELEE_CHARGE),
+        (t6_anim::RELOAD, weap_anim::RELOAD),
+        (t6_anim::RELOAD_EMPTY, weap_anim::RELOAD_EMPTY),
+        (t6_anim::RELOAD_START, weap_anim::RELOAD_START),
+        (t6_anim::RELOAD_END, weap_anim::RELOAD_END),
+        (t6_anim::RELOAD_QUICK, weap_anim_extra::RELOAD_QUICK),
+        (
+            t6_anim::RELOAD_QUICK_EMPTY,
+            weap_anim_extra::RELOAD_QUICK_EMPTY,
+        ),
+        (t6_anim::RAISE, weap_anim::RAISE),
+        (t6_anim::FIRST_RAISE, weap_anim::FIRST_RAISE),
+        (t6_anim::DROP, weap_anim::DROP),
+        (t6_anim::ALT_RAISE, weap_anim::ALT_RAISE),
+        (t6_anim::ALT_DROP, weap_anim::ALT_DROP),
+        (t6_anim::QUICK_RAISE, weap_anim::QUICK_RAISE),
+        (t6_anim::QUICK_DROP, weap_anim::QUICK_DROP),
+        (t6_anim::EMPTY_RAISE, weap_anim::EMPTY_RAISE),
+        (t6_anim::EMPTY_DROP, weap_anim::EMPTY_DROP),
+        (t6_anim::SPRINT_IN, weap_anim::SPRINT_IN),
+        (t6_anim::SPRINT_LOOP, weap_anim::SPRINT_LOOP),
+        (t6_anim::SPRINT_OUT, weap_anim::SPRINT_OUT),
+        (t6_anim::DETONATE, weap_anim::DETONATE),
+        (t6_anim::ADS_FIRE, weap_anim::ADS_FIRE),
+        (t6_anim::ADS_LASTSHOT, weap_anim::ADS_LASTSHOT),
+        (t6_anim::ADS_RECHAMBER, weap_anim::ADS_RECHAMBER),
+        (t6_anim::ADS_UP, weap_anim::ADS_UP),
+        (t6_anim::ADS_DOWN, weap_anim::ADS_DOWN),
+        (t6_anim::FIRE_INTRO, weap_anim::FIRE),
+    ];
+    let mut out = [const { None }; WEAPON_ANIM_SLOTS];
+    for (src, dst) in PAIRS {
+        // `FIRE_INTRO` stands in for `FIRE` only where there is no `FIRE`.
+        if out[dst].is_none() {
+            out[dst] = xanim(src as u32)
+                .filter(|name| !name.is_empty())
+                .map(|name| format!("{T6_XANIM_PREFIX}{}", name.to_ascii_lowercase()));
+        }
+    }
+    out
+}
+
+/// The left hand's clips of a dual-wield left half (`*_lh_mp`), in IW4
+/// slots: its idle, fire and reload live in T6's own left-hand slots, the
+/// rest (raise, sprint, ADS) are the pair's shared clips. Empty for any
+/// other weapon.
+fn t6_sz_xanims_left(
+    w: fastfile_t6::weapon::WeaponView<'_>,
+) -> [Option<String>; WEAPON_ANIM_SLOTS] {
+    use fastfile_t6::weapon::weap_anim as t6_anim;
+    const LEFT: [(usize, usize); 6] = [
+        (t6_anim::DW_LEFT_IDLE, weap_anim::IDLE),
+        (t6_anim::DW_LEFT_EMPTY_IDLE, weap_anim::EMPTY_IDLE),
+        (t6_anim::DW_LEFT_FIRE, weap_anim::FIRE),
+        (t6_anim::DW_LEFT_LASTSHOT, weap_anim::LASTSHOT),
+        (t6_anim::DW_LEFT_RELOAD, weap_anim::RELOAD),
+        (t6_anim::DW_LEFT_RELOAD_EMPTY, weap_anim::RELOAD_EMPTY),
+    ];
+    let clip = |slot: usize| {
+        w.xanim(slot as u32)
+            .filter(|name| !name.is_empty())
+            .map(|name| format!("{T6_XANIM_PREFIX}{}", name.to_ascii_lowercase()))
+    };
+    if clip(t6_anim::DW_LEFT_IDLE).is_none() {
+        return [const { None }; WEAPON_ANIM_SLOTS];
+    }
+    let mut out = t6_sz_xanims(w);
+    for (src, dst) in LEFT {
+        out[dst] = clip(src);
+    }
+    out
+}
+
+/// Every animation name a T6 weapon's `szXAnims` holds, as the zone names
+/// it (without [`T6_XANIM_PREFIX`]).
+pub fn t6_weapon_xanim_names(w: fastfile_t6::weapon::WeaponView<'_>) -> Vec<String> {
+    (0..fastfile_t6::weapon::variant::XANIM_COUNT)
+        .filter_map(|slot| w.xanim(slot).filter(|name| !name.is_empty()))
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 fn t5_to_iw4_ptr(p: fastfile_t5::Ptr) -> Ptr {
@@ -3229,6 +3484,614 @@ fn capture_t5_body_facts(
     facts.inherits_perks = leftover_t5_inherits_host_perks();
     facts.kick = leftover_t5_kick(stream, geometry);
     facts
+}
+
+/// `weapClass_t` T6 → IW4. T6 has no sniper class (its snipers are
+/// rifles, as in T5) and folds shotgun pistols into their own class; they
+/// fire pellets, so they become spread weapons here.
+fn remap_t6_weap_class(raw: i32) -> i32 {
+    use fastfile_t6::weapon::weap_class as t6;
+    match raw {
+        t6::RIFLE => 0,
+        t6::MG => 2,
+        t6::SMG => 3,
+        t6::SPREAD | t6::PISTOL_SPREAD => weapon_iw4::WEAPCLASS_SPREAD,
+        t6::PISTOL => weapon_iw4::WEAPCLASS_PISTOL,
+        t6::GRENADE => weapon_iw4::WEAPCLASS_GRENADE,
+        t6::ROCKETLAUNCHER => 7,
+        t6::TURRET => weapon_iw4::WEAPCLASS_TURRET,
+        t6::ITEM => 11,
+        _ => 10,
+    }
+}
+
+/// `weapType_t` T6 → IW4, which knows bullet, grenade, projectile and
+/// riot shield. Mines and bombs are thrown or planted like grenades.
+fn remap_t6_weap_type(raw: i32) -> i32 {
+    use fastfile_t6::weapon::weap_type as t6;
+    match raw {
+        t6::GRENADE | t6::GAS | t6::BOMB | t6::MINE => weapon_iw4::WEAPTYPE_GRENADE,
+        t6::PROJECTILE => weapon_iw4::WEAPTYPE_PROJECTILE,
+        t6::RIOTSHIELD => 3,
+        _ => weapon_iw4::WEAPTYPE_BULLET,
+    }
+}
+
+fn capture_t6_body_facts(w: fastfile_t6::weapon::WeaponView<'_>) -> WeaponBodyFacts {
+    use fastfile_t6::weapon::{def as d, variant as v};
+    let ads_in_ms = w.variant_i32(v::ADS_TRANS_IN_TIME);
+    let ads_out_ms = w.variant_i32(v::ADS_TRANS_OUT_TIME);
+    // T6 damage is a six-step curve: `damage[i]` out to `damageRange[i]`,
+    // with the last entry the floor. IW4 falls off linearly between one
+    // near and one far point, so the near step and the floor are kept.
+    let curve = w.damage_curve();
+    let (near, near_range) = curve[0];
+    let (far, far_range) = curve[fastfile_t6::weapon::def::DAMAGE_STEPS - 1];
+    let mut facts = WeaponBodyFacts {
+        body_resolved: w.has_def(),
+        fire_time_ms: w.def_i32(d::FIRE_TIME),
+        clip_size: w.variant_i32(v::CLIP_SIZE),
+        weap_type: remap_t6_weap_type(w.def_i32(d::WEAP_TYPE)),
+        weap_class: remap_t6_weap_class(w.def_i32(d::WEAP_CLASS)),
+        player_anim_type: w.def_i32(d::PLAYER_ANIM_TYPE),
+        fire_type: w.def_i32(d::FIRE_TYPE),
+        inventory_type: w.def_i32(d::INVENTORY_TYPE),
+        penetrate_type: w.def_i32(d::PENETRATE_TYPE),
+        impact_type: w.def_i32(d::IMPACT_TYPE),
+        move_speed_scale: w.def_f32(d::MOVE_SPEED_SCALE),
+        ads_move_speed_scale: w.def_f32(d::ADS_MOVE_SPEED_SCALE),
+        rechamber_time_ms: w.def_i32(d::RECHAMBER_TIME),
+        rechamber_bolt_time_ms: w.def_i32(d::RECHAMBER_BOLT_TIME),
+        drop_time_ms: w.def_i32(d::DROP_TIME),
+        raise_time_ms: w.def_i32(d::RAISE_TIME),
+        alternate_raise_time_ms: w.variant_i32(v::ALT_RAISE_TIME),
+        alternate_drop_time_ms: w.def_i32(d::ALT_DROP_TIME),
+        first_raise_time_ms: w.def_i32(d::FIRST_RAISE_TIME),
+        quick_drop_time_ms: w.def_i32(d::QUICK_DROP_TIME),
+        quick_raise_time_ms: w.def_i32(d::QUICK_RAISE_TIME),
+        bolt_action: w.def_bool(d::BOLT_ACTION),
+        select_requires_ammo: Some(false),
+        offhand_hold_is_cancelable: Some(w.def_bool(d::OFFHAND_HOLD_IS_CANCELABLE)),
+        inherits_perks: true,
+        reload_time_ms: w.variant_i32(v::RELOAD_TIME),
+        reload_empty_time_ms: w.variant_i32(v::RELOAD_EMPTY_TIME),
+        ads_in_rate: if ads_in_ms > 0 {
+            1.0 / ads_in_ms as f32
+        } else {
+            0.0
+        },
+        ads_out_rate: if ads_out_ms > 0 {
+            1.0 / ads_out_ms as f32
+        } else {
+            0.0
+        },
+        ads_zoom_fov: w.variant_f32(v::ADS_ZOOM_FOV1),
+        ads_zoom_in_frac: w.variant_f32(v::ADS_ZOOM_IN_FRAC),
+        ads_zoom_out_frac: w.variant_f32(v::ADS_ZOOM_OUT_FRAC),
+        ammo_counter_clip: w.def_i32(d::AMMO_COUNTER_CLIP),
+        start_ammo: w.def_i32(d::START_AMMO),
+        max_ammo: w.def_i32(d::MAX_AMMO),
+        ammo_count_clip_relative: w.def_bool(d::AMMO_COUNT_CLIP_RELATIVE),
+        shots_per_fire: w.def_i32(d::SHOT_COUNT).max(1),
+        damage: near,
+        max_damage_range: near_range,
+        min_damage: far,
+        min_damage_range: far_range,
+        min_player_damage: w.def_i32(d::MIN_PLAYER_DAMAGE),
+        explosion_radius: w.def_i32(d::EXPLOSION_RADIUS),
+        explosion_radius_min: w.def_i32(d::EXPLOSION_RADIUS_MIN),
+        explosion_inner_damage: w.def_i32(d::EXPLOSION_INNER_DAMAGE),
+        explosion_outer_damage: w.def_i32(d::EXPLOSION_OUTER_DAMAGE),
+        damage_cone_angle: w.def_f32(d::DAMAGE_CONE_ANGLE),
+        projectile_speed: w.def_i32(d::PROJECTILE_SPEED),
+        projectile_speed_up: w.def_i32(d::PROJECTILE_SPEED_UP),
+        projectile_speed_relative_up: w.def_i32(d::PROJECTILE_SPEED_RELATIVE_UP),
+        projectile_speed_forward: w.def_i32(d::PROJECTILE_SPEED_FORWARD),
+        projectile_activate_dist: w.def_i32(d::PROJECTILE_ACTIVATE_DIST),
+        projectile_explosion_type: w.def_i32(d::PROJ_EXPLOSION),
+        proj_impact_explode: w.def_bool(d::PROJ_IMPACT_EXPLODE),
+        stickiness: w.def_i32(d::STICKINESS),
+        timed_detonation: w.def_bool(d::TIMED_DETONATION),
+        has_detonator: w.def_bool(d::HAS_DETONATOR),
+        refuses_pickup: !w.def_bool(d::RETRIEVABLE),
+        detonate_delay_ms: w.def_i32(d::DETONATE_DELAY),
+        detonate_time_ms: w.def_i32(d::DETONATE_TIME),
+        offhand_class: leftover_t5_offhand_class(w.def_i32(d::OFFHAND_CLASS)),
+        hold_fire_time_ms: w.def_i32(d::HOLD_FIRE_TIME),
+        fuse_time_ms: w.def_i32(d::FUSE_TIME),
+        cook_off_hold: w.def_bool(d::COOK_OFF_HOLD),
+        fire_delay_ms: w.def_i32(d::FIRE_DELAY),
+        melee_damage: w.def_i32(d::MELEE_DAMAGE),
+        melee_time_ms: w.def_i32(d::MELEE_TIME),
+        melee_delay_ms: w.def_i32(d::MELEE_DELAY),
+        melee_charge_time_ms: w.def_i32(d::MELEE_CHARGE_TIME),
+        melee_charge_delay_ms: w.def_i32(d::MELEE_CHARGE_DELAY),
+        use_as_melee: w.def_bool(d::USE_AS_MELEE),
+        reload_show_rocket_time_ms: w.def_i32(d::RELOAD_SHOW_ROCKET_TIME),
+        reload_add_time_ms: w.def_i32(d::RELOAD_ADD_TIME),
+        reload_empty_add_time_ms: w.def_i32(d::RELOAD_EMPTY_ADD_TIME),
+        reload_start_time_ms: w.def_i32(d::RELOAD_START_TIME),
+        reload_start_add_time_ms: w.def_i32(d::RELOAD_START_ADD_TIME),
+        reload_end_time_ms: w.def_i32(d::RELOAD_END_TIME),
+        reload_ammo_add: w.def_i32(d::RELOAD_AMMO_ADD),
+        reload_start_add: w.def_i32(d::RELOAD_START_ADD),
+        overlay_reticle: w.def_i32(d::OVERLAY_RETICLE),
+        overlay_interface: w.def_i32(d::OVERLAY_INTERFACE),
+        ads_overlay_width: w.def_f32(d::OVERLAY_WIDTH),
+        ads_overlay_height: w.def_f32(d::OVERLAY_HEIGHT),
+        hip_reticle_side_pos: w.def_f32(d::HIP_RETICLE_SIDE_POS),
+        no_ads_when_mag_empty: w.def_bool(d::NO_ADS_WHEN_MAG_EMPTY),
+        aim_down_sight: w.def_bool(d::AIM_DOWN_SIGHT),
+        rechamber_while_ads: w.def_bool(d::RECHAMBER_WHILE_ADS),
+        ads_fire_only: w.def_bool(d::ADS_FIRE_ONLY),
+        no_partial_reload: w.def_bool(d::NO_PARTIAL_RELOAD),
+        segmented_reload: w.def_bool(d::SEGMENTED_RELOAD),
+        ads_spread: w.def_f32(d::ADS_SPREAD),
+        kill_icon_ratio: w.def_i32(d::KILL_ICON_RATIO),
+        flip_kill_icon: w.def_bool(d::FLIP_KILL_ICON),
+        idle: WeaponIdleInputs {
+            ads_idle_amount: w.def_f32(d::ADS_IDLE_AMOUNT),
+            hip_idle_amount: w.def_f32(d::HIP_IDLE_AMOUNT),
+            ads_idle_speed: w.def_f32(d::ADS_IDLE_SPEED),
+            hip_idle_speed: w.def_f32(d::HIP_IDLE_SPEED),
+            idle_crouch_factor: w.def_f32(d::IDLE_CROUCH_FACTOR),
+            idle_prone_factor: w.def_f32(d::IDLE_PRONE_FACTOR),
+        },
+        kick: capture_t6_kick(w),
+        ..WeaponBodyFacts::default()
+    };
+    apply_leftover_hip_spread(
+        &mut facts,
+        core::array::from_fn(|i| w.def_f32(d::HIP_SPREAD_STAND_MIN + 4 * i as u32)),
+    );
+    facts.parallel_bounce = w
+        .def_f32_array::<{ d::SURF_TYPE_COUNT }>(d::PARALLEL_BOUNCE)
+        .map(t6_surface_table);
+    facts.perpendicular_bounce = w
+        .def_f32_array::<{ d::SURF_TYPE_COUNT }>(d::PERPENDICULAR_BOUNCE)
+        .map(t6_surface_table);
+    if w.variant_bool(v::DUAL_MAG) {
+        facts.dual_mag = Some(weapon_iw4::DualMagTimes {
+            reload_ms: w.variant_i32(v::RELOAD_QUICK_TIME),
+            reload_empty_ms: w.variant_i32(v::RELOAD_QUICK_EMPTY_TIME),
+            add_ms: w.def_i32(d::RELOAD_QUICK_ADD_TIME),
+            empty_add_ms: w.def_i32(d::RELOAD_QUICK_EMPTY_ADD_TIME),
+        });
+    }
+    facts
+}
+
+/// A T6 per-surface table in IW4 surface order. The first 29 types agree;
+/// IW4's riot shield is T6's 31 and IW4's slush, which T6 lacks, takes snow.
+fn t6_surface_table(t6: [f32; fastfile_t6::weapon::def::SURF_TYPE_COUNT]) -> [f32; 31] {
+    const T6_RIOT_SHIELD: usize = 31;
+    const T6_SNOW: usize = 19;
+    core::array::from_fn(|iw4| match iw4 {
+        0..=28 => t6[iw4],
+        29 => t6[T6_RIOT_SHIELD],
+        _ => t6[T6_SNOW],
+    })
+}
+
+/// The T6 alias names a weapon plays directly. Reload and handling sounds
+/// come from animation notetracks, and T6 weapons still play their
+/// stand-in's animations, so those stay the stand-in's.
+fn capture_t6_sounds(w: fastfile_t6::weapon::WeaponView<'_>) -> WeaponSoundAliases {
+    use fastfile_t6::weapon::def as d;
+    let name = |off| w.def_str(off).filter(|s| !s.is_empty()).map(str::to_owned);
+    let fire = name(d::FIRE_SOUND);
+    // Some defs (`xm8_mp`) name only the shot's LFE layer as the player
+    // fire; the shot itself is the `_fire_plr` alias beside `_fire_npc`.
+    let fire_player = match (name(d::FIRE_SOUND_PLAYER), &fire) {
+        (Some(player), Some(npc)) if player.to_ascii_lowercase().ends_with("_lfe") => npc
+            .strip_suffix("_fire_npc")
+            .map_or(Some(player), |base| Some(format!("{base}_fire_plr"))),
+        (player, _) => player,
+    };
+    WeaponSoundAliases {
+        fire,
+        fire_player,
+        fire_last: name(d::FIRE_LAST_SOUND),
+        fire_last_player: name(d::FIRE_LAST_SOUND_PLAYER),
+        empty_fire: name(d::EMPTY_FIRE_SOUND),
+        empty_fire_player: name(d::EMPTY_FIRE_SOUND_PLAYER),
+        melee_swipe: name(d::MELEE_SWIPE_SOUND),
+        melee_swipe_player: name(d::MELEE_SWIPE_SOUND_PLAYER),
+        melee_hit: name(d::MELEE_HIT_SOUND),
+        melee_miss: name(d::MELEE_MISS_SOUND),
+        pullback: name(d::PULLBACK_SOUND),
+        pullback_player: name(d::PULLBACK_SOUND_PLAYER),
+        raise: name(d::RAISE_SOUND),
+        raise_player: name(d::RAISE_SOUND_PLAYER),
+        first_raise: name(d::FIRST_RAISE_SOUND),
+        first_raise_player: name(d::FIRST_RAISE_SOUND_PLAYER),
+        putaway: name(d::PUTAWAY_SOUND),
+        putaway_player: name(d::PUTAWAY_SOUND_PLAYER),
+        proj_explosion: name(d::PROJ_EXPLOSION_SOUND),
+        ..WeaponSoundAliases::default()
+    }
+}
+
+/// The models a T6 weapon attaches to its first-person (`view`) or world
+/// gun, by slot.
+/// The `attachViewModel` slot T6 weapons hold their magazine in.
+const T6_CLIP_SLOT: u32 = 6;
+
+/// One T6 attachment (or authored pair of attachments) as one weapon
+/// takes it, read from its `WeaponAttachmentUnique`.
+#[derive(Clone, Debug)]
+pub struct T6Attachment {
+    /// `au_an94_acog`, `au_an94_acog+grip`.
+    pub name: String,
+    /// The attachment table's index of the attachment (of a pair, the one
+    /// it is filed under).
+    pub kind: u32,
+    /// For a pair, `1 << kind` of both; zero for one attachment.
+    pub mask: u32,
+    /// The weapon the attachment switches to (`gl_an94_mp`).
+    pub alt_weapon: Option<String>,
+    /// First-person and world models, named as their placed copies (see
+    /// [`t6_attachment_models`]).
+    pub models: [Vec<String>; 2],
+    /// The first-person main model's copy and the copy drawn instead while
+    /// aiming (a holographic sight or rangefinder seen from behind).
+    pub view_ads_model: Option<(String, String)>,
+    /// The scope overlay the weapon shows wearing it; none for a sight
+    /// looked through (an ACOG on a sniper rifle).
+    pub overlay: Option<String>,
+    /// Gun bones the attachment hides (iron sights under an optic).
+    pub hide_tags: Vec<String>,
+    /// Clips the attachment plays instead of the weapon's, in IW4 slots.
+    pub xanims: [Option<String>; WEAPON_ANIM_SLOTS],
+    pub fire_sound: Option<String>,
+    pub fire_sound_player: Option<String>,
+    /// Removes the weapon's own attached models (a sniper's scope) but its
+    /// magazine.
+    pub disable_base_attachment: bool,
+    /// Removes the weapon's magazine (a fast mag carries its own).
+    pub disable_base_clip: bool,
+}
+
+/// How a T6 attachment changes the numbers of a weapon of its class
+/// (its `WeaponAttachment`). Scales are 1 where it changes nothing.
+#[derive(Clone, Debug)]
+pub struct T6AttachmentStats {
+    /// The attachment table's index of the attachment.
+    pub kind: u32,
+    pub clip_size_scale: f32,
+    pub fire_time_scale: f32,
+    /// Reload, empty reload, reload add, quick and quick empty reload.
+    pub reload_time_scales: [f32; 5],
+    pub ads_in_time_scale: f32,
+    pub ads_out_time_scale: f32,
+    /// The optic's ADS FOV (`fADSZoomFov1`), when it sets one.
+    pub ads_zoom_fov: Option<f32>,
+    pub ads_zoom_in_frac: Option<f32>,
+    pub ads_zoom_out_frac: Option<f32>,
+    pub damage_range_scale: f32,
+    pub hip_spread_min_scale: f32,
+    pub hip_spread_max_scale: f32,
+    pub ads_move_speed_scale: f32,
+    pub ads_view_kick_center_speed_scale: f32,
+    pub ads_idle_amount_scale: f32,
+    /// FMJ: bullets pass through more.
+    pub penetrating: bool,
+    /// Fast mag (`bDualMag`): a shell-by-shell reload loads two at a time.
+    pub dual_mag: bool,
+    /// The attachment's alternate weapon fires from the weapon's magazine.
+    pub shared_ammo: bool,
+}
+
+fn capture_t6_attachment_stats(a: fastfile_t6::weapon::AttachmentView<'_>) -> T6AttachmentStats {
+    use fastfile_t6::weapon::attachment as at;
+    // A scale the asset leaves at zero changes nothing.
+    let scale = |off| Some(a.f32_at(off)).filter(|v| *v > 0.0).unwrap_or(1.0);
+    let set = |off| Some(a.f32_at(off)).filter(|v| *v > 0.0);
+    T6AttachmentStats {
+        kind: a.attachment_type(),
+        clip_size_scale: scale(at::CLIP_SIZE_SCALE),
+        fire_time_scale: scale(at::FIRE_TIME_SCALE),
+        reload_time_scales: std::array::from_fn(|i| scale(at::RELOAD_TIME_SCALES + 4 * i as u32)),
+        ads_in_time_scale: scale(at::ADS_TRANS_IN_TIME_SCALE),
+        ads_out_time_scale: scale(at::ADS_TRANS_OUT_TIME_SCALE),
+        // A FOV of 1 is "unchanged" (a variable zoom sets only its steps).
+        ads_zoom_fov: set(at::ADS_ZOOM_FOV).filter(|fov| *fov > 1.0),
+        ads_zoom_in_frac: set(at::ADS_ZOOM_IN_FRAC),
+        ads_zoom_out_frac: set(at::ADS_ZOOM_OUT_FRAC),
+        damage_range_scale: scale(at::DAMAGE_RANGE_SCALE),
+        hip_spread_min_scale: scale(at::HIP_SPREAD_MIN_SCALE),
+        hip_spread_max_scale: scale(at::HIP_SPREAD_MAX_SCALE),
+        ads_move_speed_scale: scale(at::ADS_MOVE_SPEED_SCALE),
+        ads_view_kick_center_speed_scale: scale(at::ADS_VIEW_KICK_CENTER_SPEED_SCALE),
+        ads_idle_amount_scale: scale(at::ADS_IDLE_AMOUNT_SCALE),
+        penetrating: a.u32_at(at::PERKS) != 0,
+        dual_mag: a.flag(at::DUAL_MAG),
+        shared_ammo: a.flag(at::SHARED_AMMO),
+    }
+}
+
+/// IW4 moves at this share of running speed while aiming
+/// (`PM_CmdScale_Walk`), times the weapon's ADS move speed scale.
+const ADS_WALK_SPEED_SCALE: f32 = 0.4;
+
+/// `facts` with the numbers of `stats` applied.
+fn apply_t6_attachment_stats(facts: &mut WeaponBodyFacts, stats: &T6AttachmentStats) {
+    let ms = |value: i32, scale: f32| (value as f32 * scale).round() as i32;
+    if stats.clip_size_scale != 1.0 && facts.clip_size > 0 {
+        facts.clip_size = (facts.clip_size as f32 * stats.clip_size_scale).round() as i32;
+    }
+    facts.fire_time_ms = ms(facts.fire_time_ms, stats.fire_time_scale);
+    let [reload, empty, add, _, _] = stats.reload_time_scales;
+    facts.reload_time_ms = ms(facts.reload_time_ms, reload);
+    facts.reload_empty_time_ms = ms(facts.reload_empty_time_ms, empty);
+    facts.reload_add_time_ms = ms(facts.reload_add_time_ms, add);
+    facts.reload_empty_add_time_ms = ms(facts.reload_empty_add_time_ms, empty);
+    facts.reload_start_time_ms = ms(facts.reload_start_time_ms, reload);
+    facts.reload_end_time_ms = ms(facts.reload_end_time_ms, reload);
+    // Rates are per transition: a shorter transition is a faster rate.
+    facts.ads_in_rate /= stats.ads_in_time_scale;
+    facts.ads_out_rate /= stats.ads_out_time_scale;
+    if let Some(fov) = stats.ads_zoom_fov {
+        facts.ads_zoom_fov = fov;
+    }
+    if let Some(frac) = stats.ads_zoom_in_frac {
+        facts.ads_zoom_in_frac = frac;
+    }
+    if let Some(frac) = stats.ads_zoom_out_frac {
+        facts.ads_zoom_out_frac = frac;
+    }
+    facts.max_damage_range *= stats.damage_range_scale;
+    facts.min_damage_range *= stats.damage_range_scale;
+    for min in [
+        &mut facts.hip_spread_stand_min,
+        &mut facts.hip_spread_ducked_min,
+        &mut facts.hip_spread_prone_min,
+    ] {
+        *min *= stats.hip_spread_min_scale;
+    }
+    for max in [
+        &mut facts.hip_spread_stand_max,
+        &mut facts.hip_spread_ducked_max,
+        &mut facts.hip_spread_prone_max,
+    ] {
+        *max *= stats.hip_spread_max_scale;
+    }
+    // Relative to walking, as IW4's (SMGs 2, rifles 1), and walking is 0.4
+    // of running: a stock speeds aiming up to running pace, not past it.
+    if stats.ads_move_speed_scale != 1.0 {
+        facts.ads_move_speed_scale = (facts.ads_move_speed_scale * stats.ads_move_speed_scale)
+            .min(1.0 / ADS_WALK_SPEED_SCALE);
+    }
+    facts.kick.f_ads_view_kick_center_speed *= stats.ads_view_kick_center_speed_scale;
+    facts.idle.ads_idle_amount *= stats.ads_idle_amount_scale;
+    // A pump shotgun's fast mag loads two shells a stroke, each stroke a
+    // little slower (its reload scales).
+    if stats.dual_mag && facts.segmented_reload {
+        facts.reload_ammo_add = facts.reload_ammo_add.max(1) * 2;
+    }
+    // FMJ doubles how deep bullets go, as IW4's does.
+    if stats.penetrating {
+        facts.penetrate_multiplier *= 2.0;
+    }
+}
+
+/// A T6 attachment model placed for one weapon: the name its copy is
+/// captured under, the model it copies, the gun bone it hangs from
+/// (`None` for the root) and its offset and `(pitch, yaw, roll)` there.
+pub struct T6AttachmentModel {
+    pub copy: String,
+    pub model: String,
+    pub tag: Option<String>,
+    pub offset: [f32; 3],
+    pub angles: [f32; 3],
+}
+
+/// The models `unique` hangs on the first-person (`view`) or world gun.
+/// The same model sits differently on every weapon, so each weapon's is a
+/// copy of its own, named `model@unique`.
+pub fn t6_attachment_models(
+    unique: fastfile_t6::weapon::AttachmentUniqueView<'_>,
+    view: bool,
+) -> Vec<T6AttachmentModel> {
+    let Some(owner) = unique.name() else {
+        return Vec::new();
+    };
+    unique
+        .models(view)
+        .into_iter()
+        .flatten()
+        .map(|(model, tag, offset, angles)| {
+            let model = t6_model_name(model);
+            T6AttachmentModel {
+                copy: format!("{model}@{owner}"),
+                model,
+                tag: tag.map(str::to_owned),
+                offset,
+                angles,
+            }
+        })
+        .collect()
+}
+
+/// The first-person model `unique` draws instead of its main one while
+/// aiming, copied for this weapon as the main one is.
+pub fn t6_attachment_ads_model(
+    unique: fastfile_t6::weapon::AttachmentUniqueView<'_>,
+) -> Option<T6AttachmentModel> {
+    let owner = unique.name()?;
+    let (model, tag, offset, angles) = unique.ads_model()?;
+    let model = t6_model_name(model);
+    Some(T6AttachmentModel {
+        copy: format!("{model}@{owner}"),
+        model,
+        tag: tag.map(str::to_owned),
+        offset,
+        angles,
+    })
+}
+
+fn capture_t6_attachment(
+    unique: fastfile_t6::weapon::AttachmentUniqueView<'_>,
+) -> Option<T6Attachment> {
+    use fastfile_t6::weapon::unique as u;
+    let name = unique.name()?.to_owned();
+    Some(T6Attachment {
+        kind: unique.attachment_type(),
+        mask: unique.combined_mask(),
+        alt_weapon: unique.alt_weapon().map(str::to_owned),
+        models: [true, false].map(|view| {
+            t6_attachment_models(unique, view)
+                .into_iter()
+                .map(|model| model.copy)
+                .collect()
+        }),
+        view_ads_model: t6_attachment_models(unique, true)
+            .into_iter()
+            .next()
+            .zip(t6_attachment_ads_model(unique))
+            .map(|(main, ads)| (main.copy, ads.copy)),
+        overlay: unique
+            .asset_field_name(u::OVERLAY_MATERIAL)
+            .map(str::to_owned),
+        hide_tags: unique.hide_tags().map(str::to_owned).collect(),
+        xanims: t6_sz_xanims_by(|slot| unique.xanim(slot)),
+        fire_sound: unique.sound(u::FIRE_SOUND).map(str::to_owned),
+        fire_sound_player: unique.sound(u::FIRE_SOUND_PLAYER).map(str::to_owned),
+        disable_base_attachment: unique.flag(u::DISABLE_BASE_ATTACHMENT),
+        disable_base_clip: unique.flag(u::DISABLE_BASE_CLIP),
+        name,
+    })
+}
+
+/// Every clip a weapon's attachments name, as the zone names them.
+pub fn t6_attachment_xanim_names(w: fastfile_t6::weapon::WeaponView<'_>) -> Vec<String> {
+    w.attachment_uniques()
+        .flat_map(|unique| {
+            (0..fastfile_t6::weapon::variant::XANIM_COUNT)
+                .filter_map(move |slot| unique.xanim(slot))
+                .map(str::to_ascii_lowercase)
+        })
+        .collect()
+}
+
+/// The fire sounds a weapon's attachments name (a silencer's).
+pub fn t6_attachment_sound_names(w: fastfile_t6::weapon::WeaponView<'_>) -> Vec<String> {
+    use fastfile_t6::weapon::unique as u;
+    w.attachment_uniques()
+        .flat_map(|unique| [u::FIRE_SOUND, u::FIRE_SOUND_PLAYER].map(|off| unique.sound(off)))
+        .flatten()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn t6_attached_models(weapon: fastfile_t6::weapon::WeaponView<'_>, view: bool) -> Vec<String> {
+    (0..fastfile_t6::weapon::variant::ATTACH_MODEL_COUNT)
+        .filter_map(|slot| weapon.attached_model(slot, view))
+        .map(|(name, _, _)| t6_model_name(name))
+        .collect()
+}
+
+/// A T6 model name without the `,` that marks a reference to a model
+/// another zone defines.
+pub fn t6_model_name(name: &str) -> String {
+    name.strip_prefix(',').unwrap_or(name).to_owned()
+}
+
+/// Every alias [`capture_t6_sounds`] can name, for the sound walk to read.
+pub fn t6_weapon_sound_names(w: fastfile_t6::weapon::WeaponView<'_>) -> Vec<String> {
+    let s = capture_t6_sounds(w);
+    [
+        s.fire,
+        s.fire_player,
+        s.fire_last,
+        s.fire_last_player,
+        s.empty_fire,
+        s.empty_fire_player,
+        s.melee_swipe,
+        s.melee_swipe_player,
+        s.melee_hit,
+        s.melee_miss,
+        s.pullback,
+        s.pullback_player,
+        s.raise,
+        s.raise_player,
+        s.first_raise,
+        s.first_raise_player,
+        s.putaway,
+        s.putaway_player,
+        s.proj_explosion,
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The T6 slots whose alias the sound walk read; the rest are emptied for
+/// the stand-in to fill.
+fn keep_t6_sounds(own: &mut WeaponSoundAliases, keep: &impl Fn(&str) -> bool) {
+    for slot in [
+        &mut own.fire,
+        &mut own.fire_player,
+        &mut own.fire_last,
+        &mut own.fire_last_player,
+        &mut own.empty_fire,
+        &mut own.empty_fire_player,
+        &mut own.melee_swipe,
+        &mut own.melee_swipe_player,
+        &mut own.melee_hit,
+        &mut own.melee_miss,
+        &mut own.pullback,
+        &mut own.pullback_player,
+        &mut own.raise,
+        &mut own.raise_player,
+        &mut own.first_raise,
+        &mut own.first_raise_player,
+        &mut own.putaway,
+        &mut own.putaway_player,
+        &mut own.proj_explosion,
+    ] {
+        if slot.as_deref().is_some_and(|name| !keep(name)) {
+            *slot = None;
+        }
+    }
+}
+
+fn capture_t6_kick(w: fastfile_t6::weapon::WeaponView<'_>) -> WeaponKickFacts {
+    use fastfile_t6::weapon::{def as d, variant as v};
+    WeaponKickFacts {
+        f_ads_view_kick_center_speed: w.variant_f32(v::ADS_VIEW_KICK_CENTER_SPEED),
+        f_hip_view_kick_center_speed: w.variant_f32(v::HIP_VIEW_KICK_CENTER_SPEED),
+        gun_max_pitch: w.def_f32(d::GUN_MAX_PITCH),
+        gun_max_yaw: w.def_f32(d::GUN_MAX_YAW),
+        ads_gun_kick_reduced_kick_bullets: w.def_i32(d::ADS_GUN_KICK_REDUCED_KICK_BULLETS),
+        ads_gun_kick_reduced_kick_percent: w.def_f32(d::ADS_GUN_KICK_REDUCED_KICK_PERCENT),
+        ads_gun_kick_pitch_min: w.def_f32(d::ADS_GUN_KICK_PITCH_MIN),
+        ads_gun_kick_pitch_max: w.def_f32(d::ADS_GUN_KICK_PITCH_MAX),
+        ads_gun_kick_yaw_min: w.def_f32(d::ADS_GUN_KICK_YAW_MIN),
+        ads_gun_kick_yaw_max: w.def_f32(d::ADS_GUN_KICK_YAW_MAX),
+        ads_gun_kick_accel: w.def_f32(d::ADS_GUN_KICK_ACCEL),
+        ads_gun_kick_speed_max: w.def_f32(d::ADS_GUN_KICK_SPEED_MAX),
+        ads_gun_kick_speed_decay: w.def_f32(d::ADS_GUN_KICK_SPEED_DECAY),
+        ads_gun_kick_static_decay: w.def_f32(d::ADS_GUN_KICK_STATIC_DECAY),
+        ads_view_kick_pitch_min: w.def_f32(d::ADS_VIEW_KICK_PITCH_MIN),
+        ads_view_kick_pitch_max: w.def_f32(d::ADS_VIEW_KICK_PITCH_MAX),
+        ads_view_kick_yaw_min: w.def_f32(d::ADS_VIEW_KICK_YAW_MIN),
+        ads_view_kick_yaw_max: w.def_f32(d::ADS_VIEW_KICK_YAW_MAX),
+        hip_gun_kick_reduced_kick_bullets: w.def_i32(d::HIP_GUN_KICK_REDUCED_KICK_BULLETS),
+        hip_gun_kick_reduced_kick_percent: w.def_f32(d::HIP_GUN_KICK_REDUCED_KICK_PERCENT),
+        hip_gun_kick_pitch_min: w.def_f32(d::HIP_GUN_KICK_PITCH_MIN),
+        hip_gun_kick_pitch_max: w.def_f32(d::HIP_GUN_KICK_PITCH_MAX),
+        hip_gun_kick_yaw_min: w.def_f32(d::HIP_GUN_KICK_YAW_MIN),
+        hip_gun_kick_yaw_max: w.def_f32(d::HIP_GUN_KICK_YAW_MAX),
+        hip_gun_kick_accel: w.def_f32(d::HIP_GUN_KICK_ACCEL),
+        hip_gun_kick_speed_max: w.def_f32(d::HIP_GUN_KICK_SPEED_MAX),
+        hip_gun_kick_speed_decay: w.def_f32(d::HIP_GUN_KICK_SPEED_DECAY),
+        hip_gun_kick_static_decay: w.def_f32(d::HIP_GUN_KICK_STATIC_DECAY),
+        hip_view_kick_pitch_min: w.def_f32(d::HIP_VIEW_KICK_PITCH_MIN),
+        hip_view_kick_pitch_max: w.def_f32(d::HIP_VIEW_KICK_PITCH_MAX),
+        hip_view_kick_yaw_min: w.def_f32(d::HIP_VIEW_KICK_YAW_MIN),
+        hip_view_kick_yaw_max: w.def_f32(d::HIP_VIEW_KICK_YAW_MAX),
+    }
 }
 
 fn leftover_t5_inherits_host_perks() -> bool {
@@ -5033,9 +5896,21 @@ struct WeaponRow {
 
     attachment_view_models: Vec<String>,
     attachment_world_models: Vec<String>,
+    /// First-person attachment models drawn instead of others while
+    /// aiming: `(model, while aiming)`.
+    attachment_view_ads_models: Vec<(String, String)>,
+
+    /// See [`CatalogWeapon::t6_clip_models`] and
+    /// [`CatalogWeapon::t6_attachments`].
+    t6_clip_models: [Option<String>; 2],
+    t6_attachments: Vec<T6Attachment>,
+    t6_attachment_stats: Vec<T6AttachmentStats>,
 
     iw5_configuration: Option<(u32, Iw5AttachmentSelection)>,
     prepared_attachments: Vec<String>,
+    /// The attachment captions the HUD names the weapon with after its own
+    /// name (`MPUI_REFLEX`), for a T6 configuration.
+    attachment_caption_keys: Vec<String>,
 
     iw5_attachment_slots: [Option<String>; fastfile_iw5::size::WEAPON_ATTACHMENT_SLOT_COUNT],
     iw5_reload_overrides: Vec<fastfile_iw5::ReloadOverride>,
@@ -5057,6 +5932,9 @@ struct WeaponRow {
 
     hud_icon: Option<String>,
     hud_icon_from_slot: bool,
+    /// The HUD icon is the T6 row's own UI image, kept in its identity
+    /// namespace (see [`WeaponRegistry::hud_icon_namespace_of`]).
+    own_hud_icon: bool,
     pickup_icon: Option<String>,
     pickup_icon_image: Option<String>,
     pickup_icon_authored: bool,
@@ -5122,8 +6000,13 @@ impl Default for WeaponRow {
             hide_tags: Vec::new(),
             attachment_view_models: Vec::new(),
             attachment_world_models: Vec::new(),
+            attachment_view_ads_models: Vec::new(),
+            t6_clip_models: Default::default(),
+            t6_attachments: Vec::new(),
+            t6_attachment_stats: Vec::new(),
             iw5_configuration: None,
             prepared_attachments: Vec::new(),
+            attachment_caption_keys: Vec::new(),
             iw5_attachment_slots: std::array::from_fn(|_| None),
             iw5_reload_overrides: Vec::new(),
             iw5_anim_overrides: Vec::new(),
@@ -5138,6 +6021,7 @@ impl Default for WeaponRow {
             overlay_material_from_slot: false,
             hud_icon: None,
             hud_icon_from_slot: false,
+            own_hud_icon: false,
             pickup_icon: None,
             pickup_icon_image: None,
             pickup_icon_authored: false,
@@ -5208,6 +6092,196 @@ pub struct Iw5PreparationCensus {
     pub refused: Vec<crate::WeaponSelection>,
 }
 
+/// `base` wearing the T6 attachments of `kinds`: each one's models,
+/// hidden gun bones, clips and fire sound, and the clips of the authored
+/// pair when there is one. An attachment the weapon has no unique for
+/// (FMJ, fast ADS) changes nothing it shows. `None` for a weapon without
+/// T6 attachments.
+fn compose_t6_configuration(base: &WeaponRow, kinds: &[u32], name: String) -> Option<WeaponRow> {
+    if base.t6_attachments.is_empty() {
+        return None;
+    }
+    let singles: Vec<&T6Attachment> = kinds
+        .iter()
+        .filter_map(|&kind| {
+            base.t6_attachments
+                .iter()
+                .find(|attachment| attachment.kind == kind && attachment.mask == 0)
+        })
+        .collect();
+    let mask = kinds.iter().fold(0u32, |mask, &kind| {
+        mask | 1u32.checked_shl(kind).unwrap_or(0)
+    });
+    let pair = (kinds.len() > 1)
+        .then(|| {
+            base.t6_attachments
+                .iter()
+                .find(|attachment| attachment.mask == mask)
+        })
+        .flatten();
+    let mut row = base.clone();
+    row.name = name;
+    row.t6_attachments = Vec::new();
+    // The bare weapon's hides (its iron sights under its own scope) give
+    // way to the attachments'.
+    row.hide_tags = Vec::new();
+    for (side, models) in [
+        &mut row.attachment_view_models,
+        &mut row.attachment_world_models,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let clip = base.t6_clip_models[side].as_ref();
+        let is_clip = |model: &String| clip == Some(model);
+        if singles.iter().any(|a| a.disable_base_attachment) {
+            models.retain(|model| is_clip(model));
+        }
+        if singles.iter().any(|a| a.disable_base_clip) {
+            models.retain(|model| !is_clip(model));
+        }
+        for attachment in &singles {
+            models.extend(attachment.models[side].iter().cloned());
+        }
+    }
+    // The overlay is the pair's, else none under a sight looked through,
+    // else the one an attachment changes the scope's to (a variable zoom).
+    if !singles.is_empty() {
+        let overlay = match pair {
+            Some(pair) => pair.overlay.clone(),
+            None if singles.iter().any(|a| a.overlay.is_none()) => None,
+            None => singles
+                .iter()
+                .filter_map(|a| a.overlay.clone())
+                .find(|overlay| base.overlay_material.as_ref() != Some(overlay))
+                .or_else(|| base.overlay_material.clone()),
+        };
+        // A sight looked through aims down it like iron sights; a scope
+        // overlay hides the gun and steadies with a held breath.
+        match &overlay {
+            None => row.facts.overlay_reticle = 0,
+            Some(_) if row.facts.overlay_reticle == 0 => row.facts.overlay_reticle = 1,
+            Some(_) => {}
+        }
+        row.facts.can_hold_breath = overlay.is_some() && row.facts.weap_class != 11;
+        row.overlay_image = overlay.clone();
+        row.overlay_material = overlay;
+    }
+    row.attachment_view_ads_models = singles
+        .iter()
+        .filter_map(|attachment| attachment.view_ads_model.clone())
+        .collect();
+    // An attachment's clip set repeats the weapon's where it changes
+    // nothing; only its own clips replace the weapon's, so one
+    // attachment's set does not undo another's.
+    for attachment in singles.iter().copied().chain(pair) {
+        for (slot, clip) in attachment.xanims.iter().enumerate() {
+            if let Some(clip) = clip
+                && base.sz_xanims[slot].as_ref() != Some(clip)
+            {
+                row.sz_xanims[slot] = Some(clip.clone());
+            }
+        }
+    }
+    for stats in kinds.iter().filter_map(|&kind| {
+        base.t6_attachment_stats
+            .iter()
+            .find(|stats| stats.kind == kind)
+    }) {
+        apply_t6_attachment_stats(&mut row.facts, stats);
+    }
+    // Attachments that change only numbers (FMJ) leave the gun as bare,
+    // its own scope hiding its iron sights.
+    if singles.is_empty()
+        && let Some(bare) = base
+            .t6_attachments
+            .iter()
+            .find(|a| a.kind == 0 && a.mask == 0)
+    {
+        row.hide_tags = bare.hide_tags.clone();
+    }
+    for attachment in &singles {
+        row.hide_tags.extend(attachment.hide_tags.iter().cloned());
+        if let Some(sound) = &attachment.fire_sound {
+            row.sounds.fire = Some(sound.clone());
+        }
+        if let Some(sound) = &attachment.fire_sound_player {
+            row.sounds.fire_player = Some(sound.clone());
+        }
+        if let Some(alt) = &attachment.alt_weapon {
+            row.alternate_weapon = Some(alt.clone());
+        }
+    }
+    Some(row)
+}
+
+/// What [`WeaponBuild::prepare_t6_configurations`] did.
+#[derive(Clone, Debug, Default)]
+pub struct T6PreparationCensus {
+    pub prepared: usize,
+    /// Selections of an attachment the T6 table does not name, or of a
+    /// weapon without T6 attachments.
+    pub refused: usize,
+    /// Alternate weapons composed for configurations.
+    pub alternates: usize,
+}
+
+/// The T6 attachment table's index of each attachment, by name: the
+/// `eAttachment` a weapon's attachment uniques are filed under.
+fn t6_attachment_kinds(
+    tables: &[(crate::AssetNamespace, crate::CapturedStringTable)],
+) -> HashMap<String, u32> {
+    tables
+        .iter()
+        .filter(|(namespace, table)| {
+            *namespace == crate::AssetNamespace::T6
+                && table.name.eq_ignore_ascii_case("mp/attachmentTable.csv")
+        })
+        .flat_map(|(_, table)| {
+            (1..table.rows as i32)
+                .filter(|&row| table.cell(row, 2) == "attachment")
+                .filter_map(|row| {
+                    Some((
+                        table.cell(row, 4).to_ascii_lowercase(),
+                        table.cell(row, 0).parse().ok()?,
+                    ))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The knife and swings a T6 gun without melee clips borrows (see
+/// [`crate::T6_MELEE_WEAPON`]).
+#[derive(Clone, Debug)]
+pub struct T6Melee {
+    /// The first-person knife model.
+    pub knife: String,
+    pub melee: String,
+    pub charge: Option<String>,
+}
+
+/// What [`WeaponBuild::dress_t6_stand_ins`] did.
+#[derive(Clone, Debug, Default)]
+pub struct T6StandInCensus {
+    pub dressed: usize,
+    /// Rows showing their own T6 first-person / world model.
+    pub own_view: usize,
+    pub own_world: usize,
+    /// Rows throwing or planting their own T6 projectile model.
+    pub own_projectile: usize,
+    /// Rows firing with their own T6 sound.
+    pub own_sounds: usize,
+    /// Rows animated with their own T6 clips, held in the T6 hands.
+    pub own_anims: usize,
+    /// Dual-wield rows drawing their left half's gun and clips.
+    pub dual_wield: usize,
+    /// Rows stabbing with the melee weapon's knife and swings.
+    pub borrowed_melee: usize,
+    /// T6 rows whose IW4 stand-in is not in the registry.
+    pub missing: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct WeaponBuild {
     registry: WeaponRegistry,
@@ -5235,6 +6309,171 @@ impl WeaponBuild {
         tables: Vec<(crate::AssetNamespace, crate::CapturedStringTable)>,
     ) {
         self.family_tables = tables;
+    }
+
+    /// A row for every T6 family's attachment and compatible pair of
+    /// attachments: the base row wearing what each attachment's unique
+    /// does to it (see [`compose_t6_configuration`]).
+    pub fn prepare_t6_configurations(&mut self) -> T6PreparationCensus {
+        let families = crate::WeaponFamilies::build(&self.family_tables, &self.registry);
+        let kinds = t6_attachment_kinds(&self.family_tables);
+        let mut census = T6PreparationCensus::default();
+        let mut prepared = Vec::new();
+        for (base_id, selection) in families.candidate_selections(crate::AssetNamespace::T6) {
+            if selection.attachments.is_empty() {
+                continue;
+            }
+            let Some(family) = selection
+                .family
+                .as_ref()
+                .and_then(|key| families.family(key))
+            else {
+                continue;
+            };
+            let attachments = families.normalize(crate::AssetNamespace::T6, &selection.attachments);
+            let name = families.configuration_name(family, &attachments);
+            // Dual wield is a weapon pair of its own (`fiveseven_dw`).
+            if self
+                .registry
+                .by_namespaced
+                .contains_key(&(crate::AssetNamespace::T6, name.clone()))
+            {
+                continue;
+            }
+            let kinds: Option<Vec<u32>> =
+                attachments.iter().map(|a| kinds.get(a).copied()).collect();
+            match kinds.and_then(|kinds| {
+                compose_t6_configuration(&self.registry.rows[base_id as usize], &kinds, name)
+            }) {
+                Some(mut row) => {
+                    row.attachment_caption_keys = attachments
+                        .iter()
+                        .filter_map(|name| family.attachments.iter().find(|a| &a.name == name))
+                        .map(|a| a.caption_key.trim_start_matches('@').to_owned())
+                        .filter(|key| !key.is_empty())
+                        .collect();
+                    row.prepared_attachments = attachments.clone();
+                    prepared.push((
+                        base_id,
+                        crate::WeaponSelection {
+                            attachments,
+                            ..selection
+                        },
+                        row,
+                    ));
+                }
+                None => census.refused += 1,
+            }
+        }
+        census.prepared = prepared.len();
+        for (base_id, selection, row) in prepared {
+            self.registry
+                .configurations
+                .insert(selection, self.registry.rows.len() as u32);
+            let slots = self
+                .combat_slots
+                .get(base_id as usize)
+                .copied()
+                .unwrap_or_else(CombatFxSlots::default);
+            self.combat_slots
+                .resize(self.registry.rows.len(), CombatFxSlots::default());
+            self.combat_slots.push(slots);
+            self.registry.rows.push(row);
+            if let Some((alternate, raise)) =
+                self.compose_t6_alternate(base_id, self.registry.rows.len() - 1)
+            {
+                let parent = &mut self.registry.rows.last_mut().expect("just pushed");
+                parent.alternate_weapon = Some(alternate.name.clone());
+                parent.sz_xanims[weap_anim::ALT_RAISE] = raise;
+                parent.sz_xanims[weap_anim::ALT_DROP] = None;
+                parent.facts.alternate_drop_time_ms = 0;
+                self.combat_slots.push(slots);
+                self.registry.rows.push(alternate);
+                census.alternates += 1;
+            }
+        }
+        self.registry.rebuild_name_maps();
+        self.registry.revision = mint_weapon_revision();
+        census
+    }
+
+    /// The alternate weapon of T6 configuration `parent` (a grenade
+    /// launcher, select fire, a dual optic's second sight) as a row of its
+    /// own: T6 draws it with the configuration's attachments and returns to
+    /// the configuration, and a select fire or dual optic fires from its
+    /// magazine. Also the configuration's raise coming back from it.
+    ///
+    /// Switching plays only the raise of the weapon switched to: the
+    /// alternate's (`gl_to_grenade`) going in, the configuration's
+    /// (`gl_from_grenade`) coming back. Select fire's alternate has no raise
+    /// of its own and plays the attachment's `select_fire_in`, and the
+    /// configuration then plays its `select_fire_out` coming back.
+    fn compose_t6_alternate(
+        &self,
+        base_id: u32,
+        parent: usize,
+    ) -> Option<(WeaponRow, Option<String>)> {
+        let rows = &self.registry.rows;
+        let base = &rows[base_id as usize];
+        let config = &rows[parent];
+        let alt_name = config.alternate_weapon.as_deref()?;
+        let attachment = base.t6_attachments.iter().find(|a| {
+            a.mask == 0
+                && a.alt_weapon
+                    .as_deref()
+                    .is_some_and(|alt| alt.eq_ignore_ascii_case(alt_name))
+        })?;
+        let shared = base
+            .t6_attachment_stats
+            .iter()
+            .find(|stats| stats.kind == attachment.kind)
+            .is_some_and(|stats| stats.shared_ammo);
+        let alt_id = *self
+            .registry
+            .by_namespaced
+            .get(&(crate::AssetNamespace::T6, normalize_weapon_name(alt_name)))?;
+        let mut alt = rows[alt_id as usize].clone();
+        alt.name = format!("{}+{}", alt.name, config.name);
+        alt.alternate_weapon = Some(config.name.clone());
+        alt.attachment_view_models = config.attachment_view_models.clone();
+        alt.attachment_world_models = config.attachment_world_models.clone();
+        alt.attachment_view_ads_models = config.attachment_view_ads_models.clone();
+        alt.hide_tags = config.hide_tags.clone();
+        alt.t6_attachments = Vec::new();
+        // The alternate plays the configuration's clips (a grip's) where its
+        // own are the weapon's.
+        for slot in 0..WEAPON_ANIM_SLOTS {
+            if alt.sz_xanims[slot] == base.sz_xanims[slot] {
+                alt.sz_xanims[slot] = config.sz_xanims[slot].clone();
+            }
+        }
+        let authored = |slot: usize| {
+            attachment.xanims[slot]
+                .clone()
+                .filter(|clip| base.sz_xanims[slot].as_ref() != Some(clip))
+        };
+        let mut config_raise = config.sz_xanims[weap_anim::ALT_RAISE].clone();
+        if alt.sz_xanims[weap_anim::ALT_RAISE].is_none()
+            || alt.sz_xanims[weap_anim::ALT_RAISE] == base.sz_xanims[weap_anim::ALT_RAISE]
+        {
+            alt.sz_xanims[weap_anim::ALT_RAISE] = config_raise.clone();
+            if let Some(out) = authored(weap_anim::ALT_DROP) {
+                config_raise = Some(out);
+            }
+        }
+        alt.sz_xanims[weap_anim::ALT_DROP] = None;
+        alt.facts.alternate_drop_time_ms = 0;
+        if alt.facts.alternate_raise_time_ms <= 0 {
+            alt.facts.alternate_raise_time_ms = config.facts.alternate_raise_time_ms;
+        }
+        if shared {
+            alt.facts.ammo_index = parent as i32;
+            alt.facts.clip_index = parent as i32;
+            alt.facts.clip_size = config.facts.clip_size;
+            alt.facts.start_ammo = config.facts.start_ammo;
+            alt.facts.max_ammo = config.facts.max_ammo;
+        }
+        Some((alt, config_raise))
     }
 
     pub fn prepare_iw5_configurations(&mut self) -> Iw5PreparationCensus {
@@ -5276,7 +6515,7 @@ impl WeaponBuild {
                 .combat_slots
                 .get(base_id as usize)
                 .copied()
-                .unwrap_or_default();
+                .unwrap_or_else(CombatFxSlots::default);
             self.combat_slots
                 .resize(self.registry.rows.len(), CombatFxSlots::default());
             self.combat_slots.push(slots);
@@ -5374,11 +6613,310 @@ impl WeaponBuild {
             stamp_combat_fx(
                 &mut row.combat_fx,
                 self.combat_slots[i],
-                row.namespace,
+                row.namespace.content(),
                 fx,
                 tracers,
             );
         }
+    }
+
+    /// Gives every T6 row the models, animations, sounds, effects and icons
+    /// of its IW4 stand-in. The row keeps its own name, display key and
+    /// gameplay facts; the facts that only make sense with the stand-in's
+    /// animations and viewmodel (third-person anim set, viewmodel offsets,
+    /// sprint and melee timings, impact surface set) come from the stand-in.
+    /// Rows whose stand-in is not in the registry are reported and left bare.
+    ///
+    /// `own_view` and `own_world` say whether a T6 row's own view or world
+    /// model reached the catalogs; such a row keeps that model instead of
+    /// the stand-in's.
+    ///
+    /// `own_sound` says whether a T6 alias reached the sound catalogs; the
+    /// row plays those and the stand-in's for the rest.
+    ///
+    /// A row showing its own first-person model also takes its own
+    /// animations (`own_anim` says which reached the clip catalog) and is
+    /// held in `hands`, the T6 arms they were authored against, with sounds
+    /// and rumbles named on the clips' notetracks. Without the hands or its
+    /// idle clip it keeps the stand-in's animations and arms.
+    pub fn dress_t6_stand_ins(
+        &mut self,
+        own_view: impl Fn(&str) -> bool,
+        own_world: impl Fn(&str) -> bool,
+        own_sound: impl Fn(&str) -> bool,
+        own_anim: impl Fn(&str) -> bool,
+        hands: Option<&str>,
+        melee: Option<&T6Melee>,
+    ) -> T6StandInCensus {
+        let mut census = T6StandInCensus::default();
+        // A dual-wield pair is `X_dw` (the right hand, the row a player
+        // holds) and `X_lh` (the left, whose gun and left-hand clips the
+        // right row takes in `resolve_sz_xanim_edges`).
+        let left_halves: HashSet<String> = self
+            .registry
+            .rows
+            .iter()
+            .filter(|row| row.namespace == crate::AssetNamespace::T6)
+            .filter(|row| xanims_idle(&row.sz_xanims_left).is_some())
+            .map(|row| row.name.clone())
+            .collect();
+        for index in 1..self.registry.rows.len() {
+            let own = &self.registry.rows[index];
+            if own.namespace != crate::AssetNamespace::T6 {
+                continue;
+            }
+            let donor = crate::weapon_t6::stand_in_for(&own.name).and_then(|name| {
+                self.registry
+                    .by_namespaced
+                    .get(&(crate::AssetNamespace::Iw4, normalize_weapon_name(name)))
+                    .copied()
+            });
+            let Some(donor) = donor else {
+                census.missing.push(own.name.clone());
+                continue;
+            };
+            let donor = donor as usize;
+            let mut dressed = self.registry.rows[donor].clone();
+            let own = std::mem::take(&mut self.registry.rows[index]);
+            let stand_in_facts = std::mem::replace(&mut dressed.facts, own.facts);
+            let facts = &mut dressed.facts;
+            facts.player_anim_type = stand_in_facts.player_anim_type;
+            facts.impact_type = stand_in_facts.impact_type;
+            facts.movement = stand_in_facts.movement;
+            facts.ducked_ofs = stand_in_facts.ducked_ofs;
+            facts.prone_ofs = stand_in_facts.prone_ofs;
+            facts.knife_model = stand_in_facts.knife_model;
+            facts.sprint_raise_time_ms = stand_in_facts.sprint_raise_time_ms;
+            facts.sprint_loop_time_ms = stand_in_facts.sprint_loop_time_ms;
+            facts.sprint_drop_time_ms = stand_in_facts.sprint_drop_time_ms;
+            facts.dual_wield_view_model_offset = stand_in_facts.dual_wield_view_model_offset;
+            // The crosshair's geometry is not read from T6 weapons: without
+            // the stand-in's, its quads have no size.
+            facts.i_reticle_side_size = stand_in_facts.i_reticle_side_size;
+            facts.i_reticle_min_ofs = stand_in_facts.i_reticle_min_ofs;
+            facts.ads_aim_pitch = stand_in_facts.ads_aim_pitch;
+            facts.ads_crosshair_in_frac = stand_in_facts.ads_crosshair_in_frac;
+            facts.ads_crosshair_out_frac = stand_in_facts.ads_crosshair_out_frac;
+            if facts.hip_reticle_side_pos == 0.0 {
+                facts.hip_reticle_side_pos = stand_in_facts.hip_reticle_side_pos;
+            }
+            // The IW4 scripts give an offhand's stand-in and pick the throw
+            // button from its class (`semtex_mp` is "other", T6's
+            // `sticky_grenade_mp` "frag").
+            if facts.offhand_class != 0 && stand_in_facts.offhand_class != 0 {
+                facts.offhand_class = stand_in_facts.offhand_class;
+            }
+            // T6 tactical equipment throws with the tactical button whatever
+            // its stand-in is (IW4's tactical insertion is equipment).
+            if crate::weapon_t6::is_tactical_equipment(&own.name) {
+                facts.offhand_class = OFFHAND_CLASS_SMOKE;
+            }
+            // A T6 explosion effect that was captured replaces the
+            // stand-in's (the EMP grenade's flash, the shock charge's burst).
+            if let Some(effect) = own
+                .combat_fx
+                .explosion_hint
+                .as_deref()
+                .filter(|name| crate::T6_EFFECTS.contains(name))
+            {
+                dressed.combat_fx.explosion_hint = Some(effect.to_owned());
+            }
+            // The claymore's laser is the stand-in's, not a bouncing betty's
+            // or a trophy system's.
+            if crate::weapon_t6::sheds_stand_in_trail(&own.name) {
+                dressed.proj_trail = None;
+                dressed.proj_beacon = None;
+            }
+            // T6's sensor grenade stays where it lands, sensing, until it is
+            // destroyed (its fuse only pings again, `iw4l_t6/equipment`).
+            if crate::weapon_t6::stays_planted(&own.name) {
+                facts.timed_detonation = false;
+                if facts.stickiness == 0 {
+                    facts.stickiness = 3;
+                }
+            }
+            // A T6 riot shield bashes with the fire button.
+            facts.fire_melees = facts.weap_type == weapon_iw4::WEAPTYPE_SHIELD;
+            // T6 weapons carry no penetration multiplier: without the
+            // stand-in's, their bullets would stop at the first surface.
+            if facts.penetrate_multiplier == 0.0 {
+                facts.penetrate_multiplier = if stand_in_facts.penetrate_multiplier > 0.0 {
+                    stand_in_facts.penetrate_multiplier
+                } else {
+                    1.0
+                };
+            }
+            if facts.parallel_bounce.is_none() || facts.perpendicular_bounce.is_none() {
+                facts.parallel_bounce = stand_in_facts.parallel_bounce;
+                facts.perpendicular_bounce = stand_in_facts.perpendicular_bounce;
+            }
+            let mut own_gun = false;
+            if let Some(gun) = own.gun_xmodel.filter(|name| own_view(name)) {
+                dressed.gun_xmodel = Some(gun);
+                census.own_view += 1;
+                own_gun = true;
+                // The stand-in's attachments belong to its own gun.
+                dressed.attachment_view_models = own
+                    .attachment_view_models
+                    .iter()
+                    .filter(|name| own_view(name))
+                    .cloned()
+                    .collect();
+            }
+            let own_anims = own_gun
+                && own.sz_xanims[weap_anim::IDLE]
+                    .as_deref()
+                    .is_some_and(&own_anim);
+            let hands = hands.filter(|_| own_anims);
+            if let Some(hands) = hands {
+                dressed.sz_xanims = own.sz_xanims.map(|name| name.filter(|name| own_anim(name)));
+                dressed.sz_xanims_right = [const { None }; WEAPON_ANIM_SLOTS];
+                dressed.sz_xanims_left = [const { None }; WEAPON_ANIM_SLOTS];
+                dressed.hand_xmodel = Some(hands.to_owned());
+                census.own_anims += 1;
+                // T6 rifles have no melee clip and a pistol's is the
+                // tactical knife attachment's: both stab with the melee
+                // weapon's knife, held beside the gun as IW4's knives are.
+                // A gun with a melee of its own holds no knife.
+                dressed.knife_xmodel = None;
+                if dressed.sz_xanims[weap_anim::MELEE]
+                    .as_deref()
+                    .is_none_or(|clip| clip.contains("tactical_melee"))
+                    && let Some(melee) = melee
+                    && own_view(&melee.knife)
+                    && own_anim(&melee.melee)
+                {
+                    let charge = melee.charge.as_ref().filter(|name| own_anim(name));
+                    dressed.sz_xanims[weap_anim::MELEE] = Some(melee.melee.clone());
+                    dressed.sz_xanims[weap_anim::MELEE_CHARGE] =
+                        Some(charge.unwrap_or(&melee.melee).clone());
+                    dressed.knife_xmodel = Some(melee.knife.clone());
+                    census.borrowed_melee += 1;
+                }
+                if let Some(left) = own
+                    .name
+                    .strip_suffix("_dw")
+                    .map(|base| format!("{base}_lh"))
+                    .filter(|left| left_halves.contains(left))
+                {
+                    dressed.dual_wield_weapon = Some(left);
+                    dressed.facts.dual_wield = true;
+                    dressed.facts.no_dual_wield = false;
+                    // Both guns hang off one viewmodel; nothing is shifted
+                    // apart as IW4's two akimbo viewmodels are.
+                    dressed.facts.dual_wield_view_model_offset = 0.0;
+                    census.dual_wield += 1;
+                }
+            }
+            // A left half shows its own gun with its own left-hand clips.
+            if own_gun
+                && own.sz_xanims_left[weap_anim::IDLE]
+                    .as_deref()
+                    .is_some_and(&own_anim)
+            {
+                dressed.sz_xanims_left = own
+                    .sz_xanims_left
+                    .clone()
+                    .map(|name| name.filter(|name| own_anim(name)));
+            }
+            if let Some(world) = own.world_model.filter(|name| own_world(name)) {
+                dressed.world_model = Some(world);
+                census.own_world += 1;
+                dressed.attachment_world_models = own
+                    .attachment_world_models
+                    .iter()
+                    .filter(|name| own_world(name))
+                    .cloned()
+                    .collect();
+            }
+            if let Some(projectile) = own.projectile_model.filter(|name| own_world(name)) {
+                dressed.projectile_model = Some(projectile);
+                census.own_projectile += 1;
+            }
+            let mut sounds = own.sounds;
+            keep_t6_sounds(&mut sounds, &own_sound);
+            if sounds.fire.is_some() || sounds.fire_player.is_some() {
+                census.own_sounds += 1;
+            }
+            merge_sound_aliases(&mut sounds, &dressed.sounds);
+            if hands.is_some() {
+                sounds.notetrack_sound_map.clear();
+                sounds.notetrack_rumble_map.clear();
+                sounds.notetrack_convention = NotetrackConvention::InlinePrefix;
+            } else {
+                sounds.notetrack_sound_map =
+                    std::mem::take(&mut dressed.sounds.notetrack_sound_map);
+                sounds.notetrack_rumble_map =
+                    std::mem::take(&mut dressed.sounds.notetrack_rumble_map);
+                sounds.notetrack_convention = dressed.sounds.notetrack_convention;
+            }
+            dressed.sounds = sounds;
+            // A gun of its own hides what T6's bare weapon hides (a
+            // sniper's iron sights under its scope), not the stand-in's tags.
+            if own_gun {
+                dressed.hide_tags = own
+                    .t6_attachments
+                    .iter()
+                    .find(|attachment| attachment.kind == 0 && attachment.mask == 0)
+                    .map_or_else(Vec::new, |bare| bare.hide_tags.clone());
+            }
+            // The attachments keep what reached the catalogs; their clips
+            // only where the row plays its own.
+            dressed.t6_clip_models = [
+                own.t6_clip_models[0].clone().filter(|name| own_view(name)),
+                own.t6_clip_models[1].clone().filter(|name| own_world(name)),
+            ];
+            dressed.t6_attachments = own
+                .t6_attachments
+                .iter()
+                .cloned()
+                .map(|mut attachment| {
+                    attachment.models[0].retain(|name| own_gun && own_view(name));
+                    attachment.models[1].retain(|name| own_world(name));
+                    attachment.xanims = attachment
+                        .xanims
+                        .map(|name| name.filter(|name| hands.is_some() && own_anim(name)));
+                    for sound in [
+                        &mut attachment.fire_sound,
+                        &mut attachment.fire_sound_player,
+                    ] {
+                        *sound = sound.take().filter(|name| own_sound(name));
+                    }
+                    attachment
+                })
+                .collect();
+            dressed.t6_attachment_stats = own.t6_attachment_stats.clone();
+            // Equipment shows its own HUD icon, not the stand-in's.
+            if dressed.facts.offhand_class != 0
+                && let Some(icon) = own.hud_icon.clone()
+            {
+                dressed.hud_icon_image = Some(icon.clone());
+                dressed.hud_icon = Some(icon);
+                dressed.hud_icon_from_slot = false;
+                dressed.hud_icon_ratio = 0;
+                dressed.pickup_icon_authored = false;
+                dressed.own_hud_icon = true;
+            }
+            // The weapon's own scope overlay, or none: not the stand-in's.
+            dressed.overlay_material = own.overlay_material;
+            dressed.overlay_image = own.overlay_image;
+            dressed.overlay_material_from_slot = false;
+            dressed.name = own.name;
+            dressed.namespace = crate::AssetNamespace::T6;
+            dressed.alternate_weapon = own.alternate_weapon;
+            dressed.alternate_index = 0;
+            dressed.display_name_key = own.display_name_key;
+            self.registry.rows[index] = dressed;
+            if let Some(&slots) = self.combat_slots.get(donor)
+                && let Some(own_slots) = self.combat_slots.get_mut(index)
+            {
+                *own_slots = slots;
+            }
+            census.dressed += 1;
+        }
+        self.registry.rebuild_name_maps();
+        self.registry.revision = mint_weapon_revision();
+        census
     }
 
     pub fn stamp_namespace(&mut self, ns: crate::AssetNamespace) {
@@ -5408,45 +6946,45 @@ impl WeaponBuild {
             }
             if row.overlay_image.is_none()
                 && let Some(name) = row.overlay_material.as_deref()
-                && let Some(index) = materials.material_index_by_ns(row.namespace, name)
+                && let Some(index) = materials.material_index_by_ns(row.namespace.content(), name)
                 && let Some(material) = materials.materials.get(index.order())
             {
                 row.overlay_image = materials.hud_image_name(material).map(str::to_owned);
             }
             row.reticle.center_edge = material_hint_edge(
                 row.reticle.center_material.as_deref(),
-                row.namespace,
+                row.namespace.content(),
                 row.reticle.center_authored,
                 materials,
             );
             row.reticle.side_edge = material_hint_edge(
                 row.reticle.side_material.as_deref(),
-                row.namespace,
+                row.namespace.content(),
                 row.reticle.side_authored,
                 materials,
             );
             row.hud_material_edges = WeaponHudMaterialEdges {
                 overlay: material_hint_edge(
                     row.overlay_material.as_deref(),
-                    row.namespace,
+                    row.namespace.content(),
                     row.overlay_material_from_slot,
                     materials,
                 ),
                 hud_icon: material_hint_edge(
                     row.hud_icon.as_deref(),
-                    row.namespace,
+                    row.namespace.content(),
                     row.hud_icon_from_slot,
                     materials,
                 ),
                 pickup_icon: material_hint_edge(
                     row.pickup_icon.as_deref(),
-                    row.namespace,
+                    row.namespace.content(),
                     row.pickup_icon_authored,
                     materials,
                 ),
                 kill_icon: material_hint_edge(
                     row.kill_icon.as_deref(),
-                    row.namespace,
+                    row.namespace.content(),
                     row.kill_icon_from_slot,
                     materials,
                 ),
@@ -5460,17 +6998,17 @@ impl WeaponBuild {
                 trail: fx.hint_edge(
                     row.proj_trail_from_slot,
                     row.proj_trail.as_deref(),
-                    row.namespace,
+                    row.namespace.content(),
                 ),
                 beacon: fx.hint_edge(
                     row.proj_beacon_from_slot,
                     row.proj_beacon.as_deref(),
-                    row.namespace,
+                    row.namespace.content(),
                 ),
                 ignition: fx.hint_edge(
                     row.proj_ignition_from_slot,
                     row.proj_ignition.as_deref(),
-                    row.namespace,
+                    row.namespace.content(),
                 ),
             };
         }
@@ -5507,16 +7045,42 @@ impl WeaponBuild {
         for row in &mut self.registry.rows {
             let mut edges = [AssetEdge::Absent; WEAPON_ANIM_SLOTS];
             for (edge, hint) in edges.iter_mut().zip(row.sz_xanims.iter()) {
-                *edge = xanims.hint_edge(hint.as_deref(), row.namespace);
+                *edge = xanims.hint_edge(hint.as_deref(), row.namespace.content());
             }
             row.sz_xanim_edges = edges;
             row.sz_xanim_right_edges = std::array::from_fn(|slot| {
-                xanims.hint_edge(row.sz_xanims_right[slot].as_deref(), row.namespace)
+                xanims.hint_edge(
+                    row.sz_xanims_right[slot].as_deref(),
+                    row.namespace.content(),
+                )
             });
             row.sz_xanim_left_edges = std::array::from_fn(|slot| {
-                xanims.hint_edge(row.sz_xanims_left[slot].as_deref(), row.namespace)
+                xanims.hint_edge(row.sz_xanims_left[slot].as_deref(), row.namespace.content())
             });
         }
+    }
+
+    /// T6 times many alternate switches (select fire) at zero, the switch
+    /// lasting its clip; a zero-length raise would end before its clip plays.
+    pub fn time_t6_alternate_raises(&mut self, xanims: &crate::XAnimCatalog) -> usize {
+        let mut timed = 0;
+        for row in &mut self.registry.rows {
+            if row.namespace != crate::AssetNamespace::T6 || row.alternate_weapon.is_none() {
+                continue;
+            }
+            let Some(clip) = row.sz_xanim_edges[weap_anim::ALT_RAISE]
+                .bound_index()
+                .and_then(|index| xanims.clip_at(index))
+            else {
+                continue;
+            };
+            let clip_ms = (clip.duration() * 1000.0).round() as i32;
+            if row.facts.alternate_raise_time_ms < clip_ms / 2 {
+                row.facts.alternate_raise_time_ms = clip_ms;
+                timed += 1;
+            }
+        }
+        timed
     }
 
     pub fn resolve_notetrack_actions(&mut self, xanims: &crate::XAnimCatalog) -> (usize, usize) {
@@ -5580,13 +7144,16 @@ impl WeaponBuild {
 
     pub fn resolve_fpv_mesh_edges(&mut self, fpv: &crate::FpvMeshCatalog) {
         for row in &mut self.registry.rows {
-            row.gun_xmodel_edge = fpv_model_edge(row.gun_xmodel.as_deref(), row.namespace, fpv);
-            row.hand_xmodel_edge = fpv_model_edge(row.hand_xmodel.as_deref(), row.namespace, fpv);
-            row.rocket_model_edge = fpv_model_edge(row.rocket_model.as_deref(), row.namespace, fpv);
+            row.gun_xmodel_edge =
+                fpv_model_edge(row.gun_xmodel.as_deref(), row.namespace.content(), fpv);
+            row.hand_xmodel_edge =
+                fpv_model_edge(row.hand_xmodel.as_deref(), row.namespace.content(), fpv);
+            row.rocket_model_edge =
+                fpv_model_edge(row.rocket_model.as_deref(), row.namespace.content(), fpv);
             row.attachment_view_model_edges = row
                 .attachment_view_models
                 .iter()
-                .map(|name| fpv_model_edge(Some(name), row.namespace, fpv))
+                .map(|name| fpv_model_edge(Some(name), row.namespace.content(), fpv))
                 .collect();
             row.fpv_mount_plan = row.gun_xmodel_edge.bound_index().and_then(|gun| {
                 let attachments: Option<Vec<_>> = row
@@ -5606,10 +7173,23 @@ impl WeaponBuild {
                     crate::FpvMeshIndex::from_order(gun),
                     &attachments?,
                     rocket,
+                    row.namespace == crate::AssetNamespace::T6,
                 );
                 if let Ok(plan) = &mut plan {
+                    // A model the catalog lacks keeps its main one in view.
+                    plan.ads_swaps = row
+                        .attachment_view_ads_models
+                        .iter()
+                        .filter_map(|(model, ads)| {
+                            let at = row.attachment_view_models.iter().position(|m| m == model)?;
+                            let ads = fpv_model_edge(Some(ads), row.namespace.content(), fpv)
+                                .bound_index()?;
+                            Some((at, crate::FpvMeshIndex::from_order(ads)))
+                        })
+                        .collect();
                     if let Some(name) = row.secondary_gun_xmodel.as_deref() {
-                        let model = fpv_model_edge(Some(name), row.namespace, fpv).bound_index();
+                        let model =
+                            fpv_model_edge(Some(name), row.namespace.content(), fpv).bound_index();
                         match model {
                             Some(model) => {
                                 plan.secondary_gun = Some(crate::FpvMeshIndex::from_order(model))
@@ -5634,16 +7214,44 @@ impl WeaponBuild {
         bodies: &asset_model::BodyMeshCatalog,
     ) {
         for row in &mut self.registry.rows {
-            let map_ns = fpv.map_namespace.unwrap_or(row.namespace);
+            let map_ns = fpv.map_namespace.unwrap_or(row.namespace.content());
             let hand_name = row
                 .hand_xmodel_edge
                 .bound_index()
                 .and_then(|index| fpv.get_at(index))
                 .map(|entry| entry.skel.name.as_str());
+            // A T6 row animated with its own clips is held in the T6 arms
+            // those clips were authored against, whatever the map's kit wears.
+            let own_hands = (row.namespace == crate::AssetNamespace::T6)
+                .then_some(hand_name)
+                .flatten()
+                .and_then(|name| {
+                    let index = fpv.index_by_name(row.namespace.content(), name)?;
+                    let skel = &fpv.get_at(index)?.skel;
+                    (skel.pose.is_some() && skel.bone_names.iter().any(|bone| bone == "tag_weapon"))
+                        .then(|| {
+                            (
+                                asset_model::FpvHands::FromWeaponDef {
+                                    namespace: row.namespace.content(),
+                                    name: name.to_owned(),
+                                },
+                                crate::FpvMeshIndex::from_order(index),
+                            )
+                        })
+                });
+            if own_hands.is_some() {
+                row.fpv_hands = [own_hands.clone(), own_hands];
+                continue;
+            }
             row.fpv_hands = std::array::from_fn(|side| {
                 let kit = bodies.kits().kit(side == 1);
-                let mut choice =
-                    asset_model::FpvHands::resolve(fpv, map_ns, kit, hand_name, row.namespace);
+                let mut choice = asset_model::FpvHands::resolve(
+                    fpv,
+                    map_ns,
+                    kit,
+                    hand_name,
+                    row.namespace.content(),
+                );
                 if row.secondary_gun_xmodel.is_some()
                     && fpv.get_hands(&choice).is_some_and(|entry| {
                         !entry
@@ -5653,7 +7261,7 @@ impl WeaponBuild {
                             .any(|bone| bone == "tag_weapon1")
                     })
                 {
-                    choice = asset_model::FpvHands::game_default(row.namespace);
+                    choice = asset_model::FpvHands::game_default(row.namespace.content());
                 }
                 let (ns, name) = choice.key()?;
                 let index = fpv.index_by_name(ns, name)?;
@@ -5717,8 +7325,13 @@ impl WeaponBuild {
                 .chain(&row.sz_xanim_left_edges)
                 .filter_map(|edge| edge.bound_index())
                 .collect();
+            let hide_mode = if row.namespace == crate::AssetNamespace::T6 {
+                crate::FpvHideMode::Bones
+            } else {
+                crate::FpvHideMode::Surfaces
+            };
             let knife_model = row.knife_xmodel.as_deref().map(|name| {
-                fpv_model_edge(Some(name), row.namespace, fpv)
+                fpv_model_edge(Some(name), row.namespace.content(), fpv)
                     .bound_index()
                     .map(crate::FpvMeshIndex::from_order)
                     .ok_or_else(|| format!("knife model `{name}` missing from FPV catalog"))
@@ -5726,39 +7339,43 @@ impl WeaponBuild {
             let mut assemble = |hands: crate::FpvMeshIndex,
                                 mounts: &asset_model::FpvMountPlan,
                                 rocket: bool,
-                                knife: Option<crate::FpvMeshIndex>| {
+                                knife: Option<crate::FpvMeshIndex>,
+                                ads: bool| {
                 let key = crate::FpvAssemblyKey {
                     hands,
                     gun: mounts.gun,
                     secondary_gun: mounts.secondary_gun,
-                    attachments: mounts.attachments.iter().map(|mount| mount.model).collect(),
+                    attachments: mounts.attachment_models(ads).collect(),
                     rocket: rocket
                         .then(|| mounts.rocket.as_ref().map(|mount| mount.model))
                         .flatten(),
                     knife,
                     hide_tags: hide_tags.clone(),
+                    hide_mode,
                 };
                 shared
                     .entry(key)
                     .or_insert_with(|| {
                         census.built += 1;
-                        crate::FpvAssembly::build(fpv, hands, mounts, rocket, knife, &hide_tags)
-                            .map(Arc::new)
-                            .map_err(|error| error.to_string())
+                        crate::FpvAssembly::build(
+                            fpv, hands, mounts, rocket, knife, ads, &hide_tags, hide_mode,
+                        )
+                        .map(Arc::new)
+                        .map_err(|error| error.to_string())
                     })
                     .clone()
             };
             let sides: [Option<Result<crate::FpvSideAssemblies, String>>; 2] =
                 std::array::from_fn(|side| {
                     let (_, hands) = row.fpv_hands[side].as_ref()?;
-                    let bare = match assemble(*hands, mounts, false, None) {
+                    let bare = match assemble(*hands, mounts, false, None, false) {
                         Ok(bare) => bare,
                         Err(error) => return Some(Err(error)),
                     };
                     let rocket = match mounts
                         .rocket
                         .is_some()
-                        .then(|| assemble(*hands, mounts, true, None))
+                        .then(|| assemble(*hands, mounts, true, None, false))
                     {
                         None => None,
                         Some(Ok(rocket)) => Some(rocket),
@@ -5767,21 +7384,32 @@ impl WeaponBuild {
                     let melee = match &knife_model {
                         None => None,
                         Some(Err(error)) => return Some(Err(error.clone())),
-                        Some(Ok(knife)) => match assemble(*hands, mounts, false, Some(*knife)) {
-                            Ok(melee) => Some(melee),
-                            Err(error) => return Some(Err(error)),
-                        },
+                        Some(Ok(knife)) => {
+                            match assemble(*hands, mounts, false, Some(*knife), false) {
+                                Ok(melee) => Some(melee),
+                                Err(error) => return Some(Err(error)),
+                            }
+                        }
+                    };
+                    let ads = match (!mounts.ads_swaps.is_empty())
+                        .then(|| assemble(*hands, mounts, false, None, true))
+                    {
+                        None => None,
+                        Some(Ok(ads)) => Some(ads),
+                        Some(Err(error)) => return Some(Err(error)),
                     };
                     Some(Ok(crate::FpvSideAssemblies {
                         bare,
                         rocket,
                         melee,
+                        ads,
                     }))
                 });
             for side in sides.iter().flatten().flatten() {
                 for assembly in std::iter::once(&side.bare)
                     .chain(&side.rocket)
                     .chain(&side.melee)
+                    .chain(&side.ads)
                 {
                     for &clip_index in &clips {
                         let Some(clip) = xanims.clip_at(clip_index) else {
@@ -5814,20 +7442,31 @@ impl WeaponBuild {
         self.registry.world_catalog_identity = catalog.identity();
         for row in &mut self.registry.rows {
             row.world_model_edge =
-                world_model_edge(row.world_model.as_deref(), row.namespace, catalog);
+                world_model_edge(row.world_model.as_deref(), row.namespace.content(), catalog);
             row.attachment_world_model_edges = row
                 .attachment_world_models
                 .iter()
-                .map(|name| world_model_edge(Some(name), row.namespace, catalog))
+                .map(|name| world_model_edge(Some(name), row.namespace.content(), catalog))
                 .collect();
             let gun = row
                 .world_model_edge
                 .bound_index()
                 .and_then(|index| catalog.get_at(index));
+            // T6 places its attached models on the gun's root bone.
+            let on_gun_root = row.namespace == crate::AssetNamespace::T6;
             row.attachment_world_mounts = row
                 .attachment_world_model_edges
                 .iter()
                 .map(|edge| {
+                    if on_gun_root {
+                        // The gun bone a T6 attachment names, else the root.
+                        let attachment = catalog.get_at(edge.bound_index()?)?;
+                        let bones = &gun?.skel.bone_names;
+                        let tag = attachment.skel.mount_tag.as_deref().and_then(|tag| {
+                            bones.iter().find(|bone| bone.eq_ignore_ascii_case(tag))
+                        });
+                        return tag.or(bones.first()).cloned();
+                    }
                     let root = catalog
                         .get_at(edge.bound_index()?)?
                         .skel
@@ -5845,7 +7484,7 @@ impl WeaponBuild {
 
     pub fn apply_stats_item_groups(&mut self, table: &crate::CapturedStringTable) {
         for id in 1..=self.len() as u32 {
-            let Some(ns) = self.namespace_of(id) else {
+            let Some(ns) = self.identity_namespace_of(id) else {
                 continue;
             };
             let name = self.name_of(id).to_owned();
@@ -5879,7 +7518,7 @@ impl WeaponBuild {
         for row in &mut self.registry.rows {
             row.projectile_model_edge = match row.projectile_model.as_deref() {
                 None | Some("") => AssetEdge::Absent,
-                Some(name) => match catalog.index_by_name(row.namespace, name) {
+                Some(name) => match catalog.index_by_name(row.namespace.content(), name) {
                     Some(order) => AssetEdge::bind_order(order, zone),
                     None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
                 },
@@ -6153,10 +7792,15 @@ impl WeaponBuild {
                 sz_xanims_right: entry.sz_xanims_right,
                 sz_xanims_left: entry.sz_xanims_left,
                 hide_tags: entry.hide_tags,
-                attachment_view_models: Vec::new(),
-                attachment_world_models: Vec::new(),
+                attachment_view_models: entry.attached_models[0].clone(),
+                attachment_world_models: entry.attached_models[1].clone(),
+                attachment_view_ads_models: Vec::new(),
+                t6_clip_models: entry.t6_clip_models,
+                t6_attachments: entry.t6_attachments,
+                t6_attachment_stats: entry.t6_attachment_stats,
                 iw5_configuration: None,
                 prepared_attachments: Vec::new(),
+                attachment_caption_keys: Vec::new(),
                 iw5_attachment_slots: entry.iw5_attachment_slots,
                 iw5_reload_overrides: entry.iw5_reload_overrides,
                 iw5_anim_overrides: entry.iw5_anim_overrides,
@@ -6170,6 +7814,7 @@ impl WeaponBuild {
                 overlay_material: entry.overlay_material,
                 overlay_image: entry.overlay_image,
                 hud_icon_from_slot: entry.hud_icon_slot.is_some(),
+                own_hud_icon: false,
                 hud_icon: entry.hud_icon,
                 hud_icon_image: entry.hud_icon_image,
                 pickup_icon: entry.pickup_icon,
@@ -7158,11 +8803,25 @@ impl WeaponRegistry {
         }
     }
 
-    pub fn namespace_of(&self, index: u32) -> Option<crate::AssetNamespace> {
+    /// The namespace the weapon is named in: its key, its stats rows.
+    pub fn identity_namespace_of(&self, index: u32) -> Option<crate::AssetNamespace> {
         if index == 0 {
             return None;
         }
         self.rows.get(index as usize).map(|row| row.namespace)
+    }
+
+    /// The namespace the weapon's models, sounds, effects and icons resolve
+    /// in — its content namespace, which for a T6 weapon is its IW4
+    /// stand-in's. The namespace it is named in is
+    /// [`Self::identity_namespace_of`].
+    pub fn namespace_of(&self, index: u32) -> Option<crate::AssetNamespace> {
+        if index == 0 {
+            return None;
+        }
+        self.rows
+            .get(index as usize)
+            .map(|row| row.namespace.content())
     }
 
     pub fn revision(&self) -> u64 {
@@ -7179,7 +8838,7 @@ impl WeaponRegistry {
     }
 
     pub fn key_of(&self, index: u32) -> Option<crate::AssetKey> {
-        let ns = self.namespace_of(index)?;
+        let ns = self.identity_namespace_of(index)?;
         let name = self.name_of(index);
         if name.is_empty() {
             return None;
@@ -7271,6 +8930,13 @@ impl WeaponRegistry {
 
     pub fn describe_configuration(&self, id: u32) -> Option<&crate::WeaponSelection> {
         self.families.describe(id)
+    }
+
+    /// See [`WeaponRow::attachment_caption_keys`].
+    pub fn attachment_caption_keys_of(&self, index: u32) -> &[String] {
+        self.rows
+            .get(index as usize)
+            .map_or(&[], |row| row.attachment_caption_keys.as_slice())
     }
 
     pub fn prepared_attachments_of(&self, id: u32) -> &[String] {
@@ -7521,6 +9187,17 @@ impl WeaponRegistry {
         }
     }
 
+    /// Where [`Self::hud_icon_image_of`] resolves: a T6 row's own icon in
+    /// T6, any other in the row's content namespace.
+    pub fn hud_icon_namespace_of(&self, index: u32) -> Option<crate::AssetNamespace> {
+        let row = self.rows.get(index as usize).filter(|_| index != 0)?;
+        Some(if row.own_hud_icon {
+            row.namespace
+        } else {
+            row.namespace.content()
+        })
+    }
+
     pub fn hud_icon_image_of(&self, index: u32) -> Option<&str> {
         self.rows
             .get(index as usize)
@@ -7552,7 +9229,7 @@ impl WeaponRegistry {
         let row = self.rows.get(index as usize)?;
         row.projectile_fx.trail.is_bound().then_some(())?;
         Some(crate::FxName::new(
-            row.namespace,
+            row.namespace.content(),
             row.proj_trail.as_deref()?,
         ))
     }
@@ -7561,7 +9238,7 @@ impl WeaponRegistry {
         let row = self.rows.get(index as usize)?;
         row.projectile_fx.beacon.is_bound().then_some(())?;
         Some(crate::FxName::new(
-            row.namespace,
+            row.namespace.content(),
             row.proj_beacon.as_deref()?,
         ))
     }
@@ -7570,7 +9247,7 @@ impl WeaponRegistry {
         let row = self.rows.get(index as usize)?;
         row.projectile_fx.ignition.is_bound().then_some(())?;
         Some(crate::FxName::new(
-            row.namespace,
+            row.namespace.content(),
             row.proj_ignition.as_deref()?,
         ))
     }
@@ -8001,7 +9678,7 @@ impl crate::weapon_families::FamilyContent for WeaponRegistry {
 
     fn names_in(&self, namespace: crate::AssetNamespace) -> Vec<(u32, String)> {
         (1..=self.len() as u32)
-            .filter(|&id| self.namespace_of(id) == Some(namespace))
+            .filter(|&id| self.identity_namespace_of(id) == Some(namespace))
             .filter(|&id| self.iw5_configuration_of(id).is_none())
             .map(|id| (id, normalize_weapon_name(self.name_of(id))))
             .collect()

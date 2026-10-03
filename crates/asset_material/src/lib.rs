@@ -4,6 +4,7 @@ pub mod material_draw;
 pub mod material_images;
 pub mod t5_code_remap;
 pub mod t5_tech_map;
+pub mod t6_techset;
 pub mod vertex_layout;
 pub use vertex_layout::*;
 

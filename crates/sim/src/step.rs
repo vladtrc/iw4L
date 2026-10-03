@@ -1320,7 +1320,7 @@ fn apply_configuration_change(
         }
         _ => None,
     };
-    let hand = weapon_iw4::spawn_weapon_hand(to, &new);
+    let hand = weapon_iw4::spawn_weapon_hand(to, &new, false);
     next.weaponstate_primary = hand.weaponstate;
     next.weapon_time = hand.weapon_time;
     next.weapon_delay = hand.weapon_delay;
@@ -2216,7 +2216,8 @@ pub(crate) fn arm_held_weapon(
     let last_hand = weapon_iw4::num_hands_for_held(&ps.weapons, &ps.weapon_data, weapon);
     ps.last_weapon_hand = last_hand;
     let (clip0, clip1, stock) = weapon_iw4::spawn_clip_stock(facts, last_hand);
-    let hand = weapon_iw4::spawn_weapon_hand(weapon, facts);
+    let hand = weapon_iw4::spawn_weapon_hand(weapon, facts, true);
+    crate::combat::raise_given_weapon(ps, weapon, &hand);
     ps.weaponstate_primary = hand.weaponstate;
     ps.weapon_time = hand.weapon_time;
     ps.weapon_delay = hand.weapon_delay;

@@ -189,7 +189,7 @@ impl MenuHost<'_> {
         if column == 4 && table.eq_ignore_ascii_case("mp/statsTable.csv") {
             return Some(match result {
                 2 => family.item_group.clone(),
-                3 => family.display_key.trim_start_matches('@').to_owned(),
+                3 => family.name_key(),
                 4 => key.to_owned(),
                 6 => image_key(&family.image),
                 _ => String::new(),

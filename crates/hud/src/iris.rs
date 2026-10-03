@@ -236,9 +236,13 @@ pub(crate) fn update_iris(
         return;
     };
 
+    // A T6 weapon's overlay is its own UI image, kept in T6; its other
+    // content resolves in its stand-in's namespace.
     let weapon_ns = weapons
         .0
-        .namespace_of(viewmodel_index)
+        .identity_namespace_of(viewmodel_index)
+        .filter(|ns| *ns == asset_core::AssetNamespace::T6)
+        .or_else(|| weapons.0.namespace_of(viewmodel_index))
         .unwrap_or(crate::images::HUD_CHROME_NAMESPACE);
     let Some(handle) = hud_images.get(weapon_ns, image_name, &mut images) else {
         gaps.raise(GapCause::AdsOverlayImageMissing {

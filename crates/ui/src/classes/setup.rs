@@ -134,7 +134,7 @@ impl ClassLoadoutCatalog {
                 key.clone(),
                 asset_game::CacWeaponPreview {
                     reference: family.key.base.clone(),
-                    name_key: format!("@{}", family.display_key.trim_start_matches('@')),
+                    name_key: format!("@{}", family.name_key()),
                     image: family.image.clone(),
                     ..Default::default()
                 },

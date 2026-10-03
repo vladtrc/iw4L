@@ -922,6 +922,8 @@ pub struct WeaponGeometry {
     pub alternate_weapon_name: Option<Ptr>,
     pub alternate_raise_time_ms: i32,
     pub alternate_drop_time_ms: i32,
+    /// `iFirstRaiseTime`: a weapon's first raise after it is given.
+    pub first_raise_time_ms: i32,
 
     pub weap_def: Option<Ptr>,
 

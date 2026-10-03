@@ -22,7 +22,7 @@ mod ui;
 pub(crate) use capture::route_capture_commands;
 pub(crate) use echo::ConsoleEcho;
 pub(crate) use hitvol::route_hitvol_commands;
-pub(crate) use process::exit_process;
+pub(crate) use process::{exit_process, request_exit};
 pub(crate) use replay::route_replay_commands;
 pub(crate) use session::route_session_commands;
 pub(crate) use state_dump::route_state_dump_commands;

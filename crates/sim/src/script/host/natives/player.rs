@@ -1339,9 +1339,11 @@ fn register_inventory(registry: &mut NativeRegistry) {
     );
     registry.register(Method, "giveweapon", |world, receiver, args| {
         let id = client_of(world, receiver)?;
+        let named = weapon_arg(world, args, 0)?;
         let weapon = player_weapon(world, id, args, 0)?;
         let akimbo = optional(args, 2, int)?.unwrap_or(0) != 0;
         script_player::give_weapon(&mut FrameWorld::from_world(world), id, weapon, akimbo)?;
+        super::super::players::give_carried_insertion(world, id.0, receiver, named)?;
         Ok(Value::Undefined)
     });
     registry.register(Method, "takeweapon", |world, receiver, args| {

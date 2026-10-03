@@ -991,6 +991,7 @@ fn register_appearance(registry: &mut NativeRegistry) {
         let model = string(args, 0)?;
         let id = entity_id(world, receiver)?;
         runtime(world).set_object_field(id, "model", Value::string(&model));
+        crate::script::host::players::dress_insertion_glow(world, id, &model);
         Ok(Value::Undefined)
     });
     registry.register(
@@ -1868,13 +1869,23 @@ fn register_level(registry: &mut NativeRegistry) {
         repeat_ms: i32,
         cull_distance: f32,
     ) -> Result<Value, String> {
-        let name = name(world, int(args, 0)?)?;
-        let origin = vector(args, origin_at)?;
-        let forward = optional(args, orient_at, vector)?.unwrap_or([0.0, 0.0, 1.0]);
+        let mut name = name(world, int(args, 0)?)?;
+        let mut origin = vector(args, origin_at)?;
+        let mut forward = optional(args, orient_at, vector)?.unwrap_or([0.0, 0.0, 1.0]);
+        let mut up = optional(args, orient_at + 1, vector)?;
+        // A foreign tactical insertion shows its own light, straight up.
+        if let Some((light, at)) =
+            crate::script::host::players::insertion_light(world, &name, origin)
+        {
+            name = light.to_owned();
+            origin = at;
+            forward = [0.0, 0.0, 1.0];
+            up = Some([1.0, 0.0, 0.0]);
+        }
         let forward = glam::Vec3::from_array(forward)
             .try_normalize()
             .ok_or("effect forward vector is zero")?;
-        let up = match optional(args, orient_at + 1, vector)? {
+        let up = match up {
             Some(up) => {
                 let up = glam::Vec3::from_array(up);
                 (up - forward * up.dot(forward))

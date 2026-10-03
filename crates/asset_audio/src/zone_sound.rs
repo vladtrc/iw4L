@@ -12,6 +12,9 @@ enum Capture {
     Iw4(SoundCatalog),
     Iw5(Iw5SoundCapture),
     T5(T5SoundCapture),
+    /// T6 aliases are read from the walk's `SndBank`s and the install's
+    /// sound asset banks by the walker, which hands the catalog over.
+    T6(Option<SoundCatalog>),
 }
 
 pub struct ZoneSoundCapture {
@@ -33,6 +36,7 @@ impl ZoneSoundCapture {
             }
             ZoneGame::Iw5 => Capture::Iw5(Iw5SoundCapture::for_zone(path)),
             ZoneGame::T5 => Capture::T5(T5SoundCapture::for_zone(path)),
+            ZoneGame::T6 => Capture::T6(None),
         };
         Self {
             path: path.to_path_buf(),
@@ -76,6 +80,11 @@ impl ZoneSoundCapture {
                 self.note_partial(&walk);
                 Ok(capture.finish())
             }
+            Capture::T6(Some(catalog)) => {
+                self.note_partial(&walk);
+                Ok(catalog)
+            }
+            Capture::T6(None) => Err("no T6 aliases were read".to_owned()),
         }
     }
 
@@ -135,6 +144,13 @@ impl ZoneSoundCapture {
         }
     }
 
+    /// Hands a T6 capture the catalog its walker read.
+    pub fn set_t6(&mut self, catalog: SoundCatalog) {
+        if let Capture::T6(slot) = &mut self.capture {
+            *slot = Some(catalog);
+        }
+    }
+
     pub fn t5(&mut self) -> Option<&mut T5SoundCapture> {
         match (&mut self.capture, &self.stopped) {
             (Capture::T5(capture), None) => Some(capture),
@@ -163,6 +179,7 @@ fn is_sound_source(path: &Path, game: ZoneGame) -> bool {
         ],
         ZoneGame::Iw5 => &["code_post_gfx_mp", "common_mp", "localized_common_mp"],
         ZoneGame::T5 => &["code_post_gfx_mp", "common_mp", "localized_common_mp"],
+        ZoneGame::T6 => &["common_mp"],
     };
     names.iter().any(|name| stem.eq_ignore_ascii_case(name))
 }
@@ -265,6 +282,18 @@ pub fn ensure_zone_sound(path: &Path) -> (Stored, ZoneSoundOrigin) {
             }
             None => break,
         }
+    }
+    // T6 aliases come only from a walk's capture (see `set_t6`): a request
+    // ahead of that walk is answered without claiming the zone, so the walk
+    // can still deposit what it reads.
+    if crate::zone_game_for_path(path) == Some(ZoneGame::T6) {
+        return (
+            Err(format!(
+                "{}: T6 sounds come from the common walk, which has not run",
+                path.display()
+            )),
+            ZoneSoundOrigin::AudioOnly,
+        );
     }
     slots.insert(key.clone(), Slot::Capturing);
     drop(slots);
@@ -603,6 +632,7 @@ impl ZoneSoundCapture {
             Capture::Iw4(catalog) => catalog,
             Capture::Iw5(capture) => capture.catalog_mut(),
             Capture::T5(capture) => capture.catalog_mut(),
+            Capture::T6(_) => return,
         };
         catalog.ingest_rawfile(name, data, zlib_compressed);
     }

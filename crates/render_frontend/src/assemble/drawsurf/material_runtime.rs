@@ -54,6 +54,9 @@ impl RuntimeProgramPort {
             .ok_or(ProgramRegistryError::PassShaderPairMissing)?;
         let vertex_source = exact_stage_source(catalog, pair, RuntimeShaderStage::Vertex)?;
         let pixel_source = exact_stage_source(catalog, pair, RuntimeShaderStage::Pixel)?;
+        if render_material::is_dxbc_program(&vertex_source.program) {
+            return Self::compile_dxbc(catalog, pass, vertex_type, vertex_source, pixel_source);
+        }
         let vertex =
             super::sm3::decode_sm3_program(&vertex_source.program, RuntimeShaderStage::Vertex)
                 .map_err(|cause| ProgramRegistryError::Decode {
@@ -92,6 +95,69 @@ impl RuntimeProgramPort {
             &vertex_source.name,
             &pixel_source.name,
         )
+    }
+
+    /// A T6 pass: DXBC programs lowered by `dxbc_sm5` against the same
+    /// arena and texture tables as SM3 passes.
+    fn compile_dxbc(
+        catalog: &RuntimeMaterialCatalog,
+        pass: &RuntimePass,
+        vertex_type: u8,
+        vertex_source: &RuntimeShaderProgram,
+        pixel_source: &RuntimeShaderProgram,
+    ) -> Result<Self, ProgramRegistryError> {
+        let pair = pass
+            .shader_pair
+            .ok_or(ProgramRegistryError::PassShaderPairMissing)?;
+        let parse = |source: &RuntimeShaderProgram| {
+            dxbc_sm5::wgsl::Shader::parse(&source.program)
+                .map_err(|_| ProgramRegistryError::Abi(super::sm3_abi::PassAbiRefusal::DxbcProgram))
+        };
+        let (vertex, pixel) = (parse(vertex_source)?, parse(pixel_source)?);
+        let decl = catalog.vertex_decl(pair.vertex_decl_slot).ok_or(
+            ProgramRegistryError::MissingVertexDeclaration {
+                pointer_identity: pair.vertex_decl_slot,
+            },
+        )?;
+        let (abi, mut lowering) = render_material::build_dxbc_pass_abi(
+            &vertex,
+            &pixel,
+            decl,
+            vertex_type,
+            &pass.arguments,
+            pass.t5_custom_sampler_flags | pass.custom_sampler_flags,
+        )
+        .map_err(ProgramRegistryError::Abi)?;
+        lowering.alpha_tests = super::sm3_wgsl::dxbc_alpha_tests();
+        let source = dxbc_sm5::wgsl::lower_pass(&lowering, &vertex, &pixel).map_err(|error| {
+            ProgramRegistryError::Wgsl(super::sm3_wgsl::Sm3WgslError::WgslParse(error.to_string()))
+        })?;
+        super::sm3_wgsl::validate_wgsl(&source).map_err(ProgramRegistryError::Wgsl)?;
+        let module = super::sm3_wgsl::ValidatedPassWgsl {
+            source,
+            attribute_count: abi.attributes.len(),
+            varying_count: 0,
+            vertex_constant_len: abi.vertex_constants.len(),
+            pixel_constant_len: abi.pixel_constants.len(),
+            sampler_count: abi.samplers.len(),
+        };
+        diag::wgsl_dump::dump_pass_wgsl(&vertex_source.name, &pixel_source.name, &module.source);
+        let wgpu_layout = super::gpu_contract::derive_wgpu_pass_layout(&abi, &module)
+            .map_err(ProgramRegistryError::WgpuLayout)?;
+        let id = PortId::from_pass(pass, vertex_type)
+            .ok_or(ProgramRegistryError::PassShaderPairMissing)?;
+        Ok(Self {
+            id,
+            pair,
+            custom_sampler_flags: pass.custom_sampler_flags,
+            t5_custom_sampler_flags: pass.t5_custom_sampler_flags,
+            arguments: pass.arguments.clone(),
+            color_space: pass.color_space,
+            hardware_shadow_compare: pass.hardware_shadow_compare,
+            abi,
+            module: std::sync::Arc::new(module),
+            wgpu_layout,
+        })
     }
 
     fn finish_compile(

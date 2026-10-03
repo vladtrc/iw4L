@@ -237,6 +237,10 @@ pub(super) async fn walk_prepared_match(
     };
     let mut scripts = iw4_scripts;
     scripts.overlay(map_scripts);
+    scripts.insert_source(
+        "iw4l_t6/equipment",
+        crate::map_scripts::T6_EQUIPMENT.to_owned(),
+    );
     report.push(format!(
         "GSC source assets: {} (map overrides common_mp)",
         scripts.len()
@@ -281,6 +285,10 @@ pub(super) async fn walk_prepared_match(
             xanims.name_at(*index).unwrap_or("<unknown>")
         ));
     }
+    let t6_alt_raises = weapons.time_t6_alternate_raises(&xanims);
+    report.push(format!(
+        "T6 alternate raises timed by their clips: {t6_alt_raises}"
+    ));
     let (note_actions, inline_note_actions) = weapons.resolve_notetrack_actions(&xanims);
     report.push(format!(
         "weapon notetrack actions linked: {note_actions} ({inline_note_actions} T5 inline)"

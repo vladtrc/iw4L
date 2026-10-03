@@ -21,10 +21,27 @@ pub(crate) fn localized_weapon_name(
         gaps.raise(GapCause::NoStringTable);
         return None;
     };
-    match strings.0.text(key) {
+    let text = match weapons.0.identity_namespace_of(viewmodel_index) {
+        Some(namespace) => strings.0.text_in(namespace, key),
+        None => strings.0.text(key),
+    };
+    match text {
         Some(text) => {
             gaps.clear(HudGap::LocalizedText);
-            Some(text.to_owned())
+            // A T6 configuration is named with its attachments, as IW4's
+            // own rows are (`M4A1 Red Dot Sight`).
+            let mut name = text.to_owned();
+            for key in weapons.0.attachment_caption_keys_of(viewmodel_index) {
+                let caption = match weapons.0.identity_namespace_of(viewmodel_index) {
+                    Some(namespace) => strings.0.text_in(namespace, key),
+                    None => strings.0.text(key),
+                };
+                if let Some(caption) = caption {
+                    name.push(' ');
+                    name.push_str(caption);
+                }
+            }
+            Some(name)
         }
         None => {
             gaps.raise(GapCause::LocalizedRowMissing {

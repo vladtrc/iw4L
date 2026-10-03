@@ -42,7 +42,7 @@ pub(crate) fn player_damage(world: &mut World, tick: crate::Tick, hit: &crate::s
         Some(attacker) if attacker != Value::Undefined => attacker,
         _ => world_entity(world),
     };
-    let weapon = script_weapon(world, hit.attacker.map_or(u32::MAX, |a| a.0), hit.weapon);
+    let weapon = event_weapon(world, hit.attacker.map_or(u32::MAX, |a| a.0), hit.weapon);
     let weapon = crate::script_player::weapon_name(&FrameWorld::from_world(world), weapon);
     let hitloc = weapon_iw4::HITLOC_NAMES
         .get(usize::from(hit.hitloc))
@@ -414,6 +414,267 @@ fn bridge_class_weapon(world: &mut World, client: u32, slot: usize, weapon: u32)
     bridge.push((stand_in, weapon));
 }
 
+/// A foreign offhand is handed to the scripts by name: its stand-in's when
+/// it has one (the scripts refuse a lethal they do not know), else its own,
+/// which can belong to the script realm's weapon (`concussion_grenade_mp`).
+/// `None` when that name is the offhand's own.
+fn offhand_stand_in(world: &mut World, weapon: u32) -> Option<u32> {
+    let realm = world
+        .resource::<Runtime>()
+        .program
+        .as_ref()
+        .map_or(crate::script::Realm::Iw4, |p| p.rules());
+    let frame = FrameWorld::from_world(world);
+    let stand_in = frame
+        .weapon_setup(weapon)
+        .filter(|setup| setup.realm != realm)
+        .and_then(|setup| setup.stand_in.as_deref());
+    frame
+        .weapon_index_by_script_name(stand_in.unwrap_or(frame.weapon_script_name(weapon)))
+        .filter(|&named| weapon != 0 && named != weapon)
+}
+
+/// The give of an offhand's stand-in is bridged back to the chosen one.
+fn bridge_offhand(world: &mut World, client: u32, weapon: u32) {
+    let Some(stand_in) = offhand_stand_in(world, weapon) else {
+        return;
+    };
+    let mut runtime = world.resource_mut::<Runtime>();
+    let bridge = runtime.weapon_bridge.entry(client).or_default();
+    bridge.retain(|(from, _)| *from != stand_in);
+    bridge.push((stand_in, weapon));
+}
+
+/// T6 equipment IW4 has nothing like: the stand-in only carries it through
+/// the class script, and its throws and hits keep its own name for the T6
+/// equipment script (`iw4l_t6/equipment`) to run it as T6 does.
+const OWN_T6_EQUIPMENT: [&str; 5] = [
+    "bouncingbetty_mp",
+    "trophy_system_mp",
+    "sensor_grenade_mp",
+    "emp_grenade_mp",
+    "proximity_grenade_mp",
+];
+
+/// The weapon a throw or a hit is reported to the scripts as: the
+/// stand-in, or T6 equipment of its own under its own name.
+pub(crate) fn event_weapon(world: &mut World, client: u32, weapon: u32) -> u32 {
+    let script = script_weapon(world, client, weapon);
+    let frame = FrameWorld::from_world(world);
+    if script != weapon && OWN_T6_EQUIPMENT.contains(&frame.weapon_script_name(weapon)) {
+        weapon
+    } else {
+        script
+    }
+}
+
+/// IW4's tactical insertion, which its class script gives only as
+/// equipment (the `specialty_tacticalinsertion` perk).
+const INSERTION: &str = "flare_mp";
+
+/// The special grenade a tactical insertion in the tactical slot is handed
+/// to the class script as: one it accepts, given with the smoke class.
+const INSERTION_CARRIER: &str = "smoke_grenade_mp";
+
+const GIVE_PERK: &str = "maps/mp/perks/_perks::giveperk";
+
+/// The model IW4's scripts plant a tactical insertion's glow stick with.
+const INSERTION_GLOW_MODEL: &str = "mil_emergency_flare_mp";
+
+/// How far from its thrower a tactical insertion's glow stick is planted:
+/// at the thrower's last spot on the ground.
+const INSERTION_PLANT_REACH: f32 = 256.0;
+
+/// The flare glows IW4's scripts light on a tactical insertion (team, then
+/// enemy colour), and the T6 lights a foreign one shows in their place.
+const INSERTION_LIGHTS: [(&str, &str); 2] = [
+    (
+        "misc/flare_ambient_green",
+        "misc/fx_equip_tac_insert_light_grn",
+    ),
+    ("misc/flare_ambient", "misc/fx_equip_tac_insert_light_red"),
+];
+
+/// How far from its glow stick the scripts light a flare: at the flare
+/// model's `tag_fire_fx`.
+const INSERTION_LIGHT_REACH: f32 = 16.0;
+
+/// The T6 light a flare glow lit on a foreign tactical insertion shows as,
+/// and where: on the insertion itself.
+pub(crate) fn insertion_light(
+    world: &World,
+    effect: &str,
+    origin: [f32; 3],
+) -> Option<(&'static str, [f32; 3])> {
+    let (_, light) = INSERTION_LIGHTS
+        .iter()
+        .find(|(flare, _)| *flare == effect)?;
+    world
+        .resource::<Runtime>()
+        .insertion_spots
+        .iter()
+        .find(|(spot, _)| {
+            spot.iter()
+                .zip(origin)
+                .map(|(a, b)| (a - b) * (a - b))
+                .sum::<f32>()
+                <= INSERTION_LIGHT_REACH * INSERTION_LIGHT_REACH
+        })
+        .map(|(spot, _)| (*light, *spot))
+}
+
+/// IW4's scripts plant a thrown tactical insertion as a glow stick of their
+/// own and leave the grenade lying; a foreign one is noted for the glow
+/// stick to carry its model in the grenade's place.
+pub(crate) fn note_insertion_throw(
+    world: &mut World,
+    client: u32,
+    script: u32,
+    native: u32,
+    grenade: u64,
+) {
+    if script == native || FrameWorld::from_world(world).weapon_script_name(script) != INSERTION {
+        return;
+    }
+    let model: Arc<str> = format!("{}{native}", crate::WEAPON_MODEL_PREFIX).into();
+    world
+        .resource_mut::<Runtime>()
+        .thrown_insertions
+        .insert(client, (model, grenade));
+}
+
+/// A glow stick the scripts plant for a foreign tactical insertion, or put
+/// where one stood, carries that insertion's model.
+pub(crate) fn dress_insertion_glow(world: &mut World, object: u64, model: &str) {
+    if model != INSERTION_GLOW_MODEL {
+        return;
+    }
+    let origin = match world
+        .resource_mut::<Runtime>()
+        .object_field(object, "origin")
+    {
+        Value::Vector(origin) => origin,
+        _ => return,
+    };
+    let near = |a: [f32; 3], b: [f32; 3], reach: f32| {
+        a.iter().zip(b).map(|(a, b)| (a - b) * (a - b)).sum::<f32>() <= reach * reach
+    };
+    let placed = world
+        .resource::<Runtime>()
+        .insertion_spots
+        .iter()
+        .find(|(spot, _)| near(*spot, origin, 1.0))
+        .map(|(_, model)| model.clone());
+    let model = match placed {
+        Some(model) => model,
+        None => {
+            let throwers: Vec<u32> = world
+                .resource::<Runtime>()
+                .thrown_insertions
+                .keys()
+                .copied()
+                .collect();
+            let frame = FrameWorld::from_world(world);
+            let thrower = throwers.into_iter().find(|&client| {
+                frame
+                    .player(ClientId(client))
+                    .is_some_and(|ps| near(ps.origin, origin, INSERTION_PLANT_REACH))
+            });
+            let mut runtime = world.resource_mut::<Runtime>();
+            let Some((model, grenade)) =
+                thrower.and_then(|client| runtime.thrown_insertions.remove(&client))
+            else {
+                return;
+            };
+            if runtime.entities.contains_key(&grenade)
+                && !runtime.pending_deletes.contains(&grenade)
+            {
+                runtime.pending_deletes.push(grenade);
+            }
+            if runtime.insertion_spots.len() >= 32 {
+                runtime.insertion_spots.remove(0);
+            }
+            runtime.insertion_spots.push((origin, model.clone()));
+            model
+        }
+    };
+    let mut runtime = world.resource_mut::<Runtime>();
+    let Some(entity) = runtime.entities.get_mut(&object) else {
+        return;
+    };
+    let tag: Arc<str> = "tag_origin".into();
+    if !entity.attachments.iter().any(|(m, _)| *m == model) {
+        entity.attachments.push((model, tag));
+    }
+}
+
+/// A tactical insertion chosen as the tactical is given in its carrier's
+/// place too.
+fn bridge_insertion_carrier(world: &mut World, client: u32, weapon: u32) {
+    let frame = FrameWorld::from_world(world);
+    let Some(carrier) = frame.weapon_index_by_script_name(INSERTION_CARRIER) else {
+        return;
+    };
+    let stand_in = offhand_stand_in(world, weapon).unwrap_or(weapon);
+    if weapon == 0 || FrameWorld::from_world(world).weapon_script_name(stand_in) != INSERTION {
+        return;
+    }
+    let mut runtime = world.resource_mut::<Runtime>();
+    let bridge = runtime.weapon_bridge.entry(client).or_default();
+    bridge.retain(|(from, _)| *from != carrier);
+    bridge.push((carrier, weapon));
+}
+
+/// Tells the T6 equipment script which offhands, by the names the class
+/// script gives them under, are T6 equipment (`t6lethal`, `t6tactical`).
+fn mark_t6_offhands(world: &mut World, client: u32, class: &crate::ClassDef) {
+    let given = |world: &mut World, weapon: u32, tactical: bool| -> Value {
+        let Some(stand_in) = offhand_stand_in(world, weapon) else {
+            return Value::Undefined;
+        };
+        let frame = FrameWorld::from_world(world);
+        let name = frame.weapon_script_name(stand_in);
+        Value::string(if tactical && name == INSERTION {
+            INSERTION_CARRIER
+        } else {
+            name
+        })
+    };
+    let lethal = given(world, class.lethal, false);
+    let tactical = given(world, class.tactical, true);
+    let Value::Object(player) = player_object(world, client) else {
+        return;
+    };
+    let mut runtime = world.resource_mut::<Runtime>();
+    runtime.set_object_field(player, "t6lethal", lethal);
+    runtime.set_object_field(player, "t6tactical", tactical);
+}
+
+/// When the class script gives a tactical insertion's carrier, the perk
+/// that plants it is given as well: the class script never gives it
+/// beside a lethal.
+pub(crate) fn give_carried_insertion(
+    world: &mut World,
+    client: u32,
+    receiver: &Value,
+    weapon: u32,
+) -> Result<(), String> {
+    let frame = FrameWorld::from_world(world);
+    if frame.weapon_script_name(weapon) != INSERTION_CARRIER
+        || bridged_weapon(world, client, weapon) == weapon
+    {
+        return Ok(());
+    }
+    crate::script::start(
+        world,
+        GIVE_PERK,
+        receiver.clone(),
+        vec![Value::String("specialty_tacticalinsertion".into())],
+    )
+    .map(|_| ())
+    .map_err(|fault| fault.to_string())
+}
+
 pub(crate) fn bridged_weapon(world: &World, client: u32, weapon: u32) -> u32 {
     world
         .resource::<Runtime>()
@@ -474,14 +735,20 @@ pub(crate) fn choose_class(world: &mut World, client: u32, class: &crate::ClassD
         .remove(&client);
     bridge_class_weapon(world, client, 0, class.primary);
     bridge_class_weapon(world, client, 1, class.secondary);
-    bridge_class_weapon(world, client, 2, class.lethal);
-    bridge_class_weapon(world, client, 3, class.tactical);
     if realm == Some(crate::script::Realm::T5) {
+        bridge_class_weapon(world, client, 2, class.lethal);
+        bridge_class_weapon(world, client, 3, class.tactical);
         if let Some(response) = t5_class_response(class.id) {
             answer_menu(world, client, CLASS_MENU, &response);
         }
         return;
     }
+    // IW4's offhands are bridged by name: a fixed stand-in bridged ahead of
+    // them would hand the scripts a flash for a tactical insertion.
+    bridge_offhand(world, client, class.lethal);
+    bridge_offhand(world, client, class.tactical);
+    bridge_insertion_carrier(world, client, class.tactical);
+    mark_t6_offhands(world, client, class);
     let data = class_profile_data(world, class);
     push_answer(
         world,
@@ -499,8 +766,8 @@ fn class_profile_data(world: &mut World, class: &crate::ClassDef) -> Vec<(Vec<Va
         stand_in_for(world, 0, class.primary).unwrap_or(class.primary),
         stand_in_for(world, 1, class.secondary).unwrap_or(class.secondary),
     ];
-    let lethal = stand_in_for(world, 2, class.lethal).unwrap_or(class.lethal);
-    let tactical = stand_in_for(world, 3, class.tactical).unwrap_or(class.tactical);
+    let lethal = offhand_stand_in(world, class.lethal).unwrap_or(class.lethal);
+    let tactical = offhand_stand_in(world, class.tactical).unwrap_or(class.tactical);
     let index = class.id.0 as usize % 10;
     let frame = FrameWorld::from_world(world);
     let name = |weapon: u32| -> String {
@@ -545,12 +812,14 @@ fn class_profile_data(world: &mut World, class: &crate::ClassDef) -> Vec<(Vec<Va
         put(format!("{key}.attachment.1"), &attachments[1]);
         put(format!("{key}.camo"), "none");
     }
-    let lethal = if lethal == 0 {
-        "specialty_null".to_owned()
-    } else {
-        name(lethal)
+    // IW4's class script takes the tactical insertion as equipment only as
+    // the perk that gives its flare (any other name is a frag).
+    let equipment = match name(lethal) {
+        _ if lethal == 0 => "specialty_null".to_owned(),
+        insertion if insertion == INSERTION => "specialty_tacticalinsertion".to_owned(),
+        other => other,
     };
-    put(format!("{prefix}.perks.0"), &lethal);
+    put(format!("{prefix}.perks.0"), &equipment);
     let mut perks = ["specialty_null"; 3];
     for id in class.perks {
         if let (Some(slot), Some(perk)) = (
@@ -569,7 +838,10 @@ fn class_profile_data(world: &mut World, class: &crate::ClassDef) -> Vec<(Vec<Va
         &class.deathstreak
     };
     put(format!("{prefix}.perks.4"), deathstreak);
-    let tactical = name(tactical);
+    let tactical = match name(tactical) {
+        insertion if insertion == INSERTION => INSERTION_CARRIER.to_owned(),
+        other => other,
+    };
     put(
         format!("{prefix}.specialGrenade"),
         tactical.strip_suffix("_mp").unwrap_or(&tactical),

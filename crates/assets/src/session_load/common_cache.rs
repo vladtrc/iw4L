@@ -237,14 +237,37 @@ pub async fn load_shell_common(games: asset_transport::GamesRoot) -> ShellCommon
     let (common, reach) = ensure_common(key).await;
     let weapons = common.products.weapons.clone().publish();
     report.push(format!(
-        "CAC: {reach} common set {}; weapons={} (iw4={} iw5={} t5={}) tables={}",
+        "CAC: {reach} common set {}; weapons={} (iw4={} iw5={} t5={} t6={}) tables={}",
         common.key,
         weapons.len(),
         weapons.namespace_count(asset_core::AssetNamespace::Iw4),
         weapons.namespace_count(asset_core::AssetNamespace::Iw5),
         weapons.namespace_count(asset_core::AssetNamespace::T5),
+        weapons.namespace_count(asset_core::AssetNamespace::T6),
         common.cac_tables.len(),
     ));
+    {
+        let families = weapons.weapon_families();
+        let t6 = |family: &&asset_game::WeaponFamily| {
+            family.key.namespace == asset_core::AssetNamespace::T6
+        };
+        let offered: Vec<_> = families.offered().filter(t6).collect();
+        let excluded: Vec<_> = families
+            .excluded()
+            .iter()
+            .filter(|(key, _)| key.starts_with("t6:"))
+            .collect();
+        report.push(format!(
+            "CAC t6 families: {} offered ({} primary, {} secondary, {} lethal, {} tactical); {} excluded: {:?}",
+            offered.len(),
+            offered.iter().filter(|f| f.slot == asset_game::FamilySlot::Primary).count(),
+            offered.iter().filter(|f| f.slot == asset_game::FamilySlot::Secondary).count(),
+            offered.iter().filter(|f| f.slot == asset_game::FamilySlot::Lethal).count(),
+            offered.iter().filter(|f| f.slot == asset_game::FamilySlot::Tactical).count(),
+            excluded.len(),
+            excluded,
+        ));
+    }
     for (namespace, table) in &common.cac_tables {
         report.push(format!(
             "CAC {}: {} rows={}",
@@ -329,6 +352,10 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
         let anchor = anchor.clone();
         let progress = progress.clone();
         pool.spawn(async move { t5_weapon_common_prep(anchor.as_deref(), &progress) })
+    };
+    let t6_weapon_walk = {
+        let progress = progress.clone();
+        pool.spawn(async move { walk_t6_weapon_bundle(&progress) })
     };
     let localize_walk = {
         let anchor = anchor.clone();
@@ -439,7 +466,7 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
         mut projectile_meshes,
         mut xanims,
         mut player_anim_sources,
-        common_fx,
+        mut common_fx,
         common_fx_models,
         common_impact,
         material_seed,
@@ -604,6 +631,98 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
         weapons.len(),
         weapons.namespace_count(asset_core::AssetNamespace::T5)
     ));
+    let (t6_weapons, mut t6_content, t6_tables, t6_report) = t6_weapon_walk.await;
+    common_report.extend(t6_report);
+    let t6_captured = t6_weapons.len();
+    weapons.absorb(t6_weapons);
+    let t6_sound_names = t6_content
+        .as_ref()
+        .map_or_else(std::collections::BTreeSet::new, |content| {
+            content.sound_names.clone()
+        });
+    let t6_hands = t6_content
+        .as_ref()
+        .and_then(|content| content.hands.clone());
+    let t6_melee = t6_content
+        .as_ref()
+        .and_then(|content| content.melee.clone());
+    // T6 clips carry a prefix IW4 names do not; one that still meets a taken
+    // name is left out, and its slot stays empty rather than play IW4's.
+    let mut t6_anim_names = std::collections::BTreeSet::new();
+    if let Some(content) = &mut t6_content {
+        let (added, kept) = xanims.absorb_vacant(std::mem::take(&mut content.xanims));
+        common_report.push(format!(
+            "t6 xanims absorbed: +{}, {kept} names already taken",
+            added.len()
+        ));
+        t6_anim_names.extend(added);
+    }
+    if let Some(mut content) = t6_content {
+        common_report.push(bind_t6_fx(
+            std::mem::take(&mut content.fx),
+            std::mem::take(&mut content.fx_materials),
+            &mut material_seed,
+            &mut common_fx,
+        ));
+        common_report.push(bind_t6_content(
+            content,
+            &weapons,
+            &mut material_seed,
+            &mut fpv_meshes,
+            &mut world_weapons,
+        ));
+    }
+    let t6_dressed = weapons.dress_t6_stand_ins(
+        |name| {
+            fpv_meshes
+                .get(asset_core::AssetNamespace::Iw4, name)
+                .is_some()
+        },
+        |name| {
+            world_weapons
+                .get(asset_core::AssetNamespace::Iw4, name)
+                .is_some()
+        },
+        |name| t6_sound_names.contains(name),
+        |name| t6_anim_names.contains(name),
+        t6_hands.as_deref().filter(|name| {
+            fpv_meshes
+                .get(asset_core::AssetNamespace::Iw4, name)
+                .is_some()
+        }),
+        t6_melee.as_ref(),
+    );
+    // Thrown and planted T6 models were bound as world guns; the missile
+    // renderer looks them up among the projectile meshes.
+    let mut t6_projectiles = 0usize;
+    for id in 1..weapons.len() as u32 {
+        if weapons.identity_namespace_of(id) != Some(asset_core::AssetNamespace::T6) {
+            continue;
+        }
+        let Some(name) = weapons.projectile_model_of(id) else {
+            continue;
+        };
+        if !projectile_meshes.contains(asset_core::AssetNamespace::Iw4, name)
+            && let Some(gun) = world_weapons.get(asset_core::AssetNamespace::Iw4, name)
+        {
+            projectile_meshes.absorb_world_weapon(gun);
+            t6_projectiles += 1;
+        }
+    }
+    common_report.push(format!(
+        "t6 weapon absorb: captured={t6_captured} dressed={} own_view={} own_anims={} (hands {t6_hands:?}) dual_wield={} borrowed_melee={} own_world={} own_projectile={} (+{t6_projectiles} projectile meshes) own_sounds={} missing_stand_ins={:?}; registry now {} (t6={})",
+        t6_dressed.dressed,
+        t6_dressed.own_view,
+        t6_dressed.own_anims,
+        t6_dressed.dual_wield,
+        t6_dressed.borrowed_melee,
+        t6_dressed.own_world,
+        t6_dressed.own_projectile,
+        t6_dressed.own_sounds,
+        t6_dressed.missing,
+        weapons.len(),
+        weapons.namespace_count(asset_core::AssetNamespace::T6)
+    ));
     common_report.push(format!(
         "FPV generation: common={fpv_common_n} iw5_keys={iw5_fpv_added} t5={t5_fpv_n} t5_keys={t5_fpv_added} collide={} merged={}",
         fpv_meshes.collide_name_count(),
@@ -618,6 +737,7 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
             t5_code_stats,
             t5_census_stats,
         ),
+        (asset_core::AssetNamespace::T6, t6_tables, Vec::new()),
     ]
     .into_iter()
     .flat_map(|(namespace, code, common)| {
@@ -629,6 +749,11 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
 
     weapons.set_family_tables(cac_tables.clone());
     let iw5_prepared = weapons.prepare_iw5_configurations();
+    let t6_prepared = weapons.prepare_t6_configurations();
+    common_report.push(format!(
+        "T6 configurations: prepared={} refused={}",
+        t6_prepared.prepared, t6_prepared.refused
+    ));
     weapons.resolve_fpv_mesh_edges(&fpv_meshes);
     weapons.resolve_fpv_hands(&fpv_meshes, &asset_model::BodyMeshCatalog::default());
     weapons.resolve_world_model_edges(&world_weapons);

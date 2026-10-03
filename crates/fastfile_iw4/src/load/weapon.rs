@@ -347,6 +347,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
     s.record_weapon(WeaponGeometry {
         alternate_weapon_name,
         alternate_raise_time_ms: s.i32_at(p, s.layout(68, 92))?,
+        first_raise_time_ms: s.i32_at(p, s.layout(84, 116))?,
         alternate_drop_time_ms: weap_def
             .map(|body| s.i32_at(body, s.layout(0x290, 984)))
             .transpose()?

@@ -144,7 +144,9 @@ pub(crate) fn select_usables(world: &mut World) {
             runtime
                 .entities
                 .iter()
-                .filter(|(_, e)| !e.hidden)
+                // Hiding an entity does not stop its use: a tactical
+                // insertion's glow stick is hidden from its owner, who
+                // picks it up.
                 .filter_map(|(object, e)| {
                     Some((
                         *object,

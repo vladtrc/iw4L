@@ -284,6 +284,10 @@ pub struct WeaponSetup {
     pub realm: crate::script::Realm,
     pub base: String,
     pub attachments: Vec<String>,
+    /// The script-realm weapon a class names in this one's place, when its
+    /// own name means nothing to the scripts (`sticky_grenade_mp` →
+    /// `semtex_mp`).
+    pub stand_in: Option<String>,
 }
 
 #[derive(Debug, Default)]

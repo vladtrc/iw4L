@@ -26,6 +26,7 @@ members = [
     "crates/console",
     "crates/d3d9_decl",
     "crates/d3d9_sm3",
+    "crates/dxbc_sm5",
     "crates/d3d9_state",
     "crates/diag",
     "crates/dpvs_iw4",
@@ -33,6 +34,7 @@ members = [
     "crates/fastfile_iw4",
     "crates/fastfile_t5",
     "crates/fastfile_iw5",
+    "crates/fastfile_t6",
     "crates/frame",
     "crates/fx",
     "crates/fx_iw4",
@@ -100,6 +102,7 @@ bevy = { version = "0.19", default-features = false, features = [
 ] }
 bevy_ecs = "0.19"
 miniz_oxide = "0.8"
+lzokay-native = "0.1"
 bcdec_rs = "0.2"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 zip = { version = "6", default-features = false, features = ["deflate"] }
@@ -126,6 +129,7 @@ clipmap_iw4 = { path = "crates/clipmap_iw4" }
 console = { path = "crates/console" }
 d3d9_decl = { path = "crates/d3d9_decl" }
 d3d9_sm3 = { path = "crates/d3d9_sm3" }
+dxbc_sm5 = { path = "crates/dxbc_sm5" }
 d3d9_state = { path = "crates/d3d9_state" }
 diag = { path = "crates/diag" }
 dpvs_iw4 = { path = "crates/dpvs_iw4" }
@@ -133,6 +137,7 @@ entity_iw4 = { path = "crates/entity_iw4" }
 fastfile_iw4 = { path = "crates/fastfile_iw4" }
 fastfile_t5 = { path = "crates/fastfile_t5" }
 fastfile_iw5 = { path = "crates/fastfile_iw5" }
+fastfile_t6 = { path = "crates/fastfile_t6" }
 frame = { path = "crates/frame" }
 fx = { path = "crates/fx" }
 fx_iw4 = { path = "crates/fx_iw4" }

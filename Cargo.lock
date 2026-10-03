@@ -301,6 +301,7 @@ dependencies = [
  "fastfile_iw4",
  "fastfile_iw5",
  "fastfile_t5",
+ "fastfile_t6",
  "xmodel_runtime",
 ]
 
@@ -317,6 +318,8 @@ dependencies = [
  "fastfile_iw4",
  "fastfile_iw5",
  "fastfile_t5",
+ "fastfile_t6",
+ "symphonia",
 ]
 
 [[package]]
@@ -341,6 +344,7 @@ dependencies = [
  "fastfile_iw4",
  "fastfile_iw5",
  "fastfile_t5",
+ "fastfile_t6",
  "fx_iw4",
  "serde",
  "serde_json",
@@ -368,6 +372,7 @@ dependencies = [
  "bevy",
  "diag",
  "dpvs_iw4",
+ "dxbc_sm5",
  "fastfile_iw4",
  "fastfile_iw5",
  "fastfile_t5",
@@ -388,6 +393,7 @@ dependencies = [
  "fastfile_iw4",
  "fastfile_iw5",
  "fastfile_t5",
+ "fastfile_t6",
  "lighting_iw4",
  "xmodel_runtime",
 ]
@@ -402,8 +408,10 @@ dependencies = [
  "fastfile_iw4",
  "fastfile_iw5",
  "fastfile_t5",
+ "fastfile_t6",
  "flate2",
  "lnk",
+ "lzokay-native",
  "miniz_oxide",
  "windows",
  "windows-sys 0.61.2",
@@ -452,6 +460,7 @@ dependencies = [
  "fastfile_iw4",
  "fastfile_iw5",
  "fastfile_t5",
+ "fastfile_t6",
  "frame",
  "libc",
  "lighting_iw4",
@@ -2267,6 +2276,7 @@ dependencies = [
  "render_frontend",
  "render_fx",
  "replay",
+ "rfd",
  "session",
  "sim",
  "ui",
@@ -2688,6 +2698,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "dxbc_sm5"
+version = "0.1.0"
+
+[[package]]
 name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2823,6 +2837,13 @@ version = "0.1.0"
 [[package]]
 name = "fastfile_t5"
 version = "0.1.0"
+
+[[package]]
+name = "fastfile_t6"
+version = "0.1.0"
+dependencies = [
+ "sha1",
+]
 
 [[package]]
 name = "fastrand"
@@ -4024,6 +4045,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
+name = "lzokay-native"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "792ba667add2798c6c3e988e630f4eb921b5cbc735044825b7111ef1582c8730"
+dependencies = [
+ "byteorder",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "mach2"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4381,6 +4412,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
 dependencies = [
  "bitflags 2.13.1",
+ "block2 0.6.2",
  "objc2 0.6.4",
  "objc2-core-graphics",
  "objc2-foundation 0.3.2",
@@ -4825,6 +4857,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "perf"
 version = "0.1.0"
 dependencies = [
+ "diag",
  "perfetto-sdk",
  "serde_json",
  "uuid",
@@ -4934,6 +4967,12 @@ dependencies = [
  "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "pollster"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
 name = "portable-atomic"
@@ -5363,6 +5402,7 @@ dependencies = [
  "d3d9_state",
  "diag",
  "dpvs_iw4",
+ "dxbc_sm5",
  "entity_iw4",
  "frame",
  "fx",
@@ -5449,6 +5489,7 @@ dependencies = [
  "d3d9_sm3",
  "d3d9_state",
  "dpvs_iw4",
+ "dxbc_sm5",
  "fastfile_t5",
  "lighting_iw4",
 ]
@@ -5531,6 +5572,33 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "rfd"
+version = "0.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20dafead71c16a34e1ff357ddefc8afc11e7d51d6d2b9fbd07eaa48e3e540220"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "js-sys",
+ "libc",
+ "log",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-foundation 0.3.2",
+ "percent-encoding",
+ "pollster",
+ "raw-window-handle",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "web-sys",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5874,6 +5942,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6118,12 +6197,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5773a4c030a19d9bfaa090f49746ff35c75dfddfa700df7a5939d5e076a57039"
 dependencies = [
  "lazy_static",
+ "symphonia-bundle-flac",
  "symphonia-bundle-mp3",
  "symphonia-codec-adpcm",
  "symphonia-codec-pcm",
  "symphonia-core",
  "symphonia-format-riff",
  "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-bundle-flac"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c91565e180aea25d9b80a910c546802526ffd0072d0b8974e3ebe59b686c9976"
+dependencies = [
+ "log",
+ "symphonia-core",
+ "symphonia-metadata",
+ "symphonia-utils-xiph",
 ]
 
 [[package]]
@@ -6193,6 +6285,16 @@ dependencies = [
  "lazy_static",
  "log",
  "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-utils-xiph"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee27c85ab799a338446b68eec77abf42e1a6f1bb490656e121c6e27bfbab9f16"
+dependencies = [
+ "symphonia-core",
+ "symphonia-metadata",
 ]
 
 [[package]]

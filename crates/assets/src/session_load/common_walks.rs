@@ -842,6 +842,352 @@ pub(super) fn walk_t5_weapon_common(
     }
 }
 
+/// The T6 `common_mp` under the games root, walked for its weapons only.
+/// They carry no models or sounds of their own; the registry dresses them
+/// in IW4 stand-ins once they are absorbed.
+/// The class tables of a T6 install: `mp/statstable.csv` ships in
+/// `patch_mp`, not `common_mp`.
+fn t6_class_tables(
+    root: &asset_transport::GamesRoot,
+    report: &mut Vec<String>,
+) -> Vec<asset_game::CapturedStringTable> {
+    let zone = match find_zone_file_version(root, "patch_mp", fastfile_t6::ZONE_VERSION_PC) {
+        Ok(zone) => zone,
+        Err(error) => {
+            report.push(format!("t6 class tables: {error}"));
+            return Vec::new();
+        }
+    };
+    let image = match asset_transport::open_t6_zone(&zone.path) {
+        Ok(image) => image,
+        Err(error) => {
+            report.push(format!("t6 class tables: {error}"));
+            return Vec::new();
+        }
+    };
+    let schema = match fastfile_t6::schema::parse() {
+        Ok(schema) => schema,
+        Err(error) => {
+            report.push(format!("t6 class tables: load plan {error:?}"));
+            return Vec::new();
+        }
+    };
+    let (load, walked) = fastfile_t6::load_zone(&schema, &image.bytes, |_, _| true);
+    if let Err(error) = walked {
+        report.push(format!("t6 class tables: patch_mp walk stopped: {error:?}"));
+    }
+    let tables: Vec<_> = load
+        .assets
+        .iter()
+        .filter_map(|asset| asset_game::capture_t6_string_table(&load, asset))
+        .filter(|table| {
+            asset_game::is_stats_table_name(&table.name)
+                || table.name.eq_ignore_ascii_case("mp/attachmentTable.csv")
+        })
+        .collect();
+    report.push(format!(
+        "t6 class tables: {} from {}",
+        tables.len(),
+        zone.path.display()
+    ));
+    tables
+}
+
+pub(super) fn walk_t6_weapon_bundle(
+    progress: &LoadProgress,
+) -> (
+    WeaponBuild,
+    Option<crate::lane::t6::T6Content>,
+    Vec<asset_game::CapturedStringTable>,
+    Vec<String>,
+) {
+    let mut report = Vec::new();
+    let root = match games_root_from_env() {
+        Ok(root) => root,
+        Err(error) => {
+            report.push(format!("t6 weapons: {error}"));
+            return (WeaponBuild::default(), None, Vec::new(), report);
+        }
+    };
+    let donor = match find_common_mp_for_envelope(&root, fastfile_t6::ZONE_VERSION_PC) {
+        Ok(donor) => donor,
+        Err(error) => {
+            report.push(format!("t6 weapons: {error}"));
+            return (WeaponBuild::default(), None, Vec::new(), report);
+        }
+    };
+    let stage = progress.begin_scoped(StageId::CommonAssets, "t6_weapons", None);
+    let opened = open_zone_shared(&donor.path).map_err(|error| error.to_string());
+    stage.finish_from(&opened);
+    let image = match opened {
+        Ok(image) => image,
+        Err(error) => {
+            report.push(format!(
+                "t6 weapons: open {}: {error}",
+                donor.path.display()
+            ));
+            return (WeaponBuild::default(), None, Vec::new(), report);
+        }
+    };
+    let tables = t6_class_tables(&root, &mut report);
+    let census = lane(image.game).load_common_mp(
+        &donor.path,
+        &image,
+        progress,
+        false,
+        MaterialCatalog::default(),
+    );
+    report.extend(census.report);
+    let mut weapons = census.weapons;
+    weapons.apply_stats_tables(&tables);
+    (weapons, census.t6_content, tables, report)
+}
+
+const T6_RUNTIME_DECALS: [&str; 2] = ["mc/mtl_clan_tag", "mc/mtl_player_icon"];
+
+/// Binds a T6 walk's models to the IW4 pool: each T6 material becomes a
+/// stand-in material over the first material of its weapon's IW4 model, with
+/// the T6 colour, normal and specular maps (flat or neutral texels where it
+/// has none); each model then joins the first-person or world catalog in the
+/// IW4 namespace, where T6 weapons resolve their content.
+pub(super) fn bind_t6_content(
+    content: crate::lane::t6::T6Content,
+    weapons: &WeaponBuild,
+    materials: &mut MaterialCatalog,
+    fpv: &mut FpvMeshBuild,
+    world: &mut WorldWeaponBuild,
+) -> String {
+    use asset_core::AssetNamespace::Iw4;
+    let flat_normal = Arc::new(asset_material::solid_texture([128, 128, 255, 128], false));
+    let neutral_specular = Arc::new(asset_material::solid_texture([48, 48, 48, 160], true));
+    let mut bound: std::collections::HashMap<(String, bool), usize> = Default::default();
+    let (mut views, mut worlds, mut no_donor) = (0usize, 0usize, 0usize);
+    let mut donors_seen = std::collections::HashSet::new();
+    let mut linked_techsets = std::collections::BTreeSet::new();
+    let mut native_report = Vec::new();
+    let mut native_n = 0usize;
+    let mut donor_lines = Vec::new();
+    for mut model in content.models {
+        let donor = weapons
+            .resolve_index(model.stand_in)
+            .ok()
+            .flatten()
+            .and_then(|id| {
+                let keys = if model.hands {
+                    &fpv.get(Iw4, weapons.hand_xmodel_of(id)?)?.material_keys
+                } else if model.view {
+                    &fpv.get(Iw4, weapons.gun_xmodel_of(id)?)?.material_keys
+                } else {
+                    // A stand-in with no world model of its own (IW4's
+                    // tactical insertion is planted by script) lends its
+                    // first-person model's.
+                    match weapons
+                        .world_model_of(id)
+                        .and_then(|name| world.get(Iw4, name))
+                    {
+                        Some(gun) => &gun.material_keys,
+                        None => &fpv.get(Iw4, weapons.gun_xmodel_of(id)?)?.material_keys,
+                    }
+                };
+                // The gun's (or arms') lit body: the material binding both a
+                // colour and a normal map, not a sight, glow or decal. The
+                // T6 material keeps the donor's draw states, so an opaque
+                // body is preferred over glass or a lens.
+                let lit_bodies: Vec<usize> = keys
+                    .iter()
+                    .flatten()
+                    .filter_map(|key| {
+                        materials.materials.iter().position(|m| {
+                            m.namespace == key.namespace
+                                && m.name.as_str() == asset_core::AssetRef::bare_name(&key.name)
+                        })
+                    })
+                    .filter(|&index| {
+                        let textures = &materials.materials[index].textures;
+                        let has = |semantic| {
+                            textures
+                                .iter()
+                                .any(|t| t.semantic == semantic && t.image.is_some())
+                        };
+                        has(asset_material::TS_COLOR_MAP) && has(asset_material::TS_NORMAL_MAP)
+                    })
+                    .collect();
+                // Glass and lenses sort after the opaque surfaces (and draw
+                // without depth writes); a body's lit techniques may still
+                // include additive light passes, so its sort tells it apart.
+                lit_bodies
+                    .into_iter()
+                    .min_by_key(|&index| materials.materials[index].sort_key)
+            });
+        if let Some(donor) = donor
+            && donors_seen.insert(donor)
+            && donors_seen.len() <= 4
+        {
+            let m = &materials.materials[donor];
+            donor_lines.push(format!(
+                "{}→{} textures={:?}",
+                model.stand_in,
+                m.name.as_str(),
+                m.textures.iter().map(|t| t.semantic).collect::<Vec<_>>()
+            ));
+        }
+        let Some(donor) = donor else {
+            no_donor += 1;
+            continue;
+        };
+        model.skel.surface_materials = model
+            .surface_materials
+            .iter()
+            .map(|name| {
+                let name = name.as_ref()?;
+                // The emblem and clan-tag decals take texels the game draws per
+                // player at runtime; there is nothing to show on them here.
+                if T6_RUNTIME_DECALS.contains(&name.as_str()) {
+                    return None;
+                }
+                let key = (name.clone(), model.view);
+                if let Some(&index) = bound.get(&key) {
+                    return Some(asset_core::WalkLocalMaterialIndex::from_walk(index));
+                }
+                let captured = content.materials.get(name)?;
+                // A model draws with its own T6 technique set, the world
+                // model sharing the first-person model's material.
+                if let Some(&index) = bound.get(&(name.clone(), true))
+                    && captured.native.is_some()
+                {
+                    bound.insert(key, index);
+                    return Some(asset_core::WalkLocalMaterialIndex::from_walk(index));
+                }
+                if let Some(native) = &captured.native
+                    && let Some(set) = content.techsets.get(&native.technique_set)
+                {
+                    // A material drawn only emissive (an optic's reticle)
+                    // takes the emissive state's blend.
+                    let (draw, state) = match (native.lit_state, native.emissive_state) {
+                        (None, Some(emissive)) => {
+                            (asset_material::t6_techset::T6Draw::Emissive, Some(emissive))
+                        }
+                        (lit, _) => (asset_material::t6_techset::T6Draw::Lit, lit),
+                    };
+                    let linked = draw.technique_set_name(&native.technique_set);
+                    if !linked_techsets.contains(&linked) {
+                        materials.link_t6_technique_set(set, draw, &mut native_report);
+                        linked_techsets.insert(linked);
+                    }
+                    if let Some(index) = materials.t6_material(
+                        donor,
+                        name,
+                        set,
+                        &native.textures,
+                        native.constants.clone(),
+                        state,
+                        draw,
+                    ) {
+                        native_n += 1;
+                        bound.insert((name.clone(), true), index);
+                        bound.insert(key, index);
+                        return Some(asset_core::WalkLocalMaterialIndex::from_walk(index));
+                    }
+                }
+                let textures = asset_material::StandInTextures {
+                    color: captured
+                        .color
+                        .clone()
+                        .map(|(image, texture)| (image, texture, true)),
+                    normal: Some(captured.normal.clone().map_or_else(
+                        || ("$t6_flat_normal".to_owned(), flat_normal.clone(), false),
+                        |(image, texture)| (image, texture, false),
+                    )),
+                    specular: Some(captured.specular.clone().map_or_else(
+                        || {
+                            (
+                                "$t6_neutral_specular".to_owned(),
+                                neutral_specular.clone(),
+                                true,
+                            )
+                        },
+                        |(image, texture)| (image, texture, true),
+                    )),
+                };
+                // The world model's stand-in is a material of its own: the
+                // same name would replace the first-person model's.
+                let stand_in_name = if model.view {
+                    name.clone()
+                } else {
+                    format!("{name}#world")
+                };
+                let index = materials.stand_in_material(donor, &stand_in_name, textures)?;
+                bound.insert(key, index);
+                Some(asset_core::WalkLocalMaterialIndex::from_walk(index))
+            })
+            .collect();
+        if model.view {
+            fpv.insert_in(Iw4, model.skel, Some(materials));
+            views += 1;
+        } else {
+            world.insert_in(Iw4, model.skel, Some(materials));
+            worlds += 1;
+        }
+    }
+    materials.resolve_technique_set_edges();
+    format!(
+        "t6 content bound: {views} first-person and {worlds} world models, {} materials ({native_n} with their own technique sets: {linked_techsets:?}); {no_donor} models without an IW4 donor material; donors e.g. {donor_lines:?}; {native_report:?}",
+        bound.len()
+    )
+}
+
+/// IW4's own glow effect, whose material lends T6 effect materials their
+/// draw states (additive, emissive).
+const T6_FX_DONOR_EFFECT: &str = "misc/glow_stick_glow_green";
+
+/// T6 effects join the IW4 catalog; each material their sprites draw is an
+/// IW4 glow material wearing the T6 colour map.
+pub(super) fn bind_t6_fx(
+    effects: Vec<asset_game::T6FxCapture>,
+    fx_materials: std::collections::BTreeMap<String, crate::lane::t6::T6MaterialCapture>,
+    materials: &mut MaterialCatalog,
+    catalog: &mut asset_game::FxCatalog,
+) -> String {
+    use asset_core::AssetNamespace::Iw4;
+    let donor = catalog.get_in(Iw4, T6_FX_DONOR_EFFECT).and_then(|fx| {
+        fx.elems
+            .iter()
+            .flat_map(|elem| elem.visuals.iter())
+            .flat_map(|visual| visual.decode_keys())
+            .find_map(|key| materials.material_index_by_ns(key.namespace, &key.name))
+    });
+    let Some(donor) = donor else {
+        return format!("t6 effects: no donor material ({T6_FX_DONOR_EFFECT} not loaded)");
+    };
+    let mut bound = 0usize;
+    for (name, capture) in fx_materials {
+        let Some(color) = capture.color else {
+            continue;
+        };
+        let textures = asset_material::StandInTextures {
+            color: Some((color.0, color.1, true)),
+            normal: None,
+            specular: None,
+        };
+        if materials
+            .stand_in_material(donor.order(), &name, textures)
+            .is_some()
+        {
+            bound += 1;
+        }
+    }
+    let count = effects.len();
+    let mut refused = Vec::new();
+    for fx in &effects {
+        let before = catalog.capture_gaps;
+        catalog.capture_t6(fx, Iw4);
+        if catalog.capture_gaps != before {
+            refused.push(fx.name.as_str());
+        }
+    }
+    format!("t6 effects bound: {count} effects, {bound} materials; not convertible: {refused:?}")
+}
+
 pub(super) async fn walk_startup_material_zones(
     map_path: Option<&PathBuf>,
     progress: &LoadProgress,
@@ -952,7 +1298,7 @@ pub(super) fn load_localized_strings_beside(
             return catalog;
         }
     };
-    let lanes: [(asset_core::AssetNamespace, u32, &[&str]); 3] = [
+    let lanes: [(asset_core::AssetNamespace, u32, &[&str]); 4] = [
         (
             asset_core::AssetNamespace::Iw4,
             fastfile_iw4::ZONE_VERSION_PC,
@@ -968,18 +1314,29 @@ pub(super) fn load_localized_strings_beside(
             fastfile_iw5::ZONE_VERSION_PC,
             MP_LOCALIZED_ZONES,
         ),
+        (
+            asset_core::AssetNamespace::T6,
+            fastfile_t6::ZONE_VERSION_PC,
+            &[],
+        ),
     ];
     let runtime_language = find_runtime_common_mp(&root, zone_ff)
         .ok()
         .and_then(|zone| zone.path.parent()?.file_name()?.to_str().map(str::to_owned));
     let mut plan = Vec::new();
     for (namespace, version, names) in lanes {
-        let found: Vec<_> = if namespace == asset_core::AssetNamespace::T5 {
+        // Treyarch keeps its strings in per-language zones (`english/en_*`).
+        let found: Vec<_> = if matches!(
+            namespace,
+            asset_core::AssetNamespace::T5 | asset_core::AssetNamespace::T6
+        ) {
             match find_zone_file_version(&root, "common_mp", version).and_then(|zone| {
-                asset_transport::discover::find_t5_localized_zones(
-                    &zone.path,
-                    runtime_language.as_deref(),
-                )
+                let language = runtime_language.as_deref();
+                if namespace == asset_core::AssetNamespace::T6 {
+                    asset_transport::discover::find_t6_localized_zones(&zone.path, language)
+                } else {
+                    asset_transport::discover::find_t5_localized_zones(&zone.path, language)
+                }
             }) {
                 Ok(zones) => zones,
                 Err(error) => {

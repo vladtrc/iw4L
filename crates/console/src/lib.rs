@@ -24,12 +24,14 @@ mod diagnostics;
 pub mod editor;
 mod feature_dispatch;
 mod frontend;
+mod game_folders;
 mod gamepad;
 pub mod input;
 mod local_account;
 mod local_profile;
 pub mod plugin;
 pub mod registry;
+mod saved_position;
 mod startup;
 pub mod suggest;
 mod synthetic_input;
@@ -44,6 +46,7 @@ pub use class_dispatch::class_completions;
 pub use command::{ConsoleCommand, ConsoleQueue, SubmittedCommand};
 pub use editor::ConsoleEditor;
 pub use feature_dispatch::register_feature_commands;
+pub use game_folders::stored_game_folders;
 pub use plugin::{
     ConsoleCommandQueue, ConsoleDispatch, ConsoleDispatchSet, ConsoleFont, ConsolePlugin,
     ConsoleSettings, ConsoleState,

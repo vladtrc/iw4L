@@ -53,6 +53,8 @@ pub struct EquipmentRuntimeFacts {
     pub projectile_speed: i32,
     pub projectile_speed_up: i32,
     pub projectile_speed_forward: i32,
+    pub projectile_speed_relative_up: i32,
+    pub refuses_pickup: bool,
     pub projectile_activate_dist: i32,
     pub projectile_explosion_type: i32,
     pub weap_type: i32,
@@ -220,6 +222,18 @@ fn grenade_launch_velocity(
         velocity[0] += flat[0] * extra;
         velocity[1] += flat[1] * extra;
         velocity[2] += flat[2] * extra;
+    }
+    // Up along the view: square to the aim, in its vertical plane.
+    if facts.projectile_speed_relative_up != 0 {
+        let level = direction[0].hypot(direction[1]);
+        let up = match flatten_xy(direction) {
+            Some(flat) => [-flat[0] * direction[2], -flat[1] * direction[2], level],
+            None => [0.0, 0.0, 1.0],
+        };
+        let extra = facts.projectile_speed_relative_up as f32;
+        for (axis, along) in velocity.iter_mut().zip(up) {
+            *axis += along * extra;
+        }
     }
     project_owner_velocity(velocity, owner_vel)
 }

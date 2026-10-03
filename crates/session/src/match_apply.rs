@@ -387,8 +387,9 @@ pub fn apply_prepared_match(
                 .vehicle_compass()
                 .map(|(name, icons, size)| (name.to_owned(), (icons.clone(), size))),
         );
+        let script_names = weapons.0.script_names_table();
         content.set_weapon_setups(
-            (0..weapons.0.script_names_table().len() as u32)
+            (0..script_names.len() as u32)
                 .map(|id| {
                     let selection = weapons.0.describe_configuration(id)?;
                     let family = selection.family.as_ref()?;
@@ -396,10 +397,15 @@ pub fn apply_prepared_match(
                         realm: match family.namespace {
                             asset_core::AssetNamespace::T5 => sim::script::Realm::T5,
                             asset_core::AssetNamespace::Iw5 => sim::script::Realm::Iw5,
+                            asset_core::AssetNamespace::T6 => sim::script::Realm::T6,
                             _ => sim::script::Realm::Iw4,
                         },
                         base: family.base.clone(),
                         attachments: selection.attachments.clone(),
+                        stand_in: (family.namespace == asset_core::AssetNamespace::T6)
+                            .then(|| asset_game::t6_stand_in_for(&script_names[id as usize]))
+                            .flatten()
+                            .map(str::to_owned),
                     })
                 })
                 .collect(),
@@ -941,7 +947,7 @@ fn preflight_match_install(
         }
         for (from, to) in iw4.weapon_pairs(realm) {
             let weapon = (1..weapons.0.len() as u32).find(|&id| {
-                weapons.0.namespace_of(id) == prepared_map.namespace
+                weapons.0.identity_namespace_of(id) == prepared_map.namespace
                     && weapons.0.script_name_of(id) == to
                     && [weapons.0.gun_xmodel_of(id), weapons.0.hand_xmodel_of(id)]
                         .into_iter()

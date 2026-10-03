@@ -61,6 +61,7 @@ pub fn install_frontend_menus(catalog: &mut asset_game::MenuCatalog) -> Result<(
     catalog.load_definitions(include_str!("../menus/barracks.json"))?;
     catalog.load_definitions(include_str!("../menus/settings.json"))?;
     catalog.load_definitions(include_str!("../menus/controller.json"))?;
+    catalog.load_definitions(include_str!("../menus/game_folders.json"))?;
     let slider = catalog
         .get("pc_options_video")
         .and_then(|menu| {
@@ -129,6 +130,7 @@ pub fn install_frontend_menus(catalog: &mut asset_game::MenuCatalog) -> Result<(
                 "play mouse_click; close self; open options_multi;".into(),
             )];
             let mut controller = multiplayer.clone();
+            let mut game_folders = multiplayer.clone();
             menu.items.push(multiplayer);
             controller.name = "controller_settings".into();
             controller.text_key = "Controller".into();
@@ -137,6 +139,13 @@ pub fn install_frontend_menus(catalog: &mut asset_game::MenuCatalog) -> Result<(
                 "play mouse_click; close self; open options_controller;".into(),
             )];
             menu.items.push(controller);
+            game_folders.name = "game_folders_settings".into();
+            game_folders.text_key = "Game Folders".into();
+            game_folders.rect.y = 128.0;
+            game_folders.handlers.action = vec![asset_game::MenuEvent::Script(
+                "play mouse_click; close self; open options_game_folders;".into(),
+            )];
+            menu.items.push(game_folders);
         }
 
         let removed_rows: Vec<_> = menu
@@ -157,6 +166,7 @@ pub fn install_frontend_menus(catalog: &mut asset_game::MenuCatalog) -> Result<(
                     && item.rect.y == y
                     && item.name != "multiplayer_settings"
                     && item.name != "controller_settings"
+                    && item.name != "game_folders_settings"
             })
         });
         if name == "pc_options_controls" {

@@ -157,6 +157,7 @@ pub(crate) fn walk_zone_sound(path: &Path) -> Result<SoundCatalog, String> {
         ZoneGame::Iw4 => load_sound_catalog(path),
         ZoneGame::Iw5 => crate::sound_load_iw5::load_sound_catalog_iw5(path),
         ZoneGame::T5 => crate::sound_load_t5::load_sound_catalog_t5(path),
+        ZoneGame::T6 => Err(format!("{}: T6 sound banks are not read", path.display())),
     }
 }
 
@@ -232,6 +233,11 @@ fn sound_sources(games: &GamesRoot, map: &Path) -> (Vec<SoundSource>, Vec<SoundS
             AssetNamespace::T5,
             "localized_common_mp",
             fastfile_t5::ZONE_VERSION_PC,
+        ),
+        donor(
+            AssetNamespace::T6,
+            "common_mp",
+            fastfile_t6::ZONE_VERSION_PC,
         ),
     ];
     (before_map, after_map)

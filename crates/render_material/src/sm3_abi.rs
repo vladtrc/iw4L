@@ -223,6 +223,14 @@ pub enum PassAbiRefusal {
         destination: u16,
         row_count: u8,
     },
+
+    /// A DXBC program failed to parse or reads what the lowering refuses.
+    DxbcProgram,
+
+    /// A DXBC vertex input whose semantic no routed attribute carries.
+    DxbcVertexInputUnrouted {
+        register: u32,
+    },
 }
 
 pub fn build_pass_abi(
@@ -266,7 +274,7 @@ pub fn build_pass_abi(
     })
 }
 
-fn routed_attributes(
+pub(crate) fn routed_attributes(
     decl: &RuntimeVertexDecl,
     vertex_type: u8,
 ) -> Result<Vec<VertexAttribute>, PassAbiRefusal> {
