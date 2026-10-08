@@ -24,7 +24,12 @@
           inherit system;
           overlays = [ (import rust-overlay) ];
         };
-        toolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        toolchain = (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
+          extensions = [
+            "rust-src"
+            "rust-analyzer"
+          ];
+        };
         runtimeLibs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux (
           with pkgs;
           [
