@@ -14,3 +14,8 @@ iw4l.community.*.tmp
 # Agent working memory. None of it is the product: the artifacts, the externals,
 # the agent clones and the RE tooling and its bases all stay on this machine.
 /context/
+
+# Nix / direnv
+.direnv/
+result
+result-*
