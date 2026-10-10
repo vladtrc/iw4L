@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Sound aliases and mixing."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 diag.workspace = true
 bevy.workspace = true

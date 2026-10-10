@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "D3D9 Shader Model 1-3 token IR and deterministic WGSL emission. No IW4 knowledge."
 
+[package.metadata.iw4l]
+layer = "neutral"
+
 [dependencies]
 d3d9_decl.workspace = true
 d3d9_state.workspace = true

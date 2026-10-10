@@ -25,6 +25,8 @@ pub(crate) struct MapXModelCatalog {
     aliases: HashMap<Ptr, Ptr>,
     failed: usize,
     scene_assets: MapXModelSceneCatalog,
+    /// Slots holding a T5 stub whose model lives in another zone (`,name`).
+    t5_references: HashMap<Ptr, String>,
 
     t5_destructibles: HashMap<String, Result<T5DestructibleInitial, &'static str>>,
 }
@@ -111,6 +113,20 @@ impl MapXModelCatalog {
             self.failed += 1;
             return;
         };
+        let reference = geometry
+            .name
+            .and_then(|p| stream.cstr(p).ok())
+            .and_then(|name| name.strip_prefix(','));
+        if let Some(name) = reference {
+            for slot in std::iter::once(slot).chain(insert_slot) {
+                let slot = Ptr {
+                    block: slot.block,
+                    offset: slot.offset,
+                };
+                self.t5_references.insert(slot, name.to_owned());
+            }
+            return;
+        }
         let Ok(mesh) = build_t5_xmodel_mesh(stream, geometry, Some(materials)) else {
             self.failed += 1;
             return;
@@ -358,16 +374,30 @@ impl MapXModelCatalog {
         Some(self.meshes[index].name.as_str())
     }
 
+    fn t5_reference_at_slot(&self, slot: Ptr) -> Option<&str> {
+        let mut current = slot;
+        for _ in 0..self.aliases.len().saturating_add(1) {
+            if let Some(name) = self.t5_references.get(&current) {
+                return Some(name);
+            }
+            current = *self.aliases.get(&current)?;
+        }
+        None
+    }
+
+    /// Attaches static-model collision and returns the names of models that
+    /// live in another zone, whose collision is not attached.
     pub(crate) fn attach_t5_clip_models(
         &self,
         stream: &fastfile_t5::ZoneStream<'_>,
         geometry: fastfile_t5::ClipMapGeometry,
         clip: &mut asset_world::ClipCollision,
-    ) -> Result<(), asset_world::ClipCollisionError> {
+    ) -> Result<Vec<String>, asset_world::ClipCollisionError> {
         use asset_world::ClipCollisionError::{MissingTables, Truncated};
+        let mut foreign = Vec::new();
         let Some(rows) = geometry.static_models else {
             return if geometry.static_model_count == 0 {
-                Ok(())
+                Ok(foreign)
             } else {
                 Err(MissingTables)
             };
@@ -375,12 +405,15 @@ impl MapXModelCatalog {
         for index in 0..geometry.static_model_count {
             let row = rows.at(index * fastfile_t5::size::C_STATIC_MODEL);
             let slot = row.at(fastfile_t5::size::C_STATIC_MODEL_XMODEL_OFF);
-            let name = self
-                .name_at_slot(Ptr {
-                    block: slot.block,
-                    offset: slot.offset,
-                })
-                .ok_or(MissingTables)?;
+            let slot = Ptr {
+                block: slot.block,
+                offset: slot.offset,
+            };
+            let Some(name) = self.name_at_slot(slot) else {
+                let name = self.t5_reference_at_slot(slot).ok_or(MissingTables)?;
+                foreign.push(name.to_owned());
+                continue;
+            };
             let Some(MapXModelSceneAsset::T5(skel)) = self.scene_assets.get_name(name) else {
                 return Err(MissingTables);
             };
@@ -438,7 +471,7 @@ impl MapXModelCatalog {
                 },
             });
         }
-        Ok(())
+        Ok(foreign)
     }
 
     pub(crate) fn phys_preset_slot_n(&self) -> usize {

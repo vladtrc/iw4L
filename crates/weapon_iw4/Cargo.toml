@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Retail IW4 weapon definitions and state machine: spread, recoil, transitions."
 
+[package.metadata.iw4l]
+layer = "game"
+game = "iw4"
+
 [dependencies]
 playerstate_iw4.workspace = true
 asset_iw4.workspace = true

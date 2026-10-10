@@ -19,6 +19,7 @@ pub(crate) fn update_script_music(
     loading: Option<Res<assets::LoadingScreen>>,
     mut events: MessageReader<net::SvcScriptAudio>,
     bank: Option<Res<SoundBank>>,
+    family: Option<Res<crate::ambient::SoundBankNamespace>>,
     mut playback: ResMut<ScriptMusicPlayback>,
     mut mix: ResMut<crate::script_mix::ScriptAudioMix>,
     mut feedback: ResMut<crate::clip_store::CueFeedback>,
@@ -71,11 +72,13 @@ pub(crate) fn update_script_music(
     if !ready.0.ready_for(*generation) || loading.is_some_and(|screen| !screen.is_complete()) {
         return;
     }
-    let Some(bank) = bank else { return };
+    let (Some(bank), Some(family)) = (bank, family) else {
+        return;
+    };
     let Some(alias) = playback.pending.take() else {
         return;
     };
-    let (namespace, name) = namespace_alias(&alias);
+    let (namespace, name) = namespace_alias(&alias, family.namespace);
     let handle = runtime.trigger_cue(CueTrigger {
         event: None,
         bank: bank.0.clone(),

@@ -71,7 +71,7 @@ rerunning skips files already in place and leaves an unchanged master running.
 ## GitHub
 
 `make github-release` takes the package (`RELEASE=` or `LATEST`), requires a
-clean build whose commit is `origin/master`, uploads `iw4l-windows.zip` to a
+clean build whose commit is `origin/main`, uploads `iw4l-windows.zip` to a
 draft pre-release on that commit, compares GitHub's asset digest with the local
 file, then makes it public. Rerunning resumes a draft.
 

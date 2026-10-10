@@ -644,6 +644,10 @@ pub struct MasterBridge {
 }
 
 impl MasterBridge {
+    pub fn is_closing(&self) -> bool {
+        self.close.is_cancelled()
+    }
+
     pub fn state(&self) -> MasterBridgeState {
         self.state.lock().expect("master state poisoned").clone()
     }
@@ -1411,7 +1415,11 @@ fn open_hosted_epoch_when_world_is_live(
     let Some(launch) = launch else {
         return;
     };
-    bridge.start_hosted_match(launch.zone.clone(), config.mode.clone());
+    let map = match (launch.zone.split_once(':'), config.map.split_once(':')) {
+        (None, Some((namespace, _))) => format!("{namespace}:{}", launch.zone),
+        _ => launch.zone.clone(),
+    };
+    bridge.start_hosted_match(map, config.mode.clone());
     *sent = Some(key);
 }
 
@@ -2577,6 +2585,7 @@ fn apply_room_view(
         facts,
     );
     if is_host && view.phase.in_match() && view.epoch != 0 && *started_epoch != view.epoch {
+        host_match.configure_loading_deadline(view.requires.0 & CONTENT_T6 != 0);
         let applied = apply_host(
             host_match,
             HostMatchEvent::Start {

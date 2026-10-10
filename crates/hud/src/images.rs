@@ -166,6 +166,10 @@ impl HudImages {
         self.iwd_warmed = false;
     }
 
+    pub fn has_zone_image(&self, ns: AssetNamespace, name: &str) -> bool {
+        self.ui_images.has_zone_image(ns, name)
+    }
+
     pub fn set_games_root(&mut self, root: &Path) {
         if self.games_root == root {
             return;

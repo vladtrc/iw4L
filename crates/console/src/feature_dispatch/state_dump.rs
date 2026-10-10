@@ -116,6 +116,7 @@ pub(super) fn audio_dump_section(
     let state = report.map_or("Missing", |report| match report.state {
         frame::ReadinessState::Pending => "Pending",
         frame::ReadinessState::Ready => "Ready",
+        frame::ReadinessState::Degraded => "Degraded",
         frame::ReadinessState::Silent => "Silent",
         frame::ReadinessState::Failed => "Failed",
     });

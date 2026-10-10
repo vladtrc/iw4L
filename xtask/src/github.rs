@@ -35,10 +35,10 @@ pub fn run_cli(root: &Path, args: &[String]) -> Res<()> {
     let commit = git(&["rev-parse", &format!("{rev}^{{commit}}")])?
         .trim()
         .to_string();
-    let remote = git(&["ls-remote", "origin", "refs/heads/master"])?;
+    let remote = git(&["ls-remote", "origin", "refs/heads/main"])?;
     if remote.split_whitespace().next() != Some(commit.as_str()) {
         return Err(format!(
-            "origin/master is not {commit}; push the release commit first"
+            "origin/main is not {commit}; push the release commit first"
         ));
     }
 

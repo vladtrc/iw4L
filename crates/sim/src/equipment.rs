@@ -38,6 +38,7 @@ pub struct ProjectileState {
     pub cleanup_at_ms: i32,
     pub travel_distance: f32,
     pub live: bool,
+    pub detonation_armed: bool,
     pub stuck_pane: Option<u32>,
     pub grounded: bool,
     pub guide: crate::MissileGuide,
@@ -239,6 +240,46 @@ pub(crate) fn spawn_grenade_projectile(
     owner_vel: [f32; 3],
     kind: GrenadeLaunchKind,
 ) -> bool {
+    spawn_grenade_with_velocity(
+        world, owner, weapon, tick, origin, angles, owner_vel, kind, None,
+    )
+}
+
+pub(crate) fn spawn_script_grenade(
+    world: &mut FrameWorld,
+    owner: ClientId,
+    weapon: u32,
+    tick: Tick,
+    origin: [f32; 3],
+    velocity: [f32; 3],
+    fuse_ms: i32,
+) -> bool {
+    spawn_grenade_with_velocity(
+        world,
+        owner,
+        weapon,
+        tick,
+        origin,
+        [270.0, 0.0, 0.0],
+        [0.0; 3],
+        GrenadeLaunchKind::Thrown {
+            remaining_fuse_ms: Some(fuse_ms),
+        },
+        Some(velocity),
+    )
+}
+
+fn spawn_grenade_with_velocity(
+    world: &mut FrameWorld,
+    owner: ClientId,
+    weapon: u32,
+    tick: Tick,
+    origin: [f32; 3],
+    angles: [f32; 3],
+    owner_vel: [f32; 3],
+    kind: GrenadeLaunchKind,
+    scripted_velocity: Option<[f32; 3]>,
+) -> bool {
     let Some(facts) = world.equipment_facts_for(weapon) else {
         return false;
     };
@@ -261,7 +302,8 @@ pub(crate) fn spawn_grenade_projectile(
     } else {
         init_grenade_apos(direction, time_ms, pitch_rate, roll_rate)
     };
-    let velocity = grenade_launch_velocity(direction, &facts, owner_vel);
+    let velocity =
+        scripted_velocity.unwrap_or_else(|| grenade_launch_velocity(direction, &facts, owner_vel));
     let pos = init_grenade_pos(origin, velocity, time_ms);
     let speed = vec3_length(velocity);
     let launch_time = time_ms + fire_grenade_no_draw_ms(speed);
@@ -290,6 +332,7 @@ pub(crate) fn spawn_grenade_projectile(
         cleanup_at_ms,
         travel_distance: 0.0,
         live: true,
+        detonation_armed: false,
         stuck_pane: None,
         grounded: false,
         guide: crate::MissileGuide::default(),
@@ -1449,6 +1492,7 @@ fn arm_impact_payload(
     projectile.guide = crate::MissileGuide::default();
     projectile.grounded = normal[2] > 0.7;
     projectile.detonate_at_ms = Some(contact_time.saturating_add(facts.fuse_time_ms.max(1)));
+    projectile.detonation_armed = false;
     projectile.cleanup_at_ms = contact_time.saturating_add(GRENADE_FUSE_CAP_MS);
     if let Some(ColliderId::Player { client, .. }) = collider {
         projectile.attached_to = player_attachment(world, client, origin);
@@ -1554,7 +1598,7 @@ fn settle_equipment(
         angles[2] = side.atan2(vertical).to_degrees();
         projectile.apos.tr_base = angles;
     }
-    if !facts.timed_detonation {
+    if !facts.timed_detonation && !projectile.detonation_armed {
         projectile.detonate_at_ms = None;
         projectile.cleanup_at_ms = i32::MAX;
     }

@@ -86,11 +86,11 @@ pub use draw_text_cmd::{
     draw_text_render_flags, gfx_cmd_draw_text_size, parse_gfx_cmd_draw_text,
 };
 pub use expr::{
-    ExprError, ExprHost, OP_GETSPLASHDESCRIPTION, OP_GETSPLASHMATERIAL, OP_GETSPLASHTEXT,
-    OP_INKILLCAM, OP_MENUISOPEN, OP_MILLISECONDS, OP_SCOREBOARD_VISIBLE, OP_SECONDSASCOUNTDOWN,
-    OP_SPLASHHASICON, OP_SPLASHROWNUM, OP_TEAMFIELD, OP_UIACTIVE, Operand, PartyFlag, Statement,
-    WeaponLockView, evaluate as evaluate_expression, evaluate_float, evaluate_string,
-    is_expression_true, source_int, source_str,
+    ExprError, ExprHost, MenuParsers, OP_GETSPLASHDESCRIPTION, OP_GETSPLASHMATERIAL,
+    OP_GETSPLASHTEXT, OP_INKILLCAM, OP_MENUISOPEN, OP_MILLISECONDS, OP_SCOREBOARD_VISIBLE,
+    OP_SECONDSASCOUNTDOWN, OP_SPLASHHASICON, OP_SPLASHROWNUM, OP_TEAMFIELD, OP_UIACTIVE, Operand,
+    PartyFlag, Statement, WeaponLockView, evaluate as evaluate_expression, evaluate_float,
+    evaluate_string, is_expression_true, source_int, source_str,
 };
 pub use flashbang::{
     SCREEN_BLEND_BLURRED, SCREEN_BLEND_FLASHED, SCREEN_BLEND_NONE, ShellshockLookParms,

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Scene occupancy storage and plugin. No frontend tess, anim, FX, or GPU."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 asset_game.workspace = true
 asset_material.workspace = true

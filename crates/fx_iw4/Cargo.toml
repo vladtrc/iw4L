@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Retail IW4 FX layouts and pure sim formulas: FxEffectDef/FxElemDef, lifeMs, gravity*800, velocity integrate."
 
+[package.metadata.iw4l]
+layer = "game"
+game = "iw4"
+
 [dependencies]
 blake3 = { version = "1.8", default-features = false }
 libm = { version = "0.2.16", default-features = false }

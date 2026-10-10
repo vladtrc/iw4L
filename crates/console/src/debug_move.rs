@@ -77,10 +77,9 @@ pub(crate) fn register_debug_move_commands(registry: &mut ConsoleRegistry) {
         );
     }
     if registry.resolve("look").is_none() {
-        registry.register(
-            crate::CommandSpec::new("look")
-                .usage("look <yaw> <pitch> — write LookState + authority angles (needs cheats)"),
-        );
+        registry.register(crate::CommandSpec::new("look").usage(
+            "look <yaw> <pitch> | look actor — write LookState + authority angles (needs cheats)",
+        ));
     }
     if registry.resolve("name").is_none() {
         registry.register(
@@ -738,8 +737,13 @@ fn parse_look(
     presented: &PresentedSnapshot,
     id: sim::ClientId,
 ) -> Result<([f32; 3], [f32; 3]), String> {
+    if let [what] = args
+        && what == "actor"
+    {
+        return look_at_nearest_actor(presented, id);
+    }
     if args.len() != 2 {
-        return Err("usage: look <yaw> <pitch>".into());
+        return Err("usage: look <yaw> <pitch> | look actor".into());
     }
     let parse = |s: &str| {
         s.parse::<f32>()
@@ -753,6 +757,51 @@ fn parse_look(
     let mut angles = ps.viewangles;
     angles[1] = parse(&args[0])?;
     angles[0] = parse(&args[1])?;
+    Ok((ps.origin, angles))
+}
+
+/// Aims at the chest of the nearest actor: the script models whose pose is a
+/// multi-node animation tree. A test aid for driving zombie matches.
+fn look_at_nearest_actor(
+    presented: &PresentedSnapshot,
+    id: sim::ClientId,
+) -> Result<([f32; 3], [f32; 3]), String> {
+    let Some(ps) = presented.alive_player(id) else {
+        return Err("look: not Alive — spawn a class first".into());
+    };
+    let snapshot = presented
+        .snapshot()
+        .ok_or_else(|| "look: no snapshot".to_owned())?;
+    let eye = [
+        ps.origin[0],
+        ps.origin[1],
+        ps.origin[2] + ps.view_height_current,
+    ];
+    let target = snapshot
+        .meta
+        .entity_dobjs
+        .iter()
+        .filter(|(_, state)| state.tree.as_ref().is_some_and(|tree| tree.nodes.len() > 1))
+        .filter_map(|(owner, _)| {
+            let id = owner.script_model()?;
+            let mover = snapshot.meta.script_movers.iter().find(|m| m.id == id)?;
+            Some([
+                mover.state.tr_base[0],
+                mover.state.tr_base[1],
+                mover.state.tr_base[2] + 52.0,
+            ])
+        })
+        .min_by(|a, b| {
+            let d = |p: &[f32; 3]| (0..3).map(|i| (p[i] - eye[i]).powi(2)).sum::<f32>();
+            d(a).total_cmp(&d(b))
+        })
+        .ok_or_else(|| "look: no actor in view of the snapshot".to_owned())?;
+    let delta = [target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]];
+    let flat = (delta[0] * delta[0] + delta[1] * delta[1]).sqrt();
+    let mut angles = ps.viewangles;
+    angles[1] = delta[1].atan2(delta[0]).to_degrees();
+    // Within the player's pitch clamp, or the move never settles.
+    angles[0] = (-delta[2].atan2(flat).to_degrees()).clamp(-85.0, 85.0);
     Ok((ps.origin, angles))
 }
 

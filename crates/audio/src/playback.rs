@@ -130,12 +130,16 @@ fn apply_svc_local_sound(
     mut cmds: MessageReader<SvcLocalSound>,
     adopted: Res<LastAdoptedSnapshot>,
     announcer: Res<crate::match_voices::AnnouncerRoutes>,
+    family: Option<Res<crate::ambient::SoundBankNamespace>>,
     mut play: MessageWriter<crate::AliasCommand>,
 ) {
+    let Some(family) = family.map(|family| family.namespace) else {
+        return;
+    };
     for cmd in cmds.read() {
         let Some((namespace, alias)) = adopted
             .sound_alias_name(cmd.index)
-            .map(|alias| announcer.route(alias))
+            .map(|alias| announcer.route(alias, family))
             .map(|(namespace, alias)| (namespace, alias.to_owned()))
         else {
             diag::warn!(

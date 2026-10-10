@@ -370,6 +370,7 @@ pub enum ReadinessState {
     #[default]
     Pending,
     Ready,
+    Degraded,
     Silent,
     Failed,
 }
@@ -388,7 +389,10 @@ impl WorldReadiness {
     pub fn ready_for(self, generation: WorldGeneration) -> bool {
         generation.0.is_some()
             && self.generation == generation
-            && matches!(self.state, ReadinessState::Ready | ReadinessState::Silent)
+            && matches!(
+                self.state,
+                ReadinessState::Ready | ReadinessState::Degraded | ReadinessState::Silent
+            )
     }
 
     pub fn failed_for(self, generation: WorldGeneration) -> bool {

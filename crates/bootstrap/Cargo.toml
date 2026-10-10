@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Composition root: assembles the bevy App for menu / map / play runs."
 
+[package.metadata.iw4l]
+layer = "session"
+
 [features]
 bevy-debug = ["bevy/debug", "bevy/track_location"]
 # Bevy's own `tracing` spans, written as a Chrome trace beside the binary.

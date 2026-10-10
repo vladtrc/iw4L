@@ -27,7 +27,7 @@ pub(crate) struct PcmReservation(usize);
 
 impl PcmReservation {
     pub fn reserve(bytes: usize) -> Result<Self, crate::media::PcmError> {
-        if let Ok(before) = LIVE.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |live| {
+        if let Ok(before) = LIVE.try_update(Ordering::AcqRel, Ordering::Relaxed, |live| {
             live.checked_add(bytes)
                 .filter(|&total| total <= PCM_LIMIT_BYTES)
         }) {

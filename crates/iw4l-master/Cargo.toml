@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Standalone relay-only IW4L master, browser and opaque packet service."
 
+[package.metadata.iw4l]
+layer = "neutral"
+
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }

@@ -18,6 +18,7 @@ pub(super) struct WeaponCombatProjection {
     location_damage: Option<[f32; HITLOC_COUNT]>,
     aim_assist: weapon_iw4::AimAssistRanges,
     melee_only: bool,
+    burst_delay_ms: Option<i32>,
 }
 
 fn captured_input(f: WeaponBodyFacts, melee_charge_anim: bool) -> CapturedCombatInput {
@@ -155,6 +156,7 @@ impl WeaponCombatProjection {
         input.alternate_weapon = registry.alternate_of(id);
         Some(Self {
             input,
+            burst_delay_ms: f.burst_delay_ms,
             location_damage: f.location_damage_mult,
             aim_assist: weapon_iw4::AimAssistRanges {
                 auto_aim: f.auto_aim_range,
@@ -177,7 +179,7 @@ impl WeaponCombatProjection {
         let fire_type = weapon_iw4::FireType::from_i32(input.fire_type)
             .map_err(|_| MissingCombatFacts::UnknownFireType)?;
         input.burst_cooldown_ms = if fire_type.is_burst() {
-            rules.burst_cooldown_ms
+            self.burst_delay_ms.unwrap_or(rules.burst_cooldown_ms)
         } else {
             0
         };

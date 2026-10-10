@@ -234,6 +234,24 @@ pub(crate) fn string_index(world: &mut World, value: &Value) -> Result<i32, Stri
         .ok_or_else(|| "exceeded maximum number of localized strings".into())
 }
 
+/// A localized string and the values T5 fills its `&&1`.. with, as one
+/// configstring entry; without values, the plain string.
+pub(crate) fn string_index_with_args(world: &mut World, args: &[Value]) -> Result<i32, String> {
+    match args {
+        [Value::LocalizedString(key), extra @ ..] if !extra.is_empty() => {
+            let mut text = key.to_string();
+            for value in extra {
+                text.push(crate::HUD_PRINT_ARG_SEPARATOR);
+                text.push_str(&crate::script::runtime::to_text(value).unwrap_or_default());
+            }
+            FrameWorld::from_world(world)
+                .hud_string_index(&text)
+                .ok_or_else(|| "exceeded maximum number of localized strings".into())
+        }
+        _ => string_index(world, super::args::arg(args, 0)?),
+    }
+}
+
 fn set_flag(elem: &mut HudElem, flag: i32, value: &Value, name: &str) -> Result<(), String> {
     if number(name, value)? != 0.0 {
         elem.flags |= flag;
@@ -530,7 +548,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
     });
     registry.register(Method, "settext", |world, receiver, args| {
         let (_, slot) = slot_of(world, receiver)?;
-        let text = string_index(world, arg(args, 0)?)?;
+        let text = string_index_with_args(world, args)?;
         edit(world, slot, |s| {
             s.elem.elem_type = HE_TYPE_TEXT;
             s.elem.text = text;

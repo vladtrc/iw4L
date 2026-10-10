@@ -10,7 +10,7 @@ use crate::material_images::{ZoneUiImage, ZoneUiRgba};
 static NEXT_PUBLICATION: AtomicU64 = AtomicU64::new(1);
 type UiKey = (AssetNamespace, String);
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct UiImageBuild {
     images: HashMap<UiKey, String>,
     fallbacks: HashMap<UiKey, String>,
@@ -120,6 +120,17 @@ impl UiImagePublication {
         self.0.id
     }
 
+    /// This publication plus one match's own zone images, as a new publication.
+    pub fn with_zone_images(
+        &self,
+        namespace: AssetNamespace,
+        images: impl IntoIterator<Item = (String, ZoneUiImage)>,
+    ) -> Self {
+        let mut build = self.0.build.clone();
+        build.zone_images(namespace, images);
+        build.publish()
+    }
+
     pub(crate) fn archive(
         &self,
         namespace: AssetNamespace,
@@ -167,6 +178,9 @@ impl UiImagePublication {
 
     pub fn zone_image(&self, namespace: AssetNamespace, material: &str) -> Option<ZoneUiRgba> {
         let image = self.0.build.zone.get(&key(namespace, material))?;
+        if image.rgba.is_some() {
+            return image.rgba.clone();
+        }
         match crate::decode_iwi_rgba(&image.iwi) {
             Ok((width, height, rgba)) => Some((width, height, Arc::new(rgba))),
             Err(error) => {

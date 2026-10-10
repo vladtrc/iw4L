@@ -602,10 +602,16 @@ fn pose_remote_bodies(
                     .unwrap_or_default(),
             })
         }
-        Some(sources) if sources.multiplayer_atr().is_none() => {
+        Some(sources)
+            if sources.family() != Some(asset_anim::AssetNamespace::T6)
+                && sources.multiplayer_atr().is_none() =>
+        {
             Some(RenderGapCause::MultiplayerAtrAbsent)
         }
-        Some(sources) if sources.playeranim_script().is_none() => {
+        Some(sources)
+            if sources.family() != Some(asset_anim::AssetNamespace::T6)
+                && sources.playeranim_script().is_none() =>
+        {
             Some(RenderGapCause::PlayeranimScriptAbsent)
         }
         Some(sources) => match sources.compiled() {

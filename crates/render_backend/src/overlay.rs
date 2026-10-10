@@ -267,6 +267,15 @@ pub fn overlay_particle_cloud_tess_code_constants(
         );
         if slot == 0 {
             sources.set_constant_rows(
+                render_material::CODE_PARTICLE_CLOUD_SIZE,
+                &[float4_bits([cloud.size0, cloud.size1, 0.0, 0.0])],
+            );
+            let velocity = Vec3::from_array(cloud.pos) - Vec3::from_array(cloud.axis_or_vel);
+            sources.set_constant_rows(
+                render_material::CODE_PARTICLE_CLOUD_VELOCITY,
+                &[float4_bits([velocity.x, velocity.y, velocity.z, 0.0])],
+            );
+            sources.set_constant_rows(
                 u16::from(fx_iw4::FX_CODE_PARTICLE_CLOUD_COLOR),
                 &[float4_bits(color)],
             );

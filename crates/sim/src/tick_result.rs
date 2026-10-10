@@ -22,6 +22,8 @@ pub enum FireCommandRefusal {
     NotAlive,
     MissingPlayer,
     StaleCommand,
+    /// The match's game has no known movement or weapon rules.
+    RuleUnknown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

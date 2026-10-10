@@ -46,6 +46,10 @@ pub struct MapFacts {
     pub t5_teamset: Option<String>,
 
     pub objective_visuals: asset_game::ObjectiveVisuals,
+
+    pub path_nodes: Vec<asset_world::PathNode>,
+
+    pub hud_menus: asset_game::SessionHudMenus,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -57,6 +61,13 @@ pub struct PreparedMap {
 
     pub facts: MapFacts,
     pub gaps: PreparedGaps,
+}
+
+/// Installed map identity, owned and retired by the match transaction.
+#[derive(Resource, Clone, Debug)]
+pub struct SessionMapIdentity {
+    pub namespace: Option<asset_core::AssetNamespace>,
+    pub zone: String,
 }
 
 #[derive(Clone, Debug, Default, Resource)]

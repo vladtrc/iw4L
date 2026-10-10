@@ -118,9 +118,27 @@ impl WeaponCatalog {
             hide_tags: Vec::new(),
             sounds: capture_t6_sounds(weapon),
             combat_fx: WeaponCombatFx {
+                view_flash_hint: weapon
+                    .def_loaded_asset_name(fastfile_t6::weapon::def::VIEW_FLASH_EFFECT)
+                    .map(t6_model_name),
+                world_flash_hint: weapon
+                    .def_loaded_asset_name(fastfile_t6::weapon::def::WORLD_FLASH_EFFECT)
+                    .map(t6_model_name),
+                view_shell_eject_hint: weapon
+                    .def_loaded_asset_name(fastfile_t6::weapon::def::VIEW_SHELL_EJECT_EFFECT)
+                    .map(t6_model_name),
+                world_shell_eject_hint: weapon
+                    .def_loaded_asset_name(fastfile_t6::weapon::def::WORLD_SHELL_EJECT_EFFECT)
+                    .map(t6_model_name),
+                view_last_shot_eject_hint: weapon
+                    .def_loaded_asset_name(fastfile_t6::weapon::def::VIEW_LAST_SHOT_EJECT_EFFECT)
+                    .map(t6_model_name),
+                world_last_shot_eject_hint: weapon
+                    .def_loaded_asset_name(fastfile_t6::weapon::def::WORLD_LAST_SHOT_EJECT_EFFECT)
+                    .map(t6_model_name),
                 explosion_hint: weapon
-                    .def_asset_name(fastfile_t6::weapon::def::PROJ_EXPLOSION_EFFECT)
-                    .map(str::to_owned),
+                    .def_loaded_asset_name(fastfile_t6::weapon::def::PROJ_EXPLOSION_EFFECT)
+                    .map(t6_model_name),
                 ..WeaponCombatFx::empty(crate::AssetNamespace::T6)
             },
             combat_slots: CombatFxSlots::default(),
@@ -258,6 +276,7 @@ pub(super) fn capture_t6_body_facts(w: fastfile_t6::weapon::WeaponView<'_>) -> W
     let mut facts = WeaponBodyFacts {
         body_resolved: w.has_def(),
         fire_time_ms: w.def_i32(d::FIRE_TIME),
+        burst_delay_ms: w.has_def().then(|| w.def_i32(d::BURST_DELAY_TIME)),
         clip_size: w.variant_i32(v::CLIP_SIZE),
         weap_type: remap_t6_weap_type(w.def_i32(d::WEAP_TYPE)),
         weap_class: remap_t6_weap_class(w.def_i32(d::WEAP_CLASS)),

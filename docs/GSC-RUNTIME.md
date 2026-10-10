@@ -41,11 +41,13 @@ non-client slot.
 Names are normalized; traversal is rejected. The transaction announces its script
 outcome on stdout for a controller: `gsc: installed …` with the program fingerprint
 and module/function/native/entry counts once the world is published, `gsc: refused …
-stage=compile|install|entry fault="…"` when the load stopped at the script.
+stage=compile|install|entry fault="…"` when the load stopped at the script, or
+`stage=program unknown=<id>` when the match's game has no script program for it.
 `crates/approved_tests` records and asserts both.
 
-Natives are linked against a `Catalog` of the game's builtins (generated into
-`script/profile/iw4_catalog.rs`, split into function and method namespaces), not against the
+Natives are linked against a `Catalog` of the game's builtins (`gsc::Catalog`; each
+game crate owns its list, e.g. the generated `game_iw4/src/catalog.rs`, split into
+function and method namespaces, and its startup roots and entries), not against the
 registry. An unqualified call resolves to a function in the same file, then a builtin
 in the call's namespace, then a unique include. Qualified names and `thread` calls
 never resolve to builtins. A developer builtin used as a statement compiles to nothing

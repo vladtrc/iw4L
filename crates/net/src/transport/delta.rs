@@ -276,7 +276,10 @@ fn encode_projectile(out: &mut WireWriter, projectile: &ProjectileState) {
     }
     out.put_i32(projectile.cleanup_at_ms);
     out.put_f32(projectile.travel_distance);
-    out.put_u32(u32::from(projectile.live));
+    out.put_u32(
+        u32::from(projectile.live)
+            | (u32::from(projectile.live && projectile.detonation_armed) << 1),
+    );
     encode_trajectory(out, &projectile.pos);
     encode_trajectory(out, &projectile.apos);
     out.put_i32(projectile.entnum);
@@ -318,6 +321,7 @@ fn decode_trajectory(input: &mut WireReader<'_>) -> Result<entity_iw4::Trajector
 }
 
 fn decode_projectile(input: &mut WireReader<'_>) -> Result<ProjectileState, WireError> {
+    let detonation_armed;
     Ok(ProjectileState {
         id: ProjectileId(input.get_u32()?),
         owner: ClientId(input.get_u32()?),
@@ -332,7 +336,11 @@ fn decode_projectile(input: &mut WireReader<'_>) -> Result<ProjectileState, Wire
         },
         cleanup_at_ms: input.get_i32()?,
         travel_distance: input.get_f32()?,
-        live: input.get_u32()? != 0,
+        live: {
+            let flags = input.get_u32()?;
+            detonation_armed = flags & 2 != 0;
+            flags & 1 != 0
+        },
         pos: decode_trajectory(input)?,
         apos: decode_trajectory(input)?,
         entnum: input.get_i32()?,
@@ -349,6 +357,7 @@ fn decode_projectile(input: &mut WireReader<'_>) -> Result<ProjectileState, Wire
             passed: input.get_u8()? != 0,
         },
         attached_to: decode_missile_target(input)?,
+        detonation_armed,
     })
 }
 

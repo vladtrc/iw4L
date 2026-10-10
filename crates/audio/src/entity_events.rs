@@ -265,12 +265,15 @@ fn play_cs_sound_alias(
         "cs_sound",
         "audio: cs sound `{alias}` local={local}"
     );
-    let (namespace, alias) = alias
-        .split_once(':')
-        .and_then(|(ns, name)| {
-            asset_core::AssetNamespace::parse(ns).map(|ns| (ns, name.to_owned()))
-        })
-        .unwrap_or((asset_core::AssetNamespace::Iw4, alias));
+    let Some((namespace, alias)) = alias.split_once(':').and_then(|(ns, name)| {
+        asset_core::AssetNamespace::parse(ns).map(|ns| (ns, name.to_owned()))
+    }) else {
+        diag::warn!(
+            Audio,
+            "audio: EV_SOUND_ALIAS `{alias}` names no game's alias (typed gap)"
+        );
+        return;
+    };
     play.write(crate::AliasCommand::Play(PlayAlias {
         event,
         namespace,

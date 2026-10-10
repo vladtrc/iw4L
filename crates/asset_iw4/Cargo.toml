@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Retail IW4 asset layouts — the IR every fastfile container decodes into."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 d3d9_decl.workspace = true
 d3d9_state.workspace = true

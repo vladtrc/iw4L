@@ -14,7 +14,7 @@ pub(crate) struct PendingTicket {
 impl PendingBudget {
     pub fn reserve(&self) -> Option<PendingTicket> {
         self.0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < crate::runtime::LOGICAL_INSTANCES).then_some(count + 1)
             })
             .ok()?;

@@ -124,6 +124,7 @@ pub struct ClientMatchState {
     pub deaths: i32,
     pub score: i32,
     pub kill_streak: i32,
+    pub zombie_stats: [i32; 3],
     pub radar: RadarMode,
     pub radar_blocked: bool,
     pub remote_missile: Option<RemoteMissile>,
@@ -230,6 +231,7 @@ impl ClientMatchState {
             kills: self.kills,
             deaths: self.deaths,
             kill_streak: self.kill_streak,
+            zombie_stats: self.zombie_stats,
             radar: self.radar,
             radar_blocked: self.radar_blocked,
             remote_missile: self.remote_missile,
@@ -289,6 +291,7 @@ impl ClientMatchState {
         self.kills = meta.kills;
         self.deaths = meta.deaths;
         self.kill_streak = meta.kill_streak;
+        self.zombie_stats = meta.zombie_stats;
         self.radar = meta.radar;
         self.radar_blocked = meta.radar_blocked;
         self.remote_missile = meta.remote_missile;

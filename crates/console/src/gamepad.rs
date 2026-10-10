@@ -182,6 +182,9 @@ pub(crate) fn drive_menus_with_pad(
     gamepads: Query<&Gamepad>,
     active: Res<frame::ActivePad>,
     script_menus: Option<Res<hud::ScriptMenus>>,
+    frontend: Res<frame::UnifiedFrontend>,
+    native_menu: Res<frame::NativeGameMenu>,
+    screen: Res<frame::AppScreen>,
     (devices, console, capture): (
         Res<frame::InputDevices>,
         Res<crate::ConsoleState>,
@@ -208,7 +211,10 @@ pub(crate) fn drive_menus_with_pad(
         *repeat = None;
         return;
     }
-    if !script_menus.is_some_and(|menus| menus.captures_input()) {
+    if !native_menu.0
+        && !(frontend.0 && *screen == frame::AppScreen::MainMenu)
+        && !script_menus.is_some_and(|menus| menus.captures_input())
+    {
         *repeat = None;
         return;
     }

@@ -1,3 +1,7 @@
+pub mod actor_anims;
+pub mod actor_brain;
+pub mod actor_nav;
+pub(crate) mod actors;
 pub mod args;
 pub mod arrays;
 pub mod client_effects;
@@ -17,6 +21,8 @@ pub mod registry;
 pub mod restart;
 mod sentry_placement;
 pub mod spectators;
+pub(crate) mod t6_gametype;
+pub(crate) mod t6_zombies;
 pub mod tables;
 pub mod triggers;
 pub mod turrets;

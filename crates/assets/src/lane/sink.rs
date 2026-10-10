@@ -192,7 +192,7 @@ pub(crate) struct ZoneWalkSink {
 
     pub light_def_table: usize,
     pub light_def_bodies: usize,
-    strings_t5: fastfile_t5::ScriptStrings,
+    pub(crate) strings_t5: fastfile_t5::ScriptStrings,
     strings_iw5: fastfile_iw5::ScriptStrings,
     iw5_surfaces:
         HashMap<fastfile_iw5::Ptr, (Option<fastfile_iw5::Ptr>, Option<fastfile_iw5::Ptr>)>,
@@ -807,6 +807,30 @@ impl fastfile_t5::AssetLinkSink for CommonWalkSink {
                 .unwrap_or(asset_world::MapXModelSceneAsset::Unavailable {
                     reason: "T5 common XModel skeleton capture failed",
                 });
+                // Surfaces drawing a material another zone holds keep its name.
+                if let (asset_world::MapXModelSceneAsset::T5(skel), Some(handles)) =
+                    (&asset, geometry.material_handles)
+                {
+                    let names = skel
+                        .surface_materials
+                        .iter()
+                        .enumerate()
+                        .map(|(surface, bound)| {
+                            let slot = fastfile_t5::Ptr {
+                                block: handles.block,
+                                offset: handles.offset + (surface * 4) as u32,
+                            };
+                            bound.is_none().then(|| {
+                                let name = stream.cstr(self.material_name_ptr(slot)?).ok()?;
+                                Some(asset_core::AssetRef::bare_name(name).to_owned())
+                            })?
+                        })
+                        .collect();
+                    self.scene_models.note_foreign_materials(
+                        asset_world::MapXModelAssetKey(name.to_owned()),
+                        names,
+                    );
+                }
                 self.scene_models
                     .insert(asset_world::MapXModelAssetKey(name.to_owned()), asset);
             }

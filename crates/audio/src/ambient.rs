@@ -385,7 +385,7 @@ pub(crate) fn install_sound_bank(
     match loaded {
         Ok((bank, gaps)) => {
             epoch.bump();
-            if iwd.is_empty() {
+            if iwd.is_empty() && namespace != AssetNamespace::T6 {
                 diag::warn!(
                     Audio,
                     "audio: no IWD sound archives for `{}` — streamed aliases will gap",

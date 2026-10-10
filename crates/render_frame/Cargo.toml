@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Immutable R output: frontend source packet, dest-ring records, SMC/pretess lists."
 
+[package.metadata.iw4l]
+layer = "game"
+game = "iw4"
+
 [dependencies]
 dpvs_iw4.workspace = true
 asset_iw4.workspace = true

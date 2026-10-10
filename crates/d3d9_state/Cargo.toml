@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "D3D9 render-state, blend, compare, cull, and sampler value semantics. No IW4 knowledge."
 
+[package.metadata.iw4l]
+layer = "neutral"
+
 [dependencies]
 
 [lints]

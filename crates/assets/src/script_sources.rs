@@ -86,6 +86,12 @@ impl ScriptSources {
         self.entities.as_deref()
     }
 
+    pub fn configs(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.configs
+            .iter()
+            .map(|(name, text)| (name.as_str(), text.as_str()))
+    }
+
     pub fn config(&self, name: &str) -> Option<&str> {
         self.configs.get(&normalize(name)).map(String::as_str)
     }
@@ -99,7 +105,11 @@ impl ScriptSources {
 
     pub(crate) fn capture(&mut self, name: &str, data: &[u8], compressed: bool) {
         let name = normalize(name);
-        if name.ends_with(".cfg") || name.ends_with(".shock") || name == "radiant/keys.txt" {
+        if name.ends_with(".cfg")
+            || name.ends_with(".shock")
+            || name.ends_with(".atr")
+            || name == "radiant/keys.txt"
+        {
             if let Some(text) = asset_world::decode_rawfile_text(data, compressed) {
                 self.configs.insert(name, text);
             }

@@ -342,6 +342,19 @@ pub enum MapXModelSceneAsset {
     Unavailable { reason: &'static str },
 }
 
+impl MapXModelSceneAsset {
+    /// The game the model was read from.
+    pub fn namespace(&self) -> Option<asset_core::AssetNamespace> {
+        Some(match self {
+            Self::Iw4(_) => asset_core::AssetNamespace::Iw4,
+            Self::T5(_) => asset_core::AssetNamespace::T5,
+            Self::Iw5(_) => asset_core::AssetNamespace::Iw5,
+            Self::T6(_) => asset_core::AssetNamespace::T6,
+            Self::Unavailable { .. } => return None,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Default, Resource)]
 pub struct MapXModelSceneCatalog {
     assets: BTreeMap<MapXModelAssetKey, MapXModelSceneAsset>,
@@ -359,6 +372,9 @@ pub struct MapXModelSceneCatalog {
 
     surface_materials: BTreeMap<MapXModelAssetKey, Vec<Option<crate::MaterialIndex>>>,
     resolved: bool,
+    /// Per surface, the name of a material another zone holds (a `,name`
+    /// reference), for surfaces the capturing walk could not bind.
+    foreign_materials: BTreeMap<MapXModelAssetKey, Vec<Option<String>>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -444,6 +460,26 @@ impl MapXModelSceneCatalog {
         self.assets.entry(key).or_insert(asset);
     }
 
+    /// The walk-local materials this catalog's model surfaces draw with.
+    pub fn walk_materials(&self) -> std::collections::BTreeSet<usize> {
+        self.assets
+            .values()
+            .filter_map(|asset| match asset {
+                MapXModelSceneAsset::Iw4(skel)
+                | MapXModelSceneAsset::T5(skel)
+                | MapXModelSceneAsset::Iw5(skel)
+                | MapXModelSceneAsset::T6(skel) => Some(skel),
+                MapXModelSceneAsset::Unavailable { .. } => None,
+            })
+            .flat_map(|skel| {
+                skel.surface_materials
+                    .iter()
+                    .flatten()
+                    .map(|local| local.get())
+            })
+            .collect()
+    }
+
     pub fn remap_walk_materials(&mut self, donor_to_host: &[usize]) {
         for asset in self.assets.values_mut() {
             let (MapXModelSceneAsset::Iw4(skel)
@@ -464,7 +500,55 @@ impl MapXModelSceneCatalog {
         }
     }
 
+    /// Records the foreign material names of a model's surfaces.
+    pub fn note_foreign_materials(&mut self, key: MapXModelAssetKey, names: Vec<Option<String>>) {
+        if names.iter().any(Option::is_some) {
+            self.foreign_materials.insert(key, names);
+        }
+    }
+
+    /// Every foreign material name a surface here waits for.
+    pub fn foreign_material_names(&self) -> std::collections::BTreeSet<String> {
+        self.foreign_materials
+            .values()
+            .flatten()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    /// Binds surfaces waiting for a foreign material to the walk-local
+    /// material `bind` names for it.
+    pub fn bind_foreign_materials(&mut self, bind: impl Fn(&str) -> Option<usize>) -> usize {
+        let mut bound = 0;
+        for (key, names) in &self.foreign_materials {
+            let Some(
+                MapXModelSceneAsset::Iw4(skel)
+                | MapXModelSceneAsset::T5(skel)
+                | MapXModelSceneAsset::Iw5(skel)
+                | MapXModelSceneAsset::T6(skel),
+            ) = self.assets.get_mut(key)
+            else {
+                continue;
+            };
+            let skel = Arc::make_mut(skel);
+            for (slot, name) in skel.surface_materials.iter_mut().zip(names) {
+                if slot.is_none()
+                    && let Some(host) = name.as_deref().and_then(&bind)
+                {
+                    *slot = Some(asset_core::WalkLocalMaterialIndex::from_walk(host));
+                    bound += 1;
+                }
+            }
+        }
+        bound
+    }
+
     pub fn absorb_captured(&mut self, mut earlier: Self) {
+        // The same model captured by another walk waits for the same names.
+        for (key, names) in std::mem::take(&mut earlier.foreign_materials) {
+            self.foreign_materials.entry(key).or_insert(names);
+        }
         for (index, key) in earlier.order.into_iter().enumerate() {
             let asset = earlier
                 .assets
@@ -494,6 +578,8 @@ impl MapXModelSceneCatalog {
     pub fn retain_names(&mut self, names: &std::collections::BTreeSet<String>) {
         self.assets.retain(|key, _| names.contains(&key.0));
         self.surface_materials
+            .retain(|key, _| names.contains(&key.0));
+        self.foreign_materials
             .retain(|key, _| names.contains(&key.0));
         let mut at = 0;
         self.order.retain(|key| {

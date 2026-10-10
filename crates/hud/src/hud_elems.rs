@@ -226,6 +226,7 @@ pub(crate) fn update_hud_elems(
     mut ui_sound: MessageWriter<UiPlaySound>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
     entities: Query<(&CEntity, &CEntityRuntime)>,
+    mode: Option<Res<game_api::ModeRules>>,
 ) {
     if !surface.is_ready() {
         hide(&mut pass);
@@ -293,7 +294,19 @@ pub(crate) fn update_hud_elems(
             };
             let (material_namespace, material) = match asset_core::AssetKey::parse(material) {
                 Ok(key) if key.kind == asset_core::AssetKind::Material => (key.namespace, key.name),
-                _ => (crate::images::HUD_CHROME_NAMESPACE, material.to_owned()),
+                // A bare name another game's zone supplies (a T5 zombie
+                // script's chalk or perk icon) draws from that zone.
+                _ => [
+                    asset_core::AssetNamespace::T5,
+                    asset_core::AssetNamespace::Iw5,
+                    asset_core::AssetNamespace::T6,
+                ]
+                .into_iter()
+                .find(|&ns| hud_images.has_zone_image(ns, material))
+                .map_or(
+                    (crate::images::HUD_CHROME_NAMESPACE, material.to_owned()),
+                    |ns| (ns, material.to_owned()),
+                ),
             };
             if hud_images
                 .get(material_namespace, &material, &mut images)
@@ -319,7 +332,18 @@ pub(crate) fn update_hud_elems(
                     h: size,
                 }
             } else {
-                hud_elem_placement(surface.placement(), elem, cg_time, 0.0, font_height)
+                // IW4 grows a material to the elem's font height; T5 zombie
+                // scripts give their chalk a large font scale for the round
+                // number it may later show, and draw the material at its size.
+                let floor = if mode
+                    .as_ref()
+                    .is_some_and(|mode| !mode.hud.material_font_floor)
+                {
+                    0.0
+                } else {
+                    font_height
+                };
+                hud_elem_placement(surface.placement(), elem, cg_time, 0.0, floor)
             };
             cmds.push(Draw2dCmd {
                 material_namespace,
@@ -340,6 +364,12 @@ pub(crate) fn update_hud_elems(
             continue;
         }
 
+        // Black Ops picks a script text elem's font and size by rules only its
+        // executable holds (docs/fidelity/t5.md, waiting on the maintainer).
+        if mode.as_ref().is_some_and(|mode| !mode.hud.script_text) {
+            gaps.raise(GapCause::HudElemT5TextRule);
+            continue;
+        }
         let Some(text) = elem_text(elem, meta, strings, &input, cg_time, &mut gaps) else {
             continue;
         };

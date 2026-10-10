@@ -560,22 +560,33 @@ fn clip_slide(velocity: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
 }
 
 fn apply_entity_links(world: &mut World) {
-    let mut runtime = world.resource_mut::<Runtime>();
-    let linked: Vec<(u64, Link)> = runtime
+    let linked: Vec<(u64, Link)> = world
+        .resource::<Runtime>()
         .entities
         .iter()
         .filter_map(|(id, e)| Some((*id, e.linked_to.clone()?)))
         .collect();
     for (id, link) in linked {
-        if !runtime.live(&link.parent) {
-            runtime.entities.get_mut(&id).unwrap().linked_to = None;
+        if !world.resource::<Runtime>().live(&link.parent) {
+            world
+                .resource_mut::<Runtime>()
+                .entities
+                .get_mut(&id)
+                .unwrap()
+                .linked_to = None;
             continue;
         }
-        let field = |runtime: &mut Runtime, name| match runtime.object_field(link.parent, name) {
+        // A player parent's pose lives in its player state, not its fields.
+        let field = |world: &mut World, name| match super::players::entity_field(
+            world,
+            link.parent,
+            name,
+        ) {
             Value::Vector(v) => v,
             _ => [0.0; 3],
         };
-        let (base, base_angles) = (field(&mut runtime, "origin"), field(&mut runtime, "angles"));
+        let (base, base_angles) = (field(world, "origin"), field(world, "angles"));
+        let mut runtime = world.resource_mut::<Runtime>();
         let axis = math_iw4::angles_to_axis(base_angles);
         let offset = link.tag_offset.unwrap_or([0.0; 3]);
         let local = std::array::from_fn(|i| offset[i] + link.origin[i]);

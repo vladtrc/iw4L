@@ -15,6 +15,7 @@ pub(crate) struct Shown {
     hidden: bool,
     shown_to: u64,
     solid: bool,
+    contents: i32,
     moving: bool,
 }
 
@@ -29,6 +30,7 @@ struct Wanted {
     hidden: bool,
     shown_to: u64,
     solid: bool,
+    contents: i32,
     part_ops: Vec<(Arc<str>, bool)>,
     anim_op: Option<Option<Arc<str>>>,
 }
@@ -165,6 +167,7 @@ pub(crate) fn sync_presence(world: &mut World) {
     super::controls::sync_script_locks(world);
     super::triggers::dispatch_triggers(world);
     present(world, now);
+    super::actor_anims::present(world);
     publish_killcam_cameras(world);
     settle_collision(world);
     resolve_link_tags(world);
@@ -242,6 +245,7 @@ fn present(world: &mut World, now: i32) {
             hidden: mover.state.e_flags & entity_iw4::CG_SCRIPT_MOVER_NODRAW != 0,
             shown_to: mover.shown_to,
             solid: !mover.nonsolid,
+            contents: 0,
             moving: false,
         });
         let posed = !near(shown.origin, want.origin) || !near_angles(shown.angles, want.angles);
@@ -257,7 +261,9 @@ fn present(world: &mut World, now: i32) {
         if posed || shown.moving {
             frame.set_script_mover_pose(mover.state.number, now, want.origin, want.angles);
         }
-        let reshaped = want.model != shown.model || want.attachments != shown.attachments;
+        let reshaped = want.model != shown.model
+            || want.attachments != shown.attachments
+            || want.contents != shown.contents;
         if reshaped || !want.part_ops.is_empty() || want.anim_op.is_some() {
             present_model(&mut frame, &want);
         }
@@ -272,6 +278,7 @@ fn present(world: &mut World, now: i32) {
                 hidden: want.hidden,
                 shown_to: want.shown_to,
                 solid: want.solid,
+                contents: want.contents,
                 moving: posed,
             },
         ));
@@ -386,6 +393,7 @@ fn collect_wanted(world: &mut World) -> Vec<Wanted> {
         let anim_op = entity.anim_op.take();
         let attachments = entity.attachments.clone();
         let collision_only = matches!(entity.kind, EntityKind::Missile(_));
+        let contents = entity.contents;
         let unchanged = part_ops.is_empty()
             && anim_op.is_none()
             && runtime.shown.get(&object).is_some_and(|shown| {
@@ -393,6 +401,7 @@ fn collect_wanted(world: &mut World) -> Vec<Wanted> {
                     && shown.hidden == hidden
                     && shown.shown_to == shown_to
                     && shown.solid == solid
+                    && shown.contents == contents
                     && shown.model == model
                     && shown.attachments == attachments
                     && near(shown.origin, origin)
@@ -412,6 +421,7 @@ fn collect_wanted(world: &mut World) -> Vec<Wanted> {
             hidden,
             shown_to,
             solid,
+            contents,
             part_ops,
             anim_op,
         });
@@ -424,7 +434,15 @@ fn present_model(frame: &mut FrameWorld, want: &Wanted) {
         .model
         .as_deref()
         .and_then(|model| frame.model_capability(model))
-        .flatten();
+        .flatten()
+        .map(|capability| {
+            if want.contents == 0 {
+                return capability;
+            }
+            let mut capability = (*capability).clone();
+            capability.contents = Some(want.contents as u32);
+            Arc::new(capability)
+        });
     let anim = want
         .anim_op
         .as_ref()
@@ -435,7 +453,10 @@ fn present_model(frame: &mut FrameWorld, want: &Wanted) {
     match (&want.model, row.dobj.as_mut()) {
         (None, _) => row.dobj = None,
         (Some(model), Some(dobj)) => {
-            if dobj.current_model != **model {
+            if dobj.current_model != **model
+                || dobj.capability.as_ref().and_then(|cap| cap.contents)
+                    != capability.as_ref().and_then(|cap| cap.contents)
+            {
                 dobj.replace_model(model, capability);
             }
         }

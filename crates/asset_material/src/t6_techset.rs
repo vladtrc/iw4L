@@ -313,7 +313,7 @@ enum EngineValue {
     Literal([f32; 4]),
 }
 
-fn engine_value(name: &str) -> EngineValue {
+fn engine_value(name: &str, reflection: &Reflection) -> EngineValue {
     use EngineValue::{Code, Literal};
     match name {
         "viewProjectionMatrix" => Code("TRANSPOSE_VIEW_PROJECTION_MATRIX"),
@@ -347,6 +347,17 @@ fn engine_value(name: &str) -> EngineValue {
         "colorMatrixB" => Code("COLOR_MATRIX_B"),
         "outdoorFeatherParms" => Code("OUTDOOR_FEATHER_PARMS"),
         "particleCloudColor" => Code("PARTICLE_CLOUD_COLOR"),
+        "particleCloudMatrix"
+            if reflection.constant_buffers.iter().any(|buffer| {
+                buffer.variables.iter().any(|variable| {
+                    variable.name == "particleCloudVelWorld" && variable.flags & 2 != 0
+                })
+            }) =>
+        {
+            Code("PARTICLE_CLOUD_SIZE")
+        }
+        "particleCloudMatrix" => Code("PARTICLE_CLOUD_MATRIX0"),
+        "particleCloudVelWorld" => Code("PARTICLE_CLOUD_VELOCITY"),
         "hdrControl0" => Code("T6_HDR_CONTROL_0"),
         "hdrControl1" => Code("T6_HDR_CONTROL_1"),
         "skyColorMultiplier" => Code("T6_SKY_COLOR_MULTIPLIER"),
@@ -541,9 +552,11 @@ fn constant_argument(
             },
         );
     }
-    match engine_value(name) {
+    match engine_value(name, reflection) {
         EngineValue::Code(code) => {
             let index = match code {
+                "PARTICLE_CLOUD_SIZE" => Some(render_material::CODE_PARTICLE_CLOUD_SIZE),
+                "PARTICLE_CLOUD_VELOCITY" => Some(render_material::CODE_PARTICLE_CLOUD_VELOCITY),
                 "T6_HDR_CONTROL_0" => Some(CODE_T6_HDR_CONTROL_0),
                 "T6_HDR_CONTROL_1" => Some(CODE_T6_HDR_CONTROL_1),
                 "T6_SKY_COLOR_MULTIPLIER" => Some(CODE_T6_SKY_COLOR_MULTIPLIER),

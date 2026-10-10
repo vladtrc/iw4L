@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Presented DObj, FPV, body, item, missile, and script-model producers."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 anim_iw4.workspace = true
 asset_anim.workspace = true

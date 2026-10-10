@@ -54,6 +54,7 @@ pub(crate) fn format_session_transition(
 }
 
 pub const LOADING_DEADLINE_MS: u64 = 120_000;
+pub const T6_LOADING_DEADLINE_MS: u64 = 600_000;
 pub const RUNNING_SILENCE_MS: u64 = 60_000;
 pub const PEER_ADMISSION_DEADLINE_MS: u64 = 30_000;
 
@@ -69,6 +70,7 @@ pub struct ProgressWatch {
     pub phase: ProgressPhase,
     phase_started_at: u64,
     last_progress_ms: u64,
+    loading_deadline_ms: u64,
 }
 
 impl Default for ProgressWatch {
@@ -77,6 +79,7 @@ impl Default for ProgressWatch {
             phase: ProgressPhase::Idle,
             phase_started_at: 0,
             last_progress_ms: 0,
+            loading_deadline_ms: LOADING_DEADLINE_MS,
         }
     }
 }
@@ -102,7 +105,7 @@ impl ProgressWatch {
         match self.phase {
             ProgressPhase::Idle => false,
             ProgressPhase::Loading => {
-                now_ms.saturating_sub(self.phase_started_at) >= LOADING_DEADLINE_MS
+                now_ms.saturating_sub(self.phase_started_at) >= self.loading_deadline_ms
             }
             ProgressPhase::Running => {
                 now_ms.saturating_sub(self.last_progress_ms) >= RUNNING_SILENCE_MS
@@ -469,6 +472,14 @@ fn peer_ready_effect(
 }
 
 impl HostMatchCore {
+    pub fn configure_loading_deadline(&mut self, native_t6: bool) {
+        self.progress.loading_deadline_ms = if native_t6 {
+            T6_LOADING_DEADLINE_MS
+        } else {
+            LOADING_DEADLINE_MS
+        };
+    }
+
     pub fn match_key(&self) -> MatchKey {
         self.match_key
     }

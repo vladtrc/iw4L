@@ -27,8 +27,8 @@ pub use catalog::{
     TECHNIQUE_SLOT_COUNT, TechniqueSelectionPolicy, sort_band, sort_pass_args,
 };
 pub use code_sources::{
-    CodeSourceError, CodeSourceLookup, CompiledConstantOverlay, LayeredCodeSources,
-    RuntimeCodeSources, compile_constant_overlay,
+    CODE_PARTICLE_CLOUD_SIZE, CODE_PARTICLE_CLOUD_VELOCITY, CodeSourceError, CodeSourceLookup,
+    CompiledConstantOverlay, LayeredCodeSources, RuntimeCodeSources, compile_constant_overlay,
 };
 pub use dxbc_abi::{CODE_T6_GRID_SH, CODE_T6_REFLECTION_SH, CODE_T6_SAMPLE_DECODE};
 pub use execute::{

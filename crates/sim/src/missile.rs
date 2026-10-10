@@ -202,6 +202,7 @@ fn fire_missile(
         cleanup_at_ms: time_ms.saturating_add(crate::equipment::ROCKET_CLEANUP_MS),
         travel_distance: 0.0,
         live: true,
+        detonation_armed: false,
         stuck_pane: None,
         grounded: false,
         guide,

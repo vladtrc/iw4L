@@ -45,6 +45,7 @@ pub fn pack_unit_vec(v: [f32; 3]) -> u32 {
 }
 
 pub fn repack_vertex_t6(mut vertex: [u8; 32]) -> [u8; 32] {
+    vertex.swap(16, 18);
     let word = |v: &[u8; 32], o: usize| u32::from_le_bytes(v[o..o + 4].try_into().unwrap());
     let uv = word(&vertex, 20);
     vertex[20..24].copy_from_slice(&uv.rotate_left(16).to_le_bytes());

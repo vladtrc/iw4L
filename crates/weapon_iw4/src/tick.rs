@@ -424,7 +424,7 @@ impl WeaponCombatFacts {
         }
         let fire_ty =
             FireType::from_i32(input.fire_type).map_err(|_| MissingCombatFacts::UnknownFireType)?;
-        if fire_ty.is_burst() && input.burst_cooldown_ms <= 0 {
+        if fire_ty.is_burst() && input.burst_cooldown_ms < 0 {
             return Err(MissingCombatFacts::BurstCooldown);
         }
         if input.segmented_reload && input.reload_ammo_add <= 0 {
@@ -1087,7 +1087,7 @@ fn finish_weapon_tick(
                             cmd.pm_type,
                         );
                         hand.weaponstate = WeaponState::Ready as i32;
-                        hand.weapon_time = facts.burst_cooldown().max(1);
+                        hand.weapon_time = facts.burst_cooldown().max(0);
                         hand.shot_count = 0;
                     }
                 } else {

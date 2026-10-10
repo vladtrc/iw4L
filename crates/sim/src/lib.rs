@@ -176,7 +176,7 @@ pub use objectives::{
     VehicleHudTarget,
 };
 
-pub use world::{SimContent, SimContentBuilder};
+pub use world::{AnimClipLookup, SimContent, SimContentBuilder};
 mod weapon_content;
 pub use weapon_content::{
     SimWeaponContent, SimWeaponContentRefusal, SimWeaponRow, WeaponScriptSounds, WeaponSetup,

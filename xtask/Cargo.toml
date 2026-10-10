@@ -6,6 +6,9 @@ license.workspace = true
 publish = false
 description = "Trace gates, the ship commands (release/publish/provision/master) and the LOC report. No engine crates."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 updater = { path = "../crates/updater" }
 toml = "0.9"

@@ -25,6 +25,14 @@ pub struct RawXAnimParts {
     pub indices: Vec<u16>,
 
     pub delta_trans: Option<RawDeltaTrans>,
+    pub delta_quat: Option<RawDeltaQuat>,
+}
+
+/// Root yaw as the z and w components of a quaternion about the up axis.
+#[derive(Debug, Clone, Default)]
+pub struct RawDeltaQuat {
+    pub indices: Vec<u16>,
+    pub frames: Vec<[i16; 2]>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -123,6 +131,7 @@ pub struct AnimClip {
     pub notifies: Vec<ClipNotify>,
 
     pub delta_translation: Translation,
+    pub delta_yaw: Option<Keyed<[f32; 2]>>,
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +286,7 @@ impl AnimClip {
         cursor.finish()?;
 
         let delta_translation = decode_delta_trans(parts).unwrap_or(Translation::Default);
+        let delta_yaw = decode_delta_yaw(parts)?;
 
         Ok(Self {
             name: parts.name.clone(),
@@ -286,6 +296,7 @@ impl AnimClip {
             tracks,
             notifies: parts.notifies.clone(),
             delta_translation,
+            delta_yaw,
         })
     }
 
@@ -341,10 +352,46 @@ impl AnimClip {
         (self.duration() * 1000.0) as i32
     }
 
+    /// Root yaw in degrees at a normalized time.
+    #[must_use]
+    pub fn abs_delta_yaw(&self, frac: f32) -> f32 {
+        let Some(keys) = &self.delta_yaw else {
+            return 0.0;
+        };
+        if keys.values.is_empty() {
+            return 0.0;
+        }
+        let frame = frac.clamp(0.0, 1.0) * f32::from(self.numframes);
+        let (kind, frames) = keys.kind_and_frames();
+        let (a, b, t) = anim_iw4::span(kind, frames, keys.values.len(), frame);
+        let [za, wa] = keys.values[a];
+        let [zb, wb] = keys.values[b];
+        let (z, w) = (za + (zb - za) * t, wa + (wb - wa) * t);
+        2.0 * libm::atan2f(z, w).to_degrees()
+    }
+
     #[must_use]
     pub fn has_delta(&self) -> bool {
         !matches!(self.delta_translation, Translation::Default)
     }
+}
+
+fn decode_delta_yaw(parts: &RawXAnimParts) -> Result<Option<Keyed<[f32; 2]>>> {
+    let Some(delta) = parts.delta_quat.as_ref() else {
+        return Ok(None);
+    };
+    let values = delta
+        .frames
+        .iter()
+        .map(|[z, w]| [f32::from(*z) / 32767.0, f32::from(*w) / 32767.0])
+        .collect();
+    if delta.indices.is_empty() {
+        return Ok(Some(Keyed {
+            values,
+            frames: FrameIndices::Dense,
+        }));
+    }
+    Keyed::new(values, delta.indices.clone(), &parts.name).map(Some)
 }
 
 fn decode_delta_trans(parts: &RawXAnimParts) -> Result<Translation> {

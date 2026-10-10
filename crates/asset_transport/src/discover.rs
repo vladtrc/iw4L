@@ -100,7 +100,14 @@ pub fn game_install_root(picked: &Path) -> PathBuf {
 }
 
 pub fn folder_holds_game(folder: &Path, game: crate::ZoneGame) -> bool {
-    let version = zone_version(game);
+    folder_holds_zone_version(folder, zone_version(game))
+}
+
+pub fn folder_holds_modern_warfare(folder: &Path) -> bool {
+    folder_holds_zone_version(folder, 5)
+}
+
+fn folder_holds_zone_version(folder: &Path, version: u32) -> bool {
     let mut pending = vec![(folder.join("zone"), 0)];
     while let Some((dir, depth)) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -124,9 +131,31 @@ pub fn folder_holds_game(folder: &Path, game: crate::ZoneGame) -> bool {
 }
 
 pub fn find_game_install(root: &Path, game: crate::ZoneGame) -> Option<PathBuf> {
-    search_roots(root)
+    installation_roots(root)
         .into_iter()
         .find(|folder| folder_holds_game(folder, game))
+}
+
+pub fn find_modern_warfare_install(root: &Path) -> Option<PathBuf> {
+    installation_roots(root)
+        .into_iter()
+        .find(|folder| folder_holds_modern_warfare(folder))
+}
+
+fn installation_roots(root: &Path) -> Vec<PathBuf> {
+    let mut roots = search_roots(root);
+    let children: Vec<_> = roots
+        .iter()
+        .flat_map(|root| std::fs::read_dir(root).into_iter().flatten().flatten())
+        .map(|entry| entry.path())
+        .filter(|path| path.join("zone").is_dir())
+        .collect();
+    for child in children {
+        if !roots.contains(&child) {
+            roots.push(child);
+        }
+    }
+    roots
 }
 
 pub fn search_roots(root: &Path) -> Vec<PathBuf> {
@@ -533,19 +562,32 @@ fn find_zone_stem(
 }
 
 pub fn resolve_mp_zone_alias(zone: &str) -> Option<String> {
-    if zone.is_empty() || zone.starts_with("mp_") || zone.ends_with("_mp") {
+    if zone.is_empty()
+        || zone.starts_with("mp_")
+        || zone.starts_with("zm_")
+        || zone.ends_with("_mp")
+        || zone.ends_with("_zm")
+    {
         return None;
     }
     Some(format!("mp_{zone}"))
 }
 
 pub fn find_common_mp_for_zone(zone_ff: &Path) -> Result<ZoneFile, String> {
-    find_named_zone_for_tree(zone_ff, "common_mp")
+    let common = if zone_game_for_path(zone_ff) == Some(crate::ZoneGame::T6) {
+        crate::t6_content::T6ContentMode::for_path(zone_ff).common()
+    } else {
+        "common_mp"
+    };
+    find_named_zone_for_tree(zone_ff, common)
 }
 
 pub fn find_runtime_zone(root: &GamesRoot, zone_ff: &Path, zone: &str) -> Result<ZoneFile, String> {
     match zone_game_for_path(zone_ff) {
-        Some(crate::ZoneGame::Iw4) | None => find_zone_for_tree(zone_ff, zone),
+        Some(crate::ZoneGame::Iw4) | Some(crate::ZoneGame::T6) | None => {
+            find_zone_for_tree(zone_ff, zone)
+        }
+
         Some(_) => {
             let found = find_zone_file_under(&root.0, zone)?;
             match peek_zone_version(&found.path) {
@@ -565,7 +607,12 @@ pub fn find_runtime_zone(root: &GamesRoot, zone_ff: &Path, zone: &str) -> Result
 }
 
 pub fn find_runtime_common_mp(root: &GamesRoot, zone_ff: &Path) -> Result<ZoneFile, String> {
-    find_runtime_zone(root, zone_ff, "common_mp")
+    let common = if zone_game_for_path(zone_ff) == Some(crate::ZoneGame::T6) {
+        crate::t6_content::T6ContentMode::for_path(zone_ff).common()
+    } else {
+        "common_mp"
+    };
+    find_runtime_zone(root, zone_ff, common)
 }
 
 pub fn find_common_mp_for_envelope(root: &GamesRoot, version: u32) -> Result<ZoneFile, String> {
@@ -767,6 +814,36 @@ pub fn list_mp_map_packs(root: &GamesRoot) -> Vec<MapPack> {
         .collect()
 }
 
+/// The lobby's map list: the multiplayer packs, then the zombie maps.
+pub fn list_menu_map_packs(root: &GamesRoot) -> Vec<MapPack> {
+    let mut packs = list_mp_map_packs(root);
+    packs.extend(list_zombie_map_pack(root));
+    packs
+}
+
+/// The installed Black Ops zombie maps, as one pack for the lobby's map list.
+fn list_zombie_map_pack(root: &GamesRoot) -> Option<MapPack> {
+    let mut maps: Vec<String> = game_files(&root.0)
+        .filter_map(Result::ok)
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("ff"))
+        })
+        .filter_map(|path| {
+            let stem = path.file_stem()?.to_str()?.to_ascii_lowercase();
+            let game = zone_game_for_path(&path)?.prefix();
+            (game == "t5" && stem.starts_with("zombie") && !stem.ends_with("_patch"))
+                .then(|| format!("{game}:{stem}"))
+        })
+        .collect();
+    maps.sort();
+    maps.dedup();
+    (!maps.is_empty()).then(|| MapPack {
+        label: "T5 ZOMBIES".to_owned(),
+        maps,
+    })
+}
+
 fn map_pack_folder(zone_ff: &Path) -> String {
     game_root_for_zone(zone_ff)
         .ok()
@@ -818,9 +895,22 @@ pub fn find_t6_localized_zones(
     language: Option<&str>,
 ) -> Result<Vec<ZoneFile>, String> {
     let (dir, prefix) = language_archive(anchor, language, crate::ZoneGame::T6)?;
-    Ok(["patch_mp", "ui_mp", "code_post_gfx_mp"]
+    let mode = crate::t6_content::T6ContentMode::for_path(anchor);
+    let mut zones: Vec<String> = mode.localized().into_iter().map(str::to_owned).collect();
+    if mode == crate::t6_content::T6ContentMode::Zombies {
+        zones.push(mode.common().to_owned());
+        if let Some(map) = anchor
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| s.starts_with("zm_"))
+        {
+            zones.push(map.to_owned());
+            zones.extend(mode.supplements(anchor).into_iter().skip(1));
+        }
+    }
+    Ok(zones
         .into_iter()
-        .filter_map(|stem| t5_localized_zone(&dir, &prefix, stem))
+        .filter_map(|stem| t5_localized_zone(&dir, &prefix, &stem))
         .collect())
 }
 
@@ -840,12 +930,19 @@ fn language_archive(
     game: crate::ZoneGame,
 ) -> Result<(PathBuf, String), String> {
     let root = game_root_for_zone(anchor)?.join("zone");
+    let code_zone = if game == crate::ZoneGame::T6 {
+        crate::t6_content::T6ContentMode::for_path(anchor).localized()[2]
+    } else {
+        "code_post_gfx_mp"
+    };
+    let suffix = format!("{code_zone}.ff");
+    let localized_suffix = format!("_{suffix}");
     let mut choices: Vec<_> = files_under(vec![root])
         .filter_map(Result::ok)
         .filter(|path| {
             path.file_name()
                 .and_then(|s| s.to_str())
-                .is_some_and(|name| name.ends_with("_code_post_gfx_mp.ff"))
+                .is_some_and(|name| name.ends_with(&localized_suffix))
                 && zone_game_for_path(path) == Some(game)
         })
         .collect();
@@ -873,7 +970,7 @@ fn language_archive(
         .and_then(|s| s.to_str())
         .ok_or("language archive name")?;
     let prefix = name
-        .strip_suffix("code_post_gfx_mp.ff")
+        .strip_suffix(suffix.as_str())
         .ok_or("language prefix")?;
     let dir = chosen.parent().ok_or("language directory")?;
     Ok((dir.to_path_buf(), prefix.to_owned()))

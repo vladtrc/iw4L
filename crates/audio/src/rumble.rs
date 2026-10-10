@@ -200,12 +200,14 @@ fn script_rumble(
     event: On<net::EntityRumble>,
     adopted: Option<Res<net::LastAdoptedSnapshot>>,
     bank: Option<Res<crate::SoundBank>>,
+    family: Option<Res<crate::ambient::SoundBankNamespace>>,
     mut requests: MessageWriter<ScriptRumbleRequest>,
     mut gaps: ResMut<crate::MissingAliasGaps>,
 ) {
-    let (Some(snapshot), Some(bank)) = (
+    let (Some(snapshot), Some(bank), Some(family)) = (
         adopted.and_then(|s| s.next_snap.clone().or_else(|| s.snap.clone())),
         bank,
+        family,
     ) else {
         return;
     };
@@ -229,10 +231,7 @@ fn script_rumble(
         }
     };
     let stop = record.event == entity_iw4::EntityEventKind::STOP_RUMBLE;
-    let (namespace, name) = alias
-        .split_once(':')
-        .and_then(|(ns, name)| asset_core::AssetNamespace::parse(ns).map(|ns| (ns, name)))
-        .unwrap_or((asset_core::AssetNamespace::Iw4, alias.as_str()));
+    let (namespace, name) = crate::aliases::namespace_alias(alias, family.namespace);
     let rumble = if stop {
         None
     } else {

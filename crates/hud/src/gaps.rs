@@ -283,6 +283,8 @@ pub enum GapCause {
 
     NoFontCatalog,
 
+    HudElemT5TextRule,
+
     FontMissing {
         name: String,
     },
@@ -460,6 +462,7 @@ impl ledger::GapCause for GapCause {
             | GapCause::MenuExpression { .. }
             | GapCause::MenuScriptUnsupported { .. } => HudGap::MenuVisExp,
             GapCause::NoFontCatalog
+            | GapCause::HudElemT5TextRule
             | GapCause::FontMissing { .. }
             | GapCause::FontAtlasMissing { .. } => HudGap::AssetFont,
             GapCause::SplashNoTable
@@ -590,6 +593,9 @@ impl fmt::Display for GapCause {
             GapCause::NoFontCatalog => {
                 f.write_str("MenuCatalog is not loaded; Font_s cannot be walked")
             }
+            GapCause::HudElemT5TextRule => f.write_str(
+                "Black Ops script text elems are not drawn: their font and size rule is not known",
+            ),
             GapCause::FontMissing { name } => {
                 write!(f, "catalog has no Font_s `{name}`")
             }

@@ -35,6 +35,27 @@ pub(crate) fn compile_multiplayer(
     Ok(Arc::new(definition))
 }
 
+/// Compiles an animation tree keeping every node, as an actor's tree is
+/// addressed from any script that names it.
+pub(crate) fn compile_complete(
+    atr: &[u8],
+) -> Result<Arc<CompiledAnimTreeDefinition>, AtrCompileError> {
+    let mut parser = AtrParser::new(atr);
+    let mut ignored = 0usize;
+    let (children, eof) = parse_internal(
+        &mut parser,
+        &HashSet::new(),
+        &mut ignored,
+        true,
+        false,
+        true,
+    )?;
+    if !eof {
+        return Err(parser.bad_token("bad token"));
+    }
+    Ok(Arc::new(flatten_tree(children, ignored, 0)?))
+}
+
 fn harvest_script_anim_names(script: &[u8], names: &mut HashSet<String>) {
     let mut parser = AtrParser::new(script);
     loop {
@@ -114,7 +135,21 @@ fn parse_internal(
                     return Err(AtrCompileError::DuplicateAnimation { name });
                 }
                 let ignore = !complete && !names.contains(&name);
-                let on_line = parser.parse(false);
+                let mut on_line = parser.parse(false);
+                if on_line == "[" {
+                    // T5 node parameters such as `[blend = 0.5]` tune blending
+                    // the authority does not model; skip them.
+                    loop {
+                        let token = parser.parse(false);
+                        if token.is_empty() {
+                            return Err(parser.bad_token("unterminated node parameters"));
+                        }
+                        if token == "]" {
+                            break;
+                        }
+                    }
+                    on_line = parser.parse(false);
+                }
                 if on_line.is_empty() {
                     current = Some(WorkAnim {
                         name,
@@ -254,6 +289,10 @@ fn parse_properties(parser: &mut AtrParser<'_>) -> Result<u16, AtrCompileError> 
             Some(1) => flags |= ANIMFLAG_NONLOOPSYNC,
             Some(2) => flags |= ANIMFLAG_COMPLETE,
             Some(3) => flags |= ANIMFLAG_ADDITIVE,
+            // T5 marks client-only and separately blended branches; the
+            // authority evaluates them like any other branch.
+            None if token.eq_ignore_ascii_case("client")
+                || token.eq_ignore_ascii_case("separate") => {}
             _ => return Err(parser.bad_token("unknown anim property")),
         }
     }

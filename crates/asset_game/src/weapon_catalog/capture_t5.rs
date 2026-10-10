@@ -741,6 +741,7 @@ pub(super) fn capture_t5_body_facts(
     };
     facts.inventory_type = i32_at_t5(stream, body, sz::WEAPON_INVENTORY_TYPE_OFF);
     facts.dual_wield = u8_at_t5(stream, body, sz::WEAPON_DEF_DUAL_WIELD_OFF) != 0;
+    facts.fuel_tank = u8_at_t5(stream, body, sz::WEAPON_DEF_FUEL_TANK_OFF) != 0;
     facts.impact_type = i32_at_t5(stream, body, sz::WEAPON_DEF_IMPACT_TYPE_OFF);
     facts.ammo_counter_clip = i32_at_t5(stream, body, sz::WEAPON_DEF_AMMO_COUNTER_CLIP_OFF);
     facts.start_ammo = i32_at_t5(stream, body, sz::WEAPON_DEF_START_AMMO_OFF);

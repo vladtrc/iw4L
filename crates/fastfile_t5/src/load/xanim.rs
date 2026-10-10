@@ -37,7 +37,8 @@ pub(super) fn load_xanim_parts(
         sz::XANIM_NOTIFY_INFO * notify_count,
     )?;
 
-    if let Some(delta) = always_array(s, p.at(sz::XANIM_DELTA_PART_OFF), 4, sz::XANIM_DELTA_PART)? {
+    let delta = always_array(s, p.at(sz::XANIM_DELTA_PART_OFF), 4, sz::XANIM_DELTA_PART)?;
+    if let Some(delta) = delta {
         load_delta_part(s, delta, numframes as usize)?;
     }
 
@@ -75,7 +76,7 @@ pub(super) fn load_xanim_parts(
             name,
             numframes,
 
-            flags: if b_loop != 0 { 1 } else { 0 },
+            flags: u8::from(b_loop != 0) | (u8::from(delta.is_some()) << 1),
             bone_count,
             notify_count,
             framerate,
@@ -97,6 +98,7 @@ pub(super) fn load_xanim_parts(
             indices,
             index_count,
             indices_are_bytes: numframes < 256,
+            delta,
         },
     )?;
     s.pop()

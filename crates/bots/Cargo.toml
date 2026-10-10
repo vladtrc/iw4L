@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Host-only bot controllers: sensor observations into UserCmd."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 getrandom = "0.3"
 asset_transport.workspace = true

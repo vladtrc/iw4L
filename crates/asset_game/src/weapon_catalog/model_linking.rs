@@ -62,6 +62,11 @@ impl WeaponBuild {
                     row.preparation.attachment_mount_on_root(),
                 );
                 if let Ok(plan) = &mut plan {
+                    if row.namespace == crate::AssetNamespace::T6
+                        && row.name == normalize_weapon_name(crate::weapon_t6::MELEE_WEAPON)
+                    {
+                        plan.gun_tag = "tag_knife_attach";
+                    }
                     plan.ads_swaps = row
                         .attachment_view_ads_models
                         .iter()
@@ -215,6 +220,7 @@ impl WeaponBuild {
                 let key = crate::FpvAssemblyKey {
                     hands,
                     gun: mounts.gun,
+                    gun_tag: mounts.gun_tag,
                     secondary_gun: mounts.secondary_gun,
                     attachments: mounts.attachment_models(ads).collect(),
                     rocket: rocket

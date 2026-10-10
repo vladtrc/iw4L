@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Client UI state, settings and loading overlays."
 
+[package.metadata.iw4l]
+layer = "session"
+
 [dependencies]
 diag.workspace = true
 bevy.workspace = true
@@ -14,10 +17,15 @@ asset_material.workspace = true
 asset_transport.workspace = true
 assets.workspace = true
 frame.workspace = true
+hud_iw4.workspace = true
 net = { path = "../net" }
 updater = { path = "../updater" }
 session.workspace = true
+game_api.workspace = true
 sim.workspace = true
+weapon_iw4.workspace = true
+entity_iw4.workspace = true
+playerstate_iw4.workspace = true
 
 [lints]
 workspace = true

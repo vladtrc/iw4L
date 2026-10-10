@@ -158,9 +158,14 @@ pub(crate) struct PersistentFx {
 pub(crate) enum EntityKind {
     Map,
     Spawned,
+    /// An AI spawned from a map spawner.
+    Actor,
     HudElem,
     Player,
-    Corpse { slot: u8, anim: Option<Arc<str>> },
+    Corpse {
+        slot: u8,
+        anim: Option<Arc<str>>,
+    },
     Item(i32),
     Missile(crate::ProjectileId),
     Vehicle,
@@ -366,6 +371,17 @@ impl Runtime {
         );
         self.set_object_field(id, "classname", Value::string("player"));
         self.set_object_field(id, "code_classname", Value::string("player"));
+        if self
+            .program
+            .as_ref()
+            .is_some_and(|program| program.rules() == crate::script::Realm::T5)
+        {
+            // T5 sentients and players carry these as engine fields that
+            // start cleared.
+            for field in ["ignoreme", "headshots", "assists", "downs", "revives"] {
+                self.set_object_field(id, field, Value::Int(0));
+            }
+        }
         Ok(id)
     }
 
@@ -384,6 +400,9 @@ impl Runtime {
     }
 
     pub(crate) fn delete_entity(&mut self, id: u64) {
+        self.actor_anims.remove(&id);
+        self.actor_brains.remove(&id);
+        self.actor_moves.remove(&id);
         if let Some(client) = self.player_client(id) {
             self.release_trigger_claims(client);
         }
@@ -395,7 +414,10 @@ impl Runtime {
                 presence,
                 matches!(
                     entity.kind,
-                    EntityKind::Spawned | EntityKind::Vehicle | EntityKind::Missile(_)
+                    EntityKind::Spawned
+                        | EntityKind::Actor
+                        | EntityKind::Vehicle
+                        | EntityKind::Missile(_)
                 ),
             ));
         }
@@ -424,6 +446,7 @@ impl Runtime {
         entities: &[Vec<(String, String)>],
         keys: &BTreeMap<String, KeyType>,
     ) -> Result<(), String> {
+        self.zombies.authored = Arc::new(entities.to_vec());
         let structs = match self.object_field(0, "struct") {
             Value::Array(id) => Some(id),
             _ => None,

@@ -1,3 +1,8 @@
+**Never commit or push to `main`.** Every task goes: define the task, create a
+branch for it from an up-to-date `main`, do the work there, push the branch
+and open a pull request into `main`. `main` is protected on GitHub: it only
+changes through a merged pull request whose checks pass.
+
 Workflow, artifacts and the glossary: `CONTEXT.md`. Do not touch other agents'
 `context/mrs/*` without being asked.
 

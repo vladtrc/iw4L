@@ -82,9 +82,16 @@ pub(crate) fn generate(
             state.unsupported_receivers += requested;
             continue;
         };
+        let Some(namespace) = models
+            .get(&owner.current_model)
+            .and_then(asset_world::MapXModelSceneAsset::namespace)
+        else {
+            state.unsupported_receivers += requested;
+            continue;
+        };
         let Ok(request) = owner
             .dobj_state
-            .resolve_request(|name| xanims?.0.clip(asset_core::AssetNamespace::Iw4, name))
+            .resolve_request(|name| xanims?.0.clip(namespace, name))
         else {
             state.unsupported_receivers += requested;
             continue;

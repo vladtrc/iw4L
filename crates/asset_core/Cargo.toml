@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Generic asset identity: AssetKey, AssetRef, IndexSpace, AssetEdge, ZoneGame."
 
+[package.metadata.iw4l]
+layer = "neutral"
+
 [dependencies]
 
 [lints]

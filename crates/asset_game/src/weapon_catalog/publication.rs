@@ -28,6 +28,12 @@ impl WeaponBuild {
                     && row.name.strip_suffix("_mp").unwrap_or(&row.name) == "knife"
             })
             .map(|index| index as u32);
+        let t6_knife_name = normalize_weapon_name(crate::weapon_t6::MELEE_WEAPON);
+        let t6_knife = registry
+            .rows
+            .iter()
+            .position(|row| row.namespace == crate::AssetNamespace::T6 && row.name == t6_knife_name)
+            .map(|index| index as u32);
         for row in &mut registry.rows {
             row.preparation.set_source(row.namespace, &row.name);
             row.preparation.declare_sound_hints(&row.sounds);
@@ -61,6 +67,15 @@ impl WeaponBuild {
                 if row.namespace == crate::AssetNamespace::T5 && !row.facts.use_as_melee {
                     t5_knife.map_or(crate::MeleeWeaponPolicy::Own, |weapon| {
                         crate::MeleeWeaponPolicy::T5KnifeCompatibility { weapon }
+                    })
+                } else if row.namespace == crate::AssetNamespace::T6
+                    && row.name != t6_knife_name
+                    && row.facts.offhand_class == 0
+                    && !row.facts.fire_melees
+                    && row.facts.weap_type != weapon_iw4::WEAPTYPE_SHIELD
+                {
+                    t6_knife.map_or(crate::MeleeWeaponPolicy::Own, |weapon| {
+                        crate::MeleeWeaponPolicy::NativeT6Knife { weapon }
                     })
                 } else {
                     crate::MeleeWeaponPolicy::Own

@@ -16,6 +16,7 @@ pub use ui_material_images::{UiImageBuild, UiImagePublication};
 pub mod t5_code_remap;
 pub mod t5_tech_map;
 pub mod t6_techset;
+pub mod ui_font;
 pub mod vertex_layout;
 pub use vertex_layout::*;
 

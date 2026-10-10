@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "playerState_t and usercmd_s from retail MW2 — one-to-one data, with no ECS, bevy, or I/O."
 
+[package.metadata.iw4l]
+layer = "game"
+game = "iw4"
+
 [dependencies]
 math_iw4.workspace = true
 libm = { version = "0.2.16", default-features = false }

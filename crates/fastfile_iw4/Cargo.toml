@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Retail IW4 zone container: header, stream, pointer fixup, asset table."
 
+[package.metadata.iw4l]
+layer = "format"
+game = "iw4"
+
 [dependencies]
 asset_iw4.workspace = true
 

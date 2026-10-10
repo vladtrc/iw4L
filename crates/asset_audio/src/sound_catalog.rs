@@ -548,19 +548,6 @@ impl SoundCatalog {
         self.index_in(AssetNamespace::Iw4, alias)
     }
 
-    pub fn index_unique(&self, alias: &str) -> Option<usize> {
-        let mut found = None;
-        for ns in AssetNamespace::ALL {
-            if let Some(i) = self.index_in(ns, alias) {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(i);
-            }
-        }
-        found
-    }
-
     pub fn sound_at(&self, index: usize) -> Option<&CapturedSound> {
         self.sounds.get(index)
     }
@@ -903,19 +890,6 @@ impl SoundCatalog {
         std::str::from_utf8(data).ok()
     }
 
-    fn rawfile_text_unique(&self, name: &str) -> Option<&str> {
-        let mut found = None;
-        for ns in AssetNamespace::ALL {
-            if let Some(text) = self.rawfile_text_in(ns, name) {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(text);
-            }
-        }
-        found
-    }
-
     pub fn rawfile_text(&self, name: &str) -> Option<&str> {
         std::str::from_utf8(self.rawfile_bytes(name)?).ok()
     }
@@ -952,7 +926,6 @@ impl SoundCatalog {
 
     fn rawfile_text_for_map(&self, ns: AssetNamespace, name: &str) -> Option<&str> {
         self.rawfile_text_in(ns, name)
-            .or_else(|| self.rawfile_text_unique(name))
     }
 
     pub fn createfx_loop_sounds(

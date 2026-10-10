@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "The binary. Process entry only: allocator, argv, env, log init; assembly lives in bootstrap."
 
+[package.metadata.iw4l]
+layer = "session"
+
 [[bin]]
 name = "iw4l"
 path = "src/main.rs"

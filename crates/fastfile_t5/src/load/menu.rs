@@ -14,6 +14,7 @@ pub(super) fn load_menu_list(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSi
             load_menu_def_ptr(s, links, menus.at(i * 4))?;
         }
     }
+    links.capture_menu_list(s, p)?;
     s.pop()
 }
 
@@ -55,6 +56,7 @@ fn load_menu_def(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink, p: Ptr) 
             load_item_def_ptr(s, links, items.at(i * 4))?;
         }
     }
+    links.capture_menu_def(s, p)?;
     s.pop()
 }
 
@@ -352,6 +354,7 @@ fn load_expression_statement(s: &mut ZoneStream<'_>, p: Ptr) -> Result<()> {
     let num = s.i32_at(p, 8)?.max(0) as usize;
     if s.begin_body(p.at(12))? {
         let arr = s.alloc_load(4, sz::EXPRESSION_RPN * num)?;
+        s.fixup_slot(p.at(12), arr)?;
         for i in 0..num {
             load_expression_rpn(s, arr.at(i * sz::EXPRESSION_RPN))?;
         }

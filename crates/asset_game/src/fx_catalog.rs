@@ -295,10 +295,13 @@ impl OwnedFxElemDef {
         }
     }
 
+    /// The sound this elem plays: the alias its hint names in `namespace`,
+    /// the effect's own game.
     pub fn sound_in_bank<'a>(
         &self,
         random_seed: u64,
         sounds: &'a crate::SoundCatalog,
+        namespace: crate::AssetNamespace,
     ) -> FxBankSound<'a> {
         if self.view.elem_type != elem_type::SOUND {
             return FxBankSound::Gap;
@@ -313,14 +316,11 @@ impl OwnedFxElemDef {
         let Some(name) = hint else {
             return FxBankSound::Silent;
         };
-        match sounds
-            .index_in(crate::AssetNamespace::Iw4, name)
-            .or_else(|| sounds.index_unique(name))
-            .and_then(|index| {
-                sounds
-                    .name_at(index)
-                    .and_then(|alias| Some((sounds.namespace_of_alias(index)?, alias)))
-            }) {
+        match sounds.index_in(namespace, name).and_then(|index| {
+            sounds
+                .name_at(index)
+                .and_then(|alias| Some((sounds.namespace_of_alias(index)?, alias)))
+        }) {
             Some((namespace, alias)) => FxBankSound::Play { namespace, alias },
             None => FxBankSound::Gap,
         }
@@ -1860,10 +1860,6 @@ pub struct FxName<'a> {
 impl<'a> FxName<'a> {
     pub fn new(namespace: crate::AssetNamespace, name: &'a str) -> Self {
         Self { namespace, name }
-    }
-
-    pub fn engine(name: &'a str) -> Self {
-        Self::new(crate::AssetNamespace::Iw4, name)
     }
 
     pub fn resolve(self, catalog: &'a FxDefinitions) -> Option<&'a OwnedFxEffectDef> {

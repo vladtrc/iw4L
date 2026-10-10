@@ -186,10 +186,16 @@ impl DObj {
                                 a.parent_model
                             ),
                         })?;
+                    // An empty tag merges the model onto the parent's bone
+                    // named like the model's root (a head on its body).
+                    let tag = match a.tag.as_str() {
+                        "" => model.bone_names.first().map_or("", String::as_str),
+                        tag => tag,
+                    };
                     let range = slot.base..slot.base + slot.bone_count;
                     let found = bones[range.clone()]
                         .iter()
-                        .position(|b| b.name == a.tag)
+                        .position(|b| b.name == tag)
                         .map(|i| slot.base + i);
                     Some(found.ok_or_else(|| DObjError::AttachTag {
                         model: model.name.clone(),

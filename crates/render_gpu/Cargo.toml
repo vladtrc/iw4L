@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "wgpu resources, pipelines, upload, render graph, and submit."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 asset_iw4.workspace = true
 asset_core.workspace = true

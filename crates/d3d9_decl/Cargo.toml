@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "D3D9 vertex declaration types and usage semantics. No IW4 knowledge."
 
+[package.metadata.iw4l]
+layer = "neutral"
+
 [dependencies]
 
 [lints]

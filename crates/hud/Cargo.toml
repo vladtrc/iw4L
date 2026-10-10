@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Draws what hud_iw4 computes / Snapshot presents."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 diag.workspace = true
 bevy.workspace = true
@@ -24,6 +27,7 @@ net = { path = "../net" }
 sim = { path = "../sim" }
 math_iw4.workspace = true
 gamemode_iw4.workspace = true
+game_api.workspace = true
 
 [lints]
 workspace = true

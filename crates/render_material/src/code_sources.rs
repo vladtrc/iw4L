@@ -2,6 +2,9 @@ use std::sync::Arc;
 
 use crate::RuntimeImageId;
 
+pub const CODE_PARTICLE_CLOUD_SIZE: u16 = 0x310;
+pub const CODE_PARTICLE_CLOUD_VELOCITY: u16 = 0x311;
+
 #[derive(Clone, Debug, Default)]
 pub struct RuntimeCodeSources {
     constants: Vec<CodeConstantSlot>,

@@ -3,6 +3,8 @@
 How to touch the live process. Observation is [`PERF.md`](PERF.md).
 Two players through the dev master: `make approved SCENARIO=master_duo_chaos`
 ([scenario and setup](../crates/approved_tests/README.md#two-clients-through-the-dev-master)).
+Black Ops Zombies: `IW4L_GAMETYPE=zombies ./target/play/iw4l map t5:zombie_theater`
+([roadmap and co-op hosting](../BLACKOPS_TODO.md)).
 
 ```bash
 set -a; . ./.env; set +a          # IW4L_GAMES; DISPLAY=:0 if the session has none
@@ -11,7 +13,10 @@ cargo run --profile play -p launcher -- map iw5:mp_overwatch --cmds '…'
 ```
 
 `make` passes no foreign flags through: in the `Makefile` it is `CMDS`, on the
-binary `--cmds`. The colon is a GNU make pattern, so `make map iw5:…` fails —
+binary `--cmds`. A match runs the rules of the map's own game: Modern Warfare 2
+maps, Black Ops zombie maps and Black Ops 2 `dm`/`war`/`zclassic`
+([`T6.md`](T6.md)) start; Black Ops multiplayer and MW3 maps are refused at load
+until their gametype scripts have their own natives ([`fidelity/`](fidelity/)). The colon is a GNU make pattern, so `make map iw5:…` fails —
 write `make map ZONE=iw5:mp_overwatch` or use `cargo run`. Recipes: `make
 scenario`, `chaos`, `bench` ([`BENCH.md`](BENCH.md)), `bench-live`, `lifecycle-*`
 (`*_CMDS` in the `Makefile`). Live recipes use `[profile.play]`; LTO is `PROFILE=release`.

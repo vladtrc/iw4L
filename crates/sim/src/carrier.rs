@@ -158,6 +158,12 @@ impl SimWorld {
         crate::script::install(&mut self.ecs, program, natives, level)
     }
 
+    pub fn set_expected_players(&mut self, count: usize) {
+        if let Some(mut runtime) = self.ecs.get_resource_mut::<crate::script::Runtime>() {
+            runtime.expected_players = count;
+        }
+    }
+
     pub fn start_gsc(
         &mut self,
         name: &str,

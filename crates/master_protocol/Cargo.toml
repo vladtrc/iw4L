@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 description = "Versioned control and opaque relay protocol shared by iw4l and iw4l-master."
 
+[package.metadata.iw4l]
+layer = "neutral"
+
 [lints]
 workspace = true

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "RB_* consume: tess list workers and unsorted shadow draw-list dispatch."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 asset_iw4.workspace = true
 dpvs_iw4.workspace = true

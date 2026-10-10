@@ -28,6 +28,7 @@ pub use fastfile_iw4::GlyphCapture;
 pub use gltf_export::{GltfExportSummary, export_prepared_world_gltf};
 pub use iwd::{IwdSoundIndex, NamespaceSoundIwd, NamespaceTree, NamespaceTrees};
 pub use lane::{CommonCensus, FilmVisionCatalog, LANE_GAPS, LaneGap, LoadedWorld, ZoneLane, lane};
+pub use lane::{T6UiArt, load_t6_ui_art};
 pub use lane_capability::{LaneStatus, PreparedCapability, lane_status};
 pub use lighting_iw4::MODEL_LIGHTING_TILE_BYTES;
 pub use loading_screen::{LoadingPreviewSource, LoadingScreen};
@@ -42,6 +43,7 @@ pub use prepared::{
     PreparedBodyClips, PreparedDestructibleDeath, PreparedFpvMeshes, PreparedGaps,
     PreparedLocalizedStrings, PreparedMap, PreparedProjectileMeshes, PreparedWeapons,
     PreparedWorldWeapons, PreparedXAnims, PreparedXModelWalkCensus, SessionCompass,
+    SessionMapIdentity,
 };
 pub use session_load::{
     MatchLoadOutcome, MatchMaterialSeed, PreparedMatch, PreparedWorld, ShellCommon,

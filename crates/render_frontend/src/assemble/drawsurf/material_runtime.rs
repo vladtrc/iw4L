@@ -71,20 +71,34 @@ impl RuntimeProgramPort {
                 mut lowering,
             } => {
                 lowering.alpha_tests = super::sm3_wgsl::dxbc_alpha_tests();
-                let source =
-                    dxbc_sm5::wgsl::lower_pass(&lowering, &vertex, &pixel).map_err(|error| {
-                        ProgramRegistryError::Wgsl(super::sm3_wgsl::Sm3WgslError::WgslParse(
-                            error.to_string(),
-                        ))
-                    })?;
-                super::sm3_wgsl::validate_wgsl(&source).map_err(ProgramRegistryError::Wgsl)?;
-                super::sm3_wgsl::ValidatedPassWgsl {
-                    source,
-                    attribute_count: abi.attributes.len(),
-                    varying_count: 0,
-                    vertex_constant_len: abi.vertex_constants.len(),
-                    pixel_constant_len: abi.pixel_constants.len(),
-                    sampler_count: abi.samplers.len(),
+                let counts = [
+                    abi.attributes.len(),
+                    abi.vertex_constants.len(),
+                    abi.pixel_constants.len(),
+                    abi.samplers.len(),
+                ];
+                let _flight = super::wgsl_disk_cache::dxbc_flight(pair, &lowering, counts);
+                if let Some(cached) = super::wgsl_disk_cache::load_dxbc(pair, &lowering, counts) {
+                    cached
+                } else {
+                    let source = dxbc_sm5::wgsl::lower_pass(&lowering, &vertex, &pixel).map_err(
+                        |error| {
+                            ProgramRegistryError::Wgsl(super::sm3_wgsl::Sm3WgslError::WgslParse(
+                                error.to_string(),
+                            ))
+                        },
+                    )?;
+                    super::sm3_wgsl::validate_wgsl(&source).map_err(ProgramRegistryError::Wgsl)?;
+                    let module = super::sm3_wgsl::ValidatedPassWgsl {
+                        source,
+                        attribute_count: abi.attributes.len(),
+                        varying_count: 0,
+                        vertex_constant_len: abi.vertex_constants.len(),
+                        pixel_constant_len: abi.pixel_constants.len(),
+                        sampler_count: abi.samplers.len(),
+                    };
+                    super::wgsl_disk_cache::store_dxbc(pair, &lowering, counts, &module);
+                    module
                 }
             }
         };

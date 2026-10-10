@@ -22,6 +22,7 @@ pub fn model_kind(name: &str) -> Option<ModelKind> {
         || name.starts_with("head_")
         || name.contains("_mp_body_")
         || name.contains("_mp_head_")
+        || (name.starts_with("c_") && name.ends_with("_body"))
     {
         Some(ModelKind::Soldier)
     } else {

@@ -123,10 +123,10 @@ fn play_pending_fx_sounds(
         if req.msec_begin < clock.old_time() {
             continue;
         }
-        match crate::present::catalog_lookup(&catalog.0, req.catalog_index)
-            .and_then(|parent| parent.elems.get(req.def_index as usize))
-            .map(|elem| elem.sound_in_bank(req.random_seed, &bank.0))
-        {
+        match crate::present::catalog_lookup(&catalog.0, req.catalog_index).and_then(|parent| {
+            let elem = parent.elems.get(req.def_index as usize)?;
+            Some(elem.sound_in_bank(req.random_seed, &bank.0, parent.namespace))
+        }) {
             None | Some(asset_game::FxBankSound::Gap) => {
                 host.0.gaps.raise(FxGapCause::ElemSoundSpawnSkipped {
                     def_index: req.def_index,

@@ -1,7 +1,7 @@
 use bevy_ecs::prelude::Component;
 use std::sync::Arc;
 
-use crate::script::value::Value;
+use crate::script::Value;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Frame {

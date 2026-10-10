@@ -112,6 +112,7 @@ pub(crate) fn update_compass(
     view: Option<Res<frame::ViewSubject>>,
     local_vars: Res<crate::playercard::UiLocalVars>,
     hud_input: Option<Res<frame::HudInputView>>,
+    mode: Option<Res<game_api::ModeRules>>,
 ) {
     take_fire_pings(
         &mut ping_bus,
@@ -124,7 +125,13 @@ pub(crate) fn update_compass(
         .wrapping_sub(local_vars.int("ui_show_killedBy"))
         < 4000;
     let ui_active = hud_input.is_some_and(|i| i.script_menu_open);
-    if !surface.is_ready() || killed_by_showing || ui_active || view.is_some_and(|v| v.in_killcam())
+    let hidden_by_mode =
+        presented.snapshot().is_some() && mode.as_ref().is_some_and(|mode| !mode.hud.compass);
+    if !surface.is_ready()
+        || killed_by_showing
+        || ui_active
+        || hidden_by_mode
+        || view.is_some_and(|v| v.in_killcam())
     {
         hide(&mut pass);
         return;

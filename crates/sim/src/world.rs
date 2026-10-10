@@ -5,8 +5,8 @@ mod events;
 use bodies::{PlayerAnimInputs, PlayerBodyRuntime};
 use collision::{CollisionRuntime, LagcompPlan};
 pub use content::{
-    PlayerKitCollision, SimBrush, SimClipBsp, SimClipCmodels, SimClipMesh, SimContent,
-    SimContentBuilder, SimStaticModel, SimTriggerHull,
+    AnimClipLookup, PlayerKitCollision, SimBrush, SimClipBsp, SimClipCmodels, SimClipMesh,
+    SimContent, SimContentBuilder, SimStaticModel, SimTriggerHull,
 };
 use events::{EventJournal, PresentationQueue};
 pub use events::{PendingLocalSound, PendingPlayerCardEvent, PendingPlayerCardKind, PendingPrint};
@@ -422,11 +422,20 @@ impl SimState {
         self.hud_elem_sound_ids = ids;
     }
 
+    /// The catalog key a script's alias name plays: the alias of the match's
+    /// own game (scripts name aliases bare; clients read `<game>:<alias>`).
+    fn script_sound_key(&self, name: &str) -> Option<String> {
+        let aliases = self.content.script_sound_aliases().as_ref()?;
+        let family = self.content.family()?;
+        let key = format!("{}:{}", family.as_str(), name.to_ascii_lowercase());
+        aliases.contains_key(&key).then_some(key)
+    }
+
     pub fn script_sound_exists(&self, name: &str) -> Option<bool> {
         self.content
             .script_sound_aliases()
             .as_ref()
-            .map(|names| names.contains_key(&name.to_ascii_lowercase()))
+            .map(|_| self.script_sound_key(name).is_some())
     }
 
     pub fn script_sound_is_looping(&self, name: &str) -> Result<bool, &'static str> {
@@ -435,14 +444,15 @@ impl SimState {
             .script_sound_aliases()
             .as_ref()
             .ok_or("sound alias catalog is not installed")?;
-        aliases
-            .get(&name.to_ascii_lowercase())
-            .ok_or("sound alias not found")?
-            .ok_or("sound alias looping flags are unavailable")
+        let key = self.script_sound_key(name).ok_or("sound alias not found")?;
+        aliases[&key].ok_or("sound alias looping flags are unavailable")
     }
 
     pub fn sound_alias_index(&mut self, name: &str) -> u8 {
-        self.sound_alias_cs.index(name)
+        match self.script_sound_key(name) {
+            Some(key) => self.sound_alias_cs.index(&key),
+            None => self.sound_alias_cs.index(name),
+        }
     }
 
     pub fn effect_name_index(&mut self, name: &str) -> u8 {
@@ -556,6 +566,14 @@ impl SimState {
             self.prematch = gamemode_iw4::PrematchStep::Done;
         }
         self.phase = phase;
+    }
+
+    pub(crate) fn set_match_elapsed_ms(&mut self, elapsed: u32) {
+        self.match_elapsed_ms = elapsed;
+    }
+
+    pub(crate) fn set_game_win_winner(&mut self, winner: Option<ClientId>) {
+        self.game_win_winner = winner;
     }
 
     pub fn root_seed(&self) -> u64 {
@@ -1281,6 +1299,46 @@ impl SimState {
         >,
     ) {
         self.model_library = Arc::new(models);
+    }
+
+    pub(crate) fn zombie_body_model(&self) -> Option<String> {
+        [
+            "c_zom_dlc0_zom_sol_body1",
+            "c_zom_zombie1_body01",
+            "c_zom_zombie_civ_shorts_body",
+            "c_zom_inmate_body1",
+            "c_zom_zombie_buried_civilian_body1",
+            "c_zom_tomb_german_body_1a",
+        ]
+        .into_iter()
+        .find(|name| self.model_library.get(*name).is_some_and(Option::is_some))
+        .map(str::to_owned)
+    }
+
+    pub(crate) fn zombie_head_attachment(&self, body: &str) -> Option<(String, String)> {
+        let capability = self.model_capability(body)??;
+        let tag = xmodel_runtime::tp_head_attach_tag(&capability.pose.bone_names)?;
+        let head = match body {
+            "c_zom_dlc0_zom_sol_body1" => "c_zom_dlc0_zom_head1",
+            "c_zom_zombie1_body01" => "c_zom_zombie_head_a",
+            "c_zom_zombie_civ_shorts_body" => "c_zom_zombie_chinese_head1",
+            "c_zom_inmate_body1" => "c_zom_zombie_slackjaw_head",
+            "c_zom_zombie_buried_civilian_body1" => "c_zom_zombie_buried_male_head1",
+            "c_zom_tomb_german_body_1a" => "c_zom_tomb_german_head1",
+            _ => return None,
+        };
+        self.model_library
+            .get(head)
+            .is_some_and(Option::is_some)
+            .then(|| (head.to_owned(), tag.to_owned()))
+    }
+
+    pub(crate) fn zombie_walk_anim(&self) -> Option<String> {
+        self.content
+            .script_model_anims()
+            .keys()
+            .find(|name| name == &"ai_zombie_walk_v1")
+            .cloned()
     }
 
     pub(crate) fn model_capability(
@@ -2210,11 +2268,21 @@ impl SimState {
         &mut self.corpses
     }
 
+    pub(crate) fn script_model_clips(
+        &self,
+    ) -> Arc<std::collections::BTreeMap<String, Arc<xmodel_runtime::AnimClip>>> {
+        self.content.script_model_clips()
+    }
+
     pub(crate) fn script_model_anim(&self, name: &str) -> Option<crate::ScriptModelPlayAnim> {
         self.content
             .script_model_anims()
             .get(&name.to_ascii_lowercase())
             .copied()
+    }
+
+    pub(crate) fn script_model_states(&self) -> Option<Arc<xmodel_runtime::AnimStateTable>> {
+        self.content.script_model_states()
     }
 
     pub(crate) fn player_anim_clip(&self, legs_anim: i32) -> Option<Arc<xmodel_runtime::AnimClip>> {
@@ -2228,6 +2296,21 @@ impl SimState {
             xmodel_runtime::XAnimNodeKind::Leaf { clip, .. } => Some(Arc::clone(clip)),
             _ => None,
         }
+    }
+
+    pub(crate) fn actor_paths(&self) -> Option<Arc<crate::script::ActorPaths>> {
+        self.content.actor_paths()
+    }
+
+    pub(crate) fn actor_anim_tree(&self, name: &str) -> Option<Arc<crate::script::ActorAnimTree>> {
+        self.content.actor_anim_tree(name)
+    }
+
+    pub(crate) fn anim_clip_named(&self, name: &str) -> Option<Arc<xmodel_runtime::AnimClip>> {
+        self.content
+            .anim_clips()
+            .get(name)
+            .or_else(|| self.player_anim_clip_named(name))
     }
 
     pub(crate) fn player_anim_clip_named(

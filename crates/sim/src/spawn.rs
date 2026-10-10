@@ -43,6 +43,9 @@ pub struct MatchBootstrap {
 
     pub kind: gamemode_iw4::GameModeKind,
 
+    /// The rules the match's game gives its mode; none outside a match.
+    pub mode: Option<game_api::ModeRules>,
+
     pub allow_debug_actions: bool,
 
     pub score_limit: i32,
@@ -63,6 +66,7 @@ impl Default for MatchBootstrap {
             bot_classes: Vec::new(),
             seed: 0,
             kind: gamemode_iw4::GameModeKind::FreeForAll,
+            mode: None,
             allow_debug_actions: false,
             score_limit,
             time_limit_ms,
@@ -120,15 +124,19 @@ impl HostGameModeSelection {
 }
 
 pub fn spawn_candidate_indices(spawns: &[AuthoredSpawnPoint]) -> Vec<usize> {
-    spawn_candidate_indices_for(spawns, GameModeKind::FreeForAll, TEAM_FREE, true)
+    spawn_candidate_indices_for(spawns, GameModeKind::FreeForAll, None, TEAM_FREE, true)
 }
 
 pub fn spawn_candidate_indices_for(
     spawns: &[AuthoredSpawnPoint],
     kind: GameModeKind,
+    mode_classnames: Option<&[&str]>,
     client_state_team: i32,
     use_start_spawns: bool,
 ) -> Vec<usize> {
+    if let Some(names) = mode_classnames {
+        return filter_classname(spawns, |c| names.contains(&c));
+    }
     if kind.is_team() && (client_state_team == TEAM_AXIS || client_state_team == TEAM_ALLIES) {
         let axis = client_state_team == TEAM_AXIS;
         if use_start_spawns {
@@ -369,7 +377,11 @@ pub(crate) fn decide_forced_spawn(
     };
     let spawns = world.bootstrap_ref().spawns.clone();
     let kind = world.bootstrap_ref().kind;
-    let mut order = spawn_candidate_indices_for(&spawns, kind, client_state_team, false);
+    let names = world
+        .bootstrap_ref()
+        .mode
+        .and_then(|mode| mode.spawn_classnames);
+    let mut order = spawn_candidate_indices_for(&spawns, kind, names, client_state_team, false);
     let mut rng = MatchRng::new(seed);
     for j in (1..order.len()).rev() {
         let k = rng.next_index(j + 1);

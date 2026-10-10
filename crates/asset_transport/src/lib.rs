@@ -7,6 +7,7 @@ pub mod namespace_trees;
 pub mod progress;
 pub mod sab;
 pub mod steam;
+pub mod t6_content;
 pub mod zone;
 
 pub use artifact_cache::{
@@ -17,11 +18,12 @@ pub use asset_core::ZoneGame;
 pub use discover::{
     GamesRoot, MapPack, ZoneFile, ensure_artifacts_dir, find_common_mp_for_envelope,
     find_common_mp_for_zone, find_game_install, find_localized_common_mp_for_zone,
-    find_runtime_common_mp, find_runtime_zone, find_zone_file, find_zone_file_version,
-    find_zone_for_tree, folder_holds_game, game_install_root, game_root_for_zone,
-    games_content_report, games_root_from_env, games_root_report, group_mp_maps, list_mp_map_packs,
-    list_mp_maps, load_dotenv, map_load_title, peek_zone_version, search_roots, set_game_folders,
-    split_zone_key, zone_game_for_path, zone_version,
+    find_modern_warfare_install, find_runtime_common_mp, find_runtime_zone, find_zone_file,
+    find_zone_file_version, find_zone_for_tree, folder_holds_game, folder_holds_modern_warfare,
+    game_install_root, game_root_for_zone, games_content_report, games_root_from_env,
+    games_root_report, group_mp_maps, list_menu_map_packs, list_mp_map_packs, list_mp_maps,
+    load_dotenv, map_load_title, peek_zone_version, search_roots, set_game_folders, split_zone_key,
+    zone_game_for_path, zone_version,
 };
 pub use ipak::{IPak, ipak_name_hash};
 pub use iwd::{

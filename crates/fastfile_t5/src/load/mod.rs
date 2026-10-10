@@ -133,6 +133,25 @@ pub trait AssetLinkSink {
         Ok(())
     }
 
+    /// A loaded `MenuList`, after all of its menus.
+    fn capture_menu_list(&mut self, s: &ZoneStream<'_>, list: Ptr) -> Result<()> {
+        let _ = (s, list);
+        Ok(())
+    }
+
+    /// A loaded `menuDef_t`; every pointer below it is resolved. The body may
+    /// live in the temp block, so it must be read before this returns.
+    fn capture_menu_def(&mut self, s: &ZoneStream<'_>, menu: Ptr) -> Result<()> {
+        let _ = (s, menu);
+        Ok(())
+    }
+
+    /// A loaded `Font_s` with its glyph table resolved.
+    fn capture_font(&mut self, s: &ZoneStream<'_>, font: Ptr) -> Result<()> {
+        let _ = (s, font);
+        Ok(())
+    }
+
     fn nested_shader(
         &mut self,
         s: &ZoneStream<'_>,

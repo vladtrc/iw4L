@@ -265,6 +265,10 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         ),
         ("openmenu", "openmenu <menu> — open an in-game menuDef"),
         (
+            "end_match",
+            "end_match — host returns the match to its lobby",
+        ),
+        (
             "menutext",
             "menutext <text> — type into the active native menu field",
         ),

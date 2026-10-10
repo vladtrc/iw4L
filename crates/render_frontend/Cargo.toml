@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "R_* construction: pack drawsurf lists, worker-cmd ring, GfxScene occupancy."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 asset_audio.workspace = true
 asset_game.workspace = true

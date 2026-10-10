@@ -51,6 +51,8 @@ pub const CODE_FOG_SUN_DIR: u16 = 0x2b;
 
 pub const CODE_RENDER_TARGET_SIZE: u16 = 0x16;
 
+pub const CODE_ZNEAR: u16 = 0x21;
+
 pub const CODE_CLIP_SPACE_LOOKUP_SCALE: u16 = 0x3f;
 
 pub const CODE_CLIP_SPACE_LOOKUP_OFFSET: u16 = 0x40;
@@ -487,6 +489,15 @@ pub(crate) fn update_command_context_code_sources(
     mat_frame.outdoor = outdoor.as_deref().copied();
 
     mat_frame.code_sources = RuntimeCodeSources::default();
+    mat_frame.code_sources.set_constant_rows(
+        CODE_ZNEAR,
+        &[float4_bits([
+            clip_from_view.w_axis.z,
+            prepared.depth_hack_near,
+            0.0,
+            0.0,
+        ])],
+    );
     mat_frame.sun_shadow = None;
     let float_time_ms = cg_clock.map(|c| c.time()).unwrap_or(0);
     mat_frame.float_time = float_time_ms as f32 / 1000.0;

@@ -38,6 +38,10 @@ pub(crate) fn player_damage(world: &mut World, tick: crate::Tick, hit: &crate::s
     {
         return;
     }
+    if super::t6_gametype::active(world) {
+        super::t6_gametype::damage(world, tick, hit);
+        return;
+    }
     let attacker = match hit.attacker.map(|a| player_object(world, a.0)) {
         Some(attacker) if attacker != Value::Undefined => attacker,
         _ => world_entity(world),
@@ -184,6 +188,10 @@ pub(crate) fn owe(world: &mut World, client: u32, callback: &'static str, args: 
 
 pub(crate) fn suicide(world: &mut World, tick: crate::Tick, client: u32) {
     let id = crate::ClientId(client);
+    if super::t6_gametype::active(world) {
+        crate::script_player::debug_damage(&mut FrameWorld::from_world(world), tick, id, 100_000);
+        return;
+    }
     let mut frame = FrameWorld::from_world(world);
     if !frame
         .client_meta(id)
@@ -767,6 +775,9 @@ pub(crate) fn choose_class(world: &mut World, client: u32, class: &crate::ClassD
         .resource_mut::<Runtime>()
         .weapon_bridge
         .remove(&client);
+    if realm == Some(crate::script::Realm::T6) {
+        return;
+    }
     bridge_class_weapon(world, client, 0, class.primary);
     bridge_class_weapon(world, client, 1, class.secondary);
     if realm == Some(crate::script::Realm::T5) {
@@ -986,11 +997,22 @@ pub(crate) struct PlayerSlot {
     pub seat: crate::ScriptSeat,
     pub weapon: u32,
     pub switching: bool,
+    /// The held weapon is still being raised.
+    pub raising: bool,
+    /// `EnableInvulnerability`: nothing damages the player.
+    pub invulnerable: bool,
     pub last_stand_until_ms: Option<i64>,
     pub has_radar: bool,
     pub radar_mode: crate::RadarMode,
     pub radar_blocked: bool,
     pub link: Option<PlayerLink>,
+    /// Weapons (with camo model) and the spawn weapon a T5 script handed a
+    /// connected player before it spawned; they are applied by `spawn`.
+    pub pending_weapons: Vec<(u32, u8)>,
+    pub pending_spawn_weapon: Option<u32>,
+    /// Where a script placed the player before it spawned.
+    pub pending_origin: Option<[f32; 3]>,
+    pub pending_angles: Option<[f32; 3]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1032,11 +1054,17 @@ impl PlayerSlot {
             seat: crate::ScriptSeat::default(),
             weapon: 0,
             switching: false,
+            raising: false,
+            invulnerable: false,
             last_stand_until_ms: None,
             has_radar: false,
             radar_mode: crate::RadarMode::Normal,
             radar_blocked: false,
             link: None,
+            pending_weapons: Vec::new(),
+            pending_spawn_weapon: None,
+            pending_origin: None,
+            pending_angles: None,
         }
     }
 }
@@ -1165,13 +1193,15 @@ pub(crate) fn disconnect_player(world: &mut World, client: u32) {
         return;
     };
     let now = now_ms(world);
-    let _ = run_now(
-        world,
-        DISCONNECT,
-        Value::Object(slot.object),
-        Vec::new(),
-        now,
-    );
+    if !super::t6_gametype::active(world) {
+        let _ = run_now(
+            world,
+            DISCONNECT,
+            Value::Object(slot.object),
+            Vec::new(),
+            now,
+        );
+    }
     world
         .resource_mut::<crate::PersistentDataStore>()
         .unbind(crate::ClientId(client));
@@ -1257,12 +1287,30 @@ pub(crate) fn sync_players(world: &mut World) {
                         .set_object_field(object, "pers", pers),
                     Err(_) => return,
                 }
-                if run_now(world, CONNECT, Value::Object(object), Vec::new(), now).is_err() {
+                if let Some(team) = FrameWorld::from_world(world)
+                    .bootstrap_ref()
+                    .mode
+                    .and_then(|mode| mode.connect_team)
+                {
+                    let team = Value::string(team);
+                    let _ = store_field(world, client, "sessionteam", &team);
+                    world
+                        .resource_mut::<Runtime>()
+                        .set_object_field(object, "team", team);
+                }
+                if !super::t6_gametype::active(world)
+                    && run_now(world, CONNECT, Value::Object(object), Vec::new(), now).is_err()
+                {
                     return;
                 }
             }
         }
-        deliver_answers(world, client);
+        if !super::t6_gametype::active(world) {
+            deliver_answers(world, client);
+        }
+    }
+    if super::t6_gametype::active(world) {
+        super::t6_gametype::advance(world);
     }
     settle_deaths(world);
 }
@@ -1279,6 +1327,51 @@ pub(crate) fn team_name(team: i32) -> &'static str {
 fn client_name(name: &[u8]) -> String {
     let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
     String::from_utf8_lossy(&name[..end]).into_owned()
+}
+
+/// A zombies player who is connected but has not spawned yet: placement
+/// waits for the spawn, whatever the spectator view meanwhile shows.
+pub(crate) fn awaiting_spawn(world: &mut World, client: u32) -> bool {
+    let frame = FrameWorld::from_world(world);
+    frame
+        .bootstrap_ref()
+        .mode
+        .is_some_and(|mode| mode.scripts_spawn_players)
+        && !frame
+            .client_meta(ClientId(client))
+            .is_some_and(|meta| meta.lifecycle == crate::ClientLifecycle::Alive)
+}
+
+/// Places a connected player that has not spawned: the pose waits on its slot
+/// for `spawn`. Returns false once the player is in the world.
+pub(crate) fn place_unspawned(
+    world: &mut World,
+    client: u32,
+    origin: Option<[f32; 3]>,
+    angles: Option<[f32; 3]>,
+) -> bool {
+    if FrameWorld::from_world(world)
+        .player(ClientId(client))
+        .is_some()
+        && !awaiting_spawn(world, client)
+    {
+        return false;
+    }
+    let Some(slot) = world
+        .resource_mut::<Runtime>()
+        .into_inner()
+        .players
+        .get_mut(&client)
+    else {
+        return false;
+    };
+    if origin.is_some() {
+        slot.pending_origin = origin;
+    }
+    if angles.is_some() {
+        slot.pending_angles = angles;
+    }
+    true
 }
 
 pub(crate) fn load_field(world: &mut World, client: u32, name: &str) -> Option<Value> {
@@ -1309,12 +1402,19 @@ pub(crate) fn load_field(world: &mut World, client: u32, name: &str) -> Option<V
             }),
         });
     }
+    let pending = world
+        .resource::<Runtime>()
+        .players
+        .get(&client)
+        .map_or((None, None), |slot| {
+            (slot.pending_origin, slot.pending_angles)
+        });
     let frame = FrameWorld::from_world(world);
     let ps = frame.player(id);
     let meta = frame.client_meta(id);
     Some(match name {
-        "origin" => Value::Vector(ps.map_or([0.0; 3], |ps| ps.origin)),
-        "angles" => Value::Vector(ps.map_or([0.0; 3], |ps| ps.viewangles)),
+        "origin" => Value::Vector(ps.map_or(pending.0.unwrap_or([0.0; 3]), |ps| ps.origin)),
+        "angles" => Value::Vector(ps.map_or(pending.1.unwrap_or([0.0; 3]), |ps| ps.viewangles)),
         "health" => Value::Int(ps.map_or(0, |ps| ps.health)),
         "maxhealth" => Value::Int(
             meta.map(|m| m.max_health)
@@ -1325,6 +1425,9 @@ pub(crate) fn load_field(world: &mut World, client: u32, name: &str) -> Option<V
         "score" => Value::Int(meta?.score),
         "kills" => Value::Int(meta?.kills),
         "deaths" => Value::Int(meta?.deaths),
+        "downs" => Value::Int(meta?.zombie_stats[0]),
+        "revives" => Value::Int(meta?.zombie_stats[1]),
+        "headshots" => Value::Int(meta?.zombie_stats[2]),
         "sessionteam" => Value::string(team_name(meta?.client_state_team)),
         _ => return None,
     })
@@ -1416,6 +1519,14 @@ pub(crate) fn store_field(
             let Value::Vector(v) = value else {
                 return Err(format!("player field {name} takes a vector"));
             };
+            let (origin, angles) = if name == "origin" {
+                (Some(*v), None)
+            } else {
+                (None, Some(*v))
+            };
+            if place_unspawned(world, client, origin, angles) {
+                return Ok(true);
+            }
             let mut frame = FrameWorld::from_world(world);
             if name == "origin" {
                 frame.set_origin(id, *v);
@@ -1438,11 +1549,24 @@ pub(crate) fn store_field(
                 ps.health = ps.health.min(n);
             }
         }
+        "downs" | "revives" | "headshots" => {
+            let n = int(value)?;
+            let mut frame = FrameWorld::from_world(world);
+            if frame.client_meta(id).is_some() {
+                let slot = match name {
+                    "downs" => 0,
+                    "revives" => 1,
+                    _ => 2,
+                };
+                frame.client_meta_mut(id).zombie_stats[slot] = n;
+            }
+        }
         "score" | "kills" | "deaths" => {
             let n = int(value)?;
             let mut frame = FrameWorld::from_world(world);
             if frame.client_meta(id).is_some() {
                 let meta = frame.client_meta_mut(id);
+                diag::debug!(Sim, "player {}: {name} {n}", id.0);
                 match name {
                     "score" => meta.score = n,
                     "kills" => meta.kills = n,

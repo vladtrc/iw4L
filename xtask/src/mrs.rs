@@ -3,9 +3,9 @@
 //!
 //! One agent on the root needs no clone; a clone exists only when someone else
 //! is already working on the root. The agent's territory is code and `git
-//! commit` *inside the clone*. Landing is this one command — rebase onto master
+//! commit` *inside the clone*. Landing is this one command — rebase onto main
 //! → rustfmt the touched `.rs` → fast-forward → delete the clone — never
-//! reproduced by hand, and never `git push origin HEAD:master`.
+//! reproduced by hand, and never `git push origin HEAD:main`.
 //!
 //! Everything here is fail-closed. Uncommitted tracked WIP, an untracked `.rs`,
 //! a dirty root, a rebase conflict and a shared path that is not the symlink we
@@ -104,7 +104,7 @@ fn list(root: &Path) -> Res<()> {
             continue;
         }
         let branch = git_out(&clone, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-        let ahead = git_out(&clone, &["rev-list", "--count", "origin/master..HEAD"])?;
+        let ahead = git_out(&clone, &["rev-list", "--count", "origin/main..HEAD"])?;
         let mut state = Vec::new();
         if ahead != "0" {
             state.push(format!("{ahead} commit(s) to ship"));
@@ -198,7 +198,7 @@ fn new_mr(root: &Path, name: &str) -> Res<()> {
     println!("    ship:  cargo xtask mr ship {name}     # from the repo root, after git commit:");
     println!("           rebase → rustfmt touched .rs + commit → FF → rm clone");
     println!("           do none of those by hand; fix only what ship refuses on, then rerun");
-    println!("    before ship: read git diff origin/master...HEAD — probes, throwaway tests and");
+    println!("    before ship: read git diff origin/main...HEAD — probes, throwaway tests and");
     println!(
         "           debug prints come out of the tree first (CONTEXT.md, \"Before shipping\")"
     );
@@ -366,15 +366,15 @@ fn ship(root: &Path, name: &str) -> Res<()> {
     println!("==> fetch origin in clone");
     git(&clone, &["fetch", "origin"])?;
 
-    if is_ancestor(&clone, "HEAD", "origin/master")? {
-        println!("    clone HEAD already on root master — nothing to rebase/fmt");
+    if is_ancestor(&clone, "HEAD", "origin/main")? {
+        println!("    clone HEAD already on root main — nothing to rebase/fmt");
     } else {
-        if !is_ancestor(&clone, "origin/master", "HEAD")? {
-            println!("==> rebase clone onto origin/master");
-            if git(&clone, &["rebase", "origin/master"]).is_err() {
+        if !is_ancestor(&clone, "origin/main", "HEAD")? {
+            println!("==> rebase clone onto origin/main");
+            if git(&clone, &["rebase", "origin/main"]).is_err() {
                 let _ = git(&clone, &["rebase", "--abort"]);
                 return Err(format!(
-                    "rebase conflict. resolve by hand in {} (git rebase origin/master), then cargo xtask mr ship {name}",
+                    "rebase conflict. resolve by hand in {} (git rebase origin/main), then cargo xtask mr ship {name}",
                     clone.display()
                 ));
             }
@@ -385,7 +385,7 @@ fn ship(root: &Path, name: &str) -> Res<()> {
     land(root, &clone, name)?;
     remove(root, &clone, name)?;
     let head = git_out(root, &["rev-parse", "--short", "HEAD"])?;
-    println!("    shipped {name} → master {head}");
+    println!("    shipped {name} → main {head}");
     Ok(())
 }
 
@@ -400,7 +400,7 @@ fn fmt_touched(clone: &Path, name: &str) -> Res<()> {
             "diff",
             "--name-only",
             "--diff-filter=ACMR",
-            "origin/master...HEAD",
+            "origin/main...HEAD",
             "--",
             "*.rs",
         ],
@@ -464,28 +464,28 @@ fn land(root: &Path, clone: &Path, name: &str) -> Res<()> {
 
     let clone_head = git_out(clone, &["rev-parse", "HEAD"])?;
     let root_head = git_out(root, &["rev-parse", "HEAD"])?;
-    let origin_master = git_out(clone, &["rev-parse", "origin/master"])?;
-    if origin_master != root_head {
+    let origin_main = git_out(clone, &["rev-parse", "origin/main"])?;
+    if origin_main != root_head {
         return Err(format!(
-            "clone origin/master is {origin_master}, root HEAD is {root_head}"
+            "clone origin/main is {origin_main}, root HEAD is {root_head}"
         ));
     }
 
-    // Compared inside the clone: it has origin/master plus its own objects,
+    // Compared inside the clone: it has origin/main plus its own objects,
     // while the root does not have the clone's commits until the fetch below.
-    if is_ancestor(clone, &clone_head, "origin/master")? {
+    if is_ancestor(clone, &clone_head, "origin/main")? {
         println!("ship: {clone_head} already an ancestor of root HEAD — nothing to merge");
         return Ok(());
     }
-    if !is_ancestor(clone, "origin/master", &clone_head)? {
+    if !is_ancestor(clone, "origin/main", &clone_head)? {
         return Err(format!(
-            "not fast-forward: clone and root have diverged (master moved during ship?). run cargo xtask mr ship {name} again — it rebases. do not git push origin HEAD:master"
+            "not fast-forward: clone and root have diverged (main moved during ship?). run cargo xtask mr ship {name} again — it rebases. do not git push origin HEAD:master"
         ));
     }
 
     println!("==> fetch clone HEAD into root (objects live in the clone until this)");
     git(root, &["fetch", &path_arg(clone)?, "HEAD"])?;
-    println!("==> merge --ff-only {clone_head} onto master");
+    println!("==> merge --ff-only {clone_head} onto main");
     git(root, &["merge", "--ff-only", "--no-edit", "FETCH_HEAD"])?;
     if !is_ancestor(root, &clone_head, "HEAD")? {
         return Err("post-land ancestor check failed".into());
@@ -501,8 +501,8 @@ fn remove(root: &Path, clone: &Path, name: &str) -> Res<()> {
     refuse_wip(clone, name)?;
 
     git(clone, &["fetch", "origin"])?;
-    if !is_ancestor(clone, "HEAD", "origin/master")? {
-        let _ = git(clone, &["log", "--oneline", "origin/master..HEAD"]);
+    if !is_ancestor(clone, "HEAD", "origin/main")? {
+        let _ = git(clone, &["log", "--oneline", "origin/main..HEAD"]);
         return Err(format!(
             "clone has commits not in root HEAD after land — should not happen; run cargo xtask mr ship {name} again"
         ));
@@ -596,11 +596,11 @@ fn refuse_wip(clone: &Path, name: &str) -> Res<()> {
 fn refuse_root_wip(root: &Path) -> Res<()> {
     if tracked_dirty(root)? {
         print_status(root)?;
-        return Err("root has tracked WIP. ship only FF-merges onto a clean master".into());
+        return Err("root has tracked WIP. ship only FF-merges onto a clean main".into());
     }
     let branch = git_out(root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    if branch != "master" {
-        return Err(format!("root is on '{branch}', not master"));
+    if branch != "main" {
+        return Err(format!("root is on '{branch}', not main"));
     }
     Ok(())
 }

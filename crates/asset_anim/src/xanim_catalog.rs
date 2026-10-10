@@ -9,7 +9,7 @@ use fastfile_iw4::{
 
 use crate::asset_graph::ZoneOwner;
 use crate::asset_key::AssetNamespace;
-use crate::xanim_clip::{AnimClip, ClipNotify, RawDeltaTrans, RawXAnimParts};
+use crate::xanim_clip::{AnimClip, ClipNotify, RawDeltaQuat, RawDeltaTrans, RawXAnimParts};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct XAnimKey {
@@ -53,6 +53,7 @@ pub struct XAnimCatalog {
     zones: Vec<ZoneOwner>,
 
     decoded: Mutex<Vec<Option<Arc<AnimClip>>>>,
+    state_tables: HashMap<(AssetNamespace, String), Arc<xmodel_runtime::AnimStateTable>>,
 }
 
 #[derive(Clone, Debug)]
@@ -72,6 +73,7 @@ impl Default for XAnimCatalog {
             order: Vec::new(),
             zones: Vec::new(),
             decoded: Mutex::new(Vec::new()),
+            state_tables: HashMap::new(),
         }
     }
 }
@@ -101,6 +103,7 @@ impl Clone for XAnimCatalog {
             order: self.order.clone(),
             zones: self.zones.clone(),
             decoded: Mutex::new(decoded),
+            state_tables: self.state_tables.clone(),
         }
     }
 }
@@ -114,6 +117,19 @@ impl Deref for XAnimBuild {
 }
 
 impl XAnimCatalog {
+    pub fn zombie_states(
+        &self,
+        namespace: AssetNamespace,
+    ) -> Option<Arc<xmodel_runtime::AnimStateTable>> {
+        let mut tables = self.state_tables.iter().filter(|((family, _), table)| {
+            *family == namespace
+                && ["zm_move_walk", "zm_walk_melee", "zm_rise"]
+                    .iter()
+                    .all(|state| table.states.contains_key(*state))
+        });
+        let (_, table) = tables.next()?;
+        tables.next().is_none().then(|| Arc::clone(table))
+    }
     pub fn len(&self) -> usize {
         self.order.len()
     }
@@ -180,6 +196,8 @@ impl XAnimCatalog {
         self.clip_at(self.index_by_name(ns, name)?)
     }
 
+    /// The clip named `name`, preferring namespace `ns` and falling back to the
+    /// others (actor clips a T5 match replicates live under T5).
     pub fn decode(&self, ns: AssetNamespace, name: &str) -> Option<AnimClip> {
         let captured = self.get(ns, name)?;
         AnimClip::from_parts(&captured.parts).ok()
@@ -260,6 +278,9 @@ impl XAnimBuild {
     }
 
     pub fn absorb(&mut self, mut local: Self) -> usize {
+        self.catalog
+            .state_tables
+            .extend(std::mem::take(&mut local.catalog.state_tables));
         self.capture_gaps = self.capture_gaps.saturating_add(local.capture_gaps);
         let saved_zone = self.capture_zone;
         let saved_ns = self.capture_ns;
@@ -377,6 +398,7 @@ impl XAnimBuild {
                     notifies,
                     indices,
                     delta_trans: None,
+                    delta_quat: None,
                 }),
             },
         );
@@ -450,6 +472,7 @@ impl XAnimBuild {
             copy_u16_t5(s, geometry.indices, geometry.index_count)
         };
 
+        let (delta_trans, delta_quat) = copy_delta_t5(s, geometry.delta, geometry.numframes);
         self.insert_in(
             AssetNamespace::T5,
             CapturedXAnim {
@@ -469,7 +492,8 @@ impl XAnimBuild {
                     names,
                     notifies,
                     indices,
-                    delta_trans: None,
+                    delta_trans,
+                    delta_quat,
                 }),
             },
         );
@@ -477,6 +501,47 @@ impl XAnimBuild {
 }
 
 impl XAnimBuild {
+    pub fn capture_anim_states_t6(
+        &mut self,
+        namespace: AssetNamespace,
+        load: &fastfile_t6::ZoneLoad,
+        asset: &fastfile_t6::LoadedAsset,
+    ) -> bool {
+        if asset.ty != fastfile_t6::AssetType::RawFile || asset.header.len() < 12 {
+            return false;
+        }
+        let h = &asset.header;
+        let ptr = |at: usize| {
+            let raw = u32::from_le_bytes(h[at..at + 4].try_into().unwrap());
+            (raw != 0 && raw < 0xffff_fffe).then(|| fastfile_t6::Ptr {
+                block: ((raw - 1) >> 29) as u8,
+                offset: (raw - 1) & 0x1fff_ffff,
+            })
+        };
+        let Some(name) = ptr(0)
+            .and_then(|p| load.blocks.cstr(p).ok())
+            .and_then(|s| std::str::from_utf8(s).ok())
+        else {
+            return false;
+        };
+        if !name.starts_with("animstatedefs/") || !name.ends_with(".asd") {
+            return false;
+        }
+        let Ok(len) = usize::try_from(i32::from_le_bytes(h[4..8].try_into().unwrap())) else {
+            return false;
+        };
+        let Some(bytes) = ptr(8).and_then(|p| load.blocks.bytes(p, len).ok()) else {
+            return false;
+        };
+        let Ok(table) = crate::parse_anim_states(bytes) else {
+            return false;
+        };
+        self.catalog
+            .state_tables
+            .entry((namespace, name.to_owned()))
+            .or_insert_with(|| Arc::new(table));
+        true
+    }
     pub fn capture_xanim_t6(
         &mut self,
         ns: AssetNamespace,
@@ -552,6 +617,16 @@ impl XAnimBuild {
         } else {
             words(92, index_count)
         };
+        let delta_trans = match ptr(100) {
+            Some(delta) => match copy_delta_trans_t6(load, delta, numframes) {
+                Some(trans) => trans,
+                None => {
+                    self.capture_gaps += 1;
+                    return false;
+                }
+            },
+            None => None,
+        };
         let parts = RawXAnimParts {
             name: format!("{prefix}{}", name.to_ascii_lowercase()),
             data_byte: bytes(68, usize::from(u16_at(4))),
@@ -567,7 +642,8 @@ impl XAnimBuild {
             names,
             notifies,
             indices,
-            delta_trans: None,
+            delta_trans,
+            delta_quat: None,
         };
         self.insert_in(
             ns,
@@ -580,6 +656,9 @@ impl XAnimBuild {
     }
 
     pub fn absorb_vacant(&mut self, mut local: Self) -> (Vec<String>, usize) {
+        for (key, table) in std::mem::take(&mut local.catalog.state_tables) {
+            self.catalog.state_tables.entry(key).or_insert(table);
+        }
         let order = std::mem::take(&mut local.catalog.order);
         let entries = std::mem::take(&mut local.catalog.entries);
         let (mut added, mut kept) = (Vec::new(), 0);
@@ -691,6 +770,7 @@ impl AssetLinkSink for XAnimBuild {
                 notifies,
                 indices,
                 delta_trans,
+                delta_quat: None,
             }),
         });
         let _ = geometry.frequency;
@@ -744,6 +824,66 @@ fn copy_f32_3(s: &ZoneStream<'_>, ptr: Ptr, off: usize) -> Option<[f32; 3]> {
         f32::from_le_bytes(bytes[4..8].try_into().ok()?),
         f32::from_le_bytes(bytes[8..12].try_into().ok()?),
     ])
+}
+
+fn copy_delta_trans_t6(
+    load: &fastfile_t6::ZoneLoad,
+    delta: fastfile_t6::Ptr,
+    numframes: u16,
+) -> Option<Option<RawDeltaTrans>> {
+    let Some(trans) = load.blocks.ptr_at(delta).ok()? else {
+        return Some(None);
+    };
+    let header = load.blocks.bytes(trans, 4).ok()?;
+    let size = u16::from_le_bytes(header[..2].try_into().ok()?);
+    let small = header[2] != 0;
+    let floats = |at| -> Option<[f32; 3]> {
+        let data = load.blocks.bytes(trans.at(at), 12).ok()?;
+        Some(std::array::from_fn(|i| {
+            f32::from_le_bytes(data[i * 4..i * 4 + 4].try_into().unwrap())
+        }))
+    };
+    let mins = floats(4)?;
+    if size == 0 {
+        return Some(Some(RawDeltaTrans {
+            size,
+            small,
+            mins,
+            ..Default::default()
+        }));
+    }
+    let step = floats(16)?;
+    let count = usize::from(size) + 1;
+    let indices = if numframes < 256 {
+        load.blocks
+            .bytes(trans.at(32), count)
+            .ok()?
+            .iter()
+            .copied()
+            .map(u16::from)
+            .collect()
+    } else {
+        load.blocks
+            .bytes(trans.at(32), count * 2)
+            .ok()?
+            .chunks_exact(2)
+            .map(|v| u16::from_le_bytes(v.try_into().unwrap()))
+            .collect()
+    };
+    let frames = load.blocks.ptr_at(trans.at(28)).ok()??;
+    let packed = load
+        .blocks
+        .bytes(frames, count * if small { 3 } else { 6 })
+        .ok()?
+        .to_vec();
+    Some(Some(RawDeltaTrans {
+        size,
+        small,
+        mins,
+        step,
+        indices,
+        packed,
+    }))
 }
 
 fn copy_delta_trans(
@@ -830,6 +970,84 @@ fn copy_u32_iw5(
         .chunks_exact(4)
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
+}
+
+fn copy_delta_t5(
+    s: &fastfile_t5::ZoneStream<'_>,
+    delta: Option<fastfile_t5::Ptr>,
+    numframes: u16,
+) -> (Option<RawDeltaTrans>, Option<RawDeltaQuat>) {
+    let Some(delta) = delta else {
+        return (None, None);
+    };
+    let body = |slot: usize| match s.ptr_at(delta, slot) {
+        Ok(fastfile_t5::ZonePtr::Offset(p)) => Some(s.resolve_alias(p)),
+        _ => None,
+    };
+    let indices = |p: fastfile_t5::Ptr, n: usize| -> Vec<u16> {
+        if numframes < 256 {
+            copy_u8_t5(s, Some(p), n)
+                .into_iter()
+                .map(u16::from)
+                .collect()
+        } else {
+            copy_u16_t5(s, Some(p), n)
+        }
+    };
+    let frames_at = |p: fastfile_t5::Ptr, off: usize| match s.ptr_at(p, off) {
+        Ok(fastfile_t5::ZonePtr::Offset(q)) => Some(s.resolve_alias(q)),
+        _ => None,
+    };
+    let vec3 = |p: fastfile_t5::Ptr, off: usize| -> Option<[f32; 3]> {
+        Some([
+            s.f32_at(p, off).ok()?,
+            s.f32_at(p, off + 4).ok()?,
+            s.f32_at(p, off + 8).ok()?,
+        ])
+    };
+
+    let trans = body(0).and_then(|p| {
+        let size = s.u16_at(p, 0).ok()?;
+        let small = s.u8_at(p, 2).ok()? != 0;
+        if size == 0 {
+            return Some(RawDeltaTrans {
+                size,
+                small,
+                mins: vec3(p, 4)?,
+                ..RawDeltaTrans::default()
+            });
+        }
+        let n = usize::from(size) + 1;
+        let packed = copy_u8_t5(s, frames_at(p, 28), if small { 3 * n } else { 6 * n });
+        Some(RawDeltaTrans {
+            size,
+            small,
+            mins: vec3(p, 4)?,
+            step: vec3(p, 16)?,
+            indices: indices(p.at(32), n),
+            packed,
+        })
+    });
+
+    let quat = body(4).and_then(|p| {
+        let size = s.u16_at(p, 0).ok()?;
+        let pair = |q: fastfile_t5::Ptr, i: usize| -> Option<[i16; 2]> {
+            Some([s.i16_at(q, i * 4).ok()?, s.i16_at(q, i * 4 + 2).ok()?])
+        };
+        if size == 0 {
+            return Some(RawDeltaQuat {
+                indices: Vec::new(),
+                frames: vec![pair(p.at(4), 0)?],
+            });
+        }
+        let n = usize::from(size) + 1;
+        let frames = frames_at(p, 4)?;
+        Some(RawDeltaQuat {
+            indices: indices(p.at(8), n),
+            frames: (0..n).map(|i| pair(frames, i)).collect::<Option<_>>()?,
+        })
+    });
+    (trans, quat)
 }
 
 fn copy_u8_t5(

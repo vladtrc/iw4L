@@ -58,6 +58,7 @@ impl Plugin for HudPlugin {
             .init_resource::<HudPresentStamp>()
             .init_resource::<HudStageStamp>()
             .init_resource::<crate::expr_cache::MenuExprCache>()
+            .init_resource::<crate::expr_cache::GameMenuParsers>()
             .init_resource::<crate::hudelem::HudElemSoundLatch>()
             .init_resource::<crate::menus::ScriptMenus>()
             .add_message::<net::SvcCardSlotCmd>()
@@ -73,6 +74,7 @@ impl Plugin for HudPlugin {
                     reset_match_hud_on_torn_down,
                     hud_stamp_open,
                     sync_games_root,
+                    crate::expr_cache::sync_parsers,
                     sync_map_zone_tree,
                     sync_zone_atlases,
                     warm_hud_images,
@@ -357,11 +359,23 @@ fn ensure_hud_root(mut commands: Commands, existing: Query<Entity, With<HudRoot>
 fn sync_hud_visibility(
     screen: Res<AppScreen>,
     ui_draw: Option<Res<UiDraw>>,
+    mode: Option<Res<game_api::ModeRules>>,
     mut roots: Query<&mut Visibility, With<HudRoot>>,
     mut visible: ResMut<HudRootVisible>,
+    mut reported: Local<Option<&'static str>>,
 ) {
     let ui_on = ui_draw.is_some_and(|d| d.0);
-    let show = hud_root_should_show(*screen, ui_on);
+    let unknown = match mode.map(|mode| mode.hud.code_hud) {
+        Some(game_api::Rule::Unknown(gap)) => Some(gap),
+        _ => None,
+    };
+    if unknown.map(|gap| gap.id) != *reported {
+        if let Some(gap) = unknown {
+            diag::info!(Ui, "game gap {}: {}", gap.id, gap.what);
+        }
+        *reported = unknown.map(|gap| gap.id);
+    }
+    let show = hud_root_should_show(*screen, ui_on) && unknown.is_none();
     visible.0 = Some(i32::from(show));
     for mut vis in &mut roots {
         let want = if show {

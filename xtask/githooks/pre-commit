@@ -65,4 +65,14 @@ if command -v rustfmt >/dev/null; then
   fi
 fi
 
+# Each game's rules stay in that game's crates: refuse a commit that adds
+# anything beyond xtask/boundary/allow.txt or leaves an entry stale
+# (`cargo xtask boundary --update` lowers it).
+if command -v cargo >/dev/null; then
+  if ! (cd "$ROOT" && cargo run -q -p xtask -- boundary --enforce) >&2; then
+    echo 'pre-commit: game boundary check failed (docs/ARCHITECTURE.md).' >&2
+    exit 1
+  fi
+fi
+
 exit 0

@@ -240,10 +240,17 @@ const T6_LINES: &[(&str, &str)] = &[
 pub(crate) struct AnnouncerRoutes(HashMap<String, (AssetNamespace, String)>);
 
 impl AnnouncerRoutes {
-    pub(crate) fn route<'a>(&'a self, alias: &'a str) -> (AssetNamespace, &'a str) {
+    /// The alias a match line plays: `alias` is `<game>:<name>` or a bare
+    /// name of `family`, the match's game.
+    pub(crate) fn route<'a>(
+        &'a self,
+        alias: &'a str,
+        family: AssetNamespace,
+    ) -> (AssetNamespace, &'a str) {
+        let (ns, name) = crate::aliases::namespace_alias(alias, family);
         self.0
-            .get(alias)
-            .map_or((AssetNamespace::Iw4, alias), |(ns, routed)| (*ns, routed))
+            .get(name)
+            .map_or((ns, name), |(ns, routed)| (*ns, routed))
     }
 
     pub(crate) fn len(&self) -> usize {

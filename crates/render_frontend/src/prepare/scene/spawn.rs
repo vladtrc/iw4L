@@ -185,10 +185,9 @@ pub(crate) fn spawn_world(
     prepared: (
         Res<render_anim::PreparedFpv>,
         Res<render_anim::PreparedModelMaterials>,
-        Option<Res<render_fx::PreparedFxModels>>,
     ),
 ) {
-    let (fpv, model_materials, fx_models) = prepared;
+    let (fpv, model_materials) = prepared;
     if scene.readiness.generation != job.spawn || job.spawn.0.is_none() {
         return;
     }
@@ -697,10 +696,6 @@ pub(crate) fn spawn_world(
             tracers.as_deref(),
             fx_catalog.as_deref(),
         );
-        let fx_geometry =
-            super::world_plan::prepare_fx_model_geometry(&scene, fx_models.as_deref());
-        commands.insert_resource(fx_geometry.0.clone());
-        commands.insert_resource(fx_geometry);
         tess.material_images = std::sync::Arc::new(job.images.exact_handles().to_vec());
         if let Some(host) = fx_host.as_mut() {
             match scene.fx_glass.as_ref() {
@@ -722,6 +717,7 @@ pub(crate) fn spawn_world(
 pub(crate) fn spawn_world_finish(
     mut commands: Commands,
     load: Option<Res<assets::MapLoadProcess>>,
+    fx_models: Option<Res<render_fx::PreparedFxModels>>,
     mut scene: ResMut<WorldScene>,
     mut images: ResMut<Assets<Image>>,
     mut job: ResMut<WorldSpawnJob>,
@@ -747,6 +743,10 @@ pub(crate) fn spawn_world_finish(
         job.images.probe_handles().to_vec(),
         job.images.lightmap_handles().to_vec(),
     );
+    // World placement installs the atlas required to bind FX model materials.
+    let fx_geometry = super::world_plan::prepare_fx_model_geometry(&scene, fx_models.as_deref());
+    commands.insert_resource(fx_geometry.0.clone());
+    commands.insert_resource(fx_geometry);
     tess.material_images = std::sync::Arc::new(job.images.exact_handles().to_vec());
     job.last_work_ms = frame_started.elapsed().as_secs_f32() * 1000.0;
     if paced {

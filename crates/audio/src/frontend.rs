@@ -31,6 +31,9 @@ const FRONTEND_SOUND_ZONE: &str = "iw4:code_post_gfx_mp";
 #[derive(Resource)]
 struct FrontendAudioPrepare(Task<FrontendAudioWalked>);
 
+#[derive(Resource, Default)]
+struct FrontendAudioAttempted(Option<std::path::PathBuf>);
+
 struct FrontendAudioWalked {
     bank: Option<Arc<SoundCatalog>>,
     iwd: Arc<NamespaceSoundIwd>,
@@ -47,6 +50,7 @@ pub(crate) struct MenuSources {
 pub(crate) fn register_frontend_audio(app: &mut App) {
     register_ui_contracts(app);
     app.init_resource::<MenuSources>()
+        .init_resource::<FrontendAudioAttempted>()
         .add_message::<ReturnedToMenu>()
         .add_systems(
             Update,
@@ -69,6 +73,9 @@ fn start_frontend_audio_prepare(
     frontend: Option<Res<FrontendAudio>>,
     running: Option<Res<FrontendAudioPrepare>>,
     identity: Option<Res<LaunchIdentity>>,
+    mut attempted: ResMut<FrontendAudioAttempted>,
+    dvars: Res<frame::UiMenuDvars>,
+    unified: Option<Res<frame::UnifiedFrontend>>,
     silent: Option<Res<crate::AudioSilent>>,
     loading: (
         Option<Res<assets::MatchLoadBusy>>,
@@ -97,6 +104,15 @@ fn start_frontend_audio_prepare(
     if identity.games_root.as_os_str().is_empty() {
         return;
     }
+    if unified.as_ref().is_some_and(|frontend| frontend.0)
+        && dvars.get("ui_game_namespace") != Some("iw4")
+    {
+        return;
+    }
+    if attempted.0.as_ref() == Some(&identity.games_root) {
+        return;
+    }
+    attempted.0 = Some(identity.games_root.clone());
     let games = GamesRoot(identity.games_root.clone());
     let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
     let task = pool.spawn(async move {

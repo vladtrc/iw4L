@@ -262,9 +262,17 @@ pub fn build_world_draw(
         shadow_geometry: Vec::new(),
         reflection_probes: Vec::new(),
         dpvs,
-        outdoor_image_name: None,
+        outdoor_image_name: asset
+            .field(740)
+            .and_then(|index| load.assets.get(index))
+            .map(|image| {
+                Reader(load)
+                    .text(Reader::ptr(&image.header, 72)?)
+                    .map(|name| name.trim_start_matches(',').to_owned())
+            })
+            .transpose()?,
         outdoor_image: None,
-        outdoor_lookup: [0; 16],
+        outdoor_lookup: core::array::from_fn(|i| Reader::word(&asset.header, 676 + 4 * i).unwrap()),
         sun_effects: None,
         t5_sun_parse_exposure: None,
         t6_exposure: Some(f32::from_bits(Reader::word(&asset.header, 184)?)),

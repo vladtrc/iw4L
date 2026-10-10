@@ -1,12 +1,5 @@
-mod compiler;
-mod error;
 pub mod host;
-mod ir;
-pub mod profile;
-mod program;
 mod runtime;
-mod source;
-mod value;
 pub(crate) mod vm;
 
 pub(crate) use bevy_ecs::prelude::Resource;
@@ -15,7 +8,12 @@ pub(crate) use std::sync::Arc;
 
 pub(crate) use runtime::Runtime;
 
-pub use error::{Fault, Location};
+pub use gsc::IR_VERSION;
+pub use gsc::{Builtin, Catalog, Namespace, Owner};
+pub(crate) use gsc::{Callee, Global, Op};
+pub use gsc::{Fault, Location};
+pub use host::actor_anims::ActorAnimTree;
+pub use host::actor_nav::{ActorPaths, NavNode, NavNodeKind};
 pub(crate) use host::controls::{
     action_slot_command, command_buttons, player_commands, select_location,
 };
@@ -38,17 +36,30 @@ pub(crate) use host::presence::sync_presence;
 pub use host::registry::{Native, NativeRegistry};
 pub(crate) use host::restart::restart_level;
 pub(crate) use host::weapons::{publish_projectile_launches, sync_engine_events};
-pub use ir::IR_VERSION;
-pub(crate) use ir::{Binary, Callee, Function, Global, Op, Unary};
-pub use profile::catalog::{Builtin, Catalog, Namespace, Owner};
-pub use profile::iw4_startup::Iw4Startup;
-pub use program::{ModuleIdentity, Program, Realm, Site};
+
+/// Advances actor animation one authority tick, and raises timed notifies,
+/// before scripts run.
+pub(crate) fn advance_actors(world: &mut bevy_ecs::prelude::World) {
+    if !world
+        .resource::<crate::step::StepRequest>()
+        .reason
+        .advances_authority_world()
+    {
+        return;
+    }
+    let seconds = crate::MATCH_TICK_MS as f32 / 1000.0;
+    host::actor_anims::advance(world, seconds);
+    host::actor_nav::locomote(world, seconds);
+    host::actor_brain::think(world);
+    host::natives::engine::deliver_timed_notifies(world);
+}
+pub(crate) use gsc::ArrayKey;
+pub use gsc::{FileSources, SourceOrigin, SourceResolver, decode_source, normalize_module};
+pub use gsc::{ModuleIdentity, Program, Realm, Site};
+pub use gsc::{ScriptString, Value};
 pub(crate) use runtime::{
     advance_scheduler, copy_state, healthy, install, preflight, reset, start, take_signals,
 };
-pub use source::{FileSources, SourceOrigin, SourceResolver, decode_source, normalize_module};
-pub(crate) use value::ArrayKey;
-pub use value::{ScriptString, Value};
 pub(crate) use vm::state::{Frame, Thread, ThreadState, Waiter, WaiterKind};
 
 pub(crate) use host::entity_damage::{

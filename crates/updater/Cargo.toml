@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Community configuration and HTTPS self-update before game startup."
 
+[package.metadata.iw4l]
+layer = "neutral"
+
 [dependencies]
 rustls = { version = "0.23.31", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2.2.0"

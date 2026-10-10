@@ -715,6 +715,7 @@ fn follow_master_match(
     bridge: Option<Res<net::MasterBridge>>,
     identity: Res<LaunchIdentity>,
     live: Res<LiveWorldIdentity>,
+    map_identity: Option<Res<assets::SessionMapIdentity>>,
     has_world: Res<HasWorld>,
     busy: Option<Res<assets::MatchLoadBusy>>,
     request: Option<Res<assets::MatchLoadRequest>>,
@@ -739,9 +740,18 @@ fn follow_master_match(
         return;
     }
     let host = matches!(state, net::MasterBridgeState::Hosting { .. });
+    let same_map = match offer.map.split_once(':') {
+        Some((namespace, zone)) => map_identity.as_ref().is_some_and(|map| {
+            map.zone == zone
+                && map
+                    .namespace
+                    .is_some_and(|loaded| loaded.as_str() == namespace)
+        }),
+        None => identity.zone == offer.map,
+    };
     if has_world.0
         && (live.load_key.match_key == offer.match_key
-            || (host && live.load_key.match_key.is_none() && identity.zone == offer.map))
+            || (host && live.load_key.match_key.is_none() && same_map))
     {
         *pending = None;
         return;

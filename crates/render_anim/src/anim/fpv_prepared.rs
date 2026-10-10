@@ -17,6 +17,7 @@ use crate::anim::fpv_rig::{
 use crate::gaps::RenderGapCause;
 
 const PREPARE_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
+const PREPARE_LOADING_BUDGET: std::time::Duration = std::time::Duration::from_millis(40);
 
 const NO_COLOUR_MAP: &str = "technique samples no colour map";
 
@@ -998,7 +999,15 @@ pub fn prepare_fpv_compositions(inputs: PrepareFpvInputs, mut prepared: ResMut<P
     let Some(lighting) = lighting.as_deref() else {
         return;
     };
-    let deadline = std::time::Instant::now() + PREPARE_FRAME_BUDGET;
+    let budget = if load
+        .as_deref()
+        .is_some_and(|process| !process.is_complete())
+    {
+        PREPARE_LOADING_BUDGET
+    } else {
+        PREPARE_FRAME_BUDGET
+    };
+    let deadline = std::time::Instant::now() + budget;
     let done = {
         let Some(job) = prepared.job.as_mut() else {
             return;

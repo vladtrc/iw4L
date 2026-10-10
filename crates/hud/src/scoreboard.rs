@@ -286,11 +286,15 @@ pub(crate) fn update_scoreboard(
     mut hud_images: ResMut<HudImages>,
     mut images: ResMut<Assets<Image>>,
     mut pass: ResMut<HudTessPass>,
+    mode: Option<Res<game_api::ModeRules>>,
 ) {
     pass.scoreboard = TessJob::Hide;
     let Some(snap) = presented.snapshot() else {
         return;
     };
+    if mode.is_some_and(|mode| !mode.hud.scoreboard) {
+        return;
+    }
     let down = actions.as_ref().is_some_and(|a| a.client.kb.scores.active);
     if !displayed(down, snap, local.0) || !surface.is_ready() {
         return;

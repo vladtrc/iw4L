@@ -1,6 +1,19 @@
 #include maps\mp\_utility;
 #include common_scripts\utility;
 
+array_removeUndefined( array )
+{
+	out = [];
+
+	foreach ( value in array )
+	{
+		if ( isDefined( value ) )
+			out[ out.size ] = value;
+	}
+
+	return out;
+}
+
 main()
 {
 	level.t6Fx = [];

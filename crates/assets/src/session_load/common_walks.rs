@@ -557,6 +557,12 @@ pub(super) fn resolve_iw5_weapon_donor(
     runtime_common: Option<&Path>,
     report: &mut Vec<String>,
 ) -> Option<PathBuf> {
+    if runtime_common.is_some_and(|path| {
+        asset_transport::t6_content::T6ContentMode::for_path(path)
+            == asset_transport::t6_content::T6ContentMode::Zombies
+    }) {
+        return None;
+    }
     let Ok(root) = games_root_from_env() else {
         report.push("iw5 weapons: IW4L_GAMES unset".into());
         return None;
@@ -704,6 +710,12 @@ pub(super) fn t5_weapon_common_prep(
     progress: &LoadProgress,
 ) -> T5CommonPrep {
     let mut report = Vec::new();
+    if runtime_common.is_some_and(|path| {
+        asset_transport::t6_content::T6ContentMode::for_path(path)
+            == asset_transport::t6_content::T6ContentMode::Zombies
+    }) {
+        return T5CommonPrep::Skip(report);
+    }
     let root = match games_root_from_env() {
         Ok(root) => root,
         Err(error) => {
@@ -893,6 +905,7 @@ fn t6_class_tables(
 }
 
 pub(super) fn walk_t6_weapon_bundle(
+    runtime_common: Option<&Path>,
     progress: &LoadProgress,
 ) -> (
     WeaponBuild,
@@ -902,6 +915,12 @@ pub(super) fn walk_t6_weapon_bundle(
     Vec<(String, asset_material::material_images::ZoneUiImage)>,
 ) {
     let mut report = Vec::new();
+    if runtime_common.is_some_and(|path| {
+        asset_transport::t6_content::T6ContentMode::for_path(path)
+            == asset_transport::t6_content::T6ContentMode::Zombies
+    }) {
+        return (WeaponBuild::default(), None, Vec::new(), report, Vec::new());
+    }
     let root = match games_root_from_env() {
         Ok(root) => root,
         Err(error) => {
@@ -916,6 +935,14 @@ pub(super) fn walk_t6_weapon_bundle(
             return (WeaponBuild::default(), None, Vec::new(), report, Vec::new());
         }
     };
+    let tables = t6_class_tables(&root, &mut report);
+    if runtime_common == Some(donor.path.as_path()) {
+        report.push(format!(
+            "t6 weapons: runtime common already owns {}; donor walk skipped",
+            donor.path.display()
+        ));
+        return (WeaponBuild::default(), None, tables, report, Vec::new());
+    }
     let stage = progress.begin_scoped(StageId::CommonAssets, "t6_weapons", None);
     let opened = open_zone_shared(&donor.path).map_err(|error| error.to_string());
     stage.finish_from(&opened);
@@ -929,7 +956,6 @@ pub(super) fn walk_t6_weapon_bundle(
             return (WeaponBuild::default(), None, Vec::new(), report, Vec::new());
         }
     };
-    let tables = t6_class_tables(&root, &mut report);
     let census = lane(image.game).load_common_mp(
         &donor.path,
         &image,
@@ -959,7 +985,6 @@ pub(super) async fn walk_startup_material_zones(
     Vec<asset_world::CapturedLightDef>,
     crate::ScriptSources,
 ) {
-    const STARTUP_ZONES: [&str; 3] = ["code_post_gfx_mp", "localized_code_post_gfx_mp", "patch_mp"];
     let Some(map_path) = map_path else {
         return (
             MaterialCatalog::default(),
@@ -969,9 +994,15 @@ pub(super) async fn walk_startup_material_zones(
             crate::ScriptSources::default(),
         );
     };
+    let startup_zones =
+        if asset_transport::zone_game_for_path(map_path) == Some(asset_core::ZoneGame::T6) {
+            asset_transport::t6_content::T6ContentMode::for_path(map_path).startup()
+        } else {
+            asset_transport::t6_content::T6ContentMode::Multiplayer.startup()
+        };
     let games = games_root_from_env().ok();
 
-    let opened = STARTUP_ZONES
+    let opened = startup_zones
         .map(|zone| {
             let games = games.clone();
             let map_path = map_path.clone();
@@ -1003,7 +1034,7 @@ pub(super) async fn walk_startup_material_zones(
     let mut stats = Vec::new();
     let mut light_defs = Vec::new();
     let mut scripts = crate::ScriptSources::default();
-    for (zone, task) in STARTUP_ZONES.into_iter().zip(opened) {
+    for (zone, task) in startup_zones.into_iter().zip(opened) {
         match task.await {
             Ok((path, image)) => {
                 let envelope = peek_zone_version(&path)
@@ -1090,10 +1121,22 @@ pub(super) fn load_localized_strings_beside(
             namespace,
             asset_core::AssetNamespace::T5 | asset_core::AssetNamespace::T6
         ) {
-            match find_zone_file_version(&root, "common_mp", version).and_then(|zone| {
+            let common = if namespace == asset_core::AssetNamespace::T6 {
+                asset_transport::t6_content::T6ContentMode::for_path(zone_ff).common()
+            } else {
+                "common_mp"
+            };
+            match find_zone_file_version(&root, common, version).and_then(|zone| {
                 let language = runtime_language.as_deref();
                 if namespace == asset_core::AssetNamespace::T6 {
-                    asset_transport::discover::find_t6_localized_zones(&zone.path, language)
+                    let anchor = if asset_transport::zone_game_for_path(zone_ff)
+                        == Some(asset_core::ZoneGame::T6)
+                    {
+                        zone_ff
+                    } else {
+                        zone.path.as_path()
+                    };
+                    asset_transport::discover::find_t6_localized_zones(anchor, language)
                 } else {
                     asset_transport::discover::find_t5_localized_zones(&zone.path, language)
                 }
@@ -1163,4 +1206,296 @@ pub(super) fn finish_zone_open<E>(
         stage.set_bytes(image.bytes.len() as u64);
     }
     stage.finish_from(opened);
+}
+
+#[derive(Default)]
+pub(super) struct ZombieCommons {
+    pub(super) xanims: XAnimBuild,
+    pub(super) weapons: WeaponBuild,
+    pub(super) fpv: FpvMeshBuild,
+    pub(super) world_weapons: WorldWeaponBuild,
+    pub(super) projectiles: asset_model::ProjectileMeshBuild,
+    /// Singleplayer and zombie scripts, lowest priority first; the map and its
+    /// patch go on top.
+    pub(super) scripts: Option<crate::ScriptSources>,
+    pub(super) map_patch_scripts: crate::ScriptSources,
+    /// On-screen text of the singleplayer, zombie and map zones.
+    pub(super) strings: LocalizeCatalog,
+    /// Black Ops' own HUD menus and fonts.
+    pub(super) hud_menus: Option<asset_game::MenuCatalog>,
+    /// Each zone's models with the materials they index, for the actor
+    /// bodies and heads scripts put on spawned zombies.
+    pub(super) scene_models: Vec<(
+        asset_world::MapXModelSceneCatalog,
+        asset_material::MaterialCatalog,
+    )>,
+    /// The 2D images the zombie scripts and Black Ops' HUD name.
+    pub(super) hud_images: Vec<(String, asset_material::material_images::ZoneUiImage)>,
+    pub(super) report: Vec<String>,
+}
+
+/// T5 zombie maps run on the singleplayer script base and keep their actor
+/// animations, weapons and shared models in `common_zombie` and its patch.
+pub(super) fn walk_zombie_commons(zone_ff: &Path, progress: &LoadProgress) -> ZombieCommons {
+    let mut commons = ZombieCommons::default();
+    let is_zombie_map = zone_ff
+        .file_stem()
+        .is_some_and(|stem| stem.to_string_lossy().starts_with("zombie"));
+    if !is_zombie_map
+        || asset_transport::zone_game_for_path(zone_ff) != Some(asset_core::ZoneGame::T5)
+    {
+        return commons;
+    }
+    let stem = zone_ff
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let map_patch = format!("{stem}_patch");
+    let mut scripts = crate::ScriptSources::default();
+    let mut script_names = std::collections::BTreeSet::new();
+    for zone in [
+        "code_post_gfx",
+        "common",
+        "common_zombie",
+        "common_zombie_patch",
+        stem.as_str(),
+        map_patch.as_str(),
+    ] {
+        let found = match asset_transport::find_zone_for_tree(zone_ff, zone) {
+            Ok(found) => found,
+            Err(error) => {
+                commons
+                    .report
+                    .push(format!("zombie common {zone}: {error}"));
+                continue;
+            }
+        };
+        let stage = progress.begin_scoped(StageId::MapAssets, "zombie common", None);
+        let opened = open_zone_shared(&found.path);
+        stage.finish_from(&opened);
+        let image = match opened {
+            Ok(image) => image,
+            Err(error) => {
+                commons
+                    .report
+                    .push(format!("zombie common {zone}: open: {error}"));
+                continue;
+            }
+        };
+        let census = lane(image.game).load_common_mp(
+            &found.path,
+            &image,
+            progress,
+            false,
+            MaterialCatalog::default(),
+        );
+        let xanims = census.xanims.len();
+        commons.xanims.absorb(census.xanims);
+        commons.weapons.absorb_overriding(census.weapons.clone());
+        commons.fpv.absorb(census.fpv.clone());
+        commons.world_weapons.absorb(census.world_weapons.clone());
+        commons.projectiles.absorb(census.projectile_meshes.clone());
+        commons.report.push(format!(
+            "zombie common {zone}: xanims={xanims} weapons={} scene_models={} scripts={}",
+            census.weapons.len(),
+            census.scene_models.len(),
+            census.scripts.len(),
+        ));
+        script_names.extend(census.scripts.asset_names());
+        commons
+            .scene_models
+            .push((census.scene_models, census.material_population));
+        if zone == map_patch {
+            commons.map_patch_scripts = census.scripts;
+        } else if zone != stem {
+            scripts.overlay(census.scripts);
+        }
+    }
+    commons.scripts = Some(scripts);
+    let mut hud_menus = asset_game::MenuCatalog::default();
+    let mut menu_zones = Vec::new();
+    for zone in ["code_post_gfx", "patch"] {
+        match asset_transport::find_zone_for_tree(zone_ff, zone) {
+            Ok(found) => menu_zones.push((zone.to_owned(), found.path)),
+            Err(error) => commons.report.push(format!("t5 menus {zone}: {error}")),
+        }
+    }
+    match asset_transport::discover::find_t5_localized_zone(zone_ff, None, "code_post_gfx") {
+        Ok(Some(found)) => menu_zones.push((found.zone_name.clone(), found.path)),
+        Ok(None) => commons
+            .report
+            .push("t5 menus: no localized code_post_gfx (fonts)".into()),
+        Err(error) => commons.report.push(format!("t5 menus fonts: {error}")),
+    }
+    for (zone, path) in &menu_zones {
+        match asset_game::load_t5_menu_catalog(path) {
+            Ok(part) => {
+                commons.report.push(format!(
+                    "t5 menus {zone}: {} menus, {} lists, {} fonts",
+                    part.menus.len(),
+                    part.lists.len(),
+                    part.fonts.len()
+                ));
+                hud_menus.absorb(part);
+            }
+            Err(error) => commons.report.push(format!("t5 menus {zone}: {error}")),
+        }
+        if zone == "patch"
+            && let Ok(image) = open_zone_shared(path)
+        {
+            let population = lane(image.game).load_material_population(
+                path,
+                &image,
+                progress,
+                MaterialCatalog::default(),
+            );
+            commons
+                .scene_models
+                .push((Default::default(), population.materials));
+        }
+    }
+    let mut hud_material_names = std::collections::BTreeSet::new();
+    for list in asset_game::T5_HUD_MENU_LISTS {
+        for menu in hud_menus.list_menus.get(*list).into_iter().flatten() {
+            let Some(menu) = hud_menus.get(menu) else {
+                continue;
+            };
+            for material in std::iter::once(&menu.window_background)
+                .chain(menu.items.iter().map(|item| &item.background))
+            {
+                if let Some(name) = material.strip_prefix("t5:material/") {
+                    hud_material_names.insert(name.to_ascii_lowercase());
+                }
+            }
+        }
+    }
+    for font in hud_menus.fonts.values() {
+        for material in [&font.material, &font.glow_material] {
+            if !material.is_empty() {
+                hud_material_names.insert(material.to_ascii_lowercase());
+            }
+        }
+    }
+    commons.report.push(format!(
+        "t5 hud menus: {} menus, {} fonts, {} materials named",
+        hud_menus.menus.len(),
+        hud_menus.fonts.len(),
+        hud_material_names.len()
+    ));
+    commons.hud_menus = Some(hud_menus);
+    for stem in ["code_post_gfx", "common", "common_zombie", stem.as_str()] {
+        let found = asset_transport::discover::find_t5_localized_zone(zone_ff, None, stem);
+        // Localized zones also hold materials the zombie bodies draw with.
+        if let Ok(Some(zone)) = &found
+            && let Ok(image) = open_zone_shared(&zone.path)
+        {
+            let census = lane(image.game).load_common_mp(
+                &zone.path,
+                &image,
+                progress,
+                false,
+                MaterialCatalog::default(),
+            );
+            commons
+                .scene_models
+                .push((census.scene_models, census.material_population));
+        }
+        match found.map(|found| found.map(|zone| load_localize_catalog_in_lane(&zone.path))) {
+            Ok(Some(Ok(part))) => {
+                commons
+                    .report
+                    .push(format!("zombie localize {stem}: {} strings", part.len()));
+                commons.strings.absorb(part);
+            }
+            Ok(Some(Err(error))) => commons
+                .report
+                .push(format!("zombie localize {stem}: {error}")),
+            Ok(None) => commons
+                .report
+                .push(format!("zombie localize {stem}: no localized zone")),
+            Err(error) => commons
+                .report
+                .push(format!("zombie localize {stem}: {error}")),
+        }
+    }
+    let main = asset_transport::game_root_for_zone(zone_ff)
+        .ok()
+        .map(|root| root.join("main"));
+    let hud = zombie_hud_images(
+        &commons.scene_models,
+        &script_names,
+        &hud_material_names,
+        main.as_deref(),
+    );
+    commons
+        .report
+        .push(format!("zombie hud images: {}", hud.len()));
+    commons.hud_images = hud;
+    commons
+}
+
+/// The 2D materials zombie scripts and Black Ops' HUD menus and fonts name
+/// (round chalk, perk and power-up icons, the weapon info frame), decoded for
+/// the HUD from the zone images they sample.
+fn zombie_hud_images(
+    zones: &[(asset_world::MapXModelSceneCatalog, MaterialCatalog)],
+    names: &std::collections::BTreeSet<String>,
+    hud_names: &std::collections::BTreeSet<String>,
+    main: Option<&Path>,
+) -> Vec<(String, asset_material::ZoneUiImage)> {
+    let mut images = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (_, population) in zones {
+        for material in &population.materials {
+            let name = material.name.as_str().to_ascii_lowercase();
+            // Scripts build some names (`"hud_chalk_" + round`), so HUD-named
+            // materials count even when no literal names them.
+            let hud_named = ["hud_", "specialty_", "zom_"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix));
+            if !material.name.is_real()
+                || !(hud_named || names.contains(&name) || hud_names.contains(&name))
+                || seen.contains(&name)
+            {
+                continue;
+            }
+            let Some(image) = material
+                .textures
+                .iter()
+                .find_map(|texture| population.images.get(texture.image?))
+            else {
+                continue;
+            };
+            // Images without an in-zone payload stream from the IWDs.
+            let decoded = if image.payload.is_empty() {
+                let Some(main) = main else {
+                    continue;
+                };
+                asset_material::decode_ui_image_from_main(main, image.name.as_str())
+                    .and_then(|found| found.ok_or_else(|| "not in the IWDs".to_owned()))
+            } else {
+                asset_material::decode_zone_image_rgba(
+                    u32::from(image.width),
+                    u32::from(image.height),
+                    image.format,
+                    &image.payload,
+                )
+            };
+            match decoded {
+                Ok((width, height, rgba)) => {
+                    seen.insert(name.clone());
+                    images.push((
+                        name,
+                        asset_material::ZoneUiImage {
+                            iwi: std::sync::Arc::new([]),
+                            state: None,
+                            rgba: Some((width, height, std::sync::Arc::new(rgba))),
+                        },
+                    ));
+                }
+                Err(error) => diag::info!(Zone, "zombie hud image {name}: {error}"),
+            }
+        }
+    }
+    images
 }

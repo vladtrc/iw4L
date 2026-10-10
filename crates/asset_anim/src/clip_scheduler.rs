@@ -109,7 +109,7 @@ impl ClipScheduler {
     pub fn new(node_count: usize) -> Self {
         Self {
             identity: NEXT_SCHEDULER
-                .fetch_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |value| {
+                .try_update(AtomicOrdering::Relaxed, AtomicOrdering::Relaxed, |value| {
                     value.checked_add(1)
                 })
                 .expect("clip scheduler identity exhausted"),

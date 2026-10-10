@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Retail IW4 CPU light-grid sample and static-model lighting facts: Entry layout, RLE stride, smodel lighting offsets."
 
+[package.metadata.iw4l]
+layer = "game"
+game = "iw4"
+
 [dependencies]
 math_iw4.workspace = true
 hud_iw4.workspace = true

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Our wire: frames, deltas, prediction, interpolation. Not retail's netcode."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 updater = { path = "../updater" }
 structured_data_iw4.workspace = true

@@ -49,6 +49,9 @@ struct MatchClipPrep {
     generation: frame::WorldGeneration,
     submitted: bool,
     capacity_failure: bool,
+    allow_degraded: bool,
+    missing_aliases: usize,
+    failed_clips: usize,
     required: HashSet<ClipKey>,
     total: usize,
     stage: Option<asset_transport::StageHandle>,
@@ -259,7 +262,7 @@ fn queue_match_clips(
         );
         for alias in &voices {
             aliases += 1;
-            let (ns, alias) = announcer.route(alias);
+            let (ns, alias) = announcer.route(alias, namespace.namespace);
             request_named(clips, &bank.0, ns, alias, &mut set);
         }
     }
@@ -304,7 +307,7 @@ fn queue_match_clips(
     }
     for alias in &type10.0 {
         aliases += 1;
-        request_fx_type10(clips, &bank.0, alias, &mut set);
+        request_named(clips, &bank.0, namespace.namespace, alias, &mut set);
     }
     if !set.missing.is_empty() {
         let names: Vec<&str> = set.missing.iter().map(String::as_str).collect();
@@ -316,6 +319,8 @@ fn queue_match_clips(
         );
     }
     prep.total = set.required.len();
+    prep.allow_degraded = namespace.namespace == AssetNamespace::T6;
+    prep.missing_aliases = set.missing.len();
     prep.required = set.required;
     prep.capacity_failure = set.capacity_failure;
     prep.submitted = true;
@@ -369,6 +374,7 @@ fn poll_match_audio_ready(
         return;
     };
     let mut capacity_failure = false;
+    let mut failed_clips = 0;
     let mut submissions = PREFETCH_PER_PASS;
     prep.required.retain(|key| {
         if submissions != 0 {
@@ -389,12 +395,18 @@ fn poll_match_audio_ready(
                 | crate::clip_store::ClipError::InvalidPcm(crate::media::PcmError::MemoryLimit),
             )) => {
                 capacity_failure = true;
+                failed_clips += 1;
+                false
+            }
+            Some(Err(_)) => {
+                failed_clips += 1;
                 false
             }
             Some(_) => false,
             None => true,
         }
     });
+    prep.failed_clips += failed_clips;
     if capacity_failure {
         prep.capacity_failure = true;
         fail_capacity(&mut ready, &mut prep, Some(&mut **clips));
@@ -421,7 +433,18 @@ fn fail_capacity(ready: &mut AudioReady, prep: &mut MatchClipPrep, clips: Option
         prep.required.len(),
         prep.total
     );
-    ready.0.state = frame::ReadinessState::Failed;
+    ready.0.state = if prep.allow_degraded {
+        frame::ReadinessState::Degraded
+    } else {
+        frame::ReadinessState::Failed
+    };
+    diag::warn!(
+        Audio,
+        "audio: readiness={:?}; optional prewarm incomplete, missing_aliases={} failed_clips={}",
+        ready.0.state,
+        prep.missing_aliases,
+        prep.failed_clips
+    );
     if let Some(clips) = clips {
         clips.arm_match_live();
     }
@@ -434,8 +457,20 @@ fn mark_ready(ready: &mut AudioReady, prep: &mut MatchClipPrep, clips: Option<&m
         stage.done();
     }
     if ready.0.generation == prep.generation && ready.0.state == frame::ReadinessState::Pending {
-        ready.0.state = frame::ReadinessState::Ready;
-        diag::info!(Audio, "audio: AudioReady ({} clips prepared)", prep.total);
+        ready.0.state =
+            if prep.allow_degraded && (prep.missing_aliases > 0 || prep.failed_clips > 0) {
+                frame::ReadinessState::Degraded
+            } else {
+                frame::ReadinessState::Ready
+            };
+        diag::info!(
+            Audio,
+            "audio: AudioReady state={:?} ({} clip attempts; {} failed, {} missing aliases)",
+            ready.0.state,
+            prep.total,
+            prep.failed_clips,
+            prep.missing_aliases
+        );
         if let Some(clips) = clips {
             clips.arm_match_live();
         }
@@ -473,21 +508,6 @@ fn request_named(
             }
         }
     }
-}
-
-fn request_fx_type10(
-    clips: &mut ClipStore,
-    bank: &SoundCatalog,
-    alias: &str,
-    set: &mut MatchRequests,
-) {
-    let Some(ns) = bank
-        .index_unique(alias)
-        .and_then(|index| bank.namespace_of_alias(index))
-    else {
-        return;
-    };
-    request_named(clips, bank, ns, alias, set);
 }
 
 fn request_weapon_aliases(

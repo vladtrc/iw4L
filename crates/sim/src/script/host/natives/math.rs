@@ -131,6 +131,10 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
             ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt(),
         ))
     });
+    registry.register(Function, "distance2dsquared", |_, _, args| {
+        let (a, b) = (vector(args, 0)?, vector(args, 1)?);
+        Ok(Value::Float((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)))
+    });
     registry.register(Function, "length", |_, _, args| {
         let v = vector(args, 0)?;
         Ok(Value::Float(dot(v, v).sqrt()))

@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "IW4 client input: key buttons, mouse deltas and command assembly order."
 
+[package.metadata.iw4l]
+layer = "game"
+game = "iw4"
+
 [dependencies]
 playerstate_iw4.workspace = true
 

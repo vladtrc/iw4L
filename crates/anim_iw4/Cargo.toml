@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Retail IW4 animation data: XAnimParts curve decoding, notetracks, DObj skeleton composition."
 
+[package.metadata.iw4l]
+layer = "game"
+game = "iw4"
+
 [dependencies]
 libm = { version = "0.2.16", default-features = false }
 

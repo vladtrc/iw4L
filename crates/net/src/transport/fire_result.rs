@@ -29,6 +29,7 @@ pub fn encode_fire_results(out: &mut WireWriter, results: &[FireCommandResult]) 
                     FireCommandRefusal::NotAlive => 1,
                     FireCommandRefusal::MissingPlayer => 2,
                     FireCommandRefusal::StaleCommand => 3,
+                    FireCommandRefusal::RuleUnknown => 4,
                 });
             }
             FireCommandOutcome::Executed { accepted } => {
@@ -63,6 +64,7 @@ pub fn decode_fire_results(
                 1 => FireCommandRefusal::NotAlive,
                 2 => FireCommandRefusal::MissingPlayer,
                 3 => FireCommandRefusal::StaleCommand,
+                4 => FireCommandRefusal::RuleUnknown,
                 _ => return Err(WireError::Malformed("invalid fire refusal tag")),
             }),
             1 => {

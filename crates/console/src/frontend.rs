@@ -67,6 +67,7 @@ pub(crate) fn register(registry: &mut ConsoleRegistry) {
         "ui_map_pack",
         "ui_map_hover",
         "ui_select_map",
+        "ui_lobby_map",
         "ui_select_mode",
         "ui_password_open",
         "ui_password_save",
@@ -117,6 +118,18 @@ pub(crate) fn route(
         dvars.set("ui_master_status", "Master: Not connected");
     }
     let mut returned_from_world = false;
+    dvars.set(
+        "ui_master_configured",
+        if services
+            .intent
+            .as_ref()
+            .is_some_and(|intent| intent.configured())
+        {
+            "1"
+        } else {
+            "0"
+        },
+    );
     let mut returned_in_menu = false;
     for fact in returned.read() {
         returned_from_world |= fact.had_world;
@@ -127,6 +140,15 @@ pub(crate) fn route(
         commands.remove_resource::<sim::HostGameModeSelection>();
         *party = UiPartyState::default();
         state.public = false;
+        if !services.bridge.as_ref().is_some_and(|bridge| {
+            !bridge.is_closing()
+                && matches!(
+                    bridge.state(),
+                    net::MasterBridgeState::Hosting { .. } | net::MasterBridgeState::Joined { .. }
+                )
+        }) {
+            menus.write(UiMenuRequest::Close("game_lobby".into()));
+        }
     } else if returned_in_menu && state.public {
         let reason = match services.bridge.as_ref().map(|bridge| bridge.state()) {
             Some(net::MasterBridgeState::Failed { error, .. }) => format!("{error:?}"),
@@ -142,6 +164,29 @@ pub(crate) fn route(
         }
         dvars.set("ui_frontend_status", reason);
     }
+    if let Some(bridge) = services
+        .bridge
+        .as_ref()
+        .filter(|bridge| !bridge.is_closing())
+    {
+        let hosted = match bridge.state() {
+            net::MasterBridgeState::Hosting { .. } => Some(true),
+            net::MasterBridgeState::Joined { .. } => Some(false),
+            _ => None,
+        };
+        if let Some(hosted) = hosted {
+            let entering = !state.public;
+            state.public = true;
+            if !party.active || !party.in_lobby || party.is_host != hosted {
+                party.active = true;
+                party.in_lobby = true;
+                party.is_host = hosted;
+            }
+            if entering {
+                menus.write(UiMenuRequest::Open("game_lobby".into()));
+            }
+        }
+    }
     if dvars.get("ui_mapname").is_none()
         && let Some(map) = maps.maps().find(|map| map.starts_with("iw4:"))
     {
@@ -154,6 +199,7 @@ pub(crate) fn route(
         );
     }
     if !state.rules_seeded
+        && dvars.get("ui_game_namespace").is_none()
         && let Some(config) = catalog.as_ref().and_then(|c| c.rawfile_text(MATCH_CONFIG))
     {
         seed_rules(&mut dvars, config);
@@ -278,13 +324,22 @@ pub(crate) fn route(
                         .filter(|row| *row < PAGE_SIZE)
                         .ok_or("Invalid map row")?;
                 }
-                "ui_select_map" | "ui_select_mode" => {
+                "ui_select_map" | "ui_lobby_map" | "ui_select_mode" => {
                     if !party.in_lobby || !party.is_host {
                         return Err("Only the lobby host can change game setup".into());
                     }
                     let (mut map, mut mode) = selected_game(&dvars, &maps)?;
-                    let selecting_map = command.name == "ui_select_map";
-                    if selecting_map {
+                    let selecting_map = command.name != "ui_select_mode";
+                    if command.name == "ui_lobby_map" {
+                        let selected = command.args.first().ok_or("Missing map")?;
+                        if !maps.maps().any(|map| map == selected)
+                            || selected.split_once(':').map(|(namespace, _)| namespace)
+                                != map.split_once(':').map(|(namespace, _)| namespace)
+                        {
+                            return Err("Map is unavailable for this game".into());
+                        }
+                        map = selected.clone();
+                    } else if selecting_map {
                         let row = command
                             .args
                             .first()
@@ -390,18 +445,15 @@ pub(crate) fn route(
                     change_page(&mut state.browser_page, command, len);
                 }
                 "ui_join_lobby" | "ui_join_lobby_id" | "ui_join_lobby_selected" => {
-                    let (advert_id, map, mode) = if command.name == "ui_join_lobby_id" {
-                        let advert_id = command
-                            .args
-                            .first()
-                            .filter(|id| id.is_ascii())
-                            .ok_or("usage: ui_join_lobby_id <hex ID>")?
-                            .parse()
-                            .map_err(|_| "Invalid lobby ID")?;
-                        let (map, mode) = selected_game(&dvars, &maps)?;
-                        (advert_id, map, mode.token().into())
-                    } else {
-                        let id = if command.name == "ui_join_lobby_selected" {
+                    let (advert_id, map, mode) = {
+                        let id = if command.name == "ui_join_lobby_id" {
+                            command
+                                .args
+                                .first()
+                                .ok_or("usage: ui_join_lobby_id <hex ID>")?
+                                .parse()
+                                .map_err(|_| "Invalid lobby ID")?
+                        } else if command.name == "ui_join_lobby_selected" {
                             dvars
                                 .get("ui_browser_join_id")
                                 .unwrap_or_default()

@@ -1,8 +1,5 @@
 use asset_game::{FontDef, LocalizeCatalog, MenuCatalog, MenuDef, MenuItem, MenuRect};
-use hud_iw4::{
-    ExprError, ExprHost, item_text_origin, item_text_paint_scale, next_letter,
-    normalized_text_scale, ui_get_font_handle, ui_text_height, window_paint_scale_rect,
-};
+use hud_iw4::{ExprError, ExprHost, next_letter, normalized_text_scale};
 
 use crate::draw2d::{Draw2dCmd, Draw2dList, Draw2dOp, Draw2dProvenance};
 use crate::expr_cache::MenuExprCache;
@@ -44,12 +41,57 @@ pub(crate) enum ChromeGapKind {
     AssetFont,
     Localize,
     TextExp,
+    /// The catalog's game has no known menu layout.
+    Layout,
+}
+
+type GameMenusOf = fn(asset_core::AssetNamespace) -> &'static dyn game_api::GameMenus;
+
+static GAME_MENUS: std::sync::OnceLock<GameMenusOf> = std::sync::OnceLock::new();
+
+/// Hands the HUD the lookup of each game's menu rules; called once at startup.
+pub fn register_game_menus(menus: GameMenusOf) {
+    let _ = GAME_MENUS.set(menus);
+}
+
+fn game_menus(family: asset_core::AssetNamespace) -> Option<&'static dyn game_api::GameMenus> {
+    GAME_MENUS.get().map(|menus| menus(family))
 }
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ChromeAssets<'a> {
     pub catalog: Option<&'a MenuCatalog>,
     pub localize: Option<&'a LocalizeCatalog>,
+}
+
+impl ChromeAssets<'_> {
+    /// Where the catalog's own materials (fonts, backgrounds) are looked up.
+    pub(crate) fn namespace(&self) -> asset_core::AssetNamespace {
+        self.catalog
+            .and_then(|c| c.namespace)
+            .unwrap_or(crate::images::HUD_CHROME_NAMESPACE)
+    }
+
+    /// How the catalog's game places and scales menu items.
+    pub(crate) fn layout(&self) -> Option<&'static dyn game_api::MenuLayout> {
+        match game_menus(self.namespace())?.layout() {
+            game_api::Rule::Known(layout) => Some(layout),
+            game_api::Rule::Unknown(_) => None,
+        }
+    }
+
+    /// The font an item's `textfont` names in the catalog's game.
+    pub(crate) fn font_name(
+        &self,
+        font_enum: i32,
+        placement_scale: f32,
+        text_scale: f32,
+    ) -> Option<&'static str> {
+        match game_menus(self.namespace())?.font(font_enum, placement_scale, text_scale) {
+            game_api::Rule::Known(font) => Some(font),
+            game_api::Rule::Unknown(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -166,6 +208,12 @@ pub(crate) fn execute_chrome_menu_ex(
         },
         ..ChromeFrame::default()
     };
+    if assets.layout().is_none() {
+        for index in 0..menu.items.len() {
+            frame.coverage.gap(index, ChromeGapKind::Layout);
+        }
+        return frame;
+    }
     if !menu.vis_exp.is_empty() {
         match exprs.is_true(&menu.vis_exp, host) {
             Ok(false) => {
@@ -403,33 +451,37 @@ fn paint_text(
         frame.coverage.painted();
         return;
     }
-    let font_name = ui_get_font_handle(
+    let Some(font_name) = assets.font_name(
         item.font_enum,
         surface.scale_virtual_to_real()[1],
         item.text_scale,
-    );
+    ) else {
+        frame.coverage.gap(index, ChromeGapKind::AssetFont);
+        return;
+    };
     let Some(font) = assets.catalog.and_then(|c| c.font(font_name)) else {
         frame.coverage.gap(index, ChromeGapKind::AssetFont);
         return;
     };
 
-    let draw_text_scale = item_text_paint_scale(item.text_scale, anim.scale);
-    let scale = normalized_text_scale(font.pixel_height, draw_text_scale);
+    let Some(layout) = assets.layout() else {
+        frame.coverage.gap(index, ChromeGapKind::Layout);
+        return;
+    };
+    let draw_text_scale = layout.text_paint_scale(item.text_scale, anim.scale);
+    let scale = layout.text_scale(font.pixel_height, draw_text_scale);
     let wrap_width = (style.rect.w.abs() - item.text_align_x.max(0.0)).max(1.0);
     let lines = menu_text_lines(
         &resolved.text,
         (item.static_flags & 0x0080_0000 != 0).then_some(wrap_width),
-        |text| ui_text_width(font, text, item.text_scale),
+        |text| layout_text_width(layout, font, text, item.text_scale),
     );
     for (line, text) in lines.into_iter().enumerate() {
-        let measured_w = ui_text_width(font, &text, item.text_scale);
-        let measured_h = ui_text_height(item.text_scale);
+        let measured_w = layout_text_width(layout, font, &text, item.text_scale);
+        let measured_h = layout.text_height(item.text_scale);
         let rect = &style.rect;
-        let (x, y) = item_text_origin(
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
+        let (x, y) = layout.text_origin(
+            [rect.x, rect.y, rect.w, rect.h],
             item.text_align_mode,
             item.text_align_x,
             item.text_align_y,
@@ -445,7 +497,7 @@ fn paint_text(
             rect.vert_align as i32,
         );
         frame.list.cmds.push(Draw2dCmd {
-            material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+            material_namespace: assets.namespace(),
             x: (applied.x + 0.5).floor(),
             y: (applied.y + 0.5).floor(),
             w: applied.w,
@@ -535,21 +587,22 @@ pub(crate) fn push_owner_text(
     if text.is_empty() {
         return Ok(());
     }
-    let font_name = ui_get_font_handle(
-        args.item.font_enum,
-        args.surface.scale_virtual_to_real()[1],
-        args.item.text_scale,
-    );
+    let font_name = args
+        .assets
+        .font_name(
+            args.item.font_enum,
+            args.surface.scale_virtual_to_real()[1],
+            args.item.text_scale,
+        )
+        .ok_or(ChromeGapKind::AssetFont)?;
     let Some(font) = args.assets.catalog.and_then(|c| c.font(font_name)) else {
         return Err(ChromeGapKind::AssetFont);
     };
-    let measured_w = ui_text_width(font, text, args.item.text_scale);
-    let measured_h = ui_text_height(args.item.text_scale);
-    let (x, y) = item_text_origin(
-        args.rect.x,
-        args.rect.y,
-        args.rect.w,
-        args.rect.h,
+    let layout = args.assets.layout().ok_or(ChromeGapKind::Layout)?;
+    let measured_w = layout_text_width(layout, font, text, args.item.text_scale);
+    let measured_h = layout.text_height(args.item.text_scale);
+    let (x, y) = layout.text_origin(
+        [args.rect.x, args.rect.y, args.rect.w, args.rect.h],
         args.item.text_align_mode,
         args.item.text_align_x,
         args.item.text_align_y,
@@ -570,15 +623,19 @@ pub(crate) fn push_owner_text_right_of_rect(
     if text.is_empty() {
         return Ok(());
     }
-    let font_name = ui_get_font_handle(
-        args.item.font_enum,
-        args.surface.scale_virtual_to_real()[1],
-        args.item.text_scale,
-    );
+    let font_name = args
+        .assets
+        .font_name(
+            args.item.font_enum,
+            args.surface.scale_virtual_to_real()[1],
+            args.item.text_scale,
+        )
+        .ok_or(ChromeGapKind::AssetFont)?;
     let Some(font) = args.assets.catalog.and_then(|c| c.font(font_name)) else {
         return Err(ChromeGapKind::AssetFont);
     };
-    let width = ui_text_width(font, text, args.item.text_scale).trunc();
+    let layout = args.assets.layout().ok_or(ChromeGapKind::Layout)?;
+    let width = layout_text_width(layout, font, text, args.item.text_scale).trunc();
     let x = args.rect.x + args.rect.w - width - right_inset;
     push_owner_text_run(args, font_name, font, text, color, x, args.rect.y, frame);
     Ok(())
@@ -595,8 +652,11 @@ fn push_owner_text_run(
     y: f32,
     frame: &mut ChromeFrame,
 ) {
-    let draw_text_scale = item_text_paint_scale(args.item.text_scale, args.anim.scale);
-    let scale = normalized_text_scale(font.pixel_height, draw_text_scale);
+    let Some(layout) = args.assets.layout() else {
+        return;
+    };
+    let draw_text_scale = layout.text_paint_scale(args.item.text_scale, args.anim.scale);
+    let scale = layout.text_scale(font.pixel_height, draw_text_scale);
     let applied = args.surface.apply_rect(
         x,
         y,
@@ -606,7 +666,7 @@ fn push_owner_text_run(
         args.rect.vert_align as i32,
     );
     frame.list.cmds.push(Draw2dCmd {
-        material_namespace: crate::images::HUD_CHROME_NAMESPACE,
+        material_namespace: args.assets.namespace(),
         x: (applied.x + 0.5).floor(),
         y: (applied.y + 0.5).floor(),
         w: applied.w,
@@ -643,11 +703,11 @@ pub(crate) fn push_owner_pic(
     if args.rect.w.abs() <= f32::EPSILON || args.rect.h.abs() <= f32::EPSILON {
         return;
     }
-    let (x, y, w, h) = window_paint_scale_rect(
-        args.rect.x,
-        args.rect.y,
-        args.rect.w,
-        args.rect.h,
+    let Some(layout) = args.assets.layout() else {
+        return;
+    };
+    let [x, y, w, h] = layout.window_rect(
+        [args.rect.x, args.rect.y, args.rect.w, args.rect.h],
         args.anim.scale,
     );
     if w.abs() <= f32::EPSILON || h.abs() <= f32::EPSILON {
@@ -724,6 +784,16 @@ fn resolve_text(
         text: raw,
         loc_key: String::new(),
     }))
+}
+
+/// A text's width at `text_scale` by a game's menu layout.
+pub(crate) fn layout_text_width(
+    layout: &dyn game_api::MenuLayout,
+    font: &FontDef,
+    text: &str,
+    text_scale: f32,
+) -> f32 {
+    text_width(font, text) as f32 * layout.text_scale(font.pixel_height, text_scale)
 }
 
 pub(crate) fn ui_text_width(font: &FontDef, text: &str, text_scale: f32) -> f32 {
@@ -924,8 +994,14 @@ fn push_stretch(
     if rect.w.abs() <= f32::EPSILON || rect.h.abs() <= f32::EPSILON {
         return;
     }
-    let (x, y, w, h) =
-        window_paint_scale_rect(rect.x, rect.y, rect.w.abs(), rect.h.abs(), anim.scale);
+    let Some(layout) = (ChromeAssets {
+        catalog,
+        localize: None,
+    })
+    .layout() else {
+        return;
+    };
+    let [x, y, w, h] = layout.window_rect([rect.x, rect.y, rect.w.abs(), rect.h.abs()], anim.scale);
     if w.abs() <= f32::EPSILON || h.abs() <= f32::EPSILON {
         return;
     }

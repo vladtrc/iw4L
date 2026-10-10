@@ -5,8 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "The funnel: UserCmd in, Snapshot out. The single simulation path shared by live play, prediction and replay."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 asset_core.workspace = true
+gsc.workspace = true
 structured_data_iw4.workspace = true
 bevy_ecs.workspace = true
 sha2.workspace = true
@@ -17,6 +21,7 @@ math_iw4.workspace = true
 trace_iw4.workspace = true
 clipmap_iw4.workspace = true
 gamemode_iw4.workspace = true
+game_api.workspace = true
 hud_iw4.workspace = true
 weapon_iw4.workspace = true
 entity_iw4.workspace = true

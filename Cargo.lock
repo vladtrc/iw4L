@@ -3090,6 +3090,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "game_api"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "gsc",
+]
+
+[[package]]
+name = "game_iw4"
+version = "0.1.0"
+dependencies = [
+ "asset_core",
+ "game_api",
+ "gsc",
+ "hud_iw4",
+]
+
+[[package]]
+name = "game_iw5"
+version = "0.1.0"
+dependencies = [
+ "game_api",
+ "gsc",
+]
+
+[[package]]
+name = "game_t5"
+version = "0.1.0"
+dependencies = [
+ "asset_core",
+ "game_api",
+ "gsc",
+ "menu_expr",
+]
+
+[[package]]
+name = "game_t6"
+version = "0.1.0"
+dependencies = [
+ "asset_core",
+ "game_api",
+ "gsc",
+]
+
+[[package]]
 name = "gamemode_iw4"
 version = "0.1.0"
 dependencies = [
@@ -3253,6 +3298,15 @@ name = "grid"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b40ca9252762c466af32d0b1002e91e4e1bc5398f77455e55474deb466355ff5"
+
+[[package]]
+name = "gsc"
+version = "0.1.0"
+dependencies = [
+ "asset_core",
+ "bevy_ecs",
+ "sha2",
+]
 
 [[package]]
 name = "guillotiere"
@@ -3447,6 +3501,7 @@ dependencies = [
  "diag",
  "entity_iw4",
  "frame",
+ "game_api",
  "gamemode_iw4",
  "hud_iw4",
  "math_iw4",
@@ -3464,6 +3519,7 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "math_iw4",
+ "menu_expr",
 ]
 
 [[package]]
@@ -4115,6 +4171,10 @@ checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "menu_expr"
+version = "0.1.0"
 
 [[package]]
 name = "mimalloc"
@@ -5935,8 +5995,14 @@ dependencies = [
  "clipmap_iw4",
  "diag",
  "frame",
+ "game_api",
+ "game_iw4",
+ "game_iw5",
+ "game_t5",
+ "game_t6",
  "gamemode_iw4",
  "hud_iw4",
+ "menu_expr",
  "net",
  "perf",
  "render_frontend",
@@ -5994,8 +6060,10 @@ dependencies = [
  "diag",
  "entity_iw4",
  "fx_iw4",
+ "game_api",
  "gamemode_iw4",
  "glam",
+ "gsc",
  "hud_iw4",
  "math_iw4",
  "movement_iw4",
@@ -6801,11 +6869,16 @@ dependencies = [
  "assets",
  "bevy",
  "diag",
+ "entity_iw4",
  "frame",
+ "game_api",
+ "hud_iw4",
  "net",
+ "playerstate_iw4",
  "session",
  "sim",
  "updater",
+ "weapon_iw4",
 ]
 
 [[package]]
@@ -7775,6 +7848,7 @@ version = "0.1.0"
 dependencies = [
  "anim_iw4",
  "glam",
+ "libm",
 ]
 
 [[package]]

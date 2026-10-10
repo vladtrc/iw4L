@@ -98,9 +98,8 @@ fn vertex_input(attribute: &VertexAttribute, register: u32, vertex_type: u8) -> 
         {
             ("vec4<f32>", format!("vec4<f32>({a}.zw, 0.0, 1.0)"))
         }
-        vd::D3dDeclType::Float4 | vd::D3dDeclType::UByte4N | vd::D3dDeclType::D3dColor => {
-            ("vec4<f32>", a)
-        }
+        vd::D3dDeclType::D3dColor => ("vec4<f32>", format!("{a}.zyxw")),
+        vd::D3dDeclType::Float4 | vd::D3dDeclType::UByte4N => ("vec4<f32>", a),
         vd::D3dDeclType::Float3 => ("vec3<f32>", format!("vec4<f32>({a}, 1.0)")),
         vd::D3dDeclType::Float2 | vd::D3dDeclType::Float16x2 => {
             ("vec2<f32>", format!("vec4<f32>({a}, 0.0, 1.0)"))
@@ -108,7 +107,7 @@ fn vertex_input(attribute: &VertexAttribute, register: u32, vertex_type: u8) -> 
         vd::D3dDeclType::Unknown(_) => ("vec4<f32>", "vec4<f32>(0.0)".to_string()),
     };
     VertexInput {
-        register,
+        register: Some(register),
         location,
         attribute_type: attribute_type.to_string(),
         expression,
@@ -169,7 +168,36 @@ pub(crate) fn build_dxbc_pass_abi(
     arguments: &[RuntimeArgumentBinding],
     custom_sampler_flags: u8,
 ) -> Result<(PassProgramAbi, PassAbi), PassAbiRefusal> {
-    let attributes = routed_attributes(decl, vertex_type)?;
+    let cloud_corners = vertex_type == vd::POS_TEX_VERTEX_TYPE
+        && vertex
+            .reflection
+            .constant_buffers
+            .iter()
+            .flat_map(|buffer| &buffer.variables)
+            .any(|variable| variable.name == "particleCloudMatrix" && variable.flags & 2 != 0);
+    if usize::from(decl.stream_count) > vd::ROUTING_COUNT {
+        return Err(PassAbiRefusal::StreamCountOutOfRange {
+            stream_count: decl.stream_count,
+        });
+    }
+    let mut selected = decl.clone();
+    selected.stream_count = 0;
+    for &[source, dest] in decl.routed() {
+        let required = match decl.family.destination_usage(dest) {
+            Some((usage, usage_index)) => {
+                let semantic = Semantic { usage, usage_index };
+                vertex.input.elements.iter().any(|element| {
+                    semantic_of(&element.semantic, element.semantic_index) == Some(semantic)
+                }) || (cloud_corners && usage == vd::D3DDECLUSAGE_TEXCOORD && usage_index == 0)
+            }
+            None => true,
+        };
+        if required {
+            selected.routing[usize::from(selected.stream_count)] = [source, dest];
+            selected.stream_count += 1;
+        }
+    }
+    let attributes = routed_attributes(&selected, vertex_type)?;
     let mut vertex_inputs = Vec::new();
     let mut used_attributes = Vec::new();
     for element in &vertex.input.elements {
@@ -188,6 +216,31 @@ pub(crate) fn build_dxbc_pass_abi(
         };
         vertex_inputs.push(vertex_input(attribute, element.register, vertex_type));
         used_attributes.push(*attribute);
+    }
+
+    if cloud_corners {
+        let position = attributes
+            .iter()
+            .find(|a| a.semantic.usage == vd::D3DDECLUSAGE_POSITION);
+        let uv = attributes
+            .iter()
+            .find(|a| a.semantic.usage == vd::D3DDECLUSAGE_TEXCOORD && a.semantic.usage_index == 0);
+        if let (Some(position), Some(uv)) = (position, uv)
+            && let Some(input) = vertex_inputs
+                .iter_mut()
+                .find(|input| input.location == position.location)
+        {
+            input.expression = format!(
+                "vec4<f32>(attribute_{}, (attribute_{}.x + 2.0 * attribute_{}.y) * 0.25)",
+                position.location, uv.location, uv.location
+            );
+            if !used_attributes.iter().any(|a| a.location == uv.location) {
+                let mut input = vertex_input(uv, 0, vertex_type);
+                input.register = None;
+                vertex_inputs.push(input);
+                used_attributes.push(*uv);
+            }
+        }
     }
 
     let vertex_rows = dxbc_constant_rows(vertex)?;
@@ -241,6 +294,16 @@ pub(crate) fn build_dxbc_pass_abi(
         pixel_rows.push(SAMPLE_DECODE_ROW);
         pixel_constants = constant_bindings(&pixel_rows, RuntimeShaderStage::Pixel, arguments)?;
     }
+    let depth_near_row = pixel_constants.iter().find_map(|binding| {
+        matches!(
+            binding.source,
+            ConstantSource::Code {
+                index: 0x21,
+                row: 0
+            }
+        )
+        .then(|| pixel_rows[usize::from(binding.register)])
+    });
     let sample_adapters = samplers
         .iter()
         .enumerate()
@@ -252,6 +315,7 @@ pub(crate) fn build_dxbc_pass_abi(
                 rgb_scale: 1.0,
                 scale_row: Some(SAMPLE_DECODE_ROW),
                 alpha_row: None,
+                depth_near_row: None,
             }),
             SamplerSource::SurfaceReflectionProbe => Some(SampleAdapter {
                 slot,
@@ -260,6 +324,16 @@ pub(crate) fn build_dxbc_pass_abi(
                 rgb_scale: 1.0,
                 scale_row: None,
                 alpha_row: Some(SAMPLE_DECODE_ROW),
+                depth_near_row: None,
+            }),
+            SamplerSource::CodeTexture { index: 0x0f } => depth_near_row.map(|row| SampleAdapter {
+                slot,
+                opaque_alpha: false,
+                square_rgb: false,
+                rgb_scale: 1.0,
+                scale_row: None,
+                alpha_row: None,
+                depth_near_row: Some(row),
             }),
             _ => None,
         })

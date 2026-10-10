@@ -41,7 +41,9 @@ pub(crate) fn update(
     let Some(snapshot) = presented.snapshot() else {
         return;
     };
-    let ns = namespace.map_or(AssetNamespace::Iw4, |map| map.namespace);
+    let Some(ns) = namespace.map(|map| map.namespace) else {
+        return;
+    };
     let mut speaking: Vec<_> = snapshot
         .meta
         .world_objects

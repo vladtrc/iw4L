@@ -250,14 +250,29 @@ pub(crate) fn sync_engine_events(world: &mut World) {
     super::physics::select_usables(world);
 }
 
+fn raising(state: i32) -> bool {
+    matches!(
+        WeaponState::from_i32(state),
+        Ok(WeaponState::Raising | WeaponState::RaisingAltswitch)
+    )
+}
+
 fn notify_weapon_changes(world: &mut World) {
-    let slots: Vec<(u32, u64, u32, bool)> = world
+    let slots: Vec<(u32, u64, u32, bool, bool)> = world
         .resource::<Runtime>()
         .players
         .iter()
-        .map(|(client, slot)| (*client, slot.object, slot.weapon, slot.switching))
+        .map(|(client, slot)| {
+            (
+                *client,
+                slot.object,
+                slot.weapon,
+                slot.switching,
+                slot.raising,
+            )
+        })
         .collect();
-    for (client, object, last, was_switching) in slots {
+    for (client, object, last, was_switching, was_raising) in slots {
         let Some(ps) = FrameWorld::from_world(world)
             .player(ClientId(client))
             .copied()
@@ -275,13 +290,25 @@ fn notify_weapon_changes(world: &mut World) {
                 vec![name],
             );
         }
+        let raised = raising(ps.weaponstate_primary);
         if ps.weapon != last {
             let name = weapon_name(world, current);
             raise(world, Value::Object(object), "weapon_change", vec![name]);
         }
+        // T5: the new weapon is up (its raise, a perk bottle's drink, ended).
+        if (was_raising || ps.weapon != last) && !raised && ps.weapon != 0 {
+            let name = weapon_name(world, current);
+            raise(
+                world,
+                Value::Object(object),
+                "weapon_change_complete",
+                vec![name],
+            );
+        }
         if let Some(slot) = world.resource_mut::<Runtime>().players.get_mut(&client) {
             slot.weapon = ps.weapon;
             slot.switching = switching;
+            slot.raising = raised;
         }
     }
 }

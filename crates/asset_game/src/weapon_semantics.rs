@@ -65,13 +65,14 @@ impl WeaponCueNamespacePolicy {
 pub enum MeleeWeaponPolicy {
     Own,
     T5KnifeCompatibility { weapon: u32 },
+    NativeT6Knife { weapon: u32 },
 }
 
 impl MeleeWeaponPolicy {
     pub fn weapon(self, current: u32) -> u32 {
         match self {
             Self::Own => current,
-            Self::T5KnifeCompatibility { weapon } => weapon,
+            Self::T5KnifeCompatibility { weapon } | Self::NativeT6Knife { weapon } => weapon,
         }
     }
 }

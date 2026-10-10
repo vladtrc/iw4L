@@ -205,6 +205,13 @@ pub(crate) fn collider_entity(
     found.map_or(Value::Undefined, Value::Object)
 }
 
+pub(crate) fn damage_visible(world: &mut World, entity: u64, origin: [f32; 3]) -> bool {
+    matches!(
+        cone_trace(world, &Value::Object(entity), &[Value::Vector(origin)], DAMAGE_CONE_MASK),
+        Ok(Value::Float(fraction)) if fraction > 0.0
+    )
+}
+
 fn cone_trace(
     world: &mut World,
     receiver: &Value,
@@ -587,12 +594,36 @@ fn team_clients(world: &mut World, team: &str, except: Option<u32>) -> Vec<crate
         .collect()
 }
 
+/// How long a sound plays before its done-notify, for want of its length.
+const SOUND_DONE_MS: i64 = 2000;
+
+/// Raises the timed notifies that are due (sounds and animations done).
+pub(crate) fn deliver_timed_notifies(world: &mut World) {
+    let now = i64::from(super::super::players::now_ms(world));
+    let due: Vec<(Value, Arc<str>, Vec<Value>)> = {
+        let mut runtime = world.resource_mut::<Runtime>();
+        let (due, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut runtime.timed_notifies)
+            .into_iter()
+            .partition(|(at, ..)| *at <= now);
+        runtime.timed_notifies = kept;
+        due.into_iter()
+            .map(|(_, receiver, notify, args)| (receiver, notify, args))
+            .collect()
+    };
+    for (receiver, notify, args) in due {
+        crate::script::runtime::raise(world, receiver, &notify, args);
+    }
+}
+
 pub(crate) fn play_sound_at(
     world: &mut World,
     origin: [f32; 3],
     alias: &str,
 ) -> Result<(), String> {
-    if crate::frame::FrameWorld::from_world(world).script_sound_is_looping(alias)? {
+    if crate::frame::FrameWorld::from_world(world)
+        .script_sound_is_looping(alias)
+        .map_err(|error| format!("{error}: `{alias}`"))?
+    {
         return Err("cannot play a looping alias as a one-shot sound".into());
     }
     let index = crate::frame::FrameWorld::from_world(world).sound_alias_index(alias);
@@ -951,7 +982,10 @@ fn register_placement(registry: &mut NativeRegistry) {
         let origin = vector(args, 0)?;
         let id = entity_id(world, receiver)?;
         if let Some(client) = runtime(world).player_client(id) {
-            crate::frame::FrameWorld::from_world(world).set_origin(crate::ClientId(client), origin);
+            if !super::super::players::place_unspawned(world, client, Some(origin), None) {
+                crate::frame::FrameWorld::from_world(world)
+                    .set_origin(crate::ClientId(client), origin);
+            }
             return Ok(Value::Undefined);
         }
         world.resource_mut::<Mechanics>().stop(id, "origin");
@@ -1510,7 +1544,7 @@ fn register_sound_and_fx(registry: &mut NativeRegistry) {
             return Ok(Value::Undefined);
         }
         let origin = vector(args, 1)?;
-        let forward = optional(args, 2, vector)?.unwrap_or([0.0, 0.0, 1.0]);
+        let forward = optional(args, 2, vector)?.unwrap_or([0.0; 3]);
         let index = crate::frame::FrameWorld::from_world(world).effect_name_index(&name);
         world_event(
             world,
@@ -1546,8 +1580,19 @@ fn register_sound_and_fx(registry: &mut NativeRegistry) {
             let alias = string(args, 0)?;
             let origin = origin_of(world, receiver)?;
             play_sound_at(world, origin, &alias)?;
-            if args.len() != 1 {
-                return Err("expected one sound alias argument".into());
+            match args.get(1) {
+                None => {}
+                // T5 names a notify the entity raises once the sound is done.
+                Some(Value::String(notify)) if args.len() == 2 => {
+                    let at = i64::from(super::super::players::now_ms(world)) + SOUND_DONE_MS;
+                    world.resource_mut::<Runtime>().timed_notifies.push((
+                        at,
+                        receiver.clone(),
+                        notify.to_string().into(),
+                        Vec::new(),
+                    ));
+                }
+                Some(_) => return Err("expected one sound alias argument".into()),
             }
             Ok(Value::Undefined)
         });
@@ -1630,44 +1675,48 @@ fn register_entity_state(registry: &mut NativeRegistry) {
     entity_accepts!["willneverchange", "laseron", "laseroff", "logstring",];
 }
 
+fn bullet_trace(world: &mut World, _: &Value, args: &[Value]) -> Result<Value, String> {
+    let (start, end) = (vector(args, 0)?, vector(args, 1)?);
+    let mask = shot_mask(args)?;
+    let ignore = trace_ignore(world, args.get(3));
+    let outcome = entity_trace(world, start, end, mask, ignore);
+    let (fraction, normal, collider) = match outcome {
+        TraceOutcome::Hit {
+            fraction,
+            normal,
+            collider,
+            ..
+        } => (fraction, normal, Some(collider)),
+        TraceOutcome::StartSolid { collider, .. } => (0.0, ZERO, collider),
+        _ => (1.0, ZERO, None),
+    };
+    let (normal, surface) = match collider {
+        Some(collider) if fraction < 1.0 => (normal, surface_name(collider)),
+        _ => {
+            let d = sub(end, start);
+            let len = dot(d, d).sqrt();
+            (if len > 0.0 { scale(d, 1.0 / len) } else { ZERO }, "none")
+        }
+    };
+    let entity = collider.map_or(Value::Undefined, |c| collider_entity(world, c));
+    keyed_array(
+        world,
+        vec![
+            ("fraction", Value::Float(fraction)),
+            ("position", Value::Vector(lerp(start, end, fraction))),
+            ("entity", entity),
+            ("normal", Value::Vector(normal)),
+            ("surfacetype", Value::string(surface)),
+        ],
+    )
+}
+
 fn register_traces(registry: &mut NativeRegistry) {
     use Namespace::{Function, Method};
 
-    registry.register(Function, "bullettrace", |world, _, args| {
-        let (start, end) = (vector(args, 0)?, vector(args, 1)?);
-        let mask = shot_mask(args)?;
-        let ignore = trace_ignore(world, args.get(3));
-        let outcome = entity_trace(world, start, end, mask, ignore);
-        let (fraction, normal, collider) = match outcome {
-            TraceOutcome::Hit {
-                fraction,
-                normal,
-                collider,
-                ..
-            } => (fraction, normal, Some(collider)),
-            TraceOutcome::StartSolid { collider, .. } => (0.0, ZERO, collider),
-            _ => (1.0, ZERO, None),
-        };
-        let (normal, surface) = match collider {
-            Some(collider) if fraction < 1.0 => (normal, surface_name(collider)),
-            _ => {
-                let d = sub(end, start);
-                let len = dot(d, d).sqrt();
-                (if len > 0.0 { scale(d, 1.0 / len) } else { ZERO }, "none")
-            }
-        };
-        let entity = collider.map_or(Value::Undefined, |c| collider_entity(world, c));
-        keyed_array(
-            world,
-            vec![
-                ("fraction", Value::Float(fraction)),
-                ("position", Value::Vector(lerp(start, end, fraction))),
-                ("entity", entity),
-                ("normal", Value::Vector(normal)),
-                ("surfacetype", Value::string(surface)),
-            ],
-        )
-    });
+    // A ground trace reports like a bullet trace; zombie drops read its position.
+    registry.register(Function, "bullettrace", bullet_trace);
+    registry.register(Function, "groundtrace", bullet_trace);
     registry.register(Function, "bullettracepassed", |world, _, args| {
         let (start, end) = (vector(args, 0)?, vector(args, 1)?);
         let mask = shot_mask(args)?;

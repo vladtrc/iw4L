@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Retail IW4 killcam rules: camtime chain, window arithmetic, cancel gestures, death timeline, and the cooperative GSC task scheduler."
 
+[package.metadata.iw4l]
+layer = "game"
+game = "iw4"
+
 [dependencies]
 
 [lints]

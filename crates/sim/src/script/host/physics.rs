@@ -25,13 +25,15 @@ fn usable<'a>(
     let object = object_of(world, receiver)?;
     let runtime = world.resource_mut::<Runtime>().into_inner();
     let entity = runtime.entities.get_mut(&object).unwrap();
-    let enabled = matches!(&*entity.classname, "trigger_use" | "trigger_use_touch");
+    // A use trigger works until it is turned off; other entities wait for
+    // `makeusable`.
+    let trigger = entity.classname.starts_with("trigger_");
     Ok(entity
         .usable
         .get_or_insert_with(|| super::entities::Usable {
             cursor: 1,
             hint: -1,
-            enabled,
+            enabled: trigger,
             barred: Default::default(),
         }))
 }
@@ -114,7 +116,8 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         Ok(Value::Undefined)
     });
     registry.register(Method, "sethintstring", |world, receiver, args| {
-        let hint = super::hud::string_index(world, arg(args, 0)?)?;
+        // T5 fills the hint's `&&1`.. from further arguments (a price).
+        let hint = super::hud::string_index_with_args(world, args)?;
         usable(world, receiver)?.hint = hint;
         Ok(Value::Undefined)
     });
@@ -167,6 +170,15 @@ pub(crate) fn select_usables(world: &mut World) {
         .keys()
         .copied()
         .collect();
+    // A use trigger offers its hint only where pressing use would fire it.
+    let mut unreached = std::collections::BTreeSet::new();
+    for &client in &clients {
+        for (object, ..) in &usables {
+            if super::triggers::use_reached(world, *object, client) == Some(false) {
+                unreached.insert((client, *object));
+            }
+        }
+    }
     let mut selected = std::collections::BTreeMap::new();
     let mut frame = FrameWorld::from_world(world);
     for client in clients {
@@ -186,8 +198,10 @@ pub(crate) fn select_usables(world: &mut World) {
         ];
         let nearest = usables
             .iter()
-            .filter(|(_, _, usable, policy)| {
-                !usable.barred.contains(&client) && policy.allows(&frame, client)
+            .filter(|(object, _, usable, policy)| {
+                !usable.barred.contains(&client)
+                    && policy.allows(&frame, client)
+                    && !unreached.contains(&(client, *object))
             })
             .map(|(object, at, usable, _)| {
                 let d2: f32 = (0..3).map(|i| (at[i] - eye[i]).powi(2)).sum();

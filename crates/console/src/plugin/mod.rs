@@ -325,7 +325,7 @@ fn publish_client_action_input(
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
     mut out: ResMut<ClientActionInput>,
-    (gamepads, active, mut devices, mut physical, prediction, presented, local): (
+    (gamepads, active, mut devices, mut physical, prediction, presented, local, native_menu): (
         Query<&bevy::input::gamepad::Gamepad>,
         Res<frame::ActivePad>,
         ResMut<frame::InputDevices>,
@@ -333,6 +333,7 @@ fn publish_client_action_input(
         Res<net::ClientPredictionState>,
         Res<PresentedSnapshot>,
         Res<net::LocalPresentClient>,
+        Res<frame::NativeGameMenu>,
     ),
 ) {
     if time.elapsed_secs() - physical.mouse_activity_start > 0.3 {
@@ -375,6 +376,7 @@ fn publish_client_action_input(
         *wheel_carry = 0.0;
     }
     let modal_captured = console.open
+        || native_menu.0
         || script_menus.is_some_and(|menus| menus.captures_input())
         || keys.just_pressed(KeyCode::Escape)
         || pad.is_some_and(|pad| pad.just_pressed(bevy::input::gamepad::GamepadButton::Start));
@@ -594,11 +596,12 @@ fn publish_client_action_input(
 /// every key, and the console, still work.
 fn sync_cursor_grab(
     console: Res<ConsoleState>,
+    native_menu: Res<frame::NativeGameMenu>,
     script_menus: Option<Res<hud::ScriptMenus>>,
     screen: Option<Res<AppScreen>>,
     mut focused: MessageReader<WindowFocused>,
     mut entered: MessageReader<CursorEntered>,
-    mut windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>,
 ) {
     let mut returned = false;
     for ev in focused.read() {
@@ -606,14 +609,14 @@ fn sync_cursor_grab(
     }
     returned |= entered.read().count() > 0;
 
-    let menu_open = script_menus.is_some_and(|m| m.captures_input());
+    let menu_open = native_menu.0 || script_menus.is_some_and(|m| m.captures_input());
     let in_game = screen
         .as_ref()
         .is_some_and(|s| matches!(**s, AppScreen::InGame));
-    let grab = in_game && !console.open && !menu_open;
-    let Ok(mut cursor) = windows.single_mut() else {
+    let Ok((window, mut cursor)) = windows.single_mut() else {
         return;
     };
+    let grab = in_game && !console.open && !menu_open && window.focused;
     let want = if grab {
         CursorGrabMode::Locked
     } else {

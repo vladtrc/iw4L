@@ -22,6 +22,7 @@ pub(crate) fn update_script_ambient(
     clock: Option<Res<net::FrameClock>>,
     local: Res<net::LocalPresentClient>,
     bank: Option<Res<SoundBank>>,
+    family: Option<Res<crate::ambient::SoundBankNamespace>>,
     runtime: Res<crate::AudioRuntime>,
     mut playback: ResMut<ScriptAmbientPlayback>,
     mut map: Option<ResMut<MapSources>>,
@@ -92,12 +93,14 @@ pub(crate) fn update_script_ambient(
     let Some(alias) = plan.alias.as_ref().filter(|_| !playback.started) else {
         return;
     };
-    let Some(bank) = bank else { return };
+    let (Some(bank), Some(family)) = (bank, family) else {
+        return;
+    };
     if playback.voices.len() == 2 {
         let oldest = playback.voices.remove(0);
         oldest.release(now, 0);
     }
-    let (namespace, name) = namespace_alias(alias);
+    let (namespace, name) = namespace_alias(alias, family.namespace);
     let handle = runtime.trigger_faded_cue(
         CueTrigger {
             event: None,

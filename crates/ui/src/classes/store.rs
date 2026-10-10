@@ -172,7 +172,7 @@ fn clean_field(value: &str) -> String {
     value.replace(['\t', '\n', '\r'], " ")
 }
 
-fn encode_slots(slots: &[ClassSlotState]) -> String {
+pub(crate) fn encode_slots(slots: &[ClassSlotState]) -> String {
     let mut out = String::from(CLASS_FILE_HEADER);
     out.push('\n');
     for slot in slots {
@@ -207,7 +207,7 @@ fn encode_slots(slots: &[ClassSlotState]) -> String {
     out
 }
 
-fn decode_slots(text: &str) -> Option<Vec<ClassSlotState>> {
+pub(crate) fn decode_slots(text: &str) -> Option<Vec<ClassSlotState>> {
     let mut lines = text.lines();
     if lines.next()? != CLASS_FILE_HEADER {
         return None;
@@ -336,7 +336,7 @@ pub(crate) fn load_class_store(
     file.path = Some(path);
 }
 
-fn write_class_file(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+pub(crate) fn write_class_file(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
 
     if let Some(parent) = path.parent() {

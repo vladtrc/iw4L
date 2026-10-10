@@ -13,6 +13,11 @@ pub const PLAYERANIM_SCRIPT_PATH: &str = "mp/playeranim.script";
 
 pub const PLAYERANIM_TYPES_PATH: &str = "mp/playeranimtypes.txt";
 
+/// Compiles an animation tree's `.atr` source keeping every node.
+pub fn compile_animtree(atr: &[u8]) -> Result<Arc<CompiledAnimTreeDefinition>, AtrCompileError> {
+    crate::atr_compile::compile_complete(atr)
+}
+
 #[derive(Clone, Debug, Default, Resource)]
 pub struct PlayerAnimSources {
     family: Option<asset_core::FamilyId>,
@@ -31,6 +36,18 @@ pub struct PlayerAnimSources {
 }
 
 impl PlayerAnimSources {
+    pub fn native_t6() -> Self {
+        let (tree, script) = crate::t6_player::compile();
+        Self {
+            family: Some(asset_core::FamilyId::T6),
+            compiled: Some(Ok(tree)),
+            parsed_script: Some(Ok(script)),
+            ..Default::default()
+        }
+    }
+    pub fn native_t6_clip_names() -> impl Iterator<Item = &'static str> {
+        crate::t6_player::clip_names()
+    }
     pub fn family(&self) -> Option<asset_core::FamilyId> {
         self.family
     }
@@ -131,6 +148,16 @@ impl PlayerAnimSources {
     }
 
     pub fn compile_report_line(&self) -> String {
+        if self.family() == Some(asset_core::FamilyId::T6) {
+            return match self.compiled() {
+                Some(Ok(tree)) => format!(
+                    "native T6 player profile: nodes={} leaves={}",
+                    tree.node_count(),
+                    tree.leaf_count()
+                ),
+                _ => "native T6 player profile not compiled".into(),
+            };
+        }
         match self.compiled() {
             Some(Ok(tree)) => format!(
                 "multiplayer.atr compiled: nodes={} leaves={} ignored={} script_names={} legs={} torso={} turning={}",

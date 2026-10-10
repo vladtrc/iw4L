@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Our console: input, parsing, execution, cvar storage, coverage report."
 
+[package.metadata.iw4l]
+layer = "session"
+
 [dependencies]
 getrandom = "0.3"
 master_protocol.workspace = true

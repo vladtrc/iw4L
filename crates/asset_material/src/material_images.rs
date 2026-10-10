@@ -760,9 +760,13 @@ pub fn decode_zone_image_rgba(
 
 pub type ZoneUiRgba = (u32, u32, Arc<Vec<u8>>);
 
+#[derive(Clone)]
 pub struct ZoneUiImage {
     pub iwi: Arc<[u8]>,
     pub state: Option<render_material::CompiledPassState>,
+    /// Already decoded pixels, for images a zone holds as raw texture data
+    /// rather than an IWI file.
+    pub rgba: Option<ZoneUiRgba>,
 }
 
 pub fn decode_iwi_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {

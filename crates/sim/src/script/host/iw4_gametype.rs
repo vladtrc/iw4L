@@ -8,7 +8,10 @@ use crate::script::{Runtime, Value};
 use bevy_ecs::prelude::World;
 
 pub(crate) fn apply_level_notify(frame: &mut FrameWorld, name: &str) {
-    if name == "prematch_over" && frame.phase() == MatchPhase::Warmup {
+    let Some(mode) = frame.bootstrap_ref().mode else {
+        return;
+    };
+    if name == mode.play_starts_on && frame.phase() == MatchPhase::Warmup {
         crate::score::finish_prematch(frame);
     }
 }

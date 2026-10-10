@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Filesystem transport: discover games, inflate FastFiles, index IWDs, cache blobs."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 asset_core.workspace = true
 diag.workspace = true

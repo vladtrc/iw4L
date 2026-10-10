@@ -43,6 +43,7 @@ pub(crate) fn schedule() -> Schedule {
             expire_transient_events_system,
             crate::script::apply_disconnects,
             crate::script::advance_mechanics,
+            crate::script::advance_actors,
             crate::script::advance_scheduler,
             (
                 apply_script_signals_system,
@@ -142,6 +143,7 @@ fn phase_animated_map_models(world: &mut FrameWorld, tick: Tick, msec: i32) {
     let dt = msec as f32 / 1000.0;
 
     let at_time = i32::try_from(tick.0.saturating_mul(crate::MATCH_TICK_MS)).unwrap_or(i32::MAX);
+    let clips = world.script_model_clips();
     let mut mover_apos = Vec::new();
     world.visit_script_movers(|mover| {
         mover_apos.push((
@@ -155,6 +157,12 @@ fn phase_animated_map_models(world: &mut FrameWorld, tick: Tick, msec: i32) {
         };
         if dobj.play_anim.is_some() {
             dobj.advance_script_model_play_anim(dt);
+            if let Ok(request) = dobj
+                .semantic_state
+                .resolve_request(|name| clips.get(name).cloned())
+            {
+                dobj.pose_request = request;
+            }
         }
         if let Some(id) = capabilities.owner.script_model() {
             if let Some((_, apos)) = mover_apos.iter().find(|(mover_id, _)| *mover_id == id) {
@@ -409,6 +417,29 @@ fn run_players_system(ecs: &mut World) {
             {
                 cmd.buttons &= !playerstate_iw4::buttons::MELEE_CHARGE;
             }
+            if let Some(gap) = world
+                .bootstrap_ref()
+                .mode
+                .and_then(|mode| match mode.movement {
+                    game_api::Rule::Unknown(gap) => Some(gap),
+                    game_api::Rule::Known(()) => None,
+                })
+            {
+                world.report_game_gap(gap);
+                if let Some(index) = result_index {
+                    fire_results[index].outcome =
+                        crate::FireCommandOutcome::NotRun(crate::FireCommandRefusal::RuleUnknown);
+                }
+                if let Some(ps) = world.player_mut(*id) {
+                    ps.command_time = cmd.server_time;
+                }
+                world.set_old_cmd(*id, cmd.buttons, cmd.angles);
+                consumed.push(crate::PlayerCommand {
+                    command: cmd,
+                    ..*command
+                });
+                continue;
+            }
             let commanded_move = cmd.forwardmove != 0 || cmd.rightmove != 0;
             world.set_anim_command_buttons(*id, cmd.buttons);
             let linked_brushes: Vec<LinkedBrushCollisionBrush> = world
@@ -539,14 +570,21 @@ fn run_players_system(ecs: &mut World) {
             world.set_pmove_walking(*id, walking);
             world.link_player_area(*id, linked_bounds);
 
-            let shots = advance_weapon_command(
-                &mut world,
-                tick,
-                *id,
-                cmd,
-                delta.min(200),
-                command.sequence,
-            );
+            let weapons = world.bootstrap_ref().mode.map(|mode| mode.weapons);
+            let shots = match weapons {
+                Some(game_api::Rule::Unknown(gap)) => {
+                    world.report_game_gap(gap);
+                    Vec::new()
+                }
+                _ => advance_weapon_command(
+                    &mut world,
+                    tick,
+                    *id,
+                    cmd,
+                    delta.min(200),
+                    command.sequence,
+                ),
+            };
             if let Some(index) = result_index {
                 assert!(
                     shots.len() <= 2,
@@ -1932,9 +1970,32 @@ fn apply_select_class(
 }
 
 fn validate_class_content(
-    world: &FrameWorld,
+    world: &mut FrameWorld,
     def: &crate::ClassDef,
 ) -> Result<(), crate::ClassRejectReason> {
+    if world
+        .ecs()
+        .resource::<crate::script::Runtime>()
+        .program
+        .as_ref()
+        .is_some_and(|program| program.rules() == crate::script::Realm::T6)
+    {
+        if def.primary == 0
+            || def.perks != [0; 3]
+            || !def.deathstreak.is_empty()
+            || def
+                .weapon_slot_ids()
+                .into_iter()
+                .filter(|weapon| *weapon != 0)
+                .any(|weapon| {
+                    world
+                        .weapon_setup(weapon)
+                        .is_none_or(|setup| setup.realm != crate::script::Realm::T6)
+                })
+        {
+            return Err(crate::ClassRejectReason::LockedContent);
+        }
+    }
     for (slot, perk) in def.perks.iter().copied().enumerate() {
         if perk != 0 && crate::match_state::perk_slot_from_class_catalog(perk) != Some(slot) {
             return Err(crate::ClassRejectReason::LockedContent);

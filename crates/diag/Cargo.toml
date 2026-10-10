@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Process diagnostics: Channel/Level sinks, JSONL traces, counting allocator."
 
+[package.metadata.iw4l]
+layer = "neutral"
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

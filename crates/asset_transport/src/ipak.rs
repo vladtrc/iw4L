@@ -1,6 +1,8 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 const MAGIC: [u8; 4] = *b"KAPI";
 const VERSION: u32 = 0x50000;
@@ -11,6 +13,7 @@ const COMMANDS_PER_BLOCK: usize = 31;
 const COMMAND_RAW: u32 = 0;
 const COMMAND_LZO: u32 = 1;
 const COMMAND_OUTPUT_CAP: usize = 0x8000;
+const READ_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Key {
@@ -28,6 +31,16 @@ pub struct IPak {
     path: PathBuf,
     data_offset: u64,
     index: Vec<(Key, Entry)>,
+    reads: Mutex<ReadCache>,
+}
+
+#[derive(Default)]
+struct ReadCache {
+    payloads: BTreeMap<Key, Arc<[u8]>>,
+    order: VecDeque<Key>,
+    bytes: usize,
+    hits: usize,
+    misses: usize,
 }
 
 pub fn ipak_name_hash(name: &str) -> u32 {
@@ -93,6 +106,7 @@ impl IPak {
             path: path.to_owned(),
             data_offset,
             index,
+            reads: Mutex::default(),
         })
     }
 
@@ -124,8 +138,51 @@ impl IPak {
     }
 
     pub fn read(&self, name_hash: u32, data_hash: u32) -> Option<Result<Vec<u8>, String>> {
+        self.read_shared(name_hash, data_hash)
+            .map(|result| result.map(|bytes| bytes.to_vec()))
+    }
+
+    pub fn read_shared(&self, name_hash: u32, data_hash: u32) -> Option<Result<Arc<[u8]>, String>> {
         let entry = self.find(name_hash, data_hash)?;
-        Some(self.read_entry(entry))
+        let key = Key {
+            name_hash,
+            data_hash,
+        };
+        let mut cache = self
+            .reads
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(bytes) = cache.payloads.get(&key).cloned() {
+            cache.hits += 1;
+            return Some(Ok(bytes));
+        }
+        cache.misses += 1;
+        let bytes: Arc<[u8]> = match self.read_entry(entry) {
+            Ok(bytes) => bytes.into(),
+            Err(error) => return Some(Err(error)),
+        };
+        if bytes.len() <= READ_CACHE_BYTES {
+            while cache.bytes + bytes.len() > READ_CACHE_BYTES {
+                let Some(oldest) = cache.order.pop_front() else {
+                    break;
+                };
+                if let Some(old) = cache.payloads.remove(&oldest) {
+                    cache.bytes -= old.len();
+                }
+            }
+            cache.bytes += bytes.len();
+            cache.order.push_back(key);
+            cache.payloads.insert(key, bytes.clone());
+        }
+        Some(Ok(bytes))
+    }
+
+    pub fn read_cache_stats(&self) -> (usize, usize, usize) {
+        let cache = self
+            .reads
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        (cache.hits, cache.misses, cache.bytes)
     }
 
     fn read_entry(&self, entry: Entry) -> Result<Vec<u8>, String> {

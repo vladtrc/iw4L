@@ -102,6 +102,7 @@ pub(crate) fn spawn_script_menus(root: &mut ChildSpawnerCommands) {
 
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct MenuInputs<'w, 's> {
+    mode: Option<Res<'w, game_api::ModeRules>>,
     keys: Res<'w, ButtonInput<KeyCode>>,
     keyboard: MessageReader<'w, 's, bevy::input::keyboard::KeyboardInput>,
     mouse: Res<'w, ButtonInput<MouseButton>>,
@@ -115,6 +116,9 @@ pub(crate) struct MenuInputs<'w, 's> {
     compass: Option<Res<'w, assets::SessionCompass>>,
     party: Res<'w, frame::UiPartyState>,
     frontend_strings: Option<Res<'w, asset_game::LocalizeCatalog>>,
+    unified: Option<Res<'w, frame::UnifiedFrontend>>,
+    native_menu: Res<'w, frame::NativeGameMenu>,
+    map_identity: Option<Res<'w, assets::SessionMapIdentity>>,
 }
 
 #[derive(Default)]
@@ -177,6 +181,18 @@ pub(crate) fn update_script_menus(
     let meta = snapshot.and_then(|s| s.meta.for_client(local.0));
     let in_game = matches!(*input.screen, AppScreen::InGame | AppScreen::ClassSelect);
     let frontend = *input.screen == AppScreen::MainMenu;
+    let native = in_game
+        && input
+            .map_identity
+            .as_ref()
+            .is_some_and(|map| map.namespace == Some(asset_core::AssetNamespace::T6));
+    if native || frontend && input.unified.as_ref().is_some_and(|frontend| frontend.0) {
+        *menus = ScriptMenus::default();
+        if let Some(view) = input.hud_input.as_mut() {
+            view.script_menu_open = native && input.native_menu.0;
+        }
+        return;
+    }
     if (!in_game && !frontend) || (in_game && meta.is_none()) {
         if menus.screen.is_some() {
             out.stop_music.write(frame::UiStopMusic);
@@ -365,6 +381,7 @@ pub(crate) fn update_script_menus(
 
     let scoreboard = snapshot
         .filter(|s| in_game && crate::scoreboard::displayed(world.scores_open, s, local.0))
+        .filter(|_| !input.mode.as_ref().is_some_and(|mode| !mode.hud.scoreboard))
         .and_then(|_| catalog.get(SCOREBOARD_MENU));
     if (menus.stack.is_empty() && scoreboard.is_none()) || !surface.is_ready() {
         return;

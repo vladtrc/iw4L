@@ -14,8 +14,18 @@ those systems work.
 ## What you can try
 
 Explore maps, fight bots, and record and replay demos. Gameplay remains incomplete;
-expect missing behavior, bugs and desyncs. The asset readers also cover MW3 and Black
-Ops.
+expect missing behavior, bugs and desyncs. Each game runs on its own rules and
+data only ([game boundary](docs/ARCHITECTURE.md)): Modern Warfare 2 plays;
+Black Ops zombies maps load and run their own scripts, but rules not yet
+recovered from Black Ops (movement, weapons, HUD) are off; Black Ops
+multiplayer and MW3 maps are refused. Experimental
+[Black Ops II gameplay](docs/T6.md) supports FFA, TDM and zombies survival
+using an owned BO2 installation, including native weapons, respawns and
+[in-match classes, settings and HUD](docs/MULTIPLAYER-UI.md).
+
+Launching without a map opens the [game library](docs/FRONTEND.md): it needs no
+game data, scans a folder you choose for installed games and lists them, with
+persistent settings and game-specific menus.
 
 APIs, configuration, caches and the wire protocol change between commits;
 multiplayer peers must run the same build.
@@ -54,6 +64,11 @@ make map mp_boneyard CMDS='wait world; spawn 0; force_match_start; bot add 3'
 This builds the optimized `play` profile and starts a local match with three bots.
 `force_match_start` skips the warmup that otherwise freezes movement.
 
+On native Windows, use `powershell -ExecutionPolicy Bypass -File .\scripts\play.ps1`
+from the repository root. It builds and launches `target/play/iw4l.exe`, preserving
+the repository's `iw4l-artifacts/` settings and caches. Append `map t6:mp_raid`
+to load BO2 directly. Unoptimized `target/debug/iw4l.exe` is unsuitable for frame-rate tests.
+
 ## Inside the engine
 
 | Area | Implementation |
@@ -71,7 +86,7 @@ This builds the optimized `play` profile and starts a local match with three bot
 - [Map loading](docs/MAP-LOAD.md), [GSC runtime](docs/GSC-RUNTIME.md) and [bot AI](docs/BOTS.md): starting points for experiments and modifications.
 - [Documentation index](docs/INDEX.md), [contributing](CONTRIBUTING.md) and [security reports](SECURITY.md).
 
-This whole project is written by an LLM.
+This whole project is written by LLMs.
 
 ## Acknowledgements and license
 

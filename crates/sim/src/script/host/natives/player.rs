@@ -588,11 +588,43 @@ pub(crate) fn corpse_anim(world: &World, receiver: &Value) -> Result<Option<Arc<
     }
 }
 
+fn is_actor(world: &World, receiver: &Value) -> bool {
+    matches!(
+        entity_kind(world, receiver),
+        Some((_, super::super::entities::EntityKind::Actor))
+    )
+}
+
 fn item_number(world: &World, receiver: &Value) -> Result<i32, String> {
     match entity_kind(world, receiver) {
         Some((_, super::super::entities::EntityKind::Item(number))) => Ok(number),
         _ => Err("receiver is not a weapon item".into()),
     }
+}
+
+/// An animation argument's clip, or `None` for an animation this match never
+/// loaded: like an empty animation it has no length, motion or notetracks.
+fn loaded_clip(
+    world: &mut World,
+    args: &[Value],
+    index: usize,
+) -> Result<Option<Arc<xmodel_runtime::AnimClip>>, String> {
+    let name = match arg(args, index)? {
+        Value::Animation { name, .. } => name.clone(),
+        other => return Err(format!("{} is not an animation", kind(other))),
+    };
+    Ok(FrameWorld::from_world(world).anim_clip_named(&name))
+}
+
+/// The normalized start and end times of a delta query, `0` and `1` by default.
+fn delta_span(args: &[Value]) -> Result<(f32, f32), String> {
+    let time = |index: usize, default: f32| match args.get(index) {
+        None | Some(Value::Undefined) => Ok(default),
+        Some(Value::Int(n)) => Ok(*n as f32),
+        Some(Value::Float(f)) => Ok(*f),
+        Some(other) => Err(format!("{} is not a time", kind(other))),
+    };
+    Ok((time(1, 0.0)?, time(2, 1.0)?))
 }
 
 fn anim_clip(
@@ -605,7 +637,7 @@ fn anim_clip(
         other => return Err(format!("{} is not an animation", kind(other))),
     };
     FrameWorld::from_world(world)
-        .player_anim_clip_named(&name)
+        .anim_clip_named(&name)
         .ok_or_else(|| format!("animation '{name}' is not loaded in the simulation"))
 }
 
@@ -623,6 +655,17 @@ pub(crate) fn new_item_entity(
     let id = runtime.create_entity(super::super::entities::EntityKind::Item(number), classname)?;
     runtime.set_object_field(id, "origin", Value::Vector(origin));
     Ok(Value::Object(id))
+}
+
+fn revive_from_last_stand(
+    world: &mut World,
+    receiver: &Value,
+    _: &[Value],
+) -> Result<Value, String> {
+    let id = client_of(world, receiver)?;
+    slot(world, id.0)?.last_stand_until_ms = None;
+    script_player::revive(&mut FrameWorld::from_world(world), id);
+    Ok(Value::Undefined)
 }
 
 fn register_death(registry: &mut NativeRegistry) {
@@ -697,12 +740,8 @@ fn register_death(registry: &mut NativeRegistry) {
         super::super::players::suicide(world, tick, client);
         Ok(Value::Undefined)
     });
-    registry.register(Method, "laststandrevive", |world, receiver, _| {
-        let id = client_of(world, receiver)?;
-        slot(world, id.0)?.last_stand_until_ms = None;
-        script_player::revive(&mut FrameWorld::from_world(world), id);
-        Ok(Value::Undefined)
-    });
+    registry.register(Method, "laststandrevive", revive_from_last_stand);
+    registry.register(Method, "reviveplayer", revive_from_last_stand);
     registry.register(
         crate::script::Namespace::Function,
         "obituary",
@@ -757,12 +796,17 @@ fn register_death(registry: &mut NativeRegistry) {
             name,
         })
     });
+    // Actors have no ragdoll physics yet: a dead actor holds its death pose.
     registry.register(Method, "isragdoll", |world, receiver, _| {
-        corpse_anim(world, receiver)?;
+        if !is_actor(world, receiver) {
+            corpse_anim(world, receiver)?;
+        }
         Ok(Value::Int(0))
     });
     registry.register(Method, "startragdoll", |world, receiver, _| {
-        corpse_anim(world, receiver)?;
+        if !is_actor(world, receiver) {
+            corpse_anim(world, receiver)?;
+        }
         Ok(Value::Undefined)
     });
     registry.register(
@@ -782,6 +826,64 @@ fn register_death(registry: &mut NativeRegistry) {
                     .any(|n| n.name.eq_ignore_ascii_case(&note))
                     .into(),
             ))
+        },
+    );
+    registry.register(
+        crate::script::Namespace::Function,
+        "getmovedelta",
+        |world, _, args| {
+            let Some(clip) = loaded_clip(world, args, 0)? else {
+                return Ok(Value::Vector([0.0; 3]));
+            };
+            let (start, end) = delta_span(args)?;
+            let from = clip.abs_delta_trans(start);
+            let to = clip.abs_delta_trans(end);
+            let delta = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+            let (sin, cos) = (-clip.abs_delta_yaw(start).to_radians()).sin_cos();
+            Ok(Value::Vector([
+                delta[0] * cos - delta[1] * sin,
+                delta[0] * sin + delta[1] * cos,
+                delta[2],
+            ]))
+        },
+    );
+    registry.register(
+        crate::script::Namespace::Function,
+        "getangledelta",
+        |world, _, args| {
+            let Some(clip) = loaded_clip(world, args, 0)? else {
+                return Ok(Value::Float(0.0));
+            };
+            let (start, end) = delta_span(args)?;
+            Ok(Value::Float(math_iw4::angle_subtract(
+                clip.abs_delta_yaw(end),
+                clip.abs_delta_yaw(start),
+            )))
+        },
+    );
+    registry.register(
+        crate::script::Namespace::Function,
+        "getnotetracksindelta",
+        |world, _, args| {
+            let animation = arg(args, 0)?.clone();
+            let Some(clip) = loaded_clip(world, args, 0)? else {
+                return new_array(world, Vec::new());
+            };
+            let (start, end) = delta_span(args)?;
+            let mut rows = Vec::new();
+            for note in clip
+                .notifies
+                .iter()
+                .filter(|n| n.time >= start && n.time <= end)
+            {
+                let row = vec![
+                    animation.clone(),
+                    Value::string(note.name.as_str()),
+                    Value::Float(note.time),
+                ];
+                rows.push(new_array(world, row)?);
+            }
+            new_array(world, rows)
         },
     );
     registry.register(
@@ -988,8 +1090,15 @@ fn controls(
 fn register_body(registry: &mut NativeRegistry) {
     registry.register(Method, "spawn", |world, receiver, args| {
         let client = player(world, receiver)?;
-        let origin = vector(args, 0)?;
-        let angles = vector(args, 1)?;
+        let mut origin = vector(args, 0)?;
+        let mut angles = vector(args, 1)?;
+        // Zombie scripts place every co-op player once all are connected; a
+        // player who had not spawned yet keeps that place for the first spawn.
+        if super::super::players::awaiting_spawn(world, client) {
+            let slot = slot(world, client)?;
+            origin = slot.pending_origin.unwrap_or(origin);
+            angles = slot.pending_angles.unwrap_or(angles);
+        }
         let state = slot(world, client)?.sessionstate.clone();
         slot(world, client)?.last_stand_until_ms = None;
         let tick = world.resource::<crate::step::StepRequest>().tick;
@@ -1001,6 +1110,19 @@ fn register_body(registry: &mut NativeRegistry) {
             angles,
             &state,
         );
+        let slot = slot(world, client)?;
+        slot.pending_origin = None;
+        slot.pending_angles = None;
+        let pending = std::mem::take(&mut slot.pending_weapons);
+        let spawn_weapon = slot.pending_spawn_weapon.take();
+        let mut frame = FrameWorld::from_world(world);
+        for (weapon, model) in pending {
+            script_player::give_weapon(&mut frame, ClientId(client), weapon, false)?;
+            script_player::set_weapon_model(&mut frame, ClientId(client), weapon, model);
+        }
+        if let Some(weapon) = spawn_weapon {
+            script_player::set_spawn_weapon(&mut frame, ClientId(client), weapon)?;
+        }
         Ok(Value::Undefined)
     });
     registry.register(Method, "freezecontrols", |world, receiver, args| {
@@ -1113,7 +1235,9 @@ fn register_body(registry: &mut NativeRegistry) {
     registry.register(Method, "setplayerangles", |world, receiver, args| {
         let id = client_of(world, receiver)?;
         let angles = vector(args, 0)?;
-        FrameWorld::from_world(world).set_viewangles(id, angles);
+        if !super::super::players::place_unspawned(world, id.0, None, Some(angles)) {
+            FrameWorld::from_world(world).set_viewangles(id, angles);
+        }
         Ok(Value::Undefined)
     });
     registry.register(Method, "getstance", |world, receiver, _| {
@@ -1413,6 +1537,10 @@ fn register_inventory(registry: &mut NativeRegistry) {
             model
         };
         let akimbo = !t5 && optional(args, 2, int)?.unwrap_or(0) != 0;
+        if t5 && FrameWorld::from_world(world).player(id).is_none() {
+            slot(world, id.0)?.pending_weapons.push((weapon, model));
+            return Ok(Value::Undefined);
+        }
         script_player::give_weapon(&mut FrameWorld::from_world(world), id, weapon, akimbo)?;
         script_player::set_weapon_model(&mut FrameWorld::from_world(world), id, weapon, model);
         super::super::players::give_carried_insertion(world, id.0, receiver, named)?;
@@ -1439,6 +1567,11 @@ fn register_inventory(registry: &mut NativeRegistry) {
     registry.register(Method, "setspawnweapon", |world, receiver, args| {
         let id = client_of(world, receiver)?;
         let weapon = player_weapon(world, id, args, 0)?;
+        if super::super::players::is_t5(world) && FrameWorld::from_world(world).player(id).is_none()
+        {
+            slot(world, id.0)?.pending_spawn_weapon = Some(weapon);
+            return Ok(Value::Undefined);
+        }
         script_player::set_spawn_weapon(&mut FrameWorld::from_world(world), id, weapon)?;
         Ok(Value::Undefined)
     });
@@ -1642,6 +1775,12 @@ fn register_inventory(registry: &mut NativeRegistry) {
             ps.perk_slots[index] = 0;
         }
         slot(world, client)?.perks.remove(&name);
+        Ok(Value::Undefined)
+    });
+    registry.register(Method, "setmaxhealth", |world, receiver, args| {
+        let client = player(world, receiver)?;
+        let health = Value::Int(int(args, 0)?);
+        crate::script::host::players::store_field(world, client, "maxhealth", &health)?;
         Ok(Value::Undefined)
     });
     registry.register(Method, "hasperk", |world, receiver, args| {

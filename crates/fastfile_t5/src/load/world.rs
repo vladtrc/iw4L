@@ -111,7 +111,12 @@ fn load_path_data(s: &mut ZoneStream<'_>, p: Ptr) -> Result<()> {
     let vis_bytes = s.i32_at(p, 24)?.max(0) as usize;
     let node_tree_count = s.i32_at(p, 32)?.max(0) as usize;
 
-    if let Some(nodes) = always_array(s, p.at(4), 4, sz::PATH_NODE * node_alloc)? {
+    let nodes_array = always_array(s, p.at(4), 4, sz::PATH_NODE * node_alloc)?;
+    s.record_path_data(crate::zone::PathDataGeometry {
+        node_count,
+        nodes: nodes_array,
+    });
+    if let Some(nodes) = nodes_array {
         for i in 0..node_alloc {
             let node = nodes.at(i * sz::PATH_NODE);
             let link_count = s.u16_at(node, sz::PATH_NODE_TOTAL_LINK_COUNT_OFF)? as usize;

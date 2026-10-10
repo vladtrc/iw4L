@@ -22,7 +22,7 @@ pub const MAX_BUILD_BYTES: usize = 64;
 pub const MAX_PLAYER_NAME_BYTES: usize = 64;
 pub const MAX_LIST_ADVERTS: usize = 128;
 
-pub const SESSION_IDLE: core::time::Duration = core::time::Duration::from_secs(8);
+pub const SESSION_IDLE: core::time::Duration = core::time::Duration::from_secs(60);
 pub const SESSION_KEEP_ALIVE: core::time::Duration = core::time::Duration::from_secs(1);
 
 const MAGIC: [u8; 4] = *b"IW4M";

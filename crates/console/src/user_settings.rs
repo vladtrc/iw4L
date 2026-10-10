@@ -52,6 +52,7 @@ pub(crate) fn load_user_settings(
 
 pub(crate) fn consume_menu_binding(
     mut intents: MessageReader<frame::UiBindRequest>,
+    mut menu_input: MessageReader<frame::UiMenuRequest>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut wheel: MessageReader<MouseWheel>,
@@ -65,6 +66,9 @@ pub(crate) fn consume_menu_binding(
     mut binds: ResMut<KeyBinds>,
     mut view: ResMut<ui::BindingView>,
 ) {
+    let cancel_requested = menu_input
+        .read()
+        .any(|request| matches!(request, frame::UiMenuRequest::Key(frame::UiMenuKey::Escape)));
     capture.consumed_input = false;
     if capture.command.is_none() {
         pending.id = None;
@@ -117,7 +121,7 @@ pub(crate) fn consume_menu_binding(
         view.revision = view.revision.wrapping_add(1);
         return;
     }
-    if keys.just_pressed(KeyCode::Escape) || pad_start {
+    if keys.just_pressed(KeyCode::Escape) || pad_start || cancel_requested {
         capture.command = None;
         capture.consumed_input = true;
         pending.id = None;

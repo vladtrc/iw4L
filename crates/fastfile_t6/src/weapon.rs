@@ -46,6 +46,12 @@ pub mod def {
     pub const WEAP_CLASS: u32 = 32;
     pub const PENETRATE_TYPE: u32 = 36;
     pub const IMPACT_TYPE: u32 = 40;
+    pub const VIEW_FLASH_EFFECT: u32 = 108;
+    pub const WORLD_FLASH_EFFECT: u32 = 112;
+    pub const VIEW_SHELL_EJECT_EFFECT: u32 = 464;
+    pub const WORLD_SHELL_EJECT_EFFECT: u32 = 468;
+    pub const VIEW_LAST_SHOT_EJECT_EFFECT: u32 = 472;
+    pub const WORLD_LAST_SHOT_EJECT_EFFECT: u32 = 476;
     pub const INVENTORY_TYPE: u32 = 44;
     pub const FIRE_TYPE: u32 = 48;
     pub const OFFHAND_CLASS: u32 = 96;
@@ -550,7 +556,7 @@ pub struct WeaponView<'z> {
 
 impl<'z> WeaponView<'z> {
     pub fn new(load: &'z ZoneLoad, asset: &'z LoadedAsset) -> Option<Self> {
-        if asset.header.len() < variant::SIZE {
+        if asset.ty != crate::AssetType::Weapon || asset.header.len() < variant::SIZE {
             return None;
         }
         let mut view = Self {

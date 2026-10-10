@@ -46,6 +46,8 @@ pub fn add_runtime_plugins_with_role(app: &mut App, role: RuntimeRole) {
         .add_plugins(ReplayPlugin)
         .add_plugins(RenderPlugin)
         .add_plugins(SessionPlugin);
+    app.insert_resource(hud::GameMenuParsers(session::games::menu_parsers()));
+    hud::register_game_menus(session::games::menus);
 
     app.edit_schedule(Update, |schedule| {
         schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());

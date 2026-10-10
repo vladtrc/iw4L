@@ -17,7 +17,7 @@ enter wire IDs/content digests. Queued effects retain their producing generation
 
 Combat, equipment, penetration, FPV, HUD, world and event projections use one
 effective row. Combat binds host rules and location damage before simulation.
-The host burst cooldown remains 200 ms across sources. Presentation facts carry
+T6 burst cooldown uses its authored delay; other sources use the host rule. Presentation facts carry
 camera, alternate, dual, shield, overlay and event policies without reinterpreting
 capture classifications. Loadout labels/archive hints are prepared by asset_game.
 

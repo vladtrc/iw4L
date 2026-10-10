@@ -93,6 +93,23 @@ impl FrameWorld<'_> {
         self.ecs
     }
 
+    /// Logs a rule the match's game does not have, once per world.
+    pub(crate) fn report_game_gap(&mut self, gap: &'static game_api::Unknown) {
+        let mut reported = self
+            .ecs
+            .get_resource_or_insert_with(ReportedGameGaps::default);
+        if reported.0.insert(gap.id) {
+            diag::info!(Sim, "game gap {}: {}", gap.id, gap.what);
+        }
+    }
+
+    pub(crate) fn script_invulnerable(&self, id: crate::ClientId) -> bool {
+        self.ecs
+            .get_resource::<crate::script::Runtime>()
+            .and_then(|runtime| runtime.players.get(&id.0))
+            .is_some_and(|slot| slot.invulnerable)
+    }
+
     pub(crate) fn projectile_by_number(&self, entnum: i32) -> Option<ProjectileState> {
         let entity = entity_by_number(self.ecs, entnum)?;
         Some(self.ecs.get::<ProjectileRow>(entity)?.0)
@@ -1037,3 +1054,7 @@ fn begin_script_movers_rotate_velocity_supplied(
     }
     n
 }
+
+/// The game gaps already logged in this world.
+#[derive(bevy_ecs::prelude::Resource, Default)]
+struct ReportedGameGaps(std::collections::BTreeSet<&'static str>);

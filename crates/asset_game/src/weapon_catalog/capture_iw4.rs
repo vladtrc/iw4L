@@ -310,6 +310,7 @@ impl WeaponCatalog {
                 ..WeaponCombatFx::empty(crate::AssetNamespace::Iw4)
             },
             facts: WeaponBodyFacts {
+                burst_delay_ms: None,
                 body_resolved: geometry.weap_def.is_some(),
                 fire_time_ms: geometry.fire_time_ms,
                 impact_type: geometry.impact_type,
@@ -468,6 +469,7 @@ impl WeaponCatalog {
                 sway: WeaponSwayFacts::from_capture(geometry.sway),
                 dual_wield_view_model_offset: geometry.dual_wield_view_model_offset,
                 dual_wield: false,
+                fuel_tank: false,
                 fire_melees: false,
                 no_dual_wield: geometry.no_dual_wield,
             },

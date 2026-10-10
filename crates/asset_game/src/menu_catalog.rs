@@ -335,6 +335,8 @@ impl CapturedStringTable {
 
 #[derive(Clone, Debug, Default, Resource)]
 pub struct MenuCatalog {
+    /// The game whose zones the menus came from; `None` is the front end's.
+    pub namespace: Option<asset_core::AssetNamespace>,
     pub menus: BTreeMap<String, MenuDef>,
     pub fonts: BTreeMap<String, FontDef>,
 
@@ -351,9 +353,26 @@ pub struct MenuCatalog {
     pub material_images: BTreeMap<String, String>,
     pub material_srgb_reads: BTreeMap<String, bool>,
     pub lists: Vec<(String, i32)>,
+    /// Each menu list's menus, in list order.
+    pub list_menus: BTreeMap<String, Vec<String>>,
     pub walked: usize,
 
     pub font_headers: usize,
+}
+
+/// The HUD menus and fonts of the session map's own game, when it is not the
+/// front end's (a Black Ops map draws Black Ops' HUD).
+#[derive(Clone, Debug, Default, Resource)]
+pub struct SessionHudMenus(pub Option<Arc<MenuCatalog>>);
+
+impl PartialEq for SessionHudMenus {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -487,7 +506,9 @@ impl MenuCatalog {
     pub fn absorb(&mut self, other: MenuCatalog) {
         self.walked += other.walked;
         self.font_headers += other.font_headers;
+        self.namespace = self.namespace.or(other.namespace);
         self.lists.extend(other.lists);
+        self.list_menus.extend(other.list_menus);
         for (name, def) in other.menus {
             self.menus.insert(name, def);
         }
@@ -573,6 +594,9 @@ pub fn load_ui_menu_catalog(games: &GamesRoot) -> (MenuCatalog, Vec<String>) {
                         found.path.display()
                     ));
                     catalog.absorb(part);
+                    if catalog.namespace.is_none() {
+                        catalog.namespace = asset_transport::zone_game_for_path(&found.path);
+                    }
                 }
                 Err(error) => report.push(format!(
                     "menu catalog gap: {zone} at {}: {error}",

@@ -129,7 +129,7 @@ who has never opened the folder.
 ---
 status: active        # planned | active | blocked | landed | closed | superseded
 updated: 2026-01-20
-branch: master        # branch or clone, or "—" if the artifact is not about code
+branch: main          # branch or clone, or "—" if the artifact is not about code
 next: what comes next # required for planned / active / blocked
 ---
 
@@ -169,12 +169,12 @@ moment it stops being read it is a file the next agent has to understand before
 they may ignore it.
 
 So the last step of a slice, before `make mr ship` — or before the commit that
-lands on master when the agent works on the root and has no clone — is to read
+lands on main when the agent works on the root and has no clone — is to read
 the branch's **own** diff:
 
 ```
-git diff origin/master...HEAD --stat      # what the branch adds at all
-git diff origin/master...HEAD             # then the hunks, for real
+git diff origin/main...HEAD --stat      # what the branch adds at all
+git diff origin/main...HEAD             # then the hunks, for real
 ```
 
 and to ask of every added file, test and print: **what breaks tomorrow if this
@@ -206,7 +206,7 @@ leaves only the runtime: names, comments and tests that a reader who never
 opened `context/` can live with.
 
 **History.** Unpushed commits are the research path. Soft-reset them onto
-`origin/master` and make one commit whose message is the effect, not the
+`origin/main` and make one commit whose message is the effect, not the
 investigation. Fixes, probes, reverts and "try this" do not survive as
 separate objects. History that has already been pushed is not rewritten —
 [`docs/DEPLOY.md`](docs/DEPLOY.md).
@@ -260,6 +260,13 @@ A slice that added no scaffolding says that in one line; it is an answer, not an
 omission.
 
 ## git
+
+**`main` only changes through pull requests.** Each task gets its own
+branch from an up-to-date `main`; the branch is pushed and a pull request
+opened into `main`. Nothing is committed or pushed to `main` directly — it
+is protected on GitHub. Where this file says a slice or `make mr ship` "lands
+on main", read: lands on the task's branch, which reaches `main` through
+its pull request.
 
 ```gitignore
 /context/

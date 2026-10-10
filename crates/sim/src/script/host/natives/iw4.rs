@@ -26,6 +26,12 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         set_dvar(world, &name, &value);
         Ok(Value::Undefined)
     });
+    registry.register(Function, "setsaveddvar", |world, _, args| {
+        let name = dvar_name(args)?;
+        let value = dvar_value(args)?;
+        set_dvar(world, &name, &value);
+        Ok(Value::Undefined)
+    });
     registry.register(Function, "setdvarifuninitialized", |world, _, args| {
         if args.len() != 2 {
             return Err("wrong number of parameters".into());
@@ -244,6 +250,9 @@ fn dvar_value(args: &[Value]) -> Result<String, String> {
     }
     if let Some(Value::Vector(v)) = args.get(1) {
         return Ok(format!("{} {} {}", v[0], v[1], v[2]));
+    }
+    if let Some(Value::Undefined) = args.get(1) {
+        return Ok(String::new());
     }
     string(args, 1)
 }

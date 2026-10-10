@@ -1,3 +1,4 @@
+pub mod boundary;
 pub mod bundle_zip;
 pub mod certs;
 pub mod chaos;

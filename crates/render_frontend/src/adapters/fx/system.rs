@@ -83,9 +83,15 @@ struct FxFrameTransaction {
 struct FxSceneAccess<'w> {
     scene: Option<Res<'w, WorldScene>>,
     marks: Res<'w, EntityMarks>,
+    map: Option<Res<'w, assets::SessionMapIdentity>>,
 }
 
 impl FxSceneAccess<'_> {
+    /// The game the match's map belongs to: whose effects the code names.
+    fn family(&self) -> Option<asset_core::AssetNamespace> {
+        self.map.as_ref()?.namespace
+    }
+
     fn scene(&self) -> Option<&WorldScene> {
         self.scene.as_deref()
     }
@@ -209,7 +215,9 @@ fn present_tracker_light(
     if owner.is_none() || light.bolt.is_some() {
         return;
     }
-    let (Some(target), Some(catalog)) = (bolts.tracker_light, catalog) else {
+    let (Some(target), Some(catalog), Some(family)) =
+        (bolts.tracker_light, catalog, fx_world.family())
+    else {
         return;
     };
     elem_infos.0.sync(&catalog.0);
@@ -217,7 +225,7 @@ fn present_tracker_light(
         &mut host.0,
         &catalog.0,
         &elem_infos.0,
-        asset_game::FxName::engine(EFFECT),
+        asset_game::FxName::new(family, EFFECT),
         target,
         fx_world.view().as_ref().map(|scene| scene as &dyn FxScene),
     )
@@ -386,7 +394,7 @@ fn tick_fx_non_dependent_update(
     let _fx_update = perf::Span::HostFxUpdateCpuMs.enter();
 
     elem_infos.0.sync(&catalog.0);
-    if !pending_fx.is_empty() {
+    if let (false, Some(family)) = (pending_fx.is_empty(), fx_world.family()) {
         let world = fx_world.view();
         let scene = world.as_ref().map(|s| s as &dyn FxScene);
         for ev in pending_fx {
@@ -396,7 +404,7 @@ fn tick_fx_non_dependent_update(
                 &mut host.0,
                 &catalog.0,
                 &elem_infos.0,
-                asset_game::FxName::engine(name),
+                asset_game::FxName::new(family, name),
                 ev.origin,
                 axis,
                 scene,
@@ -408,7 +416,7 @@ fn tick_fx_non_dependent_update(
                     &mut host.0,
                     &catalog.0,
                     &elem_infos.0,
-                    asset_game::FxName::engine(fallback),
+                    asset_game::FxName::new(family, fallback),
                     ev.origin,
                     axis,
                     scene,
@@ -3107,10 +3115,10 @@ fn play_fx(
         }
         return;
     };
-    let normal = if payload.direction == [0.0, 0.0, 0.0] {
-        [0.0, 0.0, 1.0]
+    let axis = if payload.direction == [0.0; 3] {
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
     } else {
-        payload.direction
+        axis_from_hit_normal(payload.direction)
     };
     elem_infos.0.sync(&catalog.0);
     let spawn = match play_named_oriented_in_world(
@@ -3119,7 +3127,7 @@ fn play_fx(
         &elem_infos.0,
         catalog.0.map_fx_name(&def_name),
         payload.origin,
-        axis_from_hit_normal(normal),
+        axis,
         fx_world.view().as_ref().map(|s| s as &dyn FxScene),
     ) {
         Some(PlayResult::PlayedReleased { .. } | PlayResult::Held { .. }) => "spawned",
@@ -3388,7 +3396,9 @@ fn melee_blood(
         &mut host.0,
         &catalog.0,
         &mut elem_infos.0,
-        Some(asset_game::FxName::engine("impacts/flesh_hit_knife")),
+        fx_world
+            .family()
+            .map(|family| asset_game::FxName::new(family, "impacts/flesh_hit_knife")),
         target,
         &mut played,
         fx_world.view().as_ref().map(|s| s as &dyn FxScene),

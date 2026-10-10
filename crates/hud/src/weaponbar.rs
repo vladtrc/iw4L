@@ -679,6 +679,10 @@ pub(crate) struct WeaponbarInput<'w, 's> {
     select: Res<'w, WeaponSelect>,
     input: Option<Res<'w, frame::HudInputView>>,
     cameras: Query<'w, 's, &'static Projection, With<Camera3d>>,
+    hud_menus: Option<Res<'w, asset_game::SessionHudMenus>>,
+    ui_dvars: Option<Res<'w, frame::UiMenuDvars>>,
+    vis: HudPlayerVisInput<'w>,
+    mode: Option<Res<'w, game_api::ModeRules>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -746,6 +750,65 @@ pub(crate) fn update_weaponbar(
         .as_ref()
         .map(|w| offhand_ammo(ps, w, ps.offhand_primary))
         .unwrap_or(0);
+    if let Some(snap) = presented.snapshot().filter(|_| {
+        client_input
+            .mode
+            .as_ref()
+            .is_some_and(|mode| mode.hud.game_hud_menus)
+    }) {
+        gaps.clear(HudGap::PerkDisplay);
+        gaps.clear(HudGap::CompassRing);
+        let Some(t5) = client_input.hud_menus.as_ref().and_then(|m| m.0.as_deref()) else {
+            hide(&mut pass);
+            return;
+        };
+        let ammo_widths = crate::t5_hud::ammo_widths(
+            t5,
+            ammo.as_ref().and_then(|a| a.stock),
+            ammo.as_ref().and_then(|a| a.clip),
+        );
+        let state = crate::t5_hud::T5HudState {
+            ms: milliseconds() as i32,
+            dvars: snap.meta.script_dvars(local.0),
+            ui_dvars: client_input.ui_dvars.as_deref(),
+            zombies: true,
+            input: client_input.input.as_deref(),
+            vis: client_input.vis.read(&presented, local.0),
+            in_killcam: view.as_deref().is_some_and(|v| v.in_killcam()),
+            ps,
+            weapons: weapons.as_ref(),
+            ammo,
+            weapon_name: name,
+            hide_ammo,
+            ammo_widths,
+        };
+        let (list, errors) = crate::t5_hud::paint(
+            t5,
+            strings.as_ref().map(|s| &s.0),
+            &state,
+            &surface,
+            &mut exprs,
+        );
+        for error in errors {
+            gaps.raise(GapCause::WeaponbarPaint { error });
+        }
+        let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
+        for cmd in &list.cmds {
+            let _ = hud_images.get(cmd.material_namespace, &cmd.material, &mut images);
+            if let Draw2dOp::TextRun { font, .. } = &cmd.op
+                && let Some(def) = t5.font(font)
+            {
+                fonts.insert(font.clone(), def);
+            }
+        }
+        let (quads, _) = tessellate_fonts(&list, &fonts);
+        pass.weaponbar = if quads.is_empty() {
+            TessJob::Hide
+        } else {
+            TessJob::Quads(quads)
+        };
+        return;
+    }
     let smoke_ammo = weapons
         .as_ref()
         .map(|w| offhand_ammo(ps, w, ps.offhand_secondary))
@@ -1006,7 +1069,7 @@ pub(crate) fn update_weaponbar(
     pass.weaponbar = TessJob::Quads(quads);
 }
 
-fn action_slot_weapon(
+pub(crate) fn action_slot_weapon(
     ps: &PlayerState,
     slot: i32,
     weapons: Option<&BoundWeapons<'_>>,

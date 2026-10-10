@@ -4,6 +4,7 @@ mod community_servers;
 pub mod frontend;
 mod gap_hud;
 mod launch_report;
+mod launcher;
 mod layers;
 mod load_table;
 mod loading;
@@ -12,6 +13,10 @@ mod menu_load;
 mod options;
 mod plugin;
 mod screen;
+mod t6_art;
+mod t6_hud;
+mod t6_menu;
+mod t6_text;
 
 pub use classes::equip_txn::{
     EquipTxnWatch, apply_pending_class_equip, resolve_class_equip_transaction,

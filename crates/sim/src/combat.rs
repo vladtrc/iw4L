@@ -1693,6 +1693,15 @@ fn fire_weapon_melee(
         Some(ColliderId::Player { client, .. }) => {
             (entity_iw4::EntityEventKind::MELEE_HIT, client.0 as i32)
         }
+        Some(
+            ColliderId::EntityDObjBone { owner, .. } | ColliderId::EntityLinkedBrush { owner, .. },
+        ) => (
+            entity_iw4::EntityEventKind::MELEE_HIT,
+            owner
+                .script_model()
+                .and_then(|id| world.gentity_number(id))
+                .unwrap_or(ENTITYNUM_NONE),
+        ),
         _ => (
             entity_iw4::EntityEventKind::MELEE_MISS,
             i32::from(trace_iw4::ENTITYNUM_WORLD),
@@ -1755,6 +1764,50 @@ fn fire_weapon_melee(
                         ..Default::default()
                     },
                 );
+            }
+        }
+        Some(
+            ColliderId::EntityDObjBone { owner, .. } | ColliderId::EntityLinkedBrush { owner, .. },
+        ) => {
+            if world.publishes_snapshot()
+                && let Some(target) = owner.script_model()
+            {
+                let bone = match segment.collider {
+                    Some(ColliderId::EntityDObjBone { bone, .. }) => Some(usize::from(bone)),
+                    _ => None,
+                };
+                let damaged = crate::script::damage_entity(
+                    world.ecs(),
+                    &crate::script::EntityHit {
+                        target,
+                        amount,
+                        attacker: Some(attacker),
+                        means: "MOD_MELEE",
+                        weapon,
+                        point: segment.end,
+                        dir: forward,
+                        bone,
+                        flags: 0,
+                    },
+                );
+                if damaged && usize::from(segment.surf_type) == fx_iw4::FX_SURF_TYPE_FLESH {
+                    world.push_entity_event(
+                        tick,
+                        EventAudience::All,
+                        entity_iw4::EntityEventKind::MELEE_BLOOD,
+                        crate::EntityEventPayload {
+                            number: attacker.0 as i32,
+                            attacker_entity_num: attacker.0 as i32,
+                            other_entity_num: other,
+                            weapon,
+                            origin: segment.end,
+                            direction: forward,
+                            surf_type: segment.surf_type,
+                            surface_flags: segment.surface_flags,
+                            ..Default::default()
+                        },
+                    );
+                }
             }
         }
         Some(ColliderId::World { .. }) => {

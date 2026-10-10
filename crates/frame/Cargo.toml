@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Shared frame TOC labels and session identity. No plugins, no systems."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 bevy.workspace = true
 

@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Retail IW4 player movement: PM_/BG_ stance, mantle, slide, acceleration."
 
+[package.metadata.iw4l]
+layer = "game"
+game = "iw4"
+
 [dependencies]
 math_iw4.workspace = true
 playerstate_iw4.workspace = true

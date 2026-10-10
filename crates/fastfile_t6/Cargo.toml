@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Retail T6 / BO2 zone container: header, Salsa20 chunk streams, asset list."
 
+[package.metadata.iw4l]
+layer = "format"
+game = "t6"
+
 [dependencies]
 libm = { version = "0.2.16", default-features = false }
 sha1 = { version = "0.10", default-features = false }

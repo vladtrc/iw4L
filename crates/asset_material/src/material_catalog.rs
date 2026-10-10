@@ -406,21 +406,39 @@ impl MaterialCatalog {
     }
 
     pub fn absorb_asset_population(&mut self, donor: MaterialCatalog) -> Vec<usize> {
-        self.absorb_asset_population_with_material_policy(donor, false)
+        self.absorb_asset_population_with_material_policy(donor, false, None)
+            .into_iter()
+            .map(|id| id.expect("every donor material is absorbed"))
+            .collect()
     }
 
     pub fn absorb_asset_population_host_materials_win(
         &mut self,
         donor: MaterialCatalog,
     ) -> Vec<usize> {
-        self.absorb_asset_population_with_material_policy(donor, true)
+        self.absorb_asset_population_with_material_policy(donor, true, None)
+            .into_iter()
+            .map(|id| id.expect("every donor material is absorbed"))
+            .collect()
+    }
+
+    /// Absorbs only the donor materials `wanted` names, and the images they
+    /// sample, with host materials winning; the rest map to `None`. Keeps a
+    /// donor zone's unused materials out of the sorted-material budget.
+    pub fn absorb_selected_materials_host_wins(
+        &mut self,
+        donor: MaterialCatalog,
+        wanted: &std::collections::BTreeSet<usize>,
+    ) -> Vec<Option<usize>> {
+        self.absorb_asset_population_with_material_policy(donor, true, Some(wanted))
     }
 
     fn absorb_asset_population_with_material_policy(
         &mut self,
         donor: MaterialCatalog,
         host_materials_win: bool,
-    ) -> Vec<usize> {
+        wanted: Option<&std::collections::BTreeSet<usize>>,
+    ) -> Vec<Option<usize>> {
         let MaterialCatalog {
             defs:
                 MaterialDefinitions {
@@ -446,9 +464,22 @@ impl MaterialCatalog {
         for (key, count) in leftover_t5_arg_hits {
             *self.leftover_t5_arg_hits.entry(key).or_default() += count;
         }
+        let sampled: Option<std::collections::BTreeSet<usize>> = wanted.map(|wanted| {
+            wanted
+                .iter()
+                .filter_map(|&index| materials.get(index))
+                .flat_map(|material| material.textures.iter().filter_map(|texture| texture.image))
+                .collect()
+        });
         let image_ids = images
             .into_iter()
-            .map(|image| self.link_image(image))
+            .enumerate()
+            .map(|(index, image)| {
+                sampled
+                    .as_ref()
+                    .is_none_or(|sampled| sampled.contains(&index))
+                    .then(|| self.link_image(image))
+            })
             .collect::<Vec<_>>();
         let vertex_decl_ids = vertex_decls
             .into_iter()
@@ -489,18 +520,22 @@ impl MaterialCatalog {
 
         materials
             .into_iter()
-            .map(|mut material| {
+            .enumerate()
+            .map(|(index, mut material)| {
+                if wanted.is_some_and(|wanted| !wanted.contains(&index)) {
+                    return None;
+                }
                 for texture in &mut material.textures {
                     texture.image = texture
                         .image
-                        .and_then(|index| image_ids.get(index).copied());
+                        .and_then(|index| image_ids.get(index).copied().flatten());
                 }
                 material.technique_table = material.technique_table.map(&rebase_table);
-                if host_materials_win {
+                Some(if host_materials_win {
                     self.link_material_host_real_wins(material)
                 } else {
                     self.link_material(material)
-                }
+                })
             })
             .collect()
     }

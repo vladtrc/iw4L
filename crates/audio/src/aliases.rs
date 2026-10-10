@@ -339,11 +339,15 @@ pub fn select_cg_fire_alias<'a>(
     current
 }
 
-pub(crate) fn namespace_alias(alias: &str) -> (asset_core::AssetNamespace, &str) {
+/// An alias as `<game>:<name>`; a bare name is the match's game's.
+pub(crate) fn namespace_alias(
+    alias: &str,
+    family: asset_core::AssetNamespace,
+) -> (asset_core::AssetNamespace, &str) {
     alias
         .split_once(':')
         .and_then(|(ns, name)| asset_core::AssetNamespace::parse(ns).map(|ns| (ns, name)))
-        .unwrap_or((asset_core::AssetNamespace::Iw4, alias))
+        .unwrap_or((family, alias))
 }
 
 pub(crate) fn match_ui_alias(
@@ -354,7 +358,7 @@ pub(crate) fn match_ui_alias(
     match (namespace, alias) {
         (AssetNamespace::T6, "ui_pulse_text_type") => (AssetNamespace::T6, "uin_notify_data"),
         (AssetNamespace::T6, "ui_pulse_text_delete") => (AssetNamespace::T6, "uin_alert_slideout"),
-        _ => namespace_alias(alias),
+        _ => namespace_alias(alias, namespace),
     }
 }
 

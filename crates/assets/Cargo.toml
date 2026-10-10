@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 description = "Asset lane orchestration, linking and conversion into engine objects."
 
+[package.metadata.iw4l]
+layer = "mixed"
+
 [dependencies]
 structured_data_iw4.workspace = true
 render_material.workspace = true

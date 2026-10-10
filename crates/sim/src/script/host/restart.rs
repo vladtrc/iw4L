@@ -123,13 +123,20 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
     let pending_local_dvars = runtime.pending_local_dvars.clone();
     let weapon_bridge = runtime.weapon_bridge.clone();
     let personal_classes = runtime.personal_classes.clone();
+    let t6_selected_classes =
+        (program.rules() == crate::script::Realm::T6).then(|| runtime.selected_classes.clone());
     let next_presence = runtime.next_spawned_presence;
     let huds: Vec<u64> = runtime.hud_slots.keys().copied().collect();
     let clients: Vec<u32> = runtime.players.keys().copied().collect();
     let spawned: Vec<crate::ScriptModelId> = runtime
         .entities
         .values()
-        .filter(|e| matches!(e.kind, EntityKind::Spawned | EntityKind::Vehicle))
+        .filter(|e| {
+            matches!(
+                e.kind,
+                EntityKind::Spawned | EntityKind::Actor | EntityKind::Vehicle
+            )
+        })
         .filter_map(|e| e.presence)
         .collect();
 
@@ -181,6 +188,9 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
     runtime.last_tick = Some(tick);
     runtime.weapon_bridge = weapon_bridge;
     runtime.personal_classes = personal_classes;
+    if let Some(selected) = t6_selected_classes {
+        runtime.selected_classes = selected;
+    }
     runtime.next_spawned_presence = next_presence;
     runtime.restored_pers = pers;
     for (name, value) in game {

@@ -1,3 +1,4 @@
+mod anim_state;
 mod destructible;
 mod dobj;
 mod dobj_runtime;
@@ -28,14 +29,15 @@ pub use semantic::{
     XAnimSemanticNode, XAnimSemanticNodeKind, XAnimTreeSnapshot,
 };
 pub use xanim_clip::{
-    AnimClip, ClipError, ClipNotify, FrameIndices, Keyed, RawDeltaTrans, RawXAnimParts, Rotation,
-    SampledTrack, Track, Translation,
+    AnimClip, ClipError, ClipNotify, FrameIndices, Keyed, RawDeltaQuat, RawDeltaTrans,
+    RawXAnimParts, Rotation, SampledTrack, Track, Translation,
 };
 pub use xanim_tree::{
     XAnimNodeDefinition, XAnimNodeId, XAnimNodeKind, XAnimNodeState, XAnimTreeDefinition,
     XAnimTreeError, XAnimTreeRuntime,
 };
 
+pub use anim_state::{AnimStateClip, AnimStateTable};
 pub use destructible::{T5DestructibleDef, T5DestructiblePiece, T5DestructibleStage};
 
 pub use player_body::{

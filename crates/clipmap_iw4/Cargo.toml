@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Retail IW4 clipmap walk: BSP leafbrush tree, TraceExtents, capsule hooks."
 
+[package.metadata.iw4l]
+layer = "format"
+game = "iw4"
+
 [dependencies]
 trace_iw4.workspace = true
 libm = { version = "0.2.16", default-features = false }

@@ -1021,6 +1021,9 @@ fn encode_client_meta(out: &mut WireWriter, meta: &ClientSnapshotMeta) {
     out.put_i32(meta.kills);
     out.put_i32(meta.deaths);
     out.put_i32(meta.kill_streak);
+    for stat in meta.zombie_stats {
+        out.put_i32(stat);
+    }
     out.put_u8(meta.radar.wire_tag());
     out.put_u8(u8::from(meta.radar_blocked));
     match &meta.remote_missile {
@@ -1243,6 +1246,7 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
     let kills = input.get_i32()?;
     let deaths = input.get_i32()?;
     let kill_streak = input.get_i32()?;
+    let zombie_stats = [input.get_i32()?, input.get_i32()?, input.get_i32()?];
     let radar = sim::RadarMode::from_wire_tag(input.get_u8()?)
         .ok_or(WireError::Malformed("bad radar mode"))?;
     let radar_blocked = input.get_u8()? != 0;
@@ -1461,6 +1465,7 @@ fn decode_client_meta(input: &mut WireReader<'_>) -> Result<ClientSnapshotMeta, 
         kills,
         deaths,
         kill_streak,
+        zombie_stats,
         radar,
         radar_blocked,
         remote_missile,

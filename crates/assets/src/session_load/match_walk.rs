@@ -93,7 +93,7 @@ pub(super) async fn walk_prepared_match(
         iw5_materials,
         mut iw5_scene_models,
         iw5_shared_surfaces,
-        strings,
+        mut strings,
         counts:
             CommonCounts {
                 startup_count,
@@ -182,6 +182,34 @@ pub(super) async fn walk_prepared_match(
         gaps,
     } = loaded;
     world.source_namespace = map_namespace;
+    let zombie = match &zone_ff {
+        Ok(path) => walk_zombie_commons(path, &progress),
+        Err(_) => ZombieCommons::default(),
+    };
+    let zombie_scripts = zombie.scripts.map(|mut scripts| {
+        scripts.overlay(map_scripts.clone());
+        scripts.overlay(zombie.map_patch_scripts);
+        scripts
+    });
+    strings.absorb_in_namespace(asset_core::AssetNamespace::T5, zombie.strings);
+    facts.hud_menus = asset_game::SessionHudMenus(zombie.hud_menus.map(std::sync::Arc::new));
+    let zombie_scene_names = zombie_scripts
+        .as_ref()
+        .map(crate::ScriptSources::asset_names);
+    let zombie_scene_models = zombie.scene_models;
+    let zombie_hud_images = zombie.hud_images;
+    report.extend(zombie.report);
+    if !zombie.weapons.is_empty() {
+        let before = weapons.len();
+        weapons.absorb_overriding(zombie.weapons);
+        fpv_meshes.absorb(zombie.fpv);
+        world_weapons.absorb(zombie.world_weapons);
+        projectile_meshes.absorb(zombie.projectiles);
+        report.push(format!(
+            "zombie weapons: registry {before}→{}",
+            weapons.len()
+        ));
+    }
     report.append(&mut common_report);
     report.extend(image_trees.report_lines());
 
@@ -300,6 +328,10 @@ pub(super) async fn walk_prepared_match(
     let common_xanim_count = xanims.len();
     let map_xanim_count = map_xanims.len();
     let t5_xanim_added = xanims.absorb(t5_xanims);
+    let added = xanims.absorb(zombie.xanims);
+    if added > 0 {
+        report.push(format!("zombie common xanims: +{added}"));
+    }
     xanims.absorb_local(map_xanims);
     weapons.resolve_sz_xanim_edges(&xanims);
     let weapon_clip_indices = weapons.bound_weapon_xanim_indices();
@@ -402,6 +434,67 @@ pub(super) async fn walk_prepared_match(
 
     let mut global = materials;
     let iw5_linked = global.absorb_asset_population_host_materials_win(iw5_materials);
+    if let Some(names) = &zombie_scene_names {
+        let zones: Vec<_> = zombie_scene_models
+            .into_iter()
+            .map(|(mut models, population)| {
+                models.retain_names(names);
+                (models, population)
+            })
+            .collect();
+        // Surfaces may draw a material another zone holds (`,name`); take
+        // it from whichever zone defines it.
+        let foreign: std::collections::BTreeSet<String> = zones
+            .iter()
+            .flat_map(|(models, _)| models.foreign_material_names())
+            .collect();
+        let mut foreign_hosts = std::collections::HashMap::<String, usize>::new();
+        let mut absorbed = 0;
+        for (mut models, population) in zones {
+            let held: Vec<(usize, String)> = population
+                .materials
+                .iter()
+                .enumerate()
+                .filter(|(_, material)| {
+                    material.name.is_real()
+                        && foreign.contains(material.name.as_str())
+                        && !foreign_hosts.contains_key(material.name.as_str())
+                })
+                .map(|(index, material)| (index, material.name.as_str().to_owned()))
+                .collect();
+            if models.is_empty() && held.is_empty() {
+                continue;
+            }
+            absorbed += models.len();
+            let mut wanted = models.walk_materials();
+            wanted.extend(held.iter().map(|(index, _)| *index));
+            let linked = global.absorb_selected_materials_host_wins(population, &wanted);
+            for (index, name) in held {
+                if let Some(host) = linked[index] {
+                    foreign_hosts.insert(name, host);
+                }
+            }
+            let linked: Vec<usize> = linked
+                .into_iter()
+                .map(|id| id.unwrap_or(usize::MAX))
+                .collect();
+            models.remap_walk_materials(&linked);
+            world.map_xmodel_scene_assets.absorb_captured(models);
+        }
+        let bound = world
+            .map_xmodel_scene_assets
+            .bind_foreign_materials(|name| {
+                foreign_hosts.get(name).copied().or_else(|| {
+                    global.materials.iter().position(|material| {
+                        material.name.is_real() && material.name.as_str() == name
+                    })
+                })
+            });
+        report.push(format!(
+            "zombie scene models: +{absorbed}; foreign surface materials: {} names, {bound} surfaces bound",
+            foreign.len()
+        ));
+    }
     let provisional_map_ids: Vec<usize> = (0..global.materials.len()).collect();
     if iw5_mat_n > 0 {
         iw5_scene_models.remap_walk_materials(&iw5_linked);
@@ -782,8 +875,15 @@ pub(super) async fn walk_prepared_match(
         ));
     }
     let prepared = PreparedMatch {
-        ui_images: common.ui_images.clone(),
+        ui_images: if zombie_hud_images.is_empty() {
+            common.ui_images.clone()
+        } else {
+            common
+                .ui_images
+                .with_zone_images(asset_core::AssetNamespace::T5, zombie_hud_images)
+        },
         scripts,
+        zombie_scripts,
         fx,
         world,
         materials: crate::MatchMaterials {
@@ -1315,21 +1415,38 @@ fn treyarch_map_under_iw4_rules(
         })
         .unwrap_or_default();
     let mut scripts = crate::ScriptSources::default();
-    let mut map_main = declarations.map_script(&entities);
-    let end = map_main.rfind('}').expect("generated map main");
-    map_main.insert_str(end, "\tthread iw4l_maps\\destructibles::main();\n");
-    scripts.insert_source(
-        "iw4l_maps/destructibles",
-        crate::map_scripts::DESTRUCTIBLES.to_owned(),
-    );
-    if zone_name == "mp_radiation" {
+    let mut map_main;
+    if family == asset_core::FamilyId::T6 {
+        // Modern Warfare 2's animated-model table feeds its own map scripts,
+        // which a Black Ops 2 match does not run.
+        map_main = declarations
+            .map_script("")
+            .replace("maps\\mp\\_load::main();", "");
+        assert!(
+            !map_main.contains("maps\\mp\\_load"),
+            "T6 generated map script still contains maps/mp/_load"
+        );
+    } else {
+        map_main = declarations.map_script(&entities);
+        let end = map_main.rfind('}').expect("generated map main");
+        map_main.insert_str(end, "\tthread iw4l_maps\\destructibles::main();\n");
+
+        scripts.insert_source(
+            "iw4l_maps/destructibles",
+            crate::map_scripts::DESTRUCTIBLES.to_owned(),
+        );
+    }
+
+    if family == asset_core::FamilyId::T5 && zone_name == "mp_radiation" {
         let end = map_main.rfind('}').expect("generated map main");
         map_main.insert_str(end, "\tthread iw4l_maps\\radiation::main();\n");
+
         scripts.insert_source(
             "iw4l_maps/radiation",
             crate::map_scripts::RADIATION.to_owned(),
         );
     }
+
     scripts.insert_source(&module, map_main);
     scripts.set_entities(entities);
     scripts

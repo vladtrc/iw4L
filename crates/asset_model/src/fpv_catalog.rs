@@ -564,6 +564,7 @@ pub struct FpvMount {
 #[derive(Clone, Debug)]
 pub struct FpvMountPlan {
     pub gun: FpvMeshIndex,
+    pub gun_tag: &'static str,
     pub secondary_gun: Option<FpvMeshIndex>,
     pub attachments: Vec<FpvMount>,
     pub rocket: Option<FpvMount>,
@@ -725,6 +726,7 @@ pub fn plan_fpv_mounts(
         })
         .transpose()?;
     Ok(FpvMountPlan {
+        gun_tag: "tag_weapon",
         gun,
         secondary_gun: None,
         attachments: selected,

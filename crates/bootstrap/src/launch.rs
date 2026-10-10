@@ -1,12 +1,8 @@
 use std::path::PathBuf;
 
-use asset_audio::load_mp_sound_bank;
-use asset_game::{load_mp_localized_strings, load_ui_menu_catalog};
-use asset_transport::{LoadProgress, find_runtime_common_mp, find_zone_file, list_mp_map_packs};
-use assets::{
-    LoadingPreviewSource, LoadingScreen, MatchLoadRequest, NamespaceSoundIwd, NamespaceTrees,
-};
-use audio::{SoundBank, SoundIwd};
+use asset_game::load_ui_menu_catalog;
+use asset_transport::{LoadProgress, find_runtime_common_mp, find_zone_file, list_menu_map_packs};
+use assets::{LoadingPreviewSource, LoadingScreen, MatchLoadRequest, NamespaceTrees};
 use bevy::prelude::*;
 use bevy::window::PresentMode;
 use render::diag::acceptance::{
@@ -17,8 +13,7 @@ use render_frontend::prepare::scene::world::WorldScene;
 use replay::{Playback, ReplayPlayback};
 use session::StartupCommands;
 use ui::{
-    AppScreen, ClassLoadoutCatalog, LaunchIdentity, LaunchReport, MenuMapList, UiAssetRoot, UiDraw,
-    UiLayer, UiLayers,
+    AppScreen, LaunchIdentity, LaunchReport, MenuMapList, UiAssetRoot, UiDraw, UiLayer, UiLayers,
 };
 
 use crate::args::{AcceptanceLaunch, LaunchMode};
@@ -31,24 +26,6 @@ enum Role {
     Dedicated,
     Client,
     Replay,
-}
-
-fn adopt_shell_ui_images(
-    mut commands: Commands,
-    shell: Option<Res<ShellUiImages>>,
-    weapons: Option<Res<assets::PreparedWeapons>>,
-    selected: Option<Res<asset_material::UiImagePublication>>,
-) {
-    if weapons.is_some() {
-        return;
-    }
-    if let Some(shell) = shell
-        && selected
-            .as_ref()
-            .is_none_or(|selected| selected.id() != shell.0.id())
-    {
-        commands.insert_resource(shell.0.clone());
-    }
 }
 
 struct LaunchConfig {
@@ -73,67 +50,6 @@ fn launch_report(
         prediction_metrics: None,
         world_report: vec!["queued background zone load".into()],
     }
-}
-
-#[derive(Resource)]
-struct ShellUiImages(asset_material::UiImagePublication);
-
-#[derive(Resource)]
-struct ShellCommonTask {
-    task: bevy::tasks::Task<assets::ShellCommon>,
-    perk_table: Option<asset_game::CapturedStringTable>,
-    started: std::time::Instant,
-}
-
-fn install_class_catalog(
-    mut commands: Commands,
-    shell: Option<ResMut<ShellCommonTask>>,
-    mut strings: ResMut<asset_game::LocalizeCatalog>,
-    menus: Res<asset_game::MenuCatalog>,
-) {
-    use bevy::tasks::futures_lite::future;
-    let Some(mut shell) = shell else {
-        return;
-    };
-    let Some(common) = future::block_on(future::poll_once(&mut shell.task)) else {
-        return;
-    };
-    for line in &common.report {
-        diag::info!(Launch, "{line}");
-    }
-    commands.insert_resource(ui::frontend::maps::MapPresentation::from_tables(
-        &common.tables,
-        common.ui_images.clone(),
-    ));
-    commands.insert_resource(ShellUiImages(common.ui_images));
-    let mut class_catalog =
-        ClassLoadoutCatalog::from_editor_catalog(std::sync::Arc::new(common.weapons))
-            .with_weapon_tables(&common.tables);
-    if let Some(table) = shell.perk_table.as_ref() {
-        class_catalog = class_catalog.with_perk_table(table);
-    }
-    diag::info!(
-        Launch,
-        "CAC menu: primary={} secondary={} lethal={} tactical={} excluded={} ({:.0}ms after the menu started)",
-        class_catalog.primary.len(),
-        class_catalog.secondary.len(),
-        class_catalog.lethal.len(),
-        class_catalog.tactical.len(),
-        class_catalog.excluded.len(),
-        shell.started.elapsed().as_secs_f32() * 1000.0,
-    );
-    for (key, preview) in &mut class_catalog.previews {
-        if key.contains('+')
-            && asset_core::AssetKey::parse(key)
-                .is_ok_and(|key| key.namespace == asset_core::AssetNamespace::Iw4)
-            && menus.material_images.contains_key(&preview.image)
-        {
-            preview.image = format!("iw4:material/{}", preview.image);
-        }
-    }
-    strings.absorb(common.strings);
-    commands.insert_resource(class_catalog);
-    commands.remove_resource::<ShellCommonTask>();
 }
 
 fn launch_identity(config: &LaunchConfig) -> LaunchIdentity {
@@ -208,15 +124,6 @@ pub fn launch(
 fn run_export_gltf(games: asset_transport::GamesRoot, artifacts: PathBuf, zone_arg: String) {
     let found = find_zone_file(&games, &zone_arg)
         .unwrap_or_else(|error| fatal(&format!("export-gltf: {error}")));
-    let game = asset_transport::zone_game_for_path(&found.path)
-        .unwrap_or_else(|| fatal("export-gltf: source game could not be identified"));
-    if game != asset_core::ZoneGame::Iw4 {
-        fatal(&format!(
-            "export-gltf P1a supports native IW4 only; {} is {}",
-            found.zone_name,
-            game.prefix()
-        ));
-    }
     let common_mp = find_runtime_common_mp(&games, &found.path).map(|zone| zone.path);
 
     let prepared = match bevy::tasks::futures_lite::future::block_on(assets::load_prepared_match(
@@ -241,206 +148,57 @@ fn run_export_gltf(games: asset_transport::GamesRoot, artifacts: PathBuf, zone_a
     diag::announce_stdout(&summary.report_line());
 }
 
-fn mw2_not_found(
-    games: &asset_transport::GamesRoot,
-    steam: &asset_transport::SteamProbe,
-) -> String {
-    use asset_transport::SteamCandidate;
-    let instructions = if cfg!(windows) {
-        "MW2 Multiplayer was not found.\n\n\
-        Put a shortcut to the game folder next to iw4l.exe:\n\
-        1. In Steam, right-click Call of Duty: Modern Warfare 2 > Manage > Browse local \
-        files and copy the folder path from the address bar.\n\
-        2. In the folder with iw4l.exe, right-click > New > Shortcut, paste the path and \
-        name the shortcut Modern Warfare 2.\n\
-        3. Launch iw4l.exe again.\n\nSearched:\n"
-    } else {
-        "MW2 Multiplayer was not found.\n\nCreate an iw4 symlink to the game's installation directory in the configured games root, then launch again.\n\nSearched:\n"
-    };
-    let mut text = instructions.to_owned();
-    for folder in asset_transport::search_roots(&games.0) {
-        text.push_str(&format!("  {}\n", folder.display()));
-    }
-    if games
-        .0
-        .join(asset_transport::MW2_SHORTCUT)
-        .symlink_metadata()
-        .is_ok()
-    {
-        text.push_str(&format!(
-            "{} already exists, so Steam was not searched.\n",
-            asset_transport::MW2_SHORTCUT
-        ));
-    } else if !steam.steam_found {
-        text.push_str("Steam was not found on this PC.\n");
-    } else {
-        text.push_str("Tried in Steam:\n");
-        for (_, folder, candidate) in steam
-            .tried
-            .iter()
-            .filter(|(game, _, _)| *game == asset_core::ZoneGame::Iw4)
-        {
-            let outcome = match candidate {
-                SteamCandidate::Missing => "not installed here".to_owned(),
-                SteamCandidate::NoMultiplayerData => {
-                    "multiplayer data is missing; verify the game files in Steam".to_owned()
-                }
-                SteamCandidate::Linked => "linked, but the game data could not be read".to_owned(),
-                SteamCandidate::OneOfSeveral => {
-                    "one of several installs; put a shortcut to the one to use".to_owned()
-                }
-                SteamCandidate::ShortcutFailed(error) => {
-                    format!("found, but the shortcut was not created: {error}")
-                }
-            };
-            text.push_str(&format!("  {}: {outcome}\n", folder.display()));
-        }
-    }
-    text
-}
-
 fn run_menu(
     games: asset_transport::GamesRoot,
     artifacts: PathBuf,
     cheats: sim::HostCheats,
-    steam: &asset_transport::SteamProbe,
+    _steam: &asset_transport::SteamProbe,
 ) {
     start_perf(None, "menu");
-    let ui_games = asset_game::ui_games_root(&games).unwrap_or_else(|error| {
-        for line in asset_transport::games_content_report(&games) {
-            diag::warn!(Launch, "{line}");
-        }
-        diag::warn!(Launch, "{error}");
-        fatal(&mw2_not_found(&games, steam))
-    });
-    let shell_common = assets::load_pool().spawn(assets::load_shell_common(games.clone()));
-    let (mut menus, menu_report) = load_ui_menu_catalog(&ui_games);
-    ui::install_frontend_menus(&mut menus).unwrap_or_else(|error| fatal(&error));
-    for line in &menu_report {
-        diag::info!(Launch, "{line}");
-    }
-    let missing = ["main", "main_text"]
-        .into_iter()
-        .filter(|name| menus.get(name).is_none())
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        fatal(&format!(
-            "Cannot start the IW4 menu: {} not loaded from {}.\n\n\
-             A missing menu can mean an absent file or a FastFile decoding failure. \
-             Include the catalog details below when reporting this error.\n\n{}",
-            missing.join(", "),
-            ui_games.0.display(),
-            menu_report.join("\n")
-        ));
-    }
-    let maps = list_mp_map_packs(&games);
-    diag::info!(
-        Launch,
-        "menu: {} maps in {} packs under {}",
-        maps.iter().map(|pack| pack.maps.len()).sum::<usize>(),
-        maps.len(),
-        games.0.display()
-    );
+    let maps = list_menu_map_packs(&games);
     let config = LaunchConfig {
         role: Role::Listen,
         zone: String::new(),
         games_root: games.0.clone(),
         artifacts,
     };
-    let mut app = App::new();
-    let namespace_trees = NamespaceTrees::discover(&games);
-    let have = content_flags(&namespace_trees);
-    let master_intent = if have.0 & net::CONTENT_IW4 == 0 {
-        diag::warn!(
-            Net,
-            "master browser disabled: IW4 common_mp.ff is not installed"
-        );
+    let trees = NamespaceTrees::discover(&games);
+    let have = content_flags(&trees);
+    let intent = net::MasterLaunchIntent::browser_from_env(have).unwrap_or_else(|error| {
+        diag::warn!(Net, "master browser disabled: {error}");
         net::MasterLaunchIntent::disabled()
-    } else {
-        net::MasterLaunchIntent::browser_from_env(have).unwrap_or_else(|error| {
-            diag::warn!(Net, "master browser disabled: {error}");
-            net::MasterLaunchIntent::disabled()
-        })
-    };
-    app.insert_resource(master_intent);
+    });
+    let menus = asset_game::MenuCatalog::default();
+    let mut app = App::new();
+    app.insert_resource(intent);
     app.add_plugins(crate::plugins::default_plugins_with_quiet_log(
         WindowPlugin {
             primary_window: Some(Window {
-                title: "iw4l".into(),
+                title: "IW4L ? Game Library".into(),
                 resolution: (1280, 720).into(),
                 ..default()
             }),
             ..default()
         },
     ));
-    app.insert_resource(ShellCommonTask {
-        task: shell_common,
-        perk_table: menus.string_table("mp/perkTable.csv").cloned(),
-        started: std::time::Instant::now(),
-    })
-    .add_systems(
-        Update,
-        (install_class_catalog, adopt_shell_ui_images)
-            .chain()
-            .in_set(net::ClientSet::Load)
-            .after(frame::SessionSwapApplied),
-    );
-    match load_mp_localized_strings(&ui_games, "iw4:code_post_gfx_mp") {
-        Ok(loc) => {
-            diag::info!(Launch, "menu: {} localize keys", loc.len());
-            app.insert_resource(loc);
-        }
-        Err(error) => diag::warn!(Launch, "menu: localize: {error}"),
-    }
-    app.insert_resource(menus);
-    let menu_bank = match load_mp_sound_bank(&ui_games, "iw4:code_post_gfx_mp") {
-        Ok(loaded) => {
-            diag::info!(Launch, "menu: sound bank ready");
-            for line in loaded.gap_lines() {
-                diag::warn!(Launch, "menu: {line}");
-            }
-            let bank = std::sync::Arc::new(loaded.catalog);
-            app.insert_resource(SoundBank(std::sync::Arc::clone(&bank)));
-            Some(bank)
-        }
-        Err(error) => {
-            diag::warn!(Launch, "menu: sound bank: {error}");
-            None
-        }
-    };
-
-    let (menu_iwd, lines) = NamespaceSoundIwd::open(&namespace_trees);
-    for line in lines {
-        diag::info!(Launch, "menu: {line}");
-    }
-    let menu_iwd = std::sync::Arc::new(menu_iwd);
-    app.insert_resource(SoundIwd(std::sync::Arc::clone(&menu_iwd)));
-    if let Some(bank) = menu_bank {
-        app.insert_resource(audio::ClipStore::start(
-            std::sync::Arc::clone(&bank),
-            Some(std::sync::Arc::clone(&menu_iwd)),
-        ));
-        app.insert_resource(audio::FrontendAudio {
-            bank,
-            iwd: menu_iwd,
-        });
-    }
     app.insert_resource(launch_identity(&config))
         .insert_resource(cheats)
+        .insert_resource(menus)
         .insert_resource(MenuMapList(maps))
         .insert_resource(AppScreen::MainMenu)
-        .insert_resource(UiAssetRoot(Some(ui_games.0)))
         .insert_resource(StartupCommands {
             lines: console::startup_commands(),
         })
         .insert_resource(WorldScene::default())
-        .insert_resource(ClearColor(Color::srgb(0.04, 0.045, 0.06)))
+        .insert_resource(ClearColor(Color::srgb(0.02, 0.025, 0.03)))
         .insert_resource({
             let mut layers = UiLayers::default();
             layers.show_only([UiLayer::Shell, UiLayer::Overlay]);
             layers
         });
     add_runtime_plugins(&mut app);
+    app.init_resource::<MenuAssets>()
+        .add_systems(Update, load_menu_assets);
     if let Some(capture) = CaptureRequest::from_env() {
         queue_launch_capture(
             &mut app,
@@ -452,6 +210,48 @@ fn run_menu(
     }
     app.run();
     let _ = flush_perf();
+}
+
+#[derive(Resource, Default)]
+struct MenuAssets {
+    root: Option<PathBuf>,
+    task: Option<bevy::tasks::Task<(asset_game::MenuCatalog, PathBuf)>>,
+}
+
+fn load_menu_assets(
+    identity: Res<LaunchIdentity>,
+    dvars: Res<frame::UiMenuDvars>,
+    mut pending: ResMut<MenuAssets>,
+    mut catalog: ResMut<asset_game::MenuCatalog>,
+    mut commands: Commands,
+) {
+    if let Some(task) = pending.task.as_mut() {
+        if let Some((mut loaded, root)) = bevy::tasks::futures_lite::future::block_on(
+            bevy::tasks::futures_lite::future::poll_once(task),
+        ) {
+            if ui::install_frontend_menus(&mut loaded).is_ok() {
+                *catalog = loaded;
+                commands.insert_resource(UiAssetRoot(Some(root)));
+            }
+            pending.task = None;
+        }
+        return;
+    }
+    if dvars.get("ui_game_namespace") != Some("iw4") {
+        return;
+    }
+    let games = asset_transport::GamesRoot(identity.games_root.clone());
+    let Ok(root) = asset_game::ui_games_root(&games) else {
+        return;
+    };
+    if pending.root.as_ref() == Some(&root.0) {
+        return;
+    }
+    pending.root = Some(root.0.clone());
+    pending.task = Some(assets::load_pool().spawn(async move {
+        let (catalog, _) = load_ui_menu_catalog(&root);
+        (catalog, root.0)
+    }));
 }
 
 fn run_play(
@@ -524,37 +324,40 @@ fn run_map(
     let loading_title = asset_transport::map_load_title(&zone_arg_lc, game);
     let namespace_trees = NamespaceTrees::discover(&games);
     let have = content_flags(&namespace_trees);
-    let requires = net::content_required_by_map(&zone_arg_lc)
+    let map_key = game.map_or_else(|| zone.clone(), |game| format!("{}:{zone}", game.prefix()));
+    let requires = net::content_required_by_map(&map_key)
         .unwrap_or_else(|error| fatal(&format!("master content: {error}")));
 
     let master_intent = if role == Role::Replay {
         net::MasterLaunchIntent::disabled()
-    } else if have.0 & net::CONTENT_IW4 == 0 {
-        diag::warn!(
-            Net,
-            "master launch disabled: IW4 common_mp.ff is not installed"
-        );
-        net::MasterLaunchIntent::disabled()
     } else {
-        net::MasterLaunchIntent::from_env_for_map(&zone, have, requires).unwrap_or_else(|error| {
-            diag::warn!(Net, "master launch disabled: {error}");
-            net::MasterLaunchIntent::disabled()
-        })
+        net::MasterLaunchIntent::from_env_for_map(&map_key, have, requires).unwrap_or_else(
+            |error| {
+                diag::warn!(Net, "master launch disabled: {error}");
+                net::MasterLaunchIntent::disabled()
+            },
+        )
     };
 
+    let joining = master_intent.is_join();
     let config = LaunchConfig {
-        role: if master_intent.is_join() {
-            Role::Client
-        } else {
-            role
-        },
+        role: if joining { Role::Client } else { role },
         zone: zone.clone(),
         games_root: games.0.clone(),
         artifacts,
     };
     start_perf(Some(zone.clone()), role_name(config.role));
     let (mut menus, menu_report) = load_ui_menu_catalog(&games);
-    ui::install_frontend_menus(&mut menus).unwrap_or_else(|error| fatal(&error));
+
+    if game == Some(asset_core::ZoneGame::Iw4) {
+        ui::install_frontend_menus(&mut menus).unwrap_or_else(|error| fatal(&error));
+    } else if let Err(error) = ui::install_frontend_menus(&mut menus) {
+        diag::warn!(
+            Launch,
+            "frontend menus unavailable for {}: {error}",
+            game.map(|g| g.prefix()).unwrap_or("unknown")
+        );
+    }
     for line in &menu_report {
         diag::info!(Launch, "{line}");
     }
@@ -633,6 +436,12 @@ fn run_map(
             layers.show_only([UiLayer::Loading, UiLayer::Overlay]);
             layers
         });
+    if joining {
+        app.world_mut().remove_resource::<MatchLoadRequest>();
+        app.world_mut().remove_resource::<LoadingPreviewSource>();
+        app.world_mut().remove_resource::<LoadingScreen>();
+        app.insert_resource(AppScreen::MainMenu);
+    }
     if let Some(run) = acceptance_run {
         diag::info!(
             Launch,

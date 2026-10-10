@@ -33,7 +33,13 @@ pub(crate) fn resolve_hud_text(
     if raw.is_empty() {
         return Some(String::new());
     }
-    strings.0.text(raw).map(str::to_owned)
+    // `KEY␖a␖b`: a localized string whose `&&1`, `&&2` take the values.
+    let mut parts = raw.split(sim::HUD_PRINT_ARG_SEPARATOR);
+    let mut text = strings.0.text(parts.next()?)?.to_owned();
+    for (index, value) in parts.enumerate() {
+        text = text.replace(&format!("&&{}", index + 1), value);
+    }
+    Some(text)
 }
 
 pub(crate) fn hudelem_pulse_sound(

@@ -27,15 +27,18 @@ mod scorebar;
 mod scoreboard;
 mod splash;
 mod surface;
+mod t5_hud;
 mod targetmap;
 mod ui_write;
 mod weapon_name;
 mod weaponbar;
 
+pub use chrome::register_game_menus;
 pub use draw2d::{
     Draw2dCmd, Draw2dCmdCensus, Draw2dList, Draw2dOp, Draw2dProvenance, Draw2dQuad,
     TEXT_STYLE_HUDELEM, TextRunFx, tessellate, tessellate_fonts,
 };
+pub use expr_cache::GameMenuParsers;
 pub use gaps::{GapCause, HudGap, HudPresentationGaps};
 pub use gpu_list::{
     HudTessBatch, HudTessGpuFrame, HudTessTechnique, HudTessVertex, ShellshockScreen,

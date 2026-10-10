@@ -27,6 +27,11 @@ of the game — none of those will be read, and the last one cannot be accepted.
 
 ## Changes
 
+Every change goes through a pull request into `main`: create a branch for
+the task, commit there, push the branch, open the pull request. Nobody pushes
+to `main` directly; it is protected and accepts merged pull requests whose
+checks (build, `publish-check`, `boundary`) pass.
+
 * **Small and self-contained** — a fix, a crash, a wrong constant, a doc
   correction: open it directly.
 * **Architectural** — a new crate, a new subsystem, a change to how data flows
@@ -38,6 +43,7 @@ Before opening anything:
 
 ```bash
 make publish-check   # the tracked tree is the product and nothing else
+make boundary        # each game's rules stay in that game's crates (docs/ARCHITECTURE.md)
 cargo fmt --all
 cargo clippy --workspace --all-targets
 ```

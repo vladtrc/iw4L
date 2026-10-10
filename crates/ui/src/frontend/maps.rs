@@ -1,6 +1,18 @@
 use crate::MenuMapList;
 
 pub fn map_label(map: &str) -> String {
+    if let Some(name) = match map {
+        "t6:zm_nuked" => Some("Nuketown Zombies"),
+        "t6:zm_transit" => Some("TranZit"),
+        "t6:zm_highrise" => Some("Die Rise"),
+        "t6:zm_prison" => Some("Mob of the Dead"),
+        "t6:zm_buried" => Some("Buried"),
+        "t6:zm_tomb" => Some("Origins"),
+        _ => None,
+    } {
+        return name.to_owned();
+    }
+
     map.split_once(':')
         .map_or(map, |(_, name)| name)
         .trim_start_matches("mp_")
