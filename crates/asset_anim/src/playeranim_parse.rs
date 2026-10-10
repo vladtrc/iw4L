@@ -133,6 +133,7 @@ impl core::fmt::Display for PlayerAnimParseError {
 pub(crate) fn parse_player_anim_script(
     script: &[u8],
     tree: &CompiledAnimTreeDefinition,
+    t5_syntax: bool,
 ) -> Result<Arc<ParsedPlayerAnimScript>, PlayerAnimParseError> {
     let mut parser = AtrParser::new(script);
     let mut parsed = ParsedPlayerAnimScript {
@@ -167,7 +168,7 @@ pub(crate) fn parse_player_anim_script(
         }
         if mode == 0 {
             if token.eq_ignore_ascii_case("set") {
-                parse_define(&mut parser, &mut aliases)?;
+                parse_define(&mut parser, &mut aliases, t5_syntax)?;
             }
             continue;
         }
@@ -207,7 +208,7 @@ pub(crate) fn parse_player_anim_script(
                 }
                 1 => {
                     parser.unget();
-                    let item = parse_item(&mut parser, tree, &mut parsed, &aliases)?;
+                    let item = parse_item(&mut parser, tree, &mut parsed, &aliases, t5_syntax)?;
                     if let Some(items) = current_event_items.as_mut() {
                         if items.len() >= 128 {
                             return Err(bad(&parser, "exceeded maximum items per script (128)"));
@@ -246,7 +247,7 @@ pub(crate) fn parse_player_anim_script(
             }
             2 => {
                 parser.unget();
-                let item = parse_item(&mut parser, tree, &mut parsed, &aliases)?;
+                let item = parse_item(&mut parser, tree, &mut parsed, &aliases, t5_syntax)?;
                 if let Some(items) = current_items.as_mut() {
                     if items.len() >= 128 {
                         return Err(bad(&parser, "exceeded maximum items per script (128)"));
@@ -293,8 +294,9 @@ fn parse_item(
     tree: &CompiledAnimTreeDefinition,
     parsed: &mut ParsedPlayerAnimScript,
     aliases: &HashMap<(u8, String), u64>,
+    t5_syntax: bool,
 ) -> Result<ParsedAnimItem, PlayerAnimParseError> {
-    let (skip, conditions, raw) = parse_conditions(parser, aliases)?;
+    let (skip, conditions, raw) = parse_conditions(parser, aliases, t5_syntax)?;
     let brace = parser.parse(true);
     if brace != "{" {
         parser.unget();
@@ -336,7 +338,20 @@ fn parse_item(
                 );
             } else if extra.eq_ignore_ascii_case("sound") {
                 let _ = parser.parse(false);
-            } else if extra.eq_ignore_ascii_case("turretanim") {
+            } else if t5_syntax
+                && (extra.eq_ignore_ascii_case("blendouttime")
+                    || extra.eq_ignore_ascii_case("animrate"))
+            {
+                let value = parser.parse(false).parse::<f32>();
+                if value.is_err() || value.is_ok_and(|value| !value.is_finite()) {
+                    return Err(bad(parser, "expected animation modifier value"));
+                }
+            } else if extra.eq_ignore_ascii_case("turretanim")
+                || (t5_syntax
+                    && (extra.eq_ignore_ascii_case("grenadeanim")
+                        || extra.eq_ignore_ascii_case("weapontimescale")
+                        || extra.eq_ignore_ascii_case("allowmovementinterrupt")))
+            {
                 continue;
             } else {
                 parser.unget();
@@ -355,7 +370,8 @@ fn parse_item(
                     blend_ms,
                 });
             }
-            None => parsed.unresolved_anims += 1,
+            None if !skip => parsed.unresolved_anims += 1,
+            None => {}
         }
     }
     Ok(ParsedAnimItem {
@@ -369,9 +385,14 @@ fn parse_item(
 fn parse_define(
     parser: &mut AtrParser<'_>,
     aliases: &mut HashMap<(u8, String), u64>,
+    t5_syntax: bool,
 ) -> Result<(), PlayerAnimParseError> {
     let cond = parser.parse(false);
     let Some(index) = index_ci(&cond, ANIM_COND_NAMES) else {
+        if t5_syntax {
+            while !parser.parse(false).is_empty() {}
+            return Ok(());
+        }
         return Err(bad(parser, "unknown define condition"));
     };
     let alias = ascii_lower(&parser.parse(false));
@@ -449,6 +470,7 @@ fn resolve_cond_value(
 fn parse_conditions(
     parser: &mut AtrParser<'_>,
     aliases: &HashMap<(u8, String), u64>,
+    t5_syntax: bool,
 ) -> Result<(bool, Vec<ParsedAnimCondition>, String), PlayerAnimParseError> {
     let mut skip = false;
     let mut saw = false;
@@ -476,6 +498,33 @@ fn parse_conditions(
         raw.push(token.clone());
         if token.eq_ignore_ascii_case("default") {
             saw = true;
+            continue;
+        }
+        if t5_syntax
+            && (token.eq_ignore_ascii_case("stance") || token.eq_ignore_ascii_case("direction"))
+        {
+            if let Some(cond) = current.take() {
+                conditions.push(cond);
+            }
+            let value = parser.parse(false);
+            raw.push(value.clone());
+            saw = true;
+            if let Some(condition) = t5_pose_condition(&token, &value) {
+                conditions.push(condition);
+                if token.eq_ignore_ascii_case("direction")
+                    && (value.eq_ignore_ascii_case("forward")
+                        || value.eq_ignore_ascii_case("backward"))
+                {
+                    conditions.push(ParsedAnimCondition {
+                        index: anim_iw4::ANIM_COND_STRAFING,
+                        bitflags: false,
+                        bits: 0,
+                        value: 0,
+                    });
+                }
+            } else {
+                skip = true;
+            }
             continue;
         }
         if let Some(cond) = current.as_mut()
@@ -538,6 +587,11 @@ fn parse_conditions(
             skip = true;
             continue;
         }
+        if t5_syntax {
+            skip = true;
+            saw = true;
+            continue;
+        }
         return Err(bad(parser, "unknown condition token"));
     }
     if let Some(cond) = current.take() {
@@ -547,6 +601,34 @@ fn parse_conditions(
         return Err(bad(parser, "no conditions found"));
     }
     Ok((skip, conditions, raw.join(" ")))
+}
+
+fn t5_pose_condition(name: &str, value: &str) -> Option<ParsedAnimCondition> {
+    let mask = |indices: &[u8]| {
+        indices
+            .iter()
+            .fold(0u64, |bits, index| bits | (1u64 << index))
+    };
+    let crouch = mask(&[2, 6, 7, 12, 13, 16, 17]);
+    let prone = mask(&[3, 8, 9]);
+    let backward = mask(&[5, 7, 9, 11, 13]);
+    let (index, bitflags, bits, value) =
+        match (ascii_lower(name).as_str(), ascii_lower(value).as_str()) {
+            ("stance", "crouch") => (anim_iw4::ANIM_COND_MOVETYPE, true, crouch, 0),
+            ("stance", "prone") => (anim_iw4::ANIM_COND_MOVETYPE, true, prone, 0),
+            ("stance", "stand") => (anim_iw4::ANIM_COND_MOVETYPE, true, !(crouch | prone), 0),
+            ("direction", "backward") => (anim_iw4::ANIM_COND_MOVETYPE, true, backward, 0),
+            ("direction", "forward") => (anim_iw4::ANIM_COND_MOVETYPE, true, !backward, 0),
+            ("direction", "left") => (anim_iw4::ANIM_COND_STRAFING, false, 0, 1),
+            ("direction", "right") => (anim_iw4::ANIM_COND_STRAFING, false, 0, 2),
+            _ => return None,
+        };
+    Some(ParsedAnimCondition {
+        index,
+        bitflags,
+        bits,
+        value,
+    })
 }
 
 fn skip_unknown_block(parser: &mut AtrParser<'_>) {

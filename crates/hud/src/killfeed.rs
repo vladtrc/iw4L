@@ -174,20 +174,45 @@ fn snapshot_client_team(presented: &net::PresentedSnapshot, client: i32) -> i32 
         .map_or(0, |meta| meta.client_state_team)
 }
 
-fn obituary_name_color(local_team: i32, team: i32) -> [f32; 4] {
+fn obituary_name_color(local_team: i32, team: i32, dvars: sim::ScriptDvars<'_>) -> [f32; 4] {
     if !matches!(local_team, 1 | 2) || !matches!(team, 1 | 2) {
         return [1.0, 1.0, 1.0, 1.0];
     }
-    let rgb = if team == local_team {
-        gamemode_iw4::TEAM_COLOR_MY_TEAM
+    let (name, default) = if dvars
+        .int("useRelativeTeamColors")
+        .is_some_and(|value| value != 0)
+    {
+        if team == local_team {
+            ("g_TeamColor_MyTeam", gamemode_iw4::TEAM_COLOR_MY_TEAM)
+        } else {
+            ("g_TeamColor_EnemyTeam", gamemode_iw4::TEAM_COLOR_ENEMY_TEAM)
+        }
+    } else if team == 1 {
+        ("g_TeamColor_Axis", gamemode_iw4::TEAM_COLOR_AXIS)
     } else {
-        gamemode_iw4::TEAM_COLOR_ENEMY_TEAM
+        ("g_TeamColor_Allies", gamemode_iw4::TEAM_COLOR_ALLIES)
     };
-    let mut color = [1.0; 4];
-    for (slot, value) in color.iter_mut().zip(rgb.split_whitespace()) {
-        *slot = value.parse().unwrap_or(1.0);
-    }
-    color
+    let parse = |rgb: &str| {
+        let mut values = rgb.split_whitespace().map(str::parse::<f32>);
+        let rgb = [
+            values.next()?.ok()?,
+            values.next()?.ok()?,
+            values.next()?.ok()?,
+        ];
+        (values.next().is_none() && rgb.iter().all(|value| value.is_finite())).then(|| {
+            [
+                rgb[0].clamp(0.0, 1.0),
+                rgb[1].clamp(0.0, 1.0),
+                rgb[2].clamp(0.0, 1.0),
+                1.0,
+            ]
+        })
+    };
+    dvars
+        .string(name)
+        .and_then(parse)
+        .or_else(|| parse(default))
+        .unwrap_or([1.0; 4])
 }
 
 fn snapshot_client_name(presented: &net::PresentedSnapshot, client: i32) -> String {
@@ -405,6 +430,11 @@ pub(crate) fn update_killfeed(
     }
 
     let local_team = snapshot_client_team(&presented, local.0.0 as i32);
+    let Some(snapshot) = presented.snapshot() else {
+        hide(&mut pass);
+        return;
+    };
+    let dvars = snapshot.meta.script_dvars(local.0);
     let Some(item) = catalog
         .as_ref()
         .and_then(|c| c.get("hud_fullscreen"))
@@ -547,7 +577,7 @@ pub(crate) fn update_killfeed(
                             applied.h,
                             font_material.clone(),
                             attacker.clone(),
-                            obituary_name_color(local_team, *attacker_team),
+                            obituary_name_color(local_team, *attacker_team, dvars),
                             "killfeed_obituary",
                         ));
                         x_virtual += attacker_w + icon_spacing;
@@ -611,7 +641,7 @@ pub(crate) fn update_killfeed(
                         applied.h,
                         font_material.clone(),
                         victim.clone(),
-                        obituary_name_color(local_team, *victim_team),
+                        obituary_name_color(local_team, *victim_team, dvars),
                         "killfeed_obituary",
                     ));
                 }

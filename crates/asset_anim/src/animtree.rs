@@ -106,10 +106,30 @@ impl PlayerAnimSources {
             self.multiplayer_atr.as_deref(),
             self.playeranim_script.as_deref(),
         ));
-        if let Some(Ok(tree)) = self.compiled.as_ref() {
-            if let Some(script) = self.playeranim_script.as_deref() {
+        if let Some(Ok(tree)) = self.compiled.as_ref()
+            && let Some(script) = self.playeranim_script.as_deref()
+        {
+            self.parsed_script = Some(crate::playeranim_parse::parse_player_anim_script(
+                script,
+                tree,
+                self.family == Some(asset_core::AssetNamespace::T5),
+            ));
+        }
+        if self.family == Some(asset_core::AssetNamespace::T5)
+            && let (Some(Ok(tree)), Some(Ok(script)), Some(atr)) = (
+                self.compiled.as_ref(),
+                self.parsed_script.as_ref(),
+                self.multiplayer_atr.as_deref(),
+            )
+        {
+            self.compiled = Some(crate::atr_compile::compile_selected_multiplayer(
+                atr, tree, script,
+            ));
+            if let Some(Ok(tree)) = self.compiled.as_ref()
+                && let Some(script) = self.playeranim_script.as_deref()
+            {
                 self.parsed_script = Some(crate::playeranim_parse::parse_player_anim_script(
-                    script, tree,
+                    script, tree, true,
                 ));
             }
         }

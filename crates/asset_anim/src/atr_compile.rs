@@ -11,6 +11,8 @@ use crate::animtree::{
     PLAYERANIM_SCRIPT_PATH,
 };
 
+const UNSUPPORTED_BRANCH: u16 = 1 << 15;
+
 const BG_FIND_ANIM_NAMES: &[&str] = &["torso", "legs", "turning"];
 
 pub(crate) fn compile_multiplayer(
@@ -28,6 +30,54 @@ pub(crate) fn compile_multiplayer(
         names.insert((*name).to_owned());
     }
     harvest_script_anim_names(script, &mut names);
+    compile_named_tree(atr, names)
+}
+
+pub(crate) fn compile_selected_multiplayer(
+    atr: &[u8],
+    tree: &CompiledAnimTreeDefinition,
+    script: &crate::ParsedPlayerAnimScript,
+) -> Result<Arc<CompiledAnimTreeDefinition>, AtrCompileError> {
+    let mut names: HashSet<String> = BG_FIND_ANIM_NAMES
+        .iter()
+        .map(|name| (*name).into())
+        .collect();
+    for (_, _, items) in &script.slots {
+        add_selected_names(&mut names, tree, items);
+    }
+    for (_, items) in &script.events {
+        add_selected_names(&mut names, tree, items);
+    }
+    let tree = compile_named_tree(atr, names)?;
+    if tree.node_count() > usize::from(anim_iw4::PLAYER_ANIM_INDEX_MASK) + 1 {
+        return Err(AtrCompileError::BadToken {
+            offset: 0,
+            message: "character animation tree exceeds packed index capacity".into(),
+        });
+    }
+    Ok(tree)
+}
+
+fn add_selected_names(
+    names: &mut HashSet<String>,
+    tree: &CompiledAnimTreeDefinition,
+    items: &[crate::ParsedAnimItem],
+) {
+    for command in items
+        .iter()
+        .filter(|item| !item.skip)
+        .flat_map(|item| &item.commands)
+    {
+        if let Some(node) = tree.node(command.anim_index) {
+            names.insert(node.name.clone());
+        }
+    }
+}
+
+fn compile_named_tree(
+    atr: &[u8],
+    names: HashSet<String>,
+) -> Result<Arc<CompiledAnimTreeDefinition>, AtrCompileError> {
     let script_names = names.len();
     let mut ignored = 0usize;
     let children = parse_atr(atr, &names, &mut ignored)?;
@@ -114,7 +164,22 @@ fn parse_internal(
                     return Err(AtrCompileError::DuplicateAnimation { name });
                 }
                 let ignore = !complete && !names.contains(&name);
-                let on_line = parser.parse(false);
+                let mut on_line = parser.parse(false);
+                if on_line == "[" {
+                    let key = parser.parse(false);
+                    let equals = parser.parse(false);
+                    let value = parser.parse(false).parse::<f32>();
+                    let close = parser.parse(false);
+                    if !key.eq_ignore_ascii_case("turn")
+                        || equals != "="
+                        || value.is_err()
+                        || value.is_ok_and(|value| !value.is_finite())
+                        || close != "]"
+                    {
+                        return Err(parser.bad_token("invalid animation turn annotation"));
+                    }
+                    on_line = parser.parse(false);
+                }
                 if on_line.is_empty() {
                     current = Some(WorkAnim {
                         name,
@@ -130,7 +195,7 @@ fn parse_internal(
                 if on_line != ":" {
                     return Err(parser.bad_token("bad token"));
                 }
-                let flags = parse_properties(parser)?;
+                let flags = parse_properties(parser, ignore)?;
                 let brace = parser.parse(true);
                 if brace != "{" {
                     return Err(
@@ -168,6 +233,9 @@ fn parse_internal(
             )?;
             if nested_eof {
                 return Err(parser.bad_token("unexpected end of file"));
+            }
+            if !nested.is_empty() && work.flags & UNSUPPORTED_BRANCH != 0 {
+                return Err(parser.bad_token("unsupported property on retained animation branch"));
             }
             if nested.is_empty() {
                 *ignored += 1;
@@ -239,7 +307,7 @@ fn finish_parent(children: &mut Vec<ParsedAnim>, include_parent: bool, loop_sync
     }
 }
 
-fn parse_properties(parser: &mut AtrParser<'_>) -> Result<u16, AtrCompileError> {
+fn parse_properties(parser: &mut AtrParser<'_>, ignored: bool) -> Result<u16, AtrCompileError> {
     let mut flags = 0u16;
     loop {
         let token = parser.parse(false);
@@ -254,6 +322,12 @@ fn parse_properties(parser: &mut AtrParser<'_>) -> Result<u16, AtrCompileError> 
             Some(1) => flags |= ANIMFLAG_NONLOOPSYNC,
             Some(2) => flags |= ANIMFLAG_COMPLETE,
             Some(3) => flags |= ANIMFLAG_ADDITIVE,
+            _ if ignored
+                && (token.eq_ignore_ascii_case("client")
+                    || token.eq_ignore_ascii_case("separate")) =>
+            {
+                flags |= UNSUPPORTED_BRANCH
+            }
             _ => return Err(parser.bad_token("unknown anim property")),
         }
     }

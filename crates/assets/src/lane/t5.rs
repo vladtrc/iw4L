@@ -679,6 +679,7 @@ impl ZoneLane for T5Lane {
             projectile_meshes: sink.projectile_meshes,
             world_weapons: sink.world_weapons,
             xanims: sink.xanims,
+            player_anim_sources: sink.player_anim_sources,
             fx: sink.fx,
             impact_fx: sink.impact_fx.take_table(),
             fx_models: sink.fx_models,

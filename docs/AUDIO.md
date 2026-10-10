@@ -17,7 +17,8 @@ retain its revision; foreign owners and media/source mismatches refuse before pl
 T5 layers activate at resolution; others wait for primary preparation. Layers share
 deadlines, cancellation and lifetime, with independent pitch/failure. Unknown looping
 uses named one-shot compatibility. [CUES.md](CUES.md) details binding and decode contracts.
-Killcam worlds retain the live sound registry for round-result commands.
+Killcam worlds retain the live sound registry for round-result commands. Replay
+timeline changes retire event cues; music and local announcements keep playing.
 
 Weapon publication compiles thermal scopes, cue namespaces, melee precedence,
 knife substitution and breath aliases. Prediction identifies fire occurrences;

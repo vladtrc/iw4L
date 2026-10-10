@@ -303,18 +303,6 @@ impl AudioRuntime {
     }
 
     pub(crate) fn set_event_context(&self, context: Option<crate::event::EventContext>) {
-        let previous = self.event_context.get();
-        if previous
-            .zip(context)
-            .is_some_and(|(old, new)| old.world != new.world || old.timeline != new.timeline)
-        {
-            self.cue_cancellation.cancel(
-                None,
-                None,
-                None,
-                self.shared.match_epoch.load(Ordering::Acquire),
-            );
-        }
         self.event_context.set(context);
     }
 

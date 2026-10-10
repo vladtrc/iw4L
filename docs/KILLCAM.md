@@ -17,7 +17,8 @@ projectiles, script movers, combat events and script effects.
 Sound event identities use archived ticks during replay, including entity-ring
 sounds and viewmodel animation markers. Repeated snapshots do not replay the
 same event. Entering, rewinding or leaving killcam changes the event timeline
-and cancels cues from the previous timeline.
+and cancels event cues from the previous timeline. Music, local announcements
+and other cues without replay event identities continue across these transitions.
 
 FX transitions reset active effects, tracers, marks and projectile bolt state.
 Map and script effects are reconstructed from the presented world. Script FX

@@ -7,7 +7,17 @@ use bevy_ecs::prelude::World;
 use gamemode_iw4::Team;
 
 const MAX_OBJECTIVES: i32 = 32;
-const ENGINE_SERVER_INFO: &[&str] = &["ui_bomb_timer", "mapname", "g_gametype", "g_hardcore"];
+const ENGINE_SERVER_INFO: &[&str] = &[
+    "ui_bomb_timer",
+    "mapname",
+    "g_gametype",
+    "g_hardcore",
+    "userelativeteamcolors",
+    "g_teamcolor_axis",
+    "g_teamcolor_allies",
+    "g_teamcolor_myteam",
+    "g_teamcolor_enemyteam",
+];
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ScriptObjective {

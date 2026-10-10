@@ -90,6 +90,7 @@ pub(super) async fn walk_prepared_match(
         fx_models: common_fx_models,
         impact_fx: common_impact,
         t5_xanims,
+        t5_player_anim_sources,
         t5_fx,
         t5_impact_fx,
         iw5_materials,
@@ -184,6 +185,12 @@ pub(super) async fn walk_prepared_match(
         gaps,
     } = loaded;
     world.source_namespace = map_namespace;
+    if map_family == asset_core::FamilyId::T5 {
+        player_anim_sources = t5_player_anim_sources;
+        player_anim_sources.compile();
+        report.push(player_anim_sources.compile_report_line());
+        report.push(player_anim_sources.parse_report_line());
+    }
     report.append(&mut common_report);
     report.extend(image_trees.report_lines());
 

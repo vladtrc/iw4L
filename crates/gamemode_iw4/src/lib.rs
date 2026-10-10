@@ -58,4 +58,4 @@ pub use score::Score;
 
 pub use stuck_in_client::{G_PLAYER_COLLISION_EJECT_SPEED_DEFAULT, StuckClient, stuck_in_client};
 pub use suicide::is_really_alive;
-pub use teams::{TEAM_COLOR_ENEMY_TEAM, TEAM_COLOR_MY_TEAM};
+pub use teams::{TEAM_COLOR_ALLIES, TEAM_COLOR_AXIS, TEAM_COLOR_ENEMY_TEAM, TEAM_COLOR_MY_TEAM};

@@ -946,6 +946,12 @@ impl fastfile_t5::AssetLinkSink for CommonWalkSink {
         {
             self.teamsets.insert(key, icons);
         }
+        self.player_anim_sources.capture(
+            asset_core::AssetNamespace::T5,
+            name,
+            data,
+            zlib_compressed,
+        );
         self.scripts.capture(name, data, zlib_compressed);
         Ok(())
     }
