@@ -190,6 +190,15 @@ excessive_precision = "allow"
 approx_constant = "allow"
 assertions_on_constants = "deny"
 
+# Debug builds: Bevy, wgpu and the codec crates are unusably slow at opt-level 0,
+# so dependencies are optimised while workspace crates stay fast to rebuild.
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+
 # Measured and kept: wall p50 -5.7%, binary 183 MB -> 114 MB. Do not drop these
 # two lines without a new two-map A/B on the same protocol.
 #
