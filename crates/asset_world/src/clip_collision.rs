@@ -958,8 +958,15 @@ fn read_placed_static_model(
     catalog: &XModelCollCatalog,
 ) -> Option<ClipPlacedStaticModel> {
     let body = match s.ptr_at(sm, 0).ok()? {
-        ZonePtr::Offset(p) => s.resolve_alias(p),
-        _ => return None,
+        // The catalog was built by the same zone's asset-linking walk, which
+        // keys an aliased reference by this raw, unresolved target — not by
+        // whatever `resolve_alias` would (wrongly, for this field) indirect it
+        // through.
+        ZonePtr::Offset(p) => p,
+        // An unaliased reference: that walk loaded and captured it keyed by
+        // this element's own slot.
+        ZonePtr::Following | ZonePtr::Insert => sm,
+        ZonePtr::Null => return None,
     };
     let captured = catalog.get(body)?;
     let origin = [
