@@ -10,12 +10,12 @@ pub type TracerMaterialReason = AssetEdgeReason;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct OwnedTracerDef {
-    pub namespace: crate::AssetNamespace,
+    pub namespace: crate::FamilyId,
     pub name: String,
     pub material: TracerMaterial,
 
     pub material_hint: Option<String>,
-    pub material_namespace: crate::AssetNamespace,
+    pub material_namespace: crate::FamilyId,
 
     /// Whether the zone named a material for this tracer, and whether it did so
     /// through an alias. The pointers that answered it stop at the walk.
@@ -61,7 +61,7 @@ enum TracerLink {
 /// link map to resolve one more pointer against.
 #[derive(Clone, Debug, Default)]
 pub struct TracerDefinitions {
-    by_key: HashMap<(crate::AssetNamespace, String), usize>,
+    by_key: HashMap<(crate::FamilyId, String), usize>,
     defs: Vec<OwnedTracerDef>,
     zones: Vec<ZoneOwner>,
     capture_zone: ZoneOwner,
@@ -74,7 +74,7 @@ pub struct TracerCatalog {
     published: TracerDefinitions,
     links: HashMap<Ptr, TracerLink>,
     last_captured: Option<usize>,
-    capture_ns: Option<crate::AssetNamespace>,
+    capture_ns: Option<crate::FamilyId>,
 }
 
 impl std::ops::Deref for TracerCatalog {
@@ -117,7 +117,7 @@ impl TracerCatalog {
         None
     }
 
-    pub fn set_capture_ns(&mut self, ns: crate::AssetNamespace) {
+    pub fn set_capture_ns(&mut self, ns: crate::FamilyId) {
         self.capture_ns = Some(ns);
     }
 
@@ -255,7 +255,7 @@ impl TracerDefinitions {
         }
     }
 
-    pub fn index_named(&self, namespace: crate::AssetNamespace, name: &str) -> Option<usize> {
+    pub fn index_named(&self, namespace: crate::FamilyId, name: &str) -> Option<usize> {
         self.by_key.get(&(namespace, name.to_owned())).copied()
     }
 

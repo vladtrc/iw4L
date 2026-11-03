@@ -19,8 +19,7 @@ use crate::prepare::scene::cull::{
 };
 use crate::prepare::scene::smodel_lighting::update_smodel_lighting;
 use crate::prepare::scene::spawn::{
-    WorldSpawnJob, arm_world_spawn_on_install, register_world_gpu_ready, spawn_world,
-    spawn_world_finish,
+    WorldSpawnJob, register_world_gpu_ready, spawn_world, spawn_world_finish,
 };
 use crate::prepare::scene::view_parms::stamp_prepared_scene_view;
 use crate::prepare::scene::world::WorldScene;
@@ -54,14 +53,15 @@ impl Plugin for RenderPreparePlugin {
                         .before(crate::prepare::scene::gfx_scene::GfxSceneAdd),
                     crate::prepare::scene::gfx_scene::GfxSceneAdd
                         .after(crate::prepare::scene::model_lighting_cache::begin_dyn_model_lighting_frame)
-                        .after(WorkerCmdSet::CellStatic)
-                        .before(WorkerCmdSet::CellDynModel)
-                        .before(WorkerCmdSet::SkinModel),
+                        .after(WorkerCmdSet::WorldVisibility)
+                        .before(WorkerCmdSet::DynamicModels)
+                        .before(WorkerCmdSet::ModelPose),
                 )
                     .in_set(ClientSet::Present),
             )
             .scoped::<crate::assemble::drawsurf::MapSunEffects>(frame::MatchScope::Live)
             .scoped::<crate::assemble::drawsurf::SunEffectsFrameInput>(frame::MatchScope::Live)
+            .scoped::<crate::assemble::drawsurf::sun_effects::SunEffectsCameraTrack>(frame::Timeline::Live)
             .scoped::<crate::assemble::drawsurf::MapPrimaryLightTypes>(frame::MatchScope::Live)
             .scoped::<crate::assemble::drawsurf::MapPrimaryLights>(frame::MatchScope::Live)
             .scoped::<crate::assemble::drawsurf::DrawMethodDfog>(frame::MatchScope::Live)
@@ -97,7 +97,7 @@ impl Plugin for RenderPreparePlugin {
                     render_anim::prepare_model_materials.in_set(frame::InMatch).after(spawn_world_finish),
                     crate::assemble::drawsurf::tess::glass::apply_cg_glass_tess.in_set(frame::InMatch)
                         .after(spawn_world)
-                        .after(WorkerCmdSet::FxNonDependent),
+                        .after(crate::adapters::fx::system::tick_fx_non_dependent_update),
                     crate::assemble::drawsurf::fog::sync_script_fog.in_set(frame::InMatch)
                         .after(spawn_world_finish)
                         .before(stamp_prepared_scene_view),
@@ -110,18 +110,18 @@ impl Plugin for RenderPreparePlugin {
                     crate::assemble::drawsurf::publish_sun_effects_frame.in_set(frame::InMatch)
                         .after(stamp_prepared_scene_view),
                     crate::assemble::drawsurf::ingest_drawsurf_list.in_set(frame::InMatch)
-                        .after(WorkerCmdSet::CellStatic)
-                        .after(WorkerCmdSet::CellDynModel)
-                        .after(WorkerCmdSet::CellDynBrush),
+                        .after(WorkerCmdSet::WorldVisibility)
+                        .after(WorkerCmdSet::DynamicModels)
+                        .after(crate::adapters::anim::dyn_ent_brush::exec_cell_dyn_brush_cmds),
                     update_smodel_lighting.in_set(frame::InMatch)
-                        .after(WorkerCmdSet::CellStatic)
-                        .after(WorkerCmdSet::SkinModel)
+                        .after(WorkerCmdSet::WorldVisibility)
+                        .after(WorkerCmdSet::ModelPose)
                         .after(crate::adapters::anim::script_model::ScriptModelSkinSet),
                     crate::prepare::scene::smodel_geom_cache::cache_visible_smodel_surfaces.in_set(frame::InMatch)
                         .after(update_smodel_lighting),
                     crate::prepare::scene::gfx_scene::snapshot_spot_shadow_occupancy.in_set(frame::InMatch)
                         .after(crate::prepare::scene::gfx_scene::GfxSceneAdd)
-                        .after(WorkerCmdSet::SkinModel),
+                        .after(WorkerCmdSet::ModelPose),
                     crate::prepare::scene::model_lighting_cache::begin_dyn_model_lighting_frame.in_set(frame::InMatch)
                         .after(spawn_world),
                     crate::prepare::scene::model_lighting_cache::enqueue_fpv_model_lighting.in_set(frame::InMatch)
@@ -129,15 +129,15 @@ impl Plugin for RenderPreparePlugin {
                         .after(render_anim::tick_fpv_viewmodel)
                         .after(crate::prepare::scene::model_lighting_cache::begin_dyn_model_lighting_frame)
                         .after(render_anim::ScriptModelDrawSet)
-                        .before(WorkerCmdSet::CellDynModel),
+                        .before(WorkerCmdSet::DynamicModels),
                     crate::assemble::drawsurf::tess::glass::enqueue_glass_model_lighting.in_set(frame::InMatch)
                         .after(crate::prepare::scene::model_lighting_cache::begin_dyn_model_lighting_frame)
                         .after(crate::assemble::drawsurf::tess::glass::apply_cg_glass_tess)
-                        .after(WorkerCmdSet::SkinModel)
+                        .after(WorkerCmdSet::ModelPose)
                         .after(crate::adapters::anim::script_model::ScriptModelSkinSet)
-                        .after(WorkerCmdSet::CellDynModel)
+                        .after(WorkerCmdSet::DynamicModels)
                         .after(crate::prepare::scene::model_lighting_cache::update_dirty_model_lighting),
-                    log_dpvs_stats_once.in_set(frame::InMatch).after(WorkerCmdSet::CellStatic),
+                    log_dpvs_stats_once.in_set(frame::InMatch).after(WorkerCmdSet::WorldVisibility),
                     log_script_model_gaps_once,
                 )
                     .in_set(ClientSet::Present),
@@ -147,8 +147,8 @@ impl Plugin for RenderPreparePlugin {
                 Update,
                 crate::prepare::scene::model_lighting_cache::update_dirty_model_lighting.in_set(frame::InMatch)
                     .after(crate::prepare::scene::model_lighting_cache::begin_dyn_model_lighting_frame)
-                    .after(WorkerCmdSet::SkinModel)
-                    .after(WorkerCmdSet::CellDynModel)
+                    .after(WorkerCmdSet::ModelPose)
+                    .after(WorkerCmdSet::DynamicModels)
                     .after(crate::adapters::anim::script_model::ScriptModelSkinSet)
                     .after(crate::prepare::scene::model_lighting_cache::enqueue_fpv_model_lighting)
                     .in_set(ModelLightingSeated)
@@ -159,11 +159,11 @@ impl Plugin for RenderPreparePlugin {
                 (
                     crate::prepare::scene::model_lighting_cache::update_glass_dyn_lighting.in_set(frame::InMatch)
                         .after(crate::assemble::drawsurf::tess::glass::enqueue_glass_model_lighting)
-                        .before(WorkerCmdSet::FxVerts),
+                        .before(crate::assemble::prepare_static_sun_and_fx),
                     crate::assemble::drawsurf::tess::glass::apply_glass_model_lighting.in_set(frame::InMatch)
                         .after(crate::prepare::scene::model_lighting_cache::update_glass_dyn_lighting),
                     crate::prepare::scene::model_lighting_cache::update_fx_dyn_lighting.in_set(frame::InMatch)
-                        .after(WorkerCmdSet::FxVerts)
+                        .after(crate::assemble::prepare_static_sun_and_fx)
                         .after(crate::prepare::scene::model_lighting_cache::update_glass_dyn_lighting),
                     crate::assemble::drawsurf::tess::xmodel::apply_resolved_fx_model_lighting.in_set(frame::InMatch)
                         .after(crate::prepare::scene::model_lighting_cache::update_fx_dyn_lighting),
@@ -174,7 +174,7 @@ impl Plugin for RenderPreparePlugin {
                 Update,
                 (
                     crate::prepare::scene::smodel_geom_cache::skin_cached_static_model_cmd.in_set(frame::InMatch)
-                        .in_set(WorkerCmdSet::SmodelCache)
+                        .in_set(net::ClientSet::Present)
                         .after(crate::prepare::scene::smodel_geom_cache::cache_visible_smodel_surfaces),
                     crate::prepare::scene::gfx_scene::clear_host_gfx_scene.in_set(frame::InMatch)
                         .in_set(crate::prepare::scene::gfx_scene::GfxSceneClear),
@@ -194,7 +194,7 @@ impl Plugin for RenderPreparePlugin {
                     .after(fly_camera)
                     .after(stamp_prepared_scene_view)
                     .after(crate::prepare::scene::sun_stage::update_active_sun_stage)
-                    .in_set(WorkerCmdSet::CellStatic),
+                    .in_set(WorkerCmdSet::WorldVisibility),
             )
             .add_systems(
                 Update,
@@ -215,8 +215,7 @@ impl Plugin for RenderPreparePlugin {
 
         app.add_systems(
             OnEnter(frame::MatchScope::Live),
-            (arm_world_spawn_on_install, publish_dyn_atpoint_lookup)
-                .in_set(frame::ScopeSet::Derive),
+            (publish_dyn_atpoint_lookup).in_set(frame::ScopeSet::Derive),
         );
         register_world_gpu_ready(app);
         crate::prepare::scene::cell_frustum_cmds::register_cell_frustum_cmds(app);

@@ -468,6 +468,7 @@ pub(crate) fn update_command_context_code_sources(
     prepared: Res<PreparedSceneView>,
     sun_shadow: Res<render_scene::PreparedSunShadowFrame>,
     scene: Option<Res<crate::prepare::scene::world::WorldScene>>,
+    gfx: Res<render_scene::HostGfxScene>,
 ) {
     if !prepared.ready {
         return;
@@ -486,13 +487,49 @@ pub(crate) fn update_command_context_code_sources(
     mat_frame.viewmodel_clip_from_world = Some(viewmodel_clip_from_world);
     mat_frame.viewmodel_near = Some(prepared.depth_hack_near);
     mat_frame.outdoor = outdoor.as_deref().copied();
+    mat_frame.portal = scene.as_deref().and_then(|scene| scene.portal_view.clone());
+    if let Some(portal) = mat_frame.portal.as_mut() {
+        let bounds = gfx
+            .scene
+            .scene_dobjs
+            .iter()
+            .filter_map(|d| {
+                d.posed_bounds
+                    .map(|b| (render_scene::scene_info_entnum(d.info), b))
+            })
+            .chain(gfx.scene.scene_models.iter().filter_map(|d| {
+                d.posed_bounds
+                    .map(|b| (render_scene::scene_info_entnum(d.info), b))
+            }));
+        portal.set_entity_bounds(bounds);
+    }
 
     mat_frame.code_sources = RuntimeCodeSources::default();
+    mat_frame.world_cameras.clear();
     mat_frame.sun_shadow = None;
     let float_time_ms = cg_clock.map(|c| c.time()).unwrap_or(0);
     mat_frame.float_time = float_time_ms as f32 / 1000.0;
     let float_time = mat_frame.float_time;
-    let sampled_fog = fog.as_ref().map(|fog| fog.sample(float_time_ms));
+    let host_fog = fog.as_ref().map(|fog| fog.sample(float_time_ms));
+    let mut world_fogs = scene
+        .as_deref()
+        .map(|s| s.world_fogs.clone())
+        .unwrap_or(Vec::new());
+    if world_fogs.is_empty() {
+        world_fogs.push(host_fog);
+    } else {
+        world_fogs[0] = host_fog;
+    }
+    let camera_world = mat_frame.portal.as_ref().map_or(0, |p| p.camera_world);
+    let sampled_fog = world_fogs.get(camera_world).copied().flatten();
+    mat_frame.world_fog_colors = world_fogs
+        .iter()
+        .map(|fog| {
+            fog.map_or([0.35, 0.4, 0.5, 1.0], |fog| {
+                [fog.color_rgb[0], fog.color_rgb[1], fog.color_rgb[2], 1.0]
+            })
+        })
+        .collect();
 
     dfog.0 = sampled_fog.as_ref().is_some_and(|fog| fog.sun.is_some());
 
@@ -552,6 +589,7 @@ pub(crate) fn update_command_context_code_sources(
     if let Some(light) = dir_light.as_deref() {
         let _ = produce_dir_primary_light(&mut mat_frame.code_sources, light);
     }
+    let mut frame_inputs = None;
     if let Some(scene) = scene.as_deref() {
         let catalog = &generation.catalog;
         let generation = catalog.generation_id();
@@ -583,8 +621,14 @@ pub(crate) fn update_command_context_code_sources(
             .material_bindings
             .as_ref()
             .expect("material bindings compiled")
-            .bind_frame(catalog, &mut mat_frame.code_sources, &inputs)
+            .bind_frame(
+                catalog,
+                &mut mat_frame.code_sources,
+                &inputs,
+                &scene.material_layers,
+            )
             .expect("material binding generation correlated");
+        frame_inputs = Some((inputs, &scene.material_layers));
     } else {
         mat_frame.material_bindings = None;
     }
@@ -602,9 +646,84 @@ pub(crate) fn update_command_context_code_sources(
     let _ = mat_frame
         .code_sources
         .set_texture(CODE_TEXTURE_RESOLVED_POST_SUN, 0x62);
+    // Foreign worlds use the native no-sun-shadow material technique. Keep
+    // their source context before installing the camera world's receivers.
+    let unshadowed_sources = mat_frame.code_sources.clone();
     if let Some(frame) = sun_shadow.0 {
         let _ = produce_sun_shadow_code_texture(&mut mat_frame.code_sources);
         produce_sun_shadow_receiver_constants(&mut mat_frame.code_sources, frame);
         mat_frame.sun_shadow = Some(frame);
+    }
+
+    // Each other atlas world is drawn from the camera carried into it, so
+    // what it computes from the eye (fog, sky, specular) is its own map's.
+    let Some(portal) = mat_frame.portal.clone() else {
+        return;
+    };
+    for (world, world_move) in portal.moves.iter().enumerate() {
+        let camera = world_move
+            .filter(|_| world != portal.camera_world && portal.is_selected(world))
+            .map(|world_move| {
+                let clip_from_world = (clip_from_world.as_dmat4() * world_move).as_mat4();
+                let view_from_world = (view.as_dmat4() * world_move).as_mat4();
+                let view_origin = world_move
+                    .inverse()
+                    .transform_point3(eye.as_dvec3())
+                    .as_vec3();
+                let view_fog = portal
+                    .worlds
+                    .get(world)
+                    .and_then(|physical| world_fogs.get(*physical))
+                    .copied()
+                    .flatten();
+                let mut sources = if portal.worlds.get(world).copied() == Some(portal.camera_world)
+                {
+                    mat_frame.code_sources.clone()
+                } else {
+                    unshadowed_sources.clone()
+                };
+                let _ = produce_top_pair_command_context(
+                    &mut sources,
+                    clip_from_world,
+                    view_from_world,
+                    view_origin,
+                    default_world_transpose_rows(view_origin),
+                    view_fog.as_ref(),
+                    fog_dvars.enabled,
+                );
+                if let (Some((inputs, layers)), Some(bindings)) =
+                    (frame_inputs, mat_frame.material_bindings.as_ref())
+                {
+                    let inputs = asset_material::MaterialFrameBindingInputs {
+                        eye: view_origin,
+                        world_from_view: view_from_world.inverse(),
+                        fog: crate::prepare::scene::world_bindings::fog(
+                            view_fog.as_ref().unwrap_or(&NO_FRAME_FOG),
+                        ),
+                        fog_enabled: view_fog.is_some() && fog_dvars.enabled,
+                        ..inputs
+                    };
+                    bindings
+                        .bind_frame(&generation.catalog, &mut sources, &inputs, layers)
+                        .expect("material binding generation correlated");
+                }
+                let exit_plane_world = portal.exit_plane_in(world, eye.to_array());
+                let exit_plane_clip = exit_plane_world.map(|plane| {
+                    (clip_from_world.as_dmat4().inverse().transpose() * plane)
+                        .as_vec4()
+                        .to_array()
+                });
+                render_frame::WorldCamera {
+                    sun_shadow: portal.worlds.get(world).copied() == Some(portal.camera_world)
+                        && mat_frame.sun_shadow.is_some(),
+                    exit_plane_clip,
+                    exit_plane_world: exit_plane_world.map(|p| p.to_array()),
+                    code_sources: sources,
+                    view_origin,
+                    clip_from_world,
+                    view_from_world,
+                }
+            });
+        mat_frame.world_cameras.push(camera);
     }
 }

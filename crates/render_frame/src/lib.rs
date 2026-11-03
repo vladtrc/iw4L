@@ -6,6 +6,9 @@ pub mod geometry;
 pub mod gpu_contract;
 pub mod packet;
 pub mod packing;
+pub mod portal;
+pub mod portal_plan;
+pub mod portal_stencil;
 pub mod products;
 pub mod retained;
 pub mod skinning;
@@ -25,7 +28,7 @@ pub use entries::{
     smodel_rigid_index_run_continues, triangles_list_run_continues,
     xmodel_rigid_index_run_continues,
 };
-pub use exec::{MaterialExecFrame, OutdoorLookup, SpotShadowReceiver};
+pub use exec::{MaterialExecFrame, OutdoorLookup, SpotShadowReceiver, WorldCamera};
 pub use geometry::{
     DYNAMIC_INDEX_BUFFER_CAPACITY, PackedVertexRefusal, SmodelVertex, SurfaceLightmapId,
     SurfaceReflectionProbeId, SurfaceSamplerInputs, WorldVertex, WorldVertexRefusal,
@@ -44,6 +47,9 @@ pub use packet::{
     SRC_SMODEL_SKINNED_PTR, SRC_WORLD_COUNT, SRC_WORLD_PTR, SRC_XMODEL_RIGID_COUNT,
     SRC_XMODEL_RIGID_PTR,
 };
+pub use portal::{
+    PortalAtlas, PortalCamera, PortalDoor, PortalOpening, PortalPair, PortalSurfaces, PortalView,
+};
 pub use products::{
     FrameMaterialRefusal, FrameProduct, FrameProductKind, FrameProductStatus,
     FrameProductsSnapshot, MissingProductCause, ProductTarget, RenderFocusFrame, SourceRevisions,
@@ -60,4 +66,8 @@ pub use sun_shadow::{
     SunShadowForcedFrame, SunShadowPartition, SunShadowPartitionLists, SunShadowReceiverConstants,
     SunShadowViewport,
 };
+pub mod portal_budget;
+mod portal_entity;
+pub mod portal_occlusion;
+pub use portal_entity::{PortalEntityAperture, PortalEntityInstance};
 pub use texture_bind::TextureBindIdentity;

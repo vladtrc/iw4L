@@ -53,19 +53,19 @@ pub(crate) struct DecodeSamples {
     expected_len: Option<usize>,
 }
 
-impl asset_audio::XwmaPcmSink for DecodeSamples {
-    type Workspace = DecodeReservation;
-
+impl asset_audio::AudioPcmSink for DecodeSamples {
     fn reserve_workspace(
         &mut self,
         bytes: usize,
-    ) -> Result<Self::Workspace, asset_audio::XwmaDecodeError> {
-        DecodeReservation::reserve(bytes).map_err(|_| asset_audio::XwmaDecodeError::MemoryLimit)
+    ) -> Result<Box<dyn Send>, asset_audio::NativeAudioError> {
+        DecodeReservation::reserve(bytes)
+            .map(|reservation| Box::new(reservation) as Box<dyn Send>)
+            .map_err(|_| asset_audio::NativeAudioError::MemoryLimit)
     }
 
-    fn extend(&mut self, samples: &[i16]) -> Result<(), asset_audio::XwmaDecodeError> {
+    fn extend(&mut self, samples: &[i16]) -> Result<(), asset_audio::NativeAudioError> {
         self.extend(samples)
-            .map_err(|_| asset_audio::XwmaDecodeError::MemoryLimit)
+            .map_err(|_| asset_audio::NativeAudioError::MemoryLimit)
     }
 
     fn sample_count(&self) -> usize {

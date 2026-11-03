@@ -5,7 +5,7 @@ use crate::observation::{
     BotObservation, Contact, DEFAULT_OBJECTIVE_RADIUS, KnowledgeSource, ModeObjective, SelfState,
     Visibility, WeaponAction, WeaponSlot,
 };
-use crate::query::{QuerySubsystem, SightSample, WorldQuery};
+use crate::query::{SightSample, WorldQuery};
 
 pub const SIGHT_RANGE_IN: f32 = 5906.0;
 pub const SIGHT_FOV_DEG: f32 = 90.0;
@@ -39,7 +39,6 @@ pub fn observe_focused(
         .find(|(id, _)| *id == bot)
         .map(|(_, ps)| ps)?;
     let team = meta.client_state_team;
-    world.enter(QuerySubsystem::Perception);
     let self_state = SelfState {
         life_sequence: meta.life_sequence,
         id: bot,
@@ -53,8 +52,8 @@ pub fn observe_focused(
         weapon: ps.weapon as u16,
         weapon_class: world.weapon_class(ps.weapon as u16),
         weapon_action: WeaponAction::from_weaponstate(ps.weaponstate_primary),
-        ammo_clip: meta.ammo_clip,
-        ammo_stock: meta.ammo_stock,
+        ammo_clip: meta.weapon_carry.ammo_clip,
+        ammo_stock: meta.weapon_carry.ammo_stock,
         team,
     };
     let inventory = own_inventory(ps, meta, world);
@@ -102,25 +101,38 @@ pub fn observe_focused(
             if snapshot.meta.kind.is_team() && other_meta.client_state_team == team {
                 continue;
             }
-            // Out of range or outside the cone is a complete answer on its own;
-            // only a client that needed a probe it did not get is unsensed.
-            if !in_range_and_fov(ps.origin, other.origin, forward, half) {
-                continue;
+            let mut unknown = false;
+            for apparent in world.apparent_positions(ps.origin, other.origin) {
+                // The apparent position must lie in the sight cone; portal-aware
+                // rays still have to establish a clear route to the target.
+                if !in_range_and_fov(ps.origin, apparent, forward, half) {
+                    continue;
+                }
+                if probes == 0 {
+                    unknown = true;
+                    break;
+                }
+                match probe_visible(world, bot, eye, apparent, *id, &mut probes) {
+                    Visibility::Seen => {
+                        seen.push(Contact {
+                            id: *id,
+                            origin: apparent,
+                            physical_origin: other.origin,
+                            source: KnowledgeSource::CurrentlySeen,
+                            seen_tick: snapshot.tick.0,
+                            confidence: 1.0,
+                        });
+                        unknown = false;
+                        break;
+                    }
+                    Visibility::NotSeen => {}
+                    Visibility::Unknown => {
+                        unknown = true;
+                    }
+                }
             }
-            if probes == 0 {
+            if unknown {
                 unsensed.push(*id);
-                continue;
-            }
-            match probe_visible(world, bot, eye, other.origin, *id, &mut probes) {
-                Visibility::Seen => seen.push(Contact {
-                    id: *id,
-                    origin: other.origin,
-                    source: KnowledgeSource::CurrentlySeen,
-                    seen_tick: snapshot.tick.0,
-                    confidence: 1.0,
-                }),
-                Visibility::NotSeen => {}
-                Visibility::Unknown => unsensed.push(*id),
             }
         }
     }
@@ -167,6 +179,7 @@ fn own_inventory(
             let weapon = u16::try_from(id).ok()?;
             let facts = world.weapon_facts(weapon)?;
             let (clip, stock) = meta
+                .weapon_carry
                 .ammo_by_weapon
                 .iter()
                 .find(|(owned, _, _)| *owned == id as u32)

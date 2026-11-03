@@ -3,7 +3,6 @@ use bevy::ecs::schedule::ScheduleLabel;
 use bevy::prelude::*;
 use bevy::state::{app::StatesPlugin, state::StateTransitionSystems};
 use std::any::{TypeId, type_name};
-use std::marker::PhantomData;
 
 #[derive(States, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum MatchScope {
@@ -25,7 +24,8 @@ pub enum RoundPhase {
 #[source(MatchScope = MatchScope::Live)]
 pub enum Timeline {
     #[default]
-    Running,
+    Live,
+    Killcam,
 }
 
 #[derive(SystemSet, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -46,15 +46,6 @@ pub enum ScopeSet {
     Derive,
     Announce,
     Release,
-}
-
-#[derive(Resource)]
-pub struct ScopeEpoch<S: States>(pub u64, PhantomData<S>);
-
-impl<S: States> Default for ScopeEpoch<S> {
-    fn default() -> Self {
-        Self(1, PhantomData)
-    }
 }
 
 #[derive(Resource)]
@@ -92,11 +83,15 @@ struct Row {
     kind: ScopeKind,
     optional: bool,
     live: bool,
+    lifecycle: ScopeLifecycle,
+    active: fn(&World, &str) -> bool,
+}
+
+struct ScopeLifecycle {
     install: fn(&mut World),
     retire: fn(&mut World),
     present: fn(&World) -> bool,
     staging_empty: fn(&World) -> bool,
-    active: fn(&World, &str) -> bool,
     discard: fn(&mut World),
 }
 
@@ -115,9 +110,14 @@ impl ScopeRegistry {
     }
 
     pub fn rows(&self, world: &World) -> impl Iterator<Item = (&str, &str, ScopeKind, bool)> {
-        self.rows
-            .iter()
-            .map(move |row| (row.name, row.label.as_str(), row.kind, (row.present)(world)))
+        self.rows.iter().map(move |row| {
+            (
+                row.name,
+                row.label.as_str(),
+                row.kind,
+                (row.lifecycle.present)(world),
+            )
+        })
     }
 }
 
@@ -133,9 +133,6 @@ impl Plugin for ScopePlugin {
             .add_sub_state::<Timeline>()
             .init_resource::<ScopeRegistry>()
             .init_resource::<crate::Retiring>()
-            .init_resource::<ScopeEpoch<MatchScope>>()
-            .init_resource::<ScopeEpoch<RoundPhase>>()
-            .init_resource::<ScopeEpoch<Timeline>>()
             .add_systems(
                 StateTransition,
                 (
@@ -182,10 +179,19 @@ impl Plugin for ScopePlugin {
         configure_scope(app, MatchScope::Loading);
         configure_scope(app, MatchScope::Live);
         configure_scope(app, RoundPhase::Playing);
-        configure_scope(app, Timeline::Running);
+        configure_scope(app, Timeline::Live);
+        configure_scope(app, Timeline::Killcam);
         if cfg!(debug_assertions) {
             app.add_systems(Last, verify_registry.after(ScopeCommit));
         }
+    }
+}
+
+fn scope_label<S: States>(scope: &S) -> String {
+    if TypeId::of::<S>() == TypeId::of::<Timeline>() {
+        "Timeline".to_owned()
+    } else {
+        format!("{scope:?}")
     }
 }
 
@@ -201,13 +207,13 @@ fn configure_scope<S: States>(app: &mut App, scope: S) {
 }
 
 fn install_scope<S: States>(world: &mut World, scope: &S) {
-    let label = format!("{scope:?}");
+    let label = scope_label(scope);
     let actions: Vec<_> = world
         .resource::<ScopeRegistry>()
         .rows
         .iter()
         .filter(|row| row.state == TypeId::of::<S>() && row.label == label)
-        .map(|row| row.install)
+        .map(|row| row.lifecycle.install)
         .collect();
     for install in actions {
         install(world);
@@ -220,17 +226,25 @@ fn retire_state<S: States>(
 ) {
     let exited: Vec<_> = cursor
         .read(world.resource::<Messages<StateTransitionEvent<S>>>())
+        .filter(|event| event.entered != event.exited || event.allow_same_state_transitions)
         .filter_map(|event| event.exited.clone())
         .collect();
     for state in exited {
-        let label = format!("{state:?}");
+        let label = scope_label(&state);
         let actions: Vec<_> = world
             .resource::<ScopeRegistry>()
             .rows
             .iter()
             .rev()
             .filter(|row| row.state == TypeId::of::<S>() && row.label == label)
-            .map(|row| (row.retire, row.present, row.kind, row.name))
+            .map(|row| {
+                (
+                    row.lifecycle.retire,
+                    row.lifecycle.present,
+                    row.kind,
+                    row.name,
+                )
+            })
             .collect();
         for (retire, present, kind, name) in &actions {
             retire(world);
@@ -238,8 +252,6 @@ fn retire_state<S: States>(
                 assert!(!present(world), "{name} survived scope exit");
             }
         }
-        world.resource_mut::<ScopeEpoch<S>>().0 =
-            world.resource::<ScopeEpoch<S>>().0.wrapping_add(1);
         if !actions.is_empty() {
             world.resource_mut::<crate::Retiring>().mark_teardown();
             let mut registry = world.resource_mut::<ScopeRegistry>();
@@ -258,8 +270,8 @@ fn verify_registry(world: &World) {
     for row in &world.resource::<ScopeRegistry>().rows {
         if matches!(row.kind, ScopeKind::Resource | ScopeKind::Staged) {
             assert!(
-                (row.active)(world, &row.label) && (row.optional || (row.present)(world))
-                    || !(row.active)(world, &row.label) && !(row.present)(world),
+                (row.active)(world, &row.label) && (row.optional || (row.lifecycle.present)(world))
+                    || !(row.active)(world, &row.label) && !(row.lifecycle.present)(world),
                 "{} outside {}",
                 row.name,
                 row.label
@@ -271,7 +283,7 @@ fn verify_registry(world: &World) {
         );
         if !install_pending {
             assert!(
-                (row.staging_empty)(world),
+                (row.lifecycle.staging_empty)(world),
                 "{} staging not consumed",
                 row.name
             );
@@ -284,7 +296,7 @@ pub fn discard_staging(world: &mut World) {
         .resource::<ScopeRegistry>()
         .rows
         .iter()
-        .map(|row| row.discard)
+        .map(|row| row.lifecycle.discard)
         .collect();
     for retire in discard {
         retire(world);
@@ -304,7 +316,7 @@ fn present<R: Resource>(world: &World) -> bool {
 fn active<S: States>(world: &World, label: &str) -> bool {
     world
         .get_resource::<State<S>>()
-        .is_some_and(|state| format!("{:?}", state.get()) == label)
+        .is_some_and(|state| scope_label(state.get()) == label)
 }
 fn install<R: Resource + FromWorld>(world: &mut World) {
     assert!(
@@ -365,24 +377,21 @@ fn register<R: 'static, S: States>(
     app: &mut App,
     scope: S,
     kind: ScopeKind,
-    install: fn(&mut World),
-    retire: fn(&mut World),
-    present: fn(&World) -> bool,
-    staging_empty: fn(&World) -> bool,
-    discard: fn(&mut World),
+    lifecycle: ScopeLifecycle,
 ) {
     let label = format!("{scope:?}");
     assert!(
         (TypeId::of::<S>() == TypeId::of::<MatchScope>()
             && matches!(label.as_str(), "Loading" | "Live"))
             || (TypeId::of::<S>() == TypeId::of::<RoundPhase>() && label == "Playing")
-            || (TypeId::of::<S>() == TypeId::of::<Timeline>() && label == "Running"),
+            || (TypeId::of::<S>() == TypeId::of::<Timeline>()
+                && matches!(label.as_str(), "Live" | "Killcam")),
         "unsupported resource scope {label}"
     );
     if !app.is_plugin_added::<ScopePlugin>() {
         app.add_plugins(ScopePlugin);
     }
-    let label = format!("{scope:?}");
+    let label = scope_label(&scope);
     let mut registry = app.world_mut().resource_mut::<ScopeRegistry>();
     if let Some(row) = registry.rows.iter().find(|row| row.id == TypeId::of::<R>()) {
         assert!(
@@ -400,18 +409,10 @@ fn register<R: 'static, S: States>(
         kind,
         optional: false,
         live: false,
-        install,
-        retire,
-        present,
-        staging_empty,
+        lifecycle,
         active: active::<S>,
-        discard,
     };
-    if TypeId::of::<R>() == TypeId::of::<crate::WorldGeneration>() {
-        registry.rows.insert(0, row);
-    } else {
-        registry.rows.push(row);
-    }
+    registry.rows.push(row);
 }
 
 impl ScopeApp for App {
@@ -423,11 +424,13 @@ impl ScopeApp for App {
             self,
             scope,
             ScopeKind::Resource,
-            install::<R>,
-            retire::<R>,
-            present::<R>,
-            staging_empty::<R>,
-            retire_staging::<R>,
+            ScopeLifecycle {
+                install: install::<R>,
+                retire: retire::<R>,
+                present: present::<R>,
+                staging_empty: staging_empty::<R>,
+                discard: retire_staging::<R>,
+            },
         );
         self
     }
@@ -436,11 +439,13 @@ impl ScopeApp for App {
             self,
             scope,
             ScopeKind::Staged,
-            install_staged::<R>,
-            retire::<R>,
-            present::<R>,
-            staging_empty::<R>,
-            retire_staging::<R>,
+            ScopeLifecycle {
+                install: install_staged::<R>,
+                retire: retire::<R>,
+                present: present::<R>,
+                staging_empty: staging_empty::<R>,
+                discard: retire_staging::<R>,
+            },
         );
         self.init_resource::<Staging<R>>()
     }
@@ -449,11 +454,13 @@ impl ScopeApp for App {
             self,
             scope,
             ScopeKind::Message,
-            noop,
-            clear_messages::<M>,
-            messages_present::<M>,
-            empty,
-            noop,
+            ScopeLifecycle {
+                install: noop,
+                retire: clear_messages::<M>,
+                present: messages_present::<M>,
+                staging_empty: empty,
+                discard: noop,
+            },
         );
         self.add_message::<M>()
     }
@@ -482,12 +489,14 @@ pub fn stage<R: Resource>(world: &mut World, value: R) {
             kind: ScopeKind::Staged,
             optional: true,
             live: false,
-            install: install_optional_staged::<R>,
-            retire: retire::<R>,
-            present: present::<R>,
-            staging_empty: staging_empty::<R>,
+            lifecycle: ScopeLifecycle {
+                install: install_optional_staged::<R>,
+                retire: retire::<R>,
+                present: present::<R>,
+                staging_empty: staging_empty::<R>,
+                discard: retire_staging::<R>,
+            },
             active: active::<MatchScope>,
-            discard: retire_staging::<R>,
         });
     }
     world.init_resource::<Staging<R>>();
@@ -529,12 +538,14 @@ pub fn insert<R: Resource>(world: &mut World, value: R, scope: MatchScope) {
             kind: ScopeKind::Resource,
             optional: true,
             live: false,
-            install: noop,
-            retire: retire::<R>,
-            present: present::<R>,
-            staging_empty: staging_empty::<R>,
+            lifecycle: ScopeLifecycle {
+                install: noop,
+                retire: retire::<R>,
+                present: present::<R>,
+                staging_empty: staging_empty::<R>,
+                discard: retire_staging::<R>,
+            },
             active: active::<MatchScope>,
-            discard: retire_staging::<R>,
         });
     }
     if let Some(previous) = world.remove_resource::<R>() {
@@ -548,7 +559,7 @@ fn capture_census(world: &mut World) {
         .resource::<ScopeRegistry>()
         .rows
         .iter()
-        .map(|row| (row.present)(world))
+        .map(|row| (row.lifecycle.present)(world))
         .collect();
     for (row, live) in world
         .resource_mut::<ScopeRegistry>()

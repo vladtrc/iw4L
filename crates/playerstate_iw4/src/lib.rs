@@ -1,6 +1,15 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+mod command_identity;
+pub use command_identity::{
+    ClientId, CommandSequence, FireCause, LifeSequence, MatchRng, PendingBrass, RNG_DOMAIN_SCHEME,
+    RngDomain, ShotId,
+};
+
+mod events;
+pub use events::add_predictable_event;
+
 mod archive;
 mod chrome;
 mod playerstate;

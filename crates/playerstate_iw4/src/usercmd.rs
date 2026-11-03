@@ -15,6 +15,36 @@ pub struct UserCmd {
     pub remote_control: [u8; 2],
 }
 
+impl UserCmd {
+    /// Stable little-endian command representation shared by transport and input tapes.
+    pub fn canonical_bytes(&self) -> [u8; 46] {
+        let mut bytes = [0; 46];
+        let mut offset = 0;
+        let mut put = |value: &[u8]| {
+            bytes[offset..offset + value.len()].copy_from_slice(value);
+            offset += value.len();
+        };
+        put(&self.server_time.to_le_bytes());
+        put(&self.buttons.to_le_bytes());
+        for angle in self.angles {
+            put(&angle.to_le_bytes());
+        }
+        put(&self.weapon.to_le_bytes());
+        put(&self.weapon_mapped.to_le_bytes());
+        put(&self.off_hand_index.to_le_bytes());
+        put(&self.forwardmove.to_le_bytes());
+        put(&self.rightmove.to_le_bytes());
+        put(&self.melee_charge_yaw.to_le_bytes());
+        put(&[self.melee_charge_dist]);
+        put(&self.selected_location);
+        put(&self.remote_control);
+        for angle in self.gun_angle_offset {
+            put(&angle.to_le_bytes());
+        }
+        bytes
+    }
+}
+
 pub mod buttons {
     pub const ATTACK: u32 = 0x1;
 

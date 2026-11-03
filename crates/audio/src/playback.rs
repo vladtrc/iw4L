@@ -3,14 +3,16 @@ use std::sync::Arc;
 
 use crate::runtime::AudioRuntime;
 use asset_audio::SoundCatalog;
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 use bevy::prelude::*;
 use frame::{ClientSet, FxSoundPublished};
 use net::{LastAdoptedSnapshot, SvcLocalSound};
 
 use crate::clip_store::CueFeedback;
+use crate::cue::CueHandle;
+use crate::cue_execution::CueTrigger;
 use crate::messages::{
-    AliasCommand, BoundWeaponSound, Footstep, LandSound, PlayAlias, SND_ENT_LOCAL,
+    AliasCommand, BoundWeaponSound, Footstep, LandSound, PlayAlias, SND_ENT_LOCAL, SurfaceSound,
     ViewmodelNotetracks, WeaponSound,
 };
 use crate::start::{SoundClass, StartDecision, StartDecisions, StartFailure, StartOutcome};
@@ -20,6 +22,33 @@ pub struct AmbientListener;
 
 #[derive(Resource, Clone)]
 pub struct SoundBank(pub Arc<SoundCatalog>);
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct TrackedCuePlayback<'w> {
+    runtime: Res<'w, AudioRuntime>,
+    feedback: ResMut<'w, CueFeedback>,
+}
+
+impl TrackedCuePlayback<'_> {
+    pub(crate) fn audio_frame(&self) -> u64 {
+        self.runtime.audio_frame()
+    }
+
+    pub(crate) fn trigger(&mut self, request: CueTrigger) -> CueHandle {
+        let handle = self.runtime.trigger_cue(request);
+        self.track(handle)
+    }
+
+    pub(crate) fn trigger_faded(&mut self, request: CueTrigger, frames: u64) -> CueHandle {
+        let handle = self.runtime.trigger_faded_cue(request, frames);
+        self.track(handle)
+    }
+
+    fn track(&mut self, handle: CueHandle) -> CueHandle {
+        self.feedback.push(CueHandle(handle.0.clone()));
+        handle
+    }
+}
 
 #[derive(Resource, Default, Debug)]
 pub struct MissingAliasGaps {
@@ -47,31 +76,29 @@ pub(crate) struct PlayerSoundPlugin;
 
 impl Plugin for PlayerSoundPlugin {
     fn build(&self, app: &mut App) {
-        app.scoped::<crate::LoadingAudioStatus>(frame::MatchScope::Loading)
-            .scoped::<crate::LoadingAudioOwner>(frame::MatchScope::Loading)
+        app.add_observer(crate::projectile_loops::stop)
+            .add_observer(crate::flame_loops::stop);
+        app.scoped::<crate::LoadingAudio>(frame::MatchScope::Loading)
             .init_resource::<crate::clip_store::ResidentClipCache>()
             .init_resource::<MissingAliasGaps>()
             .init_resource::<StartDecisions>()
-            .scoped::<CueFeedback>(frame::MatchScope::Live)
-            .scoped::<crate::ambient::MapAmbientBooted>(frame::MatchScope::Live)
-            .scoped::<crate::ambient::MapSources>(frame::MatchScope::Live)
-            .scoped::<crate::script_ambient::ScriptAmbientPlayback>(frame::MatchScope::Live)
-            .scoped::<crate::destructible_loops::DestructibleSources>(frame::MatchScope::Live)
-            .scoped::<crate::projectile_loops::ProjectileSources>(frame::Timeline::Running)
-            .scoped::<crate::flame_loops::FlameSources>(frame::Timeline::Running)
-            .scoped_message::<crate::FlameFire>(frame::Timeline::Running)
-            .scoped::<crate::ambient::SoundBankLoadAttempted>(frame::MatchScope::Loading)
+            .scoped::<CueFeedback>(frame::Timeline::Live)
+            .scoped::<crate::ambient::MapAmbientBooted>(frame::Timeline::Live)
+            .scoped::<crate::ambient::MapSources>(frame::Timeline::Live)
+            .scoped::<crate::script_ambient::ScriptAmbientPlayback>(frame::Timeline::Live)
+            .scoped::<crate::destructible_loops::DestructibleSources>(frame::Timeline::Live)
+            .scoped_message::<crate::FlameFire>(frame::Timeline::Live)
             .scoped::<crate::ambient::ResidentSoundBank>(frame::MatchScope::Loading)
-            .scoped::<crate::BobCycleTracker>(frame::MatchScope::Live)
-            .scoped::<crate::shellshock::ShellshockSources>(frame::Timeline::Running)
-            .scoped::<crate::breath::BreathSources>(frame::Timeline::Running)
-            .scoped_message::<AliasCommand>(frame::Timeline::Running)
-            .scoped_message::<Footstep>(frame::Timeline::Running)
-            .scoped_message::<WeaponSound>(frame::Timeline::Running)
-            .scoped_message::<BoundWeaponSound>(frame::Timeline::Running)
-            .scoped_message::<ViewmodelNotetracks>(frame::Timeline::Running)
+            .scoped::<crate::shellshock::ShellshockSources>(frame::Timeline::Live)
+            .scoped::<crate::breath::BreathSources>(frame::Timeline::Live)
+            .scoped::<crate::breath::BreathAudio>(frame::Timeline::Live)
+            .scoped_message::<AliasCommand>(frame::Timeline::Live)
+            .scoped_message::<Footstep>(frame::Timeline::Live)
+            .scoped_message::<WeaponSound>(frame::Timeline::Live)
+            .scoped_message::<BoundWeaponSound>(frame::Timeline::Live)
+            .scoped_message::<ViewmodelNotetracks>(frame::Timeline::Live)
             .scoped::<crate::entity_events::NotetrackSoundTable>(frame::MatchScope::Live)
-            .scoped_message::<LandSound>(frame::Timeline::Running)
+            .scoped_message::<LandSound>(frame::Timeline::Live)
             .add_systems(
                 Update,
                 play_weapon_sound_messages
@@ -120,7 +147,7 @@ impl Plugin for PlayerSoundPlugin {
                     .in_set(ClientSet::Effects),
             )
             .add_systems(
-                Update,
+                PreUpdate,
                 (
                     crate::ambient::start_sound_bank_compose
                         .run_if(in_state(frame::MatchScope::Loading)),
@@ -198,16 +225,12 @@ fn play_alias_messages(
     mut pending: ResMut<CueFeedback>,
     mut decisions: ResMut<StartDecisions>,
     bank: Option<Res<SoundBank>>,
-    epoch: Option<Res<net::EntityEventCursor>>,
     local: Res<net::LocalPresentClient>,
 ) {
     for command in events.read() {
         let (event, pitch_scale) = match command {
             AliasCommand::StopEntity { snd_ent } => {
-                runtime.stop_emitter_cues(
-                    *snd_ent,
-                    crate::backend::presentation_epoch(epoch.as_deref()),
-                );
+                runtime.stop_emitter_cues(*snd_ent);
                 continue;
             }
             AliasCommand::Play(event) => (event, 1.0),
@@ -218,12 +241,7 @@ fn play_alias_messages(
                 snd_ent,
             } => {
                 let snd_ent = sound_entity(*snd_ent, local.0);
-                runtime.stop_cue(
-                    *namespace,
-                    alias,
-                    snd_ent,
-                    crate::backend::presentation_epoch(epoch.as_deref()),
-                );
+                runtime.stop_cue(*namespace, alias, snd_ent);
                 continue;
             }
         };
@@ -235,21 +253,22 @@ fn play_alias_messages(
             continue;
         };
         play_oneshot_recorded(
-            &bank.0,
-            event.namespace,
-            &event.alias,
-            None,
-            event.origin_inches,
             &runtime,
             &mut pending,
             &mut decisions,
-            sound_entity(event.snd_ent, local.0),
-            SoundClass::World,
-            crate::backend::presentation_epoch(epoch.as_deref()),
-            pitch_scale,
-            1.0,
-            event.fallback.iter().cloned().collect(),
-            event.event,
+            crate::cue_execution::CueTrigger {
+                event: event.event,
+                bank: Arc::clone(&bank.0),
+                namespace: event.namespace,
+                alias: event.alias.clone(),
+                bound: None,
+                origin_inches: event.origin_inches,
+                emitter: sound_entity(event.snd_ent, local.0),
+                class: SoundClass::World,
+                pitch_scale,
+                volume_scale: 1.0,
+                fallbacks: event.fallback.iter().cloned().collect(),
+            },
         );
     }
 }
@@ -261,27 +280,18 @@ fn play_footstep_messages(
     mut pending: ResMut<CueFeedback>,
     mut decisions: ResMut<StartDecisions>,
     bank: Option<Res<SoundBank>>,
-    epoch: Option<Res<net::EntityEventCursor>>,
 ) {
     let Some(bank) = bank else {
-        drop_without_bank(events.read().map(|e| (e.alias, e.event)), &mut decisions);
+        drop_without_bank(
+            events.read().map(|e| (e.sound.alias, e.sound.event)),
+            &mut decisions,
+        );
         return;
     };
-    for event in events.read() {
-        let outcome = play_surface_alias_chain(
-            &bank.0,
-            event.alias,
-            event.fallback,
-            event.origin_inches,
-            &runtime,
-            &mut pending,
-            &mut decisions,
-            event.snd_ent,
-            SoundClass::World,
-            crate::backend::presentation_epoch(epoch.as_deref()),
-            event.event,
-            event.volume_scale,
-        );
+    for message in events.read() {
+        let event = &message.sound;
+        let outcome =
+            play_surface_alias_chain(&bank.0, event, &runtime, &mut pending, &mut decisions);
         if outcome.allows_binding_fallback() {
             gaps.record(event.alias);
             gaps.record(event.fallback);
@@ -296,7 +306,6 @@ fn play_weapon_sound_messages(
     mut pending: ResMut<CueFeedback>,
     mut decisions: ResMut<StartDecisions>,
     bank: Option<Res<SoundBank>>,
-    epoch: Option<Res<net::EntityEventCursor>>,
 ) {
     let Some(bank) = bank else {
         drop_without_bank(
@@ -307,21 +316,22 @@ fn play_weapon_sound_messages(
     };
     for event in events.read() {
         let outcome = play_oneshot_recorded(
-            &bank.0,
-            event.namespace,
-            &event.alias,
-            None,
-            event.origin_inches,
             &runtime,
             &mut pending,
             &mut decisions,
-            event.snd_ent,
-            SoundClass::Weapon,
-            crate::backend::presentation_epoch(epoch.as_deref()),
-            1.0,
-            1.0,
-            Vec::new(),
-            event.event,
+            crate::cue_execution::CueTrigger {
+                event: event.event,
+                bank: Arc::clone(&bank.0),
+                namespace: event.namespace,
+                alias: event.alias.clone(),
+                bound: None,
+                origin_inches: event.origin_inches,
+                emitter: event.snd_ent,
+                class: SoundClass::Weapon,
+                pitch_scale: 1.0,
+                volume_scale: 1.0,
+                fallbacks: Vec::new(),
+            },
         );
         if outcome.allows_binding_fallback() {
             gaps.record(&event.alias);
@@ -336,7 +346,6 @@ fn play_bound_weapon_sounds(
     mut pending: ResMut<CueFeedback>,
     mut decisions: ResMut<StartDecisions>,
     bank: Option<Res<SoundBank>>,
-    epoch: Option<Res<net::EntityEventCursor>>,
     local: Res<net::LocalPresentClient>,
 ) {
     let Some(bank) = bank else {
@@ -354,21 +363,22 @@ fn play_bound_weapon_sounds(
             continue;
         };
         let outcome = play_oneshot_recorded(
-            &bank.0,
-            namespace,
-            alias,
-            Some(event.index),
-            event.origin_inches,
             &runtime,
             &mut pending,
             &mut decisions,
-            sound_entity(event.snd_ent, local.0),
-            SoundClass::Weapon,
-            crate::backend::presentation_epoch(epoch.as_deref()),
-            1.0,
-            1.0,
-            Vec::new(),
-            event.event,
+            crate::cue_execution::CueTrigger {
+                event: event.event,
+                bank: Arc::clone(&bank.0),
+                namespace,
+                alias: alias.to_owned(),
+                bound: Some(event.index),
+                origin_inches: event.origin_inches,
+                emitter: sound_entity(event.snd_ent, local.0),
+                class: SoundClass::Weapon,
+                pitch_scale: 1.0,
+                volume_scale: 1.0,
+                fallbacks: Vec::new(),
+            },
         );
         if outcome.allows_binding_fallback() {
             gaps.record(alias);
@@ -383,27 +393,18 @@ fn play_land_sound_messages(
     mut pending: ResMut<CueFeedback>,
     mut decisions: ResMut<StartDecisions>,
     bank: Option<Res<SoundBank>>,
-    epoch: Option<Res<net::EntityEventCursor>>,
 ) {
     let Some(bank) = bank else {
-        drop_without_bank(events.read().map(|e| (e.alias, e.event)), &mut decisions);
+        drop_without_bank(
+            events.read().map(|e| (e.sound.alias, e.sound.event)),
+            &mut decisions,
+        );
         return;
     };
-    for event in events.read() {
-        let outcome = play_surface_alias_chain(
-            &bank.0,
-            event.alias,
-            event.fallback,
-            event.origin_inches,
-            &runtime,
-            &mut pending,
-            &mut decisions,
-            event.snd_ent,
-            SoundClass::World,
-            crate::backend::presentation_epoch(epoch.as_deref()),
-            event.event,
-            event.volume_scale,
-        );
+    for message in events.read() {
+        let event = &message.sound;
+        let outcome =
+            play_surface_alias_chain(&bank.0, event, &runtime, &mut pending, &mut decisions);
         if outcome.allows_binding_fallback() {
             gaps.record(event.alias);
             gaps.record(event.fallback);
@@ -424,7 +425,7 @@ fn drop_without_bank<'a>(
         }
         decisions.record(StartDecision {
             event,
-            namespace: AssetNamespace::Iw4,
+            namespace: FamilyId::IW4,
             alias: alias.to_owned(),
             variant: None,
             loaded_binding_origin: None,
@@ -437,41 +438,35 @@ fn drop_without_bank<'a>(
 
 fn play_surface_alias_chain(
     bank: &Arc<SoundCatalog>,
-    alias: &str,
-    fallback: &str,
-    origin_inches: Option<[f32; 3]>,
+    sound: &SurfaceSound,
     runtime: &AudioRuntime,
     pending: &mut CueFeedback,
     decisions: &mut StartDecisions,
-    snd_ent: Option<u32>,
-    class: SoundClass,
-    epoch: u64,
-    event: Option<crate::AudioEvent>,
-    volume_scale: f32,
 ) -> StartOutcome {
-    let candidates = crate::aliases::surface_alias_candidates(alias, fallback);
+    let candidates = crate::aliases::surface_alias_candidates(sound.alias);
     let Some(first) = candidates.first() else {
         return StartOutcome::Failed(StartFailure::MissingAlias);
     };
     play_oneshot_recorded(
-        bank,
-        AssetNamespace::Iw4,
-        first,
-        None,
-        origin_inches,
         runtime,
         pending,
         decisions,
-        snd_ent,
-        class,
-        epoch,
-        1.0,
-        volume_scale,
-        candidates[1..]
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect(),
-        event,
+        crate::cue_execution::CueTrigger {
+            event: sound.event,
+            bank: Arc::clone(bank),
+            namespace: FamilyId::IW4,
+            alias: (*first).to_owned(),
+            bound: None,
+            origin_inches: sound.origin_inches,
+            emitter: sound.snd_ent,
+            class: SoundClass::World,
+            pitch_scale: 1.0,
+            volume_scale: sound.volume_scale,
+            fallbacks: candidates[1..]
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+        },
     )
 }
 
@@ -514,75 +509,22 @@ fn collect_cue_decisions(
     });
 }
 
-pub(crate) fn play_alias_oneshot(
-    bank: &Arc<SoundCatalog>,
-    namespace: AssetNamespace,
-    alias: &str,
-    origin_inches: Option<[f32; 3]>,
+pub(crate) fn play_oneshot_recorded(
     runtime: &AudioRuntime,
     pending: &mut CueFeedback,
     decisions: &mut StartDecisions,
-    snd_ent: Option<u32>,
-    class: SoundClass,
-    epoch: u64,
+    trigger: crate::cue_execution::CueTrigger,
 ) -> StartOutcome {
-    play_oneshot_recorded(
-        bank,
-        namespace,
-        alias,
-        None,
-        origin_inches,
-        runtime,
-        pending,
-        decisions,
-        snd_ent,
-        class,
-        epoch,
-        1.0,
-        1.0,
-        Vec::new(),
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn play_oneshot_recorded(
-    bank: &Arc<SoundCatalog>,
-    namespace: AssetNamespace,
-    alias: &str,
-    bound: Option<usize>,
-    origin_inches: Option<[f32; 3]>,
-    runtime: &AudioRuntime,
-    pending: &mut CueFeedback,
-    decisions: &mut StartDecisions,
-    snd_ent: Option<u32>,
-    class: SoundClass,
-    epoch: u64,
-    pitch_scale: f32,
-    volume_scale: f32,
-    fallbacks: Vec<String>,
-    event: Option<crate::AudioEvent>,
-) -> StartOutcome {
-    let handle = runtime.trigger_cue(crate::cue_execution::CueTrigger {
-        event,
-        bank: bank.clone(),
-        namespace,
-        alias: alias.into(),
-        bound,
-        origin_inches,
-        emitter: snd_ent,
-        class,
-        epoch,
-        pitch_scale,
-        volume_scale,
-        fallbacks,
-    });
+    let event = trigger.event;
+    let namespace = trigger.namespace;
+    let alias = trigger.alias.clone();
+    let handle = runtime.trigger_cue(trigger);
     let outcome = StartOutcome::Pending;
     pending.push(handle);
     decisions.record(StartDecision {
         event,
         namespace,
-        alias: alias.into(),
+        alias,
         variant: None,
         loaded_binding_origin: None,
         outcome: outcome.clone(),

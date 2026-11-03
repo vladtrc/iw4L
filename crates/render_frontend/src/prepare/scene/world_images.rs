@@ -147,34 +147,12 @@ fn lightmap_page_bytes(page: &super::world::WorldLightmap) -> u64 {
         + image_bytes(&page.sun_mask_image)
 }
 
+/// GPU images of the common set, by variant, for as long as the common profile
+/// stays the same. A new profile drops them all (`use_profile`).
 #[derive(Resource, Default)]
 pub struct ResidentGpuImages {
     profile_id: u64,
     by_variant: std::collections::HashMap<asset_material::ImageVariantId, Handle<Image>>,
-    map: ResidentMapImages,
-}
-
-#[derive(Default)]
-struct ResidentMapImages {
-    products_id: u64,
-    exact: Vec<Option<Handle<Image>>>,
-    probes: Vec<Option<Handle<Image>>>,
-    lightmaps: Vec<Option<RuntimeLightmapHandles>>,
-}
-
-impl ResidentMapImages {
-    fn all_live(&self, images: &Assets<Image>) -> bool {
-        let live = |handle: &Handle<Image>| images.get(handle.id()).is_some();
-        self.exact.iter().chain(&self.probes).flatten().all(live)
-            && self.lightmaps.iter().flatten().all(|page| {
-                page.primary.iter().all(live)
-                    && page.secondary.iter().all(live)
-                    && page.secondary_b.iter().all(live)
-                    && live(&page.ambient_diagnostic)
-                    && live(&page.directional_diagnostic)
-                    && live(&page.sun_mask_diagnostic)
-            })
-    }
 }
 
 impl ResidentGpuImages {
@@ -242,11 +220,13 @@ pub struct WorldImageUpload {
     pub reused_handle_bytes: u64,
     pub reused_common_handles: u32,
     pub reused_common_bytes: u64,
+    /// Handed images that had to be copied because the `Arc` was shared; the
+    /// rest of `handed_bytes` was moved.
+    pub copied: u32,
+    pub copied_bytes: u64,
     exact_handles: Vec<Option<Handle<Image>>>,
     exact_common: Vec<bool>,
     common_profile_id: u64,
-    products_id: u64,
-    pub resident: bool,
     exact_at: usize,
     probes: Vec<Option<Image>>,
     probe_handles: Vec<Option<Handle<Image>>>,
@@ -315,7 +295,7 @@ impl WorldImageUpload {
             scene
                 .static_model_meshes
                 .iter()
-                .chain(scene.sky_model.iter())
+                .chain(scene.sky_models.iter())
                 .flat_map(|mesh| mesh.surface_materials())
                 .flatten()
                 .filter_map(|id| {
@@ -330,14 +310,14 @@ impl WorldImageUpload {
         self.exact_common = std::mem::take(&mut scene.exact_material_common);
         self.exact_common.resize(self.exact_images.len(), false);
         self.common_profile_id = scene.common_profile_id;
-        self.products_id = scene.products_id;
-        self.resident = false;
         self.exact_variants = std::mem::take(&mut scene.exact_material_variants);
         self.exact_variants.resize(self.exact_images.len(), None);
         self.exact_by_variant.clear();
         self.exact_by_image.clear();
         self.reused_handles = 0;
         self.reused_handle_bytes = 0;
+        self.copied = 0;
+        self.copied_bytes = 0;
         self.exact_handles = vec![None; self.exact_images.len()];
         self.reachable_exact = reachable_exact_image_slots(
             &scene.runtime_material_catalog,
@@ -436,9 +416,6 @@ impl WorldImageUpload {
         paced_byte_budget: u64,
     ) -> bool {
         common.use_profile(self.common_profile_id);
-        if self.done == 0 && self.take_resident(common, images) {
-            return true;
-        }
         let start_done = self.done;
         let start_bytes = self.handed_bytes;
         let byte_budget = if max_this_frame == u32::MAX {
@@ -494,9 +471,9 @@ impl WorldImageUpload {
                 // and lets its own copy go: the two are the same texels under
                 // the same sampler, and a second `add` is a second texture.
                 let Some(variant) = variant else {
-                    let handle = images.add((*image).clone());
-                    self.exact_by_image
-                        .insert(identity, (Arc::downgrade(&image), handle.clone()));
+                    let weak = Arc::downgrade(&image);
+                    let handle = images.add(self.take_texels(image));
+                    self.exact_by_image.insert(identity, (weak, handle.clone()));
                     return handle;
                 };
                 if let Some(handle) = self.exact_by_variant.get(&variant) {
@@ -526,9 +503,9 @@ impl WorldImageUpload {
                         .insert(identity, (Arc::downgrade(&image), handle.clone()));
                     return handle;
                 }
-                let handle = images.add((*image).clone());
-                self.exact_by_image
-                    .insert(identity, (Arc::downgrade(&image), handle.clone()));
+                let weak = Arc::downgrade(&image);
+                let handle = images.add(self.take_texels(image));
+                self.exact_by_image.insert(identity, (weak, handle.clone()));
                 if common_owned && self.common_profile_id != 0 {
                     common.by_variant.insert(variant, handle.clone());
                 }
@@ -603,16 +580,6 @@ impl WorldImageUpload {
             stepped = true;
             self.sync_stage();
         }
-        // Every slot has been handed over: this is the boundary the owner
-        // meant, not merely `done == total`.
-        if self.products_id != 0 {
-            common.map = ResidentMapImages {
-                products_id: self.products_id,
-                exact: self.exact_handles.clone(),
-                probes: self.probe_handles.clone(),
-                lightmaps: self.lightmap_handles.clone(),
-            };
-        }
         if let Some(stage) = self.upload_stage.take() {
             stage.set_completed(u64::from(self.done));
             stage.set_bytes(self.handed_bytes);
@@ -621,33 +588,15 @@ impl WorldImageUpload {
         true
     }
 
-    fn take_resident(&mut self, common: &mut ResidentGpuImages, images: &Assets<Image>) -> bool {
-        let map = &common.map;
-        let same = self.products_id != 0
-            && map.products_id == self.products_id
-            && map.exact.len() == self.exact_handles.len()
-            && map.probes.len() == self.probe_handles.len()
-            && map.lightmaps.len() == self.lightmap_handles.len();
-        if !same || !map.all_live(images) {
-            common.map = ResidentMapImages::default();
-            return false;
-        }
-        self.exact_handles.clone_from(&map.exact);
-        self.probe_handles.clone_from(&map.probes);
-        self.lightmap_handles.clone_from(&map.lightmaps);
-        self.exact_images.clear();
-        self.probes.clear();
-        self.lightmaps.clear();
-        self.exact_at = 0;
-        self.probe_at = 0;
-        self.lightmap_at = 0;
-        self.done = self.total;
-        self.resident = true;
-        if let Some(stage) = self.upload_stage.take() {
-            stage.set_completed(u64::from(self.done));
-            stage.reuse();
-        }
-        true
+    /// The texels themselves when this slot holds the last reference, which a
+    /// map-owned image does once the scene is built; a copy only when someone
+    /// else still holds them (the common set, or a second slot of this map).
+    fn take_texels(&mut self, image: Arc<Image>) -> Image {
+        Arc::try_unwrap(image).unwrap_or_else(|shared| {
+            self.copied = self.copied.saturating_add(1);
+            self.copied_bytes = self.copied_bytes.saturating_add(image_bytes(&shared));
+            (*shared).clone()
+        })
     }
 
     fn sync_stage(&self) {

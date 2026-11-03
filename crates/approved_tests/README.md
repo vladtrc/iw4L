@@ -109,13 +109,14 @@ never a quit.
 
 ```sh
 cargo xtask master install root@vps --name dev --port 4434 --ca ~/.iw4l/dev-vpn-ca
-cp "$IW4L_GAMES/dev.iw4l-server" context/simulated-iw4l-folder/community-dev.iw4l-server
+cp "$IW4L_GAMES/dev.iw4l-server" "$IW4L_GAMES/community-dev.iw4l-server"
 make approved SCENARIO=master_duo_chaos
 ```
 
-`master_duo_chaos` stages the Linux game binary directly in
-`context/simulated-iw4l-folder`. Both processes run from that directory and
-select `IW4L_COMMUNITY` when set, otherwise its `community-dev.iw4l-server`.
+`master_duo_chaos` stages a private hard link or copy of the Linux game binary
+in its run's `install/` directory. Both processes run there with isolated
+accounts, settings and artifacts. The descriptor is `community-dev.iw4l-server` under the resolved games root
+(`IW4L_GAMES`); each process gets it as the saved choice in its own `iw4l-artifacts/community.json`.
 The runner refuses descriptors outside
 the dev channel (port 4434 and a TLS name matching the descriptor host or `iw4l-dev`). Networking uses the descriptor's address,
 TLS name and embedded CA. Linux development binaries select the descriptor without fetching

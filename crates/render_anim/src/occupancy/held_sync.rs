@@ -2,9 +2,9 @@ use bevy::prelude::*;
 use frame::ScopeApp;
 use frame::{LaunchReport, LifeEnded, LifeFrontPublished, LifeStarted, ViewSubject};
 use net::{ClientSet, LocalPresentClient, PresentedSnapshot};
+use std::borrow::Cow;
 
 use crate::anim::fpv_prepared::{FpvOwnerInputs, PreparedFpv};
-use crate::gaps::{RenderGap, RenderGapCause, RenderPresentationGaps};
 use crate::occupancy::fpv_present::{
     FpvHeldLife, FpvHeldSettled, FpvPlacementRoot, FpvState, FpvStatusGap, PendingFpvSpawn,
     PendingFpvSpawnRequest, SessionViewmodel,
@@ -23,7 +23,6 @@ pub fn sync_fpv_to_held_weapon(
     mut settled: ResMut<FpvHeldSettled>,
     mut held_life: ResMut<FpvHeldLife>,
     mut status: ResMut<FpvStatusGap>,
-    gaps: Res<RenderPresentationGaps>,
     mut report: Option<ResMut<LaunchReport>>,
     existing_fpv: Query<Entity, With<FpvPlacementRoot>>,
     mut started: MessageReader<LifeStarted>,
@@ -130,7 +129,7 @@ pub fn sync_fpv_to_held_weapon(
             settled.0 = Some(0);
             let state = FpvState::ClearedNoWeapon;
             if let Some(report) = report.as_deref_mut() {
-                report.sim_gap = state.label();
+                report.sim_gap = state.label().to_owned();
             }
             status.0 = Some(state);
         }
@@ -156,15 +155,13 @@ pub fn sync_fpv_to_held_weapon(
     }
 
     let Some(table) = prepared.table() else {
-        let waiting = FpvState::Blocked(RenderGapCause::FpvCatalogMissing);
+        let waiting = FpvState::Blocked(Cow::Borrowed("FPV catalog missing"));
         if status.0.as_ref() != Some(&waiting) {
             status.0 = Some(waiting);
         }
         return;
     };
-    let Some((weapon_handle, parent_handle)) =
-        owners.handles(presented.weapon_epoch(), held, ps.weapon_primary)
-    else {
+    let Some((weapon_handle, parent_handle)) = owners.handles(held, ps.weapon_primary) else {
         return;
     };
     if owners.bind(table).is_none() {
@@ -194,18 +191,19 @@ pub fn sync_fpv_to_held_weapon(
             session_vm.0 = None;
             pending_fpv.0 = None;
             settled.0 = Some(held);
-            FpvState::Blocked(RenderGapCause::FpvGunXModelUnresolved { weapon_id: held })
+            FpvState::Blocked(Cow::<'static, str>::Owned(format!(
+                "gunXModel[0] unresolved for weapon {weapon_id}",
+                weapon_id = held
+            )))
         }
     };
 
     if let Some(cause) = state.cause() {
-        gaps.raise(cause.clone());
-    } else {
-        gaps.clear(RenderGap::FpvViewmodel);
+        diag::warn_once!(World, "{}", cause.clone());
     }
     diag::info!(Fpv, "fpv held sync: weapon={held} — {state}");
     if let Some(report) = report.as_deref_mut() {
-        report.sim_gap = state.label();
+        report.sim_gap = state.label().to_owned();
     }
     status.0 = Some(state);
 }
@@ -221,7 +219,7 @@ pub fn sync_fpv_status_to_probe(
         return;
     };
     if let Some(report) = report.as_deref_mut() {
-        report.sim_gap = state.label();
+        report.sim_gap = state.label().to_owned();
     }
 }
 

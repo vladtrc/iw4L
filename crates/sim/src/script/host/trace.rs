@@ -54,6 +54,13 @@ pub(crate) fn entities(runtime: &RoundScript, models: &[EntityCollisionCapabilit
                     .filter(|node| node.state.weight > 0.0)
                     .find_map(|node| node.clip.as_deref())
             });
-        perf::truck(id.to_wire(), state, integer(body, "health"), clip, None);
+        perf::instant!("truck", "iw4l.sim", |ctx| {
+            let (script_model_id, health, death_clip): (u32, Option<i64>, Option<&str>) =
+                (id.to_wire(), integer(body, "health"), clip);
+            ctx.arg("script_model_id", i64::from(script_model_id));
+            ctx.arg("state", state);
+            ctx.arg("health", health);
+            ctx.arg("death_clip", death_clip);
+        });
     }
 }

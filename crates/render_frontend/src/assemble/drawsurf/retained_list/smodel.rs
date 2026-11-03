@@ -152,6 +152,7 @@ pub(super) struct SmodelDestinationRecord {
     lighting_handle: u32,
     pub(super) packed_lighting: Option<[u8; 4]>,
     placement: u32,
+    visibility_slot: u32,
     stream: Option<lighting_iw4::SmodelSurfPath>,
     cache_index: Option<u16>,
     pretess: Option<SmodelPretessRange>,
@@ -186,6 +187,8 @@ impl SmodelDestinationRecord {
                 lighting_handle: self.lighting_handle,
                 packed_lighting: self.packed_lighting,
                 placement: self.placement,
+                visibility_slot: self.visibility_slot,
+                owner_world_from_local: self.world_from_local,
                 stream: self.stream,
                 cache_index: self.cache_index,
                 pretess: self.pretess,
@@ -230,10 +233,12 @@ impl SmodelPretessBuilder {
             cache_indices,
             self.enabled,
             false,
-            self.cmd_used,
-            self.cmd_cap,
-            self.dest_used(),
-            render_frame::DYNAMIC_INDEX_BUFFER_CAPACITY,
+            lighting_iw4::SmodelPretessSpace {
+                command_used: self.cmd_used,
+                command_capacity: self.cmd_cap,
+                index_used: self.dest_used(),
+                index_capacity: render_frame::DYNAMIC_INDEX_BUFFER_CAPACITY,
+            },
             runs,
         )
     }
@@ -284,26 +289,14 @@ pub(super) struct SmodelConsumeResult {
 pub(super) fn push_smodel_surf_bucket(
     lists: &mut lighting_iw4::SmodelSurfBucketLists,
     queues: &mut SmodelBucketEmitQueues,
-    lod: i32,
-    smc_enable: bool,
-    lighting_nonzero: bool,
-    lodinfo_29: u8,
+    selected_bucket: Option<i32>,
     cache_index: u16,
     smodel_index: u16,
-    lod_is_rigid: Option<bool>,
     mut source: SmodelBucketEmitSource,
 ) -> (Option<i32>, bool) {
-    let Some(lod_is_rigid) = lod_is_rigid else {
+    let Some(bucket) = selected_bucket else {
         return (None, false);
     };
-    let bucket = lighting_iw4::add_static_model_surf_to_bucket(
-        lod,
-        smc_enable,
-        lighting_nonzero,
-        lodinfo_29,
-        cache_index,
-        lod_is_rigid,
-    );
     let payload = lighting_iw4::smodel_bucket_store_payload(bucket, smodel_index, cache_index);
     let Some(push) = lighting_iw4::smodel_surf_bucket_push(lists, bucket, payload) else {
         return (None, false);
@@ -319,43 +312,151 @@ pub(super) fn push_smodel_surf_bucket(
     (Some(bucket), push == lighting_iw4::SmodelBucketPush::Full)
 }
 
-pub(super) fn expand_smodel_destination(
-    source: SmodelBucketEmitSource,
-    source_path: Option<lighting_iw4::SmodelSurfPath>,
-    smodel_plan: &SmodelGpuPlan,
-    catalog: &crate::assemble::drawsurf::RuntimeMaterialCatalog,
-    _cache: Option<&WorldStaticModelCache>,
-    _pretess: &mut SmodelPretessBuilder,
-    out: &mut Vec<SmodelDestinationRecord>,
-    custom_skip: Option<&mut HashSet<u32>>,
-) -> SmodelExpandStats {
-    let mut stats = SmodelExpandStats::default();
-    let Some(placement) = smodel_plan.placements.get(source.placement as usize) else {
-        return stats;
-    };
-    let Some(mesh) = smodel_plan.meshes.get(placement.mesh) else {
-        return stats;
-    };
-    let lod_surfs = mesh
-        .surfaces_by_lod
-        .get(usize::from(source.lod))
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let Some(object_id) = source
-        .placement
-        .checked_add(1)
-        .and_then(|id| u16::try_from(id).ok())
-    else {
-        return stats;
-    };
-    for &(surface, authored) in lod_surfs {
+pub(super) struct SmodelDestinationWriter<'a> {
+    pub(super) smodel_plan: &'a SmodelGpuPlan,
+    pub(super) catalog: &'a crate::assemble::drawsurf::RuntimeMaterialCatalog,
+    pub(super) out: &'a mut Vec<SmodelDestinationRecord>,
+}
+
+impl SmodelDestinationWriter<'_> {
+    pub(super) fn expand(
+        &mut self,
+        source: SmodelBucketEmitSource,
+        source_path: Option<lighting_iw4::SmodelSurfPath>,
+        custom_skip: Option<&mut HashSet<u32>>,
+    ) -> SmodelExpandStats {
+        let smodel_plan = self.smodel_plan;
+        let catalog = self.catalog;
+        let out = &mut *self.out;
+        let mut stats = SmodelExpandStats::default();
+        let Some(placement) = smodel_plan.placements.get(source.placement as usize) else {
+            return stats;
+        };
+        let Some(mesh) = smodel_plan.meshes.get(placement.mesh) else {
+            return stats;
+        };
+        let lod_surfs = mesh
+            .surfaces_by_lod
+            .get(usize::from(source.lod))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let Some(object_id) = source
+            .placement
+            .checked_add(1)
+            .and_then(|id| u16::try_from(id).ok())
+        else {
+            return stats;
+        };
+        for &(surface, authored) in lod_surfs {
+            if !smodel_colour_emits(source.pass, catalog, authored) {
+                continue;
+            }
+            if !smodel_sun_shadow_emits(source.pass, catalog, authored) {
+                stats.skipped_custom = stats.skipped_custom.saturating_add(1);
+                continue;
+            }
+            let material = match source.pass {
+                SmodelDestinationPass::Colour if placement.lit => smodel_plan
+                    .lit_material_key
+                    .get(&(authored, placement.reflection_probe_index))
+                    .copied(),
+                SmodelDestinationPass::Colour => {
+                    smodel_plan.unlit_material_key.get(&authored).copied()
+                }
+                SmodelDestinationPass::SunShadow => smodel_plan
+                    .lit_material_key
+                    .get(&(authored, placement.reflection_probe_index))
+                    .copied()
+                    .or_else(|| smodel_plan.unlit_material_key.get(&authored).copied())
+                    .or_else(|| smodel_plan.shadow_material_key.get(&authored).copied()),
+            };
+            let Some(material) = material else {
+                continue;
+            };
+            let Some(mat) = smodel_plan.materials.get(material as usize) else {
+                continue;
+            };
+            if source.pass == SmodelDestinationPass::Colour
+                && placement.lit != mat.model_lighting_required
+            {
+                continue;
+            }
+            let Some(material_sorted_index) = mat.material_sorted_index else {
+                continue;
+            };
+            let Some(source_path) = source_path else {
+                continue;
+            };
+            let stream = lighting_iw4::smodel_dest_path(source_path, false);
+            let pretess_range = None;
+            let cache_index = matches!(
+                stream,
+                lighting_iw4::SmodelSurfPath::Cached | lighting_iw4::SmodelSurfPath::Pretess
+            )
+            .then_some(source.payload);
+            out.push(SmodelDestinationRecord {
+                material_rank: material_sorted_index,
+                key: smodel_drawsurf_key(
+                    mat.sort_key,
+                    material_sorted_index,
+                    object_id,
+                    placement.reflection_probe_index,
+                    placement.primary_light_index,
+                    stream,
+                ),
+                surface,
+                material,
+                world_from_local: source.world_from_local,
+                lighting_handle: source.lighting_handle,
+                packed_lighting: source.packed_lighting,
+                placement: source.placement,
+                visibility_slot: placement.lighting_slot.unwrap_or(source.placement as usize)
+                    as u32,
+                stream: Some(stream),
+                cache_index,
+                pretess: pretess_range,
+                surface_samplers: crate::assemble::drawsurf::SurfaceSamplerInputs {
+                    reflection_probe: Some(crate::assemble::drawsurf::SurfaceReflectionProbeId(
+                        placement.reflection_probe_index,
+                    )),
+                    ..Default::default()
+                },
+            });
+            stats.emitted = stats.emitted.saturating_add(1);
+        }
+        note_custom_only_skip(stats, source.placement, custom_skip);
+        stats
+    }
+
+    fn push(
+        &mut self,
+        source: SmodelBucketEmitSource,
+        surface: u32,
+        authored: Option<assets::MaterialIndex>,
+        stream: Option<lighting_iw4::SmodelSurfPath>,
+        pretess: Option<SmodelPretessRange>,
+    ) -> SmodelExpandStats {
+        let smodel_plan = self.smodel_plan;
+        let catalog = self.catalog;
+        let out = &mut *self.out;
+        let mut stats = SmodelExpandStats::default();
         if !smodel_colour_emits(source.pass, catalog, authored) {
-            continue;
+            return stats;
         }
         if !smodel_sun_shadow_emits(source.pass, catalog, authored) {
-            stats.skipped_custom = stats.skipped_custom.saturating_add(1);
-            continue;
+            stats.skipped_custom = 1;
+            return stats;
         }
+        let Some(placement) = smodel_plan.placements.get(source.placement as usize) else {
+            return stats;
+        };
+        let Some(object_id) = source
+            .placement
+            .checked_add(1)
+            .and_then(|id| u16::try_from(id).ok())
+        else {
+            return stats;
+        };
         let material = match source.pass {
             SmodelDestinationPass::Colour if placement.lit => smodel_plan
                 .lit_material_key
@@ -370,24 +471,22 @@ pub(super) fn expand_smodel_destination(
                 .or_else(|| smodel_plan.shadow_material_key.get(&authored).copied()),
         };
         let Some(material) = material else {
-            continue;
+            return stats;
         };
         let Some(mat) = smodel_plan.materials.get(material as usize) else {
-            continue;
+            return stats;
         };
         if source.pass == SmodelDestinationPass::Colour
             && placement.lit != mat.model_lighting_required
         {
-            continue;
+            return stats;
         }
         let Some(material_sorted_index) = mat.material_sorted_index else {
-            continue;
+            return stats;
         };
-        let Some(source_path) = source_path else {
-            continue;
+        let Some(stream) = stream else {
+            return stats;
         };
-        let stream = lighting_iw4::smodel_dest_path(source_path, false);
-        let pretess_range = None;
         let cache_index = matches!(
             stream,
             lighting_iw4::SmodelSurfPath::Cached | lighting_iw4::SmodelSurfPath::Pretess
@@ -409,9 +508,10 @@ pub(super) fn expand_smodel_destination(
             lighting_handle: source.lighting_handle,
             packed_lighting: source.packed_lighting,
             placement: source.placement,
+            visibility_slot: placement.lighting_slot.unwrap_or(source.placement as usize) as u32,
             stream: Some(stream),
             cache_index,
-            pretess: pretess_range,
+            pretess,
             surface_samplers: crate::assemble::drawsurf::SurfaceSamplerInputs {
                 reflection_probe: Some(crate::assemble::drawsurf::SurfaceReflectionProbeId(
                     placement.reflection_probe_index,
@@ -419,10 +519,228 @@ pub(super) fn expand_smodel_destination(
                 ..Default::default()
             },
         });
-        stats.emitted = stats.emitted.saturating_add(1);
+        stats.emitted = 1;
+        stats
     }
-    note_custom_only_skip(stats, source.placement, custom_skip);
-    stats
+
+    fn expand_cached_batch(
+        &mut self,
+        sources: &[SmodelBucketEmitSource],
+        cache: Option<&WorldStaticModelCache>,
+        pretess: &mut SmodelPretessBuilder,
+        mut custom_skip: Option<&mut HashSet<u32>>,
+    ) -> SmodelExpandStats {
+        let smodel_plan = self.smodel_plan;
+        let mut stats = SmodelExpandStats::default();
+        let Some(&first) = sources.first() else {
+            return stats;
+        };
+        let Some(placement) = smodel_plan.placements.get(first.placement as usize) else {
+            return stats;
+        };
+        let Some(mesh) = smodel_plan.meshes.get(placement.mesh) else {
+            return stats;
+        };
+        let lod_surfs = mesh
+            .surfaces_by_lod
+            .get(usize::from(first.lod))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if lod_surfs.is_empty() {
+            return stats;
+        }
+        let ids: Vec<u16> = sources.iter().map(|source| source.payload).collect();
+        let mut runs: Vec<&[u16]> = Vec::new();
+        let mut complete = true;
+        for &(surface, _) in lod_surfs {
+            for source in sources {
+                let Some(place) = smodel_plan.placements.get(source.placement as usize) else {
+                    complete = false;
+                    continue;
+                };
+                match cached_index_run(cache, place, surface) {
+                    Some(run) => runs.push(run),
+                    None => complete = false,
+                }
+            }
+        }
+        let decision = if complete {
+            pretess.decide(&ids, &runs)
+        } else {
+            pretess.decide(&ids, &[])
+        };
+        if decision.cmd_kind == lighting_iw4::SmodelCmdKind::Unchanged && decision.consumed == 0 {
+            for &source in sources {
+                let one = self.expand(
+                    source,
+                    Some(lighting_iw4::SmodelSurfPath::Cached),
+                    custom_skip.as_mut().map(|set| &mut **set),
+                );
+                stats.emitted = stats.emitted.saturating_add(one.emitted);
+                stats.skipped_custom = stats.skipped_custom.saturating_add(one.skipped_custom);
+            }
+            return stats;
+        }
+        if let Some(alloc) = decision.pretess
+            && decision.dest == lighting_iw4::SmodelSurfPath::Pretess
+            && let Some(batch_range) = pretess.commit_pretess(alloc, &runs)
+        {
+            let mut start = batch_range.start;
+            for &(surface, authored) in lod_surfs {
+                let mut count = 0u32;
+                for source in sources {
+                    if let Some(place) = smodel_plan.placements.get(source.placement as usize)
+                        && let Some(run) = cached_index_run(cache, place, surface)
+                    {
+                        count = count.saturating_add(run.len() as u32);
+                    }
+                }
+                let range = (count > 0).then_some(SmodelPretessRange { start, count });
+                start = start.saturating_add(count);
+                let one = self.push(
+                    first,
+                    surface,
+                    authored,
+                    Some(lighting_iw4::SmodelSurfPath::Pretess),
+                    range,
+                );
+                stats.emitted = stats.emitted.saturating_add(one.emitted);
+                stats.skipped_custom = stats.skipped_custom.saturating_add(one.skipped_custom);
+            }
+            note_custom_only_skip(
+                stats,
+                first.placement,
+                custom_skip.as_mut().map(|set| &mut **set),
+            );
+            return stats;
+        }
+        for &source in sources {
+            let Some(place) = smodel_plan.placements.get(source.placement as usize) else {
+                continue;
+            };
+            let mut one = SmodelExpandStats::default();
+            for &(surface, authored) in lod_surfs {
+                let range = cached_index_run(cache, place, surface)
+                    .and_then(|run| pretess.append_cached_fallback(run));
+                let pushed = self.push(
+                    source,
+                    surface,
+                    authored,
+                    Some(lighting_iw4::SmodelSurfPath::Cached),
+                    range,
+                );
+                one.emitted = one.emitted.saturating_add(pushed.emitted);
+                one.skipped_custom = one.skipped_custom.saturating_add(pushed.skipped_custom);
+            }
+            note_custom_only_skip(
+                one,
+                source.placement,
+                custom_skip.as_mut().map(|set| &mut **set),
+            );
+            stats.emitted = stats.emitted.saturating_add(one.emitted);
+            stats.skipped_custom = stats.skipped_custom.saturating_add(one.skipped_custom);
+        }
+        stats
+    }
+
+    pub(super) fn consume_buckets(
+        &mut self,
+        lists: &mut lighting_iw4::SmodelSurfBucketLists,
+        queues: &mut SmodelBucketEmitQueues,
+        active_mask: u32,
+        cache: Option<&WorldStaticModelCache>,
+        pretess: &mut SmodelPretessBuilder,
+        mut custom_skip: Option<&mut HashSet<u32>>,
+    ) -> SmodelConsumeResult {
+        let smodel_plan = self.smodel_plan;
+        let mut consumed = [None; lighting_iw4::SMODEL_BUCKET_LIST_N];
+        let n = lighting_iw4::smodel_bucket_lists_consume(lists, active_mask, &mut consumed);
+        let mut result = SmodelConsumeResult {
+            buckets: n as u32,
+            context_refused: 0,
+            skipped_custom: 0,
+        };
+        for bucket in consumed.into_iter().take(n).flatten() {
+            let sources = std::mem::take(&mut queues.rows[bucket.bucket as usize]);
+            if sources.len() != usize::from(bucket.count) {
+                result.context_refused = result.context_refused.saturating_add(
+                    u32::try_from(sources.len().abs_diff(usize::from(bucket.count)))
+                        .unwrap_or(u32::MAX),
+                );
+            }
+            let count = usize::from(bucket.count).min(sources.len());
+            let mut i = 0usize;
+            while i < count {
+                let source = sources[i];
+                if source.payload != bucket.ids[i] || source.lod != bucket.lod {
+                    result.context_refused = result.context_refused.saturating_add(1);
+                    i += 1;
+                    continue;
+                }
+                if bucket.source != lighting_iw4::SmodelSurfPath::Cached {
+                    let stats = self.expand(
+                        source,
+                        Some(bucket.source),
+                        custom_skip.as_mut().map(|set| &mut **set),
+                    );
+                    result.skipped_custom =
+                        result.skipped_custom.saturating_add(stats.skipped_custom);
+                    i += 1;
+                    continue;
+                }
+                let ids = &bucket.ids[i..count];
+                let rest = &sources[i..count];
+                let bank_n = lighting_iw4::smodel_same_bank_count(ids).min(rest.len());
+                let batch_state = smodel_plan
+                    .placements
+                    .get(source.placement as usize)
+                    .map(smodel_cached_batch_state);
+                let mut n = 1usize;
+                while n < bank_n {
+                    let next = rest[n];
+                    if next.payload != ids[n]
+                        || next.lod != bucket.lod
+                        || smodel_plan
+                            .placements
+                            .get(next.placement as usize)
+                            .map(smodel_cached_batch_state)
+                            != batch_state
+                    {
+                        break;
+                    }
+                    n += 1;
+                }
+                let stats = self.expand_cached_batch(
+                    &rest[..n],
+                    cache,
+                    pretess,
+                    custom_skip.as_mut().map(|set| &mut **set),
+                );
+                result.skipped_custom = result.skipped_custom.saturating_add(stats.skipped_custom);
+                i += n;
+            }
+        }
+        result
+    }
+
+    pub(super) fn consume_tail(
+        &mut self,
+        lists: &mut lighting_iw4::SmodelSurfBucketLists,
+        queues: &mut SmodelBucketEmitQueues,
+        cache: Option<&WorldStaticModelCache>,
+        pretess: &mut SmodelPretessBuilder,
+        custom_skip: Option<&mut HashSet<u32>>,
+    ) -> SmodelConsumeResult {
+        let mut mask = 0u32;
+        for (bucket, count) in lists.count.iter().enumerate() {
+            if *count > 0
+                && let Some(bucket_mask) = lighting_iw4::smodel_bucket_mask(bucket as u8)
+            {
+                mask |= bucket_mask;
+            }
+        }
+        self.consume_buckets(lists, queues, mask, cache, pretess, custom_skip)
+    }
 }
 
 fn cached_index_run<'a>(
@@ -435,354 +753,11 @@ fn cached_index_run<'a>(
     (!run.is_empty() && run.len().is_multiple_of(3)).then_some(run.as_slice())
 }
 
-fn push_smodel_destination(
-    source: SmodelBucketEmitSource,
-    surface: u32,
-    authored: Option<assets::MaterialIndex>,
-    stream: Option<lighting_iw4::SmodelSurfPath>,
-    pretess: Option<SmodelPretessRange>,
-    smodel_plan: &SmodelGpuPlan,
-    catalog: &crate::assemble::drawsurf::RuntimeMaterialCatalog,
-    out: &mut Vec<SmodelDestinationRecord>,
-) -> SmodelExpandStats {
-    let mut stats = SmodelExpandStats::default();
-    if !smodel_colour_emits(source.pass, catalog, authored) {
-        return stats;
-    }
-    if !smodel_sun_shadow_emits(source.pass, catalog, authored) {
-        stats.skipped_custom = 1;
-        return stats;
-    }
-    let Some(placement) = smodel_plan.placements.get(source.placement as usize) else {
-        return stats;
-    };
-    let Some(object_id) = source
-        .placement
-        .checked_add(1)
-        .and_then(|id| u16::try_from(id).ok())
-    else {
-        return stats;
-    };
-    let material = match source.pass {
-        SmodelDestinationPass::Colour if placement.lit => smodel_plan
-            .lit_material_key
-            .get(&(authored, placement.reflection_probe_index))
-            .copied(),
-        SmodelDestinationPass::Colour => smodel_plan.unlit_material_key.get(&authored).copied(),
-        SmodelDestinationPass::SunShadow => smodel_plan
-            .lit_material_key
-            .get(&(authored, placement.reflection_probe_index))
-            .copied()
-            .or_else(|| smodel_plan.unlit_material_key.get(&authored).copied())
-            .or_else(|| smodel_plan.shadow_material_key.get(&authored).copied()),
-    };
-    let Some(material) = material else {
-        return stats;
-    };
-    let Some(mat) = smodel_plan.materials.get(material as usize) else {
-        return stats;
-    };
-    if source.pass == SmodelDestinationPass::Colour && placement.lit != mat.model_lighting_required
-    {
-        return stats;
-    }
-    let Some(material_sorted_index) = mat.material_sorted_index else {
-        return stats;
-    };
-    let Some(stream) = stream else {
-        return stats;
-    };
-    let cache_index = matches!(
-        stream,
-        lighting_iw4::SmodelSurfPath::Cached | lighting_iw4::SmodelSurfPath::Pretess
-    )
-    .then_some(source.payload);
-    out.push(SmodelDestinationRecord {
-        material_rank: material_sorted_index,
-        key: smodel_drawsurf_key(
-            mat.sort_key,
-            material_sorted_index,
-            object_id,
-            placement.reflection_probe_index,
-            placement.primary_light_index,
-            stream,
-        ),
-        surface,
-        material,
-        world_from_local: source.world_from_local,
-        lighting_handle: source.lighting_handle,
-        packed_lighting: source.packed_lighting,
-        placement: source.placement,
-        stream: Some(stream),
-        cache_index,
-        pretess,
-        surface_samplers: crate::assemble::drawsurf::SurfaceSamplerInputs {
-            reflection_probe: Some(crate::assemble::drawsurf::SurfaceReflectionProbeId(
-                placement.reflection_probe_index,
-            )),
-            ..Default::default()
-        },
-    });
-    stats.emitted = 1;
-    stats
-}
-
-fn expand_cached_destination_batch(
-    sources: &[SmodelBucketEmitSource],
-    smodel_plan: &SmodelGpuPlan,
-    catalog: &crate::assemble::drawsurf::RuntimeMaterialCatalog,
-    cache: Option<&WorldStaticModelCache>,
-    pretess: &mut SmodelPretessBuilder,
-    out: &mut Vec<SmodelDestinationRecord>,
-    mut custom_skip: Option<&mut HashSet<u32>>,
-) -> SmodelExpandStats {
-    let mut stats = SmodelExpandStats::default();
-    let Some(&first) = sources.first() else {
-        return stats;
-    };
-    let Some(placement) = smodel_plan.placements.get(first.placement as usize) else {
-        return stats;
-    };
-    let Some(mesh) = smodel_plan.meshes.get(placement.mesh) else {
-        return stats;
-    };
-    let lod_surfs = mesh
-        .surfaces_by_lod
-        .get(usize::from(first.lod))
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    if lod_surfs.is_empty() {
-        return stats;
-    }
-    let ids: Vec<u16> = sources.iter().map(|source| source.payload).collect();
-    let mut runs: Vec<&[u16]> = Vec::new();
-    let mut complete = true;
-    for &(surface, _) in lod_surfs {
-        for source in sources {
-            let Some(place) = smodel_plan.placements.get(source.placement as usize) else {
-                complete = false;
-                continue;
-            };
-            match cached_index_run(cache, place, surface) {
-                Some(run) => runs.push(run),
-                None => complete = false,
-            }
-        }
-    }
-    let decision = if complete {
-        pretess.decide(&ids, &runs)
-    } else {
-        pretess.decide(&ids, &[])
-    };
-    if decision.cmd_kind == lighting_iw4::SmodelCmdKind::Unchanged && decision.consumed == 0 {
-        for &source in sources {
-            let one = expand_smodel_destination(
-                source,
-                Some(lighting_iw4::SmodelSurfPath::Cached),
-                smodel_plan,
-                catalog,
-                cache,
-                pretess,
-                out,
-                custom_skip.as_mut().map(|set| &mut **set),
-            );
-            stats.emitted = stats.emitted.saturating_add(one.emitted);
-            stats.skipped_custom = stats.skipped_custom.saturating_add(one.skipped_custom);
-        }
-        return stats;
-    }
-    if let Some(alloc) = decision.pretess
-        && decision.dest == lighting_iw4::SmodelSurfPath::Pretess
-        && let Some(batch_range) = pretess.commit_pretess(alloc, &runs)
-    {
-        let mut start = batch_range.start;
-        for &(surface, authored) in lod_surfs {
-            let mut count = 0u32;
-            for source in sources {
-                if let Some(place) = smodel_plan.placements.get(source.placement as usize)
-                    && let Some(run) = cached_index_run(cache, place, surface)
-                {
-                    count = count.saturating_add(run.len() as u32);
-                }
-            }
-            let range = (count > 0).then_some(SmodelPretessRange { start, count });
-            start = start.saturating_add(count);
-            let one = push_smodel_destination(
-                first,
-                surface,
-                authored,
-                Some(lighting_iw4::SmodelSurfPath::Pretess),
-                range,
-                smodel_plan,
-                catalog,
-                out,
-            );
-            stats.emitted = stats.emitted.saturating_add(one.emitted);
-            stats.skipped_custom = stats.skipped_custom.saturating_add(one.skipped_custom);
-        }
-        note_custom_only_skip(
-            stats,
-            first.placement,
-            custom_skip.as_mut().map(|set| &mut **set),
-        );
-        return stats;
-    }
-    for &source in sources {
-        let Some(place) = smodel_plan.placements.get(source.placement as usize) else {
-            continue;
-        };
-        let mut one = SmodelExpandStats::default();
-        for &(surface, authored) in lod_surfs {
-            let range = cached_index_run(cache, place, surface)
-                .and_then(|run| pretess.append_cached_fallback(run));
-            let pushed = push_smodel_destination(
-                source,
-                surface,
-                authored,
-                Some(lighting_iw4::SmodelSurfPath::Cached),
-                range,
-                smodel_plan,
-                catalog,
-                out,
-            );
-            one.emitted = one.emitted.saturating_add(pushed.emitted);
-            one.skipped_custom = one.skipped_custom.saturating_add(pushed.skipped_custom);
-        }
-        note_custom_only_skip(
-            one,
-            source.placement,
-            custom_skip.as_mut().map(|set| &mut **set),
-        );
-        stats.emitted = stats.emitted.saturating_add(one.emitted);
-        stats.skipped_custom = stats.skipped_custom.saturating_add(one.skipped_custom);
-    }
-    stats
-}
-
 fn smodel_cached_batch_state(placement: &SmodelPlacement) -> (usize, bool, u8, u8) {
     (
         placement.mesh,
         placement.lit,
         placement.reflection_probe_index,
         placement.primary_light_index,
-    )
-}
-
-pub(super) fn consume_smodel_buckets(
-    lists: &mut lighting_iw4::SmodelSurfBucketLists,
-    queues: &mut SmodelBucketEmitQueues,
-    active_mask: u32,
-    smodel_plan: &SmodelGpuPlan,
-    catalog: &crate::assemble::drawsurf::RuntimeMaterialCatalog,
-    cache: Option<&WorldStaticModelCache>,
-    pretess: &mut SmodelPretessBuilder,
-    out: &mut Vec<SmodelDestinationRecord>,
-    mut custom_skip: Option<&mut HashSet<u32>>,
-) -> SmodelConsumeResult {
-    let mut consumed = [None; lighting_iw4::SMODEL_BUCKET_LIST_N];
-    let n = lighting_iw4::smodel_bucket_lists_consume(lists, active_mask, &mut consumed);
-    let mut result = SmodelConsumeResult {
-        buckets: n as u32,
-        context_refused: 0,
-        skipped_custom: 0,
-    };
-    for bucket in consumed.into_iter().take(n).flatten() {
-        let sources = std::mem::take(&mut queues.rows[bucket.bucket as usize]);
-        if sources.len() != usize::from(bucket.count) {
-            result.context_refused = result.context_refused.saturating_add(
-                u32::try_from(sources.len().abs_diff(usize::from(bucket.count)))
-                    .unwrap_or(u32::MAX),
-            );
-        }
-        let count = usize::from(bucket.count).min(sources.len());
-        let mut i = 0usize;
-        while i < count {
-            let source = sources[i];
-            if source.payload != bucket.ids[i] || source.lod != bucket.lod {
-                result.context_refused = result.context_refused.saturating_add(1);
-                i += 1;
-                continue;
-            }
-            if bucket.source != lighting_iw4::SmodelSurfPath::Cached {
-                let stats = expand_smodel_destination(
-                    source,
-                    Some(bucket.source),
-                    smodel_plan,
-                    catalog,
-                    cache,
-                    pretess,
-                    out,
-                    custom_skip.as_mut().map(|set| &mut **set),
-                );
-                result.skipped_custom = result.skipped_custom.saturating_add(stats.skipped_custom);
-                i += 1;
-                continue;
-            }
-            let ids = &bucket.ids[i..count];
-            let rest = &sources[i..count];
-            let bank_n = lighting_iw4::smodel_same_bank_count(ids).min(rest.len());
-            let batch_state = smodel_plan
-                .placements
-                .get(source.placement as usize)
-                .map(smodel_cached_batch_state);
-            let mut n = 1usize;
-            while n < bank_n {
-                let next = rest[n];
-                if next.payload != ids[n]
-                    || next.lod != bucket.lod
-                    || smodel_plan
-                        .placements
-                        .get(next.placement as usize)
-                        .map(smodel_cached_batch_state)
-                        != batch_state
-                {
-                    break;
-                }
-                n += 1;
-            }
-            let stats = expand_cached_destination_batch(
-                &rest[..n],
-                smodel_plan,
-                catalog,
-                cache,
-                pretess,
-                out,
-                custom_skip.as_mut().map(|set| &mut **set),
-            );
-            result.skipped_custom = result.skipped_custom.saturating_add(stats.skipped_custom);
-            i += n;
-        }
-    }
-    result
-}
-
-pub(super) fn consume_smodel_bucket_tail(
-    lists: &mut lighting_iw4::SmodelSurfBucketLists,
-    queues: &mut SmodelBucketEmitQueues,
-    smodel_plan: &SmodelGpuPlan,
-    catalog: &crate::assemble::drawsurf::RuntimeMaterialCatalog,
-    cache: Option<&WorldStaticModelCache>,
-    pretess: &mut SmodelPretessBuilder,
-    out: &mut Vec<SmodelDestinationRecord>,
-    custom_skip: Option<&mut HashSet<u32>>,
-) -> SmodelConsumeResult {
-    let mut mask = 0u32;
-    for (bucket, count) in lists.count.iter().enumerate() {
-        if *count > 0
-            && let Some(bucket_mask) = lighting_iw4::smodel_bucket_mask(bucket as u8)
-        {
-            mask |= bucket_mask;
-        }
-    }
-    consume_smodel_buckets(
-        lists,
-        queues,
-        mask,
-        smodel_plan,
-        catalog,
-        cache,
-        pretess,
-        out,
-        custom_skip,
     )
 }

@@ -1,128 +1,126 @@
+use bevy::prelude::*;
 use entity_iw4::Trajectory;
-use sim::{ClientId, ProjectileId, ProjectileState};
+use sim::{ClientId, FireCause, ProjectileState};
+use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum PresentedProjectile {
-    Authoritative(ProjectileState),
+use crate::client::presentation::entities::CEntity;
 
-    Predicted {
-        owner: ClientId,
-        weapon: u32,
-        origin: [f32; 3],
-        velocity: [f32; 3],
-        pos: Trajectory,
-        apos: Trajectory,
-        launch_time: i32,
-    },
+const PREDICTED_PROJECTILE_GRACE: Duration = Duration::from_millis(200);
+
+/// Flight of a projectile entity: its authoritative row, or the owner's launch until one arrives.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct ProjectileMotion {
+    pub owner: ClientId,
+    pub weapon: u32,
+    pub pos: Trajectory,
+    pub apos: Trajectory,
+    pub launch_time: i32,
+    pub spawn_time_ms: i32,
 }
 
-pub fn merge_presented_projectiles(
-    authoritative: &[ProjectileState],
-    predicted: &[ProjectileState],
-    local: ClientId,
-) -> Vec<PresentedProjectile> {
-    let mut out: Vec<PresentedProjectile> = authoritative
-        .iter()
-        .copied()
-        .map(PresentedProjectile::Authoritative)
-        .collect();
-
-    let authoritative_local_weapons = authoritative
-        .iter()
-        .filter(|p| p.owner == local)
-        .map(|p| p.weapon)
-        .collect::<std::collections::HashSet<_>>();
-
-    for projectile in predicted.iter().filter(|p| p.owner == local) {
-        if authoritative_local_weapons.contains(&projectile.weapon) {
-            continue;
-        }
-        out.push(PresentedProjectile::Predicted {
+impl ProjectileMotion {
+    pub fn from_state(projectile: &ProjectileState) -> Self {
+        Self {
             owner: projectile.owner,
             weapon: projectile.weapon,
-            origin: projectile.origin,
-            velocity: projectile.velocity,
             pos: projectile.pos,
             apos: projectile.apos,
             launch_time: projectile.launch_time,
-        });
-    }
-
-    out
-}
-
-impl PresentedProjectile {
-    pub fn owner(&self) -> ClientId {
-        match self {
-            Self::Authoritative(p) => p.owner,
-            Self::Predicted { owner, .. } => *owner,
-        }
-    }
-
-    pub fn weapon(&self) -> u32 {
-        match self {
-            Self::Authoritative(p) => p.weapon,
-            Self::Predicted { weapon, .. } => *weapon,
-        }
-    }
-
-    pub fn origin(&self) -> [f32; 3] {
-        match self {
-            Self::Authoritative(p) => p.origin,
-            Self::Predicted { origin, .. } => *origin,
+            spawn_time_ms: projectile.spawn_time_ms,
         }
     }
 
     pub fn origin_at(&self, at_time_ms: i32) -> [f32; 3] {
-        entity_iw4::evaluate_trajectory(&self.pos(), at_time_ms)
+        entity_iw4::evaluate_trajectory(&self.pos, at_time_ms)
     }
+}
 
-    pub fn velocity(&self) -> [f32; 3] {
-        match self {
-            Self::Authoritative(p) => p.velocity,
-            Self::Predicted { velocity, .. } => *velocity,
+/// Owner launch awaiting the authoritative projectile with the same cause.
+#[derive(Component, Debug)]
+pub struct ClientPredictedProjectile {
+    pub cause: FireCause,
+    timeout: Timer,
+}
+
+/// Keeps a projectile entity's motion equal to its authoritative row.
+pub(crate) fn install_projectile_motion(
+    commands: &mut Commands,
+    entity: Entity,
+    state: entity_iw4::EntityState,
+    snapshot: Option<&sim::Snapshot>,
+) {
+    let row = (state.e_type == entity_iw4::ET_MISSILE)
+        .then(|| {
+            snapshot?
+                .projectiles
+                .iter()
+                .find(|p| p.entnum == state.number)
+        })
+        .flatten();
+    match row {
+        Some(row) => {
+            commands
+                .entity(entity)
+                .insert(ProjectileMotion::from_state(row));
         }
-    }
-
-    pub fn apos(&self) -> Trajectory {
-        match self {
-            Self::Authoritative(p) => p.apos,
-            Self::Predicted { apos, .. } => *apos,
-        }
-    }
-
-    pub fn pos(&self) -> Trajectory {
-        match self {
-            Self::Authoritative(p) => p.pos,
-            Self::Predicted { pos, .. } => *pos,
-        }
-    }
-
-    pub fn launch_time(&self) -> i32 {
-        match self {
-            Self::Authoritative(p) => p.launch_time,
-            Self::Predicted { launch_time, .. } => *launch_time,
-        }
-    }
-
-    pub fn authoritative_id(&self) -> Option<ProjectileId> {
-        match self {
-            Self::Authoritative(p) => Some(p.id),
-            Self::Predicted { .. } => None,
+        None => {
+            commands.entity(entity).remove::<ProjectileMotion>();
         }
     }
 }
 
-pub fn count_throw_rows(presented: &[PresentedProjectile], owner: ClientId, weapon: u32) -> usize {
-    presented
-        .iter()
-        .filter(|row| match row {
-            PresentedProjectile::Authoritative(p) => p.owner == owner && p.weapon == weapon,
-            PresentedProjectile::Predicted {
-                owner: o,
-                weapon: w,
-                ..
-            } => *o == owner && *w == weapon,
-        })
-        .count()
+pub(crate) fn spawn_predicted_projectile(
+    commands: &mut Commands,
+    cause: FireCause,
+    weapon: u32,
+    tick: sim::Tick,
+    launch: sim::LaunchMotion,
+    roundtrip: Option<Duration>,
+) {
+    let timeout = roundtrip.unwrap_or(Duration::ZERO) + PREDICTED_PROJECTILE_GRACE;
+    perf::instant!("predicted_projectile_spawn", "iw4l.sim", |ctx| {
+        ctx.arg("client", i64::from(cause.client.0));
+        ctx.arg("life", i64::from(cause.life.0));
+        ctx.arg("command", i64::from(cause.command.0));
+        ctx.arg("ordinal", i64::from(cause.ordinal));
+        ctx.arg("hand", i64::from(cause.hand));
+        ctx.arg("weapon", i64::from(weapon));
+        ctx.arg("timeout_ms", timeout.as_millis() as i64);
+    });
+    commands.spawn((
+        ProjectileMotion {
+            owner: cause.client,
+            weapon,
+            pos: launch.pos,
+            apos: launch.apos,
+            launch_time: launch.launch_time,
+            spawn_time_ms: sim::level_time_ms(tick),
+        },
+        ClientPredictedProjectile {
+            cause,
+            timeout: Timer::new(timeout, TimerMode::Once),
+        },
+        DespawnOnExit(frame::Timeline::Live),
+    ));
+}
+
+/// The authority refused or never launched this shot.
+pub(crate) fn expire_predicted_projectiles(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut pending: Query<(Entity, &mut ClientPredictedProjectile), Without<CEntity>>,
+) {
+    for (entity, mut predicted) in &mut pending {
+        if predicted.timeout.tick(time.delta()).is_finished() {
+            perf::instant!("predicted_projectile_timed_out", "iw4l.sim", |ctx| {
+                let cause = predicted.cause;
+                ctx.arg("client", i64::from(cause.client.0));
+                ctx.arg("life", i64::from(cause.life.0));
+                ctx.arg("command", i64::from(cause.command.0));
+                ctx.arg("ordinal", i64::from(cause.ordinal));
+                ctx.arg("hand", i64::from(cause.hand));
+            });
+            commands.entity(entity).despawn();
+        }
+    }
 }

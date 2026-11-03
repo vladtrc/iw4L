@@ -16,14 +16,14 @@ asset_material.workspace = true
 render_material.workspace = true
 asset_transport.workspace = true
 assets.workspace = true
-hud_iw4 = { path = "../hud_iw4" }
-weapon_iw4 = { path = "../weapon_iw4" }
-movement_iw4 = { path = "../movement_iw4" }
-playerstate_iw4 = { path = "../playerstate_iw4" }
+hud_iw4 = { workspace = true }
+weapon_iw4 = { workspace = true }
+movement_iw4 = { workspace = true }
+playerstate_iw4 = { workspace = true }
 entity_iw4.workspace = true
 frame.workspace = true
-net = { path = "../net" }
-sim = { path = "../sim" }
+net = { workspace = true }
+sim = { workspace = true }
 math_iw4.workspace = true
 gamemode_iw4.workspace = true
 

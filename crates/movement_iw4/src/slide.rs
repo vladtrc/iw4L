@@ -58,7 +58,7 @@ fn trace_callback<C: CollisionBackend>(
             fraction: hit.fraction,
             end: hit.endpos,
             normal: hit.normal,
-            blocked: hit.allsolid != 0,
+            blocked: hit.allsolid != 0 || (start == end && hit.startsolid != 0),
             walkable: hit.walkable != 0,
         }
     }

@@ -1,5 +1,5 @@
 use asset_world::ClipCollision;
-use net::{AUTHORITY_MS, PresentedProjectile, PresentedSnapshot};
+use net::{AUTHORITY_MS, PresentedSnapshot};
 use playerstate_iw4::{
     CG_CAMERA_PULLBACK_BOX_HALF, CG_CAMERA_PULLBACK_CLIPMASK, CG_THIRD_PERSON_RANGE_DEFAULT,
     KillCamMode, OffsetThirdPersonViewInputs, ThirdPersonViewInputs, is_third_person_view,
@@ -27,7 +27,9 @@ pub fn presented_is_third_person(
         return false;
     };
     if in_killcam && ps.kill_cam_entity != playerstate_iw4::ENTITYNUM_NONE {
-        return true;
+        // Older demos name the eventual missile throughout the preroll.
+        // The camera remains first person until it can resolve that entity.
+        return super::killcam::classify_view(presented, local, true, None).is_some();
     }
     if remote_missile_link(presented, local).is_some() {
         return true;
@@ -53,7 +55,7 @@ fn remote_missile_link(
 // The missile leaves the snapshot on impact, before the link goes and the
 // static starts. The last pose is held until then so that neither the
 // player's own view nor a black frame shows in between.
-#[derive(Default)]
+#[derive(bevy::prelude::Resource, Default)]
 pub struct RemoteMissileView {
     held: Option<HeldMissileView>,
     turn: MissileTurn,
@@ -139,9 +141,10 @@ impl RemoteMissileView {
             .is_none()
             .then(|| {
                 presented
-                    .presented_projectiles()
+                    .snapshot()?
+                    .projectiles
                     .iter()
-                    .find(|p| p.authoritative_id() == Some(link.projectile))
+                    .find(|p| p.id == link.projectile)
             })
             .flatten();
         let snapshot_ms = presented.tick().map_or(at_time, sim::level_time_ms);
@@ -163,7 +166,7 @@ impl RemoteMissileView {
 }
 
 fn missile_eye(
-    missile: &PresentedProjectile,
+    missile: &sim::ProjectileState,
     snapshot_ms: i32,
     at_time: i32,
     clip: Option<&ClipCollision>,

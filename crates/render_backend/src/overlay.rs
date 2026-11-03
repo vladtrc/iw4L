@@ -5,8 +5,7 @@ pub use render_frame::code_math::{
 };
 use render_frame::{LightAttenuationBind, OutdoorLookup};
 use render_material::{
-    CompiledConstantOverlay, MaterialRefusal, RuntimeCodeSources, RuntimeImageId,
-    RuntimeMaterialCatalog,
+    MaterialRefusal, RuntimeCodeSources, RuntimeImageId, RuntimeMaterialCatalog,
 };
 
 pub const CODE_LIGHT_POSITION: u16 = lighting_iw4::CONST_SRC_CODE_LIGHT_POSITION;
@@ -324,12 +323,9 @@ fn overlay_shadow_lookup(sources: &mut RuntimeCodeSources, lookup: &[f32; 16]) {
 pub fn apply_shadowable_light(
     sources: &mut RuntimeCodeSources,
     packed_drawsurf: u64,
-    lights: &[lighting_iw4::GfxLightPack],
-    attenuation: &[LightAttenuationBind],
-    local_light_bindings: &[CompiledConstantOverlay],
+    frame: &render_frame::MaterialExecFrame,
     catalog: &RuntimeMaterialCatalog,
     eye: Vec3,
-    spot_receivers: &[Option<render_frame::SpotShadowReceiver>],
 ) -> Result<(), MaterialRefusal> {
     let index = dpvs_iw4::GfxDrawSurf {
         packed: packed_drawsurf,
@@ -337,7 +333,7 @@ pub fn apply_shadowable_light(
     .scene_light_index();
     let packed = lighting_iw4::pack_shadowable_light(
         index,
-        lights.get(usize::from(index)),
+        frame.primary_lights.get(usize::from(index)),
         [eye.x, eye.y, eye.z],
         lighting_iw4::R_COLOR_SCALE_DEFAULT,
         lighting_iw4::R_COLOR_SCALE_DEFAULT,
@@ -345,7 +341,8 @@ pub fn apply_shadowable_light(
     let bindings = if matches!(packed, lighting_iw4::ShadowableLightPack::Unchanged) {
         None
     } else {
-        let bindings = local_light_bindings
+        let bindings = frame
+            .local_light_bindings
             .get(usize::from(index))
             .ok_or(MaterialRefusal::MissingLightBindings { scene_light: index })?;
         bindings.validate_generation(catalog)?;
@@ -374,7 +371,7 @@ pub fn apply_shadowable_light(
             sources.set_constant_rows(CODE_LIGHT_SPECULAR, &[float4_bits(specular)]);
             sources.set_constant_rows(CODE_LIGHT_SPOTDIR, &[float4_bits(spot_dir)]);
             overlay_falloff_placement(sources, falloff_placement);
-            overlay_attenuation(sources, attenuation.get(usize::from(index)));
+            overlay_attenuation(sources, frame.attenuation.get(usize::from(index)));
         }
         lighting_iw4::ShadowableLightPack::Spot {
             position,
@@ -390,7 +387,7 @@ pub fn apply_shadowable_light(
             sources.set_constant_rows(CODE_LIGHT_SPOTDIR, &[float4_bits(spot_dir)]);
             sources.set_constant_rows(CODE_LIGHT_SPOTFACTORS, &[float4_bits(spot_factors)]);
             overlay_falloff_placement(sources, falloff_placement);
-            overlay_attenuation(sources, attenuation.get(usize::from(index)));
+            overlay_attenuation(sources, frame.attenuation.get(usize::from(index)));
         }
     }
 
@@ -398,7 +395,11 @@ pub fn apply_shadowable_light(
         packed,
         lighting_iw4::ShadowableLightPack::Omni { .. }
             | lighting_iw4::ShadowableLightPack::Spot { .. }
-    ) && let Some(receiver) = spot_receivers.get(usize::from(index)).copied().flatten()
+    ) && let Some(receiver) = frame
+        .spot_receivers
+        .get(usize::from(index))
+        .copied()
+        .flatten()
     {
         overlay_shadow_lookup(sources, &receiver.lookup);
         sources.set_constant_rows(

@@ -1,10 +1,11 @@
 use super::*;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct PersistentRemoteTree {
     binding: Arc<asset_game::SoldierBodyAnimation>,
     pub(crate) runtime: xmodel_runtime::XAnimTreeRuntime,
-    pub(crate) namespace: asset_core::AssetNamespace,
+    pub(crate) namespace: asset_core::FamilyId,
     pub(crate) dobj: Option<std::sync::Arc<xmodel_runtime::DObj>>,
     pub(crate) reuse_key: Option<xmodel_runtime::DObjReuseKey>,
     pub(crate) legs: u16,
@@ -12,48 +13,24 @@ pub struct PersistentRemoteTree {
     pub(crate) legs_restart: bool,
     pub(crate) torso_restart: bool,
 
-    pub(crate) occupation_key: Option<CorpseOccupationKey>,
-
     pub(crate) legs_rate_sample: ClientAnimSample,
 
     pub(crate) torso_rate_sample: ClientAnimSample,
+}
+
+impl PersistentRemoteTree {
+    fn clips_unchanged(&self, legs: PlayerAnimValue, torso: PlayerAnimValue) -> bool {
+        self.legs == legs.effective_index()
+            && self.torso == torso.effective_index()
+            && self.legs_restart == legs.restart_toggle()
+            && self.torso_restart == torso.restart_toggle()
+    }
 }
 
 pub struct PoseClips {
     pub clip: Arc<xmodel_runtime::AnimClip>,
     pub torso_clip: Option<Arc<xmodel_runtime::AnimClip>>,
     pub legs_for_tree: Arc<xmodel_runtime::AnimClip>,
-}
-
-#[derive(Resource, Default)]
-pub struct RemoteBodyTrees {
-    by_ent: HashMap<u32, PersistentRemoteTree>,
-}
-
-impl RemoteBodyTrees {
-    pub fn retained_bindings(&self) -> usize {
-        self.by_ent.len()
-    }
-
-    pub fn tree_storage_bytes(&self) -> usize {
-        self.by_ent.capacity() * std::mem::size_of::<(u32, PersistentRemoteTree)>()
-    }
-
-    pub fn get(&self, persist_key: u32) -> Option<&PersistentRemoteTree> {
-        self.by_ent.get(&persist_key)
-    }
-
-    pub fn get_mut(&mut self, persist_key: u32) -> Option<&mut PersistentRemoteTree> {
-        self.by_ent.get_mut(&persist_key)
-    }
-
-    pub fn remove(&mut self, persist_key: u32) -> Option<PersistentRemoteTree> {
-        self.by_ent.remove(&persist_key)
-    }
-
-    pub fn retain_live(&mut self, live: &HashSet<u32>) {
-        self.by_ent.retain(|ent, _| live.contains(ent));
-    }
 }
 
 pub struct AdvancedRemoteTree {
@@ -88,46 +65,11 @@ pub fn skip_frozen_corpse_dobj(
     is_corpse && tree_reused && last_was_cache_hit && has_cache
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CorpseOccupationKey {
-    pub identity: net::CorpseIdentity,
-}
-
-pub fn corpse_occupation_key(entity: &net::CEntity) -> Option<CorpseOccupationKey> {
-    entity
-        .corpse_identity()
-        .map(|identity| CorpseOccupationKey { identity })
-}
-
 pub fn fresh_corpse_clip_time(age_ms: i32, clip_length_ms: i32) -> f32 {
     if clip_length_ms <= 0 || age_ms <= 0 {
         return 0.0;
     }
     (age_ms as f32 / clip_length_ms as f32).min(1.0)
-}
-
-pub fn clone_corpse_tree_from_victim(
-    trees: &mut RemoteBodyTrees,
-    corpse_ent: u32,
-    victim: u32,
-    key: CorpseOccupationKey,
-) {
-    if trees
-        .by_ent
-        .get(&corpse_ent)
-        .is_some_and(|slot| slot.occupation_key == Some(key))
-    {
-        return;
-    }
-    let Some(src) = trees.by_ent.get(&victim).cloned() else {
-        trees.by_ent.remove(&corpse_ent);
-        return;
-    };
-    let mut dst = src;
-    dst.dobj = None;
-    dst.reuse_key = None;
-    dst.occupation_key = Some(key);
-    trees.by_ent.insert(corpse_ent, dst);
 }
 
 pub fn packed_anim(raw: i32) -> Option<PlayerAnimValue> {
@@ -139,17 +81,30 @@ pub fn zero_anim() -> PlayerAnimValue {
     PlayerAnimValue::from_raw(0).expect("zero fits PLAYER_ANIM_RAW_MASK")
 }
 
-pub fn advance_remote_tree(
-    binding: &Arc<asset_game::SoldierBodyAnimation>,
+#[derive(Clone, Copy)]
+pub struct RemoteAnimTracks {
     legs: PlayerAnimValue,
     torso: PlayerAnimValue,
-    persist_key: u32,
+}
+
+impl RemoteAnimTracks {
+    pub fn from_pair(pair: playerstate_iw4::AnimPair) -> Option<Self> {
+        let legs = packed_anim(pair.legs_anim)?;
+        let torso = packed_anim(pair.torso_anim).unwrap_or_else(zero_anim);
+        Some(Self { legs, torso })
+    }
+}
+
+pub fn advance_remote_tree(
+    binding: &Arc<asset_game::SoldierBodyAnimation>,
+    tracks: RemoteAnimTracks,
     dt: f32,
     origin: [f32; 3],
     pose_time_ms: i32,
     corpse_age_ms: Option<i32>,
-    trees: &mut RemoteBodyTrees,
+    tree_slot: &mut Option<PersistentRemoteTree>,
 ) -> Result<AdvancedRemoteTree, String> {
+    let RemoteAnimTracks { legs, torso } = tracks;
     let tree = binding.tree();
     let script = binding.script();
     let body = binding.body();
@@ -157,8 +112,7 @@ pub fn advance_remote_tree(
     let torso_index = torso.effective_index();
     let legs_restart = legs.restart_toggle();
     let torso_restart = torso.restart_toggle();
-    let previous = trees.by_ent.remove(&persist_key);
-    let occupation_key = previous.as_ref().and_then(|slot| slot.occupation_key);
+    let previous = tree_slot.take();
     let prev = previous.filter(|slot| Arc::ptr_eq(&slot.binding, binding));
     let prev_restart_changed_legs = prev
         .as_ref()
@@ -166,19 +120,9 @@ pub fn advance_remote_tree(
     let prev_restart_changed_torso = prev
         .as_ref()
         .is_some_and(|slot| slot.torso_restart != torso_restart);
-    let reused = prev.as_ref().is_some_and(|slot| {
-        slot.namespace == body.namespace
-            && tree_clips_unchanged(
-                slot.legs,
-                slot.torso,
-                slot.legs_restart,
-                slot.torso_restart,
-                legs_index,
-                torso_index,
-                legs_restart,
-                torso_restart,
-            )
-    });
+    let reused = prev
+        .as_ref()
+        .is_some_and(|slot| slot.namespace == body.namespace && slot.clips_unchanged(legs, torso));
 
     let mut clips = None;
     let mut slot = if reused {
@@ -245,7 +189,6 @@ pub fn advance_remote_tree(
                 torso: 0,
                 legs_restart: false,
                 torso_restart: false,
-                occupation_key,
                 legs_rate_sample: ClientAnimSample::default(),
                 torso_rate_sample: ClientAnimSample::default(),
             },
@@ -291,17 +234,22 @@ pub fn advance_remote_tree(
                         .ok_or("player tree torso branch missing")?,
                 ),
             },
-            old_legs,
-            old_torso,
-            legs_index,
-            torso_index,
-            prev_restart_changed_legs,
-            prev_restart_changed_torso,
-            old_legs_moving,
-            old_torso_moving,
-            slot.legs_rate_sample.move_speed > 0.0,
-            slot.torso_rate_sample.move_speed > 0.0,
-            [legs_properties.blend_ms, torso_properties.blend_ms],
+            xmodel_runtime::PlayerAnimTransition {
+                previous: old_legs,
+                index: legs_index,
+                restart: prev_restart_changed_legs,
+                was_moving: old_legs_moving,
+                moving: slot.legs_rate_sample.move_speed > 0.0,
+                authored_blend_ms: legs_properties.blend_ms,
+            },
+            xmodel_runtime::PlayerAnimTransition {
+                previous: old_torso,
+                index: torso_index,
+                restart: prev_restart_changed_torso,
+                was_moving: old_torso_moving,
+                moving: slot.torso_rate_sample.move_speed > 0.0,
+                authored_blend_ms: torso_properties.blend_ms,
+            },
         )?;
         if let Some(time) = locomotion_phase {
             let id = xmodel_runtime::XAnimNodeId(legs_index);
@@ -356,8 +304,8 @@ pub fn advance_remote_tree(
     if torso_index != 0 && !leaf_enrolled(&slot.runtime, torso_index) {
         return Err("complete goal weight left the torso leaf at 0".into());
     }
-    trees.by_ent.insert(persist_key, slot);
-    let slot = trees.by_ent.get_mut(&persist_key).expect("tree inserted");
+    *tree_slot = Some(slot);
+    let slot = tree_slot.as_mut().expect("tree inserted");
     Ok(AdvancedRemoteTree {
         runtime: slot.runtime.clone(),
         clips,
@@ -370,20 +318,4 @@ fn leaf_enrolled(runtime: &xmodel_runtime::XAnimTreeRuntime, index: u16) -> bool
         .states()
         .get(index as usize)
         .is_some_and(|state| state.weight > 0.0 || state.goal_weight > 0.0)
-}
-
-pub fn tree_clips_unchanged(
-    last_legs: u16,
-    last_torso: u16,
-    last_legs_restart: bool,
-    last_torso_restart: bool,
-    legs: u16,
-    torso: u16,
-    legs_restart: bool,
-    torso_restart: bool,
-) -> bool {
-    last_legs == legs
-        && last_torso == torso
-        && last_legs_restart == legs_restart
-        && last_torso_restart == torso_restart
 }

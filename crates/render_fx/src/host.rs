@@ -25,7 +25,7 @@ pub struct PreparedImpactFx {
 impl PreparedImpactFx {
     pub fn explosion_table(
         &self,
-        weapon_namespace: Option<asset_core::AssetNamespace>,
+        weapon_namespace: Option<asset_core::FamilyId>,
     ) -> Option<&asset_game::OwnedFxImpactTable> {
         self.families
             .iter()

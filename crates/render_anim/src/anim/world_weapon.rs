@@ -6,16 +6,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use xmodel_runtime::{Attach, DObj, ModelPoseSrc};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WorldCompositionRefusal {
-    ForeignOwner,
-    Configuration(asset_game::ConfigurationRefusal),
-    RequiredModel,
-    Appearance(asset_game::AppearanceModelStatus),
-    RequiredPose,
-    Topology(String),
-}
-
 pub(crate) struct WorldAttachment {
     pub(crate) index: WorldWeaponIndex,
     pub(crate) tag: String,
@@ -91,7 +81,7 @@ impl ItemComposition {
 #[derive(Resource, Default)]
 pub(crate) struct PreparedItemCompositions {
     owner: Option<(Arc<WeaponRegistry>, Arc<WorldWeaponCatalog>)>,
-    by_weapon: HashMap<(WeaponHandle, u8), Result<Arc<ItemComposition>, WorldCompositionRefusal>>,
+    by_weapon: HashMap<(WeaponHandle, u8), Result<Arc<ItemComposition>, String>>,
 }
 
 impl PreparedItemCompositions {
@@ -113,12 +103,12 @@ impl PreparedItemCompositions {
         world: &PreparedWorldWeapons,
         weapon: WeaponHandle,
         camo: u8,
-    ) -> Result<Arc<ItemComposition>, WorldCompositionRefusal> {
+    ) -> Result<Arc<ItemComposition>, String> {
         self.reset_for(weapons, world);
         let (registry, catalog) = self.owner.as_ref().unwrap();
         let bound = registry
             .bind(weapon)
-            .map_err(|_| WorldCompositionRefusal::ForeignOwner)?;
+            .map_err(|_| "world weapon belongs to another owner".to_owned())?;
         let id = bound.wire_id();
         self.by_weapon
             .entry((weapon, camo))
@@ -151,36 +141,36 @@ fn compose_item(
     catalog: &Arc<WorldWeaponCatalog>,
     weapon: WeaponHandle,
     camo: u8,
-) -> Result<ItemComposition, WorldCompositionRefusal> {
+) -> Result<ItemComposition, String> {
     let id = registry
         .bind(weapon)
-        .map_err(|_| WorldCompositionRefusal::ForeignOwner)?
+        .map_err(|_| "world weapon belongs to another owner".to_owned())?
         .wire_id();
     if registry.world_catalog_identity() != catalog.identity() {
-        return Err(WorldCompositionRefusal::ForeignOwner);
+        return Err("world weapon belongs to another owner".to_owned());
     }
     registry
         .configuration_admission(id)
-        .map_err(WorldCompositionRefusal::Configuration)?;
+        .map_err(|reason| format!("world weapon configuration: {reason}"))?;
     let appearance = registry
         .select_appearance(id, camo)
-        .ok_or(WorldCompositionRefusal::RequiredModel)?;
+        .ok_or("required world weapon model missing".to_owned())?;
     if let status @ asset_game::AppearanceModelStatus::DeclaredUnavailable { .. } =
         appearance.world_status()
     {
-        return Err(WorldCompositionRefusal::Appearance(status));
+        return Err(format!("world weapon appearance: {status:?}"));
     }
     let entry = appearance
         .world_model(catalog)
-        .ok_or(WorldCompositionRefusal::RequiredModel)?;
+        .ok_or("required world weapon model missing".to_owned())?;
     let order = appearance
         .world_order(catalog)
-        .ok_or(WorldCompositionRefusal::RequiredModel)?;
+        .ok_or("required world weapon model missing".to_owned())?;
     let pose = entry
         .skel
         .pose
         .as_ref()
-        .ok_or(WorldCompositionRefusal::RequiredPose)?;
+        .ok_or("required world weapon pose missing".to_owned())?;
     let mut key = entry.skel.name.clone();
     let mut topology = Vec::new();
     let mut models = vec![(pose, None)];
@@ -212,8 +202,7 @@ fn compose_item(
             }),
         ));
     }
-    let dobj =
-        DObj::build(&models).map_err(|e| WorldCompositionRefusal::Topology(e.to_string()))?;
+    let dobj = DObj::build(&models).map_err(|e| format!("world weapon topology: {e}"))?;
     Ok(ItemComposition {
         name: entry.skel.name.clone(),
         model: WorldWeaponIndex::from_order(order),

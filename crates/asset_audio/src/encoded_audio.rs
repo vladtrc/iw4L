@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
-pub(crate) struct EncodedAudio {
+pub struct EncodedAudio {
     bytes: Arc<[u8]>,
     content_id: [u8; 32],
 }

@@ -36,7 +36,8 @@ pub struct RuntimeProgramPort {
     color_space: super::pass_color_space::PassColorSpace,
     hardware_shadow_compare: bool,
     abi: super::sm3_abi::PassProgramAbi,
-    module: std::sync::Arc<super::sm3_wgsl::ValidatedPassWgsl>,
+    module: std::sync::Arc<super::shader_wgsl::ValidatedPassWgsl>,
+    lowering: render_material::ProgramLoweringRecipe,
     wgpu_layout: super::gpu_contract::WgpuPassLayout,
 }
 
@@ -52,44 +53,24 @@ impl RuntimeProgramPort {
         let pair = prepared.pair();
         let (vertex_name, pixel_name) = prepared.names();
         let (abi, programs) = prepared.into_programs();
-        let module = match programs {
-            render_material::PreparedShaderPrograms::Sm3 { vertex, pixel } => {
-                let lowering = super::sm3_wgsl::pass_lowering_abi(&abi);
-                if let Some(cached) = super::wgsl_disk_cache::load(pair, &lowering) {
-                    cached
-                } else {
-                    let module =
-                        super::sm3_wgsl::lower_pass_to_validated_wgsl(&abi, &vertex, &pixel)
-                            .map_err(ProgramRegistryError::Wgsl)?;
-                    super::wgsl_disk_cache::store(pair, &lowering, &module);
-                    module
-                }
+        let cache_key = programs.cache_key(&abi);
+        let module = if let Some(cached) = cache_key.as_deref().and_then(|key| {
+            super::wgsl_disk_cache::load(pair, abi.vertex_layout.owner.as_str(), key)
+        }) {
+            cached
+        } else {
+            let module = programs
+                .lower(&abi)
+                .map_err(ProgramRegistryError::Lowering)?;
+            super::shader_wgsl::validate_wgsl(&module.source)
+                .map_err(ProgramRegistryError::Wgsl)?;
+            if let Some(key) = cache_key.as_deref() {
+                super::wgsl_disk_cache::store(pair, abi.vertex_layout.owner.as_str(), key, &module);
             }
-            render_material::PreparedShaderPrograms::Dxbc {
-                vertex,
-                pixel,
-                mut lowering,
-            } => {
-                lowering.alpha_tests = super::sm3_wgsl::dxbc_alpha_tests();
-                let source =
-                    dxbc_sm5::wgsl::lower_pass(&lowering, &vertex, &pixel).map_err(|error| {
-                        ProgramRegistryError::Wgsl(super::sm3_wgsl::Sm3WgslError::WgslParse(
-                            error.to_string(),
-                        ))
-                    })?;
-                super::sm3_wgsl::validate_wgsl(&source).map_err(ProgramRegistryError::Wgsl)?;
-                super::sm3_wgsl::ValidatedPassWgsl {
-                    source,
-                    attribute_count: abi.attributes.len(),
-                    varying_count: 0,
-                    vertex_constant_len: abi.vertex_constants.len(),
-                    pixel_constant_len: abi.pixel_constants.len(),
-                    sampler_count: abi.samplers.len(),
-                }
-            }
+            module
         };
         diag::wgsl_dump::dump_pass_wgsl(vertex_name, pixel_name, &module.source);
-        let wgpu_layout = super::gpu_contract::derive_wgpu_pass_layout(&abi, &module)
+        let wgpu_layout = super::gpu_contract::derive_wgpu_pass_layout(&abi)
             .map_err(ProgramRegistryError::WgpuLayout)?;
         Ok(Self {
             id,
@@ -101,6 +82,7 @@ impl RuntimeProgramPort {
             hardware_shadow_compare: pass.hardware_shadow_compare,
             abi,
             module: std::sync::Arc::new(module),
+            lowering: render_material::ProgramLoweringRecipe::new(id, programs),
             wgpu_layout,
         })
     }
@@ -133,11 +115,15 @@ impl RuntimeProgramPort {
             && self.abi.vertex_type == other.abi.vertex_type
     }
 
-    pub fn shared_module(&self) -> std::sync::Arc<super::sm3_wgsl::ValidatedPassWgsl> {
+    pub fn lowering_recipe(&self) -> render_material::ProgramLoweringRecipe {
+        self.lowering.clone()
+    }
+
+    pub fn shared_module(&self) -> std::sync::Arc<super::shader_wgsl::ValidatedPassWgsl> {
         std::sync::Arc::clone(&self.module)
     }
 
-    pub fn module(&self) -> &super::sm3_wgsl::ValidatedPassWgsl {
+    pub fn module(&self) -> &super::shader_wgsl::ValidatedPassWgsl {
         &self.module
     }
 
@@ -156,48 +142,60 @@ impl RuntimeProgramPort {
     pub fn bind_surface_samplers(
         &self,
         inputs: SurfaceSamplerInputs,
-    ) -> Result<Vec<BoundSurfaceSampler>, SurfaceSamplerRefusal> {
+    ) -> Result<Vec<BoundSurfaceSampler>, &'static str> {
         let mut bound = Vec::new();
         for sampler in &self.abi.samplers {
             let resource = match sampler.source {
                 super::sm3_abi::SamplerSource::SurfaceReflectionProbe => {
                     BoundSurfaceSampler::ReflectionProbe {
                         register: sampler.register,
-                        id: inputs.reflection_probe.ok_or(
-                            SurfaceSamplerRefusal::MissingReflectionProbe {
-                                register: sampler.register,
-                            },
-                        )?,
+                        id: inputs.reflection_probe.ok_or_else(|| {
+                            diag::warn_once!(
+                                World,
+                                "missing reflection probe for sampler register {}",
+                                sampler.register
+                            );
+                            "missing reflection probe"
+                        })?,
                     }
                 }
                 super::sm3_abi::SamplerSource::SurfacePrimaryLightmap => {
                     BoundSurfaceSampler::PrimaryLightmap {
                         register: sampler.register,
-                        id: inputs.primary_lightmap.ok_or(
-                            SurfaceSamplerRefusal::MissingPrimaryLightmap {
-                                register: sampler.register,
-                            },
-                        )?,
+                        id: inputs.primary_lightmap.ok_or_else(|| {
+                            diag::warn_once!(
+                                World,
+                                "missing primary lightmap for sampler register {}",
+                                sampler.register
+                            );
+                            "missing primary lightmap"
+                        })?,
                     }
                 }
                 super::sm3_abi::SamplerSource::SurfaceSecondaryLightmap => {
                     BoundSurfaceSampler::SecondaryLightmap {
                         register: sampler.register,
-                        id: inputs.secondary_lightmap.ok_or(
-                            SurfaceSamplerRefusal::MissingSecondaryLightmap {
-                                register: sampler.register,
-                            },
-                        )?,
+                        id: inputs.secondary_lightmap.ok_or_else(|| {
+                            diag::warn_once!(
+                                World,
+                                "missing secondary lightmap for sampler register {}",
+                                sampler.register
+                            );
+                            "missing secondary lightmap"
+                        })?,
                     }
                 }
                 super::sm3_abi::SamplerSource::SurfaceSecondaryBLightmap => {
                     BoundSurfaceSampler::SecondaryBLightmap {
                         register: sampler.register,
-                        id: inputs.secondary_lightmap.ok_or(
-                            SurfaceSamplerRefusal::MissingSecondaryLightmap {
-                                register: sampler.register,
-                            },
-                        )?,
+                        id: inputs.secondary_lightmap.ok_or_else(|| {
+                            diag::warn_once!(
+                                World,
+                                "missing secondary lightmap for sampler register {}",
+                                sampler.register
+                            );
+                            "missing secondary lightmap"
+                        })?,
                     }
                 }
                 super::sm3_abi::SamplerSource::MaterialTexture { .. }
@@ -354,7 +352,8 @@ impl ProgramRegistryError {
     pub fn census_key(&self) -> String {
         match self {
             Self::Preparation(refusal) => refusal.census_key(),
-            Self::Wgsl(error) => wgsl_census_key(error),
+            Self::Wgsl(error) => error.census_key(),
+            Self::Lowering(error) => error.census_key.clone(),
             other => {
                 let text = format!("{other:?}");
                 text.split(['{', '('])
@@ -363,46 +362,6 @@ impl ProgramRegistryError {
                     .trim()
                     .to_owned()
             }
-        }
-    }
-}
-
-fn wgsl_census_key(error: &super::sm3_wgsl::Sm3WgslError) -> String {
-    match error {
-        super::sm3_wgsl::Sm3WgslError::Emit(d3d9_sm3::Sm3WgslError::LoweringSurface(
-            super::sm3::Sm3LoweringRefusal::UnknownOpcode { opcode, .. },
-        )) => format!("UnknownOpcode({opcode:#x})"),
-        super::sm3_wgsl::Sm3WgslError::Emit(
-            d3d9_sm3::Sm3WgslError::UnsupportedInstructionControls {
-                opcode, controls, ..
-            },
-        ) => format!("Wgsl/UnsupportedInstructionControls({opcode:?},{controls})"),
-        super::sm3_wgsl::Sm3WgslError::Emit(
-            d3d9_sm3::Sm3WgslError::UnsupportedSamplerTextureType { texture_type, .. },
-        ) => format!("Wgsl/UnsupportedSamplerTextureType({texture_type})"),
-        super::sm3_wgsl::Sm3WgslError::Emit(d3d9_sm3::Sm3WgslError::UnbalancedControlFlow {
-            kind,
-            ..
-        }) => format!("Wgsl/UnbalancedControlFlow({kind})"),
-        other => {
-            let text = format!("{other:?}");
-            if let Some(at) = text.find("UnknownOpcode") {
-                if let Some(op) = text[at..].find("opcode:") {
-                    let opcode = text[at + op + 7..]
-                        .split([',', '}'])
-                        .next()
-                        .unwrap_or("")
-                        .trim();
-                    return format!("UnknownOpcode({opcode})");
-                }
-            }
-
-            let inner = text
-                .strip_prefix("Emit(")
-                .map(|rest| rest.trim_end_matches(')'))
-                .unwrap_or(text.as_str());
-            let name = inner.split(['{', '(']).next().unwrap_or(inner).trim();
-            format!("Wgsl/{name}")
         }
     }
 }
@@ -427,17 +386,11 @@ pub enum BoundSurfaceSampler {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SurfaceSamplerRefusal {
-    MissingReflectionProbe { register: u16 },
-    MissingPrimaryLightmap { register: u16 },
-    MissingSecondaryLightmap { register: u16 },
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProgramRegistryError {
     Preparation(render_material::ProgramAbiRefusal),
-    Wgsl(super::sm3_wgsl::Sm3WgslError),
+    Lowering(render_material::ProgramLoweringError),
+    Wgsl(super::shader_wgsl::WgslValidationError),
     WgpuLayout(super::gpu_contract::WgpuLayoutRefusal),
     DuplicatePort {
         pair: RuntimeShaderPair,

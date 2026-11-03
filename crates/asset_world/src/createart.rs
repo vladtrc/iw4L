@@ -278,7 +278,7 @@ fn strip_gsc_comments(source: &str) -> String {
         out.push(b[i]);
         i += 1;
     }
-    String::from_utf8(out).unwrap_or_default()
+    String::from_utf8(out).unwrap_or(String::new())
 }
 
 fn parse_gsc_scalar_assigns(source: &str) -> HashMap<String, f32> {

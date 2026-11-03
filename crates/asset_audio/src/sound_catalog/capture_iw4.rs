@@ -53,8 +53,8 @@ fn inspect_sound_file(s: &ZoneStream<'_>, file: Ptr) -> InspectedSoundFile {
             }
         }
         Some(2) | Some(3) => {
-            let dir = name_at(s, file, s.layout(4, 8)).unwrap_or_default();
-            let name = name_at(s, file, s.layout(8, 16)).unwrap_or_default();
+            let dir = name_at(s, file, s.layout(4, 8)).unwrap_or(String::new());
+            let name = name_at(s, file, s.layout(8, 16)).unwrap_or(String::new());
             let file_name = if dir.is_empty() {
                 name.clone()
             } else {
@@ -146,7 +146,7 @@ pub(super) fn stereo_speaker_gains(s: &ZoneStream<'_>, row: Ptr) -> Option<[[f32
     }
 }
 
-pub(crate) fn capture_stereo_speaker_gains(
+pub fn capture_stereo_speaker_gains(
     mut word: impl FnMut(usize) -> Option<u32>,
 ) -> Option<[[f32; 2]; 2]> {
     let mut gains = [[0.0; 2]; 2];
@@ -248,7 +248,7 @@ impl AssetLinkSink for SoundCatalog {
         pcm: Ptr,
         data_len: usize,
     ) -> Result<()> {
-        let name = name_at(s, header, 0).unwrap_or_default();
+        let name = name_at(s, header, 0).unwrap_or(String::new());
 
         let (format, rate, bits, channels, samples, block_size) =
             if s.wire_format() == fastfile_iw4::Iw4WireFormat::X64 {
@@ -301,7 +301,7 @@ impl AssetLinkSink for SoundCatalog {
             pcm: pcm_bytes.into(),
             zone: self.capture_zone,
             seek_table: Vec::new(),
-            sab_media: None,
+            external_media: None,
         });
         Ok(())
     }
@@ -322,7 +322,7 @@ impl AssetLinkSink for SoundCatalog {
     }
 
     fn capture_snd_curve(&mut self, s: &ZoneStream<'_>, header: Ptr) -> Result<()> {
-        let name = name_at(s, header, 0).unwrap_or_default();
+        let name = name_at(s, header, 0).unwrap_or(String::new());
         if name.is_empty() {
             self.capture_gaps += 1;
         }
@@ -364,7 +364,7 @@ impl AssetLinkSink for SoundCatalog {
         count: usize,
         head: Option<Ptr>,
     ) -> Result<()> {
-        let name = name_at(s, list, 0).unwrap_or_default();
+        let name = name_at(s, list, 0).unwrap_or(String::new());
         let Some(arr) = head else {
             if count > 0 {
                 self.capture_gaps += 1;
@@ -375,7 +375,8 @@ impl AssetLinkSink for SoundCatalog {
         let mut aliases = Vec::with_capacity(count);
         for i in 0..count {
             let row = arr.at(i * s.layout(sz::SND_ALIAS, 136));
-            let alias_name = name_at(s, row, s.layout(SND_ALIAS_ALIAS_NAME, 0)).unwrap_or_default();
+            let alias_name =
+                name_at(s, row, s.layout(SND_ALIAS_ALIAS_NAME, 0)).unwrap_or(String::new());
             let subtitle = optional_name(s, row, s.layout(SND_ALIAS_SUBTITLE, 8));
             let secondary = optional_name(s, row, s.layout(SND_ALIAS_SECONDARY, 16));
             let chain = optional_name(s, row, s.layout(SND_ALIAS_CHAIN, 24));
@@ -500,7 +501,12 @@ impl AssetLinkSink for SoundCatalog {
                     .f32_at(row, s.layout(SND_ALIAS_VELOCITY_MIN, 76))
                     .unwrap_or(0.0),
                 flags,
-                looping: None,
+                looping: flags
+                    .map(SndAliasFlags::from_word)
+                    .map(SndAliasFlags::looping),
+                channel_id: flags
+                    .map(SndAliasFlags::from_word)
+                    .map(SndAliasFlags::channel),
                 slave_percentage: s
                     .f32_at(row, s.layout(SND_ALIAS_SLAVE_PERCENTAGE, 84))
                     .unwrap_or(0.0),
@@ -517,7 +523,7 @@ impl AssetLinkSink for SoundCatalog {
                     .i32_at(row, s.layout(SND_ALIAS_START_DELAY, 100))
                     .unwrap_or(0),
                 volume_falloff,
-                t5_distance_curves: None,
+                distance_curve_names: None,
                 near_falloff: None,
                 voice_priority: None,
                 envelop_min: s
@@ -531,7 +537,7 @@ impl AssetLinkSink for SoundCatalog {
                     .unwrap_or(0.0),
                 speaker_map: speaker_map_name(s, row),
                 stereo_speaker_gains: stereo_speaker_gains(s, row),
-                t6_speaker_pan: None,
+                surround_pan: None,
                 limit_count: None,
                 entity_limit_count: None,
             });

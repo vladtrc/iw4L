@@ -4,8 +4,8 @@ use core::{fmt, str::FromStr};
 
 pub mod budget;
 
-pub const PROTOCOL_VERSION: u16 = 10;
-pub const ALPN: &[u8] = b"iw4l-master/10";
+pub const PROTOCOL_VERSION: u16 = 11;
+pub const ALPN: &[u8] = b"iw4l-master/11";
 pub const MAX_CONTROL_BYTES: usize = 16 * 1024;
 pub const MAX_OPAQUE_PAYLOAD: usize = 1100;
 
@@ -102,46 +102,96 @@ id_type!(MemberId, 16);
 
 pub type RoomId = AdvertId;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct ContentFlags(pub u8);
+/// Canonical family tokens, independent of the games installed on the service.
+/// Private storage keeps locally constructed and decoded inventories bounded.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ContentFamilies(Vec<String>);
 
-impl ContentFlags {
-    pub const IW4: Self = Self(1 << 0);
-    pub const IW5: Self = Self(1 << 1);
-    pub const T5: Self = Self(1 << 2);
-    pub const T6: Self = Self(1 << 3);
-    pub const KNOWN: Self = Self(Self::IW4.0 | Self::IW5.0 | Self::T5.0 | Self::T6.0);
-    pub const FAMILIES: [(&'static str, Self); 4] = [
-        ("iw4", Self::IW4),
-        ("iw5", Self::IW5),
-        ("t5", Self::T5),
-        ("t6", Self::T6),
-    ];
+impl ContentFamilies {
+    pub const MAX_FAMILIES: usize = 64;
+    pub const MAX_TOKEN_BYTES: usize = 64;
 
-    pub fn family(name: &str) -> Option<Self> {
-        Self::FAMILIES
-            .into_iter()
-            .find_map(|(family, flag)| (family == name).then_some(flag))
+    fn valid_token(token: &str) -> bool {
+        !token.is_empty()
+            && token.len() <= Self::MAX_TOKEN_BYTES
+            && token
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
     }
-
+    pub fn from_families<I, S>(families: I) -> Result<Self, ProtocolError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut values = std::collections::BTreeSet::new();
+        for family in families {
+            let token = family.as_ref();
+            if !Self::valid_token(token) {
+                return Err(ProtocolError::InvalidBody);
+            }
+            values.insert(token.to_owned());
+            if values.len() > Self::MAX_FAMILIES {
+                return Err(ProtocolError::LengthExceeded(values.len()));
+            }
+        }
+        Ok(Self(values.into_iter().collect()))
+    }
+    pub fn family(name: &str) -> Option<Self> {
+        Self::from_families([name]).ok()
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(String::as_str)
+    }
     pub fn map_family(map: &str) -> &str {
         map.split_once(':').map_or("iw4", |(family, _)| family)
     }
-
     pub fn for_map(map: &str) -> Option<Self> {
         Self::family(Self::map_family(map))
     }
-
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
+    pub fn contains_family(&self, family: &str) -> bool {
+        self.0
+            .binary_search_by(|token| token.as_str().cmp(family))
+            .is_ok()
     }
-
-    pub const fn missing_from(self, have: Self) -> Self {
-        Self(self.0 & !have.0)
+    pub fn contains(&self, other: &Self) -> bool {
+        other.iter().all(|family| self.contains_family(family))
     }
-
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
+    pub fn missing_from(&self, have: &Self) -> Self {
+        Self(
+            self.0
+                .iter()
+                .filter(|family| !have.contains_family(family))
+                .cloned()
+                .collect(),
+        )
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    fn write(&self, out: &mut Writer) {
+        out.u8(self.0.len() as u8);
+        for token in &self.0 {
+            // Construction and decoding enforce these bounds.
+            out.string(token, Self::MAX_TOKEN_BYTES)
+                .expect("validated family token");
+        }
+    }
+    fn read(input: &mut Reader<'_>) -> Result<Self, ProtocolError> {
+        let count = input.u8()? as usize;
+        if count > Self::MAX_FAMILIES {
+            return Err(ProtocolError::LengthExceeded(count));
+        }
+        let mut tokens: Vec<String> = Vec::with_capacity(count);
+        for _ in 0..count {
+            let token = input.string(Self::MAX_TOKEN_BYTES)?;
+            if !Self::valid_token(&token)
+                || tokens.last().is_some_and(|previous| previous >= &token)
+            {
+                return Err(ProtocolError::InvalidBody);
+            }
+            tokens.push(token);
+        }
+        Ok(Self(tokens))
     }
 }
 
@@ -295,8 +345,8 @@ pub struct RoomView {
     pub epoch: u32,
     pub phase: RoomPhase,
     pub max_players: u8,
-    pub requires: ContentFlags,
-    pub available: ContentFlags,
+    pub requires: ContentFamilies,
+    pub available: ContentFamilies,
     pub password_protected: bool,
 }
 
@@ -315,8 +365,8 @@ impl RoomView {
             max_players: self.max_players,
             locked: !self.joinable,
             in_match: self.phase.in_match(),
-            requires: self.requires,
-            available: self.available,
+            requires: self.requires.clone(),
+            available: self.available.clone(),
             password_protected: self.password_protected,
             generation: self.revision,
         }
@@ -339,8 +389,8 @@ pub struct Advert {
     pub locked: bool,
 
     pub in_match: bool,
-    pub requires: ContentFlags,
-    pub available: ContentFlags,
+    pub requires: ContentFamilies,
+    pub available: ContentFamilies,
     pub password_protected: bool,
     pub generation: u64,
 }
@@ -366,13 +416,13 @@ pub enum RequestBody {
         map: String,
         mode: String,
         max_players: u8,
-        requires: ContentFlags,
-        available: ContentFlags,
+        requires: ContentFamilies,
+        available: ContentFamilies,
         password: String,
     },
     JoinRoom {
         room_id: AdvertId,
-        have: ContentFlags,
+        have: ContentFamilies,
         password: String,
     },
     SetPassword {
@@ -450,7 +500,7 @@ impl StatusResponse {
     };
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServiceError {
     Malformed,
     InvalidAdvert,
@@ -463,8 +513,8 @@ pub enum ServiceError {
     NotHost,
     NotMember,
     MissingContent {
-        requires: ContentFlags,
-        have: ContentFlags,
+        requires: ContentFamilies,
+        have: ContentFamilies,
     },
 }
 
@@ -483,14 +533,14 @@ impl ServiceError {
             11 => Self::NotHost,
             13 => Self::NotMember,
             14 => Self::MissingContent {
-                requires: ContentFlags(body.u8()?),
-                have: ContentFlags(body.u8()?),
+                requires: ContentFamilies::read(body)?,
+                have: ContentFamilies::read(body)?,
             },
             _ => return Err(ProtocolError::InvalidBody),
         })
     }
 
-    fn write(self, out: &mut Writer) {
+    fn write(&self, out: &mut Writer) {
         let tag = match self {
             Self::Malformed => 1,
             Self::InvalidAdvert => 2,
@@ -506,8 +556,8 @@ impl ServiceError {
         };
         out.u8(tag);
         if let Self::MissingContent { requires, have } = self {
-            out.u8(requires.0);
-            out.u8(have.0);
+            requires.write(out);
+            have.write(out);
         }
     }
 }
@@ -832,8 +882,8 @@ fn encode_request_body(body: &RequestBody) -> Result<Vec<u8>, ProtocolError> {
             out.string(map, MAX_MAP_BYTES)?;
             out.string(mode, MAX_MODE_BYTES)?;
             out.u8(*max_players);
-            out.u8(requires.0);
-            out.u8(available.0);
+            requires.write(&mut out);
+            available.write(&mut out);
             out.string(password, MAX_PASSWORD_BYTES)?;
         }
         RequestBody::JoinRoom {
@@ -843,7 +893,7 @@ fn encode_request_body(body: &RequestBody) -> Result<Vec<u8>, ProtocolError> {
         } => {
             out.u8(TAG_JOIN_ROOM);
             out.bytes(&room_id.0);
-            out.u8(have.0);
+            have.write(&mut out);
             out.string(password, MAX_PASSWORD_BYTES)?;
         }
         RequestBody::SetPassword { password } => {
@@ -953,8 +1003,8 @@ fn decode_request_body(body: &mut Reader<'_>) -> Result<RequestBody, ProtocolErr
             let map = body.string(MAX_MAP_BYTES)?;
             let mode = body.string(MAX_MODE_BYTES)?;
             let max_players = body.u8()?;
-            let requires = ContentFlags(body.u8()?);
-            let available = ContentFlags(body.u8()?);
+            let requires = ContentFamilies::read(body)?;
+            let available = ContentFamilies::read(body)?;
             let password = body.string(MAX_PASSWORD_BYTES)?;
             validate_advert(&name, &map, &mode, max_players)?;
             RequestBody::CreateRoom {
@@ -969,7 +1019,7 @@ fn decode_request_body(body: &mut Reader<'_>) -> Result<RequestBody, ProtocolErr
         }
         TAG_JOIN_ROOM => RequestBody::JoinRoom {
             room_id: AdvertId(body.array()?),
-            have: ContentFlags(body.u8()?),
+            have: ContentFamilies::read(body)?,
             password: body.string(MAX_PASSWORD_BYTES)?,
         },
         TAG_SET_PASSWORD => RequestBody::SetPassword {
@@ -1082,8 +1132,8 @@ fn encode_response_body(body: &ResponseBody) -> Result<Vec<u8>, ProtocolError> {
                 out.u8(advert.max_players);
                 out.u8(u8::from(advert.locked));
                 out.u8(u8::from(advert.in_match));
-                out.u8(advert.requires.0);
-                out.u8(advert.available.0);
+                advert.requires.write(&mut out);
+                advert.available.write(&mut out);
                 out.u8(u8::from(advert.password_protected));
                 out.u64(advert.generation);
             }
@@ -1136,8 +1186,8 @@ fn decode_response_body(body: &mut Reader<'_>) -> Result<ResponseBody, ProtocolE
                     max_players: body.u8()?,
                     locked: bool_byte(body.u8()?)?,
                     in_match: bool_byte(body.u8()?)?,
-                    requires: ContentFlags(body.u8()?),
-                    available: ContentFlags(body.u8()?),
+                    requires: ContentFamilies::read(body)?,
+                    available: ContentFamilies::read(body)?,
                     password_protected: bool_byte(body.u8()?)?,
                     generation: body.u64()?,
                 });
@@ -1166,8 +1216,8 @@ fn encode_room_view(view: &RoomView) -> Result<Vec<u8>, ProtocolError> {
     out.u8(view.phase.wire());
     out.u8(u8::from(view.joinable));
     out.u8(view.max_players);
-    out.u8(view.requires.0);
-    out.u8(view.available.0);
+    view.requires.write(&mut out);
+    view.available.write(&mut out);
     out.u8(u8::from(view.password_protected));
     out.string(&view.name, MAX_ADVERT_NAME_BYTES)?;
     out.string(&view.map, MAX_MAP_BYTES)?;
@@ -1193,8 +1243,8 @@ fn decode_room_view(body: &mut Reader<'_>) -> Result<RoomView, ProtocolError> {
     let phase = RoomPhase::from_wire(body.u8()?)?;
     let joinable = bool_byte(body.u8()?)?;
     let max_players = body.u8()?;
-    let requires = ContentFlags(body.u8()?);
-    let available = ContentFlags(body.u8()?);
+    let requires = ContentFamilies::read(body)?;
+    let available = ContentFamilies::read(body)?;
     let password_protected = bool_byte(body.u8()?)?;
     let name = body.string(MAX_ADVERT_NAME_BYTES)?;
     let map = body.string(MAX_MAP_BYTES)?;

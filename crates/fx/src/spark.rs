@@ -127,12 +127,16 @@ pub fn update_spark_history(
     spark_handle: u16,
     world_origin: [f32; 3],
     elem_axis: [[f32; 3]; 3],
-    size0: f32,
-    placement_scale: f32,
-    color_rgba: [u8; 4],
+    visual: &FxSparkFillVisual,
     elem_flags: i32,
     msec_now: i32,
 ) {
+    let &FxSparkFillVisual {
+        size0,
+        scale: placement_scale,
+        color_rgba,
+        ..
+    } = visual;
     let Some(dense) = spark_slot_for_handle(spark_handle) else {
         return;
     };

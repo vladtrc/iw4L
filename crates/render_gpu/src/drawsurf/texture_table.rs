@@ -176,7 +176,7 @@ impl ExactTextureTable {
     }
 
     pub fn census(&self) -> (usize, usize, usize, usize) {
-        let n = |lane: &Vec<TextureView>| lane.len().saturating_sub(1);
+        let n = |lane: &[TextureView]| lane.len().saturating_sub(1);
         (
             n(&self.views[0]),
             n(&self.views[1]),

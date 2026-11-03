@@ -49,7 +49,7 @@ pub struct ClassChangeBlockReason(pub Option<String>);
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub enum ClassSelectPhase {
     Interactive,
-    Pending { request_id: u32, class_index: usize },
+    Pending { class_index: usize },
 }
 
 impl Default for ClassSelectPhase {
@@ -62,23 +62,10 @@ impl ClassSelectPhase {
     pub fn is_pending(&self) -> bool {
         matches!(self, Self::Pending { .. })
     }
-
-    pub fn pending_request_id(&self) -> Option<u32> {
-        match *self {
-            Self::Pending { request_id, .. } => Some(request_id),
-            Self::Interactive => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ClassEquipRequest {
-    pub request_id: u32,
-    pub class_index: usize,
 }
 
 #[derive(Resource, Debug, Default)]
-pub struct PendingClassEquip(pub Option<ClassEquipRequest>);
+pub struct PendingClassEquip(pub Option<usize>);
 
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
 pub struct ClassSelectStatus(pub Option<String>);
@@ -89,29 +76,6 @@ pub struct ClassSelectHighlight(pub usize);
 impl Default for ClassSelectHighlight {
     fn default() -> Self {
         Self(0)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ClassEquipRefusal {
-    AlreadyPending { request_id: u32 },
-
-    UnknownClass(String),
-
-    LockedContent { index: usize, reason: String },
-}
-
-impl std::fmt::Display for ClassEquipRefusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AlreadyPending { request_id } => {
-                write!(f, "equip already pending (request_id={request_id})")
-            }
-            Self::UnknownClass(name) => write!(f, "unknown_class: `{name}`"),
-            Self::LockedContent { index, reason } => {
-                write!(f, "locked_content: preset {index} — {reason}")
-            }
-        }
     }
 }
 
@@ -134,71 +98,44 @@ pub fn commit_class_equip(
     phase: &mut ClassSelectPhase,
     pending: &mut PendingClassEquip,
     status: &mut ClassSelectStatus,
-    seq: &mut net::ActionRequestIds,
-) -> Result<u32, ClassEquipRefusal> {
-    if let Some(request_id) = phase.pending_request_id() {
-        return Err(ClassEquipRefusal::AlreadyPending { request_id });
+) -> Result<(), String> {
+    if phase.is_pending() {
+        return Err("equip already pending".into());
     }
-    if store.slots.get(index).is_none() {
-        return Err(ClassEquipRefusal::UnknownClass(index.to_string()));
-    }
+    u32::try_from(index).map_err(|_| "class index exceeds wire capacity".to_owned())?;
     if let Some(reason) = store.lock_reason(index) {
-        let refusal = ClassEquipRefusal::LockedContent { index, reason };
-        status.0 = Some(refusal.to_string());
-        return Err(refusal);
+        status.0 = Some(reason.clone());
+        return Err(reason);
     }
-    let request_id = seq.allocate();
-    highlight.0 = index;
-    store.selected = index;
-    pending.0 = Some(ClassEquipRequest {
-        request_id,
-        class_index: index,
-    });
-    *phase = ClassSelectPhase::Pending {
-        request_id,
-        class_index: index,
-    };
+    if store.slots.get(index).is_some() {
+        highlight.0 = index;
+        store.selected = index;
+    }
+    pending.0 = Some(index);
+    *phase = ClassSelectPhase::Pending { class_index: index };
     status.0 = None;
-    Ok(request_id)
+    Ok(())
 }
 
 pub fn accept_class_equip(
     equipped: &mut crate::classes::store::EquippedClass,
     phase: &mut ClassSelectPhase,
     overlay: &mut ClassSelectOverlayOpen,
-    request_id: u32,
-) -> bool {
-    match *phase {
-        ClassSelectPhase::Pending {
-            request_id: pending,
-            class_index,
-        } if pending == request_id => {
-            equipped.0 = Some(class_index);
-            *phase = ClassSelectPhase::Interactive;
-            overlay.0 = false;
-            true
-        }
-        _ => false,
+) {
+    if let ClassSelectPhase::Pending { class_index } = *phase {
+        equipped.0 = Some(class_index);
+        *phase = ClassSelectPhase::Interactive;
+        overlay.0 = false;
     }
 }
 
 pub fn reject_class_equip(
     phase: &mut ClassSelectPhase,
     status: &mut ClassSelectStatus,
-    request_id: u32,
     reason: impl Into<String>,
-) -> bool {
-    match *phase {
-        ClassSelectPhase::Pending {
-            request_id: pending,
-            ..
-        } if pending == request_id => {
-            *phase = ClassSelectPhase::Interactive;
-            status.0.replace(reason.into());
-            true
-        }
-        _ => false,
-    }
+) {
+    *phase = ClassSelectPhase::Interactive;
+    status.0 = Some(reason.into());
 }
 
 pub(crate) struct ClassSelectPlugin;

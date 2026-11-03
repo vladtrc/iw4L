@@ -102,7 +102,6 @@ fn setup(mut commands: Commands, font: Res<ui::GameUiFont>) {
 pub(crate) struct ChatOutbox<'w> {
     local: Res<'w, net::LocalPresentClient>,
     inbox: ResMut<'w, net::ClientActionInbox>,
-    ids: ResMut<'w, net::ActionRequestIds>,
 }
 
 fn submit(state: &mut ChatState, outbox: &mut ChatOutbox) {
@@ -110,7 +109,6 @@ fn submit(state: &mut ChatState, outbox: &mut ChatOutbox) {
         && let Err(error) = outbox.inbox.push(
             outbox.local.0,
             sim::ClientAction::Chat {
-                request_id: outbox.ids.allocate(),
                 team_only: state.team_only,
                 text: sim::chat::payload(&state.line),
             },

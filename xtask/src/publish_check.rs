@@ -470,11 +470,20 @@ fn scoped_contracts(root: &Path, paths: &[PathBuf]) -> Res<Vec<String>> {
         }
         sources.push((path, text));
     }
+    let bypass_patterns: Vec<_> = types
+        .iter()
+        .flat_map(|name| {
+            [
+                format!(".insert_resource({name}{{"),
+                format!(".insert_resource({name}::"),
+                format!("If<Res<{name}>"),
+                format!("If<ResMut<{name}>"),
+            ]
+        })
+        .collect();
     let mut findings = Vec::new();
     for (path, text) in sources {
-        if path == Path::new("crates/frame/src/scope.rs")
-            || path == Path::new("crates/net/src/role_matrix.rs")
-        {
+        if path == Path::new("crates/frame/src/scope.rs") {
             continue;
         }
         for (index, line) in text.lines().enumerate() {
@@ -487,13 +496,16 @@ fn scoped_contracts(root: &Path, paths: &[PathBuf]) -> Res<Vec<String>> {
             ]
             .iter()
             .any(|name| compact.contains(name));
-            let bypass = types.iter().any(|name| {
-                compact.contains(&format!(".init_resource::<{name}>"))
-                    || compact.contains(&format!(".insert_resource({name}{{"))
-                    || compact.contains(&format!(".insert_resource({name}::"))
-                    || compact.contains(&format!("If<Res<{name}>"))
-                    || compact.contains(&format!("If<ResMut<{name}>"))
-            });
+            let render_scope = path == Path::new("crates/render_gpu/src/drawsurf/scope.rs");
+            let initializes_scoped = !render_scope
+                && compact.split(".init_resource::<").skip(1).any(|tail| {
+                    tail.split_once('>')
+                        .is_some_and(|(ty, _)| types.contains(ty.rsplit("::").next().unwrap_or(ty)))
+                });
+            let bypass = initializes_scoped
+                || bypass_patterns
+                    .iter()
+                    .any(|pattern| compact.contains(pattern));
             let state_writer = path != Path::new("crates/session/src/scope_control.rs")
                 && [
                     "NextState<MatchScope>",

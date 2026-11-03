@@ -16,6 +16,39 @@ pub use entity_iw4::{
 
 pub type GlassPieceId = u32;
 
+#[derive(Clone, Copy, Debug)]
+pub struct GlassBlastFalloff {
+    pub inner_damage: i32,
+    pub outer_damage: i32,
+}
+impl GlassBlastFalloff {
+    pub fn amount(self, radius: f32, distance: f32) -> u32 {
+        glass_blast_integer_damage(self.inner_damage, self.outer_damage, radius, distance)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GlassBlastCone {
+    pub direction: [f32; 3],
+    pub cosine: f32,
+}
+impl GlassBlastCone {
+    pub fn keeps(self, offset: [f32; 3]) -> bool {
+        glass_blast_cone_keeps(self.direction, self.cosine, offset)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GlassHit {
+    pub position: [f32; 3],
+    pub direction: [f32; 3],
+}
+impl GlassHit {
+    pub fn seed(self, pane: GlassPaneBasis) -> Option<GlassShatterSeed> {
+        glass_shatter_seed_from_hit(pane, self.position, self.direction)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GlassPieceSnapshot {
     pub state: GlassPieceState,
@@ -28,6 +61,8 @@ pub struct GlassPieceSnapshot {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorldObjectSnapshot {
+    /// Per portal: physical exit A/B has no connected standing route.
+    pub portal_blocked_exits: Vec<[bool; 2]>,
     pub as_of_ms: i32,
     pub map_round_epoch: u32,
     pub fracture_profile_version: u32,
@@ -46,6 +81,7 @@ pub struct DestructibleLoopSound {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct WorldObjectState {
+    portal_blocked_exits: Vec<[bool; 2]>,
     destructible_loop_sounds: Vec<DestructibleLoopSound>,
     glass_pieces: Vec<(GlassPieceId, ServerGlassPiece)>,
 
@@ -64,6 +100,13 @@ struct GlassNativeMeta {
 }
 
 impl WorldObjectState {
+    pub fn portal_blocked_exits(&self) -> &[[bool; 2]] {
+        &self.portal_blocked_exits
+    }
+    pub(crate) fn set_portal_blocked_exits(&mut self, exits: Vec<[bool; 2]>) {
+        self.portal_blocked_exits = exits;
+    }
+
     pub fn set_destructible_loop_sounds(&mut self, rows: Vec<DestructibleLoopSound>) {
         self.destructible_loop_sounds = rows;
     }
@@ -85,6 +128,12 @@ impl WorldObjectState {
             .iter()
             .map(|(id, piece)| (*id, piece.damage))
             .collect()
+    }
+
+    pub(crate) fn non_solid_glass_ids(&self) -> impl Iterator<Item = GlassPieceId> + '_ {
+        self.glass_pieces
+            .iter()
+            .filter_map(|(id, piece)| (!glass_is_solid(piece.damage)).then_some(*id))
     }
 
     pub fn glass_radius_targets(&self) -> Vec<(GlassPieceId, GlassPaneBasis)> {
@@ -160,23 +209,28 @@ impl WorldObjectState {
             .glass_pane(id)
             .map(|pane| (pane.origin, [0.0, 0.0, 1.0]))
             .unwrap_or(([0.0, 0.0, 0.0], [0.0, 0.0, 1.0]));
-        self.force_shatter_glass(id, at_time_ms, hit, dir, GlassCause::Script)
+        self.force_shatter_glass(
+            id,
+            at_time_ms,
+            GlassHit {
+                position: hit,
+                direction: dir,
+            },
+            GlassCause::Script,
+        )
     }
 
     pub fn force_shatter_glass(
         &mut self,
         id: GlassPieceId,
         at_time_ms: i32,
-        hit: [f32; 3],
-        dir: [f32; 3],
+        impact: GlassHit,
         cause: GlassCause,
     ) -> GlassPieceState {
         if !self.glass_is_solid(id) {
             return self.glass_piece_state(id);
         }
-        let seed = self
-            .glass_pane(id)
-            .and_then(|pane| glass_shatter_seed_from_hit(pane, hit, dir));
+        let seed = self.glass_pane(id).and_then(|pane| impact.seed(pane));
         self.apply_glass_damage_caused(
             id,
             u32::from(GLASS_DAMAGE_TO_DESTROY),
@@ -190,19 +244,19 @@ impl WorldObjectState {
     pub fn apply_glass_blast(
         &mut self,
         origin: [f32; 3],
-        inner_damage: i32,
-        outer_damage: i32,
+        falloff: GlassBlastFalloff,
         radius: f32,
         at_time_ms: i32,
         next_random: &mut impl FnMut() -> f32,
     ) {
         self.apply_glass_blast_oriented(
             origin,
-            inner_damage,
-            outer_damage,
+            falloff,
             radius,
-            [0.0; 3],
-            0.0,
+            GlassBlastCone {
+                direction: [0.0; 3],
+                cosine: 0.0,
+            },
             at_time_ms,
             next_random,
         );
@@ -211,14 +265,16 @@ impl WorldObjectState {
     pub fn apply_glass_blast_oriented(
         &mut self,
         origin: [f32; 3],
-        inner_damage: i32,
-        outer_damage: i32,
+        falloff: GlassBlastFalloff,
         radius: f32,
-        cone_dir: [f32; 3],
-        cone_cos: f32,
+        cone: GlassBlastCone,
         at_time_ms: i32,
         next_random: &mut impl FnMut() -> f32,
     ) {
+        let GlassBlastFalloff {
+            inner_damage,
+            outer_damage,
+        } = falloff;
         if inner_damage <= 0 && outer_damage <= 0 {
             return;
         }
@@ -239,10 +295,10 @@ impl WorldObjectState {
             let dy = pane.origin[1] - origin[1];
             let dz = pane.origin[2] - origin[2];
             let d = (dx * dx + dy * dy + dz * dz).sqrt();
-            if !glass_blast_cone_keeps(cone_dir, cone_cos, [dx, dy, dz]) {
+            if !cone.keeps([dx, dy, dz]) {
                 continue;
             }
-            let amount = glass_blast_integer_damage(inner_damage, outer_damage, r, d);
+            let amount = falloff.amount(r, d);
             if amount == 0 {
                 continue;
             }
@@ -255,8 +311,10 @@ impl WorldObjectState {
                 id,
                 amount,
                 at_time_ms,
-                origin,
-                dir,
+                GlassHit {
+                    position: origin,
+                    direction: dir,
+                },
                 next_random,
                 GlassCause::Blast,
             );
@@ -289,16 +347,14 @@ impl WorldObjectState {
         id: GlassPieceId,
         damage: u32,
         at_time_ms: i32,
-        hit: [f32; 3],
-        dir: [f32; 3],
+        impact: GlassHit,
         next_random: &mut impl FnMut() -> f32,
     ) -> GlassPieceState {
         self.apply_glass_hit_caused(
             id,
             damage,
             at_time_ms,
-            hit,
-            dir,
+            impact,
             next_random,
             GlassCause::Impact,
         )
@@ -309,8 +365,7 @@ impl WorldObjectState {
         id: GlassPieceId,
         damage: u32,
         at_time_ms: i32,
-        hit: [f32; 3],
-        dir: [f32; 3],
+        impact: GlassHit,
         next_random: &mut impl FnMut() -> f32,
         cause: GlassCause,
     ) -> GlassPieceState {
@@ -326,10 +381,7 @@ impl WorldObjectState {
         let collapse = (next != previous && next == GlassPieceState::Weakened)
             .then(|| glass_weakened_collapse_time_cs(next_random));
         let seed = (next != previous && next == GlassPieceState::Shattered)
-            .then(|| {
-                self.glass_pane(id)
-                    .and_then(|pane| glass_shatter_seed_from_hit(pane, hit, dir))
-            })
+            .then(|| self.glass_pane(id).and_then(|pane| impact.seed(pane)))
             .flatten();
         self.apply_glass_damage_caused(id, damage, at_time_ms, collapse, seed, cause)
     }
@@ -373,6 +425,7 @@ impl WorldObjectState {
         sort_pairs(&mut glass_pieces);
 
         WorldObjectSnapshot {
+            portal_blocked_exits: self.portal_blocked_exits.clone(),
             as_of_ms: 0,
             map_round_epoch: self.map_round_epoch,
             fracture_profile_version: GLASS_FRACTURE_PROFILE_VERSION,
@@ -382,6 +435,7 @@ impl WorldObjectState {
     }
 
     pub fn adopt_snapshot(&mut self, snap: &WorldObjectSnapshot) {
+        self.portal_blocked_exits = snap.portal_blocked_exits.clone();
         self.map_round_epoch = snap.map_round_epoch;
         self.destructible_loop_sounds = snap.destructible_loop_sounds.clone();
         self.glass_pieces.clear();
@@ -420,7 +474,7 @@ impl WorldObjectState {
     }
 
     fn glass_native_meta(&self, id: GlassPieceId) -> GlassNativeMeta {
-        lookup_value(&self.glass_native, id).unwrap_or_default()
+        lookup_value(&self.glass_native, id).unwrap_or_else(GlassNativeMeta::default)
     }
 
     pub fn glass_break_record(&self, id: GlassPieceId) -> Option<GlassBreakRecord> {

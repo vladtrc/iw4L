@@ -25,21 +25,19 @@ pub use layouts::{
     CollisionPartition,
 };
 pub use mesh::{
-    ClipAabbNode, ClipBorder, ClipMeshRef, ClipMeshTables, ClipPartition, MeshWalkCensus,
-    VERTS_PER_SEGMENT, aabb_forest_roots, flatten_tri_material_index, flatten_tri_surface_flags,
-    trace_through_mesh, trace_through_mesh_into, trace_through_mesh_with_census,
+    ClipAabbNode, ClipBorder, ClipMeshRef, ClipMeshTables, ClipPartition, VERTS_PER_SEGMENT,
+    aabb_forest_roots, flatten_tri_material_index, flatten_tri_surface_flags, trace_through_mesh,
+    trace_through_mesh_into,
 };
 pub use temp_box::transformed_temp_capsule_trace;
 pub use world_trace::{
-    ClipWorldWinner, WorldTraceCensus, combine_brush_mesh, finish_mesh_forest_fallback,
-    trace_brush_and_mesh, trace_brush_and_mesh_with_census, trace_brush_and_mesh_with_winner,
-    trace_leaf_brushes_into, trace_leaf_mesh_into,
+    ClipWorldWinner, combine_brush_mesh, finish_mesh_forest_fallback, trace_brush_and_mesh,
+    trace_brush_and_mesh_with_winner, trace_leaf_brushes_into, trace_leaf_mesh_into,
 };
 pub use xmodel_trace::{
-    ClipStaticModel, RigidXform, StaticModelHit, StaticModelWalkStats, XModelAnimBone, XModelColl,
-    XModelCollSurf, XModelCollTri, point_trace_static_models, point_trace_static_models_stats,
-    point_trace_static_models_stats_keyed, trace_box_misses, trace_static_model, xmodel_trace_line,
-    xmodel_trace_line_animated,
+    ClipStaticModel, RigidXform, StaticModelHit, XModelAnimBone, XModelColl, XModelCollSurf,
+    XModelCollTri, point_trace_static_models, point_trace_static_models_keyed, trace_box_misses,
+    trace_static_model, xmodel_trace_line, xmodel_trace_line_animated,
 };
 
 pub trait BrushView {
@@ -220,7 +218,7 @@ pub fn collect_leaf_hits<B: BrushView>(map: &ClipMapRef<'_, B>, ext: &TraceExten
         return hits;
     }
     let always_one = || 1.0_f32;
-    let _ = walk_clip_tree(map, ext, &always_one, &mut |leaf| {
+    walk_clip_tree(map, ext, &always_one, &mut |leaf| {
         hits.visit_leaf(leaf, map.leafbrushes);
     });
     hits.finish();
@@ -312,16 +310,11 @@ pub fn trace_through_tree_with_glass<B: BrushView>(
         ..Trace::default()
     };
     let frac = core::cell::Cell::new(1.0_f32);
-    let _ = walk_clip_tree(map, ext, &|| frac.get(), &mut |leaf| {
-        let _ = trace_leaf_brushes_into(map, leaf, ext, glass_is_solid, &mut best);
+    walk_clip_tree(map, ext, &|| frac.get(), &mut |leaf| {
+        trace_leaf_brushes_into(map, leaf, ext, glass_is_solid, &mut best);
         frac.set(best.fraction);
     });
     best
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct TreeWalkCensus {
-    pub early_out_n: u32,
 }
 
 pub fn walk_clip_tree<B: BrushView>(
@@ -329,25 +322,31 @@ pub fn walk_clip_tree<B: BrushView>(
     ext: &TraceExtents,
     fraction: &dyn Fn() -> f32,
     on_leaf: &mut dyn FnMut(&ClipLeaf),
-) -> TreeWalkCensus {
-    let mut census = TreeWalkCensus::default();
+) {
     if map.nodes.is_empty() || map.leaves.is_empty() {
-        return census;
+        return;
     }
     let walk = TreeWalk::new(ext);
     walk_node(
         map,
         0,
-        walk.start,
-        walk.end,
-        0.0,
-        1.0,
+        TreeSegment {
+            start: walk.start,
+            end: walk.end,
+            start_fraction: 0.0,
+            end_fraction: 1.0,
+        },
         &walk,
         fraction,
         on_leaf,
-        &mut census.early_out_n,
     );
-    census
+}
+
+struct TreeSegment {
+    start: [f32; 3],
+    end: [f32; 3],
+    start_fraction: f32,
+    end_fraction: f32,
 }
 
 struct TreeWalk {
@@ -406,19 +405,20 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 fn walk_node<B: BrushView>(
     map: &ClipMapRef<'_, B>,
     mut num: i32,
-    mut p1: [f32; 3],
-    p2: [f32; 3],
-    mut p1t: f32,
-    p2t: f32,
+    segment: TreeSegment,
     walk: &TreeWalk,
     fraction: &dyn Fn() -> f32,
     on_leaf: &mut dyn FnMut(&ClipLeaf),
-    early_out_n: &mut u32,
 ) {
+    let TreeSegment {
+        start: mut p1,
+        end: p2,
+        start_fraction: mut p1t,
+        end_fraction: p2t,
+    } = segment;
     loop {
         if num < 0 {
             if p1t >= fraction() {
-                *early_out_n = early_out_n.saturating_add(1);
                 return;
             }
             let leaf_i = (!num) as usize;
@@ -450,7 +450,6 @@ fn walk_node<B: BrushView>(
         }
 
         if p1t >= fraction() {
-            *early_out_n = early_out_n.saturating_add(1);
             return;
         }
         let diff = d2 - d1;
@@ -480,14 +479,15 @@ fn walk_node<B: BrushView>(
         walk_node(
             map,
             node.children[side],
-            p1,
-            mid,
-            p1t,
-            midt,
+            TreeSegment {
+                start: p1,
+                end: mid,
+                start_fraction: p1t,
+                end_fraction: midt,
+            },
             walk,
             fraction,
             on_leaf,
-            early_out_n,
         );
         p1 = lerp3(p1, p2, frac2);
         p1t = (p2t - p1t) * frac2 + p1t;

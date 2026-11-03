@@ -1,6 +1,6 @@
 use std::cell::UnsafeCell;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::admission::AdmissionFailure;
 use crate::media::RenderMedia;
@@ -36,7 +36,6 @@ pub enum InstanceStatus {
 pub(crate) struct InstanceState {
     pub id: u64,
     pub scope: AudioScope,
-    pub epoch: u64,
     pub stopped: AtomicBool,
     pub finish_attack: AtomicBool,
     pub paused: AtomicBool,
@@ -148,12 +147,21 @@ struct RenderState {
     limiter: crate::mix_bus::MasterLimiter,
 }
 
+/// The mix taken off the device for an offline capture. While armed the device
+/// plays silence, and the control thread renders up to `target` and keeps the
+/// blocks here, so the mix advances by the capturer's clock, not the wall's.
+#[derive(Default)]
+pub(crate) struct CaptureTap {
+    pub armed: AtomicBool,
+    pub target: AtomicU64,
+    pub samples: Mutex<Vec<[f32; 2]>>,
+}
+
 pub(crate) struct RenderShared {
     slots: [Slot; PHYSICAL_VOICES],
     rendering: AtomicBool,
     state: UnsafeCell<RenderState>,
     pub frame: AtomicU64,
-    pub presentation_epoch: AtomicU64,
     pub master: AtomicU32,
     pub busy_blocks: AtomicU64,
     pub device_active: AtomicBool,
@@ -164,6 +172,7 @@ pub(crate) struct RenderShared {
     pub device_underruns: AtomicU64,
     pub cancelled: AtomicBool,
     pub peak: AtomicU32,
+    pub capture: CaptureTap,
 }
 
 // The bounded rendering lease exclusively owns RenderState. Slot payload access
@@ -179,6 +188,12 @@ impl Drop for RenderLease<'_> {
 }
 
 impl RenderShared {
+    pub fn synchronize(&self) {
+        while self.rendering.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             slots: std::array::from_fn(|_| Slot::new()),
@@ -193,7 +208,6 @@ impl RenderShared {
                 limiter: Default::default(),
             }),
             frame: AtomicU64::new(0),
-            presentation_epoch: AtomicU64::new(0),
             master: AtomicU32::new(1.0f32.to_bits()),
             busy_blocks: AtomicU64::new(0),
             device_active: AtomicBool::new(false),
@@ -204,6 +218,7 @@ impl RenderShared {
             device_underruns: AtomicU64::new(0),
             cancelled: AtomicBool::new(false),
             peak: AtomicU32::new(0),
+            capture: CaptureTap::default(),
         }
     }
 
@@ -228,7 +243,6 @@ impl RenderShared {
         // The lease is held until every reference to this state has expired.
         let state = unsafe { &mut *self.state.get() };
         let frame = self.frame.load(Ordering::Relaxed);
-        let epoch = self.presentation_epoch.load(Ordering::Acquire);
         let cancelled = self.cancelled.load(Ordering::Acquire);
         let hold_one_shots = device == Some(false) && self.device_required.load(Ordering::Relaxed);
         for (index, slot) in self.slots.iter().enumerate() {
@@ -242,7 +256,6 @@ impl RenderShared {
                     assignment,
                     &mut state.cursors[index],
                     frame,
-                    epoch,
                     cancelled,
                     hold_one_shots,
                     state.buses.bus(assignment.media.bus),
@@ -307,7 +320,9 @@ impl RenderShared {
         true
     }
 
-    // These operations require the sole control owner, including in offline use.
+    /// # Safety
+    /// The caller must be the sole control owner of this `RenderShared`.
+    /// Calls to `publish` and `reclaim` must not overlap, including across threads.
     pub unsafe fn publish(&self, assignment: Assignment) -> Result<usize, Assignment> {
         let Some(index) = self
             .slots
@@ -322,6 +337,9 @@ impl RenderShared {
         Ok(index)
     }
 
+    /// # Safety
+    /// The caller must be the sole control owner of this `RenderShared`.
+    /// Calls to `publish` and `reclaim` must not overlap, including across threads.
     pub unsafe fn reclaim(&self, index: usize) -> Option<Assignment> {
         let slot = self.slots.get(index)?;
         if slot.phase.load(Ordering::Acquire) != RETIRED {
@@ -337,7 +355,6 @@ fn render_assignment(
     assignment: &Assignment,
     cursor: &mut Cursor,
     frame: u64,
-    epoch: u64,
     cancelled: bool,
     hold_one_shots: bool,
     output: &mut [[f32; 2]; QUANTUM],
@@ -345,7 +362,6 @@ fn render_assignment(
     let instance = &assignment.instance;
     if cancelled
         || instance.stopped.load(Ordering::Acquire)
-        || (instance.scope == AudioScope::Match && instance.epoch != epoch)
         || assignment.media.release.as_ref().is_some_and(|release| {
             release.expired(frame)
                 || (release.requested() && !instance.has_reached(InstanceStatus::Started))

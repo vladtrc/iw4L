@@ -6,13 +6,6 @@ pub struct WeaponHandle {
     row: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WeaponBindingRefusal {
-    ForeignOwner,
-    UnknownWeapon,
-    StaleSnapshot,
-}
-
 #[derive(Clone, Copy)]
 pub struct BoundWeapon<'a> {
     registry: &'a WeaponRegistry,
@@ -74,12 +67,12 @@ impl Default for WeaponRegistry {
 }
 
 impl WeaponRegistry {
-    pub fn bind(&self, handle: WeaponHandle) -> Result<BoundWeapon<'_>, WeaponBindingRefusal> {
+    pub fn bind(&self, handle: WeaponHandle) -> Result<BoundWeapon<'_>, &'static str> {
         if handle.revision != self.revision {
-            return Err(WeaponBindingRefusal::ForeignOwner);
+            return Err("weapon handle belongs to another registry");
         }
         if self.rows.get(handle.row as usize).is_none() {
-            return Err(WeaponBindingRefusal::UnknownWeapon);
+            return Err("unknown weapon handle");
         }
         Ok(BoundWeapon {
             registry: self,
@@ -87,7 +80,7 @@ impl WeaponRegistry {
         })
     }
 
-    pub fn bind_published_row(&self, row: u32) -> Result<BoundWeapon<'_>, WeaponBindingRefusal> {
+    pub fn bind_published_row(&self, row: u32) -> Result<BoundWeapon<'_>, &'static str> {
         self.bind(WeaponHandle {
             revision: self.revision,
             row,

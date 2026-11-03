@@ -599,7 +599,50 @@ fn fires(classname: &str) -> Option<Fires> {
     }
 }
 
+// A map's boundary volumes can extend beyond its atlas slab. Geometry
+// overlap alone must never activate a trigger in a different world.
+#[derive(Clone, Copy, Debug)]
+struct Volume<'f> {
+    world: Option<usize>,
+    shape: VolumeShape<'f>,
+}
+
 fn volume<'f>(runtime: &mut RoundScript, frame: &'f FrameWorld, object: u64) -> Option<Volume<'f>> {
+    let shape = volume_shape(runtime, frame, object)?;
+    let origin = match runtime.object_field(object, "origin") {
+        Value::Vector(origin) => origin,
+        _ => [0.0; 3],
+    };
+    Some(Volume {
+        world: frame
+            .content()
+            .atlas()
+            .map(|_| crate::world_graph::world_at(origin)),
+        shape,
+    })
+}
+
+impl Volume<'_> {
+    fn in_world(&self, point: [f32; 3]) -> bool {
+        self.world
+            .is_none_or(|world| crate::world_graph::world_at(point) == world)
+    }
+
+    fn crosses(&self, start: [f32; 3], end: [f32; 3]) -> bool {
+        self.in_world(start) && self.in_world(end) && self.shape.crosses(start, end)
+    }
+
+    fn touches(&self, mins: [f32; 3], maxs: [f32; 3]) -> bool {
+        let mid = std::array::from_fn(|i| (mins[i] + maxs[i]) * 0.5);
+        self.in_world(mid) && self.shape.touches(mins, maxs)
+    }
+}
+
+fn volume_shape<'f>(
+    runtime: &mut RoundScript,
+    frame: &'f FrameWorld,
+    object: u64,
+) -> Option<VolumeShape<'f>> {
     let entity = runtime.entities.get(&object)?;
     let (cylinder, brush, trigger_model) = (entity.cylinder, entity.brush, entity.trigger_model);
     let origin = match runtime.object_field(object, "origin") {
@@ -607,7 +650,7 @@ fn volume<'f>(runtime: &mut RoundScript, frame: &'f FrameWorld, object: u64) -> 
         _ => [0.0; 3],
     };
     if let Some((radius, height)) = cylinder {
-        return Some(Volume::Cylinder {
+        return Some(VolumeShape::Cylinder {
             origin,
             radius,
             height,
@@ -615,7 +658,7 @@ fn volume<'f>(runtime: &mut RoundScript, frame: &'f FrameWorld, object: u64) -> 
     }
     if let Some(n) = trigger_model {
         let hulls = frame.clip_cmodels().triggers.get(n as usize)?;
-        return (!hulls.is_empty()).then_some(Volume::Hulls { origin, hulls });
+        return (!hulls.is_empty()).then_some(VolumeShape::Hulls { origin, hulls });
     }
     let model = frame.clip_cmodels().models.get(brush? as usize)?;
     let first = model.first_brush as usize;
@@ -625,20 +668,20 @@ fn volume<'f>(runtime: &mut RoundScript, frame: &'f FrameWorld, object: u64) -> 
         .get(first..first + usize::from(model.num_brushes))
         .unwrap_or(&[]);
     if !ids.is_empty() {
-        return Some(Volume::Brushes {
+        return Some(VolumeShape::Brushes {
             origin,
             ids,
             brushes: frame.clip_brushes(),
         });
     }
-    Some(Volume::Box {
+    Some(VolumeShape::Box {
         mins: std::array::from_fn(|i| origin[i] + model.mins[i]),
         maxs: std::array::from_fn(|i| origin[i] + model.maxs[i]),
     })
 }
 
 #[derive(Clone, Copy, Debug)]
-enum Volume<'f> {
+enum VolumeShape<'f> {
     Cylinder {
         origin: [f32; 3],
         radius: f32,
@@ -706,14 +749,14 @@ fn segment_planes(start: [f32; 3], end: [f32; 3], planes: impl Iterator<Item = [
         .all(|plane| clip_plane(start, end, plane, &mut enter, &mut exit))
 }
 
-impl Volume<'_> {
+impl VolumeShape<'_> {
     fn crosses(&self, start: [f32; 3], end: [f32; 3]) -> bool {
         if !start.into_iter().chain(end).all(f32::is_finite) {
             return false;
         }
         match *self {
-            Volume::Box { mins, maxs } => segment_planes(start, end, box_planes(mins, maxs)),
-            Volume::Brushes {
+            VolumeShape::Box { mins, maxs } => segment_planes(start, end, box_planes(mins, maxs)),
+            VolumeShape::Brushes {
                 origin,
                 ids,
                 brushes,
@@ -727,7 +770,7 @@ impl Volume<'_> {
                             && segment_planes(start, end, brush.planes.iter().copied())
                     })
             }
-            Volume::Hulls { origin, hulls } => {
+            VolumeShape::Hulls { origin, hulls } => {
                 let start = std::array::from_fn(|i| start[i] - origin[i]);
                 let end = std::array::from_fn(|i| end[i] - origin[i]);
                 hulls.iter().any(|hull| {
@@ -742,7 +785,7 @@ impl Volume<'_> {
                     segment_planes(start, end, box_planes(mins, maxs).chain(slabs))
                 })
             }
-            Volume::Cylinder {
+            VolumeShape::Cylinder {
                 origin,
                 radius,
                 height,
@@ -794,7 +837,7 @@ impl Volume<'_> {
 
     fn touches(&self, mins: [f32; 3], maxs: [f32; 3]) -> bool {
         match *self {
-            Volume::Brushes {
+            VolumeShape::Brushes {
                 origin,
                 ids,
                 brushes,
@@ -811,7 +854,7 @@ impl Volume<'_> {
                         })
                     })
             }
-            Volume::Cylinder {
+            VolumeShape::Cylinder {
                 origin,
                 radius,
                 height,
@@ -823,10 +866,10 @@ impl Volume<'_> {
                 (origin[2] + height * 0.5 - mid[2]).abs() < height * 0.5 + half[2]
                     && dx * dx + dy * dy < reach * reach
             }
-            Volume::Box { mins: lo, maxs: hi } => {
+            VolumeShape::Box { mins: lo, maxs: hi } => {
                 (0..3).all(|i| mins[i] <= hi[i] && maxs[i] >= lo[i])
             }
-            Volume::Hulls { origin, hulls } => {
+            VolumeShape::Hulls { origin, hulls } => {
                 let mid: [f32; 3] = std::array::from_fn(|i| (mins[i] + maxs[i]) * 0.5 - origin[i]);
                 let half: [f32; 3] = std::array::from_fn(|i| (maxs[i] - mins[i]) * 0.5);
                 hulls.iter().any(|hull| {

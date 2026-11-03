@@ -1,29 +1,25 @@
 use super::*;
-mod common;
-mod iw4;
-mod iw5;
-mod t5;
-mod t6;
-use common::native_curve;
+pub mod common;
+pub mod iw4;
+pub use common::native_curve;
 
-struct CueSemantics {
-    spatial: Option<Result<SpatialPlaybackPolicy, SpatialPolicyFailure>>,
-    limits: [VoiceLimit; 2],
-    group: GroupSelection,
-    zero_volume_unity: bool,
-    speaker_gains: Option<[[f32; 2]; 2]>,
-    mixer_group_supported: bool,
-    streamed_decode: crate::StreamedDecodePolicy,
-    secondary: (SecondaryActivation, SecondaryPolicySource),
+pub struct CueSemantics {
+    pub spatial: Option<Result<SpatialPlaybackPolicy, SpatialPolicyFailure>>,
+    pub limits: [VoiceLimit; 2],
+    pub group: GroupSelection,
+    pub zero_volume_unity: bool,
+    pub speaker_gains: Option<[[f32; 2]; 2]>,
+    pub mixer_group_supported: bool,
+    pub secondary: (SecondaryActivation, SecondaryPolicySource),
 }
 
-enum GroupSelection {
+pub enum GroupSelection {
     Ungrouped,
     Index(u32),
     Unknown,
 }
 
-trait CueCompiler {
+pub trait CueCompiler: Send + Sync {
     fn prepare(&self, row: &CapturedAlias, channel: Option<&EntChannel>) -> CueSemantics;
 }
 
@@ -34,19 +30,14 @@ pub(super) fn compile(
 ) -> Option<AliasPlaybackPolicy> {
     let sound = catalog.sound_at(alias)?;
     let row = sound.aliases.get(variant)?;
-    let namespace = AssetNamespace::from_zone_game(sound.game);
+    let namespace = sound.game;
     let channels = catalog.channels_in(namespace);
     let group_volumes = catalog.mixer_group_volumes_in(namespace);
     let channel = sound
         .ent_channel(variant)
         .map(|id| ChannelKey { namespace, id });
     let channel_info = channel.and_then(|key| channels?.get(key.id as usize));
-    let compiler: &dyn CueCompiler = match namespace {
-        AssetNamespace::Iw4 => &iw4::Iw4CueCompiler,
-        AssetNamespace::Iw5 => &iw5::Iw5CueCompiler,
-        AssetNamespace::T5 => &t5::T5CueCompiler,
-        AssetNamespace::T6 => &t6::T6CueCompiler,
-    };
+    let compiler = crate::audio_family(namespace)?.cue;
     let semantics = compiler.prepare(row, channel_info);
     let group_gain = match semantics.group {
         GroupSelection::Index(native_index) => {
@@ -68,7 +59,6 @@ pub(super) fn compile(
     Some(AliasPlaybackPolicy {
         namespace,
         looping: LoopingPolicy::compile(row.is_looping()),
-        streamed_decode: semantics.streamed_decode,
         composition: CueCompositionPolicy::compile(
             row,
             semantics.mixer_group_supported,

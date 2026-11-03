@@ -7,14 +7,14 @@ use std::sync::Arc;
 pub(super) type ColourBindingLanes = [HashMap<BoundTextureKey, Arc<[u32]>>; 4];
 
 #[derive(Resource, Default)]
-pub(super) struct ExactColourBindingCache {
+pub(crate) struct ExactColourBindingCache {
     pub(super) generation: MaterialGenerationId,
     views_revision: u64,
     pub(super) textures: ColourBindingLanes,
 }
 
 #[derive(Resource, Default)]
-pub(super) struct ExactShadowBindingCache {
+pub(crate) struct ExactShadowBindingCache {
     pub(super) generation: MaterialGenerationId,
     views_revision: u64,
     pub(super) textures: HashMap<BoundTextureKey, Arc<[u32]>>,

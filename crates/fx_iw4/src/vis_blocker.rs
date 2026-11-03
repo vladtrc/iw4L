@@ -59,31 +59,33 @@ pub fn distance_fade_range(dist: f32, base: f32, amp: f32) -> f32 {
     }
 }
 
-#[inline]
-pub fn evaluate_distance_fade(
-    dist: f32,
-    fade_in_base: f32,
-    fade_in_amp: f32,
-    fade_out_base: f32,
-    fade_out_amp: f32,
-) -> Option<u32> {
-    if fade_in_amp == 0.0 && fade_out_amp == 0.0 {
-        return None;
+#[derive(Clone, Copy, Debug)]
+pub struct FxDistanceFade {
+    pub fade_in: [f32; 2],
+    pub fade_out: [f32; 2],
+}
+
+impl FxDistanceFade {
+    #[inline]
+    pub fn evaluate(&self, dist: f32) -> Option<u32> {
+        if self.fade_in[1] == 0.0 && self.fade_out[1] == 0.0 {
+            return None;
+        }
+        let mut fade_in = 1.0;
+        let mut fade_out = 1.0;
+        if self.fade_in[1] != 0.0 {
+            fade_in = distance_fade_range(dist, self.fade_in[0], self.fade_in[1]);
+        }
+        if self.fade_out[1] != 0.0 {
+            fade_out = 1.0 - distance_fade_range(dist, self.fade_out[0], self.fade_out[1]);
+        }
+        let fade = if fade_in < fade_out {
+            fade_in
+        } else {
+            fade_out
+        };
+        Some((fade * FX_DISTANCE_FADE_SCALE as f32 + FX_DISTANCE_FADE_BIAS as f32) as i32 as u32)
     }
-    let mut fade_in = 1.0;
-    let mut fade_out = 1.0;
-    if fade_in_amp != 0.0 {
-        fade_in = distance_fade_range(dist, fade_in_base, fade_in_amp);
-    }
-    if fade_out_amp != 0.0 {
-        fade_out = 1.0 - distance_fade_range(dist, fade_out_base, fade_out_amp);
-    }
-    let fade = if fade_in < fade_out {
-        fade_in
-    } else {
-        fade_out
-    };
-    Some((fade * FX_DISTANCE_FADE_SCALE as f32 + FX_DISTANCE_FADE_BIAS as f32) as i32 as u32)
 }
 
 #[inline]
@@ -92,30 +94,25 @@ pub fn vis_blocker_param4(color_alpha: u8, distance_fade: u32) -> f32 {
     (prod as f32) * (FX_VIS_BLOCKER_BYTE_TO_UNIT as f32)
 }
 
-#[inline]
-pub fn vis_blocker_add_prepared(
-    buf: &mut FxVisBlockerBuf,
-    flags: i32,
-    origin: [f32; 3],
-    size0: f32,
-    color_alpha: u8,
-    fade_in: [f32; 2],
-    fade_out: [f32; 2],
-    camera: [f32; 3],
-) -> bool {
-    if (flags & FX_ELEM_FLAG_VIS_BLOCKER) == 0 {
-        return false;
+impl FxVisBlockerBuf {
+    #[inline]
+    pub fn add_prepared(
+        &mut self,
+        flags: i32,
+        origin: [f32; 3],
+        size0: f32,
+        color_alpha: u8,
+        fade: FxDistanceFade,
+        camera: [f32; 3],
+    ) -> bool {
+        if (flags & FX_ELEM_FLAG_VIS_BLOCKER) == 0 {
+            return false;
+        }
+        let Some(fade) = fade.evaluate(crate::vec::vec3_distance(camera, origin)) else {
+            return false;
+        };
+        vis_blocker_add(self, origin, size0, vis_blocker_param4(color_alpha, fade))
     }
-    let Some(fade) = evaluate_distance_fade(
-        crate::vec::vec3_distance(camera, origin),
-        fade_in[0],
-        fade_in[1],
-        fade_out[0],
-        fade_out[1],
-    ) else {
-        return false;
-    };
-    vis_blocker_add(buf, origin, size0, vis_blocker_param4(color_alpha, fade))
 }
 
 #[inline]

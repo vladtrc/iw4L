@@ -2007,10 +2007,7 @@ impl<'a> ZoneStream<'a> {
     }
 
     pub fn watermark(&self, block: u8) -> usize {
-        self.offsets
-            .get(block as usize)
-            .copied()
-            .unwrap_or_default()
+        self.offsets.get(block as usize).copied().unwrap_or(0)
     }
 
     pub fn tag_alloc(&mut self, tag: u32, align: usize, bytes: usize) {

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use asset_audio::{SoundCatalog, unit_random};
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 
 use crate::admission::AdmissionPolicy;
 use crate::clip_store::{ClipKey, MediaService, clip_key_for_sound};
@@ -25,7 +25,6 @@ pub enum CueFailure {
     InvalidMediaBinding,
     NoMedia,
     Cancelled,
-    FireRefused,
     StaleScope,
     DuplicateEvent,
     StaleEvent,
@@ -164,12 +163,6 @@ impl CueHandle {
 }
 
 impl CueState {
-    pub(crate) fn primary_outcome(&self) -> Option<crate::StartOutcome> {
-        self.completion
-            .get()
-            .map(|decision| decision.outcome.clone())
-    }
-
     fn active(&self) -> bool {
         self.playback.get().map_or_else(
             || self.completion.get().is_none(),
@@ -221,7 +214,38 @@ impl CueState {
     }
 
     pub(crate) fn complete(&self, decision: crate::StartDecision) {
-        let _ = self.completion.set(decision);
+        if self.completion.set(decision).is_ok() {
+            let decision = self.completion.get().expect("stored cue decision");
+            perf::instant!("audio_start_decision", "iw4l.sim", |ctx| {
+                ctx.arg("alias", decision.alias.as_str());
+                ctx.arg(
+                    "submitted",
+                    matches!(decision.outcome, crate::StartOutcome::Submitted),
+                );
+                if let Some(event) = decision.event {
+                    ctx.arg("entity", event.id.emitter);
+                    if let crate::AudioOccurrence::Entity {
+                        domain,
+                        sequence,
+                        tick,
+                        ordinal,
+                    } = event.id.occurrence
+                    {
+                        ctx.arg("sequence", i64::from(sequence));
+                        ctx.arg("tick", i64::from(tick));
+                        ctx.arg("ordinal", i64::from(ordinal));
+                        ctx.arg(
+                            "domain",
+                            match domain {
+                                net::EntityEventDomain::Predicted => "predicted",
+                                net::EntityEventDomain::Snapshot => "snapshot",
+                                net::EntityEventDomain::Ring => "ring",
+                            },
+                        );
+                    }
+                }
+            });
+        }
     }
     pub(crate) fn resolved(&self, result: Result<ResolvedCue, CueFailure>) {
         let _ = self.result.set(result.map(|cue| ResolvedCueInfo {
@@ -231,21 +255,20 @@ impl CueState {
     }
 }
 
-pub(crate) struct CueRequest {
+pub(crate) struct CueSubmission {
     pub state: Arc<CueState>,
     pub execution: crate::cue_execution::CueIntent,
     pub bank: Arc<SoundCatalog>,
     pub media: Option<MediaService>,
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub alias: String,
     pub bound: Option<usize>,
     pub scope: AudioScope,
-    pub epoch: u64,
     pub pitch_scale: f32,
     pub volume_scale: f32,
 }
 
-impl CueRequest {
+impl CueSubmission {
     pub(crate) fn reject(self, reason: CueFailure) {
         self.state.resolved(Err(reason));
         let decision = crate::StartDecision {
@@ -267,7 +290,7 @@ impl CueRequest {
 
 pub(crate) struct CueResolver {
     lcg: u32,
-    history: HashMap<(AudioScope, u64, u64, usize), usize>,
+    history: HashMap<(AudioScope, u64, usize), usize>,
 }
 
 impl CueResolver {
@@ -278,7 +301,7 @@ impl CueResolver {
         }
     }
 
-    pub fn resolve(&mut self, request: &CueRequest) -> Result<ResolvedCue, CueFailure> {
+    pub fn resolve(&mut self, request: &CueSubmission) -> Result<ResolvedCue, CueFailure> {
         let bank = &request.bank;
         let index = request
             .bound
@@ -292,12 +315,7 @@ impl CueResolver {
         if published.namespace != request.namespace {
             return Err(CueFailure::MissingPolicy);
         }
-        let epoch = if request.scope == AudioScope::Match {
-            request.epoch
-        } else {
-            0
-        };
-        let key = (request.scope, epoch, bank.revision(), index);
+        let key = (request.scope, bank.revision(), index);
         if self.history.len() == SELECTOR_CAPACITY && !self.history.contains_key(&key) {
             return Err(CueFailure::SelectorBudget);
         }
@@ -339,8 +357,7 @@ impl CueResolver {
         })
     }
 
-    pub fn retain_epoch(&mut self, epoch: u64) {
-        self.history
-            .retain(|(scope, old, _, _), _| *scope != AudioScope::Match || *old == epoch);
+    pub fn stop_scope(&mut self, scope: AudioScope) {
+        self.history.retain(|(owner, _, _), _| *owner != scope);
     }
 }

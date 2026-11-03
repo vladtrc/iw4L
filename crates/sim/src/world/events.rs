@@ -76,26 +76,26 @@ impl EventJournal {
         });
         self.pellet_fx.clear();
     }
-    pub(super) fn push(
-        &mut self,
-        tick: Tick,
-        audience: EventAudience,
-        event: SimEvent,
-        publishes_snapshot: bool,
-    ) {
+    pub(super) fn push(&mut self, tick: Tick, audience: EventAudience, event: SimEvent) {
         let sequence = self.next_event;
         self.next_event = sequence.next();
-        if publishes_snapshot
-            && let SimEvent::Died {
-                victim, attacker, ..
-            } = &event
+        if let SimEvent::Died {
+            victim, attacker, ..
+        } = &event
         {
             let suicide = match attacker {
                 None => 1,
                 Some(a) if a == victim => 1,
                 Some(_) => 0,
             };
-            perf::death(victim.0, attacker.map(|a| a.0), suicide, tick.0);
+            perf::instant!("death", "iw4l.sim", |ctx| {
+                let (victim, attacker, tick): (u32, Option<u32>, u32) =
+                    (victim.0, attacker.map(|a| a.0), tick.0);
+                ctx.arg("victim", i64::from(victim));
+                ctx.arg("attacker", attacker.map(i64::from));
+                ctx.arg("suicide", i64::from(suicide));
+                ctx.arg("tick", i64::from(tick));
+            });
         }
         self.journal.push(EventRecord {
             sequence,

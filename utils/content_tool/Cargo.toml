@@ -1,0 +1,30 @@
+[package]
+name = "content_tool"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "iw4l-content"
+path = "src/main.rs"
+
+[features]
+default = ["all-games"]
+all-games = ["t5", "t6", "iw5"]
+t5 = ["dep:ext_t5"]
+t6 = ["dep:ext_t6"]
+iw5 = ["dep:ext_iw5"]
+
+[dependencies]
+content_gen.workspace = true
+asset_transport.workspace = true
+game_family.workspace = true
+desktop.workspace = true
+diag.workspace = true
+serde_json.workspace = true
+ext_t5 = { workspace = true, optional = true }
+ext_t6 = { workspace = true, optional = true }
+ext_iw5 = { workspace = true, optional = true }
+
+[lints]
+workspace = true

@@ -1,6 +1,5 @@
 mod alloc_count;
 pub mod exit;
-pub mod gap;
 pub mod wgsl_dump;
 
 pub use alloc_count::{
@@ -179,9 +178,9 @@ pub fn init_log(artifacts_root: &Path) -> PathBuf {
     };
 
     if state.traces.is_some() {
-        let zone = std::env::var("IW4L_ZONE").unwrap_or_default();
+        let zone = std::env::var("IW4L_ZONE").unwrap_or(String::new());
         let role = std::env::var("IW4L_ROLE").unwrap_or_else(|_| "Listen".into());
-        let games = std::env::var("IW4L_GAMES").unwrap_or_default();
+        let games = std::env::var("IW4L_GAMES").unwrap_or(String::new());
         let git = option_env!("IW4L_GIT_HASH").unwrap_or("unknown");
         let header = serde_json::json!({
             "t": 0,
@@ -262,20 +261,41 @@ fn flush_collapsed(state: &mut DiagState) {
     };
     let n = state.last_count;
     let line = format!("{}  {}  ↑ repeated {n}× — {msg}", ch.as_str(), lvl.as_str());
-    emit_raw(state, ch, lvl, &line, Some(n), None, None, true);
+    emit_raw(
+        state,
+        RawEvent {
+            channel: ch,
+            level: lvl,
+            message: &line,
+            repetitions: Some(n),
+            name: None,
+            fields: None,
+            collapsed_banner: true,
+        },
+    );
     state.last_count = 1;
 }
 
-fn emit_raw(
-    state: &mut DiagState,
-    ch: Channel,
-    lvl: Level,
-    msg: &str,
-    n: Option<u32>,
-    ev: Option<&str>,
-    fields: Option<&serde_json::Value>,
+struct RawEvent<'a> {
+    channel: Channel,
+    level: Level,
+    message: &'a str,
+    repetitions: Option<u32>,
+    name: Option<&'a str>,
+    fields: Option<&'a serde_json::Value>,
     collapsed_banner: bool,
-) {
+}
+
+fn emit_raw(state: &mut DiagState, event: RawEvent<'_>) {
+    let RawEvent {
+        channel: ch,
+        level: lvl,
+        message: msg,
+        repetitions: n,
+        name: ev,
+        fields,
+        collapsed_banner,
+    } = event;
     let text = if collapsed_banner {
         msg.to_owned()
     } else {
@@ -356,7 +376,18 @@ pub fn write_event(
     flush_collapsed(&mut state);
     state.last_key = Some(key);
     state.last_count = 1;
-    emit_raw(&mut state, ch, lvl, msg, None, ev, fields, false);
+    emit_raw(
+        &mut state,
+        RawEvent {
+            channel: ch,
+            level: lvl,
+            message: msg,
+            repetitions: None,
+            name: ev,
+            fields,
+            collapsed_banner: false,
+        },
+    );
 }
 
 pub fn flush() {
@@ -501,5 +532,15 @@ macro_rules! event {
             Some($ev),
             None,
         );
+    }};
+}
+
+#[macro_export]
+macro_rules! warn_once {
+    ($channel:ident, $($args:tt)*) => {{
+        static WARNED: ::std::sync::atomic::AtomicBool = ::std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, ::std::sync::atomic::Ordering::Relaxed) {
+            $crate::warn!($channel, $($args)*);
+        }
     }};
 }

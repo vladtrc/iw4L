@@ -8,17 +8,17 @@ use fastfile_iw4::{
 };
 
 use crate::asset_graph::ZoneOwner;
-use crate::asset_key::AssetNamespace;
 use crate::xanim_clip::{AnimClip, ClipNotify, RawDeltaTrans, RawXAnimParts};
+use asset_core::FamilyId;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct XAnimKey {
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub name: String,
 }
 
 impl XAnimKey {
-    pub fn new(namespace: AssetNamespace, name: &str) -> Self {
+    pub fn new(namespace: FamilyId, name: &str) -> Self {
         Self {
             namespace,
             name: ascii_lower(name),
@@ -32,7 +32,7 @@ impl XAnimKey {
 
 #[derive(Clone, Debug)]
 pub struct CapturedXAnim {
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub parts: Arc<RawXAnimParts>,
 }
 
@@ -59,7 +59,7 @@ pub struct XAnimCatalog {
 pub struct XAnimBuild {
     catalog: XAnimCatalog,
     capture_zone: ZoneOwner,
-    capture_ns: Option<AssetNamespace>,
+    capture_ns: Option<FamilyId>,
     pub capture_gaps: usize,
     strings: ScriptStrings,
 }
@@ -122,14 +122,14 @@ impl XAnimCatalog {
         self.order.is_empty()
     }
 
-    pub fn get(&self, ns: AssetNamespace, name: &str) -> Option<&CapturedXAnim> {
+    pub fn get(&self, ns: FamilyId, name: &str) -> Option<&CapturedXAnim> {
         self.entries.get(self.index_by_name(ns, name)?)
     }
 
     pub fn hint_edge(
         &self,
         hint: Option<&str>,
-        ns: AssetNamespace,
+        ns: FamilyId,
     ) -> asset_core::AssetEdge<asset_core::XAnimSpace> {
         match hint.filter(|name| !name.is_empty()) {
             None => asset_core::AssetEdge::Absent,
@@ -144,12 +144,15 @@ impl XAnimCatalog {
         self.indices.contains_key(key)
     }
 
-    pub fn index_by_name(&self, ns: AssetNamespace, name: &str) -> Option<usize> {
+    pub fn index_by_name(&self, ns: FamilyId, name: &str) -> Option<usize> {
         self.indices.get(&XAnimKey::new(ns, name)).copied()
     }
 
     pub fn zone_of(&self, index: usize) -> ZoneOwner {
-        self.zones.get(index).copied().unwrap_or_default()
+        self.zones
+            .get(index)
+            .copied()
+            .unwrap_or(asset_core::ZoneOwner::UNKNOWN)
     }
 
     pub fn name_at(&self, index: usize) -> Option<&str> {
@@ -176,11 +179,11 @@ impl XAnimCatalog {
         Some(Arc::clone(slot.get_or_insert(arc)))
     }
 
-    pub fn clip(&self, ns: AssetNamespace, name: &str) -> Option<Arc<AnimClip>> {
+    pub fn clip(&self, ns: FamilyId, name: &str) -> Option<Arc<AnimClip>> {
         self.clip_at(self.index_by_name(ns, name)?)
     }
 
-    pub fn decode(&self, ns: AssetNamespace, name: &str) -> Option<AnimClip> {
+    pub fn decode(&self, ns: FamilyId, name: &str) -> Option<AnimClip> {
         let captured = self.get(ns, name)?;
         AnimClip::from_parts(&captured.parts).ok()
     }
@@ -189,21 +192,16 @@ impl XAnimCatalog {
         self.order.iter().map(|k| k.name.as_str())
     }
 
-    pub fn namespace_count(&self, ns: AssetNamespace) -> usize {
+    pub fn namespace_count(&self, ns: FamilyId) -> usize {
         self.order.iter().filter(|k| k.namespace == ns).count()
     }
 
     pub fn collide_name_count(&self) -> usize {
-        let mut seen: std::collections::HashMap<&str, u8> = std::collections::HashMap::new();
-        for k in &self.order {
-            *seen.entry(k.name.as_str()).or_insert(0) |= match k.namespace {
-                AssetNamespace::Iw4 => 1,
-                AssetNamespace::T5 => 2,
-                AssetNamespace::Iw5 => 4,
-                AssetNamespace::T6 => 8,
-            };
+        let mut seen: HashMap<&str, std::collections::BTreeSet<FamilyId>> = HashMap::new();
+        for key in &self.order {
+            seen.entry(&key.name).or_default().insert(key.namespace);
         }
-        seen.values().filter(|bits| bits.count_ones() >= 2).count()
+        seen.values().filter(|families| families.len() >= 2).count()
     }
 }
 
@@ -216,7 +214,7 @@ impl XAnimBuild {
         self.strings = strings;
     }
 
-    pub fn set_capture_ns(&mut self, ns: AssetNamespace) {
+    pub fn set_capture_ns(&mut self, ns: FamilyId) {
         self.capture_ns = Some(ns);
     }
 
@@ -232,7 +230,7 @@ impl XAnimBuild {
         );
     }
 
-    pub fn insert_in(&mut self, ns: AssetNamespace, mut captured: CapturedXAnim) {
+    pub fn insert_in(&mut self, ns: FamilyId, mut captured: CapturedXAnim) {
         captured.namespace = ns;
         let key = captured.key();
         self.retain(key, captured);
@@ -288,297 +286,9 @@ impl XAnimBuild {
     pub fn absorb_local(&mut self, local: Self) {
         let _ = self.absorb(local);
     }
-
-    pub fn capture_xanim_iw5(
-        &mut self,
-        s: &fastfile_iw5::ZoneStream<'_>,
-        strings: &fastfile_iw5::ScriptStrings,
-        geometry: fastfile_iw5::XAnimPartsGeometry,
-    ) {
-        let Some(name_ptr) = geometry.name else {
-            self.capture_gaps += 1;
-            return;
-        };
-        let Ok(name) = s.cstr(name_ptr) else {
-            self.capture_gaps += 1;
-            return;
-        };
-        if name.is_empty() {
-            self.capture_gaps += 1;
-            return;
-        }
-
-        let track_count = geometry.bone_count[9] as usize;
-        let mut names = Vec::with_capacity(track_count);
-        if let Some(arr) = geometry.names {
-            for i in 0..track_count {
-                let sid = s.u16_at(arr, i * 2).unwrap_or(0);
-                names.push(strings.get(s, sid).unwrap_or("").to_owned());
-            }
-        } else if track_count > 0 {
-            self.capture_gaps += 1;
-            return;
-        }
-
-        let mut notifies = Vec::with_capacity(geometry.notify_count);
-        if let Some(arr) = geometry.notify {
-            for i in 0..geometry.notify_count {
-                let b = arr.at(i * fastfile_iw5::size::XANIM_NOTIFY_INFO);
-                let sid = s.u16_at(b, 0).unwrap_or(0);
-                let time = s.f32_at(b, 4).unwrap_or(0.0);
-                notifies.push(ClipNotify {
-                    name: strings.get(s, sid).unwrap_or("").to_owned(),
-                    time,
-                });
-            }
-        }
-
-        let data_byte = copy_u8_iw5(s, geometry.data_byte, geometry.data_byte_count);
-        let data_short = copy_u16_iw5(s, geometry.data_short, geometry.data_short_count);
-        let data_int = copy_u32_iw5(s, geometry.data_int, geometry.data_int_count);
-        let random_data_short = copy_u16_iw5(
-            s,
-            geometry.random_data_short,
-            geometry.random_data_short_count,
-        );
-        let random_data_byte = copy_u8_iw5(
-            s,
-            geometry.random_data_byte,
-            geometry.random_data_byte_count,
-        );
-        let random_data_int =
-            copy_u32_iw5(s, geometry.random_data_int, geometry.random_data_int_count);
-        let indices = if geometry.indices_are_bytes {
-            copy_u8_iw5(s, geometry.indices, geometry.index_count)
-                .into_iter()
-                .map(u16::from)
-                .collect()
-        } else {
-            copy_u16_iw5(s, geometry.indices, geometry.index_count)
-        };
-
-        self.insert_in(
-            AssetNamespace::Iw5,
-            CapturedXAnim {
-                namespace: AssetNamespace::Iw5,
-                parts: Arc::new(RawXAnimParts {
-                    name: name.to_owned(),
-                    data_byte,
-                    data_short,
-                    data_int,
-                    random_data_byte,
-                    random_data_short,
-                    random_data_int,
-                    numframes: geometry.numframes,
-                    flags: geometry.flags,
-                    bone_count: geometry.bone_count,
-                    framerate: geometry.framerate,
-                    names,
-                    notifies,
-                    indices,
-                    delta_trans: None,
-                }),
-            },
-        );
-    }
-
-    pub fn capture_xanim_t5(
-        &mut self,
-        s: &fastfile_t5::ZoneStream<'_>,
-        strings: &fastfile_t5::ScriptStrings,
-        geometry: fastfile_t5::XAnimPartsGeometry,
-    ) {
-        let Some(name_ptr) = geometry.name else {
-            self.capture_gaps += 1;
-            return;
-        };
-        let Ok(name) = s.cstr(name_ptr) else {
-            self.capture_gaps += 1;
-            return;
-        };
-        if name.is_empty() {
-            self.capture_gaps += 1;
-            return;
-        }
-
-        let track_count = geometry.bone_count[9] as usize;
-        let mut names = Vec::with_capacity(track_count);
-        if let Some(arr) = geometry.names {
-            for i in 0..track_count {
-                let sid = s.u16_at(arr, i * 2).unwrap_or(0);
-                names.push(strings.get(s, sid).unwrap_or("").to_owned());
-            }
-        } else if track_count > 0 {
-            self.capture_gaps += 1;
-            return;
-        }
-
-        let mut notifies = Vec::with_capacity(geometry.notify_count);
-        if let Some(arr) = geometry.notify {
-            for i in 0..geometry.notify_count {
-                let b = arr.at(i * fastfile_t5::size::XANIM_NOTIFY_INFO);
-                let sid = s.u16_at(b, 0).unwrap_or(0);
-                let time = s.f32_at(b, 4).unwrap_or(0.0);
-                notifies.push(ClipNotify {
-                    name: strings.get(s, sid).unwrap_or("").to_owned(),
-                    time,
-                });
-            }
-        }
-
-        let data_byte = copy_u8_t5(s, geometry.data_byte, geometry.data_byte_count);
-        let data_short = copy_u16_t5(s, geometry.data_short, geometry.data_short_count);
-        let data_int = copy_u32_t5(s, geometry.data_int, geometry.data_int_count);
-        let random_data_short = copy_u16_t5(
-            s,
-            geometry.random_data_short,
-            geometry.random_data_short_count,
-        );
-        let random_data_byte = copy_u8_t5(
-            s,
-            geometry.random_data_byte,
-            geometry.random_data_byte_count,
-        );
-        let random_data_int =
-            copy_u32_t5(s, geometry.random_data_int, geometry.random_data_int_count);
-        let indices = if geometry.indices_are_bytes {
-            copy_u8_t5(s, geometry.indices, geometry.index_count)
-                .into_iter()
-                .map(u16::from)
-                .collect()
-        } else {
-            copy_u16_t5(s, geometry.indices, geometry.index_count)
-        };
-
-        self.insert_in(
-            AssetNamespace::T5,
-            CapturedXAnim {
-                namespace: AssetNamespace::T5,
-                parts: Arc::new(RawXAnimParts {
-                    name: name.to_owned(),
-                    data_byte,
-                    data_short,
-                    data_int,
-                    random_data_byte,
-                    random_data_short,
-                    random_data_int,
-                    numframes: geometry.numframes,
-                    flags: geometry.flags,
-                    bone_count: geometry.bone_count,
-                    framerate: geometry.framerate,
-                    names,
-                    notifies,
-                    indices,
-                    delta_trans: None,
-                }),
-            },
-        );
-    }
 }
 
 impl XAnimBuild {
-    pub fn capture_xanim_t6(
-        &mut self,
-        ns: AssetNamespace,
-        prefix: &str,
-        load: &fastfile_t6::ZoneLoad,
-        asset: &fastfile_t6::LoadedAsset,
-    ) -> bool {
-        const SIZE: usize = 104;
-        let h = &asset.header;
-        if asset.ty != fastfile_t6::AssetType::XAnimParts || h.len() < SIZE {
-            return false;
-        }
-        let u16_at = |o: usize| u16::from_le_bytes([h[o], h[o + 1]]);
-        let u32_at = |o: usize| u32::from_le_bytes(h[o..o + 4].try_into().unwrap());
-        let ptr = |o: usize| {
-            let raw = u32_at(o);
-            (raw != 0 && raw < 0xFFFF_FFFE).then(|| fastfile_t6::Ptr {
-                block: ((raw - 1) >> 29) as u8,
-                offset: (raw - 1) & 0x1FFF_FFFF,
-            })
-        };
-        let bytes = |o: usize, len: usize| -> Vec<u8> {
-            ptr(o)
-                .and_then(|p| load.blocks.bytes(p, len).ok())
-                .map_or_else(Vec::new, <[u8]>::to_vec)
-        };
-        let words = |o: usize, count: usize| -> Vec<u16> {
-            bytes(o, 2 * count)
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|c| u16::from_le_bytes(*c))
-                .collect()
-        };
-        let dwords = |o: usize, count: usize| -> Vec<u32> {
-            bytes(o, 4 * count)
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|c| u32::from_le_bytes(*c))
-                .collect()
-        };
-        let Some(name) = ptr(0)
-            .and_then(|p| load.blocks.cstr(p).ok())
-            .and_then(|b| core::str::from_utf8(b).ok())
-            .filter(|name| !name.is_empty())
-        else {
-            self.capture_gaps += 1;
-            return false;
-        };
-        let numframes = u16_at(14);
-        let mut bone_count = [0u8; 10];
-        bone_count.copy_from_slice(&h[24..34]);
-        let names = words(64, usize::from(bone_count[9]))
-            .into_iter()
-            .map(|id| load.script_string(id).unwrap_or("").to_owned())
-            .collect();
-        let notifies = bytes(96, 8 * usize::from(h[34]))
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|c| ClipNotify {
-                name: load
-                    .script_string(u16::from_le_bytes([c[0], c[1]]))
-                    .unwrap_or("")
-                    .to_owned(),
-                time: f32::from_le_bytes([c[4], c[5], c[6], c[7]]),
-            })
-            .collect();
-        let index_count = u32_at(44) as usize;
-        let indices = if numframes < 256 {
-            bytes(92, index_count).into_iter().map(u16::from).collect()
-        } else {
-            words(92, index_count)
-        };
-        let parts = RawXAnimParts {
-            name: format!("{prefix}{}", name.to_ascii_lowercase()),
-            data_byte: bytes(68, usize::from(u16_at(4))),
-            data_short: words(72, usize::from(u16_at(6))),
-            data_int: dwords(76, usize::from(u16_at(8))),
-            random_data_short: words(80, u32_at(40) as usize),
-            random_data_byte: bytes(84, usize::from(u16_at(10))),
-            random_data_int: dwords(88, usize::from(u16_at(12))),
-            numframes,
-            flags: u8::from(h[16] != 0) | (u8::from(h[17] != 0) << 1),
-            bone_count,
-            framerate: f32::from_le_bytes(h[48..52].try_into().unwrap()),
-            names,
-            notifies,
-            indices,
-            delta_trans: None,
-        };
-        self.insert_in(
-            ns,
-            CapturedXAnim {
-                namespace: ns,
-                parts: Arc::new(parts),
-            },
-        );
-        true
-    }
-
     pub fn absorb_vacant(&mut self, mut local: Self) -> (Vec<String>, usize) {
         let order = std::mem::take(&mut local.catalog.order);
         let entries = std::mem::take(&mut local.catalog.entries);
@@ -674,7 +384,7 @@ impl AssetLinkSink for XAnimBuild {
         let delta_trans = copy_delta_trans(s, geometry.delta_trans);
 
         self.insert_captured(CapturedXAnim {
-            namespace: AssetNamespace::Iw4,
+            namespace: FamilyId::IW4,
             parts: Arc::new(RawXAnimParts {
                 name: name.to_owned(),
                 data_byte,
@@ -708,7 +418,7 @@ fn copy_u8(s: &ZoneStream<'_>, ptr: Option<Ptr>, count: usize) -> Vec<u8> {
     };
     s.slice_at(p, 0, count)
         .map(|b| b.to_vec())
-        .unwrap_or_default()
+        .unwrap_or(Vec::new())
 }
 
 fn copy_u16(s: &ZoneStream<'_>, ptr: Option<Ptr>, count: usize) -> Vec<u16> {
@@ -783,98 +493,4 @@ fn copy_delta_trans(
         indices,
         packed,
     })
-}
-
-fn copy_u8_iw5(
-    s: &fastfile_iw5::ZoneStream<'_>,
-    ptr: Option<fastfile_iw5::Ptr>,
-    count: usize,
-) -> Vec<u8> {
-    let Some(p) = ptr else {
-        return Vec::new();
-    };
-    s.slice_at(p, 0, count)
-        .map(|b| b.to_vec())
-        .unwrap_or_default()
-}
-
-fn copy_u16_iw5(
-    s: &fastfile_iw5::ZoneStream<'_>,
-    ptr: Option<fastfile_iw5::Ptr>,
-    count: usize,
-) -> Vec<u16> {
-    let Some(p) = ptr else {
-        return Vec::new();
-    };
-    let Ok(bytes) = s.slice_at(p, 0, count * 2) else {
-        return Vec::new();
-    };
-    bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect()
-}
-
-fn copy_u32_iw5(
-    s: &fastfile_iw5::ZoneStream<'_>,
-    ptr: Option<fastfile_iw5::Ptr>,
-    count: usize,
-) -> Vec<u32> {
-    let Some(p) = ptr else {
-        return Vec::new();
-    };
-    let Ok(bytes) = s.slice_at(p, 0, count * 4) else {
-        return Vec::new();
-    };
-    bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
-}
-
-fn copy_u8_t5(
-    s: &fastfile_t5::ZoneStream<'_>,
-    ptr: Option<fastfile_t5::Ptr>,
-    count: usize,
-) -> Vec<u8> {
-    let Some(p) = ptr else {
-        return Vec::new();
-    };
-    s.slice_at(p, 0, count)
-        .map(|b| b.to_vec())
-        .unwrap_or_default()
-}
-
-fn copy_u16_t5(
-    s: &fastfile_t5::ZoneStream<'_>,
-    ptr: Option<fastfile_t5::Ptr>,
-    count: usize,
-) -> Vec<u16> {
-    let Some(p) = ptr else {
-        return Vec::new();
-    };
-    let Ok(bytes) = s.slice_at(p, 0, count * 2) else {
-        return Vec::new();
-    };
-    bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect()
-}
-
-fn copy_u32_t5(
-    s: &fastfile_t5::ZoneStream<'_>,
-    ptr: Option<fastfile_t5::Ptr>,
-    count: usize,
-) -> Vec<u32> {
-    let Some(p) = ptr else {
-        return Vec::new();
-    };
-    let Ok(bytes) = s.slice_at(p, 0, count * 4) else {
-        return Vec::new();
-    };
-    bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
 }

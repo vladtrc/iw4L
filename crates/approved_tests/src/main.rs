@@ -31,6 +31,7 @@ struct Args {
 }
 
 fn main() {
+    bootstrap::initialize_runtime();
     let root = repo_root();
     let args = match parse_args(&root) {
         Ok(args) => args,
@@ -213,7 +214,7 @@ fn resolve_scenes(
 }
 
 fn run(root: &Path, args: &Args) -> Result<bool, String> {
-    asset_transport::load_dotenv();
+    desktop::load_dotenv();
     let replay = args.replay.as_deref().map(read_replay).transpose()?;
     let seed = replay
         .as_ref()
@@ -228,7 +229,7 @@ fn run(root: &Path, args: &Args) -> Result<bool, String> {
         ));
     }
 
-    let games = asset_transport::games_root_from_env()?;
+    let games = asset_transport::games_root()?;
     let installed = asset_transport::list_mp_maps(&games);
     let (map_b, map_b_rule, candidates): (Option<String>, String, Vec<String>) =
         match (&replay, &SCENARIO.map_b) {
@@ -306,7 +307,13 @@ fn run(root: &Path, args: &Args) -> Result<bool, String> {
     let scenes_b = resolve_scenes("b", &map_b, 1, seed, replay.as_ref());
     let phases = hgl::phases(&map_b, &scenes_a, &scenes_b);
     let script = scenario::script(&phases);
-    let child_args = vec!["menu".to_owned(), "--cmds".to_owned(), script.clone()];
+    let child_args = vec![
+        "--gametype".to_owned(),
+        SCENARIO.gametype.to_owned(),
+        "menu".to_owned(),
+        "--cmds".to_owned(),
+        script.clone(),
+    ];
 
     if let Some(replay) = &replay {
         let source = replay
@@ -366,7 +373,6 @@ fn run(root: &Path, args: &Args) -> Result<bool, String> {
         env: vec![
             ("IW4L_PERF", "1".into()),
             ("IW4L_PRESENT_MODE", "AutoNoVsync".into()),
-            ("IW4L_GAMETYPE", SCENARIO.gametype.into()),
             (
                 "IW4L_SETTINGS_PATH",
                 run_dir.join("settings.cfg").display().to_string(),

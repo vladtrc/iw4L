@@ -293,6 +293,7 @@ fn encode_projectile(out: &mut WireWriter, projectile: &ProjectileState) {
     out.put_u8(projectile.guide.stage);
     out.put_u8(projectile.guide.passed.into());
     encode_missile_target(out, projectile.attached_to);
+    super::meta_wire::encode_fire_cause(out, projectile.cause);
 }
 
 fn encode_trajectory(out: &mut WireWriter, tr: &entity_iw4::Trajectory) {
@@ -349,6 +350,7 @@ fn decode_projectile(input: &mut WireReader<'_>) -> Result<ProjectileState, Wire
             passed: input.get_u8()? != 0,
         },
         attached_to: decode_missile_target(input)?,
+        cause: super::meta_wire::decode_fire_cause(input)?,
     })
 }
 
@@ -405,23 +407,7 @@ fn decode_projectile_delta(input: &mut WireReader<'_>) -> Result<ProjectileEntit
 }
 
 pub(crate) fn encode_usercmd(out: &mut WireWriter, cmd: &UserCmd) {
-    out.put_i32(cmd.server_time);
-    out.put_u32(cmd.buttons);
-    for axis in cmd.angles {
-        out.put_i32(axis);
-    }
-    out.put_u16(cmd.weapon);
-    out.put_u16(cmd.weapon_mapped);
-    out.put_u16(cmd.off_hand_index);
-    out.put_i8(cmd.forwardmove);
-    out.put_i8(cmd.rightmove);
-    out.put_f32(cmd.melee_charge_yaw);
-    out.put_u8(cmd.melee_charge_dist);
-    out.put_bytes(&cmd.selected_location);
-    out.put_bytes(&cmd.remote_control);
-    for angle in cmd.gun_angle_offset {
-        out.put_f32(angle);
-    }
+    out.put_bytes(&cmd.canonical_bytes());
 }
 
 pub(crate) fn decode_usercmd(input: &mut WireReader<'_>) -> Result<UserCmd, WireError> {
@@ -482,6 +468,22 @@ pub(super) fn encode_missile_target(out: &mut WireWriter, target: Option<sim::Mi
             out.put_u32(entity.generation());
             offset
         }
+        Some(sim::MissileTarget::PlayerBone {
+            client,
+            life,
+            bone,
+            offset,
+            angles,
+        }) => {
+            out.put_u8(4);
+            out.put_u32(client.0);
+            out.put_u32(life.0);
+            out.put_u16(bone);
+            for value in offset.into_iter().chain(angles) {
+                out.put_f32(value);
+            }
+            return;
+        }
         Some(sim::MissileTarget::Player {
             client,
             life,
@@ -502,6 +504,20 @@ pub(super) fn decode_missile_target(
     input: &mut WireReader<'_>,
 ) -> Result<Option<sim::MissileTarget>, WireError> {
     let tag = input.get_u8()?;
+    if tag == 4 {
+        let client = sim::ClientId(input.get_u32()?);
+        let life = sim::LifeSequence(input.get_u32()?);
+        let bone = input.get_u16()?;
+        let offset = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
+        let angles = [input.get_f32()?, input.get_f32()?, input.get_f32()?];
+        return Ok(Some(sim::MissileTarget::PlayerBone {
+            client,
+            life,
+            bone,
+            offset,
+            angles,
+        }));
+    }
     let identity = match tag {
         0 => return Ok(None),
         1 => None,

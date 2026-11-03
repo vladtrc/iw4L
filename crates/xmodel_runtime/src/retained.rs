@@ -52,6 +52,7 @@ pub struct RetainedModelCapability {
     pub key: String,
     pub pose: ModelPoseSrc,
     pub bone_collision: Vec<Option<BoneCollision>>,
+    pub bone_part_classification: Vec<u8>,
 
     pub contents: Option<u32>,
 
@@ -245,6 +246,29 @@ pub fn collision_dobj_with_controller(
         return Ok(Vec::new());
     }
     let posed = pose_dobj_with_controller(dobj, request, world_from_model, controller)?;
+    // Unclassified parts inherit across the assembled hierarchy, including
+    // duplicate attachment bones. Classification exists even without an OBB.
+    let mut classes = vec![0u8; dobj.bones.len()];
+    for (slot, (model, _)) in dobj.models.iter().zip(models.iter()) {
+        for local in 0..slot.bone_count {
+            let index = slot.base + local;
+            let raw = model
+                .bone_part_classification
+                .get(local)
+                .copied()
+                .unwrap_or(0);
+            classes[index] = if raw == 0 {
+                let parent = dobj
+                    .duplicates
+                    .iter()
+                    .find_map(|&(dest, source)| (dest == index).then_some(source))
+                    .or(dobj.bones[index].parent);
+                parent.map_or(0, |parent| classes[parent])
+            } else {
+                raw
+            };
+        }
+    }
     let mut bones = Vec::new();
     for (slot, (model, _)) in dobj.models.iter().zip(models.iter()) {
         for local in 0..slot.bone_count {
@@ -277,7 +301,7 @@ pub fn collision_dobj_with_controller(
                 .map_err(|_| MaterializeError::BoneIndexOverflow { bone: bone_index })?;
             bones.push(CollisionBone {
                 bone,
-                part_classification: collision.part_classification,
+                part_classification: classes[bone_index],
                 center,
                 axes,
                 half_size,

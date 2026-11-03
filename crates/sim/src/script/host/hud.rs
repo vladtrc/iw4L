@@ -225,7 +225,7 @@ pub(crate) fn string_index(world: &mut World, value: &Value) -> Result<i32, Stri
         Value::Int(_) | Value::Float(_) => format!(
             "{}{}",
             crate::HUD_STRING_PLAIN,
-            crate::script::runtime::to_text(value).unwrap_or_default()
+            crate::script::runtime::to_text(value).unwrap_or(String::new())
         ),
         other => return Err(format!("{other:?} is not a string")),
     };
@@ -358,7 +358,7 @@ fn plain_text(world: &mut World, value: &Value) -> String {
     match name.as_ref().unwrap_or(value) {
         Value::String(text) => text.to_string(),
         Value::LocalizedString(key) => key.to_string(),
-        other => crate::script::runtime::to_text(other).unwrap_or_default(),
+        other => crate::script::runtime::to_text(other).unwrap_or(String::new()),
     }
 }
 

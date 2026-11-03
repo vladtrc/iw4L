@@ -7,11 +7,31 @@ quinn-proto = { git = "https://github.com/quinn-rs/quinn", rev = "f650e0f213b01e
 [workspace]
 resolver = "3"
 members = [
+    "utils/content_gen",
+    "utils/content_tool",
+    "extensions/iw5/load",
+    "extensions/iw5/gameplay",
+    "extensions/iw5/audio",
+    "extensions/iw5/world",
+    "extensions/iw5/material",
+    "extensions/iw5/zone",
+    "extensions/t6/load",
+    "extensions/t6/gameplay",
+    "extensions/t6/audio",
+    "extensions/t6/world",
+    "extensions/t6/material",
+    "extensions/t6/zone",
+    "extensions/t5/load",
+    "extensions/t5/script",
+    "extensions/t5/gameplay",
+    "extensions/t5/audio",
+    "extensions/t5/world",
+    "extensions/t5/material",
+    "extensions/t5/zone",
     "crates/anim_iw4",
-    "crates/approved_tests",
-    "crates/asset_core",
     "crates/asset_anim",
     "crates/asset_audio",
+    "crates/asset_core",
     "crates/asset_game",
     "crates/asset_iw4",
     "crates/asset_material",
@@ -19,38 +39,34 @@ members = [
     "crates/asset_transport",
     "crates/asset_world",
     "crates/assets",
-    "crates/bootstrap",
     "crates/audio",
     "crates/bots",
     "crates/clipmap_iw4",
+    "crates/community",
     "crates/console",
     "crates/d3d9_decl",
     "crates/d3d9_sm3",
-    "crates/dxbc_sm5",
     "crates/d3d9_state",
     "crates/diag",
     "crates/dpvs_iw4",
     "crates/entity_iw4",
     "crates/fastfile_iw4",
-    "crates/fastfile_t5",
-    "crates/fastfile_iw5",
-    "crates/fastfile_t6",
     "crates/frame",
     "crates/fx",
     "crates/fx_iw4",
+    "crates/game_family",
     "crates/gamemode_iw4",
     "crates/hud",
     "crates/hud_iw4",
-    "crates/killcam_iw4",
     "crates/input_iw4",
-    "crates/launcher",
+    "crates/iw4l-master",
+    "crates/killcam_iw4",
     "crates/lighting_iw4",
     "crates/marks_iw4",
     "crates/master_protocol",
     "crates/math_iw4",
     "crates/movement_iw4",
     "crates/net",
-    "crates/iw4l-master",
     "crates/perf",
     "crates/playerstate_iw4",
     "crates/render",
@@ -63,15 +79,26 @@ members = [
     "crates/render_material",
     "crates/render_scene",
     "crates/replay",
-    "crates/theater",
     "crates/session",
     "crates/sim",
     "crates/structured_data_iw4",
+    "crates/theater",
     "crates/trace_iw4",
     "crates/ui",
-    "crates/updater",
     "crates/weapon_iw4",
     "crates/xmodel_runtime",
+    "crates/approved_tests",
+    "apps/bootstrap",
+    "apps/launcher",
+    "apps/desktop",
+    "crates/updater",
+    "extensions/t5/fastfile",
+    "extensions/t5",
+    "crates/dxbc_sm5",
+    "extensions/t6/fastfile",
+    "extensions/t6",
+    "extensions/iw5/fastfile",
+    "extensions/iw5",
     "xtask",
 ]
 
@@ -79,86 +106,92 @@ members = [
 edition = "2024"
 license = "Apache-2.0"
 
+[workspace.lints.clippy]
+excessive_precision = "allow"
+approx_constant = "allow"
+assertions_on_constants = "deny"
+
 [workspace.dependencies]
-bevy = { version = "0.20", default-features = false, features = [
-    "bevy_state",
-    "debug",
-    "bevy_window",
-    "bevy_winit",
-    "bevy_ui",
-    "bevy_ui_render",
-    "bevy_text",
-    "bevy_render",
-    "bevy_core_pipeline",
-    "bevy_log",
-    "bevy_sprite",
-    "bevy_sprite_render",
-    "bevy_asset",
-    "bevy_gilrs",
-    "multi_threaded",
-    "x11",
-    "wayland",
-    "png",
-    "system_clipboard",
-    "bevy_ui_widgets",
-    "ui_picking",
-] }
-bevy_ecs = "0.20"
-miniz_oxide = "0.8"
-lzokay-native = "0.1"
-bcdec_rs = "0.2"
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
-zip = { version = "6", default-features = false, features = ["deflate"] }
-dotenvy = "0.15"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-async-lock = "3"
-sha2 = "0.10"
-png = "0.18"
+content_gen = { path = "utils/content_gen" }
+ext_iw5_load = { path = "extensions/iw5/load" }
+ext_iw5_gameplay = { path = "extensions/iw5/gameplay" }
+ext_iw5_audio = { path = "extensions/iw5/audio" }
+ext_iw5_world = { path = "extensions/iw5/world" }
+ext_iw5_material = { path = "extensions/iw5/material" }
+ext_iw5_zone = { path = "extensions/iw5/zone" }
+ext_t6_load = { path = "extensions/t6/load" }
+ext_t6_gameplay = { path = "extensions/t6/gameplay" }
+ext_t6_audio = { path = "extensions/t6/audio" }
+ext_t6_world = { path = "extensions/t6/world" }
+ext_t6_material = { path = "extensions/t6/material" }
+ext_t6_zone = { path = "extensions/t6/zone" }
+ext_t5_load = { path = "extensions/t5/load" }
+ext_t5_script = { path = "extensions/t5/script" }
+ext_t5_gameplay = { path = "extensions/t5/gameplay" }
+ext_t5_audio = { path = "extensions/t5/audio" }
+ext_t5_world = { path = "extensions/t5/world" }
+ext_t5_material = { path = "extensions/t5/material" }
+ext_t5_zone = { path = "extensions/t5/zone" }
 anim_iw4 = { path = "crates/anim_iw4" }
-asset_iw4 = { path = "crates/asset_iw4" }
-asset_core = { path = "crates/asset_core" }
+approved_tests = { path = "crates/approved_tests" }
 asset_anim = { path = "crates/asset_anim" }
 asset_audio = { path = "crates/asset_audio" }
+asset_core = { path = "crates/asset_core" }
 asset_game = { path = "crates/asset_game" }
-asset_transport = { path = "crates/asset_transport" }
+asset_iw4 = { path = "crates/asset_iw4" }
 asset_material = { path = "crates/asset_material" }
 asset_model = { path = "crates/asset_model" }
+asset_transport = { path = "crates/asset_transport" }
 asset_world = { path = "crates/asset_world" }
 assets = { path = "crates/assets" }
+async-lock = "3"
 audio = { path = "crates/audio" }
+bcdec_rs = "0.2"
+bevy = { default-features = false, features = ["bevy_state", "debug", "bevy_window", "bevy_winit", "bevy_ui", "bevy_ui_render", "bevy_text", "bevy_render", "bevy_core_pipeline", "bevy_log", "bevy_sprite", "bevy_sprite_render", "bevy_asset", "bevy_gilrs", "multi_threaded", "x11", "wayland", "png", "system_clipboard", "bevy_ui_widgets", "ui_picking"], version = "0.20" }
+bevy_ecs = "0.20"
+bootstrap = { path = "apps/bootstrap", default-features = false }
 bots = { path = "crates/bots" }
 clipmap_iw4 = { path = "crates/clipmap_iw4" }
+community = { path = "crates/community" }
 console = { path = "crates/console" }
 d3d9_decl = { path = "crates/d3d9_decl" }
 d3d9_sm3 = { path = "crates/d3d9_sm3" }
-dxbc_sm5 = { path = "crates/dxbc_sm5" }
 d3d9_state = { path = "crates/d3d9_state" }
+desktop = { path = "apps/desktop" }
 diag = { path = "crates/diag" }
+dotenvy = "0.15"
 dpvs_iw4 = { path = "crates/dpvs_iw4" }
+dxbc_sm5 = { path = "crates/dxbc_sm5" }
 entity_iw4 = { path = "crates/entity_iw4" }
 fastfile_iw4 = { path = "crates/fastfile_iw4" }
-fastfile_t5 = { path = "crates/fastfile_t5" }
-fastfile_iw5 = { path = "crates/fastfile_iw5" }
-fastfile_t6 = { path = "crates/fastfile_t6" }
+ext_iw5_fastfile = { path = "extensions/iw5/fastfile" }
+ext_t5_fastfile = { path = "extensions/t5/fastfile" }
+ext_t6_fastfile = { path = "extensions/t6/fastfile" }
+flate2 = { default-features = false, features = ["zlib-rs"], version = "1.1" }
 frame = { path = "crates/frame" }
 fx = { path = "crates/fx" }
 fx_iw4 = { path = "crates/fx_iw4" }
+game_family = { path = "crates/game_family" }
 gamemode_iw4 = { path = "crates/gamemode_iw4" }
+glam = "0.33.2"
 hud = { path = "crates/hud" }
 hud_iw4 = { path = "crates/hud_iw4" }
-structured_data_iw4 = { path = "crates/structured_data_iw4" }
-killcam_iw4 = { path = "crates/killcam_iw4" }
 input_iw4 = { path = "crates/input_iw4" }
-launcher = { path = "crates/launcher" }
+iw4l-master = { path = "crates/iw4l-master" }
+ext_iw5 = { path = "extensions/iw5" }
+killcam_iw4 = { path = "crates/killcam_iw4" }
+launcher = { path = "apps/launcher" }
 lighting_iw4 = { path = "crates/lighting_iw4" }
+lzokay-native = "0.1"
 marks_iw4 = { path = "crates/marks_iw4" }
-math_iw4 = { path = "crates/math_iw4" }
 master_protocol = { path = "crates/master_protocol" }
+math_iw4 = { path = "crates/math_iw4" }
+miniz_oxide = "0.8"
 movement_iw4 = { path = "crates/movement_iw4" }
 net = { path = "crates/net" }
 perf = { path = "crates/perf" }
 playerstate_iw4 = { path = "crates/playerstate_iw4" }
+png = "0.18"
 render = { path = "crates/render" }
 render_anim = { path = "crates/render_anim" }
 render_backend = { path = "crates/render_backend" }
@@ -168,75 +201,39 @@ render_fx = { path = "crates/render_fx" }
 render_gpu = { path = "crates/render_gpu" }
 render_material = { path = "crates/render_material" }
 render_scene = { path = "crates/render_scene" }
-session = { path = "crates/session" }
 replay = { path = "crates/replay" }
-theater = { path = "crates/theater" }
+serde = { features = ["derive"], version = "1" }
+serde_json = "1"
+session = { path = "crates/session" }
+sha2 = "0.10"
 sim = { path = "crates/sim" }
+structured_data_iw4 = { path = "crates/structured_data_iw4" }
+ext_t5 = { path = "extensions/t5" }
+ext_t6 = { path = "extensions/t6" }
+theater = { path = "crates/theater" }
 trace_iw4 = { path = "crates/trace_iw4" }
 ui = { path = "crates/ui" }
+updater = { path = "crates/updater" }
 weapon_iw4 = { path = "crates/weapon_iw4" }
 xmodel_runtime = { path = "crates/xmodel_runtime" }
-glam = "0.33.2"
+xtask = { path = "xtask" }
+zip = { default-features = false, features = ["deflate"], version = "6" }
 
-# Transcribing a retail constant at full precision is the requirement, not a
-# style slip. `clippy::excessive_precision` fired on
-# `0.0005882352706976235` — the exact f32 read out of the retail image with
-# `re data` — and rejected an iteration that had ported two more branches of
-# PM_Friction. Shortening such a literal to "enough" digits is the silent
-# approximation this project exists to forbid, so the lint has to go rather
-# than the digits.
-[workspace.lints.clippy]
-excessive_precision = "allow"
-# Retail constants must preserve the transcribed f32 bits. Replacing a literal
-# with a mathematical standard-library constant can change those bits.
-approx_constant = "allow"
-assertions_on_constants = "deny"
-
-# Measured and kept: wall p50 -5.7%, binary 183 MB -> 114 MB. Do not drop these
-# two lines without a new two-map A/B on the same protocol.
-#
-# Live recipes (`make map` / `play` / `bench` / `bench-live` / …) do not use this profile.
-# Fat LTO: `PROFILE=release` on a live target when the number must match the
-# LTO binary's.
-# Fat LTO + one codegen unit stay on this profile only. `make deploy` does not
-# select it; that is `PROFILE=release`.
 [profile.release]
-lto = true
-codegen-units = 1
-strip = "symbols"
-
-# The dev loop, including `make bench` and the default Windows/master
-# deploy path. Same opt-level as release (Bevy is unusable without it), minus
-# the two settings whose cost is paid at *link* time: fat LTO over the whole
-# dependency graph in one codegen unit is a single-threaded rustc at ~6.6 GB
-# that reruns after an edit in any crate. That link was timed at 13m03s.
-# That link, not the game, is what `make play` was waiting on.
-#
-# `lto = false` keeps crate-local ThinLTO; `"off"` is not required.
-# Incremental is for workspace recompiles after the first fill of this
-# profile cache. Strip lives here, not in RUSTFLAGS: env RUSTFLAGS override
-# target rustflags and would split the play/release fingerprint.
-#
-# Separate profile rather than a relaxed `[profile.release]`: the release
-# binary the published numbers describe has to stay buildable.
-# Frame-time cost of `play` vs `release` is NOT measured here — that A/B is
-# `make bench <demo>` vs `make bench <demo> PROFILE=release`.
-[profile.play]
-inherits = "release"
 opt-level = 3
 lto = false
 codegen-units = 16
 incremental = true
 strip = "symbols"
 
+[profile.play]
+inherits = "release"
+
 # The binary a sampler can read (`make bench-perf`). Same code as
-# [profile.play] — opt-level and codegen-units unchanged, so the frame times it
-# samples are the frame times `make bench-live` reports — plus the two things
-# perf needs and a release build drops: DWARF line tables (`debug = 1`) to name
-# a frame, and a frame pointer in every function (`-Cforce-frame-pointers=yes`,
-# set by the recipe) so `--call-graph fp` can walk out of it. Strip is off so
-# those line tables survive. Its own profile dir: play/release fingerprints
-# stay one cache, no relink on a bench↔perf switch.
+# [profile.play], plus DWARF line tables (`debug = 1`) to name a frame and a
+# frame pointer in every function (`-Cforce-frame-pointers=yes`, set by the
+# recipe) so `--call-graph fp` can walk out of it. Strip is off so those line
+# tables survive.
 [profile.perf]
 inherits = "play"
 debug = 1

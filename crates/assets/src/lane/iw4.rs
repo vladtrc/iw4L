@@ -6,15 +6,13 @@ use super::helpers::{
     decode_reflection_probes, report_dpvs, report_ffa_spawns, report_intermission,
     report_map_models, report_world_batches, smodel_lighting_samples,
 };
-use super::{
-    CommonCensus, CommonWalkSink, LaneGap, LoadedWorld, MaterialPopulation, MaterialPopulationSink,
-    ZoneLane, ZoneWalkSink,
-};
+use super::sink::{CommonWalkSink, MaterialPopulationSink, ZoneWalkSink};
+use crate::{CommonCensus, LaneGap, LoadedWorld, MaterialPopulation, ZoneLane};
 use crate::{
+    PreparedWorld,
     lane_capability::{LaneStatus, PreparedCapability},
-    session_load::PreparedWorld,
 };
-use asset_core::ZoneGame;
+use asset_core::FamilyId;
 use asset_material::decode_material_color_maps;
 use asset_transport::{LoadProgress, StageId, ZoneImage, ZoneMemory};
 use asset_world::{
@@ -26,7 +24,7 @@ use asset_world::{
 pub struct Iw4Lane;
 
 impl Iw4Lane {
-    pub const GAME: ZoneGame = ZoneGame::Iw4;
+    pub const GAME: FamilyId = FamilyId::IW4;
     pub const CAPABILITIES: &'static [(PreparedCapability, LaneStatus)] = &[
         (PreparedCapability::Envelope, LaneStatus::SupportedPopulated),
         (
@@ -53,7 +51,7 @@ impl Iw4Lane {
 }
 
 impl ZoneLane for Iw4Lane {
-    fn game(&self) -> ZoneGame {
+    fn game(&self) -> FamilyId {
         Self::GAME
     }
 
@@ -68,7 +66,7 @@ impl ZoneLane for Iw4Lane {
         progress: &LoadProgress,
         shared_surfaces: asset_model::SharedXModelSurfaces,
         material_seed: asset_material::MaterialCatalog,
-        common_film_visions: &super::FilmVisionCatalog,
+        common_film_visions: &crate::FilmVisionCatalog,
     ) -> LoadedWorld {
         let mut report = Vec::new();
         let stage = progress.begin_scoped(StageId::MapAssets, "header", None);
@@ -118,10 +116,10 @@ impl ZoneLane for Iw4Lane {
         sink.seed_materials(material_seed);
         sink.map_xmodels.shared_surfaces = shared_surfaces;
         sink.set_capture_zone(asset_core::ZoneOwner::from_zone_path(path));
-        sink.set_capture_ns(asset_core::AssetNamespace::Iw4);
+        sink.set_capture_ns(asset_core::FamilyId::IW4);
         sink.sound = Some(asset_audio::ZoneSoundCapture::for_map(
             path,
-            asset_audio::ZoneGame::Iw4,
+            asset_audio::FamilyId::IW4,
             "map",
         ));
         let walked = load_zone(&mut stream, &mut sink);
@@ -642,7 +640,7 @@ impl ZoneLane for Iw4Lane {
                     sound: map_sound,
                     materials: map_materials,
                     world: PreparedWorld {
-                        source_namespace: Some(asset_core::AssetNamespace::Iw4),
+                        source_namespace: Some(asset_core::FamilyId::IW4),
                         draw: Some(draw),
                         dynamic_light: None,
                         static_model_meshes,
@@ -783,10 +781,10 @@ impl ZoneLane for Iw4Lane {
         ));
         sink.seed_materials(material_seed);
         sink.set_capture_zone(asset_core::ZoneOwner::intern(&zone_name));
-        sink.set_capture_ns(asset_core::AssetNamespace::Iw4);
+        sink.set_capture_ns(asset_core::FamilyId::IW4);
         sink.sound = asset_audio::ZoneSoundCapture::claim_common(
             path,
-            asset_audio::ZoneGame::Iw4,
+            asset_audio::FamilyId::IW4,
             "common census",
         );
         let walk = load_zone(&mut stream, &mut sink);
@@ -829,10 +827,12 @@ impl ZoneLane for Iw4Lane {
                 sink.projectile_meshes.absorb_world_weapon(gun);
             }
         }
-        let graph = crate::resolve_after_absorb(
-            &sink.materials,
-            &mut sink.tracers,
-            &mut sink.fx,
+        let graph = crate::AssetGraphLinker {
+            materials: &sink.materials,
+            tracers: &mut sink.tracers,
+            fx: &mut sink.fx,
+        }
+        .resolve_after_absorb(
             Some(&mut sink.weapons),
             None,
             Some(&mut sink.world_weapons),
@@ -1105,7 +1105,9 @@ impl ZoneLane for Iw4Lane {
                 material_population,
                 light_defs,
                 report,
-                pen_table: sink.pen_table.unwrap_or_default(),
+                pen_table: sink
+                    .pen_table
+                    .unwrap_or_else(weapon_iw4::PenetrationDepthTable::default),
                 pen_table_loaded: sink.pen_table.is_some(),
                 lochit_table: sink.lochit_table,
                 xmodel_walk: sink.models.walk_census(),
@@ -1143,7 +1145,9 @@ impl ZoneLane for Iw4Lane {
                 material_population: sink.materials,
                 light_defs,
                 report,
-                pen_table: sink.pen_table.unwrap_or_default(),
+                pen_table: sink
+                    .pen_table
+                    .unwrap_or_else(weapon_iw4::PenetrationDepthTable::default),
                 pen_table_loaded: sink.pen_table.is_some(),
                 lochit_table: sink.lochit_table,
                 xmodel_walk: sink.models.walk_census(),
@@ -1195,10 +1199,10 @@ impl ZoneLane for Iw4Lane {
         ));
         sink.seed_materials(material_seed);
         sink.set_capture_zone(asset_core::ZoneOwner::intern(&zone_name));
-        sink.set_capture_ns(asset_core::AssetNamespace::Iw4);
+        sink.set_capture_ns(asset_core::FamilyId::IW4);
         sink.sound = asset_audio::ZoneSoundCapture::claim_common(
             path,
-            asset_audio::ZoneGame::Iw4,
+            asset_audio::FamilyId::IW4,
             "material population",
         );
         let walk = load_zone(&mut stream, &mut sink);
@@ -1268,7 +1272,7 @@ fn decode_map_material_images(
     }
     let mut keys = fx_material_keys;
     keys.extend(glass_names.iter().map(|name| asset_core::MaterialKey {
-        namespace: asset_core::AssetNamespace::Iw4,
+        namespace: asset_core::FamilyId::IW4,
         name: name.clone(),
     }));
     match asset_material::material_images::decode_images_for_keys(
@@ -1299,8 +1303,8 @@ fn decode_map_material_images(
 
 fn select_film_vision(
     name: Option<&str>,
-    map: &super::FilmVisionCatalog,
-    common: &super::FilmVisionCatalog,
+    map: &crate::FilmVisionCatalog,
+    common: &crate::FilmVisionCatalog,
 ) -> Result<Option<(asset_world::FilmVision, &'static str)>, String> {
     let name = name.ok_or_else(|| "map path has no UTF-8 stem".to_owned())?;
     let candidate = map

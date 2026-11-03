@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, futures_lite::future};
 use frame::ClientSet;
 
-use asset_game::{LocalizeCatalog, load_mp_localized_strings};
+use asset_game::{LocalizeCatalog, load_localized_strings_for_zone};
 use asset_transport::{
     GamesRoot, LoadProgress, find_runtime_common_mp, find_zone_file, list_mp_map_packs,
 };
@@ -27,7 +27,7 @@ fn launch_report(
         common_mp,
         zone_ff,
         zone_alias,
-        sim_gap: "map loading has not reached clipmap yet",
+        sim_gap: "map loading has not reached clipmap yet".into(),
         prediction_metrics: None,
         world_report: vec!["queued background zone walk".into()],
     }
@@ -76,20 +76,24 @@ fn insert_loading_chrome(
     title: String,
     zone: &str,
     zone_ff: Result<std::path::PathBuf, String>,
-    request_id: u64,
+    worlds: Vec<assets::LoadingWorld>,
+
     mode: sim::HostGameModeSelection,
 ) {
     diag::info!(Ui, "loading: map={zone} mode={}", mode.token());
-    commands.insert_resource(LoadingScreen::new(
-        progress,
-        title,
-        mode.display_name().to_owned(),
-    ));
+    commands.insert_resource(
+        LoadingScreen::new(progress, title, mode.display_name().to_owned())
+            .with_worlds(worlds.iter().map(|world| world.title.clone()).collect()),
+    );
     if let Ok(path) = zone_ff {
         commands.insert_resource(LoadingPreviewSource {
             path,
             map_name: zone.to_owned(),
-            request_id,
+            more: worlds
+                .into_iter()
+                .skip(1)
+                .filter_map(|world| Some((world.zone_ff?, world.zone)))
+                .collect(),
         });
     }
     commands.insert_resource({
@@ -99,71 +103,106 @@ fn insert_loading_chrome(
     });
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct MenuScreenTransition<'w> {
+    class_overlay: ResMut<'w, ClassSelectOverlayOpen>,
+    app_screen: ResMut<'w, AppScreen>,
+}
+
+impl MenuScreenTransition<'_> {
+    fn show(&mut self, destination: AppScreen) {
+        self.class_overlay.0 = false;
+        *self.app_screen = destination;
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct SessionLoadingOverlay<'w, 's> {
+    commands: Commands<'w, 's>,
+    menu_screen: MenuScreenTransition<'w>,
+    identity: Option<ResMut<'w, LaunchIdentity>>,
+    window: Query<'w, 's, &'static mut Window, With<bevy::window::PrimaryWindow>>,
+}
+
+impl SessionLoadingOverlay<'_, '_> {
+    fn begin(
+        mut self,
+        mut approved: MessageReader<MapLoadApproved>,
+        mode: Option<Res<sim::HostGameModeSelection>>,
+        loading: Option<Res<LoadingScreen>>,
+        request: Option<Res<MatchLoadRequest>>,
+        transition: Res<session::SessionSwapRequest>,
+    ) {
+        let Some(fact) = approved.read().last() else {
+            return;
+        };
+        if !transition.load_pending() {
+            return;
+        }
+        let Some(mut identity) = self.identity else {
+            return;
+        };
+        let games = asset_transport::GamesRoot(identity.games_root.clone());
+        let merged = assets::MergedMap::find(&identity.artifacts, &fact.zone).and_then(Result::ok);
+        let requested = merged
+            .as_ref()
+            .map_or(fact.zone.as_str(), assets::MergedMap::zone);
+        let (zone, zone_ff, common_mp, zone_alias, mut loading_title) =
+            resolve_zone(&games, requested);
+        let worlds = match &merged {
+            Some(merged) => {
+                loading_title = merged.name.clone();
+                merged.loading_worlds(&games)
+            }
+            None => Vec::new(),
+        };
+        if loading.as_ref().is_some_and(|s| s.title() == loading_title) {
+            return;
+        }
+        let probe = launch_report(zone.clone(), common_mp, zone_ff.clone(), zone_alias);
+        let progress = request
+            .as_ref()
+            .map(|r| r.progress.clone())
+            .unwrap_or_else(LoadProgress::default);
+
+        identity.zone = zone.clone();
+        if let Ok(mut window) = self.window.single_mut() {
+            window.title = format!("iw4l — {zone}");
+        }
+        self.menu_screen.show(AppScreen::Loading);
+        self.commands.insert_resource(probe);
+        insert_loading_chrome(
+            &mut self.commands,
+            progress,
+            loading_title,
+            &zone,
+            zone_ff,
+            worlds,
+            mode.as_deref()
+                .copied()
+                .unwrap_or_else(sim::HostGameModeSelection::launch_default),
+        );
+        diag::info!(Ui, "session: loading overlay `{zone}`");
+    }
+}
+
 pub(crate) fn begin_load_from_session(
-    mut commands: Commands,
-    mut approved: MessageReader<MapLoadApproved>,
+    overlay: SessionLoadingOverlay,
+    approved: MessageReader<MapLoadApproved>,
     mode: Option<Res<sim::HostGameModeSelection>>,
-    mut app_screen: ResMut<AppScreen>,
-    mut class_overlay: ResMut<ClassSelectOverlayOpen>,
-    identity: Option<ResMut<LaunchIdentity>>,
     loading: Option<Res<LoadingScreen>>,
     request: Option<Res<MatchLoadRequest>>,
-    abort: Option<Res<assets::MatchLoadAbort>>,
-    mut window: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+    transition: Res<session::SessionSwapRequest>,
 ) {
-    let Some(fact) = approved.read().last() else {
-        return;
-    };
-    if abort.is_some_and(|abort| abort.0 == fact.request_id) {
-        return;
-    }
-    let Some(mut identity) = identity else {
-        return;
-    };
-    let games = asset_transport::GamesRoot(identity.games_root.clone());
-    let (zone, zone_ff, common_mp, zone_alias, loading_title) = resolve_zone(&games, &fact.zone);
-    if loading.as_ref().is_some_and(|s| s.title() == loading_title) {
-        return;
-    }
-    let probe = launch_report(zone.clone(), common_mp, zone_ff.clone(), zone_alias);
-    let progress = request
-        .as_ref()
-        .filter(|r| r.request_id == fact.request_id)
-        .map(|r| r.progress.clone())
-        .unwrap_or_default();
-
-    identity.zone = zone.clone();
-    if let Ok(mut window) = window.single_mut() {
-        window.title = format!("iw4l — {zone}");
-    }
-    class_overlay.0 = false;
-    *app_screen = AppScreen::Loading;
-    commands.insert_resource(probe);
-    insert_loading_chrome(
-        &mut commands,
-        progress,
-        loading_title,
-        &zone,
-        zone_ff,
-        fact.request_id,
-        mode.as_deref()
-            .copied()
-            .unwrap_or_else(sim::HostGameModeSelection::from_env),
-    );
-    diag::info!(
-        Ui,
-        "session: loading overlay `{zone}` (swap #{})",
-        fact.request_id
-    );
+    overlay.begin(approved, mode, loading, request, transition);
 }
 
 pub(crate) fn restore_menu_on_return(
     mut commands: Commands,
     mut returned: MessageReader<StateTransitionEvent<frame::MatchScope>>,
-    mut class_overlay: ResMut<ClassSelectOverlayOpen>,
+    mut menu_screen: MenuScreenTransition,
     mut maps: ResMut<MenuMapList>,
     identity: Option<Res<LaunchIdentity>>,
-    mut app_screen: ResMut<AppScreen>,
     chrome: Query<Entity, Or<(With<LoadingRoot>, With<LoadingCamera>)>>,
     overlay_cams: Query<Entity, With<OverlayUiCamera>>,
 ) {
@@ -173,8 +212,7 @@ pub(crate) fn restore_menu_on_return(
     {
         return;
     }
-    class_overlay.0 = false;
-    *app_screen = AppScreen::MainMenu;
+    menu_screen.show(AppScreen::MainMenu);
 
     dismiss_loading_overlay(&mut commands, chrome.iter(), overlay_cams.iter(), false);
     if maps.0.is_empty() {
@@ -213,7 +251,7 @@ fn start_menu_strings_prepare(
         return;
     };
     let task = AsyncComputeTaskPool::get().spawn(async move {
-        match load_mp_localized_strings(&GamesRoot(root), "iw4:code_post_gfx_mp") {
+        match load_localized_strings_for_zone(&GamesRoot(root), "iw4:code_post_gfx_mp") {
             Ok(catalog) => Some(catalog),
             Err(error) => {
                 diag::warn!(Ui, "menu: localize: {error}");
@@ -245,7 +283,7 @@ fn install_menu_strings_prepare(
 
 pub(crate) fn register_menu_load_systems(app: &mut App) {
     app.add_systems(
-        Update,
+        PreUpdate,
         (
             begin_load_from_session,
             restore_menu_on_return.after(begin_load_from_session),

@@ -3,10 +3,9 @@ use fx_iw4::{
     FX_TRAIL_TANGENT_PACKED, FxBeamVert, beam_color_rgba, beam_generate_verts, beam_index_count,
     beam_vert_count, create_clip_matrix, trail_pack_normal, trail_pack_texcoord,
 };
-use render_fx::{CombatFxDump, FxWorldColorImages, TracerWorld};
+use render_fx::{CombatFxDump, TracerWorld};
 
 use crate::adapters::fx::system::{FxCodeMeshBind, FxPresentSkip};
-use crate::assemble::drawsurf::MaterialGeneration;
 use crate::assemble::drawsurf::tess::fx::FxCodeMeshPlan;
 
 pub(crate) fn present_tracer_beams(
@@ -14,11 +13,9 @@ pub(crate) fn present_tracer_beams(
     cam_tf: &Transform,
     clip_from_world: Option<[f32; 16]>,
     tan_half_fov: Option<(f32, f32)>,
-    color_images: &FxWorldColorImages,
-    runtime: &MaterialGeneration,
     plan: &mut FxCodeMeshPlan,
     combat: &mut CombatFxDump,
-    bind: impl Fn(usize, &FxWorldColorImages, &MaterialGeneration) -> FxCodeMeshBind,
+    bind: impl Fn(usize) -> (bool, FxCodeMeshBind),
 ) {
     combat.tracer_live = world.pool.live_count() as u32;
     combat.beam_queued = world.queued.len() as u32;
@@ -55,9 +52,9 @@ pub(crate) fn present_tracer_beams(
             combat.beam_miss_material = combat.beam_miss_material.saturating_add(1);
             continue;
         };
-        let has_color = color_images.colors_by_asset.contains_key(&asset_id);
+        let (has_color, binding) = bind(asset_id);
         combat.last_tracer_has_color = Some(i64::from(has_color));
-        match bind(asset_id, color_images, runtime) {
+        match binding {
             FxCodeMeshBind::Skip(FxPresentSkip::NoOrdinal) => {
                 combat.beam_miss_ordinal = combat.beam_miss_ordinal.saturating_add(1);
             }

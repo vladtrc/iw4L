@@ -59,7 +59,7 @@ struct ScreenHistory {
     view: TextureView,
     format: TextureFormat,
     size: Extent3d,
-    owner: (Option<u64>, u32, u32, u64, u32),
+    owner: (u32, u32, u64, u32),
     saved_ms: i32,
 }
 
@@ -99,7 +99,6 @@ impl TemporalScreenGpu {
         };
         let size = texture.size();
         let owner = (
-            frame.world_generation,
             frame.client,
             frame.view_client,
             frame.life_sequence,

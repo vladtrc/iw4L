@@ -8,25 +8,14 @@ use crate::identities::{DamageSource, LifeSequence, MatchRng, PelletId, ShotId};
 use crate::match_state::{ClientLifecycle, EventAudience};
 use crate::world::{ClientId, Tick};
 use crate::world_objects::glass_piece_is_solid;
-use anim_iw4::{
-    ANIM_COND_RIOTSHIELDNEXT, ANIM_ET_DROPWEAPON, ANIM_ET_FIREWEAPON, ANIM_ET_KNIFE_MELEE,
-    ANIM_ET_KNIFE_MELEE_CHARGE, ANIM_ET_MELEEATTACK, ANIM_ET_RAISEWEAPON, ANIM_ET_RELOAD,
-};
+use anim_iw4::ANIM_ET_RAISEWEAPON;
 use entity_iw4::glass_add_damage;
-use movement_iw4::{Pml, is_in_air, mantle::is_weapon_inactive};
-use playerstate_iw4::{ENTITYNUM_NONE, PlayerState, mantle_flags};
+use playerstate_iw4::{ENTITYNUM_NONE, PlayerState};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use weapon_iw4::{
-    AIM_SPREAD_MOVE_SPEED_THRESHOLD_DEFAULT, AimSpreadMotion, AimSpreadState, CURSOR_HINT_NONE,
-    FireWeaponKind, MELEE_TRACE_OFFSETS, MeleeChargeState, OFFHAND_INV_SLOTS, OffhandCmd,
-    OffhandInvRow, PLAYER_MELEE_HEIGHT_DEFAULT, PLAYER_MELEE_RANGE_DEFAULT,
-    PLAYER_MELEE_WIDTH_DEFAULT, SpreadOverrideState, WeaponCmd, WeaponHandState, WeaponTickEvent,
-    add_aim_spread_fire, adjust_aim_spread_scale, ammo_row_present, ammo_table_key,
-    begin_reload_event, clip_row_present, clip_table_key, fire_weapon_kind,
-    fire_weapon_spread_degrees, get_ammo_not_in_clip, get_clip_for_hand, get_spread_for_weapon,
-    melee_trace_count, melee_trace_end, num_hands_for_held, reload_insert_event,
-    set_ammo_not_in_clip, set_clip_for_hand, weapon_hands,
+    FireWeaponKind, MELEE_TRACE_OFFSETS, MeleeTrace, PLAYER_MELEE_HEIGHT_DEFAULT,
+    PLAYER_MELEE_RANGE_DEFAULT, PLAYER_MELEE_WIDTH_DEFAULT, fire_weapon_kind,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -149,893 +138,248 @@ pub(crate) fn advance_weapon_command(
     msec: i32,
     command_sequence: Option<crate::CommandSequence>,
 ) -> Vec<AcceptedShot> {
-    let msec = msec.clamp(1, 200);
-    let frametime = msec as f32 / 1000.0;
     let mut accepted = Vec::new();
+    if !world
+        .client_meta(id)
+        .is_some_and(|meta| meta.lifecycle == ClientLifecycle::Alive)
     {
-        let id = &id;
-        let cmd = &cmd;
-        if !world
-            .client_meta(*id)
-            .is_some_and(|m| m.lifecycle == ClientLifecycle::Alive)
-        {
-            return accepted;
-        }
-        if let Some(mut ps) = world.player(*id).copied() {
-            let parent = u32::from(cmd.weapon_mapped);
-            let target = u32::from(cmd.weapon);
-            if target != 0
-                && parent != target
-                && ps.weapons.contains(&(parent as i32))
-                && world
-                    .combat_facts_for(parent)
-                    .is_some_and(|f| f.alternate_weapon == target)
-            {
-                if let Some(facts) = world.combat_facts_for(target) {
-                    let ammo = weapon_iw4::ammo_table_key(facts.ammo_index, target);
-                    let clip = weapon_iw4::clip_table_key(facts.clip_index, target);
-                    let (initial_clip, _, initial_stock) = weapon_iw4::spawn_clip_stock(&facts, 0);
-                    if !ammo_row_present(&ps.ammo, ammo) {
-                        set_ammo_not_in_clip(&mut ps.ammo, ammo, initial_stock);
-                    }
-                    if !clip_row_present(&ps.ammoclip, clip) {
-                        set_clip_for_hand(&mut ps.ammoclip, clip, 0, initial_clip);
-                    }
-                    world.client_meta_mut(*id).set_ammo(
-                        target,
-                        get_clip_for_hand(&ps.ammoclip, clip, 0),
-                        get_ammo_not_in_clip(&ps.ammo, ammo),
-                    );
-                    *world.player_mut(*id).expect("present player") = ps;
-                }
-            }
-        }
-        let old_buttons = world
-            .old_buttons_mut()
-            .iter()
-            .find(|(c, _)| c == id)
-            .map_or(0, |(_, b)| *b);
-        let old_angles = world
-            .old_cmd_angles_mut()
-            .iter()
-            .find(|(c, _)| c == id)
-            .map_or(cmd.angles, |(_, a)| *a);
-
-        let Some(ps) = world.player(*id).copied() else {
-            return accepted;
-        };
-
-        let facts_weapon = if ps.weapon != 0 {
-            ps.weapon
-        } else if cmd.weapon != 0 {
-            u32::from(cmd.weapon)
-        } else {
-            return accepted;
-        };
-        let Some(facts) = world.combat_facts_for(facts_weapon) else {
-            return accepted;
-        };
-
-        {
-            let mut state = AimSpreadState {
-                aim_spread_scale: ps.aim_spread_scale,
-                spread_override: ps.spread_override,
-                spread_override_state: ps.spread_override_state,
-            };
-            let motion = AimSpreadMotion {
-                frametime,
-                cmd_angles: cmd.angles,
-                old_angles,
-                forwardmove: cmd.forwardmove,
-                rightmove: cmd.rightmove,
-                velocity_xy: [ps.velocity[0], ps.velocity[1]],
-                speed: ps.speed,
-                move_speed_threshold: AIM_SPREAD_MOVE_SPEED_THRESHOLD_DEFAULT,
-            };
-            adjust_aim_spread_scale(
-                &mut state,
-                &facts.spread_facts(),
-                &facts.aim_spread_decay_facts(),
-                ps.ground_entity_num,
-                ps.pm_type,
-                ps.e_flags,
-                ps.f_weapon_pos_frac,
-                &motion,
-            );
-            if let Some(ps_mut) = world.player_mut(*id) {
-                ps_mut.aim_spread_scale = state.aim_spread_scale;
-                ps_mut.spread_override_state = state.spread_override_state;
-            }
-        }
-        let Some(ps) = world.player(*id).copied() else {
-            return accepted;
-        };
-        let meta = world.client_meta(*id).cloned().unwrap_or_default();
-        let started_weapon = ps.weapon;
-        let ammo_weapon = if started_weapon != 0 {
-            started_weapon
-        } else {
-            facts_weapon
-        };
-        let last_hand = num_hands_for_held(&ps.weapons, &ps.weapon_data, ammo_weapon);
-        let (meta_clip, meta_stock) = meta.ammo_for(ammo_weapon);
-        let ammo_index = weapon_iw4::ammo_table_key(facts.ammo_index, ammo_weapon);
-        let clip_index = weapon_iw4::clip_table_key(facts.clip_index, ammo_weapon);
-
-        let stock = if ammo_row_present(&ps.ammo, ammo_index) {
-            get_ammo_not_in_clip(&ps.ammo, ammo_index)
-        } else {
-            meta_stock
-        };
-        let clip0 = if clip_row_present(&ps.ammoclip, clip_index) {
-            get_clip_for_hand(&ps.ammoclip, clip_index, 0)
-        } else {
-            meta_clip
-        };
-        let clip1 = if clip_row_present(&ps.ammoclip, clip_index) {
-            get_clip_for_hand(&ps.ammoclip, clip_index, 1)
-        } else {
-            0
-        };
-
-        let quick_reload = facts.dual_mag.is_some() && meta.quick_reload_ready(ammo_weapon);
-        let mut hands = [
-            WeaponHandState {
-                weapon: started_weapon,
-                weaponstate: ps.weaponstate_primary,
-                weapon_time: ps.weapon_time,
-                weapon_delay: ps.weapon_delay,
-                weap_anim: ps.weap_anim,
-                hand_index: 0,
-                clip: clip0,
-                stock,
-                shot_count: meta.weapon_shot_count,
-                burst_latch: meta.burst_latch,
-                rechamber_pending: weapon_iw4::weapon_rechamber_pending(
-                    &ps.weapons,
-                    &ps.weapon_data,
-                    started_weapon,
-                    0,
-                ),
-                delayed_rechamber: false,
-                weapon_restrict_kick_time: ps.weapon_restrict_kick_time,
-                quick_reload,
-            },
-            WeaponHandState {
-                weapon: started_weapon,
-                weaponstate: ps.weaponstate_secondary,
-                weapon_time: ps.weapon_time_secondary,
-                weapon_delay: ps.weapon_delay_secondary,
-                weap_anim: ps.weap_anim_secondary,
-                hand_index: 1,
-                clip: if last_hand >= 1 { clip1 } else { 0 },
-                stock,
-                shot_count: ps.weapon_shot_count_secondary as u8,
-                burst_latch: meta.burst_latch_secondary,
-                rechamber_pending: weapon_iw4::weapon_rechamber_pending(
-                    &ps.weapons,
-                    &ps.weapon_data,
-                    started_weapon,
-                    1,
-                ),
-                delayed_rechamber: false,
-                weapon_restrict_kick_time: ps.weapon_restrict_kick_time_secondary,
-                quick_reload,
-            },
-        ];
-        let locked_fire = world.missile_launch_facts(ps.weapon).is_none_or(|f| {
-            !f.require_lock_to_fire || meta.weapon_lock.can_fire(ps.weapon, meta.life_sequence.0)
+        return accepted;
+    }
+    let Some(mut state) = world.player(id).copied() else {
+        return accepted;
+    };
+    let old_buttons = world.old_buttons(id).unwrap_or(0);
+    let old_angles = world.old_cmd_angles(id).unwrap_or(cmd.angles);
+    let meta = world.client_meta(id).expect("alive metadata");
+    let life = meta.life_sequence;
+    let can_fire = world
+        .missile_launch_facts(state.weapon)
+        .is_none_or(|facts| {
+            !facts.require_lock_to_fire || meta.weapon_lock.can_fire(state.weapon, life.0)
         });
-        let fire_buttons = if locked_fire {
-            cmd.buttons
-        } else {
-            cmd.buttons & !playerstate_iw4::buttons::ATTACK
+    let content = world.content();
+    let script = world.player_anim_script();
+    let animation = crate::bg::weapon_animation::AnimationInputs {
+        script: script.as_deref(),
+        last_movetype: world.last_anim_movetype(id),
+        strafing: world.last_anim_strafing(id),
+        buttons: world.anim_command_buttons(id),
+    };
+    let mut anim_seed = world.anim_event_seed();
+    let inputs = weapon_iw4::FireInputs {
+        cmd,
+        root_seed: world.root_seed(),
+        life,
+        client: id,
+        command: command_sequence,
+        mantle_weapon_inactive: movement_iw4::mantle::is_weapon_inactive(&state, true),
+        old_buttons,
+        old_angles,
+        msec,
+        can_fire,
+        linked_origin: None,
+    };
+    let mut animator = crate::bg::weapon_animation::PlayerWeaponAnimation {
+        content: &content,
+        inputs: animation,
+        seed: &mut anim_seed,
+    };
+    let advanced = weapon_iw4::pm_weapon(
+        &mut state,
+        &mut world.client_meta_mut(id).weapon_carry,
+        content.as_ref(),
+        &inputs,
+        &mut animator,
+    );
+    *world.player_mut(id).expect("present player") = state;
+    world.set_anim_event_seed(anim_seed);
+    let Some(step) = advanced else {
+        return accepted;
+    };
+    for entry in step.events.into_iter().flatten() {
+        let shot_id =
+            matches!(entry.1, weapon_iw4::WeaponEvent::Fire { .. }).then(|| world.alloc_shot_id());
+        let mut state = *world.player(id).expect("weapon event retains its player");
+        let mut event_inputs = inputs;
+        event_inputs.linked_origin = world
+            .client_meta(id)
+            .and_then(|meta| meta.linked_weapon_view)
+            .map(|view| view.origin);
+        let animation = crate::bg::weapon_animation::AnimationInputs {
+            script: script.as_deref(),
+            last_movetype: world.last_anim_movetype(id),
+            strafing: world.last_anim_strafing(id),
+            buttons: world.anim_command_buttons(id),
         };
-        let selected_airdrop_marker =
-            world.weapon_script_name(ps.weapon) == crate::equipment::AIRDROP_MARKER_WEAPON;
-        let marker_offhand_class = i32::MAX;
-        let mut wcmd = WeaponCmd {
-            msec,
-            server_time: cmd.server_time,
-            stun_time: ps.stun_time,
-            buttons: fire_buttons
-                | if selected_airdrop_marker && cmd.buttons & playerstate_iw4::buttons::ATTACK != 0
-                {
-                    playerstate_iw4::buttons::FRAG
-                } else {
-                    0
-                },
-            old_buttons: old_buttons
-                | if selected_airdrop_marker && old_buttons & playerstate_iw4::buttons::ATTACK != 0
-                {
-                    playerstate_iw4::buttons::FRAG
-                } else {
-                    0
-                },
-
-            cmd_weapon: if cmd.weapon != 0 {
-                cmd.weapon
-            } else {
-                ps.weapon as u16
-            },
-            pm_flags: ps.pm_flags,
-            weap_flags: ps.weap_flags,
-            pm_type: ps.pm_type,
-            e_flags: ps.e_flags,
-            last_weapon_hand: last_hand,
-            f_weapon_pos_frac: ps.f_weapon_pos_frac,
-            melee_charge_yaw: cmd.melee_charge_yaw,
-            melee_charge_dist: cmd.melee_charge_dist,
-            player_melee_range: PLAYER_MELEE_RANGE_DEFAULT,
-
-            is_in_air: {
-                let pml = Pml {
-                    forward: [0.0; 3],
-                    right: [0.0; 3],
-                    up: [0.0; 3],
-                    frametime,
-                    msec,
-                    walking: 0,
-                    ground_plane: u32::from(ps.ground_entity_num != ENTITYNUM_NONE),
-                    almost_ground_plane: 0,
-                    ground_trace: [0; 11],
-                    previous_origin: [0.0; 3],
-                    previous_velocity: [0.0; 3],
-                    holdrand: 0,
-                    jump_animations: [None; 4],
-                    mantle_movetype: None,
-                    landing_animation: false,
-                    fall_damage: 0,
-                };
-                is_in_air(&ps, &pml)
-            },
-            melee_charge: MeleeChargeState {
-                pm_flags: ps.pm_flags,
-                pm_type: ps.pm_type,
-                e_flags: ps.e_flags,
-                melee_charge_yaw: ps.melee_charge_yaw,
-                melee_charge_dist: ps.melee_charge_dist,
-                melee_charge_time: ps.melee_charge_time,
-            },
-            melee_started: None,
-
-            mantle_weapon_inactive: is_weapon_inactive(&ps, true),
-            mantle_quick_raise: (ps.mantle_flags & mantle_flags::QUICK) != 0,
-            cmd_weapon_owned: {
-                let w = if cmd.weapon != 0 {
-                    u32::from(cmd.weapon)
-                } else {
-                    ps.weapon
-                };
-                w == 0
-                    || ps.weapons.contains(&(w as i32))
-                    || (ps.weapons.contains(&(i32::from(cmd.weapon_mapped)))
-                        && world
-                            .combat_facts_for(u32::from(cmd.weapon_mapped))
-                            .is_some_and(|f| f.alternate_weapon == w))
-            },
-
-            cmd_weapon_pistol_quick: world
-                .combat_facts_for(u32::from(cmd.weapon))
-                .is_some_and(|f| f.weap_class == 5),
-            alternate_switch: cmd.weapon != 0
-                && (facts.alternate_weapon == u32::from(cmd.weapon)
-                    || (facts.inventory_type == 3 && ps.weapon_primary == u32::from(cmd.weapon))),
-            switch_alternate_raise_time_ms: world
-                .combat_facts_for(u32::from(cmd.weapon))
-                .map_or(0, |f| f.alternate_raise_time_ms),
-            switch_raise_time_ms: {
-                let w = if cmd.weapon != 0 {
-                    u32::from(cmd.weapon)
-                } else {
-                    ps.weapon
-                };
-                world
-                    .combat_facts_for(w)
-                    .map(|f| f.raise_time_ms)
-                    .unwrap_or(0)
-            },
-            switch_quick_raise_time_ms: {
-                let w = if cmd.weapon != 0 {
-                    u32::from(cmd.weapon)
-                } else {
-                    ps.weapon
-                };
-                world
-                    .combat_facts_for(w)
-                    .map(|f| f.quick_raise_time_ms)
-                    .unwrap_or(0)
-            },
-            switch_first_raise_time_ms: {
-                let w = if cmd.weapon != 0 {
-                    u32::from(cmd.weapon)
-                } else {
-                    ps.weapon
-                };
-                if weapon_used_before(&ps, w) {
-                    0
-                } else {
-                    world
-                        .combat_facts_for(w)
-                        .map_or(0, |f| f.first_raise_time_ms.max(0))
-                }
-            },
-            perks0: ps.perks[0],
-            perks1: ps.perks[1],
-            perk_weap_reload_multiplier: weapon_iw4::PERK_WEAP_RELOAD_MULTIPLIER_DEFAULT,
-            offhand: {
-                let mut inventory = [OffhandInvRow::default(); OFFHAND_INV_SLOTS];
-                for (i, &slot) in ps.weapons.iter().enumerate() {
-                    if slot <= 0 {
-                        continue;
-                    }
-                    let weapon = slot as u32;
-                    let (clip, stock) = meta.ammo_for(weapon);
-                    let eq = world.equipment_facts_for(weapon);
-                    let combat = world.combat_facts_for(weapon);
-                    inventory[i] = OffhandInvRow {
-                        weapon,
-                        offhand_class: if selected_airdrop_marker && weapon == ps.weapon {
-                            marker_offhand_class
-                        } else {
-                            eq.map(|e| e.offhand_class).unwrap_or(0)
-                        },
-                        ammo: clip + stock,
-                        hold_fire_time_ms: eq.map(|e| e.hold_fire_time_ms).unwrap_or(0),
-                        fire_time_ms: combat.map(|f| f.fire_time_ms).unwrap_or(0),
-                        fire_delay_ms: combat.map(|f| f.fire_delay_ms).unwrap_or(0),
-                        fuse_time_ms: eq.map(|e| e.fuse_time_ms).unwrap_or(0),
-                        cook_off_hold: eq.map(|e| e.cook_off_hold).unwrap_or(false),
-                        offhand_hold_is_cancelable: combat
-                            .and_then(|f| f.offhand_hold_is_cancelable),
-                        weap_type: combat.map(|f| f.weap_type).unwrap_or(0),
-                        has_detonator: eq.is_some_and(|e| e.has_detonator),
-                        detonate_delay_ms: eq.map_or(0, |e| e.detonate_delay_ms),
-                        detonate_time_ms: eq.map_or(0, |e| e.detonate_time_ms),
-                    };
-                }
-                OffhandCmd {
-                    inventory,
-                    offhand_primary: if selected_airdrop_marker {
-                        marker_offhand_class
-                    } else {
-                        ps.offhand_primary
-                    },
-                    offhand_secondary: ps.offhand_secondary,
-                    cmd_off_hand_index: cmd.off_hand_index,
-                    cmd_off_hand_owned: cmd.off_hand_index != 0
-                        && ps
-                            .weapons
-                            .iter()
-                            .any(|&slot| slot == i32::from(cmd.off_hand_index)),
-                    cursor_hint_ent: CURSOR_HINT_NONE,
-                    held_quick_drop_time_ms: facts.quick_drop_time_ms,
-                    off_hand_index: ps.off_hand_index,
-                    grenade_time_left: ps.grenade_time_left,
-                }
-            },
+        let mut anim_seed = world.anim_event_seed();
+        let mut animator = crate::bg::weapon_animation::PlayerWeaponAnimation {
+            content: &content,
+            inputs: animation,
+            seed: &mut anim_seed,
         };
-        let clip_before = hands[0].clip;
-        let events = weapon_hands(&mut hands, &facts, &mut wcmd, last_hand);
-        let hand0 = hands[0];
-        for &(hand, event) in events.iter().flatten() {
-            if hand != 0 {
-                continue;
+        let action = step.apply_event(
+            weapon_iw4::WeaponEventInstance {
+                hand: entry.0,
+                event: entry.1,
+                shot: shot_id,
+            },
+            &mut state,
+            &mut world.client_meta_mut(id).weapon_carry,
+            &event_inputs,
+            content.as_ref(),
+            &mut animator,
+        );
+        *world
+            .player_mut(id)
+            .expect("weapon event retains its player") = state;
+        world.set_anim_event_seed(anim_seed);
+        match action {
+            weapon_iw4::WeaponAction::None => {}
+            weapon_iw4::WeaponAction::Detonate { weapon } => {
+                world
+                    .weapon_notes
+                    .push(crate::equipment::WeaponNote::DetonationRequested { owner: id, weapon });
             }
-            match event {
-                WeaponTickEvent::PutawayStarted
-                    if ps.pm_flags & playerstate_iw4::pm_flags::MANTLE == 0 =>
-                {
-                    apply_player_anim_event_with_target(
-                        world,
-                        *id,
-                        ANIM_ET_DROPWEAPON,
-                        Some(u32::from(wcmd.cmd_weapon)),
-                    );
-                }
-                WeaponTickEvent::RaiseStarted
-                    if started_weapon != 0
-                        && hand0.weaponstate
-                            != weapon_iw4::WeaponState::RaisingAltswitch as i32 =>
-                {
-                    apply_player_anim_event(world, *id, ANIM_ET_RAISEWEAPON);
-                }
-                _ => {}
-            }
-        }
-        if let Some(charge) = wcmd.melee_started {
-            if let Some(ps_mut) = world.player_mut(*id) {
-                movement_iw4::add_predictable_event(
-                    ps_mut,
-                    entity_iw4::EntityEventKind::MELEE_SWIPE.0,
-                    0,
-                );
-            }
-            let anim = match (facts.knife_model != 0, charge) {
-                (true, true) => ANIM_ET_KNIFE_MELEE_CHARGE,
-                (true, false) => ANIM_ET_KNIFE_MELEE,
-                (false, _) => ANIM_ET_MELEEATTACK,
-            };
-            apply_player_anim_event(world, *id, anim);
-        }
-
-        if let Some(ps_mut) = world.player_mut(*id) {
-            for (index, hand) in hands.iter().enumerate().take(last_hand as usize + 1) {
-                weapon_iw4::set_weapon_rechamber_pending(
-                    &ps_mut.weapons,
-                    &mut ps_mut.weapon_data,
-                    started_weapon,
-                    index,
-                    hand.rechamber_pending,
-                );
-            }
-            weapon_iw4::update_scope_zoom(ps_mut, cmd.buttons, old_buttons, facts.scope_zoom);
-            ps_mut.weapon = hand0.weapon;
-            if hand0.weapon != started_weapon {
-                ps_mut.scope_zoom_level = 0;
-                if hand0.weaponstate == weapon_iw4::WeaponState::RaisingAltswitch as i32 {
-                    ps_mut.aim_spread_scale = ps_mut.aim_spread_scale.max(128.0);
-                }
-                ps_mut.weapon_primary = if hand0.weapon == u32::from(cmd.weapon) {
-                    u32::from(cmd.weapon_mapped)
+            weapon_iw4::WeaponAction::Brass {
+                weapon,
+                hand,
+                pending,
+                origin,
+            } => {
+                let kind = if hand == 1 {
+                    entity_iw4::EntityEventKind::EJECT_BRASS_LEFT
                 } else {
-                    0
+                    entity_iw4::EntityEventKind::EJECT_BRASS
                 };
-            }
-            ps_mut.weaponstate_primary = hand0.weaponstate;
-            ps_mut.weapon_time = hand0.weapon_time;
-            ps_mut.weapon_delay = hand0.weapon_delay;
-            ps_mut.weap_anim = hand0.weap_anim;
-            ps_mut.weapon_restrict_kick_time = hand0.weapon_restrict_kick_time;
-            ps_mut.last_weapon_hand = last_hand;
-            ps_mut.pm_flags = wcmd.pm_flags;
-            ps_mut.weap_flags = wcmd.weap_flags;
-            ps_mut.off_hand_index = wcmd.offhand.off_hand_index;
-            ps_mut.grenade_time_left = wcmd.offhand.grenade_time_left;
-            ps_mut.melee_charge_yaw = wcmd.melee_charge.melee_charge_yaw;
-            ps_mut.melee_charge_dist = wcmd.melee_charge.melee_charge_dist;
-            ps_mut.melee_charge_time = wcmd.melee_charge.melee_charge_time;
-            if last_hand >= 1 {
-                let h1 = hands[1];
-                ps_mut.weaponstate_secondary = h1.weaponstate;
-                ps_mut.weapon_time_secondary = h1.weapon_time;
-                ps_mut.weapon_delay_secondary = h1.weapon_delay;
-                ps_mut.weap_anim_secondary = h1.weap_anim;
-                ps_mut.weapon_shot_count_secondary = i32::from(h1.shot_count);
-                ps_mut.weapon_restrict_kick_time_secondary = h1.weapon_restrict_kick_time;
-            }
-        }
-        let life = world
-            .client_meta(*id)
-            .map(|m| m.life_sequence)
-            .unwrap_or_default();
-        let held_rechamber_pending = world.player(*id).map_or([false; 2], |ps| {
-            std::array::from_fn(|hand| {
-                weapon_iw4::weapon_rechamber_pending(&ps.weapons, &ps.weapon_data, ps.weapon, hand)
-            })
-        });
-        let meta = world.client_meta_mut(*id);
-        if hand0.weapon != started_weapon {
-            if started_weapon != 0 {
-                meta.set_ammo(started_weapon, hand0.clip, hand0.stock);
-            }
-        } else if hand0.weapon != 0 {
-            meta.set_ammo(hand0.weapon, hand0.clip, hand0.stock);
-        }
-        if hand0.weapon != 0 {
-            meta.mirror_held_ammo(hand0.weapon);
-        }
-        meta.weapon_shot_count = hand0.shot_count;
-        meta.burst_latch = hand0.burst_latch;
-        meta.rechamber_pending = held_rechamber_pending[0];
-        meta.burst_latch_secondary = last_hand >= 1 && hands[1].burst_latch;
-        meta.rechamber_pending_secondary = held_rechamber_pending[1];
-        if facts.dual_mag.is_some() && started_weapon != 0 {
-            meta.set_quick_reload_ready(started_weapon, hand0.quick_reload);
-        }
-
-        if ammo_index != 0 || clip_index != 0 {
-            if let Some(ps_mut) = world.player_mut(*id) {
-                if ammo_index != 0 {
-                    let _ = set_ammo_not_in_clip(&mut ps_mut.ammo, ammo_index, hands[0].stock);
-                }
-                if clip_index != 0 {
-                    let _ = set_clip_for_hand(&mut ps_mut.ammoclip, clip_index, 0, hands[0].clip);
-                    if last_hand >= 1 {
-                        let _ =
-                            set_clip_for_hand(&mut ps_mut.ammoclip, clip_index, 1, hands[1].clip);
-                    }
-                }
-            }
-        }
-
-        if hands[0].delayed_rechamber {
-            if let Some(ps) = world.player_mut(*id) {
-                movement_iw4::add_predictable_event(
-                    ps,
-                    entity_iw4::EntityEventKind::RECHAMBER_WEAPON.0,
-                    0,
-                );
-            }
-        }
-        if hands[0].clip > clip_before {
-            if let Some(ps) = world.player_mut(*id) {
-                movement_iw4::add_predictable_event(
-                    ps,
-                    entity_iw4::EntityEventKind::RELOAD_ADDAMMO.0,
-                    0,
-                );
-            }
-        }
-
-        let mut fire_ordinal = 0u16;
-        for slot in events.into_iter().flatten() {
-            let (_hand_i, ev) = slot;
-            match ev {
-                WeaponTickEvent::Detonated { weapon } => {
-                    world
-                        .weapon_notes
-                        .push(crate::equipment::WeaponNote::DetonationRequested {
-                            owner: *id,
-                            weapon,
-                        });
-                    if let Some(ps) = world.player_mut(*id) {
-                        movement_iw4::add_predictable_event(
-                            ps,
-                            entity_iw4::EntityEventKind::DETONATE.0,
-                            weapon as i32,
-                        );
-                    }
-                }
-                WeaponTickEvent::ReloadAmmoAdded { shells: _ } => {}
-                WeaponTickEvent::RechamberWeapon => {
-                    if !hands[_hand_i as usize].delayed_rechamber {
-                        if let Some(ps) = world.player_mut(*id) {
-                            movement_iw4::add_predictable_event(
-                                ps,
-                                entity_iw4::EntityEventKind::RECHAMBER_WEAPON.0,
-                                0,
-                            );
-                        }
-                    }
-                }
-                WeaponTickEvent::EjectBrass => {
-                    let kind = if _hand_i == 1 {
-                        entity_iw4::EntityEventKind::EJECT_BRASS_LEFT
-                    } else {
-                        entity_iw4::EntityEventKind::EJECT_BRASS
-                    };
-                    let pending = world.client_meta_mut(*id).pending_brass[_hand_i as usize]
-                        .take()
-                        .filter(|pending| {
-                            pending.life == life && pending.weapon == hands[_hand_i as usize].weapon
-                        });
-                    let origin = world.player(*id).map_or([0.0; 3], |ps| ps.origin);
-                    world.push_entity_event(
-                        tick,
-                        EventAudience::All,
-                        kind,
-                        crate::EntityEventPayload {
-                            number: id.0 as i32,
-                            weapon: hands[_hand_i as usize].weapon,
-                            hand: _hand_i,
-                            origin,
-                            correlation: pending.map_or(0, |pending| pending.shot.0),
-                            fire_cause: pending.and_then(|pending| pending.cause),
-                            ..Default::default()
-                        },
-                    );
-                }
-                WeaponTickEvent::ShotAccepted { ammo_used } => {
-                    let hand = &hands[_hand_i as usize];
-                    let shot_id = world.alloc_shot_id();
-                    let fire_cause = command_sequence.map(|command| crate::FireCause {
-                        client: *id,
-                        life,
-                        command,
-                        ordinal: fire_ordinal,
-                        hand: _hand_i,
-                    });
-                    fire_ordinal += 1;
-                    let weapon = hand.weapon;
-                    if facts.bolt_action {
-                        world.client_meta_mut(*id).pending_brass[_hand_i as usize] =
-                            Some(crate::PendingBrass {
-                                cause: fire_cause,
-                                life,
-                                shot: shot_id,
-                                weapon,
-                            });
-                    }
-                    let Some(ps) = world.player(*id).copied() else {
-                        continue;
-                    };
-                    apply_player_anim_event(world, *id, ANIM_ET_FIREWEAPON);
-                    let combat_seed = match fire_cause {
-                        Some(cause) => cause.combat_seed(world.root_seed()),
-                        None => world.combat_rng_mut().next_u32(),
-                    };
-                    let origin = world
-                        .client_meta(*id)
-                        .and_then(|meta| meta.linked_weapon_view)
-                        .map_or(
-                            [
-                                ps.origin[0],
-                                ps.origin[1],
-                                ps.origin[2] + ps.view_height_current,
-                            ],
-                            |view| view.origin,
-                        );
-
-                    let mut shot_angles = ps.viewangles;
-                    for (angle, offset) in shot_angles.iter_mut().zip(cmd.gun_angle_offset) {
-                        if offset.is_finite() {
-                            *angle += offset.clamp(-45.0, 45.0);
-                        }
-                    }
-                    let last_shot = hand.clip == 0 && facts.fire_type != 5;
-                    world.push_entity_event(
-                        tick,
-                        EventAudience::All,
-                        entity_iw4::predicted_weapon_fire_event(_hand_i as i32, last_shot),
-                        crate::EntityEventPayload {
-                            number: id.0 as i32,
-                            weapon,
-                            correlation: shot_id.0,
-                            fire_cause,
-                            hand: _hand_i,
-                            origin,
-                            direction: shot_angles,
-                            ..Default::default()
-                        },
-                    );
-                    world
-                        .weapon_notes
-                        .push(crate::equipment::WeaponNote::Fired { owner: *id });
-
-                    if let Some(ps_mut) = world.player_mut(*id) {
-                        add_aim_spread_fire(
-                            &mut ps_mut.aim_spread_scale,
-                            ps.f_weapon_pos_frac,
-                            facts.hip_spread_fire_add,
-                        );
-                    }
-                    let aim_spread_scale = world
-                        .player(*id)
-                        .map(|p| p.aim_spread_scale)
-                        .unwrap_or(ps.aim_spread_scale);
-                    let ads_frac = ps.f_weapon_pos_frac.clamp(0.0, 1.0);
-                    let override_state = SpreadOverrideState::from_i32(ps.spread_override_state);
-                    let cone = get_spread_for_weapon(
-                        ps.view_height_current,
-                        ps.spread_override,
-                        override_state,
-                        &facts.spread_facts(),
-                        weapon_iw4::perk_weap_spread_multiplier(ps.perks[0]),
-                    );
-                    let spread_degrees = fire_weapon_spread_degrees(
-                        cone,
-                        facts.ads_spread,
-                        ads_frac,
-                        aim_spread_scale,
-                    );
-                    accepted.push(AcceptedShot {
-                        shot_id,
-                        fire_cause,
-                        attacker: *id,
-                        attacker_life: life,
-                        hand: _hand_i,
+                world.push_entity_event(
+                    tick,
+                    EventAudience::All,
+                    kind,
+                    crate::EntityEventPayload {
+                        number: id.0 as i32,
                         weapon,
-                        ammo_used,
+                        hand,
                         origin,
-                        angles: shot_angles,
-                        ads_frac,
-                        view_height_current: ps.view_height_current,
-                        aim_spread_scale,
-                        perks0: ps.perks[0],
-                        combat_seed,
-                        owner_velocity: ps.velocity,
-                        spread_degrees,
-                    });
-                }
-                WeaponTickEvent::OffhandPrepare { weapon } => {
-                    world
-                        .weapon_notes
-                        .push(crate::equipment::WeaponNote::Pullback { owner: *id, weapon });
-                    if let Some(ps) = world.player_mut(*id) {
-                        movement_iw4::add_predictable_event(
-                            ps,
-                            entity_iw4::EntityEventKind::PREP_OFFHAND.0,
-                            weapon as i32,
-                        );
-                    }
-                }
-                WeaponTickEvent::OffhandUsed {
+                        correlation: pending.map_or(0, |pending| pending.shot.0),
+                        fire_cause: pending.and_then(|pending| pending.cause),
+                        ..Default::default()
+                    },
+                );
+            }
+            weapon_iw4::WeaponAction::Fire(fire) => {
+                let combat_seed = fire
+                    .combat_seed
+                    .unwrap_or_else(|| world.combat_rng_mut().next_u32());
+                world.push_entity_event(
+                    tick,
+                    EventAudience::All,
+                    entity_iw4::predicted_weapon_fire_event(fire.hand as i32, fire.last_shot),
+                    crate::EntityEventPayload {
+                        number: id.0 as i32,
+                        weapon: fire.weapon,
+                        correlation: fire.shot_id.0,
+                        fire_cause: fire.cause,
+                        hand: fire.hand,
+                        origin: fire.origin,
+                        direction: fire.angles,
+                        ..Default::default()
+                    },
+                );
+                world
+                    .weapon_notes
+                    .push(crate::equipment::WeaponNote::Fired { owner: id });
+                accepted.push(AcceptedShot {
+                    shot_id: fire.shot_id,
+                    fire_cause: fire.cause,
+                    attacker: id,
+                    attacker_life: life,
+                    hand: fire.hand,
+                    weapon: fire.weapon,
+                    ammo_used: fire.ammo_used,
+                    origin: fire.origin,
+                    angles: fire.angles,
+                    ads_frac: fire.ads_frac,
+                    view_height_current: fire.view_height,
+                    aim_spread_scale: fire.aim_spread_scale,
+                    perks0: fire.perks0,
+                    combat_seed,
+                    owner_velocity: fire.velocity,
+                    spread_degrees: fire.spread_degrees,
+                });
+            }
+            weapon_iw4::WeaponAction::Pullback { weapon } => {
+                world
+                    .weapon_notes
+                    .push(crate::equipment::WeaponNote::Pullback { owner: id, weapon });
+            }
+            weapon_iw4::WeaponAction::OffhandUsed {
+                weapon,
+                remaining_fuse_ms,
+                cause,
+                combat_seed,
+                origin,
+                angles,
+                velocity,
+            } => {
+                let combat_seed = combat_seed.unwrap_or_else(|| world.combat_rng_mut().next_u32());
+                if crate::equipment::spawn_grenade_projectile(
+                    world,
+                    id,
                     weapon,
-                    remaining_fuse_ms,
-                } => {
-                    let combat = world.weapon_combat_row(weapon);
-                    let meta = world.client_meta_mut(*id);
-                    let (clip, stock) = meta.ammo_for(weapon);
-                    if clip + stock > 0 {
-                        if clip > 0 {
-                            meta.set_ammo(weapon, clip - 1, stock);
-                        } else {
-                            meta.set_ammo(weapon, 0, stock - 1);
-                        }
-                    }
-                    if let Some(facts) = combat {
-                        if let Some(ps) = world.player_mut(*id) {
-                            spend_ps_offhand_round(ps, weapon, facts);
-                        }
-                    }
-                    if crate::equipment::spawn_offhand_projectile(
-                        world,
-                        *id,
-                        weapon,
+                    crate::equipment::ProjectileLaunch {
                         tick,
-                        remaining_fuse_ms,
-                    ) {
-                        if let Some(ps) = world.player(*id).copied() {
-                            let origin = [
-                                ps.origin[0],
-                                ps.origin[1],
-                                ps.origin[2] + ps.view_height_current,
-                            ];
-                            world.push_entity_event(
-                                tick,
-                                EventAudience::All,
-                                entity_iw4::EntityEventKind::USE_OFFHAND,
-                                crate::EntityEventPayload {
-                                    number: id.0 as i32,
-                                    weapon,
-                                    origin,
-                                    event_parm: weapon as i32,
-                                    ..Default::default()
-                                },
-                            );
-                        }
-                    }
-                }
-                WeaponTickEvent::OffhandCookedOff { weapon } => {
-                    let combat = world.weapon_combat_row(weapon);
-                    let meta = world.client_meta_mut(*id);
-                    let (clip, stock) = meta.ammo_for(weapon);
-                    if clip + stock > 0 {
-                        if clip > 0 {
-                            meta.set_ammo(weapon, clip - 1, stock);
-                        } else {
-                            meta.set_ammo(weapon, 0, stock - 1);
-                        }
-                    }
-                    if let Some(facts) = combat {
-                        if let Some(ps) = world.player_mut(*id) {
-                            spend_ps_offhand_round(ps, weapon, facts);
-                        }
-                    }
-                    crate::equipment::explode_offhand_in_hand(world, *id, weapon, tick);
-                }
-                WeaponTickEvent::ReloadStarted => {
-                    apply_player_anim_event(world, *id, ANIM_ET_RELOAD);
-                    let hand = &hands[_hand_i as usize];
-                    let event = begin_reload_event(&facts, hand.clip);
-                    if let Some(ps) = world.player_mut(*id) {
-                        movement_iw4::add_predictable_event(
-                            ps,
-                            entity_iw4::EntityEventKind::RESET_ADS.0,
-                            0,
-                        );
-                        movement_iw4::add_predictable_event(ps, event, 0);
-                    }
-                    world
-                        .weapon_notes
-                        .push(crate::equipment::WeaponNote::ReloadStarted { owner: *id });
-                }
-                WeaponTickEvent::ReloadInsert => {
-                    let hand = &hands[_hand_i as usize];
-                    let event = reload_insert_event(&facts, hand.clip);
-                    if let Some(ps) = world.player_mut(*id) {
-                        movement_iw4::add_predictable_event(ps, event, 0);
-                    }
-                }
-                WeaponTickEvent::ReloadEnded => {
-                    if let Some(ps) = world.player_mut(*id) {
-                        movement_iw4::add_predictable_event(
-                            ps,
-                            entity_iw4::EntityEventKind::RELOAD_END.0,
-                            0,
-                        );
-                    }
-                }
-                WeaponTickEvent::EmptyClick => {
-                    if let Some(ps) = world.player_mut(*id) {
-                        movement_iw4::add_predictable_event(
-                            ps,
-                            entity_iw4::EntityEventKind::NOAMMO.0,
-                            0,
-                        );
-                    }
-                }
-                WeaponTickEvent::AlternateStarted => {
-                    if let Some(ps) = world.player_mut(*id) {
-                        movement_iw4::add_predictable_event(
-                            ps,
-                            entity_iw4::EntityEventKind::WEAPON_ALT.0,
-                            i32::from(cmd.weapon),
-                        );
-                    }
-                }
-                WeaponTickEvent::PutawayStarted => {
-                    if let Some(ps) = world.player_mut(*id) {
-                        movement_iw4::add_predictable_event(
-                            ps,
-                            entity_iw4::EntityEventKind::PUTAWAY_WEAPON.0,
-                            0,
-                        );
-                    }
-                }
-                WeaponTickEvent::RaiseStarted => {
-                    let hand = &hands[_hand_i as usize];
-                    let first = hand.weap_anim as u32 & weapon_iw4::WEAP_ANIM_EVENT_MASK
-                        == weapon_iw4::weap_anim_event::FIRST_RAISE;
-                    let weapon = hand.weapon;
-                    if let Some(ps) = world.player_mut(*id) {
-                        mark_weapon_used(ps, weapon);
-                        movement_iw4::add_predictable_event(
-                            ps,
-                            if first {
-                                entity_iw4::EntityEventKind::FIRST_RAISE_WEAPON.0
-                            } else {
-                                entity_iw4::EntityEventKind::RAISE_WEAPON.0
-                            },
-                            0,
-                        );
-                    }
-                }
-                WeaponTickEvent::MeleeFired => {
-                    let hand = &hands[_hand_i as usize];
-                    let weapon = hand.weapon;
-                    let Some(ps) = world.player(*id).copied() else {
-                        continue;
-                    };
-                    let origin = [
-                        ps.origin[0],
-                        ps.origin[1],
-                        ps.origin[2] + ps.view_height_current,
-                    ];
+                        origin,
+                        angles,
+                        owner_velocity: velocity,
+                        combat_seed,
+                    },
+                    crate::equipment::GrenadeLaunchKind::Thrown { remaining_fuse_ms },
+                    cause,
+                ) {
                     world.push_entity_event(
                         tick,
                         EventAudience::All,
-                        entity_iw4::EntityEventKind::FIRE_MELEE,
+                        entity_iw4::EntityEventKind::USE_OFFHAND,
                         crate::EntityEventPayload {
                             number: id.0 as i32,
                             weapon,
                             origin,
-                            direction: ps.viewangles,
+                            event_parm: weapon as i32,
                             ..Default::default()
                         },
                     );
-                    if world.publishes_snapshot() {
-                        fire_weapon_melee(world, tick, *id, life, weapon, origin, ps.viewangles);
-                    }
                 }
-                WeaponTickEvent::StunnedStarted => {
-                    apply_player_anim_event(world, *id, 21);
-                }
-                WeaponTickEvent::RaiseFinished | WeaponTickEvent::DropFinished => {}
             }
-        }
-        let meta = world.client_meta_mut(*id);
-        for (index, hand) in hands.iter().enumerate() {
-            if !hand.rechamber_pending
-                || index > last_hand as usize
-                || meta.pending_brass[index]
-                    .is_some_and(|pending| pending.life != life || pending.weapon != hand.weapon)
-            {
-                meta.pending_brass[index] = None;
+            weapon_iw4::WeaponAction::CookedOff { weapon } => {
+                crate::equipment::explode_offhand_in_hand(world, id, weapon, tick);
+            }
+            weapon_iw4::WeaponAction::ReloadStarted => {
+                world
+                    .weapon_notes
+                    .push(crate::equipment::WeaponNote::ReloadStarted { owner: id });
+            }
+            weapon_iw4::WeaponAction::Melee {
+                weapon,
+                origin,
+                angles,
+            } => {
+                world.push_entity_event(
+                    tick,
+                    EventAudience::All,
+                    entity_iw4::EntityEventKind::FIRE_MELEE,
+                    crate::EntityEventPayload {
+                        number: id.0 as i32,
+                        weapon,
+                        origin,
+                        direction: angles,
+                        ..Default::default()
+                    },
+                );
+                fire_weapon_melee(world, tick, id, life, weapon, origin, angles);
             }
         }
     }
+    step.finish_events(&mut world.client_meta_mut(id).weapon_carry, life);
     accepted
 }
 
@@ -1077,40 +421,26 @@ fn apply_player_anim_event_inner(
     let Some(script) = world.player_anim_script() else {
         return;
     };
+    let content = world.content();
+    let animation = crate::bg::weapon_animation::AnimationInputs {
+        script: Some(script.as_ref()),
+        last_movetype: world.last_anim_movetype(id),
+        strafing: world.last_anim_strafing(id),
+        buttons: world.anim_command_buttons(id),
+    };
     let mut seed = world.anim_event_seed();
-    let Some(ps) = world.player(id).copied() else {
+    let Some(ps) = world.player_mut(id) else {
         return;
     };
-    let (view_w, primary) = crate::pmove_anim_weapon_ids(&ps);
-    let view_facts = world.combat_facts_for(view_w);
-    let primary_facts = world.combat_facts_for(primary);
-    let movetype =
-        crate::player_anim_script::event_anim_movetype(&ps, world.last_anim_movetype(id));
-    let strafing = world.last_anim_strafing(id);
-    let mut conds = crate::anim_conditions_from_pmove(
-        &ps,
-        view_facts,
-        primary_facts,
-        Some(movetype),
-        strafing,
-        world.anim_command_buttons(id),
+    crate::bg::weapon_animation::apply_animation_event(
+        ps,
+        &content,
+        &animation,
+        &mut seed,
+        event,
+        next_weapon,
+        force,
     );
-    if let Some(next_weapon) = next_weapon {
-        conds.set_value(
-            ANIM_COND_RIOTSHIELDNEXT,
-            u32::from(
-                world
-                    .combat_facts_for(next_weapon)
-                    .is_some_and(|facts| facts.player_anim_type == 15),
-            ),
-        );
-    }
-    {
-        let Some(ps) = world.player_mut(id) else {
-            return;
-        };
-        script.apply_event(ps, event, &conds, &mut seed, force);
-    }
     world.set_anim_event_seed(seed);
 }
 
@@ -1158,10 +488,14 @@ fn flame_burns_this_tick(facts: &weapon_iw4::WeaponCombatFacts, now_ms: i32) -> 
     now_ms.div_euclid(interval) != (now_ms - window).div_euclid(interval)
 }
 
-pub(crate) fn phase_emit(world: &FrameWorld, tick: Tick, shots: &[AcceptedShot]) -> Vec<Emission> {
+pub fn phase_emit(
+    content: &crate::SimContent,
+    tick: Tick,
+    shots: &[AcceptedShot],
+) -> Vec<Emission> {
     let mut out = Vec::new();
     for shot in shots {
-        let Some(facts) = world.combat_facts_for(shot.weapon) else {
+        let Some(facts) = content.weapon_combat_facts(shot.weapon) else {
             continue;
         };
 
@@ -1238,85 +572,21 @@ pub(crate) fn phase_trace(
             em.origin[2] + em.direction[2] * em.max_range,
         ];
         let pen = world.bullet_pen_facts_for(em.weapon);
-        let glass_damage = RefCell::new(
-            world
-                .world_objects()
-                .glass_damage_pairs()
-                .into_iter()
-                .collect::<HashMap<u32, u16>>(),
-        );
-        let glass_seen = RefCell::new(Vec::<u32>::new());
-        let on_glass_hit = |piece: u16, end: [f32; 3]| {
-            let pane = u32::from(piece);
-            if glass_seen.borrow().contains(&pane) {
-                return;
-            }
-            glass_seen.borrow_mut().push(pane);
-            let dist = {
-                let dx = end[0] - em.origin[0];
-                let dy = end[1] - em.origin[1];
-                let dz = end[2] - em.origin[2];
-                (dx * dx + dy * dy + dz * dz).sqrt()
-            };
-            let scaled = bullet_damage_at_distance(&facts, dist).max(0) as u32;
-            let mut map = glass_damage.borrow_mut();
-            let cur = map.entry(pane).or_insert(0);
-            *cur = glass_add_damage(*cur, scaled);
-        };
-        let (segments, terminal) = bullet_trace_segments_filtered(
-            world.clip_brushes(),
-            world.clip_bsp(),
-            world.clip_cmodels(),
-            world.clip_mesh(),
-            &query.players.poses,
-            &query.entities.rows,
-            &BulletTraceQuery {
-                start: em.origin,
-                end,
-                mask: MASK_BULLET_WORLD,
-                ignore: Some(em.attacker),
-                ignore_hit: None,
-                ignore_model: None,
+        let (segments, terminal) = trace_emission(
+            EmissionCollision {
+                content: &world.content(),
+                glass_pairs: &world.world_objects().glass_damage_pairs(),
+                players: &query.players.poses,
+                entities: &query.entities.rows,
             },
+            &em,
+            end,
+            &facts,
             pen,
-            world.penetration_table(),
-            &|piece| {
-                glass_piece_is_solid(
-                    glass_damage
-                        .borrow()
-                        .get(&(u32::from(piece)))
-                        .copied()
-                        .unwrap_or(0),
-                )
-            },
-            Some(&on_glass_hit),
+            world.world_objects().portal_blocked_exits(),
         );
-        if bounces < 8
-            && facts.weap_type == weapon_iw4::WEAPTYPE_BULLET
-            && facts.weap_class != weapon_iw4::WEAPCLASS_SPREAD
-            && !pen.explosive_bullet
-            && let Some(hit) = segments
-                .last()
-                .filter(|hit| !hit.startsolid && segment_is_shield(hit.collider))
-        {
-            let mut rng = MatchRng::new(
-                u64::from(em.combat_seed) ^ (u64::from(em.pellet.0) << 32) ^ u64::from(bounces),
-            );
-            let chance = (pen.ricochet_chance * 0.5).clamp(0.0, 1.0);
-            let roll = (rng.next_u32() >> 8) as f32 / 16_777_216.0;
-            if roll <= chance
-                && chance > 0.0
-                && let Some(direction) = crate::shield::ricochet_direction(em.direction, hit.normal)
-            {
-                pending.push_back((
-                    Emission {
-                        origin: std::array::from_fn(|i| hit.end[i] + direction[i]),
-                        direction,
-                        ..em
-                    },
-                    bounces + 1,
-                ));
-            }
+        if let Some(next) = ricochet_emission(&em, bounces, &facts, pen, &segments) {
+            pending.push_back((next, bounces + 1));
         }
         let entity_epoch = entity_collision_epoch(terminal, &query.entities.rows);
         let startsolid = segments.first().is_some_and(|s| s.startsolid);
@@ -1377,11 +647,13 @@ pub(crate) fn phase_trace(
                 let dx = segment.end[0] - em.origin[0];
                 let dy = segment.end[1] - em.origin[1];
                 let dz = segment.end[2] - em.origin[2];
-                (dx * dx + dy * dy + dz * dz).sqrt()
+                segment
+                    .travel_distance
+                    .unwrap_or_else(|| (dx * dx + dy * dy + dz * dz).sqrt())
             };
             let scaled =
                 ((bullet_damage_at_distance(&facts, dist) as f32) * segment.damage_mult) as i32;
-            if !exit && world.publishes_snapshot() {
+            if !exit {
                 let means = crate::script_player::means(
                     world,
                     DamageSource::Shot(em.shot_id),
@@ -1409,8 +681,7 @@ pub(crate) fn phase_trace(
             {
                 let head = hud_iw4::obituary_is_headshot(hitloc);
                 let mut fatal = false;
-                if world.publishes_snapshot()
-                    && scaled > 0
+                if scaled > 0
                     && let Some(vmeta) = world.client_meta(victim)
                     && vmeta.lifecycle == ClientLifecycle::Alive
                 {
@@ -1532,7 +803,7 @@ pub(crate) fn phase_trace(
                     flesh_flags: 0,
                 });
             }
-            if exit || !world.publishes_snapshot() || scaled <= 0 {
+            if exit || scaled <= 0 {
                 continue;
             }
             match segment.collider {
@@ -1542,7 +813,7 @@ pub(crate) fn phase_trace(
                     | ColliderId::EntityLinkedBrush { owner, .. },
                 ) => {
                     if let Some(ColliderId::EntityDObjBone { bone, .. }) = segment.collider
-                        && crate::t5_destructible::apply_hit(
+                        && crate::model_behaviors::apply_hit(
                             world,
                             tick,
                             owner,
@@ -1596,8 +867,10 @@ pub(crate) fn phase_trace(
                             piece,
                             scaled as u32,
                             at_time_ms,
-                            segment.end,
-                            em.direction,
+                            crate::world_objects::GlassHit {
+                                position: segment.end,
+                                direction: em.direction,
+                            },
                             &mut || crate::item::random_unit(&mut holdrand),
                         );
                         *world.stuck_holdrand_mut() = holdrand;
@@ -1643,14 +916,28 @@ fn fire_weapon_melee(
     };
     let mut best_frac = 1.0f32;
     let mut best_hit: Option<crate::bullet_collision::BulletTraceSegment> = None;
-    let n = melee_trace_count(width, height);
-    for (index, offset) in MELEE_TRACE_OFFSETS.iter().take(n).enumerate() {
-        let end = melee_trace_end(origin, forward, right, up, range, width, height, *offset);
+    let trace = MeleeTrace {
+        muzzle: origin,
+        forward,
+        right,
+        up,
+        range,
+        width,
+        height,
+    };
+    for (index, offset) in MELEE_TRACE_OFFSETS
+        .iter()
+        .take(trace.sample_count())
+        .enumerate()
+    {
+        let end = trace.endpoint(*offset);
         let (segments, _) = bullet_trace_segments_filtered(
-            world.clip_brushes(),
-            world.clip_bsp(),
-            world.clip_cmodels(),
-            world.clip_mesh(),
+            crate::world_graph::AtlasClip {
+                brushes: world.clip_brushes(),
+                bsp: world.clip_bsp(),
+                cmodels: world.clip_cmodels(),
+                mesh: world.clip_mesh(),
+            },
             &query.players.poses,
             &query.entities.rows,
             &BulletTraceQuery {
@@ -1663,11 +950,12 @@ fn fire_weapon_melee(
             },
             weapon_iw4::BulletPenFacts::default(),
             world.penetration_table(),
-            &is_solid,
-            None,
+            crate::bullet_collision::GlassTrace {
+                is_solid: &is_solid,
+                on_hit: None,
+            },
         );
         if index == 0
-            && world.publishes_snapshot()
             && let Some(segment) = segments.first()
         {
             crate::script::host::triggers::damage_line(
@@ -1784,8 +1072,10 @@ fn fire_weapon_melee(
                     piece,
                     u32::from(crate::world_objects::GLASS_MELEE_DAMAGE),
                     at_time_ms,
-                    segment.end,
-                    forward,
+                    crate::world_objects::GlassHit {
+                        position: segment.end,
+                        direction: forward,
+                    },
                     &mut || crate::item::random_unit(&mut holdrand),
                 );
                 *world.stuck_holdrand_mut() = holdrand;
@@ -1906,45 +1196,12 @@ pub(crate) fn bullet_process_on_hit(collider: Option<ColliderId>) -> bool {
     collider.is_some()
 }
 
-fn spend_ps_offhand_round(ps: &mut PlayerState, weapon: u32, facts: weapon_iw4::WeaponCombatFacts) {
-    let clip_key = clip_table_key(facts.clip_index, weapon);
-    if clip_key != 0 && clip_row_present(&ps.ammoclip, clip_key) {
-        let clip = get_clip_for_hand(&ps.ammoclip, clip_key, 0);
-        if clip > 0 {
-            let _ = set_clip_for_hand(&mut ps.ammoclip, clip_key, 0, clip - 1);
-            return;
-        }
-    }
-    let ammo_key = ammo_table_key(facts.ammo_index, weapon);
-    if ammo_key != 0 && ammo_row_present(&ps.ammo, ammo_key) {
-        let stock = get_ammo_not_in_clip(&ps.ammo, ammo_key);
-        if stock > 0 {
-            let _ = set_ammo_not_in_clip(&mut ps.ammo, ammo_key, stock - 1);
-        }
-    }
-}
-
-fn weapon_used_before(ps: &PlayerState, weapon: u32) -> bool {
-    ps.weapons
-        .iter()
-        .position(|&held| held == weapon as i32)
-        .is_none_or(|slot| ps.weapon_data[slot * WEAPON_DATA_STRIDE] != 0)
-}
-
-pub(crate) fn mark_weapon_used(ps: &mut PlayerState, weapon: u32) {
-    if let Some(slot) = ps.weapons.iter().position(|&held| held == weapon as i32) {
-        ps.weapon_data[slot * WEAPON_DATA_STRIDE] = 1;
-    }
-}
-
-const WEAPON_DATA_STRIDE: usize = 5;
-
 pub(crate) fn raise_given_weapon(
     ps: &mut PlayerState,
     weapon: u32,
     hand: &weapon_iw4::WeaponHandState,
 ) {
-    mark_weapon_used(ps, weapon);
+    weapon_iw4::mark_weapon_used(ps, weapon);
     if hand.weap_anim as u32 & weapon_iw4::WEAP_ANIM_EVENT_MASK
         == weapon_iw4::weap_anim_event::FIRST_RAISE
     {
@@ -1954,4 +1211,453 @@ pub(crate) fn raise_given_weapon(
             0,
         );
     }
+}
+
+#[derive(Clone, Copy)]
+struct EmissionCollision<'a> {
+    content: &'a crate::SimContent,
+    glass_pairs: &'a [(u32, u16)],
+    players: &'a [crate::PlayerCollisionPose],
+    entities: &'a [EntityCollisionTraceGeom],
+}
+
+fn trace_emission(
+    collision: EmissionCollision<'_>,
+    em: &Emission,
+    end: [f32; 3],
+    facts: &weapon_iw4::WeaponCombatFacts,
+    pen: weapon_iw4::BulletPenFacts,
+    blocked: &[[bool; 2]],
+) -> (Vec<crate::BulletTraceSegment>, Option<ColliderId>) {
+    let content = collision.content;
+    let Some(atlas) = content.atlas().filter(|atlas| !atlas.portals.is_empty()) else {
+        return trace_emission_world(collision, em, end, facts, pen, 0.0);
+    };
+    let mut current = *em;
+    let mut finish = end;
+    let mut distance = 0.0;
+    let mut damage_mult = 1.0;
+    let mut all = Vec::new();
+    for _ in 0..16 {
+        let crossing = atlas.crossing(current.origin, finish);
+        let leg_end = crossing.map_or(finish, |(t, _, _)| {
+            std::array::from_fn(|i| current.origin[i] + (finish[i] - current.origin[i]) * t)
+        });
+        let (mut segments, terminal) =
+            trace_emission_world(collision, &current, leg_end, facts, pen, distance);
+        for segment in &mut segments {
+            segment.damage_mult *= damage_mult;
+        }
+        if let Some(last) = segments.last() {
+            damage_mult = last.damage_mult;
+        }
+        if terminal.is_none()
+            && let Some(crate::TraceOutcome::Hit {
+                end: at,
+                normal,
+                collider,
+                ..
+            }) = atlas.unavailable_exit_hit(blocked, current.origin, finish)
+        {
+            let tail = segments.last().filter(|s| s.collider.is_none()).copied();
+            if tail.is_some() {
+                segments.pop();
+            }
+            let mut impact = crate::bullet_collision::make_segment(
+                tail.map_or(current.origin, |s| s.start),
+                crate::bullet_collision::SegmentContact {
+                    end: at,
+                    normal,
+                    collider: Some(collider),
+                    startsolid: false,
+                },
+                false,
+                0.,
+                damage_mult,
+                crate::BulletPath::Extended,
+            );
+            impact.travel_distance = Some(
+                distance
+                    + glam::Vec3::from_array(at).distance(glam::Vec3::from_array(current.origin)),
+            );
+            segments.push(impact);
+            all.extend(segments);
+            return (all, Some(collider));
+        }
+        all.extend(segments);
+        if terminal.is_some() || crossing.is_none() {
+            return (all, terminal);
+        }
+        let traveled =
+            glam::Vec3::from_array(leg_end).distance(glam::Vec3::from_array(current.origin));
+        distance += traveled;
+        let (_, portal, from_a) = crossing.unwrap();
+        let (entered, exit, yaw) = atlas.portals[portal.index()].oriented(from_a);
+        current.max_range = (current.max_range - traveled).max(0.0);
+        if current.max_range < 0.01 {
+            return (all, None);
+        }
+        current.origin = crate::world_graph::carry_point(&entered, &exit, yaw, leg_end);
+        current.direction = crate::world_graph::rotate_yaw(current.direction, yaw);
+        current.origin = std::array::from_fn(|i| current.origin[i] + current.direction[i] * 0.02);
+        finish =
+            std::array::from_fn(|i| current.origin[i] + current.direction[i] * current.max_range);
+    }
+    (all, None)
+}
+
+fn trace_emission_world(
+    collision: EmissionCollision<'_>,
+    em: &Emission,
+    end: [f32; 3],
+    facts: &weapon_iw4::WeaponCombatFacts,
+    pen: weapon_iw4::BulletPenFacts,
+    distance_before: f32,
+) -> (Vec<crate::BulletTraceSegment>, Option<ColliderId>) {
+    let EmissionCollision {
+        content,
+        glass_pairs,
+        players,
+        entities,
+    } = collision;
+    let world = content
+        .atlas()
+        .map_or(0, |_| crate::world_graph::world_at(em.origin));
+    let offset = crate::world_graph::world_offset(world);
+    let local_players: Vec<_> = players
+        .iter()
+        .filter(|p| content.atlas().is_none() || crate::world_graph::world_at(p.origin) == world)
+        .map(|p| crate::world_graph::shifted(p, offset))
+        .collect();
+    let original = *em;
+    let mut local = original;
+    local.origin = std::array::from_fn(|i| original.origin[i] - offset[i]);
+    let end = std::array::from_fn(|i| end[i] - offset[i]);
+    let em = &local;
+    let beyond = content
+        .atlas()
+        .and_then(|atlas| world.checked_sub(1).and_then(|i| atlas.worlds.get(i)));
+    let (brushes, bsp, cmodels, mesh) = match beyond {
+        Some(map) => (&map.brushes[..], &map.bsp, &map.cmodels, &map.mesh),
+        None => (
+            content.clip_brushes(),
+            content.clip_bsp(),
+            content.clip_cmodels(),
+            content.clip_mesh(),
+        ),
+    };
+    let entities = if world == 0 { entities } else { &[] };
+    let glass_damage = RefCell::new(glass_pairs.iter().copied().collect::<HashMap<u32, u16>>());
+    let glass_seen = RefCell::new(Vec::<u32>::new());
+    let on_glass_hit = |piece: u16, end: [f32; 3]| {
+        let pane = u32::from(piece);
+        if glass_seen.borrow().contains(&pane) {
+            return;
+        }
+        glass_seen.borrow_mut().push(pane);
+        let dist = {
+            let dx = end[0] - em.origin[0];
+            let dy = end[1] - em.origin[1];
+            let dz = end[2] - em.origin[2];
+            (dx * dx + dy * dy + dz * dz).sqrt()
+        };
+        let scaled = bullet_damage_at_distance(facts, distance_before + dist).max(0) as u32;
+        let mut map = glass_damage.borrow_mut();
+        let cur = map.entry(pane).or_insert(0);
+        *cur = glass_add_damage(*cur, scaled);
+    };
+    let (mut segments, terminal) = bullet_trace_segments_filtered(
+        crate::world_graph::AtlasClip {
+            brushes,
+            bsp,
+            cmodels,
+            mesh,
+        },
+        &local_players,
+        entities,
+        &BulletTraceQuery {
+            start: em.origin,
+            end,
+            mask: MASK_BULLET_WORLD,
+            ignore: Some(em.attacker),
+            ignore_hit: None,
+            ignore_model: None,
+        },
+        pen,
+        &content.weapons().pen_table,
+        crate::bullet_collision::GlassTrace {
+            is_solid: &|piece| {
+                glass_piece_is_solid(
+                    glass_damage
+                        .borrow()
+                        .get(&(u32::from(piece)))
+                        .copied()
+                        .unwrap_or(0),
+                )
+            },
+            on_hit: Some(&on_glass_hit),
+        },
+    );
+    for segment in &mut segments {
+        segment.travel_distance = Some(
+            distance_before
+                + glam::Vec3::from_array(segment.end).distance(glam::Vec3::from_array(em.origin)),
+        );
+        for i in 0..3 {
+            segment.start[i] += offset[i];
+            segment.end[i] += offset[i];
+        }
+    }
+    (segments, terminal)
+}
+
+fn ricochet_emission(
+    em: &Emission,
+    bounces: u8,
+    facts: &weapon_iw4::WeaponCombatFacts,
+    pen: weapon_iw4::BulletPenFacts,
+    segments: &[crate::BulletTraceSegment],
+) -> Option<Emission> {
+    if bounces >= 8
+        || facts.weap_type != weapon_iw4::WEAPTYPE_BULLET
+        || facts.weap_class == weapon_iw4::WEAPCLASS_SPREAD
+        || pen.explosive_bullet
+    {
+        return None;
+    }
+    let hit = segments
+        .last()
+        .filter(|hit| !hit.startsolid && segment_is_shield(hit.collider))?;
+    let mut rng = MatchRng::new(
+        u64::from(em.combat_seed) ^ (u64::from(em.pellet.0) << 32) ^ u64::from(bounces),
+    );
+    let chance = (pen.ricochet_chance * 0.5).clamp(0.0, 1.0);
+    let roll = (rng.next_u32() >> 8) as f32 / 16_777_216.0;
+    if roll <= chance && chance > 0.0 {
+        let direction = crate::shield::ricochet_direction(em.direction, hit.normal)?;
+        Some(Emission {
+            origin: std::array::from_fn(|i| hit.end[i] + direction[i]),
+            direction,
+            ..*em
+        })
+    } else {
+        None
+    }
+}
+
+#[derive(Default)]
+pub struct OwnerShotEffects {
+    pub events: Vec<(entity_iw4::EntityEventKind, crate::EntityEventPayload)>,
+    pub pellets: Vec<crate::PelletFxRecord>,
+}
+
+pub fn owner_shot_effects(
+    scene: &crate::CollisionScene,
+    snapshot: &crate::Snapshot,
+    tick: Tick,
+    owner: ClientId,
+    fire: &weapon_iw4::FiredWeapon,
+) -> OwnerShotEffects {
+    let content = &scene.content;
+    let cause = fire
+        .cause
+        .expect("sequenced owner fire requires its command cause");
+    let shot = AcceptedShot {
+        shot_id: fire.shot_id,
+        fire_cause: fire.cause,
+        attacker: owner,
+        attacker_life: cause.life,
+        hand: fire.hand,
+        weapon: fire.weapon,
+        ammo_used: fire.ammo_used,
+        origin: fire.origin,
+        angles: fire.angles,
+        ads_frac: fire.ads_frac,
+        view_height_current: fire.view_height,
+        aim_spread_scale: fire.aim_spread_scale,
+        perks0: fire.perks0,
+        combat_seed: fire
+            .combat_seed
+            .expect("sequenced owner fire requires its combat seed"),
+        owner_velocity: fire.velocity,
+        spread_degrees: fire.spread_degrees,
+    };
+    let emissions = phase_emit(content, tick, std::slice::from_ref(&shot));
+    if emissions.is_empty() {
+        return OwnerShotEffects::default();
+    }
+    let players: Vec<_> = snapshot
+        .players
+        .iter()
+        .filter(|(id, _)| *id != owner)
+        .filter_map(|(id, ps)| {
+            let meta = snapshot.meta.for_client(*id)?;
+            (meta.lifecycle == ClientLifecycle::Alive).then(|| crate::PlayerCollisionPose {
+                client: *id,
+                origin: ps.origin,
+                mins: crate::PLAYER_MINS,
+                maxs: crate::PLAYER_MAXS,
+                life_sequence: meta.life_sequence,
+                hit_volume: crate::HitVolumeKind::Standing,
+                bones: meta
+                    .shield_collision
+                    .as_ref()
+                    .map_or_else(Vec::new, |collision| collision.bones.clone()),
+                viewangles: [0.0; 3],
+                shield: meta.shield,
+                shield_normal: meta
+                    .shield_collision
+                    .as_ref()
+                    .map(|collision| collision.normal),
+            })
+        })
+        .collect();
+    let entities: Vec<_> = scene
+        .capabilities
+        .iter()
+        .map(crate::EntityCollisionCapabilities::trace_geom)
+        .collect();
+    let glass = scene.world_objects.glass_damage_pairs();
+    let mut out = OwnerShotEffects::default();
+    let mut ordinals = HashMap::<(ShotId, PelletId), u16>::new();
+    let mut pending: std::collections::VecDeque<_> =
+        emissions.into_iter().map(|em| (em, 0u8)).collect();
+    while let Some((em, bounces)) = pending.pop_front() {
+        let Some(facts) = content.weapon_combat_facts(em.weapon) else {
+            continue;
+        };
+        let pen = content
+            .weapons()
+            .bullet_pen
+            .get(em.weapon as usize)
+            .copied()
+            .unwrap_or_else(weapon_iw4::BulletPenFacts::default);
+        let end = std::array::from_fn(|i| em.origin[i] + em.direction[i] * em.max_range);
+        let (segments, _) = trace_emission(
+            EmissionCollision {
+                content,
+                glass_pairs: &glass,
+                players: &players,
+                entities: &entities,
+            },
+            &em,
+            end,
+            &facts,
+            pen,
+            scene.world_objects.portal_blocked_exits(),
+        );
+        if let Some(next) = ricochet_emission(&em, bounces, &facts, pen, &segments) {
+            pending.push_back((next, bounces + 1));
+        }
+        for segment in segments {
+            let ordinal = ordinals.entry((em.shot_id, em.pellet)).or_default();
+            let segment_ordinal = *ordinal;
+            *ordinal = ordinal
+                .checked_add(1)
+                .expect("bullet segment count exceeds wire limit");
+            let exit = segment.surface_flags & fx_iw4::FX_IMPACT_EXIT_SURFACE_FLAG != 0;
+            if matches!(segment.collider, Some(ColliderId::Player { .. })) {
+                out.pellets.push(crate::PelletFxRecord {
+                    attacker: owner.0 as i32,
+                    weapon: em.weapon,
+                    correlation: em.shot_id.0,
+                    fire_cause: em.fire_cause,
+                    pellet: em.pellet.0,
+                    segment: segment_ordinal,
+                    hand: em.hand,
+                    start: segment.start,
+                    end: segment.end,
+                    normal: [0.0; 3],
+                    surf_type: segment.surf_type,
+                    surface_flags: segment.surface_flags,
+                    flesh_flags: 0,
+                });
+                continue;
+            }
+            let flesh_flags = if !exit {
+                match segment.collider {
+                    Some(ColliderId::Player { hitloc, .. }) if hitloc != crate::shield::HITLOC => {
+                        fx_iw4::flesh_hit_flags(hud_iw4::obituary_is_headshot(hitloc), false) as u8
+                    }
+                    _ => 0,
+                }
+            } else {
+                0
+            };
+            if bullet_process_on_hit(segment.collider) {
+                let impact_type = if segment_is_shield(segment.collider) {
+                    3
+                } else {
+                    facts.impact_type
+                };
+                if let Some(event) = entity_iw4::bullet_hit_event(impact_type, false) {
+                    out.events.push((
+                        event,
+                        crate::EntityEventPayload {
+                            number: owner.0 as i32,
+                            attacker_entity_num: owner.0 as i32,
+                            other_entity_num: match segment.collider {
+                                Some(
+                                    ColliderId::EntityDObjBone { owner, .. }
+                                    | ColliderId::EntityLinkedBrush { owner, .. },
+                                ) => owner
+                                    .script_model()
+                                    .and_then(|id| {
+                                        snapshot
+                                            .meta
+                                            .script_movers
+                                            .iter()
+                                            .find(|mover| mover.id == id)
+                                    })
+                                    .map_or(ENTITYNUM_NONE, |mover| mover.state.number),
+                                Some(ColliderId::Player { client, .. }) => client.0 as i32,
+                                _ => ENTITYNUM_NONE,
+                            },
+                            event_parm: i32::from(flesh_flags),
+                            weapon: em.weapon,
+                            correlation: em.shot_id.0,
+                            fire_cause: em.fire_cause,
+                            pellet: em.pellet.0,
+                            segment: segment_ordinal,
+                            hand: em.hand,
+                            origin: segment.end,
+                            origin2: segment.start,
+                            direction: segment.normal,
+                            surf_type: segment.surf_type,
+                            surface_flags: segment.surface_flags,
+                            simulation_flags: u8::from(segment.penetrated),
+                        },
+                    ));
+                    continue;
+                }
+                if fx_iw4::impact_table_row(facts.impact_type, false).is_none() {
+                    continue;
+                }
+            }
+            out.pellets.push(crate::PelletFxRecord {
+                attacker: owner.0 as i32,
+                weapon: em.weapon,
+                correlation: em.shot_id.0,
+                fire_cause: em.fire_cause,
+                pellet: em.pellet.0,
+                segment: segment_ordinal,
+                hand: em.hand,
+                start: segment.start,
+                end: segment.end,
+                normal: if bullet_process_on_hit(segment.collider) {
+                    segment.normal
+                } else {
+                    [0.0; 3]
+                },
+                surf_type: segment.surf_type,
+                surface_flags: segment.surface_flags,
+                flesh_flags: if bullet_process_on_hit(segment.collider) {
+                    flesh_flags
+                } else {
+                    0
+                },
+            });
+        }
+    }
+    out
 }

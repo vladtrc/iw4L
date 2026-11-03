@@ -86,7 +86,7 @@ pub fn ensure_primary_light_words(
 }
 
 pub fn relink_dyn_ent_primary_lights(
-    words: &mut Vec<u32>,
+    words: &mut [u32],
     closest: Option<&mut [u8]>,
     atpoint: &DynAtPointLookup,
     id: u32,
@@ -160,7 +160,7 @@ pub fn register_dyn_ent_systems(app: &mut App) {
                 cull_dyn_ent_cell_models
                     .in_set(frame::InMatch)
                     .after(link_dyn_ent_cells)
-                    .after(frame::WorkerCmdSet::CellStatic),
+                    .after(frame::WorkerCmdSet::WorldVisibility),
                 pose_dyn_ents
                     .in_set(frame::InMatch)
                     .after(cull_dyn_ent_cell_models),
@@ -169,14 +169,14 @@ pub fn register_dyn_ent_systems(app: &mut App) {
                     .after(pose_dyn_ents),
             )
                 .in_set(frame::RenderSet::Anim)
-                .in_set(frame::WorkerCmdSet::CellDynModel))
+                .in_set(frame::WorkerCmdSet::DynamicModels))
             .in_set(frame::InMatch),
         )
         .add_systems(
             Update,
             (dyn_ent_phys::step_phys_world0
                 .in_set(frame::InMatch)
-                .in_set(frame::WorkerCmdSet::Physics))
+                .in_set(frame::ClientSet::Present))
             .in_set(frame::InMatch),
         );
 }
@@ -241,12 +241,7 @@ pub fn xmodel_radius(
         return 0.0;
     };
     match catalog.get(key) {
-        Some(
-            asset_world::MapXModelSceneAsset::Iw4(skel)
-            | asset_world::MapXModelSceneAsset::Iw5(skel)
-            | asset_world::MapXModelSceneAsset::T6(skel)
-            | asset_world::MapXModelSceneAsset::T5(skel),
-        ) => skel.radius.unwrap_or(0.0),
+        Some(asset_world::MapXModelSceneAsset::Captured { skel, .. }) => skel.radius.unwrap_or(0.0),
         Some(asset_world::MapXModelSceneAsset::Unavailable { .. }) | None => 0.0,
     }
 }
@@ -261,12 +256,9 @@ pub fn xmodel_phys_hull(
         return fallback;
     };
     match catalog.get(key) {
-        Some(
-            asset_world::MapXModelSceneAsset::Iw4(skel)
-            | asset_world::MapXModelSceneAsset::Iw5(skel)
-            | asset_world::MapXModelSceneAsset::T6(skel)
-            | asset_world::MapXModelSceneAsset::T5(skel),
-        ) => hull_from_bounds(skel.bounds).unwrap_or(fallback),
+        Some(asset_world::MapXModelSceneAsset::Captured { skel, .. }) => {
+            hull_from_bounds(skel.bounds).unwrap_or(fallback)
+        }
         Some(asset_world::MapXModelSceneAsset::Unavailable { .. }) | None => fallback,
     }
 }
@@ -290,12 +282,7 @@ fn xmodel_local_bounds(
 ) -> Option<([f32; 3], [f32; 3])> {
     let catalog = catalog?;
     match catalog.get(key) {
-        Some(
-            asset_world::MapXModelSceneAsset::Iw4(skel)
-            | asset_world::MapXModelSceneAsset::Iw5(skel)
-            | asset_world::MapXModelSceneAsset::T6(skel)
-            | asset_world::MapXModelSceneAsset::T5(skel),
-        ) => skel.bounds,
+        Some(asset_world::MapXModelSceneAsset::Captured { skel, .. }) => skel.bounds,
         Some(asset_world::MapXModelSceneAsset::Unavailable { .. }) | None => None,
     }
 }
@@ -455,11 +442,60 @@ fn link_dyn_ent_cells(
     }
 }
 
+fn portal_dyn_ent_visible(
+    vis: &PublishedCellVis,
+    membership: &DynEntCellBits,
+    cells: &WorldDpvsCells,
+    id: u32,
+    origin: [f32; 3],
+    radius: f32,
+) -> Option<bool> {
+    if vis.views.is_empty() {
+        return None;
+    }
+    let world = sim::world_graph::world_at(origin);
+    Some(vis.views.iter().any(|view| {
+        if view.world != world {
+            return false;
+        }
+        let local = AdmittedCellVis {
+            words: &view.words,
+            cell_count: view.cell_count,
+            vis_all: view.vis_all,
+        };
+        // The current catalog's membership is authored in host-world cells.
+        let cell_hidden = world == 0 && cell_admission_hides(id, membership, local);
+        !cell_hidden
+            && !sphere_behind_frustum(origin, radius, &view.planes)
+            && (world == 0
+                || cells.for_world(world).is_some_and(|native| {
+                    view.admits_bounds(native, Bounds::from_mid_half(origin, [radius; 3]))
+                }))
+    }))
+}
+
+pub(super) fn portal_lod_eye(
+    vis: &PublishedCellVis,
+    origin: [f32; 3],
+    camera_eye: Option<[f32; 3]>,
+) -> Option<[f32; 3]> {
+    let world = sim::world_graph::world_at(origin);
+    let distance =
+        |eye: [f32; 3]| (Vec3::from_array(eye) - Vec3::from_array(origin)).length_squared();
+    vis.views
+        .iter()
+        .filter(|view| view.world == world)
+        .min_by(|a, b| distance(a.eye).total_cmp(&distance(b.eye)))
+        .map(|view| view.eye)
+        .or(camera_eye)
+}
+
 fn cull_dyn_ent_cell_models(
     catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<FpvLens>>,
     cell_vis: Res<PublishedCellVis>,
     membership: Res<DynEntCellBits>,
+    cells: Res<WorldDpvsCells>,
     mut instances: Query<
         (&WorldDynEntInstance, &Transform, &mut Visibility),
         With<DynEntModelEntity>,
@@ -473,13 +509,20 @@ fn cull_dyn_ent_cell_models(
             *visibility = Visibility::Hidden;
             continue;
         }
-        if cell_admission_hides(u32::from(inst.index), &membership, vis) {
-            *visibility = Visibility::Hidden;
-            continue;
-        }
         let origin = transform.translation.to_array();
         let radius = xmodel_radius(catalog, &inst.current_model);
-        let culled = sphere_behind_frustum(origin, radius, &planes);
+        let culled = !portal_dyn_ent_visible(
+            &cell_vis,
+            &membership,
+            &cells,
+            u32::from(inst.index),
+            origin,
+            radius,
+        )
+        .unwrap_or_else(|| {
+            !(cell_vis.world == 0 && cell_admission_hides(u32::from(inst.index), &membership, vis))
+                && !sphere_behind_frustum(origin, radius, &planes)
+        });
         if culled {
             *visibility = Visibility::Hidden;
         } else {
@@ -489,6 +532,7 @@ fn cull_dyn_ent_cell_models(
 }
 
 fn pose_dyn_ents(
+    cell_vis: Res<PublishedCellVis>,
     catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
     instances: Query<(Entity, &WorldDynEntInstance, &Transform, &Visibility)>,
     cameras: Query<(&GlobalTransform, &Projection, &Camera), With<FpvLens>>,
@@ -504,7 +548,7 @@ fn pose_dyn_ents(
         product.assets.clear();
         return;
     };
-    let eye = cameras
+    let camera_eye = cameras
         .single()
         .ok()
         .map(|(xf, _, _)| xf.translation().to_array());
@@ -514,14 +558,17 @@ fn pose_dyn_ents(
             continue;
         }
 
+        let eye = portal_lod_eye(&cell_vis, transform.translation.to_array(), camera_eye);
         let camera_hidden = *visibility == Visibility::Hidden;
+        // Foreign offscreen objects neither draw in a view nor cast into the
+        // root sun map (R2). Keep hidden camera-world objects for sun casters.
+        if camera_hidden
+            && sim::world_graph::world_at(transform.translation.to_array()) != cell_vis.world
+        {
+            continue;
+        }
         let skel = match catalog.get(&inst.current_model) {
-            Some(
-                asset_world::MapXModelSceneAsset::Iw4(skel)
-                | asset_world::MapXModelSceneAsset::Iw5(skel)
-                | asset_world::MapXModelSceneAsset::T6(skel)
-                | asset_world::MapXModelSceneAsset::T5(skel),
-            ) => skel.as_ref(),
+            Some(asset_world::MapXModelSceneAsset::Captured { skel, .. }) => skel.as_ref(),
             Some(asset_world::MapXModelSceneAsset::Unavailable { .. }) | None => {
                 continue;
             }
@@ -532,7 +579,7 @@ fn pose_dyn_ents(
             inst.lighting_origin,
             1.0,
             eye.map(Vec3::from_array),
-            skinned_ramp,
+            &skinned_ramp,
         );
         if eye.is_some() && camera_lod.is_none() {
             continue;
@@ -552,12 +599,13 @@ fn pose_dyn_ents(
             let Some((surfaces, authored)) = pose_script_dobj_with_materials(
                 Some(catalog),
                 &[skel],
+                &[inst.current_model.0.as_str()],
                 dobj,
                 &request,
                 Some(DObjLodView {
                     origin: inst.lighting_origin,
                     eye: eye.map(Vec3::from_array),
-                    ramp: skinned_ramp,
+                    ramp: &skinned_ramp,
                 }),
                 &[],
             ) else {
@@ -584,126 +632,149 @@ fn pose_dyn_ents(
     }
 }
 
-fn append_dynent_draws(
-    catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
-    atlas: Option<Res<WorldModelLightingAtlas>>,
-    atpoint: Res<DynAtPointLookup>,
-    tess: Option<Res<TessMaterials>>,
-    facts: Res<WorldPresentFacts>,
-    mut plan: ResMut<DynEntDrawPlan>,
-    mut lighting_requests: ResMut<ModelLightingRequests>,
-    product: Res<DynEntPoseProduct>,
-    model_materials: Res<crate::anim::model_materials::PreparedModelMaterials>,
-    mut last_material_generation: Local<Option<render_material::MaterialGenerationId>>,
-    mut draws: Local<Vec<XModelSurfaceDraw>>,
-    mut owners: Local<Vec<DynEntOwnerDraw>>,
-) {
-    let atlas_ref = atlas.as_deref();
-    if catalog.is_none() || atlas_ref.is_none() || !facts.spawned || tess.is_none() {
-        plan.publish_no_rows();
-        return;
-    }
-    let catalog_changed = catalog.as_ref().is_some_and(|c| c.is_changed());
-    let atlas_changed = atlas.as_ref().is_some_and(|a| a.is_changed());
-    let tess_changed = tess.as_ref().is_some_and(|h| h.is_changed());
-    let tess = tess.as_deref().expect("checked");
-    let tess_catalog = std::sync::Arc::clone(&tess.catalog());
-    let material_generation = tess.catalog().generation_id();
-    let catalog_reset = catalog_changed
-        || atlas_changed
-        || tess_changed
-        || *last_material_generation != Some(material_generation);
-    if catalog_reset {
-        let (revision, generation) = (plan.revision, plan.generation);
-        *plan = DynEntDrawPlan::default();
-        plan.revision = revision;
-        plan.generation = generation;
-        *last_material_generation = Some(material_generation);
-    }
-    draws.clear();
-    owners.clear();
+#[derive(bevy::ecs::system::SystemParam)]
+struct DynEntDrawPublisher<'w, 's> {
+    plan: ResMut<'w, DynEntDrawPlan>,
+    lighting_requests: ResMut<'w, ModelLightingRequests>,
+    atpoint: Res<'w, DynAtPointLookup>,
+    last_material_generation: Local<'s, Option<render_material::MaterialGenerationId>>,
+    draws: Local<'s, Vec<XModelSurfaceDraw>>,
+    owners: Local<'s, Vec<DynEntOwnerDraw>>,
+}
 
-    let mut drawn = 0u16;
-    let mut packed_assets: Vec<Option<Vec<(u32, u32)>>> = vec![None; product.assets.len()];
+impl DynEntDrawPublisher<'_, '_> {
+    fn publish(
+        mut self,
+        catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
+        atlas: Option<Res<WorldModelLightingAtlas>>,
+        tess: Option<Res<TessMaterials>>,
+        facts: Res<WorldPresentFacts>,
+        product: Res<DynEntPoseProduct>,
+        model_materials: Res<crate::anim::model_materials::PreparedModelMaterials>,
+    ) {
+        let atlas_ref = atlas.as_deref();
+        if catalog.is_none() || atlas_ref.is_none() || !facts.spawned || tess.is_none() {
+            self.plan.publish_no_rows();
+            return;
+        }
+        let catalog_changed = catalog.as_ref().is_some_and(|c| c.is_changed());
+        let atlas_changed = atlas.as_ref().is_some_and(|a| a.is_changed());
+        let tess_changed = tess.as_ref().is_some_and(|h| h.is_changed());
+        let tess = tess.as_deref().expect("checked");
+        let tess_catalog = std::sync::Arc::clone(&tess.catalog());
+        let material_generation = tess.catalog().generation_id();
+        let catalog_reset = catalog_changed
+            || atlas_changed
+            || tess_changed
+            || *self.last_material_generation != Some(material_generation);
+        if catalog_reset {
+            let (revision, generation) = (self.plan.revision, self.plan.generation);
+            *self.plan = DynEntDrawPlan::default();
+            self.plan.revision = revision;
+            self.plan.generation = generation;
+            *self.last_material_generation = Some(material_generation);
+        }
+        self.draws.clear();
+        self.owners.clear();
 
-    for row in &product.owners {
-        let posed = &product.assets[row.asset_index];
-        let surfaces_idx = if let Some(asset) = plan.asset(&posed.key, posed.camera_lod) {
-            asset.surfaces.clone()
-        } else if let Some(surfaces) = packed_assets[row.asset_index].as_ref() {
-            surfaces.clone()
-        } else {
-            let materials: Vec<Option<SmodelPassMaterial>> = posed
-                .surfaces
-                .iter()
-                .zip(posed.authored.iter().copied())
-                .map(|(_surface, authored)| {
-                    model_materials.authored(&tess_catalog, authored?).cloned()
-                })
-                .collect();
-            if materials.iter().all(Option::is_none) {
+        let mut drawn = 0u16;
+        let mut packed_assets: Vec<Option<Vec<(u32, u32)>>> = vec![None; product.assets.len()];
+
+        for row in &product.owners {
+            let posed = &product.assets[row.asset_index];
+            let surfaces_idx = if let Some(asset) = self.plan.asset(&posed.key, posed.camera_lod) {
+                asset.surfaces.clone()
+            } else if let Some(surfaces) = packed_assets[row.asset_index].as_ref() {
+                surfaces.clone()
+            } else {
+                let materials: Vec<Option<SmodelPassMaterial>> = posed
+                    .surfaces
+                    .iter()
+                    .zip(posed.authored.iter().copied())
+                    .map(|(_surface, authored)| {
+                        model_materials.authored(&tess_catalog, authored?).cloned()
+                    })
+                    .collect();
+                if materials.iter().all(Option::is_none) {
+                    continue;
+                }
+                let surfaces = append_dynent_asset(
+                    &mut self.plan,
+                    posed.key.clone(),
+                    posed.camera_lod,
+                    &posed.surfaces,
+                    &materials,
+                );
+                packed_assets[row.asset_index] = Some(surfaces.clone());
+                surfaces
+            };
+            if surfaces_idx.is_empty() {
                 continue;
             }
-            let surfaces = append_dynent_asset(
-                &mut plan,
-                posed.key.clone(),
-                posed.camera_lod,
-                &posed.surfaces,
-                &materials,
-            );
-            packed_assets[row.asset_index] = Some(surfaces.clone());
-            surfaces
-        };
-        if surfaces_idx.is_empty() {
-            continue;
-        }
-        let box_half = row
-            .radius
-            .and_then(|radius| lighting_box_half(&[radius], &[DOBJ_RADIUS_PARENT_ROOT]));
-        let lookup_fallback = atpoint.fallback(row.lighting_origin, box_half);
-        let pending_lighting = (!row.camera_hidden).then(|| {
-            lighting_requests.request(ModelLightingRequest {
-                owner: ModelLightingOwner::DynEnt(row.entity),
-                origin: row.lighting_origin,
-                lookup_fallback,
-            })
-        });
-        let caster_bound = row.radius.map(|radius| render_scene::XModelCasterBound {
-            origin: row.world_from_local.w_axis.truncate().to_array(),
-            radius: radius.max(1.0),
-        });
-        let object_id = XMODEL_OBJECT_ID_DYNENT_BASE.saturating_add(drawn);
-        drawn = drawn.saturating_add(1);
-        owners.push(DynEntOwnerDraw {
-            object_id,
-            model: row.model.clone(),
-        });
-        for (surface, material) in surfaces_idx {
-            draws.push(XModelSurfaceDraw {
-                surface,
-                material,
-                world_from_local: row.world_from_local,
-                lighting_handle: 0,
-                pending_lighting,
-                colour_refusal: row
-                    .camera_hidden
-                    .then_some(XModelColourRefusal::CameraFrustum),
-                object_id,
-                scene_light_index: 0,
-                reflection_probe_index: 0,
-                packed_lighting: None,
-                is_scope: false,
-                scene_entnum: None,
-                body_client: None,
-                caster_bound,
+            let box_half = row
+                .radius
+                .and_then(|radius| lighting_box_half(&[radius], &[DOBJ_RADIUS_PARENT_ROOT]));
+            let lookup_fallback = self.atpoint.fallback(row.lighting_origin, box_half);
+            let pending_lighting = (!row.camera_hidden).then(|| {
+                self.lighting_requests.request(ModelLightingRequest {
+                    owner: ModelLightingOwner::DynEnt(row.entity),
+                    origin: row.lighting_origin,
+                    lookup_fallback,
+                })
             });
+            let caster_bound = row.radius.map(|radius| render_scene::XModelCasterBound {
+                origin: row.world_from_local.w_axis.truncate().to_array(),
+                radius: radius.max(1.0),
+            });
+            let object_id = XMODEL_OBJECT_ID_DYNENT_BASE.saturating_add(drawn);
+            drawn = drawn.saturating_add(1);
+            self.owners.push(DynEntOwnerDraw {
+                object_id,
+                model: row.model.clone(),
+            });
+            for (surface, material) in surfaces_idx {
+                self.draws.push(XModelSurfaceDraw {
+                    surface,
+                    material,
+                    world_from_local: row.world_from_local,
+                    lighting_handle: 0,
+                    pending_lighting,
+                    colour_refusal: row
+                        .camera_hidden
+                        .then_some(XModelColourRefusal::CameraFrustum),
+                    object_id,
+                    scene_light_index: 0,
+                    reflection_probe_index: 0,
+                    packed_lighting: None,
+                    is_scope: false,
+                    scene_entnum: None,
+                    body_client: None,
+                    caster_bound,
+                });
+            }
         }
+        if !self.draws.is_empty() {
+            let topology = topology_fingerprint(
+                &self.plan.indices,
+                &self.plan.surface_ranges,
+                self.plan.vertices.len(),
+            );
+            let rev = self.plan.revision;
+            self.plan.revision = stamp_plan_geometry(&mut self.plan.revisions, rev, topology);
+        }
+        self.plan
+            .publish_frame_rows(&mut self.draws, &mut self.owners);
     }
-    if !draws.is_empty() {
-        let topology =
-            topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.vertices.len());
-        let rev = plan.revision;
-        plan.revision = stamp_plan_geometry(&mut plan.revisions, rev, topology);
-    }
-    plan.publish_frame_rows(&mut draws, &mut owners);
+}
+
+fn append_dynent_draws(
+    publisher: DynEntDrawPublisher,
+    catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
+    atlas: Option<Res<WorldModelLightingAtlas>>,
+    tess: Option<Res<TessMaterials>>,
+    facts: Res<WorldPresentFacts>,
+    product: Res<DynEntPoseProduct>,
+    model_materials: Res<crate::anim::model_materials::PreparedModelMaterials>,
+) {
+    publisher.publish(catalog, atlas, tess, facts, product, model_materials);
 }

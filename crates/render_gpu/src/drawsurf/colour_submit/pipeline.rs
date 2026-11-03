@@ -1,7 +1,6 @@
 use crate::WorldPipelineWarmup;
 
 use super::*;
-use bevy::platform::collections::HashSet;
 
 pub fn cached_lighting_port_variant(
     port: &crate::AdmittedExactPort,
@@ -42,6 +41,7 @@ fn adapt_admitted_port(port: &crate::AdmittedExactPort) -> ExactColourPortGpu {
         ),
         vertex_buffers,
         cached_source,
+        clipped_sources: std::array::from_fn(|_| std::sync::OnceLock::new()),
         cached_vertex_buffers,
         port: port.clone(),
     }
@@ -79,13 +79,6 @@ pub(super) fn kick_extracted_colour_pipelines(
     mut warmup: ResMut<WorldPipelineWarmup>,
 ) {
     let extracted = frame.as_deref().map(ExtractedColourRefs::new);
-    let world = extracted
-        .filter(|extracted| extracted.world.catalog.is_some())
-        .map_or_default(|extracted| extracted.world.world_generation);
-    if registry.set_world(world) {
-        *kicked = ExactPipelineKickCache::default();
-        *warmup = WorldPipelineWarmup::default();
-    }
     registry.poll();
 
     for key in registry.take_discovered() {
@@ -139,7 +132,14 @@ pub(super) fn kick_admitted_pipelines(
     };
     let generation_changed = kicked.generation != Some(extracted.world.generation);
     let views_changed = kicked.views != view_sig;
-    let demand_changed = kicked.demand_revision != extracted.frame.pipeline_demand_revision;
+    let portal_mode = extracted
+        .frame
+        .exec_frame
+        .portal
+        .as_ref()
+        .map(|_| super::portal_scene::exit_clip_mode(device));
+    let demand_changed = kicked.demand_revision != extracted.frame.pipeline_demand_revision
+        || kicked.portal_mode != portal_mode;
     if generation_changed || views_changed {
         if kicked.generation == Some(extracted.world.generation)
             && kicked.views == [crate::LENS_VIEW_SIGNATURE]
@@ -157,17 +157,16 @@ pub(super) fn kick_admitted_pipelines(
         kicked.scheduled.clear();
         kicked.generation = Some(extracted.world.generation);
         kicked.views = view_sig.clone();
-        schedule_admitted_pipelines(
+        kicked.schedule_admitted_pipelines(
             extracted,
             prepared_table,
             &view_sig,
             registry,
             pipeline,
             device,
-            &mut kicked.scheduled,
-            &mut kicked.current,
         );
         kicked.demand_revision = extracted.frame.pipeline_demand_revision;
+        kicked.portal_mode = portal_mode;
         diag::info!(
             World,
             "exact pipelines: working set={} modules held={} tasks in flight={}",
@@ -177,17 +176,16 @@ pub(super) fn kick_admitted_pipelines(
         );
     } else if demand_changed {
         let before = kicked.current.len();
-        schedule_admitted_pipelines(
+        kicked.schedule_admitted_pipelines(
             extracted,
             prepared_table,
             &view_sig,
             registry,
             pipeline,
             device,
-            &mut kicked.scheduled,
-            &mut kicked.current,
         );
         kicked.demand_revision = extracted.frame.pipeline_demand_revision;
+        kicked.portal_mode = portal_mode;
         diag::info!(
             World,
             "exact pipelines: demand revision={} added={} working set={}",
@@ -197,7 +195,6 @@ pub(super) fn kick_admitted_pipelines(
         );
     }
     *warmup = WorldPipelineWarmup {
-        generation: extracted.world.world_generation,
         initialized: true,
         total: kicked.current.len() as u32,
         ready: kicked
@@ -208,76 +205,113 @@ pub(super) fn kick_admitted_pipelines(
     };
 }
 
-fn schedule_admitted_pipelines(
-    extracted: ExtractedColourRefs<'_>,
-    prepared_table: &render_material::PreparedMaterialTable,
-    view_sig: &[(TextureFormat, u32)],
-    registry: &mut ExactPipelineRegistry,
-    pipeline: &ExactColourPipeline,
-    device: &RenderDevice,
-    scheduled: &mut HashSet<ExactColourPipelineKey>,
-    current: &mut Vec<ExactPipelineSlot>,
-) {
-    for (main_format, samples) in view_sig.iter().copied() {
-        let techs = lighting_iw4::LIT_TECH_NO_SHADOW_DIR_SLOTS
-            .into_iter()
-            .chain(lighting_iw4::LIT_TECH_NO_SHADOW_LOCAL_SLOTS)
-            .chain(lighting_iw4::LIT_TECH_SHADOW_DIR_SLOTS)
-            .chain(lighting_iw4::LIT_TECH_SHADOW_SPOT_SLOTS)
-            .chain([super::super::SUN_SHADOW_CASTER_TECH, 5]);
-        for tech in techs {
-            let shadow = tech == super::super::SUN_SHADOW_CASTER_TECH;
-            for (material, prepared_pass) in
-                prepared_table.passes_for_tech(super::super::TechType(tech))
-            {
-                let state = super::super::state::GfxPassState::from_prepared(prepared_pass.state);
-                let state0 = state.apply_change_state_0_host(AlphaMode::Opaque, false);
-                let state1 = state.apply_change_state_1_host();
-                let target = exact_colour_target_format(
-                    if shadow {
-                        SHADOWMAP_SUN_COLOR_FORMAT
-                    } else {
-                        main_format
-                    },
-                    state0.srgb_write,
-                );
-                for port in prepared_pass.port.iter().flatten() {
-                    use asset_iw4::vertex_decl::{
-                        PACKED_VERTEX_TYPE, STATICMODELCACHE_VERTEX_TYPE,
-                    };
-                    if tech != 5 && port.vertex_type != PACKED_VERTEX_TYPE {
-                        let used = if port.vertex_type == STATICMODELCACHE_VERTEX_TYPE {
-                            extracted
+impl ExactPipelineKickCache {
+    fn schedule_admitted_pipelines(
+        &mut self,
+        extracted: ExtractedColourRefs<'_>,
+        prepared_table: &render_material::PreparedMaterialTable,
+        view_sig: &[(TextureFormat, u32)],
+        registry: &mut ExactPipelineRegistry,
+        pipeline: &ExactColourPipeline,
+        device: &RenderDevice,
+    ) {
+        let scheduled = &mut self.scheduled;
+        let current = &mut self.current;
+        for (main_format, samples) in view_sig.iter().copied() {
+            let techs = lighting_iw4::LIT_TECH_NO_SHADOW_DIR_SLOTS
+                .into_iter()
+                .chain(lighting_iw4::LIT_TECH_NO_SHADOW_LOCAL_SLOTS)
+                .chain(lighting_iw4::LIT_TECH_SHADOW_DIR_SLOTS)
+                .chain(lighting_iw4::LIT_TECH_SHADOW_SPOT_SLOTS)
+                .chain([super::super::SUN_SHADOW_CASTER_TECH, 5]);
+            for tech in techs {
+                let shadow = tech == super::super::SUN_SHADOW_CASTER_TECH;
+                for (material, prepared_pass) in
+                    prepared_table.passes_for_tech(super::super::TechType(tech))
+                {
+                    let state =
+                        super::super::state::GfxPassState::from_prepared(prepared_pass.state);
+                    let state0 = state.apply_change_state_0_host(false);
+                    let state1 = state.apply_change_state_1_host();
+                    let target = exact_colour_target_format(
+                        if shadow {
+                            SHADOWMAP_SUN_COLOR_FORMAT
+                        } else {
+                            main_format
+                        },
+                        state0.srgb_write,
+                    );
+                    for port in prepared_pass.port.iter().flatten() {
+                        use asset_iw4::vertex_decl::{
+                            PACKED_VERTEX_TYPE, STATICMODELCACHE_VERTEX_TYPE,
+                        };
+                        if tech != 5 && port.vertex_type != PACKED_VERTEX_TYPE {
+                            let used = if port.vertex_type == STATICMODELCACHE_VERTEX_TYPE {
+                                extracted
+                                    .frame
+                                    .pipeline_smodel_materials
+                                    .contains(&material.0)
+                            } else {
+                                extracted
+                                    .frame
+                                    .pipeline_world_materials
+                                    .contains(&material.0)
+                            };
+                            if !used {
+                                continue;
+                            }
+                        }
+                        let key = ExactColourPipelineKey {
+                            target,
+                            depth_format: if shadow {
+                                SHADOWMAP_SUN_DEPTH_FORMAT
+                            } else {
+                                SCENE_DEPTH_FORMAT
+                            },
+                            samples: if shadow { 1 } else { samples },
+                            state0,
+                            state1,
+                            port: *port,
+                            cached_lighting: false,
+                            mark_mesh: false,
+                            forward_z: shadow,
+                            portal_stencil: false,
+                            exit_clip: None,
+                        };
+                        if scheduled.insert(key) {
+                            current.push(request_exact_pipeline(registry, pipeline, device, key));
+                        }
+                        // A foreign world first appears with exit clipping, then
+                        // becomes the unclipped root after a crossing. Both use
+                        // portal stencil state, unlike the ordinary warmup key.
+                        // Compile both before releasing the loading screen.
+                        // Donor materials from other games are admitted too, but
+                        // are not geometry of this scene and need no portal variant.
+                        let scene_material = extracted
+                            .frame
+                            .pipeline_world_materials
+                            .contains(&material.0)
+                            || extracted
                                 .frame
                                 .pipeline_smodel_materials
-                                .contains(&material.0)
-                        } else {
-                            extracted
-                                .frame
-                                .pipeline_world_materials
-                                .contains(&material.0)
-                        };
-                        if !used {
-                            continue;
+                                .contains(&material.0);
+                        if !shadow && scene_material && extracted.frame.exec_frame.portal.is_some()
+                        {
+                            for exit_clip in
+                                [None, Some(super::portal_scene::exit_clip_mode(device))]
+                            {
+                                let portal_key = ExactColourPipelineKey {
+                                    portal_stencil: true,
+                                    exit_clip,
+                                    ..key
+                                };
+                                if scheduled.insert(portal_key) {
+                                    current.push(request_exact_pipeline(
+                                        registry, pipeline, device, portal_key,
+                                    ));
+                                }
+                            }
                         }
-                    }
-                    let key = ExactColourPipelineKey {
-                        target,
-                        depth_format: if shadow {
-                            SHADOWMAP_SUN_DEPTH_FORMAT
-                        } else {
-                            SCENE_DEPTH_FORMAT
-                        },
-                        samples: if shadow { 1 } else { samples },
-                        state0,
-                        state1,
-                        port: *port,
-                        cached_lighting: false,
-                        mark_mesh: false,
-                        forward_z: shadow,
-                    };
-                    if scheduled.insert(key) {
-                        current.push(request_exact_pipeline(registry, pipeline, device, key));
                     }
                 }
             }

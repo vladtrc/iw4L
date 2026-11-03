@@ -5,7 +5,7 @@ use weapon_iw4::WeaponCombatFacts;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WeaponSetup {
-    pub realm: crate::script::Realm,
+    pub realm: crate::script::FamilyId,
     pub base: String,
     pub attachments: Vec<String>,
     pub stand_in: Option<String>,
@@ -63,14 +63,6 @@ pub struct SimWeaponContent {
     pub(crate) equipment_runtime: Vec<EquipmentRuntimeFacts>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SimWeaponContentRefusal {
-    MissingSentinel,
-    NonDenseRows,
-    UnknownAlias,
-    InvalidProgression,
-}
-
 impl SimWeaponContent {
     pub(crate) fn bootstrap() -> Self {
         Self {
@@ -103,9 +95,9 @@ impl SimWeaponContent {
         pen_table: weapon_iw4::PenetrationDepthTable,
         pen_table_loaded: bool,
         rank_progression: gamemode_iw4::progression::RankProgression,
-    ) -> Result<Arc<Self>, SimWeaponContentRefusal> {
+    ) -> Result<Arc<Self>, &'static str> {
         if rank_progression.rank(0).is_none() {
-            return Err(SimWeaponContentRefusal::InvalidProgression);
+            return Err("invalid rank progression");
         }
         let mut result = Self {
             rank_progression,
@@ -117,7 +109,7 @@ impl SimWeaponContent {
         let mut setups = Vec::new();
         for row in rows {
             if row.wire_id as usize != names.len() {
-                return Err(SimWeaponContentRefusal::NonDenseRows);
+                return Err("non-dense weapon rows");
             }
             result.unlock_requirements.push(row.unlock_requirement);
             result.weapon_def_scales.push(row.scales);
@@ -142,11 +134,11 @@ impl SimWeaponContent {
             setups.push(row.setup);
         }
         if names.is_empty() {
-            return Err(SimWeaponContentRefusal::MissingSentinel);
+            return Err("missing weapon sentinel");
         }
         for (name, id) in aliases {
             if id as usize >= names.len() {
-                return Err(SimWeaponContentRefusal::UnknownAlias);
+                return Err("unknown weapon alias");
             }
             result.weapon_script_aliases.insert(name, id);
         }

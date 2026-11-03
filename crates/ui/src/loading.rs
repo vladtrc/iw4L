@@ -87,13 +87,12 @@ pub(crate) struct LoadingPreviewTask {
 #[derive(Clone, PartialEq, Eq)]
 struct PreviewIdentity {
     publication_id: u64,
-    request_id: u64,
     map_name: String,
 }
 
 impl PreviewIdentity {
     fn matches(&self, source: &LoadingPreviewSource) -> bool {
-        self.request_id == source.request_id && self.map_name == source.map_name
+        self.map_name == source.map_name
     }
 }
 
@@ -101,6 +100,7 @@ const LETTER_STEP: Duration = Duration::from_millis(140);
 const LETTER_FONT_PX: f32 = 56.0;
 const LETTER_FONT_MIN: f32 = 28.0;
 const MODE_FONT_PX: f32 = 22.0;
+const WORLD_FONT_PX: f32 = 26.0;
 const STATUS_FONT_PX: f32 = 14.0;
 const STATUS_NUMBER_COL_PX: f32 = 64.0;
 const STATUS_NAME_GAP_PX: f32 = 28.0;
@@ -123,16 +123,47 @@ fn loading_text_shadow() -> TextShadow {
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct LoadingPreviewRequest<'w> {
+    source: Option<Res<'w, LoadingPreviewSource>>,
+    inflight: Option<Res<'w, LoadingPreviewTask>>,
+    publication: Option<Res<'w, asset_material::UiImagePublication>>,
+}
+
+impl LoadingPreviewRequest<'_> {
+    fn publication_id(&self) -> u64 {
+        self.publication
+            .as_ref()
+            .map_or(0, |publication| publication.id())
+    }
+
+    fn start(&self, commands: &mut Commands, progress: &LoadProgress) {
+        if let Some(source) = self.source.as_deref()
+            && let Some(publication) = self.publication.as_deref()
+        {
+            let same = self.inflight.as_deref().is_some_and(|task| {
+                task.identity.matches(source) && task.identity.publication_id == publication.id()
+            });
+            if !same {
+                begin_loading_preview_decode(
+                    commands,
+                    source,
+                    progress.clone(),
+                    publication.clone(),
+                );
+            }
+        }
+    }
+}
+
 pub(crate) fn spawn_loading_screen(
     mut commands: Commands,
     screen: Option<Res<LoadingScreen>>,
     font: Option<Res<GameUiFont>>,
-    zone_ff: Option<Res<LoadingPreviewSource>>,
+    preview: LoadingPreviewRequest,
     existing: Query<(Entity, Option<&LoadingOverlayTitle>), With<LoadingRoot>>,
     cameras: Query<Entity, With<LoadingCamera>>,
     leftover_overlay: Query<Entity, With<OverlayUiCamera>>,
-    inflight_preview: Option<Res<LoadingPreviewTask>>,
-    ui_images: Option<Res<asset_material::UiImagePublication>>,
 ) {
     let Some(screen) = screen else {
         return;
@@ -141,7 +172,7 @@ pub(crate) fn spawn_loading_screen(
     let title_ok = existing
         .iter()
         .any(|(_, spawned)| spawned.is_some_and(|s| s.0 == title));
-    let publication_id = ui_images.as_ref().map_or(0, |publication| publication.id());
+    let publication_id = preview.publication_id();
     let owner_ok = existing
         .iter()
         .any(|(_, spawned)| spawned.is_some_and(|s| s.1 == publication_id));
@@ -216,6 +247,17 @@ pub(crate) fn spawn_loading_screen(
                     ..default()
                 })
                 .with_children(|left| {
+                    // A merged map's worlds, stacked upward from world 0 as
+                    // the preview's bands are.
+                    for world in screen.worlds().iter().rev() {
+                        left.spawn((
+                            Text::new(world.clone()),
+                            game_text_font(&font, WORLD_FONT_PX),
+                            TextColor(Color::srgb(0.72, 0.74, 0.77)),
+                            TextLayout::justify(Justify::Left),
+                            loading_text_shadow(),
+                        ));
+                    }
                     left.spawn((
                         Text::default(),
                         TextLayout::justify(Justify::Left),
@@ -251,6 +293,7 @@ pub(crate) fn spawn_loading_screen(
                 .with_children(|right| {
                     right.spawn((
                         LoadingStatusList,
+                        StatusTable::default(),
                         Node {
                             width: Val::Percent(100.0),
                             flex_direction: FlexDirection::Column,
@@ -269,48 +312,40 @@ pub(crate) fn spawn_loading_screen(
         screen.title(),
         screen.mode_label()
     );
-    if let Some(source) = zone_ff
-        && let Some(publication) = ui_images
-    {
-        let same = inflight_preview.as_deref().is_some_and(|task| {
-            task.identity.matches(&source) && task.identity.publication_id == publication.id()
-        });
-        if !same {
-            begin_loading_preview_decode(
-                &mut commands,
-                source.path.clone(),
-                source.map_name.clone(),
-                source.request_id,
-                screen.progress.clone(),
-                publication.clone(),
-            );
-        }
-    }
+    preview.start(&mut commands, &screen.progress);
 }
 
 fn begin_loading_preview_decode(
     commands: &mut Commands,
-    zone_ff: std::path::PathBuf,
-    map_name: String,
-    request_id: u64,
+    source: &LoadingPreviewSource,
     progress: LoadProgress,
     publication: asset_material::UiImagePublication,
 ) {
     let identity = PreviewIdentity {
         publication_id: publication.id(),
-        request_id,
-        map_name: map_name.clone(),
+        map_name: source.map_name.clone(),
     };
+    let worlds: Vec<(std::path::PathBuf, String)> =
+        std::iter::once((source.path.clone(), source.map_name.clone()))
+            .chain(source.more.iter().cloned())
+            .collect();
 
     let task = AsyncComputeTaskPool::get().spawn(async move {
         let stage = progress.begin(asset_transport::StageId::Preview, None);
-        let decoded = match asset_material::decode_map_preview(&publication, &zone_ff, &map_name) {
-            Ok(decoded) => decoded,
-            Err(error) => {
-                diag::warn!(Ui, "loading: preview index: {error}");
-                stage.fail();
-                return None;
+        let mut previews = Vec::with_capacity(worlds.len());
+        for (zone_ff, map_name) in &worlds {
+            match asset_material::decode_map_preview(&publication, zone_ff, map_name) {
+                Ok(decoded) => previews.push(decoded),
+                Err(error) => {
+                    diag::warn!(Ui, "loading: preview index: {error}");
+                    stage.fail();
+                    return None;
+                }
             }
+        }
+        let decoded = match previews.len() {
+            1 => previews.pop().flatten(),
+            _ => stack_previews(&previews),
         };
         // A zone with no loadscreen is not a failure — the branch simply had
         // nothing to decode.
@@ -321,6 +356,50 @@ fn begin_loading_preview_decode(
         decoded
     });
     commands.insert_resource(LoadingPreviewTask { identity, task });
+}
+
+/// A merged map's previews as equal horizontal bands, world 0 at the bottom:
+/// each band shows the middle of its world's preview at the size of the
+/// largest. A world with no preview leaves its band the loading color.
+fn stack_previews(previews: &[Option<(u32, u32, Vec<u8>)>]) -> Option<(u32, u32, Vec<u8>)> {
+    let width = previews.iter().flatten().map(|p| p.0).max()?;
+    let height = previews.iter().flatten().map(|p| p.1).max()?;
+    let bands = previews.len() as u32;
+    let clear = LOADING_CLEAR.to_srgba().to_u8_array();
+    let mut pixels = clear.repeat((width * height) as usize);
+    for y in 0..height {
+        let band = (y * bands / height).min(bands - 1);
+        let Some((sw, sh, source)) = &previews[(bands - 1 - band) as usize] else {
+            continue;
+        };
+        // The band's row as a fraction of the band, mapped onto the source's
+        // middle slice of the band's aspect.
+        let band_top = band * height / bands;
+        let band_rows = (band + 1) * height / bands - band_top;
+        let slice = (f64::from(*sh) / f64::from(bands)).max(1.0);
+        let slice_top = (f64::from(*sh) - slice) / 2.0;
+        let along = (f64::from(y - band_top) + 0.5) / f64::from(band_rows.max(1));
+        let sy = (slice_top + along * slice - 0.5).clamp(0.0, f64::from(sh - 1));
+        for x in 0..width {
+            let sx = ((f64::from(x) + 0.5) * f64::from(*sw) / f64::from(width) - 0.5)
+                .clamp(0.0, f64::from(sw - 1));
+            let to = ((y * width + x) * 4) as usize;
+            pixels[to..to + 4].copy_from_slice(&bilinear(source, *sw, *sh, sx, sy));
+        }
+    }
+    Some((width, height, pixels))
+}
+
+fn bilinear(pixels: &[u8], width: u32, height: u32, x: f64, y: f64) -> [u8; 4] {
+    let (x0, y0) = (x.floor() as u32, y.floor() as u32);
+    let (x1, y1) = ((x0 + 1).min(width - 1), (y0 + 1).min(height - 1));
+    let (fx, fy) = (x - f64::from(x0), y - f64::from(y0));
+    let at = |x: u32, y: u32, c: usize| f64::from(pixels[((y * width + x) * 4) as usize + c]);
+    std::array::from_fn(|c| {
+        let top = at(x0, y0, c) * (1.0 - fx) + at(x1, y0, c) * fx;
+        let bottom = at(x0, y1, c) * (1.0 - fx) + at(x1, y1, c) * fx;
+        (top * (1.0 - fy) + bottom * fy).round() as u8
+    })
 }
 
 pub(crate) fn poll_loading_preview(
@@ -382,40 +461,157 @@ pub(crate) fn poll_loading_preview(
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct LoadingScreenView<'w, 's> {
+    letters:
+        Query<'w, 's, (&'static LoadingLetter, &'static mut TextColor), Without<LoadingStatusCell>>,
+    list: Query<
+        'w,
+        's,
+        (Entity, Option<&'static Children>, &'static mut StatusTable),
+        With<LoadingStatusList>,
+    >,
+    cells: Query<
+        'w,
+        's,
+        (
+            &'static LoadingStatusCell,
+            &'static mut Text,
+            &'static mut TextColor,
+        ),
+        Without<LoadingLetter>,
+    >,
+}
+
+impl LoadingScreenView<'_, '_> {
+    fn animate(&mut self, screen: &LoadingScreen) {
+        let count = self.letters.iter().count().max(1);
+        let step = (screen.elapsed().as_millis() / LETTER_STEP.as_millis()) as usize;
+        let active = ping_pong(step, count);
+        let inactive = if screen.preview_ready() {
+            Color::srgb(0.96, 0.96, 0.97)
+        } else {
+            Color::srgb(0.42, 0.44, 0.47)
+        };
+        for (letter, mut color) in &mut self.letters {
+            color.0 = if letter.0 == active {
+                Color::srgb(1.0, 0.62, 0.12)
+            } else {
+                inactive
+            };
+        }
+    }
+
+    fn refresh(
+        &mut self,
+        commands: &mut Commands,
+        screen: &LoadingScreen,
+        font: Option<&GameUiFont>,
+        load: Option<&assets::MapLoadProcess>,
+    ) {
+        let (Ok((list_entity, children, mut shown)), Some(font)) = (self.list.single_mut(), font)
+        else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if shown.next_refresh.is_some_and(|due| now < due) {
+            return;
+        }
+        shown.next_refresh = Some(now + STATUS_TABLE_PERIOD);
+
+        // The process is the load; the screen is one way of watching it. When both
+        // are here the process wins, because it is the one a new request replaces.
+        let progress = load
+            .map(|process| &process.progress)
+            .unwrap_or(&screen.progress);
+        let snapshot = progress.snapshot();
+        let table = project(&snapshot);
+
+        if children.is_none_or(|children| children.is_empty()) {
+            for entity in shown.drain() {
+                commands.entity(entity).try_despawn();
+            }
+            let mut children = Vec::with_capacity(2 + STATUS_SLOTS);
+            // Replacing children only detaches old rows, and a detached row stays on
+            // screen as its own UI root.
+            let head = spawn_metric_row(commands, &font.0, StatusLine::Head);
+            let spacer = spawn_spacer_row(commands);
+            shown.head = Some(head);
+            shown.spacer = Some(spacer);
+            children.extend([head, spacer]);
+            for slot in 0..STATUS_SLOTS {
+                let entity = spawn_metric_row(commands, &font.0, StatusLine::Slot(slot));
+                shown.slots.push((None, entity));
+                children.push(entity);
+            }
+            commands.entity(list_entity).replace_children(&children);
+        }
+
+        for row in table.running.iter().chain(table.ended.iter()) {
+            if shown.slots.iter().any(|(id, _)| *id == Some(row.id)) {
+                continue;
+            }
+            let free = shown.slots.iter().position(|(id, _)| id.is_none());
+            let slot = free.or_else(|| {
+                shown.slots.iter().position(|(id, _)| {
+                    id.and_then(|id| table.row(id))
+                        .is_some_and(|held| matches!(held.state, RowState::Done | RowState::Reused))
+                })
+            });
+            let Some(slot) = slot else { continue };
+            shown.slots[slot].0 = Some(row.id);
+        }
+
+        // Stages overlap, so this is shorter than their column added up.
+        let elapsed = format_elapsed(total_elapsed(&snapshot));
+        let (head_name, head_paint) = match screen.failure() {
+            Some(reason) => (format!("Map load failed — {reason}"), STATUS_FAILED),
+            None => ("Loading".to_owned(), STATUS_TOTAL),
+        };
+
+        for (cell, mut text, mut color) in &mut self.cells {
+            let (value, name, paint) = match cell.line {
+                StatusLine::Head => (Some(&elapsed), head_name.as_str(), head_paint),
+                StatusLine::Slot(slot) => {
+                    match shown
+                        .slots
+                        .get(slot)
+                        .and_then(|(id, _)| *id)
+                        .and_then(|id| table.row(id))
+                    {
+                        Some(row) => (Some(&row.value), row.name.as_str(), row.state.color()),
+                        None => (None, "", STATUS_TOTAL),
+                    }
+                }
+            };
+            set_text(
+                &mut text,
+                match cell.column {
+                    StatusColumn::Name => name,
+                    StatusColumn::Number => value.map_or("", |metric| metric.number.as_str()),
+                    StatusColumn::Unit => value.map_or("", |metric| metric.unit.as_str()),
+                },
+            );
+            color.0 = paint;
+        }
+    }
+}
+
 pub(crate) fn update_loading_screen(
     mut commands: Commands,
-    time: Res<Time>,
     font: Option<Res<GameUiFont>>,
     mut screen: Option<ResMut<LoadingScreen>>,
     load: Option<Res<assets::MapLoadProcess>>,
-    mut next_table: Local<Option<std::time::Instant>>,
-    mut shown: Local<StatusTable>,
-    mut letters: Query<(&LoadingLetter, &mut TextColor), Without<LoadingStatusCell>>,
-    list: Query<(Entity, Option<&Children>), With<LoadingStatusList>>,
-    mut cells: Query<(&LoadingStatusCell, &mut Text, &mut TextColor), Without<LoadingLetter>>,
+    mut view: LoadingScreenView,
     roots: Query<Entity, Or<(With<LoadingRoot>, With<LoadingCamera>)>>,
 ) {
     let Some(screen) = screen.as_deref_mut() else {
         return;
     };
 
-    screen.tick_elapsed(time.delta());
+    screen.tick_elapsed();
 
-    let count = letters.iter().count().max(1);
-    let step = (screen.elapsed().as_millis() / LETTER_STEP.as_millis()) as usize;
-    let active = ping_pong(step, count);
-    let inactive = if screen.preview_ready() {
-        Color::srgb(0.96, 0.96, 0.97)
-    } else {
-        Color::srgb(0.42, 0.44, 0.47)
-    };
-    for (letter, mut color) in &mut letters {
-        color.0 = if letter.0 == active {
-            Color::srgb(1.0, 0.62, 0.12)
-        } else {
-            inactive
-        };
-    }
+    view.animate(screen);
 
     if screen.is_complete() {
         dismiss_loading_overlay(&mut commands, roots.iter(), std::iter::empty(), true);
@@ -423,94 +619,7 @@ pub(crate) fn update_loading_screen(
         return;
     }
 
-    let now = std::time::Instant::now();
-    if next_table.is_some_and(|due| now < due) {
-        return;
-    }
-    *next_table = Some(now + STATUS_TABLE_PERIOD);
-
-    // The process is the load; the screen is one way of watching it. When both
-    // are here the process wins, because it is the one a new request replaces.
-    let progress = load
-        .as_deref()
-        .map(|process| &process.progress)
-        .unwrap_or(&screen.progress);
-    let snapshot = progress.snapshot();
-    let table = project(&snapshot);
-
-    let (Ok((list_entity, children)), Some(font)) = (list.single(), font.as_ref()) else {
-        return;
-    };
-    if children.is_none_or(|children| children.is_empty())
-        || shown.request != Some(snapshot.request_id)
-    {
-        for entity in shown.drain() {
-            commands.entity(entity).try_despawn();
-        }
-        shown.request = Some(snapshot.request_id);
-        let mut children = Vec::with_capacity(2 + STATUS_SLOTS);
-        // Replacing children only detaches old rows, and a detached row stays on
-        // screen as its own UI root.
-        let head = spawn_metric_row(&mut commands, &font.0, StatusLine::Head);
-        let spacer = spawn_spacer_row(&mut commands);
-        shown.head = Some(head);
-        shown.spacer = Some(spacer);
-        children.extend([head, spacer]);
-        for slot in 0..STATUS_SLOTS {
-            let entity = spawn_metric_row(&mut commands, &font.0, StatusLine::Slot(slot));
-            shown.slots.push((None, entity));
-            children.push(entity);
-        }
-        commands.entity(list_entity).replace_children(&children);
-    }
-
-    for row in table.running.iter().chain(table.ended.iter()) {
-        if shown.slots.iter().any(|(id, _)| *id == Some(row.id)) {
-            continue;
-        }
-        let free = shown.slots.iter().position(|(id, _)| id.is_none());
-        let slot = free.or_else(|| {
-            shown.slots.iter().position(|(id, _)| {
-                id.and_then(|id| table.row(id))
-                    .is_some_and(|held| matches!(held.state, RowState::Done | RowState::Reused))
-            })
-        });
-        let Some(slot) = slot else { continue };
-        shown.slots[slot].0 = Some(row.id);
-    }
-
-    // Stages overlap, so this is shorter than their column added up.
-    let elapsed = format_elapsed(total_elapsed(&snapshot));
-    let (head_name, head_paint) = match screen.failure() {
-        Some(reason) => (format!("Map load failed — {reason}"), STATUS_FAILED),
-        None => ("Loading".to_owned(), STATUS_TOTAL),
-    };
-
-    for (cell, mut text, mut color) in &mut cells {
-        let (value, name, paint) = match cell.line {
-            StatusLine::Head => (Some(&elapsed), head_name.as_str(), head_paint),
-            StatusLine::Slot(slot) => {
-                match shown
-                    .slots
-                    .get(slot)
-                    .and_then(|(id, _)| *id)
-                    .and_then(|id| table.row(id))
-                {
-                    Some(row) => (Some(&row.value), row.name.as_str(), row.state.color()),
-                    None => (None, "", STATUS_TOTAL),
-                }
-            }
-        };
-        set_text(
-            &mut text,
-            match cell.column {
-                StatusColumn::Name => name,
-                StatusColumn::Number => value.map_or("", |metric| metric.number.as_str()),
-                StatusColumn::Unit => value.map_or("", |metric| metric.unit.as_str()),
-            },
-        );
-        color.0 = paint;
-    }
+    view.refresh(&mut commands, screen, font.as_deref(), load.as_deref());
 }
 
 /// Rewriting a `Text` that already says this would re-lay out the row.
@@ -528,10 +637,9 @@ enum StatusColumn {
     Unit,
 }
 
-#[derive(Default)]
+#[derive(Component, Default)]
 pub(crate) struct StatusTable {
-    /// A second request is a different load and gets a table of its own.
-    request: Option<u64>,
+    next_refresh: Option<std::time::Instant>,
     head: Option<Entity>,
     spacer: Option<Entity>,
     slots: Vec<(Option<asset_transport::StageId>, Entity)>,

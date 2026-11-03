@@ -152,7 +152,25 @@ pub fn sample_killcam_seat(
 
     let mut remapped = archived;
     rebase_archived_timers(&mut remapped, rebase_ms);
-    let player_state = apply_killcam_seat(&viewer_ps, &remapped, session.focus);
+    // The scripted seat names the eventual missile even in the preroll.
+    // Stay in first person until that entity exists in the archived frame.
+    let mut focus = session.focus;
+    if focus.kill_cam_entity != playerstate_iw4::ENTITYNUM_NONE
+        && !frame
+            .snapshot
+            .meta
+            .entities
+            .iter()
+            .any(|e| e.number == focus.kill_cam_entity)
+        && !frame
+            .snapshot
+            .projectiles
+            .iter()
+            .any(|p| p.entnum == focus.kill_cam_entity)
+    {
+        focus.kill_cam_entity = playerstate_iw4::ENTITYNUM_NONE;
+    }
+    let player_state = apply_killcam_seat(&viewer_ps, &remapped, focus);
 
     Some(SeatSample {
         player_state,
@@ -314,6 +332,8 @@ fn overlay_archived_world(
     out.meta.sound_aliases = live.meta.sound_aliases.clone();
     out.meta.hud_strings = live.meta.hud_strings.clone();
     out.meta.hud_materials = live.meta.hud_materials.clone();
+    // Server info is a configstring: a killcam replays the world, not it.
+    out.meta.objectives.server_info = live.meta.objectives.server_info.clone();
 
     let archived_viewer = archived
         .players
@@ -437,7 +457,7 @@ fn overlay_killcam_hud(
         .meta
         .for_client(viewer)
         .map(|m| m.hud_current.clone())
-        .unwrap_or_default();
+        .unwrap_or(Vec::new());
     let wipe = session.focus.kill_cam_entity != playerstate_iw4::HITSCAN_KILL_CAM_ENTITY;
     let mut archival = if wipe {
         Vec::new()
@@ -445,7 +465,7 @@ fn overlay_killcam_hud(
         archived
             .and_then(|snap| snap.meta.for_client(session.focus_client))
             .map(|m| m.hud_archival.clone())
-            .unwrap_or_default()
+            .unwrap_or(Vec::new())
     };
     sim::rebase_hud_archival(&mut archival, rebase_ms);
     if let Some((_, meta)) = out.meta.clients.iter_mut().find(|(id, _)| *id == viewer) {

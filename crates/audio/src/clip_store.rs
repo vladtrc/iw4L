@@ -5,13 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use asset_audio::SoundCatalog;
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 use assets::NamespaceSoundIwd;
 use bevy::prelude::*;
 
 use crate::media::PcmBuffer;
 use crate::media_queue::{ClipJob, MediaJobQueue, MediaPriority, QueueRefusal};
-use crate::pcm::decode_audio_bytes;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ClipKey {
@@ -23,10 +22,9 @@ pub(crate) struct ClipKey {
 enum ClipLocator {
     Loaded(usize),
     Streamed {
-        ns: AssetNamespace,
+        ns: FamilyId,
         dir: String,
         name: String,
-        decode: asset_audio::StreamedDecodePolicy,
     },
 }
 
@@ -43,11 +41,9 @@ impl ClipKey {
 pub enum ClipPath {
     /// Linear PCM read in place from the zone.
     Pcm,
-    /// T5 ADPCM, decoded in process.
-    Adpcm,
-    Xwma,
-    Sab,
-    /// A clip read out of an IWD rather than out of the zone.
+    Container,
+    Native,
+    External,
     Streamed,
     /// No decoder claims the key: the bank holds nothing at that index, or it
     /// holds a clip in a format none of the four above reads. Counted here so
@@ -60,9 +56,9 @@ impl ClipPath {
 
     pub const ALL: [Self; Self::COUNT] = [
         Self::Pcm,
-        Self::Adpcm,
-        Self::Xwma,
-        Self::Sab,
+        Self::Container,
+        Self::Native,
+        Self::External,
         Self::Streamed,
         Self::Unresolved,
     ];
@@ -70,9 +66,9 @@ impl ClipPath {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Pcm => "pcm",
-            Self::Adpcm => "t5 adpcm",
-            Self::Xwma => "t5 xwma",
-            Self::Sab => "t6 sab",
+            Self::Container => "container",
+            Self::Native => "native",
+            Self::External => "external",
             Self::Streamed => "streamed",
             Self::Unresolved => "unresolved",
         }
@@ -82,10 +78,10 @@ impl ClipPath {
 #[derive(Clone, Debug)]
 pub(crate) enum ClipError {
     Decode,
-    UnsupportedCodec(asset_audio::SabCodec),
+    UnsupportedCodec(asset_audio::ExternalAudioCodec),
     MetadataMismatch,
     ForeignOwner,
-    Xwma(asset_audio::XwmaDecodeError),
+    Native(asset_audio::NativeAudioError),
     InvalidPcm(crate::media::PcmError),
     Read,
     QueueClosed,
@@ -96,6 +92,7 @@ impl From<crate::pcm::DecodeError> for ClipError {
     fn from(error: crate::pcm::DecodeError) -> Self {
         match error {
             crate::pcm::DecodeError::Decode => Self::Decode,
+            crate::pcm::DecodeError::Native(error) => Self::Native(error),
             crate::pcm::DecodeError::Read => Self::Read,
             crate::pcm::DecodeError::UnsupportedCodec(codec) => Self::UnsupportedCodec(codec),
             crate::pcm::DecodeError::MetadataMismatch => Self::MetadataMismatch,
@@ -113,10 +110,11 @@ pub(crate) enum MediaRequest {
 }
 
 // Bump when PCM decode, layout or trim rules change.
-const PCM_CONVERSION_REVISION: u32 = 1;
+const PCM_CONVERSION_REVISION: u32 = 2;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct LoadedClipKey {
+    family: FamilyId,
     content: [u8; 32],
     conversion_revision: u32,
     format: i32,
@@ -136,21 +134,16 @@ fn resident_clip_key(bank: &SoundCatalog, key: &ClipKey) -> Option<(LoadedClipKe
         return None;
     };
     let sound = bank.pcm_at(*index)?;
-    // SAB capture has a locator, not a verified payload hash. Never reuse it
+    // External media has a locator, not a verified payload hash. Never reuse it
     // under the empty encoded-content hash shared by descriptor-only entries.
-    if sound.sab_media.is_some() {
+    if sound.external_media.is_some() {
         return None;
     }
-    let common = matches!(
-        sound.zone.as_str(),
-        "code_post_gfx_mp"
-            | "localized_code_post_gfx_mp"
-            | "patch_mp"
-            | "common_mp"
-            | "localized_common_mp"
-    );
+    let common = asset_audio::audio_family(sound.game())
+        .is_some_and(|family| family.common_zones.contains(&sound.zone.as_str()));
     Some((
         LoadedClipKey {
+            family: sound.game(),
             content: sound.encoded_content_id(),
             conversion_revision: PCM_CONVERSION_REVISION,
             format: sound.format(),
@@ -208,8 +201,71 @@ impl PreparedClipCache {
         if std::sync::Weak::ptr_eq(&inner.bank, &Arc::downgrade(bank)) {
             return;
         }
-        inner.prepared.retain(|_, entry| entry.common);
+        let before_bytes = inner
+            .prepared
+            .values()
+            .map(|entry| entry.pcm.resident_bytes())
+            .sum::<usize>();
+        let before_count = inner.prepared.len();
+        let current: HashSet<_> = (0..bank.loaded_sounds().len())
+            .filter_map(|index| {
+                resident_clip_key(
+                    bank,
+                    &ClipKey {
+                        revision: bank.revision(),
+                        locator: ClipLocator::Loaded(index),
+                    },
+                )
+                .map(|(key, _)| key)
+            })
+            .collect();
+        inner
+            .prepared
+            .retain(|key, entry| entry.common && current.contains(key));
         inner.bank = Arc::downgrade(bank);
+        if crate::diagnostics::enabled() {
+            crate::diagnostics::emit(format!(
+                "audio cache: bank={} before={before_count}/{before_bytes}B after={}/{}B idle={}B",
+                bank.revision(),
+                inner.prepared.len(),
+                inner
+                    .prepared
+                    .values()
+                    .map(|entry| entry.pcm.resident_bytes())
+                    .sum::<usize>(),
+                inner
+                    .prepared
+                    .values()
+                    .filter(|entry| !entry.pcm.shared())
+                    .map(|entry| entry.pcm.resident_bytes())
+                    .sum::<usize>()
+            ));
+        }
+    }
+
+    fn evict_idle(&self) -> usize {
+        let mut inner = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut freed = 0;
+        inner.prepared.retain(|_, entry| {
+            if entry.pcm.shared() {
+                return true;
+            }
+            freed += entry.pcm.resident_bytes();
+            false
+        });
+        EVICTED_BYTES.fetch_add(freed as u64, Ordering::Relaxed);
+        if crate::diagnostics::enabled() {
+            crate::diagnostics::emit(format!(
+                "audio cache pressure: freed={freed}B remaining={}/{}B",
+                inner.prepared.len(),
+                inner
+                    .prepared
+                    .values()
+                    .map(|entry| entry.pcm.resident_bytes())
+                    .sum::<usize>()
+            ));
+        }
+        freed
     }
 
     fn ready(&self, profile_id: u64, key: &LoadedClipKey, common: bool) -> Option<PcmBuffer> {
@@ -358,6 +414,9 @@ impl ClipStore {
     pub(crate) fn service(&self) -> MediaService {
         self.service.clone()
     }
+    pub(crate) fn release_idle_streamed(&self) -> usize {
+        evict_idle_streamed(&self.service.0.requests, &self.service.0.outcomes)
+    }
     pub fn workers(&self) -> usize {
         self.service.workers()
     }
@@ -443,12 +502,15 @@ impl MediaService {
                         note_prepared(path, prepare_at, result.as_ref());
                         if matches!(result, Err(ClipError::InvalidPcm(crate::media::PcmError::MemoryLimit)))
                             && !stop_worker.load(Ordering::Acquire)
-                            && evict_idle_streamed(&requests, &outcomes) != 0
                         {
-                            let retry_at = Instant::now();
-                            let (path, retry) = prepare_clip_now(&bank, iwd.as_deref(), &job.key);
-                            note_prepared(path, retry_at, retry.as_ref());
-                            result = retry;
+                            let cached = clip_cache.as_ref().map_or(0, PreparedClipCache::evict_idle);
+                            let streamed = evict_idle_streamed(&requests, &outcomes);
+                            if cached != 0 || streamed != 0 {
+                                let retry_at = Instant::now();
+                                let (path, retry) = prepare_clip_now(&bank, iwd.as_deref(), &job.key);
+                                note_prepared(path, retry_at, retry.as_ref());
+                                result = retry;
+                            }
                         }
                         if stop_worker.load(Ordering::Acquire) {
                             return;
@@ -664,11 +726,7 @@ impl CueFeedback {
     }
 }
 
-pub(crate) fn clip_keys_for_alias(
-    bank: &SoundCatalog,
-    ns: AssetNamespace,
-    alias: &str,
-) -> Vec<ClipKey> {
+pub(crate) fn clip_keys_for_alias(bank: &SoundCatalog, ns: FamilyId, alias: &str) -> Vec<ClipKey> {
     let mut seen_alias = HashSet::new();
     let mut seen_key = HashSet::new();
     let mut out = Vec::new();
@@ -678,7 +736,7 @@ pub(crate) fn clip_keys_for_alias(
 
 fn collect_clip_keys(
     bank: &SoundCatalog,
-    ns: AssetNamespace,
+    ns: FamilyId,
     alias: &str,
     depth: u8,
     seen_alias: &mut HashSet<String>,
@@ -722,7 +780,7 @@ fn collect_clip_keys(
 
 pub(crate) fn clip_key_for_sound(
     bound: asset_audio::BoundSound<'_>,
-) -> Result<Option<ClipKey>, asset_audio::SoundBindingRefusal> {
+) -> Result<Option<ClipKey>, &'static str> {
     let revision = bound.revision();
     Ok(bound.media()?.map(|media| ClipKey {
         revision,
@@ -732,12 +790,10 @@ pub(crate) fn clip_key_for_sound(
                 namespace,
                 dir,
                 name,
-                decode,
             } => ClipLocator::Streamed {
                 ns: namespace,
                 dir,
                 name,
-                decode,
             },
         },
     }))
@@ -833,7 +889,7 @@ fn note_outcome(path: ClipPath, result: Result<&PcmBuffer, &ClipError>) {
             SAMPLE_BYTES[slot].fetch_add(prepared.resident_bytes() as u64, Ordering::Relaxed);
         }
         Err(error) => {
-            if let ClipError::Xwma(error) = error {
+            if let ClipError::Native(error) = error {
                 diag::warn!(Audio, "audio: {error}");
             }
             FAILED[slot].fetch_add(1, Ordering::Relaxed);
@@ -859,16 +915,9 @@ fn prepare_clip_now(
             };
             (path, prepare_loaded(sound))
         }
-        ClipLocator::Streamed {
-            ns,
-            dir,
-            name,
-            decode,
-            ..
-        } => (
-            ClipPath::Streamed,
-            prepare_streamed(iwd, *ns, dir, name, *decode),
-        ),
+        ClipLocator::Streamed { ns, dir, name, .. } => {
+            (ClipPath::Streamed, prepare_streamed(iwd, *ns, dir, name))
+        }
     }
 }
 
@@ -876,74 +925,29 @@ fn prepare_clip_now(
 /// decides — the two read the same fields in the same order, so a clip cannot
 /// be counted under one path and decoded by another.
 fn loaded_path(sound: &asset_audio::LoadedSoundPcm) -> Option<ClipPath> {
-    if sound.sab_media.is_some() {
-        Some(ClipPath::Sab)
-    } else if sound.t5_adpcm_bytes().is_some() {
-        Some(ClipPath::Adpcm)
-    } else if sound.is_t5_xwma() {
-        Some(ClipPath::Xwma)
-    } else if sound.format() == asset_audio::MSS_PCM {
-        Some(ClipPath::Pcm)
-    } else {
-        None
+    if sound.external_media.is_some() {
+        return Some(ClipPath::External);
     }
-}
-
-fn prepare_loaded(sound: &asset_audio::LoadedSoundPcm) -> Result<PcmBuffer, ClipError> {
-    if let Some(source) = &sound.sab_media {
-        return crate::pcm::sab_media::prepare(source).map_err(ClipError::from);
-    }
-    let channels = u16::try_from(sound.channels())
-        .map_err(|_| ClipError::InvalidPcm(crate::media::PcmError::UnsupportedChannels))?;
-    PcmBuffer::validate_geometry(channels, sound.rate).map_err(ClipError::InvalidPcm)?;
-    if let Some(bytes) = sound.t5_adpcm_bytes() {
-        let pcm = crate::pcm::t5_stream::decode_adpcm(
-            bytes,
-            sound.samples,
-            sound.rate,
-            u32::from(channels),
-        )
-        .map_err(ClipError::from)?;
-        return Ok(pcm);
-    }
-    if sound.is_t5_xwma() {
-        let mut samples =
-            crate::decode_budget::DecodeSamples::new().map_err(ClipError::InvalidPcm)?;
-        asset_audio::decode_t5_xwma(
-            sound.encoded_bytes(),
-            &sound.seek_table,
-            u32::from(channels),
-            sound.rate,
-            &mut samples,
-        )
-        .map_err(|error| match error {
-            asset_audio::XwmaDecodeError::MemoryLimit => {
-                ClipError::InvalidPcm(crate::media::PcmError::MemoryLimit)
-            }
-            asset_audio::XwmaDecodeError::CacheRead => ClipError::Read,
-            error => ClipError::Xwma(error),
-        })?;
-        return samples
-            .into_pcm(channels, sound.rate)
-            .map_err(ClipError::InvalidPcm);
-    }
-    if sound.format() != 1 {
-        return Err(ClipError::Decode);
-    }
-    PcmBuffer::from_zone(sound.encoded_shared(), sound.bits(), channels, sound.rate).map_err(
-        |error| match error {
-            crate::media::PcmError::Empty => ClipError::Decode,
-            error => ClipError::InvalidPcm(error),
+    Some(
+        match asset_audio::audio_family(sound.game())?
+            .decoder
+            .encoding(sound)?
+        {
+            asset_audio::LoadedAudioEncoding::Pcm => ClipPath::Pcm,
+            asset_audio::LoadedAudioEncoding::Container => ClipPath::Container,
+            asset_audio::LoadedAudioEncoding::Native => ClipPath::Native,
         },
     )
+}
+fn prepare_loaded(sound: &asset_audio::LoadedSoundPcm) -> Result<PcmBuffer, ClipError> {
+    crate::pcm::native_decode::prepare_loaded(sound).map_err(ClipError::from)
 }
 
 fn prepare_streamed(
     iwd: Option<&NamespaceSoundIwd>,
-    ns: AssetNamespace,
+    ns: FamilyId,
     dir: &str,
     name: &str,
-    decode: asset_audio::StreamedDecodePolicy,
 ) -> Result<PcmBuffer, ClipError> {
     let iwd = iwd.ok_or(ClipError::Read)?;
     let rel = format!("{dir}/{name}");
@@ -962,12 +966,5 @@ fn prepare_streamed(
             return Err(ClipError::Read);
         }
     };
-    let pcm = if decode == asset_audio::StreamedDecodePolicy::WmaContainerWithWaveCompatibility
-        && !bytes.starts_with(b"RIFF")
-    {
-        crate::pcm::t5_stream::decode(&bytes)
-    } else {
-        decode_audio_bytes(&bytes)
-    };
-    pcm.map_err(ClipError::from)
+    crate::pcm::native_decode::prepare_streamed(ns, &bytes).map_err(ClipError::from)
 }

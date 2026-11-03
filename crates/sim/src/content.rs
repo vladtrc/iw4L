@@ -358,14 +358,7 @@ fn hash_camouflage_slots(h: &mut Digest, slots: &[Vec<u8>]) {
 }
 
 pub fn content_digest(
-    combat: &[WeaponCombatFacts],
-    penetration: &[weapon_iw4::BulletPenFacts],
-    runnable: &[bool],
-    unlocks: &[Result<gamemode_iw4::progression::UnlockRequirement, String>],
-    ranks: &gamemode_iw4::progression::RankProgression,
-    transition_groups: &[u32],
-    camouflage_slots: &[Vec<u8>],
-    equipment: &[crate::EquipmentRuntimeFacts],
+    weapon_content: &crate::SimWeaponContent,
     bootstrap: &MatchBootstrap,
     clip_brushes: &[SimBrush],
     script_models: &[crate::EntityCollisionCapabilities],
@@ -373,13 +366,17 @@ pub fn content_digest(
 ) -> u64 {
     let mut h = Digest::new();
     h.u64(CONTENT_DIGEST_SCHEME);
-    hash_combat(&mut h, combat);
-    hash_penetration(&mut h, penetration);
-    hash_weapon_admission(&mut h, runnable, transition_groups);
-    hash_camouflage_slots(&mut h, camouflage_slots);
-    hash_equipment(&mut h, equipment);
-    hash_unlocks(&mut h, unlocks);
-    hash_ranks(&mut h, ranks);
+    hash_combat(&mut h, &weapon_content.weapon_combat);
+    hash_penetration(&mut h, &weapon_content.bullet_pen);
+    hash_weapon_admission(
+        &mut h,
+        &weapon_content.weapon_runnable,
+        &weapon_content.weapon_transition_groups,
+    );
+    hash_camouflage_slots(&mut h, &weapon_content.weapon_camouflage_slots);
+    hash_equipment(&mut h, &weapon_content.equipment_runtime);
+    hash_unlocks(&mut h, &weapon_content.unlock_requirements);
+    hash_ranks(&mut h, &weapon_content.rank_progression);
     hash_class_catalog(&mut h);
     hash_spawns(&mut h, &bootstrap.spawns);
     hash_collision(&mut h, clip_brushes);
@@ -400,14 +397,7 @@ pub struct ContentComponents {
 }
 
 pub fn content_components(
-    combat: &[WeaponCombatFacts],
-    penetration: &[weapon_iw4::BulletPenFacts],
-    runnable: &[bool],
-    unlocks: &[Result<gamemode_iw4::progression::UnlockRequirement, String>],
-    ranks: &gamemode_iw4::progression::RankProgression,
-    transition_groups: &[u32],
-    camouflage_slots: &[Vec<u8>],
-    equipment: &[crate::EquipmentRuntimeFacts],
+    weapon_content: &crate::SimWeaponContent,
     bootstrap: &MatchBootstrap,
     clip_brushes: &[SimBrush],
     script_models: &[crate::EntityCollisionCapabilities],
@@ -429,13 +419,17 @@ pub fn content_components(
     hash_script_models(&mut models, script_models);
 
     let mut weapons = component(b'W');
-    hash_combat(&mut weapons, combat);
-    hash_penetration(&mut weapons, penetration);
-    hash_weapon_admission(&mut weapons, runnable, transition_groups);
-    hash_camouflage_slots(&mut weapons, camouflage_slots);
-    hash_equipment(&mut weapons, equipment);
-    hash_unlocks(&mut weapons, unlocks);
-    hash_ranks(&mut weapons, ranks);
+    hash_combat(&mut weapons, &weapon_content.weapon_combat);
+    hash_penetration(&mut weapons, &weapon_content.bullet_pen);
+    hash_weapon_admission(
+        &mut weapons,
+        &weapon_content.weapon_runnable,
+        &weapon_content.weapon_transition_groups,
+    );
+    hash_camouflage_slots(&mut weapons, &weapon_content.weapon_camouflage_slots);
+    hash_equipment(&mut weapons, &weapon_content.equipment_runtime);
+    hash_unlocks(&mut weapons, &weapon_content.unlock_requirements);
+    hash_ranks(&mut weapons, &weapon_content.rank_progression);
 
     let mut classes = component(b'C');
     hash_class_catalog(&mut classes);

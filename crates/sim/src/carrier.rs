@@ -6,7 +6,7 @@ use playerstate_iw4::PlayerState;
 
 use crate::frame::{
     FrameWorld, PayloadIndex, collect_dropped_items, collect_players, collect_projectiles,
-    collect_script_movers, install_state_entity, player_ref, spawn_payload_rows,
+    collect_script_movers, install_state_entity, player_ref,
 };
 use crate::gentity::ScriptMoverGentity;
 use crate::identities::ScriptModelId;
@@ -17,7 +17,6 @@ use crate::world::{ClientId, SimState, Tick};
 pub struct SimWorld {
     ecs: World,
     state_entity: Entity,
-    schedule: bevy_ecs::schedule::Schedule,
 }
 
 impl Default for SimWorld {
@@ -34,35 +33,7 @@ impl Default for SimWorld {
         ));
         ecs.insert_resource(crate::script::Mechanics::default());
         ecs.insert_resource(crate::script::NativeRegistry::default());
-        Self {
-            ecs,
-            state_entity,
-            schedule: crate::step::schedule(),
-        }
-    }
-}
-
-impl Clone for SimWorld {
-    fn clone(&self) -> Self {
-        let mut ecs = World::new();
-        let state_entity = ecs.spawn((**self).clone()).id();
-        ecs.entity_mut(state_entity).insert(PayloadIndex::default());
-        install_state_entity(&mut ecs, state_entity);
-        spawn_payload_rows(
-            &mut ecs,
-            collect_players(&self.ecs),
-            collect_projectiles(&self.ecs),
-            collect_script_movers(&self.ecs),
-            collect_dropped_items(&self.ecs),
-        );
-        ecs.insert_resource(*self.ecs.resource::<crate::LocalPlayerProfile>());
-        ecs.insert_resource(self.ecs.resource::<crate::PersistentDataStore>().clone());
-        crate::script::copy_state(&self.ecs, &mut ecs);
-        Self {
-            ecs,
-            state_entity,
-            schedule: crate::step::schedule(),
-        }
+        Self { ecs, state_entity }
     }
 }
 
@@ -154,8 +125,51 @@ impl SimWorld {
         self.ecs.insert_resource(profile);
     }
 
-    pub(crate) fn frame(&mut self) -> FrameWorld<'_> {
+    pub fn frame(&mut self) -> FrameWorld<'_> {
         FrameWorld::new(&mut self.ecs, self.state_entity)
+    }
+
+    pub fn input_program(&self) -> Option<&crate::input_program::InputProgramRun> {
+        self.ecs
+            .get_resource::<crate::input_program::InputProgramRun>()
+    }
+
+    pub fn input_program_owns(&self, client: ClientId) -> bool {
+        self.input_program()
+            .is_some_and(|run| run.actor(client).is_some())
+    }
+
+    pub fn install_input_program(
+        &mut self,
+        program: crate::input_program::InputProgram,
+    ) -> Result<(), String> {
+        self.install_input_ensemble(program, Vec::new())
+    }
+
+    pub fn install_input_ensemble(
+        &mut self,
+        program: crate::input_program::InputProgram,
+        mut actors: Vec<crate::input_program::InputProgram>,
+    ) -> Result<(), String> {
+        if self.input_program().is_some() {
+            return Err(
+                "input program already owns this match; reload the map for a new take".into(),
+            );
+        }
+        actors.sort_by_key(|actor| actor.client);
+        let mut owners = std::collections::BTreeSet::from([program.client]);
+        for actor in &actors {
+            if !owners.insert(actor.client) {
+                return Err("duplicate input program actor".into());
+            }
+        }
+        let mut run = crate::input_program::InputProgramRun::prepare(self, program)?;
+        run.actors = actors
+            .into_iter()
+            .map(|actor| crate::input_program::InputProgramRun::prepare(self, actor))
+            .collect::<Result<_, _>>()?;
+        self.ecs.insert_resource(run);
+        Ok(())
     }
 
     fn run(
@@ -163,9 +177,40 @@ impl SimWorld {
         tick: Tick,
         input: &TickInput,
         msec: i32,
-        reason: StepReason,
     ) -> Result<crate::TickResult, crate::script::Fault> {
-        crate::step::run_schedule(&mut self.ecs, &mut self.schedule, tick, input, msec, reason)
+        let resolved = if let Some(mut run) = self
+            .ecs
+            .remove_resource::<crate::input_program::InputProgramRun>()
+        {
+            let life = self
+                .client_meta(run.program.client)
+                .map(|meta| meta.life_sequence);
+            let mut resolved = run.input(tick, input, msec, life);
+            if run.failure.is_none() {
+                for actor in &mut run.actors {
+                    let life = self
+                        .client_meta(actor.program.client)
+                        .map(|meta| meta.life_sequence);
+                    resolved = actor.input(tick, &resolved, msec, life);
+                    if let Some(error) = &actor.failure {
+                        run.failure = Some(format!("actor {}: {error}", actor.program.client.0));
+                        break;
+                    }
+                }
+            }
+            if run.failure.is_some() {
+                resolved.cmds.retain(|cmd| run.actor(cmd.client).is_none());
+                resolved
+                    .shot_samples
+                    .retain(|((id, _), _)| run.actor(*id).is_none());
+                resolved.actions.retain(|(id, _)| run.actor(*id).is_none());
+            }
+            self.ecs.insert_resource(run);
+            resolved
+        } else {
+            input.clone()
+        };
+        crate::step::run_frame(&mut self.ecs, tick, &resolved, msec)
     }
 
     pub fn visit_projectiles(&self, visit: impl FnMut(&crate::ProjectileState)) {
@@ -215,18 +260,12 @@ impl SimWorld {
         crate::script::set_dvar(&mut self.ecs, name, value);
     }
 
-    pub fn gsc_realm(&self) -> Option<crate::script::Realm> {
+    pub fn gsc_realm(&self) -> Option<crate::script::FamilyId> {
         self.ecs
             .resource::<crate::script::RoundScript>()
             .program
             .as_ref()
             .map(|program| program.rules())
-    }
-
-    pub fn gsc_program_fingerprint(&self) -> Option<[u8; 32]> {
-        self.ecs
-            .resource::<crate::script::RoundScript>()
-            .program_fingerprint()
     }
 
     pub fn set_script_archive_time(
@@ -396,26 +435,6 @@ impl SimWorld {
             .slow_motion
     }
 
-    pub fn adopt_snapshot(&mut self, snapshot: &Snapshot) -> crate::AdoptReport {
-        assert!(
-            self.gsc_program_fingerprint().is_none(),
-            "snapshot lacks GSC state; restore a full SimWorld checkpoint"
-        );
-        self.frame().adopt_snapshot(snapshot)
-    }
-
-    pub fn adopt_prediction_snapshot(
-        &mut self,
-        snapshot: &Snapshot,
-        local: ClientId,
-    ) -> crate::AdoptReport {
-        assert!(
-            self.gsc_program_fingerprint().is_none(),
-            "prediction snapshots cannot restore authority GSC state"
-        );
-        self.frame().adopt_prediction_snapshot(snapshot, local)
-    }
-
     pub fn request_round_restart(&mut self) -> Result<(), String> {
         if !self.is_running() || !self.cheats_enabled() {
             return Err("round restart needs an active match with cheats".into());
@@ -448,34 +467,8 @@ impl SimWorld {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum StepReason {
-    #[default]
-    AuthorityFrame,
-
-    PredictNew,
-
-    Replay,
-}
-
-impl StepReason {
-    pub const fn advances_authority_world(self) -> bool {
-        matches!(self, Self::AuthorityFrame)
-    }
-
-    pub const fn is_replay(self) -> bool {
-        matches!(self, Self::Replay)
-    }
-}
-
-pub fn step(
-    world: &mut SimWorld,
-    tick: Tick,
-    input: &TickInput,
-    msec: i32,
-    reason: StepReason,
-) -> crate::TickResult {
-    try_step(world, tick, input, msec, reason)
+pub fn step(world: &mut SimWorld, tick: Tick, input: &TickInput, msec: i32) -> crate::TickResult {
+    try_step(world, tick, input, msec)
         .unwrap_or_else(|fault| panic!("GSC execution failed: {fault}"))
 }
 
@@ -484,7 +477,6 @@ pub fn try_step(
     tick: Tick,
     input: &TickInput,
     msec: i32,
-    reason: StepReason,
 ) -> Result<crate::TickResult, crate::script::Fault> {
-    world.run(tick, input, msec, reason)
+    world.run(tick, input, msec)
 }

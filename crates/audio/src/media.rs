@@ -204,7 +204,7 @@ pub(crate) struct RenderMedia {
     pub gain: Option<LiveGain>,
     pub channel_gain: Option<LiveGain>,
     pub release: Option<Arc<CueRelease>>,
-    pub bus: asset_core::AssetNamespace,
+    pub bus: asset_core::FamilyId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -217,6 +217,22 @@ pub enum PcmError {
     NonFinite,
     MemoryLimit,
 }
+
+impl std::fmt::Display for PcmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::UnsupportedChannels => "unsupported PCM channel count",
+            Self::UnsupportedBitDepth => "unsupported PCM bit depth",
+            Self::InvalidRate => "invalid PCM sample rate",
+            Self::Empty => "PCM contains no samples",
+            Self::PartialFrame => "PCM ends with an incomplete sample frame",
+            Self::NonFinite => "PCM contains a non-finite sample",
+            Self::MemoryLimit => "PCM memory budget exceeded",
+        })
+    }
+}
+
+impl std::error::Error for PcmError {}
 
 #[derive(Clone, Debug)]
 pub(crate) struct PcmBuffer {
@@ -411,7 +427,7 @@ impl RenderMedia {
             gain: None,
             channel_gain: None,
             release: None,
-            bus: asset_core::AssetNamespace::Iw4,
+            bus: asset_core::FamilyId::IW4,
         }
     }
 

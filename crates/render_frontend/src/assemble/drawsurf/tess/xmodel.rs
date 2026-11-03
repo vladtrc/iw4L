@@ -151,6 +151,41 @@ impl XModelDrawPlan {
         }
         Ok(vertices)
     }
+    fn publish_topology_shares(
+        &mut self,
+        prev_index: Option<Arc<Vec<u32>>>,
+        prev_range: Option<Arc<Vec<(u32, u32)>>>,
+    ) {
+        let Self {
+            indices,
+            surface_ranges: ranges,
+            index_share,
+            range_share,
+            topology_revision,
+            index_banks,
+            range_banks,
+            ..
+        } = self;
+
+        let indices_same = prev_index
+            .as_ref()
+            .is_some_and(|prev| prev.as_slice() == indices.as_slice());
+        let ranges_same = prev_range
+            .as_ref()
+            .is_some_and(|prev| prev.as_slice() == ranges.as_slice());
+        if indices_same && ranges_same {
+            *index_share = prev_index;
+            *range_share = prev_range;
+            index_banks.put_write(std::mem::take(indices));
+            range_banks.put_write(std::mem::take(ranges));
+            return;
+        }
+        *topology_revision = topology_revision.wrapping_add(1);
+        index_banks.put_write(std::mem::take(indices));
+        range_banks.put_write(std::mem::take(ranges));
+        *index_share = Some(index_banks.published());
+        *range_share = Some(range_banks.published());
+    }
 }
 
 pub const HOST_XMODEL_RIGID_TESS_INFO_PACKED_ARM: u8 = 1;
@@ -248,468 +283,682 @@ struct ProducerKeys {
     producer_revision: [u64; 8],
 }
 
-fn producer_keys(
-    fpv: &FpvDrawPlan,
-    bodies: &RemoteBodyDrawPlan,
-    scripts: &ScriptModelDrawPlan,
-    missiles: &MissileDrawPlan,
-    items: &ItemDrawPlan,
-    fx_models: &FxModelDrawPlan,
-    dynents: &DynEntDrawPlan,
-    sky: Option<&super::sky::SkyModelDrawPlan>,
-) -> ProducerKeys {
-    let sky_rev = sky.map(|sky| sky.revisions).unwrap_or_default();
-    let sky_gen = sky.map(|sky| sky.generation).unwrap_or(0);
-    ProducerKeys {
-        generation: [
-            fpv.generation,
-            bodies.generation,
-            scripts.generation,
-            missiles.generation,
-            items.generation,
-            fx_models.generation,
-            dynents.generation,
-            sky_gen,
-        ],
-        topology: [
-            fpv.revisions.topology,
-            bodies.revisions.topology,
-            scripts.revisions.topology,
-            missiles.revisions.topology,
-            items.revisions.topology,
-            fx_models.revisions.topology,
-            dynents.revisions.topology,
-            sky_rev.topology,
-        ],
-        admission: [
-            fpv.revisions.admission,
-            bodies.revisions.admission,
-            scripts.revisions.admission,
-            missiles.revisions.admission,
-            items.revisions.admission,
-            fx_models.revisions.admission,
-            dynents.revisions.admission,
-            sky_rev.admission,
-        ],
-        vertices: [
-            fpv.revisions.vertices,
-            bodies.revisions.vertices,
-            scripts.revisions.vertices,
-            missiles.revisions.vertices,
-            items.revisions.vertices,
-            fx_models.revisions.vertices,
-            dynents.revisions.vertices,
-            sky_rev.vertices,
-        ],
-        materials: [
-            fpv.revisions.materials,
-            bodies.revisions.materials,
-            scripts.revisions.materials,
-            missiles.revisions.materials,
-            items.revisions.materials,
-            fx_models.revisions.materials,
-            dynents.revisions.materials,
-            sky_rev.materials,
-        ],
-        draws: [
-            fpv.revisions.draws,
-            bodies.revisions.draws,
-            scripts.revisions.draws,
-            missiles.revisions.draws,
-            items.revisions.draws,
-            fx_models.revisions.draws,
-            dynents.revisions.draws,
-            sky_rev.draws,
-        ],
-        producer_revision: [
-            fpv.revision,
-            bodies.revision,
-            scripts.revision,
-            missiles.revision,
-            items.revision,
-            fx_models.revision,
-            dynents.revision,
-            0,
-        ],
-    }
+#[derive(Clone, Copy)]
+pub struct XModelProducers<'a> {
+    pub fpv: &'a FpvDrawPlan,
+    pub bodies: &'a RemoteBodyDrawPlan,
+    pub scripts: &'a ScriptModelDrawPlan,
+    pub missiles: &'a MissileDrawPlan,
+    pub items: &'a ItemDrawPlan,
+    pub fx_models: &'a FxModelDrawPlan,
+    pub dynents: &'a DynEntDrawPlan,
 }
 
-fn xmodel_merge_stamp(
-    fpv: &FpvDrawPlan,
-    bodies: &RemoteBodyDrawPlan,
-    scripts: &ScriptModelDrawPlan,
-    missiles: &MissileDrawPlan,
-    items: &ItemDrawPlan,
-    fx_models: &FxModelDrawPlan,
-    dynents: &DynEntDrawPlan,
-    scene: Option<&crate::GfxScene>,
-    sky: Option<(&super::sky::SkyModelDrawPlan, Vec3)>,
-) -> XModelMergeStamp {
-    // The one thing still read out of the producers' rows here is which scene
-    // entity each draw belongs to, because whether that entity is admitted this
-    // frame is the scene's answer, not the producer's — a frame input, not a
-    // guess at whether the payload changed. The payload fingerprint that used
-    // to sit next to it is gone: `vertices`, `draws` and `topology` below are
-    // the producers' own published verdicts now.
-    let mut occupancy = DefaultHasher::new();
-    fpv_scene_colour(fpv, scene).hash(&mut occupancy);
-    for draw in bodies.draws() {
-        scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
+impl<'a> XModelProducers<'a> {
+    fn keys(self, sky: Option<&super::sky::SkyModelDrawPlan>) -> ProducerKeys {
+        let Self {
+            fpv,
+            bodies,
+            scripts,
+            missiles,
+            items,
+            fx_models,
+            dynents,
+        } = self;
+        let sky_rev = sky
+            .map(|sky| sky.revisions)
+            .unwrap_or_else(render_frame::SourceRevisions::default);
+        let sky_gen = sky.map(|sky| sky.generation).unwrap_or(0);
+        ProducerKeys {
+            generation: [
+                fpv.generation,
+                bodies.generation,
+                scripts.generation,
+                missiles.generation,
+                items.generation,
+                fx_models.generation,
+                dynents.generation,
+                sky_gen,
+            ],
+            topology: [
+                fpv.revisions.topology,
+                bodies.revisions.topology,
+                scripts.revisions.topology,
+                missiles.revisions.topology,
+                items.revisions.topology,
+                fx_models.revisions.topology,
+                dynents.revisions.topology,
+                sky_rev.topology,
+            ],
+            admission: [
+                fpv.revisions.admission,
+                bodies.revisions.admission,
+                scripts.revisions.admission,
+                missiles.revisions.admission,
+                items.revisions.admission,
+                fx_models.revisions.admission,
+                dynents.revisions.admission,
+                sky_rev.admission,
+            ],
+            vertices: [
+                fpv.revisions.vertices,
+                bodies.revisions.vertices,
+                scripts.revisions.vertices,
+                missiles.revisions.vertices,
+                items.revisions.vertices,
+                fx_models.revisions.vertices,
+                dynents.revisions.vertices,
+                sky_rev.vertices,
+            ],
+            materials: [
+                fpv.revisions.materials,
+                bodies.revisions.materials,
+                scripts.revisions.materials,
+                missiles.revisions.materials,
+                items.revisions.materials,
+                fx_models.revisions.materials,
+                dynents.revisions.materials,
+                sky_rev.materials,
+            ],
+            draws: [
+                fpv.revisions.draws,
+                bodies.revisions.draws,
+                scripts.revisions.draws,
+                missiles.revisions.draws,
+                items.revisions.draws,
+                fx_models.revisions.draws,
+                dynents.revisions.draws,
+                sky_rev.draws,
+            ],
+            producer_revision: [
+                fpv.revision,
+                bodies.revision,
+                scripts.revision,
+                missiles.revision,
+                items.revision,
+                fx_models.revision,
+                dynents.revision,
+                0,
+            ],
+        }
     }
-    for draw in scripts.draws() {
-        script_draw_admitted(scene, draw).hash(&mut occupancy);
+
+    fn merge_stamp(
+        self,
+        scene: Option<&crate::GfxScene>,
+        sky: Option<(
+            &super::sky::SkyModelDrawPlan,
+            Vec3,
+            Option<&render_frame::PortalView>,
+        )>,
+    ) -> XModelMergeStamp {
+        let Self {
+            fpv,
+            bodies,
+            scripts,
+            missiles,
+            items,
+            fx_models,
+            dynents,
+        } = self;
+        let mut occupancy = DefaultHasher::new();
+        fpv_scene_colour(fpv, scene).hash(&mut occupancy);
+        for draw in bodies.draws() {
+            scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
+        }
+        for draw in scripts.draws() {
+            script_draw_admitted(scene, draw).hash(&mut occupancy);
+        }
+        for draw in missiles.draws() {
+            scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
+        }
+        for draw in items.draws() {
+            scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
+        }
+        (!fx_models.draws().is_empty()).hash(&mut occupancy);
+        (!dynents.draws().is_empty()).hash(&mut occupancy);
+        let sky_eye = sky.map(|(_, eye, _)| [eye.x.to_bits(), eye.y.to_bits(), eye.z.to_bits()]);
+        let keys = self.keys(sky.map(|(sky, _, _)| sky));
+        XModelMergeStamp {
+            topology: XModelTopologyKey {
+                generation: keys.generation,
+                topology: keys.topology,
+                admission: keys.admission,
+                occupancy: occupancy.finish(),
+            },
+            vertices: keys.vertices,
+            materials: keys.materials,
+            draws: keys.draws,
+            producer_revision: keys.producer_revision,
+            fpv_world: mat4_bits(fpv.world_from_local),
+            fpv_lighting: fpv.lighting_handle,
+            fpv_scene_light: fpv.scene_light_index,
+            fpv_probe: fpv.reflection_probe_index,
+            fpv_visible: fpv.visible,
+            fpv_drawgun: fpv.drawgun,
+            fpv_colour: fpv_scene_colour(fpv, scene),
+            sky_eye,
+        }
     }
-    for draw in missiles.draws() {
-        scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
+
+    pub fn merge_into(
+        self,
+        merged: &mut XModelDrawPlan,
+        scene: Option<&crate::GfxScene>,
+        sky: Option<(
+            &'a super::sky::SkyModelDrawPlan,
+            Vec3,
+            Option<&'a render_frame::PortalView>,
+        )>,
+    ) -> XModelMergeStamps {
+        let Self {
+            fpv,
+            bodies,
+            scripts,
+            missiles,
+            items,
+            fx_models,
+            dynents,
+        } = self;
+        let stamp = self.merge_stamp(scene, sky);
+        if merged.last_input == Some(stamp) {
+            publish_skin_jobs(merged, fpv, bodies);
+            return XModelMergeStamps {
+                concatenated: false,
+                ..XModelMergeStamps::default()
+            };
+        }
+        if merged.last_topology == Some(stamp.topology) && merged.concat_layout {
+            let prev = merged.last_input;
+            let vertices_changed = prev.is_none_or(|p| p.vertices != stamp.vertices);
+            let draws_changed = prev.is_none_or(|p| concat_draws_changed(p, &stamp));
+            let mut packed_ms = 0.0;
+            if vertices_changed {
+                let packed_started = Instant::now();
+                let prev_packed = merged.packed_share.take();
+                let mut packed = merged.packed_banks.take_write();
+                let mut packed_ok = true;
+                recopy_concat_packed_bank(
+                    &mut packed,
+                    &mut packed_ok,
+                    merged.last_admitted,
+                    self.packed_owners(sky),
+                );
+                let key = packed_ok
+                    .then(|| PackedContentKey::new(&stamp, merged.last_admitted, packed.len()));
+                let payload = install_retained_packed(
+                    packed_ok,
+                    packed,
+                    merged.decoded_n,
+                    XMODEL_PACKED_EMPTY_PLAN,
+                    XMODEL_PACKED_UNAVAILABLE,
+                );
+                publish_packed_payload(merged, prev_packed, payload, key);
+                packed_ms = packed_started.elapsed().as_secs_f32() * 1000.0;
+            }
+            if draws_changed {
+                self.refresh_draws(merged, scene, sky);
+            }
+            merged.last_input = Some(stamp);
+            publish_skin_jobs(merged, fpv, bodies);
+            return XModelMergeStamps {
+                concatenated: true,
+                packed_ms,
+                append_ms: 0.0,
+            };
+        }
+        let prev_packed = merged.packed_share.take();
+        let prev_index = merged.index_share.take();
+        let prev_range = merged.range_share.take();
+        let mut packed = merged.packed_banks.take_write();
+        packed.clear();
+        let indices = merged.index_banks.take_write();
+        let ranges = merged.range_banks.take_write();
+        merged.clear();
+        merged.indices = indices;
+        merged.surface_ranges = ranges;
+        merged.indices.clear();
+        merged.surface_ranges.clear();
+        merged.concat_layout = true;
+
+        packed.reserve(
+            packed_row_count(bodies.packed_vertices())
+                + packed_row_count(fpv.packed_vertices())
+                + packed_row_count(scripts.packed_vertices())
+                + packed_row_count(missiles.packed_vertices())
+                + packed_row_count(items.packed_vertices())
+                + packed_row_count(fx_models.packed_vertices())
+                + packed_row_count(dynents.packed_vertices()),
+        );
+        let mut packed_ok = true;
+        let mut admitted = 0u8;
+        let append_started = Instant::now();
+        let mut next_body_object = XMODEL_OBJECT_ID_BODY_BASE;
+        let (fx_draws, fx_object_id_exhausted) = dense_fx_object_ids(
+            fx_models.draws(),
+            merged
+                .draws
+                .iter()
+                .chain(dynents.draws().iter())
+                .map(|draw| draw.object_id)
+                .max(),
+        );
+        merged.fx_object_id_exhausted = fx_object_id_exhausted;
+        if (XModelGeometrySource {
+            decoded_n: bodies.decoded_n(),
+            indices: bodies.indices(),
+            surface_ranges: bodies.surface_ranges(),
+            materials: bodies.materials(),
+            packed_payload: bodies.packed_vertices(),
+        })
+        .append_admitted(
+            merged,
+            &mut packed,
+            &mut packed_ok,
+            bodies.draws().iter().filter_map(|d| {
+                scene_ent_admitted(scene, d.scene_entnum).then(|| {
+                    let object_id = next_body_object;
+                    next_body_object = next_body_object.saturating_add(1);
+                    XModelSurfaceDraw {
+                        surface: d.surface,
+                        material: d.material,
+                        world_from_local: d.world_from_local,
+                        lighting_handle: d.lighting_handle,
+
+                        pending_lighting: None,
+                        colour_refusal: None,
+                        object_id,
+                        scene_light_index: d.scene_light_index,
+                        reflection_probe_index: d.reflection_probe_index,
+                        packed_lighting: None,
+                        is_scope: false,
+                        scene_entnum: d.scene_entnum,
+                        body_client: d.scene_entnum,
+                        // Remote bodies carry no radius here; unbounded keeps
+                        // every player caster in both partitions.
+                        caster_bound: None,
+                    }
+                })
+            }),
+        ) {
+            admitted |= ADMIT_BODY;
+        }
+
+        if fpv_scene_colour(fpv, scene) {
+            if (XModelGeometrySource {
+                decoded_n: fpv.decoded_n(),
+                indices: fpv.indices(),
+                surface_ranges: fpv.surface_ranges(),
+                materials: fpv.materials(),
+                packed_payload: fpv.packed_vertices(),
+            })
+            .append_admitted(
+                merged,
+                &mut packed,
+                &mut packed_ok,
+                fpv.draws().iter().map(|d| XModelSurfaceDraw {
+                    surface: d.surface,
+                    material: d.material,
+                    world_from_local: fpv.world_from_local,
+                    lighting_handle: fpv.lighting_handle,
+                    pending_lighting: None,
+                    colour_refusal: None,
+                    object_id: XMODEL_OBJECT_ID_VIEWMODEL,
+                    scene_light_index: fpv.scene_light_index,
+                    reflection_probe_index: fpv.reflection_probe_index,
+                    packed_lighting: None,
+                    is_scope: d.is_scope,
+                    scene_entnum: Some(crate::SCENE_VIEWMODEL_ENTNUM),
+                    body_client: None,
+                    caster_bound: None,
+                }),
+            ) {
+                admitted |= ADMIT_FPV;
+            }
+        }
+
+        if (XModelGeometrySource {
+            decoded_n: scripts.vertices().len(),
+            indices: scripts.indices(),
+            surface_ranges: scripts.surface_ranges(),
+            materials: scripts.materials(),
+            packed_payload: scripts.packed_vertices(),
+        })
+        .append_admitted(
+            merged,
+            &mut packed,
+            &mut packed_ok,
+            scripts
+                .draws()
+                .iter()
+                .copied()
+                .filter(|d| script_draw_admitted(scene, d)),
+        ) {
+            admitted |= ADMIT_SCRIPT;
+        }
+
+        if (XModelGeometrySource {
+            decoded_n: missiles.vertices().len(),
+            indices: missiles.indices(),
+            surface_ranges: missiles.surface_ranges(),
+            materials: missiles.materials(),
+            packed_payload: missiles.packed_vertices(),
+        })
+        .append_admitted(
+            merged,
+            &mut packed,
+            &mut packed_ok,
+            missiles
+                .draws()
+                .iter()
+                .copied()
+                .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
+        ) {
+            admitted |= ADMIT_MISSILE;
+        }
+
+        if (XModelGeometrySource {
+            decoded_n: items.vertices().len(),
+            indices: items.indices(),
+            surface_ranges: items.surface_ranges(),
+            materials: items.materials(),
+            packed_payload: items.packed_vertices(),
+        })
+        .append_admitted(
+            merged,
+            &mut packed,
+            &mut packed_ok,
+            items
+                .draws()
+                .iter()
+                .copied()
+                .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
+        ) {
+            admitted |= ADMIT_ITEM;
+        }
+        if !fx_draws.is_empty() {
+            admitted |= ADMIT_FX;
+            append_source_plan(
+                merged,
+                fx_models.vertices().len(),
+                fx_models.indices(),
+                fx_models.surface_ranges(),
+                fx_models.materials(),
+                fx_draws.into_iter(),
+            );
+            append_packed_source(
+                &mut packed,
+                &mut packed_ok,
+                fx_models.packed_vertices(),
+                fx_models.vertices().len(),
+            );
+        }
+        if (XModelGeometrySource {
+            decoded_n: dynents.vertices().len(),
+            indices: dynents.indices(),
+            surface_ranges: dynents.surface_ranges(),
+            materials: dynents.materials(),
+            packed_payload: dynents.packed_vertices(),
+        })
+        .append_admitted(
+            merged,
+            &mut packed,
+            &mut packed_ok,
+            dynents.draws().iter().copied(),
+        ) {
+            admitted |= ADMIT_DYNENT;
+        }
+        if let Some((sky, eye, view)) = sky {
+            if (XModelGeometrySource {
+                decoded_n: sky.geometry.decoded_vertices().len(),
+                indices: sky.geometry.indices(),
+                surface_ranges: sky.geometry.surface_ranges(),
+                materials: &sky.geometry.materials,
+                packed_payload: &sky.geometry.packed_vertices,
+            })
+            .append_admitted(
+                merged,
+                &mut packed,
+                &mut packed_ok,
+                sky.draws_at(eye, view),
+            ) {
+                admitted |= ADMIT_SKY;
+            }
+        }
+        let append_ms = append_started.elapsed().as_secs_f32() * 1000.0;
+        let packed_started = Instant::now();
+        merged.last_admitted = admitted;
+        let key =
+            packed_ok.then(|| PackedContentKey::new(&stamp, merged.last_admitted, packed.len()));
+        let payload = install_retained_packed(
+            packed_ok,
+            packed,
+            merged.decoded_n,
+            XMODEL_PACKED_EMPTY_PLAN,
+            XMODEL_PACKED_UNAVAILABLE,
+        );
+        publish_packed_payload(merged, prev_packed, payload, key);
+        merged.publish_topology_shares(prev_index, prev_range);
+        publish_decoded_share(merged);
+        merged.last_input = Some(stamp);
+        merged.last_topology = Some(stamp.topology);
+        publish_skin_jobs(merged, fpv, bodies);
+        let packed_ms = packed_started.elapsed().as_secs_f32() * 1000.0;
+        XModelMergeStamps {
+            append_ms,
+            packed_ms,
+            concatenated: true,
+        }
     }
-    for draw in items.draws() {
-        scene_ent_admitted(scene, draw.scene_entnum).hash(&mut occupancy);
+
+    fn packed_owners(
+        self,
+        sky: Option<(
+            &'a super::sky::SkyModelDrawPlan,
+            Vec3,
+            Option<&'a render_frame::PortalView>,
+        )>,
+    ) -> [ConcatPackedOwner<'a>; 8] {
+        let Self {
+            fpv,
+            bodies,
+            scripts,
+            missiles,
+            items,
+            fx_models,
+            dynents,
+        } = self;
+        let sky_geom = sky.map(|(sky, _, _)| &sky.geometry);
+        [
+            ConcatPackedOwner {
+                admit: ADMIT_BODY,
+                payload: bodies.packed_vertices(),
+                decoded_n: bodies.decoded_n(),
+            },
+            ConcatPackedOwner {
+                admit: ADMIT_FPV,
+                payload: fpv.packed_vertices(),
+                decoded_n: fpv.decoded_n(),
+            },
+            ConcatPackedOwner {
+                admit: ADMIT_SCRIPT,
+                payload: scripts.packed_vertices(),
+                decoded_n: scripts.vertices().len(),
+            },
+            ConcatPackedOwner {
+                admit: ADMIT_MISSILE,
+                payload: missiles.packed_vertices(),
+                decoded_n: missiles.vertices().len(),
+            },
+            ConcatPackedOwner {
+                admit: ADMIT_ITEM,
+                payload: items.packed_vertices(),
+                decoded_n: items.vertices().len(),
+            },
+            ConcatPackedOwner {
+                admit: ADMIT_FX,
+                payload: fx_models.packed_vertices(),
+                decoded_n: fx_models.vertices().len(),
+            },
+            ConcatPackedOwner {
+                admit: ADMIT_DYNENT,
+                payload: dynents.packed_vertices(),
+                decoded_n: dynents.vertices().len(),
+            },
+            ConcatPackedOwner {
+                admit: ADMIT_SKY,
+                payload: sky_geom
+                    .map(|g| &g.packed_vertices)
+                    .unwrap_or(bodies.packed_vertices()),
+                decoded_n: sky_geom.map(|g| g.decoded_vertices().len()).unwrap_or(0),
+            },
+        ]
     }
-    (!fx_models.draws().is_empty()).hash(&mut occupancy);
-    (!dynents.draws().is_empty()).hash(&mut occupancy);
-    let sky_eye = sky.map(|(_, eye)| [eye.x.to_bits(), eye.y.to_bits(), eye.z.to_bits()]);
-    let keys = producer_keys(
-        fpv,
-        bodies,
-        scripts,
-        missiles,
-        items,
-        fx_models,
-        dynents,
-        sky.map(|(sky, _)| sky),
-    );
-    XModelMergeStamp {
-        topology: XModelTopologyKey {
-            generation: keys.generation,
-            topology: keys.topology,
-            admission: keys.admission,
-            occupancy: occupancy.finish(),
-        },
-        vertices: keys.vertices,
-        materials: keys.materials,
-        draws: keys.draws,
-        producer_revision: keys.producer_revision,
-        fpv_world: mat4_bits(fpv.world_from_local),
-        fpv_lighting: fpv.lighting_handle,
-        fpv_scene_light: fpv.scene_light_index,
-        fpv_probe: fpv.reflection_probe_index,
-        fpv_visible: fpv.visible,
-        fpv_drawgun: fpv.drawgun,
-        fpv_colour: fpv_scene_colour(fpv, scene),
-        sky_eye,
+
+    fn refresh_draws(
+        self,
+        merged: &mut XModelDrawPlan,
+        scene: Option<&crate::GfxScene>,
+        sky: Option<(
+            &super::sky::SkyModelDrawPlan,
+            Vec3,
+            Option<&render_frame::PortalView>,
+        )>,
+    ) {
+        let Self {
+            fpv,
+            bodies,
+            scripts,
+            missiles,
+            items,
+            fx_models,
+            dynents,
+        } = self;
+        merged.draws.clear();
+        merged.materials.clear();
+        let mut range_base = 0u32;
+        let mut next_body_object = XMODEL_OBJECT_ID_BODY_BASE;
+        let (fx_draws, fx_object_id_exhausted) = dense_fx_object_ids(
+            fx_models.draws(),
+            dynents.draws().iter().map(|draw| draw.object_id).max(),
+        );
+        merged.fx_object_id_exhausted = fx_object_id_exhausted;
+        append_concat_owner_draws(
+            merged,
+            &mut range_base,
+            bodies.surface_ranges().len(),
+            bodies.materials(),
+            bodies.draws().iter().filter_map(|d| {
+                scene_ent_admitted(scene, d.scene_entnum).then(|| {
+                    let object_id = next_body_object;
+                    next_body_object = next_body_object.saturating_add(1);
+                    XModelSurfaceDraw {
+                        surface: d.surface,
+                        material: d.material,
+                        world_from_local: d.world_from_local,
+                        lighting_handle: d.lighting_handle,
+                        pending_lighting: None,
+                        colour_refusal: None,
+                        object_id,
+                        scene_light_index: d.scene_light_index,
+                        reflection_probe_index: d.reflection_probe_index,
+                        packed_lighting: None,
+                        is_scope: false,
+                        scene_entnum: d.scene_entnum,
+                        body_client: d.scene_entnum,
+                        // Remote bodies carry no radius here; unbounded keeps
+                        // every player caster in both partitions.
+                        caster_bound: None,
+                    }
+                })
+            }),
+        );
+        if fpv_scene_colour(fpv, scene) {
+            append_concat_owner_draws(
+                merged,
+                &mut range_base,
+                fpv.surface_ranges().len(),
+                fpv.materials(),
+                fpv.draws().iter().map(|d| XModelSurfaceDraw {
+                    surface: d.surface,
+                    material: d.material,
+                    world_from_local: fpv.world_from_local,
+                    lighting_handle: fpv.lighting_handle,
+                    pending_lighting: None,
+                    colour_refusal: None,
+                    object_id: XMODEL_OBJECT_ID_VIEWMODEL,
+                    scene_light_index: fpv.scene_light_index,
+                    reflection_probe_index: fpv.reflection_probe_index,
+                    packed_lighting: None,
+                    is_scope: d.is_scope,
+                    scene_entnum: Some(crate::SCENE_VIEWMODEL_ENTNUM),
+                    body_client: None,
+                    caster_bound: None,
+                }),
+            );
+        }
+        append_concat_owner_draws(
+            merged,
+            &mut range_base,
+            scripts.surface_ranges().len(),
+            scripts.materials(),
+            scripts
+                .draws()
+                .iter()
+                .copied()
+                .filter(|d| script_draw_admitted(scene, d)),
+        );
+        append_concat_owner_draws(
+            merged,
+            &mut range_base,
+            missiles.surface_ranges().len(),
+            missiles.materials(),
+            missiles
+                .draws()
+                .iter()
+                .copied()
+                .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
+        );
+        append_concat_owner_draws(
+            merged,
+            &mut range_base,
+            items.surface_ranges().len(),
+            items.materials(),
+            items
+                .draws()
+                .iter()
+                .copied()
+                .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
+        );
+        append_concat_owner_draws(
+            merged,
+            &mut range_base,
+            fx_models.surface_ranges().len(),
+            fx_models.materials(),
+            fx_draws,
+        );
+        append_concat_owner_draws(
+            merged,
+            &mut range_base,
+            dynents.surface_ranges().len(),
+            dynents.materials(),
+            dynents.draws().iter().copied(),
+        );
+        if let Some((sky, eye, view)) = sky {
+            append_concat_owner_draws(
+                merged,
+                &mut range_base,
+                sky.geometry.surface_ranges().len(),
+                &sky.geometry.materials,
+                sky.draws_at(eye, view),
+            );
+        }
     }
 }
 
 fn mat4_bits(m: Mat4) -> [u32; 16] {
     let cols = m.to_cols_array();
     std::array::from_fn(|i| cols[i].to_bits())
-}
-
-pub fn merge_xmodel_draw_plan(
-    merged: &mut XModelDrawPlan,
-    fpv: &FpvDrawPlan,
-    bodies: &RemoteBodyDrawPlan,
-    scripts: &ScriptModelDrawPlan,
-    missiles: &MissileDrawPlan,
-    items: &ItemDrawPlan,
-    fx_models: &FxModelDrawPlan,
-    dynents: &DynEntDrawPlan,
-    scene: Option<&crate::GfxScene>,
-    sky: Option<(&super::sky::SkyModelDrawPlan, Vec3)>,
-) -> XModelMergeStamps {
-    let stamp = xmodel_merge_stamp(
-        fpv, bodies, scripts, missiles, items, fx_models, dynents, scene, sky,
-    );
-    if merged.last_input == Some(stamp) {
-        publish_skin_jobs(merged, fpv, bodies);
-        return XModelMergeStamps {
-            concatenated: false,
-            ..XModelMergeStamps::default()
-        };
-    }
-    if merged.last_topology == Some(stamp.topology) && merged.concat_layout {
-        let prev = merged.last_input;
-        let vertices_changed = prev.is_none_or(|p| p.vertices != stamp.vertices);
-        let draws_changed = prev.is_none_or(|p| concat_draws_changed(p, &stamp));
-        let mut packed_ms = 0.0;
-        if vertices_changed {
-            let packed_started = Instant::now();
-            let prev_packed = merged.packed_share.take();
-            let mut packed = merged.packed_banks.take_write();
-            let mut packed_ok = true;
-            recopy_concat_packed_bank(
-                &mut packed,
-                &mut packed_ok,
-                merged.last_admitted,
-                concat_packed_owners(
-                    fpv, bodies, scripts, missiles, items, fx_models, dynents, sky,
-                ),
-            );
-            let key = packed_ok
-                .then(|| PackedContentKey::new(&stamp, merged.last_admitted, packed.len()));
-            let payload = install_retained_packed(
-                packed_ok,
-                packed,
-                merged.decoded_n,
-                XMODEL_PACKED_EMPTY_PLAN,
-                XMODEL_PACKED_UNAVAILABLE,
-            );
-            publish_packed_payload(merged, prev_packed, payload, key);
-            packed_ms = packed_started.elapsed().as_secs_f32() * 1000.0;
-        }
-        if draws_changed {
-            refresh_concat_draws(
-                merged, fpv, bodies, scripts, missiles, items, fx_models, dynents, scene, sky,
-            );
-        }
-        merged.last_input = Some(stamp);
-        publish_skin_jobs(merged, fpv, bodies);
-        return XModelMergeStamps {
-            concatenated: true,
-            packed_ms,
-            append_ms: 0.0,
-        };
-    }
-    let prev_packed = merged.packed_share.take();
-    let prev_index = merged.index_share.take();
-    let prev_range = merged.range_share.take();
-    let mut packed = merged.packed_banks.take_write();
-    packed.clear();
-    let indices = merged.index_banks.take_write();
-    let ranges = merged.range_banks.take_write();
-    merged.clear();
-    merged.indices = indices;
-    merged.surface_ranges = ranges;
-    merged.indices.clear();
-    merged.surface_ranges.clear();
-    merged.concat_layout = true;
-
-    packed.reserve(
-        packed_row_count(bodies.packed_vertices())
-            + packed_row_count(fpv.packed_vertices())
-            + packed_row_count(scripts.packed_vertices())
-            + packed_row_count(missiles.packed_vertices())
-            + packed_row_count(items.packed_vertices())
-            + packed_row_count(fx_models.packed_vertices())
-            + packed_row_count(dynents.packed_vertices()),
-    );
-    let mut packed_ok = true;
-    let mut admitted = 0u8;
-    let append_started = Instant::now();
-    let mut next_body_object = XMODEL_OBJECT_ID_BODY_BASE;
-    let (fx_draws, fx_object_id_exhausted) = dense_fx_object_ids(
-        fx_models.draws(),
-        merged
-            .draws
-            .iter()
-            .chain(dynents.draws().iter())
-            .map(|draw| draw.object_id)
-            .max(),
-    );
-    merged.fx_object_id_exhausted = fx_object_id_exhausted;
-    if append_admitted_source(
-        merged,
-        &mut packed,
-        &mut packed_ok,
-        bodies.decoded_n(),
-        bodies.indices(),
-        bodies.surface_ranges(),
-        bodies.materials(),
-        bodies.packed_vertices(),
-        bodies.draws().iter().filter_map(|d| {
-            scene_ent_admitted(scene, d.scene_entnum).then(|| {
-                let object_id = next_body_object;
-                next_body_object = next_body_object.saturating_add(1);
-                XModelSurfaceDraw {
-                    surface: d.surface,
-                    material: d.material,
-                    world_from_local: d.world_from_local,
-                    lighting_handle: d.lighting_handle,
-
-                    pending_lighting: None,
-                    colour_refusal: None,
-                    object_id,
-                    scene_light_index: d.scene_light_index,
-                    reflection_probe_index: d.reflection_probe_index,
-                    packed_lighting: None,
-                    is_scope: false,
-                    scene_entnum: d.scene_entnum,
-                    body_client: d.scene_entnum,
-                    // Remote bodies carry no radius here; unbounded keeps
-                    // every player caster in both partitions.
-                    caster_bound: None,
-                }
-            })
-        }),
-    ) {
-        admitted |= ADMIT_BODY;
-    }
-
-    if fpv_scene_colour(fpv, scene) {
-        if append_admitted_source(
-            merged,
-            &mut packed,
-            &mut packed_ok,
-            fpv.decoded_n(),
-            fpv.indices(),
-            fpv.surface_ranges(),
-            fpv.materials(),
-            fpv.packed_vertices(),
-            fpv.draws().iter().map(|d| XModelSurfaceDraw {
-                surface: d.surface,
-                material: d.material,
-                world_from_local: fpv.world_from_local,
-                lighting_handle: fpv.lighting_handle,
-                pending_lighting: None,
-                colour_refusal: None,
-                object_id: XMODEL_OBJECT_ID_VIEWMODEL,
-                scene_light_index: fpv.scene_light_index,
-                reflection_probe_index: fpv.reflection_probe_index,
-                packed_lighting: None,
-                is_scope: d.is_scope,
-                scene_entnum: Some(crate::SCENE_VIEWMODEL_ENTNUM),
-                body_client: None,
-                caster_bound: None,
-            }),
-        ) {
-            admitted |= ADMIT_FPV;
-        }
-    }
-
-    if append_admitted_source(
-        merged,
-        &mut packed,
-        &mut packed_ok,
-        scripts.vertices().len(),
-        scripts.indices(),
-        scripts.surface_ranges(),
-        scripts.materials(),
-        scripts.packed_vertices(),
-        scripts
-            .draws()
-            .iter()
-            .copied()
-            .filter(|d| script_draw_admitted(scene, d)),
-    ) {
-        admitted |= ADMIT_SCRIPT;
-    }
-
-    if append_admitted_source(
-        merged,
-        &mut packed,
-        &mut packed_ok,
-        missiles.vertices().len(),
-        missiles.indices(),
-        missiles.surface_ranges(),
-        missiles.materials(),
-        missiles.packed_vertices(),
-        missiles
-            .draws()
-            .iter()
-            .copied()
-            .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
-    ) {
-        admitted |= ADMIT_MISSILE;
-    }
-
-    if append_admitted_source(
-        merged,
-        &mut packed,
-        &mut packed_ok,
-        items.vertices().len(),
-        items.indices(),
-        items.surface_ranges(),
-        items.materials(),
-        items.packed_vertices(),
-        items
-            .draws()
-            .iter()
-            .copied()
-            .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
-    ) {
-        admitted |= ADMIT_ITEM;
-    }
-    if !fx_draws.is_empty() {
-        admitted |= ADMIT_FX;
-        append_source_plan(
-            merged,
-            fx_models.vertices().len(),
-            fx_models.indices(),
-            fx_models.surface_ranges(),
-            fx_models.materials(),
-            fx_draws.into_iter(),
-        );
-        append_packed_source(
-            &mut packed,
-            &mut packed_ok,
-            fx_models.packed_vertices(),
-            fx_models.vertices().len(),
-        );
-    }
-    if append_admitted_source(
-        merged,
-        &mut packed,
-        &mut packed_ok,
-        dynents.vertices().len(),
-        dynents.indices(),
-        dynents.surface_ranges(),
-        dynents.materials(),
-        dynents.packed_vertices(),
-        dynents.draws().iter().copied(),
-    ) {
-        admitted |= ADMIT_DYNENT;
-    }
-    if let Some((sky, eye)) = sky {
-        if append_admitted_source(
-            merged,
-            &mut packed,
-            &mut packed_ok,
-            sky.geometry.decoded_vertices().len(),
-            sky.geometry.indices(),
-            sky.geometry.surface_ranges(),
-            &sky.geometry.materials,
-            &sky.geometry.packed_vertices,
-            sky.draws.iter().map(|draw| XModelSurfaceDraw {
-                world_from_local: Mat4::from_translation(eye),
-                ..*draw
-            }),
-        ) {
-            admitted |= ADMIT_SKY;
-        }
-    }
-    let append_ms = append_started.elapsed().as_secs_f32() * 1000.0;
-    let packed_started = Instant::now();
-    merged.last_admitted = admitted;
-    let key = packed_ok.then(|| PackedContentKey::new(&stamp, merged.last_admitted, packed.len()));
-    let payload = install_retained_packed(
-        packed_ok,
-        packed,
-        merged.decoded_n,
-        XMODEL_PACKED_EMPTY_PLAN,
-        XMODEL_PACKED_UNAVAILABLE,
-    );
-    publish_packed_payload(merged, prev_packed, payload, key);
-    publish_topology_shares(
-        prev_index,
-        prev_range,
-        &mut merged.indices,
-        &mut merged.surface_ranges,
-        &mut merged.index_share,
-        &mut merged.range_share,
-        &mut merged.topology_revision,
-        &mut merged.index_banks,
-        &mut merged.range_banks,
-    );
-    publish_decoded_share(merged);
-    merged.last_input = Some(stamp);
-    merged.last_topology = Some(stamp.topology);
-    publish_skin_jobs(merged, fpv, bodies);
-    let packed_ms = packed_started.elapsed().as_secs_f32() * 1000.0;
-    XModelMergeStamps {
-        append_ms,
-        packed_ms,
-        concatenated: true,
-    }
 }
 
 fn publish_skin_jobs(merged: &mut XModelDrawPlan, fpv: &FpvDrawPlan, bodies: &RemoteBodyDrawPlan) {
@@ -783,63 +1032,6 @@ struct ConcatPackedOwner<'a> {
     decoded_n: usize,
 }
 
-fn concat_packed_owners<'a>(
-    fpv: &'a FpvDrawPlan,
-    bodies: &'a RemoteBodyDrawPlan,
-    scripts: &'a ScriptModelDrawPlan,
-    missiles: &'a MissileDrawPlan,
-    items: &'a ItemDrawPlan,
-    fx_models: &'a FxModelDrawPlan,
-    dynents: &'a DynEntDrawPlan,
-    sky: Option<(&'a super::sky::SkyModelDrawPlan, Vec3)>,
-) -> [ConcatPackedOwner<'a>; 8] {
-    let sky_geom = sky.map(|(sky, _)| &sky.geometry);
-    [
-        ConcatPackedOwner {
-            admit: ADMIT_BODY,
-            payload: bodies.packed_vertices(),
-            decoded_n: bodies.decoded_n(),
-        },
-        ConcatPackedOwner {
-            admit: ADMIT_FPV,
-            payload: fpv.packed_vertices(),
-            decoded_n: fpv.decoded_n(),
-        },
-        ConcatPackedOwner {
-            admit: ADMIT_SCRIPT,
-            payload: scripts.packed_vertices(),
-            decoded_n: scripts.vertices().len(),
-        },
-        ConcatPackedOwner {
-            admit: ADMIT_MISSILE,
-            payload: missiles.packed_vertices(),
-            decoded_n: missiles.vertices().len(),
-        },
-        ConcatPackedOwner {
-            admit: ADMIT_ITEM,
-            payload: items.packed_vertices(),
-            decoded_n: items.vertices().len(),
-        },
-        ConcatPackedOwner {
-            admit: ADMIT_FX,
-            payload: fx_models.packed_vertices(),
-            decoded_n: fx_models.vertices().len(),
-        },
-        ConcatPackedOwner {
-            admit: ADMIT_DYNENT,
-            payload: dynents.packed_vertices(),
-            decoded_n: dynents.vertices().len(),
-        },
-        ConcatPackedOwner {
-            admit: ADMIT_SKY,
-            payload: sky_geom
-                .map(|g| &g.packed_vertices)
-                .unwrap_or(bodies.packed_vertices()),
-            decoded_n: sky_geom.map(|g| g.decoded_vertices().len()).unwrap_or(0),
-        },
-    ]
-}
-
 fn concat_packed_layout(admitted: u8, owners: &[ConcatPackedOwner<'_>; 8]) -> ([usize; 8], usize) {
     let mut counts = [0usize; 8];
     let mut expected = 0usize;
@@ -893,142 +1085,6 @@ fn append_concat_owner_draws(
     *range_base = range_base.saturating_add(surface_n as u32);
 }
 
-fn refresh_concat_draws(
-    merged: &mut XModelDrawPlan,
-    fpv: &FpvDrawPlan,
-    bodies: &RemoteBodyDrawPlan,
-    scripts: &ScriptModelDrawPlan,
-    missiles: &MissileDrawPlan,
-    items: &ItemDrawPlan,
-    fx_models: &FxModelDrawPlan,
-    dynents: &DynEntDrawPlan,
-    scene: Option<&crate::GfxScene>,
-    sky: Option<(&super::sky::SkyModelDrawPlan, Vec3)>,
-) {
-    merged.draws.clear();
-    merged.materials.clear();
-    let mut range_base = 0u32;
-    let mut next_body_object = XMODEL_OBJECT_ID_BODY_BASE;
-    let (fx_draws, fx_object_id_exhausted) = dense_fx_object_ids(
-        fx_models.draws(),
-        dynents.draws().iter().map(|draw| draw.object_id).max(),
-    );
-    merged.fx_object_id_exhausted = fx_object_id_exhausted;
-    append_concat_owner_draws(
-        merged,
-        &mut range_base,
-        bodies.surface_ranges().len(),
-        bodies.materials(),
-        bodies.draws().iter().filter_map(|d| {
-            scene_ent_admitted(scene, d.scene_entnum).then(|| {
-                let object_id = next_body_object;
-                next_body_object = next_body_object.saturating_add(1);
-                XModelSurfaceDraw {
-                    surface: d.surface,
-                    material: d.material,
-                    world_from_local: d.world_from_local,
-                    lighting_handle: d.lighting_handle,
-                    pending_lighting: None,
-                    colour_refusal: None,
-                    object_id,
-                    scene_light_index: d.scene_light_index,
-                    reflection_probe_index: d.reflection_probe_index,
-                    packed_lighting: None,
-                    is_scope: false,
-                    scene_entnum: d.scene_entnum,
-                    body_client: d.scene_entnum,
-                    // Remote bodies carry no radius here; unbounded keeps
-                    // every player caster in both partitions.
-                    caster_bound: None,
-                }
-            })
-        }),
-    );
-    if fpv_scene_colour(fpv, scene) {
-        append_concat_owner_draws(
-            merged,
-            &mut range_base,
-            fpv.surface_ranges().len(),
-            fpv.materials(),
-            fpv.draws().iter().map(|d| XModelSurfaceDraw {
-                surface: d.surface,
-                material: d.material,
-                world_from_local: fpv.world_from_local,
-                lighting_handle: fpv.lighting_handle,
-                pending_lighting: None,
-                colour_refusal: None,
-                object_id: XMODEL_OBJECT_ID_VIEWMODEL,
-                scene_light_index: fpv.scene_light_index,
-                reflection_probe_index: fpv.reflection_probe_index,
-                packed_lighting: None,
-                is_scope: d.is_scope,
-                scene_entnum: Some(crate::SCENE_VIEWMODEL_ENTNUM),
-                body_client: None,
-                caster_bound: None,
-            }),
-        );
-    }
-    append_concat_owner_draws(
-        merged,
-        &mut range_base,
-        scripts.surface_ranges().len(),
-        scripts.materials(),
-        scripts
-            .draws()
-            .iter()
-            .copied()
-            .filter(|d| script_draw_admitted(scene, d)),
-    );
-    append_concat_owner_draws(
-        merged,
-        &mut range_base,
-        missiles.surface_ranges().len(),
-        missiles.materials(),
-        missiles
-            .draws()
-            .iter()
-            .copied()
-            .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
-    );
-    append_concat_owner_draws(
-        merged,
-        &mut range_base,
-        items.surface_ranges().len(),
-        items.materials(),
-        items
-            .draws()
-            .iter()
-            .copied()
-            .filter(|d| scene_ent_admitted(scene, d.scene_entnum)),
-    );
-    append_concat_owner_draws(
-        merged,
-        &mut range_base,
-        fx_models.surface_ranges().len(),
-        fx_models.materials(),
-        fx_draws,
-    );
-    append_concat_owner_draws(
-        merged,
-        &mut range_base,
-        dynents.surface_ranges().len(),
-        dynents.materials(),
-        dynents.draws().iter().copied(),
-    );
-    if let Some((sky, eye)) = sky {
-        append_concat_owner_draws(
-            merged,
-            &mut range_base,
-            sky.geometry.surface_ranges().len(),
-            &sky.geometry.materials,
-            sky.draws.iter().map(|draw| XModelSurfaceDraw {
-                world_from_local: Mat4::from_translation(eye),
-                ..*draw
-            }),
-        );
-    }
-}
-
 fn publish_packed_payload(
     merged: &mut XModelDrawPlan,
     prev: Option<Arc<Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>>>,
@@ -1060,37 +1116,6 @@ fn publish_packed_payload(
             merged.packed_vertices = other;
         }
     }
-}
-
-fn publish_topology_shares(
-    prev_index: Option<Arc<Vec<u32>>>,
-    prev_range: Option<Arc<Vec<(u32, u32)>>>,
-    indices: &mut Vec<u32>,
-    ranges: &mut Vec<(u32, u32)>,
-    index_share: &mut Option<Arc<Vec<u32>>>,
-    range_share: &mut Option<Arc<Vec<(u32, u32)>>>,
-    topology_revision: &mut u64,
-    index_banks: &mut super::ShareBanks<u32>,
-    range_banks: &mut super::ShareBanks<(u32, u32)>,
-) {
-    let indices_same = prev_index
-        .as_ref()
-        .is_some_and(|prev| prev.as_slice() == indices.as_slice());
-    let ranges_same = prev_range
-        .as_ref()
-        .is_some_and(|prev| prev.as_slice() == ranges.as_slice());
-    if indices_same && ranges_same {
-        *index_share = prev_index;
-        *range_share = prev_range;
-        index_banks.put_write(std::mem::take(indices));
-        range_banks.put_write(std::mem::take(ranges));
-        return;
-    }
-    *topology_revision = topology_revision.wrapping_add(1);
-    index_banks.put_write(std::mem::take(indices));
-    range_banks.put_write(std::mem::take(ranges));
-    *index_share = Some(index_banks.published());
-    *range_share = Some(range_banks.published());
 }
 
 fn publish_decoded_share(merged: &mut XModelDrawPlan) {
@@ -1128,141 +1153,147 @@ fn append_packed_source(
     }
 }
 
-fn append_admitted_source(
-    merged: &mut XModelDrawPlan,
-    packed: &mut Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
-    packed_ok: &mut bool,
+#[derive(Clone, Copy)]
+struct XModelGeometrySource<'a> {
     decoded_n: usize,
-    indices: &[u32],
-    surface_ranges: &[(u32, u32)],
-    materials: &[SmodelPassMaterial],
-    packed_payload: &asset_world::PackedVertexPayload,
-    draws: impl IntoIterator<Item = XModelSurfaceDraw>,
-) -> bool {
-    let draws: Vec<XModelSurfaceDraw> = draws.into_iter().collect();
-    if draws.is_empty() {
-        return false;
-    }
-    let mut used = vec![false; surface_ranges.len()];
-    for d in &draws {
-        if let Some(slot) = used.get_mut(d.surface as usize) {
-            *slot = true;
-        }
-    }
-    let all_surfaces_live = !used.is_empty() && used.iter().all(|&live| live);
-    if all_surfaces_live {
-        append_source_plan(
-            merged,
+    indices: &'a [u32],
+    surface_ranges: &'a [(u32, u32)],
+    materials: &'a [SmodelPassMaterial],
+    packed_payload: &'a asset_world::PackedVertexPayload,
+}
+
+impl XModelGeometrySource<'_> {
+    fn append_admitted(
+        self,
+        merged: &mut XModelDrawPlan,
+        packed: &mut Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
+        packed_ok: &mut bool,
+        draws: impl IntoIterator<Item = XModelSurfaceDraw>,
+    ) -> bool {
+        let Self {
             decoded_n,
             indices,
             surface_ranges,
             materials,
-            draws.into_iter(),
-        );
-        append_packed_source(packed, packed_ok, packed_payload, decoded_n);
-        return true;
-    }
-    compact_admitted_source(
-        merged,
-        packed,
-        packed_ok,
-        decoded_n,
-        indices,
-        surface_ranges,
-        materials,
-        packed_payload,
-        &used,
-        draws,
-    );
-    true
-}
-
-fn compact_admitted_source(
-    merged: &mut XModelDrawPlan,
-    packed: &mut Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
-    packed_ok: &mut bool,
-    decoded_n: usize,
-    indices: &[u32],
-    surface_ranges: &[(u32, u32)],
-    materials: &[SmodelPassMaterial],
-    packed_payload: &asset_world::PackedVertexPayload,
-    used_surfaces: &[bool],
-    draws: Vec<XModelSurfaceDraw>,
-) {
-    let source_rows = match packed_payload {
-        asset_world::PackedVertexPayload::Iw4(rows) if rows.len() == decoded_n => {
-            Some(rows.as_slice())
+            packed_payload,
+        } = self;
+        let draws: Vec<XModelSurfaceDraw> = draws.into_iter().collect();
+        if draws.is_empty() {
+            return false;
         }
-        _ => {
-            if decoded_n != 0 {
-                *packed_ok = false;
-                packed.clear();
+        let mut used = vec![false; surface_ranges.len()];
+        for d in &draws {
+            if let Some(slot) = used.get_mut(d.surface as usize) {
+                *slot = true;
             }
-            None
         }
-    };
-    const UNMAPPED: u32 = u32::MAX;
-    let mut vert_remap = vec![UNMAPPED; decoded_n];
-    let mut surf_remap = vec![UNMAPPED; surface_ranges.len()];
-    let vert_base = merged.decoded_n as u32;
-    let mut new_verts = 0u32;
-    for (si, &(start, count)) in surface_ranges.iter().enumerate() {
-        if !used_surfaces.get(si).copied().unwrap_or(false) {
-            continue;
+        let all_surfaces_live = !used.is_empty() && used.iter().all(|&live| live);
+        if all_surfaces_live {
+            append_source_plan(
+                merged,
+                decoded_n,
+                indices,
+                surface_ranges,
+                materials,
+                draws.into_iter(),
+            );
+            append_packed_source(packed, packed_ok, packed_payload, decoded_n);
+            return true;
         }
-        let start = start as usize;
-        let end = start.saturating_add(count as usize);
-        let Some(span) = indices.get(start..end) else {
-            continue;
+        self.compact_admitted(merged, packed, packed_ok, &used, draws);
+        true
+    }
+
+    fn compact_admitted(
+        self,
+        merged: &mut XModelDrawPlan,
+        packed: &mut Vec<[u8; asset_iw4::size::GFX_PACKED_VERTEX]>,
+        packed_ok: &mut bool,
+        used_surfaces: &[bool],
+        draws: Vec<XModelSurfaceDraw>,
+    ) {
+        let Self {
+            decoded_n,
+            indices,
+            surface_ranges,
+            materials,
+            packed_payload,
+        } = self;
+        let source_rows = match packed_payload {
+            asset_world::PackedVertexPayload::Iw4(rows) if rows.len() == decoded_n => {
+                Some(rows.as_slice())
+            }
+            _ => {
+                if decoded_n != 0 {
+                    *packed_ok = false;
+                    packed.clear();
+                }
+                None
+            }
         };
-        let new_start = merged.indices.len() as u32;
-        for &old in span {
-            let old = old as usize;
-            let Some(slot) = vert_remap.get_mut(old) else {
+        const UNMAPPED: u32 = u32::MAX;
+        let mut vert_remap = vec![UNMAPPED; decoded_n];
+        let mut surf_remap = vec![UNMAPPED; surface_ranges.len()];
+        let vert_base = merged.decoded_n as u32;
+        let mut new_verts = 0u32;
+        for (si, &(start, count)) in surface_ranges.iter().enumerate() {
+            if !used_surfaces.get(si).copied().unwrap_or(false) {
+                continue;
+            }
+            let start = start as usize;
+            let end = start.saturating_add(count as usize);
+            let Some(span) = indices.get(start..end) else {
                 continue;
             };
-            if *slot == UNMAPPED {
-                *slot = vert_base.saturating_add(new_verts);
-                if *packed_ok {
-                    if let Some(rows) = source_rows {
-                        packed.push(rows[old]);
+            let new_start = merged.indices.len() as u32;
+            for &old in span {
+                let old = old as usize;
+                let Some(slot) = vert_remap.get_mut(old) else {
+                    continue;
+                };
+                if *slot == UNMAPPED {
+                    *slot = vert_base.saturating_add(new_verts);
+                    if *packed_ok {
+                        if let Some(rows) = source_rows {
+                            packed.push(rows[old]);
+                        }
                     }
+                    new_verts = new_verts.saturating_add(1);
                 }
-                new_verts = new_verts.saturating_add(1);
+                merged.indices.push(*slot);
             }
-            merged.indices.push(*slot);
+            surf_remap[si] = merged.surface_ranges.len() as u32;
+            merged.surface_ranges.push((new_start, count));
         }
-        surf_remap[si] = merged.surface_ranges.len() as u32;
-        merged.surface_ranges.push((new_start, count));
-    }
-    let mut mat_remap = vec![UNMAPPED; materials.len()];
-    let mut used_mat = vec![false; materials.len()];
-    for d in &draws {
-        if let Some(slot) = used_mat.get_mut(d.material as usize) {
-            *slot = true;
+        let mut mat_remap = vec![UNMAPPED; materials.len()];
+        let mut used_mat = vec![false; materials.len()];
+        for d in &draws {
+            if let Some(slot) = used_mat.get_mut(d.material as usize) {
+                *slot = true;
+            }
         }
-    }
-    for (mi, live) in used_mat.iter().enumerate() {
-        if !*live {
-            continue;
+        for (mi, live) in used_mat.iter().enumerate() {
+            if !*live {
+                continue;
+            }
+            mat_remap[mi] = merged.materials.len() as u32;
+            merged.materials.push(materials[mi].clone());
         }
-        mat_remap[mi] = merged.materials.len() as u32;
-        merged.materials.push(materials[mi].clone());
-    }
-    merged.decoded_n = merged.decoded_n.saturating_add(new_verts as usize);
-    merged.concat_layout = false;
-    for mut d in draws {
-        if let Some(&mapped) = surf_remap.get(d.surface as usize)
-            && mapped != UNMAPPED
-        {
-            d.surface = mapped;
+        merged.decoded_n = merged.decoded_n.saturating_add(new_verts as usize);
+        merged.concat_layout = false;
+        for mut d in draws {
+            if let Some(&mapped) = surf_remap.get(d.surface as usize)
+                && mapped != UNMAPPED
+            {
+                d.surface = mapped;
+            }
+            if let Some(&mapped) = mat_remap.get(d.material as usize)
+                && mapped != UNMAPPED
+            {
+                d.material = mapped;
+            }
+            merged.draws.push(d);
         }
-        if let Some(&mapped) = mat_remap.get(d.material as usize)
-            && mapped != UNMAPPED
-        {
-            d.material = mapped;
-        }
-        merged.draws.push(d);
     }
 }
 

@@ -82,17 +82,31 @@ impl PlayerCardData {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct PlayerCardProfile<'a> {
+    pub name: &'a [u8; 16],
+    pub team: i32,
+    pub rank: i32,
+    pub prestige: i32,
+    pub icon: u32,
+    pub title: u32,
+    pub nameplate: u32,
+}
+
 #[must_use]
 pub fn player_cards_set_script_slot(
     cg_time: i32,
-    name16: &[u8; 16],
-    team: i32,
-    rank: i32,
-    prestige: i32,
-    icon: u32,
-    title: u32,
-    nameplate: u32,
+    profile: PlayerCardProfile<'_>,
 ) -> PlayerCardData {
+    let PlayerCardProfile {
+        name: name16,
+        team,
+        rank,
+        prestige,
+        icon,
+        title,
+        nameplate,
+    } = profile;
     let mut name = [0u8; 32];
     let n = name16.len().min(name.len());
     name[..n].copy_from_slice(&name16[..n]);

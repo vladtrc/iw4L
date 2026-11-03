@@ -55,18 +55,6 @@ impl TeamMusic {
             losing: music("losing"),
         }
     }
-
-    fn t5(script: &str, team: &str) -> Self {
-        let spawn =
-            crate::game_nested_string_assignment(script, &["music", &format!("spawn_{team}")]);
-        Self {
-            spawn: spawn.map(|state| format!("mus_{}", state.to_ascii_lowercase())),
-            victory: Some("mus_victory".to_owned()),
-            defeat: Some("mus_loss".to_owned()),
-            winning: Some("mus_time_running_out".to_owned()),
-            losing: Some("mus_time_running_out".to_owned()),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -117,71 +105,6 @@ impl ObjectiveVisuals {
                 Some("com_plasticcase_friendly".to_owned()),
                 Some("com_plasticcase_enemy".to_owned()),
             ],
-        }
-    }
-
-    #[must_use]
-    pub fn t5(allies: Option<&str>, axis: Option<&str>) -> Self {
-        let allies_flag = match allies {
-            Some("marines") => "mp_flag_allies_1",
-            Some("rebels") => "mp_flag_allies_3",
-            _ => "mp_flag_allies_2",
-        };
-        let axis_flag = match axis {
-            Some("russian") => "mp_flag_axis_1",
-            Some("tropas") => "mp_flag_axis_3",
-            _ => "mp_flag_axis_2",
-        };
-        let crates = [
-            Some("mp_supplydrop_ally".to_owned()),
-            Some("mp_supplydrop_axis".to_owned()),
-        ];
-        Self {
-            neutral_flag: Some("mp_flag_neutral".to_owned()),
-            bomb: Some("prop_suitcase_bomb".to_owned()),
-            plant_weapon: Some("briefcase_bomb_mp".to_owned()),
-            defuse_weapon: Some("briefcase_bomb_defuse_mp".to_owned()),
-            bomb_explosion_fx: Some("maps/mp_maps/fx_mp_exp_bomb".to_owned()),
-            flag: [Some(allies_flag.to_owned()), Some(axis_flag.to_owned())],
-            flag_carry: [
-                Some(format!("{allies_flag}_carry")),
-                Some(format!("{axis_flag}_carry")),
-            ],
-            flag_base_fx: std::array::from_fn(|_| Some("misc/fx_ui_flagbase_gold_t5".to_owned())),
-            crate_model: crates.clone(),
-            crate_overlay: crates,
-        }
-    }
-
-    #[must_use]
-    pub fn t6(allies: Option<&str>, axis: Option<&str>) -> Self {
-        let flag = |faction| match faction {
-            Some("seals") => Some("mp_flag_allies_1"),
-            Some("fbi") => Some("mp_flag_allies_2"),
-            Some("isa") => Some("mp_flag_allies_3"),
-            Some("pla") => Some("mp_flag_axis_1"),
-            Some("pmc") => Some("mp_flag_axis_2"),
-            Some("cd") => Some("mp_flag_axis_3"),
-            _ => None,
-        };
-        let flags = [flag(allies), flag(axis)];
-        Self {
-            neutral_flag: Some("mp_flag_neutral".into()),
-            bomb: Some("prop_suitcase_bomb".into()),
-            bomb_explosion_fx: Some("maps/mp_maps/fx_mp_exp_bomb".into()),
-            plant_weapon: Some("briefcase_bomb_mp".into()),
-            defuse_weapon: Some("briefcase_bomb_defuse_mp".into()),
-            flag: flags.map(|name| name.map(str::to_owned)),
-            flag_carry: flags.map(|name| name.map(|name| format!("{name}_carry"))),
-            crate_model: [
-                Some("t6_wpn_supply_drop_ally".into()),
-                Some("t6_wpn_supply_drop_axis".into()),
-            ],
-            crate_overlay: [
-                Some("t6_wpn_supply_drop_ally".into()),
-                Some("t6_wpn_supply_drop_axis".into()),
-            ],
-            ..Default::default()
         }
     }
 
@@ -239,7 +162,7 @@ pub struct SessionTeamSettings(pub MapTeamSettings);
 
 fn table_icon(
     table: &CapturedStringTable,
-    namespace: asset_core::AssetNamespace,
+    namespace: asset_core::FamilyId,
     charset: Option<&str>,
 ) -> Option<asset_core::AssetKey> {
     let charset = charset.filter(|s| !s.is_empty())?;
@@ -250,7 +173,7 @@ fn table_icon(
 #[must_use]
 pub fn team_settings(
     table: &CapturedStringTable,
-    namespace: asset_core::AssetNamespace,
+    namespace: asset_core::FamilyId,
     allieschar: Option<&str>,
     axischar: Option<&str>,
 ) -> MapTeamSettings {
@@ -316,7 +239,7 @@ pub fn team_settings(
 #[must_use]
 pub fn team_settings_for_zone(
     table: &CapturedStringTable,
-    namespace: asset_core::AssetNamespace,
+    namespace: asset_core::FamilyId,
     arena_text: Option<&str>,
     zone: &str,
 ) -> MapTeamSettings {
@@ -332,137 +255,6 @@ pub fn team_settings_for_zone(
         row.allieschar.as_deref(),
         row.axischar.as_deref(),
     )
-}
-
-fn is_basemaps_arena_name(name: &str) -> bool {
-    let n = name.replace('\\', "/");
-    n.eq_ignore_ascii_case("mp/basemaps.arena")
-        || n.rsplit('/')
-            .next()
-            .is_some_and(|leaf| leaf.eq_ignore_ascii_case("basemaps.arena"))
-}
-
-fn is_faction_table_name(name: &str) -> bool {
-    name.replace('\\', "/")
-        .eq_ignore_ascii_case("mp/factiontable.csv")
-}
-
-pub fn load_iw5_team_sources(zone_path: &Path) -> (Option<String>, Option<CapturedStringTable>) {
-    let Ok(image) = crate::open_zone(zone_path) else {
-        return (None, None);
-    };
-    let Ok(header) = image.iw5_header() else {
-        return (None, None);
-    };
-    let mut memory = crate::Iw5ZoneMemory::for_header(&header);
-    let Ok(mut stream) = memory.stream(&image.bytes) else {
-        return (None, None);
-    };
-    let mut sink = Iw5TeamIconSink::default();
-    let _ = fastfile_iw5::load_zone(&mut stream, &mut sink);
-    (sink.arena_text, sink.faction_table)
-}
-
-#[derive(Default)]
-struct Iw5TeamIconSink {
-    arena_text: Option<String>,
-    faction_table: Option<CapturedStringTable>,
-}
-
-impl fastfile_iw5::AssetSink for Iw5TeamIconSink {
-    fn set_script_strings(&mut self, _strings: fastfile_iw5::ScriptStrings) {}
-    fn load_asset(
-        &mut self,
-        s: &mut fastfile_iw5::ZoneStream<'_>,
-        _index: usize,
-        ty: fastfile_iw5::AssetType,
-        slot: fastfile_iw5::Ptr,
-    ) -> fastfile_iw5::Result<()> {
-        fastfile_iw5::load_asset_at_observed(s, ty, slot, self)?;
-        Ok(())
-    }
-}
-
-impl fastfile_iw5::AssetLinkSink for Iw5TeamIconSink {
-    fn loaded(
-        &mut self,
-        _s: &fastfile_iw5::ZoneStream<'_>,
-        _ty: fastfile_iw5::AssetType,
-        _slot: fastfile_iw5::Ptr,
-        _insert: Option<fastfile_iw5::Ptr>,
-    ) -> fastfile_iw5::Result<()> {
-        Ok(())
-    }
-    fn alias(
-        &mut self,
-        _ty: fastfile_iw5::AssetType,
-        _slot: fastfile_iw5::Ptr,
-        _target: fastfile_iw5::Ptr,
-    ) -> fastfile_iw5::Result<()> {
-        Ok(())
-    }
-    fn capture_raw_file(
-        &mut self,
-        name: &str,
-        data: &[u8],
-        zlib: bool,
-    ) -> fastfile_iw5::Result<()> {
-        if is_basemaps_arena_name(name) {
-            if let Some(text) = crate::decode_rawfile_text(data, zlib) {
-                self.arena_text = Some(text);
-            }
-        }
-        Ok(())
-    }
-    fn capture_string_table(
-        &mut self,
-        s: &fastfile_iw5::ZoneStream<'_>,
-        header: fastfile_iw5::Ptr,
-    ) -> fastfile_iw5::Result<()> {
-        let name = match s.ptr_at(header, 0).ok() {
-            Some(fastfile_iw5::ZonePtr::Offset(p)) => {
-                s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned()
-            }
-            _ => return Ok(()),
-        };
-        if !is_faction_table_name(&name) {
-            return Ok(());
-        }
-        let columns = s.i32_at(header, s.layout(4, 8)).unwrap_or(0).max(0) as usize;
-        let rows = s.i32_at(header, s.layout(8, 12)).unwrap_or(0).max(0) as usize;
-        let cells_n = columns.saturating_mul(rows);
-        let arr = match s.ptr_at(header, s.layout(12, 16)).ok() {
-            Some(fastfile_iw5::ZonePtr::Offset(p)) => s.resolve_alias(p),
-            _ => {
-                self.faction_table = Some(CapturedStringTable {
-                    name,
-                    columns,
-                    rows,
-                    cells: Vec::new(),
-                });
-                return Ok(());
-            }
-        };
-        let mut cells = Vec::with_capacity(cells_n);
-        let cell_sz = s.layout(fastfile_iw5::size::STRING_TABLE_CELL, 16);
-        for i in 0..cells_n {
-            let cell = arr.at(i * cell_sz);
-            let value = match s.ptr_at(cell, 0).ok() {
-                Some(fastfile_iw5::ZonePtr::Offset(p)) => {
-                    s.cstr(s.resolve_alias(p)).ok().unwrap_or("").to_owned()
-                }
-                _ => String::new(),
-            };
-            cells.push(value);
-        }
-        self.faction_table = Some(CapturedStringTable {
-            name,
-            columns,
-            rows,
-            cells,
-        });
-        Ok(())
-    }
 }
 
 #[must_use]
@@ -542,167 +334,70 @@ fn unquote(value: &str) -> String {
     value.trim().trim_matches('"').to_owned()
 }
 
-#[must_use]
-pub fn t5_teamset_key_from_rawfile(name: &str) -> Option<&str> {
-    let file = name.rsplit(['/', '\\']).next()?;
-    let stem = file.strip_prefix("_teamset_")?.strip_suffix(".gsc")?;
-    (!stem.is_empty()).then_some(stem)
-}
-
-#[must_use]
-pub fn t5_teamset_from_map_gsc(script: &str) -> Option<&str> {
-    let lower = script.to_ascii_lowercase();
-    let mut from = 0;
-    while let Some(rel) = lower[from..].find("_teamset_") {
-        let start = from + rel + "_teamset_".len();
-        let Some(rest) = script.get(start..) else {
-            return None;
-        };
-        let Some(end) = rest.find("::") else {
-            from = start;
-            continue;
-        };
-        let name = rest[..end].trim();
-        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-            from = start + end + 2;
-            continue;
-        }
-        if rest[end..].to_ascii_lowercase().starts_with("::level_init") {
-            return Some(name);
-        }
-        from = start + end + 2;
-    }
-    None
-}
-
-fn script_dvar_string<'a>(script: &'a str, key: &str) -> Option<&'a str> {
-    for line in script.lines() {
-        let line = line.trim();
-        let Some((function, args)) = line.split_once('(') else {
-            continue;
-        };
-        if !function.trim().eq_ignore_ascii_case("setdvar") {
-            continue;
-        }
-        let mut quotes = args.split('"');
-        let (Some(before), Some(name), Some(between), Some(value)) =
-            (quotes.next(), quotes.next(), quotes.next(), quotes.next())
-        else {
-            continue;
-        };
-        if !before.trim().is_empty() || !name.eq_ignore_ascii_case(key) {
-            continue;
-        }
-        if !matches!(between.trim(), "," | ",&" | ", &") {
-            continue;
-        }
-        return Some(value);
-    }
-    None
-}
-
-#[must_use]
-pub fn t5_settings_from_teamset_gsc(script: &str) -> MapTeamSettings {
-    let color = |key| {
-        let mut values = script_dvar_string(script, key)?
-            .split_whitespace()
-            .map(str::parse::<f32>);
-        let rgb = [
-            values.next()?.ok()?,
-            values.next()?.ok()?,
-            values.next()?.ok()?,
-        ];
-        (values.next().is_none() && rgb.iter().all(|v| v.is_finite())).then_some(rgb)
-    };
-    MapTeamSettings {
-        allies_color: color("g_TeamColor_Allies"),
-        axis_color: color("g_TeamColor_Axis"),
-        allies_name: script_dvar_string(script, "g_TeamName_Allies").and_then(|name| {
-            asset_core::AssetKey::new(
-                asset_core::AssetNamespace::T5,
-                asset_core::AssetKind::Localize,
-                name,
-            )
-            .ok()
-        }),
-        axis_name: script_dvar_string(script, "g_TeamName_Axis").and_then(|name| {
-            asset_core::AssetKey::new(
-                asset_core::AssetNamespace::T5,
-                asset_core::AssetKind::Localize,
-                name,
-            )
-            .ok()
-        }),
-        attackers: asset_audio::game_string_assignment(script, "attackers").map(str::to_owned),
-        defenders: asset_audio::game_string_assignment(script, "defenders").map(str::to_owned),
-        allies: crate::game_nested_string_assignment(script, &["icons", "allies"]).and_then(
-            |name| {
-                asset_core::AssetKey::new(
-                    asset_core::AssetNamespace::T5,
-                    asset_core::AssetKind::Material,
-                    name,
-                )
-                .ok()
-            },
-        ),
-        axis: crate::game_nested_string_assignment(script, &["icons", "axis"]).and_then(|name| {
-            asset_core::AssetKey::new(
-                asset_core::AssetNamespace::T5,
-                asset_core::AssetKind::Material,
-                name,
-            )
-            .ok()
-        }),
-        allies_charset: asset_audio::game_string_assignment(script, "allies").map(str::to_owned),
-        axis_charset: asset_audio::game_string_assignment(script, "axis").map(str::to_owned),
-        allies_strings: teamset_strings(script, "allies"),
-        axis_strings: teamset_strings(script, "axis"),
-        allies_voice: crate::game_nested_string_assignment(script, &["voice", "allies"])
-            .map(str::to_owned),
-        axis_voice: crate::game_nested_string_assignment(script, &["voice", "axis"])
-            .map(str::to_owned),
-        allies_music: TeamMusic::t5(script, "allies"),
-        axis_music: TeamMusic::t5(script, "axis"),
-    }
-}
-
-fn teamset_strings(script: &str, team: &str) -> FactionStrings {
-    let key = |suffix| {
-        crate::game_nested_string_assignment(script, &["strings", &format!("{team}_{suffix}")])
-            .map(str::to_owned)
-    };
-    FactionStrings {
-        name: key("name"),
-        eliminated: key("eliminated"),
-        forfeited: key("forfeited"),
-    }
-}
-
-#[must_use]
-pub fn t5_teamset_from_rawfile(name: &str, data: &[u8], zlib_compressed: bool) -> Option<String> {
-    if !asset_audio::is_map_main_script(name) {
-        return None;
-    }
-    let text = crate::decode_rawfile_text(data, zlib_compressed)?;
-    t5_teamset_from_map_gsc(&text).map(str::to_owned)
-}
-
-#[must_use]
-pub fn t5_settings_from_teamset_rawfile(
-    name: &str,
-    data: &[u8],
-    zlib_compressed: bool,
-) -> Option<(String, MapTeamSettings)> {
-    let key = t5_teamset_key_from_rawfile(name)?.to_owned();
-    let text = crate::decode_rawfile_text(data, zlib_compressed)?;
-    let icons = t5_settings_from_teamset_gsc(&text);
-    (icons.allies.is_some() || icons.axis.is_some()).then_some((key, icons))
-}
-
 pub fn read_basemaps_arena(games_root: &Path) -> Option<String> {
     read_iwd_named(games_root, "mp/basemaps.arena").and_then(|bytes| String::from_utf8(bytes).ok())
 }
 
 pub fn read_iwd_named(games_root: &Path, want: &str) -> Option<Vec<u8>> {
     asset_transport::read_iwd_named(games_root, want)
+}
+
+pub type TeamSourcesLoader = fn(&Path) -> (Option<String>, Option<CapturedStringTable>);
+
+#[derive(Clone, Copy)]
+pub struct TeamFamily {
+    /// Bind this family’s objective visuals into the reference game mode.
+    pub bind_objectives: bool,
+    /// Missing native flag-base effects intentionally suppress the host effect.
+    pub allow_absent_flag_base_fx: bool,
+    pub icon_alias_suffixes: &'static [&'static str],
+    /// Native projection of reference announcer lines; None retains reference routes.
+    pub announcer: Option<fn(&str, &str) -> String>,
+    /// None when normalized faction-table capture already supplies the visuals.
+    pub objectives: Option<fn(&MapTeamSettings) -> ObjectiveVisuals>,
+    /// A separate source walk beyond the family's normal asset walk, when needed.
+    pub sources: Option<TeamSourcesLoader>,
+}
+
+pub const REFERENCE_TEAM_FAMILY: TeamFamily = TeamFamily {
+    bind_objectives: false,
+    allow_absent_flag_base_fx: false,
+    icon_alias_suffixes: &[],
+    announcer: None,
+    objectives: None,
+    sources: None,
+};
+
+#[derive(Default)]
+pub struct TeamFamilies(std::collections::BTreeMap<asset_core::FamilyId, TeamFamily>);
+impl TeamFamilies {
+    pub fn register(&mut self, family: asset_core::FamilyId, policy: TeamFamily) {
+        assert!(
+            self.0.insert(family, policy).is_none(),
+            "duplicate team family"
+        );
+    }
+}
+static TEAM_FAMILIES: std::sync::OnceLock<TeamFamilies> = std::sync::OnceLock::new();
+pub fn install_team_families(families: TeamFamilies) -> Result<(), &'static str> {
+    TEAM_FAMILIES
+        .set(families)
+        .map_err(|_| "team families already installed")
+}
+pub fn team_family(family: asset_core::FamilyId) -> Option<&'static TeamFamily> {
+    TEAM_FAMILIES.get()?.0.get(&family)
+}
+
+pub fn team_icon_alias(
+    namespace: asset_core::FamilyId,
+    material: &str,
+    icon: &asset_core::AssetKey,
+) -> bool {
+    namespace == icon.namespace
+        && team_family(namespace).is_some_and(|policy| {
+            policy
+                .icon_alias_suffixes
+                .iter()
+                .any(|suffix| material.strip_suffix(suffix) == Some(icon.name.as_str()))
+        })
 }

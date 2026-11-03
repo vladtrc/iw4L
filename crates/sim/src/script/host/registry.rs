@@ -56,7 +56,6 @@ impl Default for NativeRegistry {
         super::weapons::register(&mut registry);
         super::vehicles::register(&mut registry);
         super::physics::register(&mut registry);
-        natives::t5::register(&mut registry);
         super::controls::register(&mut registry);
         super::client_effects::register(&mut registry);
         super::guidance::register(&mut registry);

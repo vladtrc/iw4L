@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use render_fx::{FxWorldColorImages, PreparedFxCatalog, PreparedTracers};
 
-use crate::assemble::drawsurf::{RuntimeImageHandles, RuntimeLightmapHandles, RuntimeMaterial};
+use crate::assemble::drawsurf::{RuntimeImageHandles, RuntimeMaterial};
 
 use super::world::WorldScene;
+use super::world_images::WorldImageUpload;
 
 fn log_image_asset_memory(images: &Assets<Image>) {
     use bevy::asset::RenderAssetUsages;
@@ -268,7 +269,7 @@ pub(crate) fn prepare_fx_model_geometry(
         let Some(entry) = models.get_at(index) else {
             continue;
         };
-        let name = models.name_at(index).unwrap_or_default();
+        let name = models.name_at(index).unwrap_or("");
         let binding = (|| {
             let pose = entry.skel.pose.as_ref()?;
             let dobj = xmodel_runtime::DObj::build(&[(pose, None)]).ok()?;
@@ -368,13 +369,14 @@ pub fn install(
     commands: &mut Commands,
     scene: &WorldScene,
     images: &Assets<Image>,
-    exact_material_handles: Vec<Option<Handle<Image>>>,
-    reflection_probe_handles: Vec<Option<Handle<Image>>>,
-    lightmap_handles: Vec<Option<RuntimeLightmapHandles>>,
+    uploaded: &WorldImageUpload,
     tracers: Option<&PreparedTracers>,
     fx_catalog: Option<&PreparedFxCatalog>,
 ) {
-    let fx_images = world_color_images(scene, &exact_material_handles, tracers, fx_catalog);
+    let exact_material_handles = uploaded.exact_handles();
+    let reflection_probe_handles = uploaded.probe_handles();
+    let lightmap_handles = uploaded.lightmap_handles();
+    let fx_images = world_color_images(scene, exact_material_handles, tracers, fx_catalog);
     {
         let value = fx_images;
         commands.queue(move |world: &mut World| {
@@ -391,10 +393,10 @@ pub fn install(
     {
         let value = RuntimeImageHandles::from_pools(
             scene.runtime_material_catalog.generation_id(),
-            exact_material_handles.clone(),
+            exact_material_handles.to_vec(),
             scene.exact_material_names.clone(),
-            reflection_probe_handles.clone(),
-            lightmap_handles.clone(),
+            reflection_probe_handles.to_vec(),
+            lightmap_handles.to_vec(),
             None,
         );
         commands.queue(move |world: &mut World| {

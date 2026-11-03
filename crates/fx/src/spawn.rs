@@ -213,9 +213,9 @@ pub fn spawn_looping_partial(
 
 pub fn stop_pending_loop(host: &mut FxSystemHost, effect_slot: usize) {
     use fx_iw4::{FX_STATUS_HAS_PENDING_LOOP_ELEMS, FX_STATUS_REF_COUNT_MASK_IW4};
-    let (handle, refs) = match host.effect_at(effect_slot) {
+    let refs = match host.effect_at(effect_slot) {
         Some(e) if (e.status & FX_STATUS_HAS_PENDING_LOOP_ELEMS) != 0 => {
-            (e.own_handle, e.status & FX_STATUS_REF_COUNT_MASK_IW4)
+            e.status & FX_STATUS_REF_COUNT_MASK_IW4
         }
         _ => return,
     };
@@ -224,7 +224,7 @@ pub fn stop_pending_loop(host: &mut FxSystemHost, effect_slot: usize) {
         effect.status = effect.status.wrapping_sub(1);
     }
     if refs == 1 {
-        host.del_ref_to_effect(handle);
+        host.request_garbage_collection();
     }
 }
 
@@ -268,7 +268,7 @@ pub fn stop_effect_non_recursive(host: &mut FxSystemHost, effect_slot: usize) {
         .map(|e| e.status & FX_STATUS_REF_COUNT_MASK_IW4)
         .unwrap_or(0);
     if refs == 1 {
-        host.del_ref_to_effect(self_handle);
+        host.request_garbage_collection();
     }
 }
 
@@ -315,10 +315,16 @@ fn spawn_origin_world(
         effect_axis,
         elem_def.spawn_origin,
         elem_def.flags,
-        elem_def.spawn_offset_radius_base,
-        elem_def.spawn_offset_radius_amp,
-        elem_def.spawn_offset_height_base,
-        elem_def.spawn_offset_height_amp,
+        fx_iw4::FxSpawnOffset {
+            radius: [
+                elem_def.spawn_offset_radius_base,
+                elem_def.spawn_offset_radius_amp,
+            ],
+            height: [
+                elem_def.spawn_offset_height_base,
+                elem_def.spawn_offset_height_amp,
+            ],
+        },
         life_idx,
     )
 }
@@ -552,18 +558,7 @@ fn spawn_elem(
                         0.0,
                         effect_axis,
                     )[0],
-                    elem_def.flags,
-                    elem_def.spark_count,
-                    elem_def.spark_vel_min,
-                    elem_def.spark_vel_max,
-                    elem_def.spark_vel_cone_frac,
-                    elem_def.spark_gravity,
-                    elem_def.spark_length,
-                    elem_def.spark_loop_time,
-                    elem_def.spark_boost_time,
-                    elem_def.spark_boost_factor,
-                    elem_def.spark_bounce_frac,
-                    elem_def.spark_bounce_rand,
+                    &elem_def,
                 ) {
                     crate::spark_fountain::FountainSpray::Ready => {}
                     crate::spark_fountain::FountainSpray::MeshFull => {

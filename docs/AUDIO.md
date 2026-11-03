@@ -30,35 +30,21 @@ Media caps 4096 keys and 256 queued jobs, including at most 192 prewarm jobs.
 Urgent requests promote queued work; two to four workers publish clips as
 completed, with one reserved for urgent work. PCM pins at most 256 MiB;
 decode scratch reserves 64 MiB. Geometry and partial frames are validated.
-Native T5 WMA2 emits budget-owned cached s16 chunks for mono 44.1 kHz and
-stereo 48 kHz profiles. T6 capture retains SAB locators; workers reserve output,
-input and FLAC scratch before reading and validate channel/rate/frame metadata.
-Descriptor-only SAB entries bypass cross-bank caching. T6 captures native 2D/3D
-flags, dry/near distance curves, MP mixer-group hierarchy, priorities and voice
-limits from the alias banks and sound-driver globals. Authored start delays
-schedule on the audio clock. Six native pan weights use a named stereo fold:
-rear/center at -3 dB and LFE at -6 dB. IW5 pointer-based speaker maps,
-cross-channel routes and multichannel output remain unsupported; WMA seek/tail
-semantics need corpus validation.
+Native decoders reserve output, input and scratch before reading and validate
+channel/rate/frame metadata. Families own source locators, codec wrapping,
+spatial flags and speaker projection. Native policies: [T5](../extensions/t5/docs/RUNTIME.md),
+[T6](../extensions/t6/docs/RUNTIME.md), [IW5](../extensions/iw5/docs/RUNTIME.md).
 
 Desired loops use scope/epoch/object/slot versions and retain virtual cursors.
-Projectile cues follow authoritative bolts and retire on removal or timeline
-replacement.
+Projectile cues follow authoritative bolts and retire on removal or timeline replacement.
+Blade contacts use material cues; retrieval selects the family’s item/ammo cue. Virtual sources retain alias limits; channel caps apply to physical voices.
 Control ranks eight map voices with a 0.002 gain floor. Device recovery uses
 bounded backoff; one-shots preserve PCM during short outages until their start
 deadlines expire. Master volume is applied once. `OfflineRenderer` shares the
-mixing kernel. Streaming, DSP buses/tails and acoustic propagation are unfinished.
-
+mixing kernel. Portal cues take the shortest route through open aperture centres;
+snapshot exit availability controls attenuation and panning. General occlusion, streaming and DSP buses/tails remain unfinished.
 `IW4L_AUDIO_DIAG=1` enables cue identities/decisions, request/preparation timings,
 slow control stages, affinity and device/null frame counts. Set
 `IW4L_AUDIO_DIAG_PATH` for a buffered file; the bounded queue counts dropped
 records. `dump` and `clip` include readiness and recent decisions. Device frames
 measure mixing into callbacks, before device latency or hardware playback.
-
-BO2 faction music uses native spawn/victory tracks, shared defeat music and the
-shared time-running-out cue for both host late-match states. Announcer routes
-translate host objective, flag, round and supported reward events into native
-faction aliases; mode variants share their base introduction. Routes require
-native catalog entries. Shared HUD text pulses use BO2 notification sounds.
-References absent from the installed native banks remain reported as missing;
-no replacement alias or media is synthesized for them.

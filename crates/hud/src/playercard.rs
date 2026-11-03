@@ -10,11 +10,10 @@ use hud_iw4::{
     PLAYERCARD_YOU_KILLED_MENU, PlayerCardData, player_cards_set_script_slot, script_menu_name,
     ui_run_op_get_player_card_info,
 };
-use net::{FrameClock, LocalPresentClient, PresentedSnapshot};
+use net::{FrameClock, PresentedSnapshot};
 
 use crate::chrome::{ChromeAssets, ChromeFrame, ChromeMenuAnim, execute_chrome_menu_with_anim};
 use crate::draw2d::{Draw2dOp, tessellate_fonts};
-use crate::gaps::{GapCause, HudGap, HudPresentationGaps, ImageMiss};
 use crate::gpu_list::{HudTessPass, TessJob};
 use crate::images::HudImages;
 use crate::scorebar::milliseconds;
@@ -54,7 +53,7 @@ impl UiLocalVars {
         self.ints
             .get(name)
             .map(|v| v.to_string())
-            .unwrap_or_default()
+            .unwrap_or(String::new())
     }
 }
 
@@ -218,7 +217,7 @@ impl ExprHost for PlayerCardExprHost<'_> {
                 .broadcast
                 .as_ref()
                 .map(|(_, description)| description.clone())
-                .unwrap_or_default(),
+                .unwrap_or(String::new()),
         ))
     }
     fn get_perk(&self, _name: &str) -> Result<Operand, ExprError> {
@@ -284,10 +283,6 @@ pub(crate) fn spawn_playercard(root: &mut ChildSpawnerCommands) {
     ));
 }
 
-fn hide(pass: &mut HudTessPass) {
-    pass.playercard = TessJob::Hide;
-}
-
 fn apply_card_slots(
     slots: &mut MessageReader<net::SvcCardSlotCmd>,
     cache: &mut PlayerCardCache,
@@ -301,16 +296,18 @@ fn apply_card_slots(
             .map(|meta| {
                 player_cards_set_script_slot(
                     cg_time,
-                    &meta.name,
-                    meta.client_state_team,
-                    meta.rank,
-                    meta.prestige,
-                    meta.player_card_icon,
-                    meta.player_card_title,
-                    meta.player_card_nameplate,
+                    hud_iw4::PlayerCardProfile {
+                        name: &meta.name,
+                        team: meta.client_state_team,
+                        rank: meta.rank,
+                        prestige: meta.prestige,
+                        icon: meta.player_card_icon,
+                        title: meta.player_card_title,
+                        nameplate: meta.player_card_nameplate,
+                    },
                 )
             })
-            .unwrap_or_default();
+            .unwrap_or_else(PlayerCardData::default);
         cache.set(cmd.slot, data);
     }
 }
@@ -369,245 +366,279 @@ pub(crate) struct PlayerCardMessages<'w, 's> {
     sound: MessageWriter<'w, frame::UiPlaySound>,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(SystemParam)]
+pub(crate) struct PlayerCardDisplay<'w> {
+    catalog: Option<Res<'w, MenuCatalog>>,
+    strings: Option<Res<'w, PreparedLocalizedStrings>>,
+    hud_images: ResMut<'w, HudImages>,
+    images: ResMut<'w, Assets<Image>>,
+    pass: ResMut<'w, HudTessPass>,
+    exprs: ResMut<'w, crate::expr_cache::MenuExprCache>,
+    cg_clock: Res<'w, FrameClock>,
+}
+
+impl PlayerCardDisplay<'_> {
+    fn hide(&mut self) {
+        self.pass.playercard = TessJob::Hide;
+    }
+
+    fn update(
+        &mut self,
+        surface: Res<crate::surface::Hud2dSurface>,
+        mut cache: ResMut<PlayerCardCache>,
+        mut local_vars: ResMut<UiLocalVars>,
+        mut messages: PlayerCardMessages,
+        presentation: net::LocalPresentation,
+        view: Option<Res<frame::ViewSubject>>,
+    ) {
+        if !surface.is_ready() {
+            return;
+        }
+        let now_ms = milliseconds() as i32;
+        apply_card_slots(
+            &mut messages.card_slots,
+            &mut cache,
+            &presentation.presented,
+            self.cg_clock.time(),
+        );
+        apply_open_menus(
+            &mut messages.open_menus,
+            &mut local_vars,
+            self.catalog.as_deref(),
+            &mut self.exprs,
+            now_ms,
+        );
+
+        for cmd in messages.splashes.read().filter(|cmd| cmd.slot == 1) {
+            let Some(table) = self
+                .catalog
+                .as_deref()
+                .and_then(|c| c.string_table(hud_iw4::SPLASH_TABLE_NAME))
+            else {
+                diag::warn_once!(
+                    Ui,
+                    "mp/splashTable.csv was not in the UI-zone StringTable walk"
+                );
+                continue;
+            };
+            let Some(row) = table.lookup_row(&cmd.key) else {
+                diag::warn_once!(Ui, "splashTable has no row `{key}`", key = cmd.key.clone());
+                continue;
+            };
+            let duration =
+                hud_iw4::splash_duration_ms(table.cell(row, hud_iw4::SPLASH_COL_DURATION));
+            let (_, slot) = hud_iw4::activate_splash(1, row, duration, cmd.optional, now_ms);
+            let key = table
+                .cell(row, hud_iw4::SPLASH_COL_DESCRIPTION)
+                .trim_start_matches('@');
+            let Some(description) = self.strings.as_deref().and_then(|s| s.0.text(key)) else {
+                diag::warn_once!(
+                    Ui,
+                    "key `{key}` has no row in the loaded language",
+                    key = key.to_owned()
+                );
+                continue;
+            };
+            cache.broadcast = Some((
+                slot,
+                hud_iw4::splash_replace_optional(description, cmd.optional),
+            ));
+            local_vars.set_int("callout_update_time", now_ms + 1500);
+            messages.sound.write(frame::UiPlaySound {
+                alias: "mp_card_slide".into(),
+            });
+        }
+        if cache.broadcast.as_ref().is_some_and(|(slot, _)| {
+            now_ms
+                > slot
+                    .start_ms
+                    .saturating_add(slot.duration_ms)
+                    .saturating_add(150)
+        }) {
+            cache.broadcast = None;
+        }
+        let live = local_vars.int("ui_show_youKilled") != 0
+            || local_vars.int("ui_show_killedBy") != 0
+            || cache.broadcast.is_some();
+        if !live {
+            self.hide();
+            return;
+        }
+        let Some(catalog) = self.catalog.as_ref() else {
+            diag::warn_once!(Ui, "MenuCatalog is not loaded; playercard menus cannot run");
+            self.hide();
+            return;
+        };
+
+        let own_team = presentation
+            .snapshot()
+            .and_then(|s| s.meta.for_client(presentation.client_id()))
+            .map(|m| m.client_state_team)
+            .unwrap_or(0);
+        let host = PlayerCardExprHost {
+            menu: None,
+            ms: now_ms,
+            in_killcam: view.as_deref().is_some_and(|v| v.in_killcam()),
+            game_ended: presentation.snapshot().is_some_and(|s| {
+                matches!(
+                    s.meta.phase,
+                    sim::MatchPhase::Intermission | sim::MatchPhase::PostGame
+                )
+            }),
+            own_team,
+            dvars: presentation
+                .snapshot()
+                .map(|s| s.meta.script_dvars(presentation.client_id()))
+                .unwrap_or_else(sim::ScriptDvars::default),
+            local_vars: &local_vars,
+            cache: &cache,
+            catalog: Some(catalog),
+        };
+
+        let mut list = crate::draw2d::Draw2dList::default();
+        let mut any_menu_missing = false;
+        let mut table_miss = false;
+        let mut empty_paint = false;
+        for menu_name in [PLAYERCARD_YOU_KILLED_MENU, PLAYERCARD_KILLED_BY_MENU]
+            .into_iter()
+            .chain(cache.broadcast.as_ref().map(|_| "playercard_splash"))
+        {
+            let Some(menu) = catalog.get(menu_name) else {
+                any_menu_missing = true;
+                diag::warn_once!(
+                    Ui,
+                    "MenuCatalog has no `{name}`",
+                    name = menu_name.to_owned()
+                );
+                continue;
+            };
+            if host.table("mp/cardTitleTable.csv").is_none() {
+                table_miss = true;
+                diag::warn_once!(
+                    Ui,
+                    "string table `{name}` was not in the UI-zone walk",
+                    name = String::from("mp/cardTitleTable.csv")
+                );
+            }
+            if host.table("mp/cardIconTable.csv").is_none() {
+                table_miss = true;
+                diag::warn_once!(
+                    Ui,
+                    "string table `{name}` was not in the UI-zone walk",
+                    name = String::from("mp/cardIconTable.csv")
+                );
+            }
+            let host = PlayerCardExprHost {
+                menu: Some(menu),
+                ..host
+            };
+            let anim = match (menu_name, cache.broadcast.as_ref()) {
+                ("playercard_splash", Some((slot, _))) => {
+                    let end = slot.start_ms.saturating_add(slot.duration_ms);
+                    let (script, start) = if now_ms > end {
+                        (&menu.on_close_request, end)
+                    } else {
+                        (&menu.on_open, slot.start_ms)
+                    };
+                    let lerp = hud_iw4::item_run_script_lerp(script, start);
+                    for command in &lerp.leftover {
+                        diag::warn_once!(
+                            Ui,
+                            "{menu}: menu script `{command}` is not executed",
+                            menu = menu_name.to_owned(),
+                            command = command.clone()
+                        );
+                    }
+                    lerp.anim(now_ms)
+                }
+                _ => ChromeMenuAnim::IDENTITY,
+            };
+            let ChromeFrame {
+                list: frame_list,
+                coverage: _,
+                vis_errors,
+            } = execute_chrome_menu_with_anim(
+                menu,
+                &host,
+                &surface,
+                ChromeAssets {
+                    catalog: Some(catalog),
+                    localize: self.strings.as_ref().map(|s| &s.0),
+                },
+                anim,
+                &mut self.exprs,
+            );
+            for (item, err) in vis_errors {
+                diag::warn_once!(
+                    Ui,
+                    "{menu}[{item}] expression: {err}",
+                    menu = menu_name.to_owned()
+                );
+            }
+            if frame_list.cmds.is_empty() {
+                empty_paint = true;
+            }
+            list.cmds.extend(frame_list.cmds);
+        }
+
+        let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
+
+        for cmd in &list.cmds {
+            if self
+                .hud_images
+                .get(
+                    crate::images::HUD_CHROME_NAMESPACE,
+                    &cmd.material,
+                    &mut self.images,
+                )
+                .is_none()
+            {
+                diag::warn_once!(
+                    Ui,
+                    "playercard image `{name}` is {miss}",
+                    name = cmd.material.clone(),
+                    miss = if self.hud_images.has_games_root() {
+                        "not a zone atlas and not in the IWD"
+                    } else {
+                        "no games root is set"
+                    }
+                );
+            }
+            if let Draw2dOp::TextRun { font, .. } = &cmd.op {
+                if fonts.contains_key(font) {
+                    continue;
+                }
+                if let Some(def) = catalog.font(font) {
+                    fonts.insert(font.clone(), def);
+                }
+            }
+        }
+
+        let (quads, _) = tessellate_fonts(&list, &fonts);
+        if quads.is_empty() {
+            self.hide();
+            if !any_menu_missing && !table_miss && empty_paint {
+                diag::warn_once!(
+                    Ui,
+                    "`{name}` paint emitted no tess quads",
+                    name = String::from("playercard")
+                );
+            }
+            return;
+        }
+
+        self.pass.playercard = TessJob::Quads(quads);
+    }
+}
+
 pub(crate) fn update_playercard(
     surface: Res<crate::surface::Hud2dSurface>,
-    catalog: Option<Res<MenuCatalog>>,
-    strings: Option<Res<PreparedLocalizedStrings>>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut gaps: ResMut<HudPresentationGaps>,
-    mut pass: ResMut<HudTessPass>,
-    mut exprs: ResMut<crate::expr_cache::MenuExprCache>,
-    mut cache: ResMut<PlayerCardCache>,
-    mut local_vars: ResMut<UiLocalVars>,
-    mut messages: PlayerCardMessages,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
+    cache: ResMut<PlayerCardCache>,
+    local_vars: ResMut<UiLocalVars>,
+    messages: PlayerCardMessages,
+    presentation: net::LocalPresentation,
     view: Option<Res<frame::ViewSubject>>,
-    cg_clock: Res<FrameClock>,
+    mut display: PlayerCardDisplay,
 ) {
-    if !surface.is_ready() {
-        return;
-    }
-    let now_ms = milliseconds() as i32;
-    apply_card_slots(
-        &mut messages.card_slots,
-        &mut cache,
-        &presented,
-        cg_clock.time(),
-    );
-    apply_open_menus(
-        &mut messages.open_menus,
-        &mut local_vars,
-        catalog.as_deref(),
-        &mut exprs,
-        now_ms,
-    );
-
-    for cmd in messages.splashes.read().filter(|cmd| cmd.slot == 1) {
-        let Some(table) = catalog
-            .as_deref()
-            .and_then(|c| c.string_table(hud_iw4::SPLASH_TABLE_NAME))
-        else {
-            gaps.raise(GapCause::SplashNoTable);
-            continue;
-        };
-        let Some(row) = table.lookup_row(&cmd.key) else {
-            gaps.raise(GapCause::SplashKeyMissing {
-                key: cmd.key.clone(),
-            });
-            continue;
-        };
-        let duration = hud_iw4::splash_duration_ms(table.cell(row, hud_iw4::SPLASH_COL_DURATION));
-        let (_, slot) = hud_iw4::activate_splash(1, row, duration, cmd.optional, now_ms);
-        let key = table
-            .cell(row, hud_iw4::SPLASH_COL_DESCRIPTION)
-            .trim_start_matches('@');
-        let Some(description) = strings.as_deref().and_then(|s| s.0.text(key)) else {
-            gaps.raise(GapCause::LocalizedRowMissing {
-                key: key.to_owned(),
-            });
-            continue;
-        };
-        cache.broadcast = Some((
-            slot,
-            hud_iw4::splash_replace_optional(description, cmd.optional),
-        ));
-        local_vars.set_int("callout_update_time", now_ms + 1500);
-        messages.sound.write(frame::UiPlaySound {
-            alias: "mp_card_slide".into(),
-        });
-    }
-    if cache.broadcast.as_ref().is_some_and(|(slot, _)| {
-        now_ms
-            > slot
-                .start_ms
-                .saturating_add(slot.duration_ms)
-                .saturating_add(150)
-    }) {
-        cache.broadcast = None;
-    }
-    let live = local_vars.int("ui_show_youKilled") != 0
-        || local_vars.int("ui_show_killedBy") != 0
-        || cache.broadcast.is_some();
-    if !live {
-        gaps.clear(HudGap::PlayerCard);
-        hide(&mut pass);
-        return;
-    }
-    let Some(catalog) = catalog.as_ref() else {
-        gaps.raise(GapCause::PlayerCardNoCatalog);
-        hide(&mut pass);
-        return;
-    };
-
-    let own_team = presented
-        .snapshot()
-        .and_then(|s| s.meta.for_client(local.0))
-        .map(|m| m.client_state_team)
-        .unwrap_or(0);
-    let host = PlayerCardExprHost {
-        menu: None,
-        ms: now_ms,
-        in_killcam: view.as_deref().is_some_and(|v| v.in_killcam()),
-        game_ended: presented.snapshot().is_some_and(|s| {
-            matches!(
-                s.meta.phase,
-                sim::MatchPhase::Intermission | sim::MatchPhase::PostGame
-            )
-        }),
-        own_team,
-        dvars: presented
-            .snapshot()
-            .map(|s| s.meta.script_dvars(local.0))
-            .unwrap_or_default(),
-        local_vars: &local_vars,
-        cache: &cache,
-        catalog: Some(catalog),
-    };
-
-    let mut list = crate::draw2d::Draw2dList::default();
-    let mut any_menu_missing = false;
-    let mut table_miss = false;
-    let mut empty_paint = false;
-    for menu_name in [PLAYERCARD_YOU_KILLED_MENU, PLAYERCARD_KILLED_BY_MENU]
-        .into_iter()
-        .chain(cache.broadcast.as_ref().map(|_| "playercard_splash"))
-    {
-        let Some(menu) = catalog.get(menu_name) else {
-            any_menu_missing = true;
-            gaps.raise(GapCause::PlayerCardNoMenu {
-                name: menu_name.to_owned(),
-            });
-            continue;
-        };
-        if host.table("mp/cardTitleTable.csv").is_none() {
-            table_miss = true;
-            gaps.raise(GapCause::PlayerCardTableMissing {
-                name: String::from("mp/cardTitleTable.csv"),
-            });
-        }
-        if host.table("mp/cardIconTable.csv").is_none() {
-            table_miss = true;
-            gaps.raise(GapCause::PlayerCardTableMissing {
-                name: String::from("mp/cardIconTable.csv"),
-            });
-        }
-        let host = PlayerCardExprHost {
-            menu: Some(menu),
-            ..host
-        };
-        let anim = match (menu_name, cache.broadcast.as_ref()) {
-            ("playercard_splash", Some((slot, _))) => {
-                let end = slot.start_ms.saturating_add(slot.duration_ms);
-                let (script, start) = if now_ms > end {
-                    (&menu.on_close_request, end)
-                } else {
-                    (&menu.on_open, slot.start_ms)
-                };
-                let lerp = hud_iw4::item_run_script_lerp(script, start);
-                for command in &lerp.leftover {
-                    gaps.raise(GapCause::MenuScriptUnsupported {
-                        menu: menu_name.to_owned(),
-                        command: command.clone(),
-                    });
-                }
-                lerp.anim(now_ms)
-            }
-            _ => ChromeMenuAnim::IDENTITY,
-        };
-        let ChromeFrame {
-            list: frame_list,
-            coverage: _,
-            vis_errors,
-        } = execute_chrome_menu_with_anim(
-            menu,
-            &host,
-            &surface,
-            ChromeAssets {
-                catalog: Some(catalog),
-                localize: strings.as_ref().map(|s| &s.0),
-            },
-            anim,
-            &mut exprs,
-        );
-        for (item, err) in vis_errors {
-            gaps.raise(GapCause::MenuExpression {
-                menu: menu_name.to_owned(),
-                item,
-                err,
-            });
-        }
-        if frame_list.cmds.is_empty() {
-            empty_paint = true;
-        }
-        list.cmds.extend(frame_list.cmds);
-    }
-
-    let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
-    let mut image_missing = false;
-    for cmd in &list.cmds {
-        if hud_images
-            .get(
-                crate::images::HUD_CHROME_NAMESPACE,
-                &cmd.material,
-                &mut images,
-            )
-            .is_none()
-        {
-            image_missing = true;
-            gaps.raise(GapCause::PlayerCardMaterialMissing {
-                name: cmd.material.clone(),
-                miss: if hud_images.has_games_root() {
-                    ImageMiss::NotDecoded
-                } else {
-                    ImageMiss::NoGamesRoot
-                },
-            });
-        }
-        if let Draw2dOp::TextRun { font, .. } = &cmd.op {
-            if fonts.contains_key(font) {
-                continue;
-            }
-            if let Some(def) = catalog.font(font) {
-                fonts.insert(font.clone(), def);
-            }
-        }
-    }
-
-    let (quads, _) = tessellate_fonts(&list, &fonts);
-    if quads.is_empty() {
-        hide(&mut pass);
-        if !any_menu_missing && !table_miss && empty_paint {
-            gaps.raise(GapCause::PlayerCardEmptyPaint {
-                name: String::from("playercard"),
-            });
-        }
-        return;
-    }
-    if !image_missing && !any_menu_missing && !table_miss {
-        gaps.clear(HudGap::PlayerCard);
-    }
-    pass.playercard = TessJob::Quads(quads);
+    display.update(surface, cache, local_vars, messages, presentation, view);
 }

@@ -1,6 +1,7 @@
 use std::{
     alloc::{GlobalAlloc, Layout},
     cell::Cell,
+    ffi::CStr,
     sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
 };
 
@@ -85,16 +86,17 @@ pub fn counting_enabled() -> bool {
         0 => false,
         1 => true,
         _ => {
-            let on = env_key_present(b"IW4L_COUNTING_ALLOC\0");
+            let on = env_key_present(c"IW4L_COUNTING_ALLOC");
             STATE.store(u8::from(on), Ordering::Relaxed);
             on
         }
     }
 }
 
-fn env_key_present(key_nul: &[u8]) -> bool {
-    debug_assert_eq!(key_nul.last().copied(), Some(0));
-    !unsafe { getenv(key_nul.as_ptr().cast()) }.is_null()
+fn env_key_present(key: &CStr) -> bool {
+    // This runs inside GlobalAlloc; std::env::var_os may allocate recursively.
+    // CStr supplies a valid terminated name; the returned storage is never read.
+    !unsafe { getenv(key.as_ptr()) }.is_null()
 }
 
 unsafe extern "C" {

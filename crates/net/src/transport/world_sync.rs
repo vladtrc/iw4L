@@ -127,13 +127,23 @@ impl WorldObjectUpdate {
         state.fracture_profile_version = self.fracture_profile_version;
         match self.change {
             WorldObjectChange::Unchanged => {}
-            WorldObjectChange::Delta { glass, loops } => {
+            WorldObjectChange::Delta {
+                glass,
+                loops,
+                portal_exits,
+            } => {
                 apply_pair_delta(&mut state.glass_pieces, &glass);
                 state.destructible_loop_sounds = loops;
+                state.portal_blocked_exits = portal_exits;
             }
-            WorldObjectChange::Full { glass, loops } => {
+            WorldObjectChange::Full {
+                glass,
+                loops,
+                portal_exits,
+            } => {
                 state.glass_pieces = glass;
                 state.destructible_loop_sounds = loops;
+                state.portal_blocked_exits = portal_exits;
             }
         }
     }

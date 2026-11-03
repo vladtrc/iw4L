@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use frame::ScopeApp;
 use frame::{AppScreen, ClassEquipResolved, LaunchReport, LocalSpawnArmed, RuntimeRole};
 use net::{
     AuthorityInputGate, ClientActionInbox, ClientPredictionState, ClientSet, LocalPresentClient,
@@ -9,24 +10,22 @@ use sim::ClientAction;
 use render_frontend::prepare::scene::camera::SimCamera;
 
 pub fn arm_local_from_presented(
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
+    presentation: net::LocalPresentation,
     policy: Res<crate::SessionReadinessPolicy>,
     mut armed: ResMut<LocalSpawnArmed>,
     role: Res<RuntimeRole>,
-    generation: Res<frame::WorldGeneration>,
     mut screen: ResMut<AppScreen>,
     sim_cam: Option<ResMut<SimCamera>>,
     mut look: ResMut<LookState>,
 ) {
-    if !role.runs_client() || armed.armed_for(generation.stamp()) {
+    if !role.runs_client() || armed.0 {
         return;
     }
 
-    if !policy.admission_allowed || policy.generation != generation.stamp() {
+    if !policy.admission_allowed {
         return;
     }
-    let Some(ps) = presented.alive_player(local.0) else {
+    let Some(ps) = presentation.presented.alive_player(presentation.local.0) else {
         return;
     };
 
@@ -49,35 +48,25 @@ pub fn arm_local_from_presented(
         ps.viewangles[1],
         ps.weapon
     );
-    armed.0 = generation.stamp();
+    armed.0 = true;
 }
 
 fn apply_local_input_policy(
     policy: Res<crate::SessionReadinessPolicy>,
-    generation: Res<frame::WorldGeneration>,
     signon: Res<net::SignonState>,
     armed: Res<LocalSpawnArmed>,
     mut gate: ResMut<AuthorityInputGate>,
 ) {
-    gate.local_cmds_enabled = policy.local_input_allowed(
-        generation.stamp(),
-        armed.armed_for(generation.stamp()),
-        signon.phase.is_failed(),
-    );
+    gate.local_cmds_enabled = policy.local_input_allowed(armed.0, signon.phase.is_failed());
 }
 
 fn guard_local_input_before_prediction(
     policy: Res<crate::SessionReadinessPolicy>,
-    generation: Res<frame::WorldGeneration>,
     signon: Res<net::SignonState>,
     armed: Res<LocalSpawnArmed>,
     mut gate: ResMut<AuthorityInputGate>,
 ) {
-    gate.local_cmds_enabled = policy.local_input_allowed(
-        generation.stamp(),
-        armed.armed_for(generation.stamp()),
-        signon.phase.is_failed(),
-    );
+    gate.local_cmds_enabled = policy.local_input_allowed(armed.0, signon.phase.is_failed());
 }
 
 pub fn join_local_on_class_select(
@@ -85,13 +74,12 @@ pub fn join_local_on_class_select(
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,
     mut actions: ResMut<ClientActionInbox>,
-    mut request_ids: ResMut<net::ActionRequestIds>,
     role: Option<Res<RuntimeRole>>,
     policy: Res<crate::SessionReadinessPolicy>,
-    mut joining: Local<Option<sim::ActionRequestId>>,
+    mut joining: Local<bool>,
 ) {
     if !matches!(*screen, AppScreen::ClassSelect) {
-        *joining = None;
+        *joining = false;
         return;
     }
     if role.is_some_and(|role| *role == RuntimeRole::Replay) {
@@ -107,27 +95,19 @@ pub fn join_local_on_class_select(
         .and_then(|s| s.meta.for_client(local.0))
         .is_some_and(|meta| meta.lifecycle != sim::ClientLifecycle::Connecting)
     {
-        *joining = None;
+        *joining = false;
         return;
     }
 
-    if let Some(request_id) = *joining {
-        if actions
-            .pending_for(local.0)
-            .any(|action| sim::action_request_id(&action) == request_id)
-        {
-            return;
-        }
-
-        *joining = None;
+    if *joining {
+        return;
     }
-    let request_id = request_ids.allocate();
-    match actions.push(local.0, ClientAction::JoinMatch { request_id }) {
+    match actions.push(local.0, ClientAction::JoinMatch) {
         Ok(()) => {
-            *joining = Some(request_id);
+            *joining = true;
             diag::info!(
                 Fpv,
-                "class select: queued JoinMatch request_id={request_id} \
+                "class select: queued JoinMatch \
                  (meta-only; spectator pm_type is a named gap)"
             );
         }
@@ -149,14 +129,16 @@ pub fn sync_prediction_metrics_to_probe(
 }
 
 pub fn register_local_arm_systems(app: &mut App) {
-    app.init_resource::<LocalSpawnArmed>()
+    app.scoped::<LocalSpawnArmed>(frame::MatchScope::Live)
         .add_systems(
             Update,
             (
                 arm_local_from_presented
                     .in_set(frame::InMatch)
                     .after(ClassEquipResolved),
-                join_local_on_class_select.after(crate::admission::update_admission),
+                join_local_on_class_select
+                    .in_set(frame::InMatch)
+                    .after(crate::admission::update_admission),
                 apply_local_input_policy
                     .in_set(frame::InMatch)
                     .after(arm_local_from_presented),

@@ -103,10 +103,7 @@ impl WorldDrawGpuPlan {
                     source_layout: "packed payload published for extract",
                 },
             ) {
-                asset_world::WorldVertexPayload::Iw4(rows)
-                | asset_world::WorldVertexPayload::Iw5(rows)
-                | asset_world::WorldVertexPayload::T5(rows)
-                | asset_world::WorldVertexPayload::T6(rows) => {
+                asset_world::WorldVertexPayload::Captured { rows, .. } => {
                     self.vertex_share = Some(Arc::new(rows));
                 }
                 unavailable => self.packed_vertices = unavailable,

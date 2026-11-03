@@ -7,8 +7,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
+use frame::ScopeApp;
 use master_protocol::{
-    ALPN, AdmissionFailure, AdvertId, ContentFlags, ControlFrame, ControlHello, ControlRequest,
+    ALPN, AdmissionFailure, AdvertId, ContentFamilies, ControlFrame, ControlHello, ControlRequest,
     ControlResponse, EndpointRole, MAX_BOOTSTRAP_STREAM_BYTES, MAX_CONCURRENT_BOOTSTRAP,
     MAX_RELAY_UNI_STREAMS, MemberId, RelayDatagram, RequestBody, ResponseBody, RoomView,
     SESSION_IDLE, SessionCloseReason, decode_relay, decode_relay_stream, decode_stream_payload,
@@ -36,26 +37,11 @@ pub use population::CommunityPlayerCounts;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
 
-pub const CONTENT_IW4: u8 = ContentFlags::IW4.0;
-
-pub const fn content_inventory(iw4: bool, iw5: bool, t5: bool, t6: bool) -> ContentFlags {
-    ContentFlags(
-        (if iw4 { ContentFlags::IW4.0 } else { 0 })
-            | (if iw5 { ContentFlags::IW5.0 } else { 0 })
-            | (if t5 { ContentFlags::T5.0 } else { 0 })
-            | (if t6 { ContentFlags::T6.0 } else { 0 }),
-    )
+pub fn content_inventory<'a>(families: impl IntoIterator<Item = &'a str>) -> ContentFamilies {
+    ContentFamilies::from_families(families).expect("valid bounded installed inventory")
 }
-
-pub fn content_names(flags: ContentFlags) -> String {
-    let mut names: Vec<_> = ContentFlags::FAMILIES
-        .into_iter()
-        .filter_map(|(name, flag)| flags.contains(flag).then_some(name))
-        .collect();
-    if !ContentFlags::KNOWN.contains(flags) {
-        names.push("unknown");
-    }
-    names.join(",")
+pub fn content_names(families: &ContentFamilies) -> String {
+    families.iter().collect::<Vec<_>>().join(",")
 }
 
 const RELAY_PACKET_BYTES: usize = crate::transport::protocol::MAX_PACKET_BYTES as usize;
@@ -391,7 +377,7 @@ struct MasterTarget {
 }
 
 fn master_target() -> Result<Option<MasterTarget>> {
-    if let Some(community) = updater::selected() {
+    if let Some(community) = community::selected() {
         return Ok(Some(MasterTarget {
             address: community.master.address.clone(),
             server_name: community.master.server_name.clone(),
@@ -410,8 +396,8 @@ struct HostConfig {
     map: String,
     mode: String,
     max_players: u8,
-    requires: ContentFlags,
-    have: ContentFlags,
+    requires: ContentFamilies,
+    have: ContentFamilies,
 }
 
 #[derive(Clone, Debug)]
@@ -421,13 +407,13 @@ struct JoinConfig {
     advert_id: AdvertId,
     map: String,
     mode: String,
-    have: ContentFlags,
+    have: ContentFamilies,
 }
 
 #[derive(Clone, Debug)]
 struct BrowserConfig {
     target: MasterTarget,
-    have: ContentFlags,
+    have: ContentFamilies,
 }
 
 #[derive(Clone, Debug)]
@@ -442,7 +428,7 @@ enum MasterLaunchMode {
 pub struct MasterLaunchIntent(MasterLaunchMode);
 
 impl MasterLaunchIntent {
-    pub fn browser_from_env(have: ContentFlags) -> Result<Self> {
+    pub fn browser_from_env(have: ContentFamilies) -> Result<Self> {
         let Some(target) = master_target()? else {
             return Ok(Self::disabled());
         };
@@ -452,7 +438,11 @@ impl MasterLaunchIntent {
         })))
     }
 
-    pub fn from_env_for_map(map: &str, have: ContentFlags, requires: ContentFlags) -> Result<Self> {
+    pub fn from_env_for_map(
+        map: &str,
+        have: ContentFamilies,
+        requires: ContentFamilies,
+    ) -> Result<Self> {
         let Some(target) = master_target()? else {
             return Ok(Self::disabled());
         };
@@ -462,23 +452,23 @@ impl MasterLaunchIntent {
             (None, None) => Ok(Self::disabled()),
             (Some(name), None) if !name.trim().is_empty() => {
                 Ok(Self(MasterLaunchMode::Host(HostConfig {
-                    password: std::env::var("IW4L_MASTER_PASSWORD").unwrap_or_default(),
+                    password: std::env::var("IW4L_MASTER_PASSWORD").unwrap_or(String::new()),
                     auto_start_map: true,
                     target,
                     name,
                     map: map.to_owned(),
-                    mode: std::env::var("IW4L_GAMETYPE").unwrap_or_else(|_| "dm".into()),
+                    mode: sim::host_game_mode_kind().token().into(),
                     max_players: parse_max_players()?,
                     requires,
                     have,
                 })))
             }
             (None, Some(advert_id)) => Ok(Self(MasterLaunchMode::Join(JoinConfig {
-                password: std::env::var("IW4L_MASTER_PASSWORD").unwrap_or_default(),
+                password: std::env::var("IW4L_MASTER_PASSWORD").unwrap_or(String::new()),
                 target,
                 advert_id: advert_id.parse()?,
                 map: map.to_owned(),
-                mode: std::env::var("IW4L_GAMETYPE").unwrap_or_else(|_| "dm".into()),
+                mode: sim::host_game_mode_kind().token().into(),
                 have,
             }))),
             (Some(_), Some(_)) => {
@@ -515,10 +505,10 @@ pub struct MasterAdvert {
     pub max_players: u8,
     pub locked: bool,
     pub in_match: bool,
-    pub requires: ContentFlags,
-    pub available: ContentFlags,
+    pub requires: ContentFamilies,
+    pub available: ContentFamilies,
     pub password_protected: bool,
-    pub missing: ContentFlags,
+    pub missing: ContentFamilies,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -529,7 +519,7 @@ pub struct MasterBrowserSnapshot {
     pub loading: bool,
     pub adverts: Vec<MasterAdvert>,
     pub error: Option<String>,
-    pub have: ContentFlags,
+    pub have: ContentFamilies,
 }
 
 #[derive(Resource)]
@@ -591,6 +581,7 @@ pub enum MasterMenuAction {
 
 #[derive(Clone, Debug)]
 enum MasterBridgeCommand {
+    InstalledMatch(Option<frame::MatchKey>),
     SetPassword {
         password: String,
     },
@@ -615,7 +606,7 @@ enum MasterBridgeCommand {
         weapons: u64,
         classes: u64,
         #[allow(dead_code)]
-        load_key: frame::LocalLoadKey,
+        match_key: frame::MatchKey,
     },
     MatchEnded {
         match_key: frame::MatchKey,
@@ -736,7 +727,9 @@ impl MasterBridgeState {
 
     pub fn families(&self) -> Option<frame::AssetFamilies> {
         match self {
-            Self::Hosting { families, .. } | Self::Joined { families, .. } => Some(*families),
+            Self::Hosting { families, .. } | Self::Joined { families, .. } => {
+                Some(families.clone())
+            }
             _ => None,
         }
     }
@@ -775,7 +768,6 @@ pub struct MasterBridge {
     state: Arc<Mutex<MasterBridgeState>>,
     commands: Arc<Mutex<Vec<QueuedCommand>>>,
     outcomes: Arc<Mutex<VecDeque<MasterOperationResult>>>,
-    installed_load: Arc<Mutex<Option<frame::LocalLoadKey>>>,
     mailbox: RelayMailbox,
     bootstrap: Arc<BootstrapLane>,
     close: CancellationToken,
@@ -818,12 +810,18 @@ impl MasterBridge {
     fn send(&self, command: MasterBridgeCommand) {
         let mut commands = self.commands.lock().expect("master command queue poisoned");
         if matches!(command, MasterBridgeCommand::AuthorityProgress { .. })
-            && let Some(queued) = commands.iter_mut().find(|queued| {
-                matches!(
-                    queued.command,
-                    MasterBridgeCommand::AuthorityProgress { .. }
-                )
-            })
+            && let Some(queued) = commands
+                .iter_mut()
+                .rev()
+                .take_while(|queued| {
+                    !matches!(queued.command, MasterBridgeCommand::InstalledMatch(_))
+                })
+                .find(|queued| {
+                    matches!(
+                        queued.command,
+                        MasterBridgeCommand::AuthorityProgress { .. }
+                    )
+                })
         {
             queued.command = command;
             return;
@@ -851,8 +849,8 @@ impl MasterBridge {
         });
     }
 
-    pub fn set_installed_load(&self, load: Option<frame::LocalLoadKey>) {
-        *self.installed_load.lock().expect("installed load poisoned") = load;
+    pub fn set_installed_match(&self, installed: Option<frame::MatchKey>) {
+        self.send(MasterBridgeCommand::InstalledMatch(installed));
     }
 
     pub fn report_map_loaded(&self, epoch: u32, descriptor: crate::MatchDescriptor) {
@@ -868,14 +866,14 @@ impl MasterBridge {
         &self,
         epoch: u32,
         descriptor: crate::MatchDescriptor,
-        load_key: frame::LocalLoadKey,
+        match_key: frame::MatchKey,
     ) {
         self.send(MasterBridgeCommand::HostWorldReady {
             epoch,
             map: descriptor.map,
             weapons: descriptor.weapons,
             classes: descriptor.classes,
-            load_key,
+            match_key,
         });
     }
 
@@ -951,88 +949,121 @@ impl MasterMatchStart {
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct MasterMatchHandshake<'w> {
+    authority: Option<Res<'w, AuthorityWorld>>,
+    level: Option<Res<'w, crate::ClientLevel>>,
+    descriptor: Option<Res<'w, crate::MatchDescriptor>>,
+}
+
+impl MasterMatchHandshake<'_> {
+    fn relay_hello(&self) -> Option<HandshakeHello> {
+        let descriptor = self.descriptor.as_deref()?;
+        let fingerprint = self
+            .authority
+            .as_ref()
+            .filter(|authority| authority.0.has_world_clip())
+            .map(|authority| ContentFingerprint::from_world(&authority.0))
+            .or_else(|| {
+                self.level
+                    .as_ref()
+                    .filter(|level| level.content.has_world_clip())
+                    .map(|level| level.fingerprint)
+            })?;
+        let mut hello = handshake_for_match(Some(fingerprint), Some(descriptor))?;
+        hello.limits.max_packet_bytes = RELAY_PACKET_BYTES as u32;
+        Some(hello)
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct MasterRelayChannels<'w, 's> {
+    udp_hub: Option<Res<'w, UdpAuthorityHub>>,
+    udp_link: Option<Res<'w, UdpClientLink>>,
+    commands: Commands<'w, 's>,
+}
+
+impl MasterRelayChannels<'_, '_> {
+    fn arm(
+        mut self,
+        settings: Res<frame::GameSettings>,
+        intent: Res<MasterLaunchIntent>,
+        role: Res<frame::RuntimeRole>,
+        content: MasterMatchHandshake,
+        bridge: Option<Res<MasterBridge>>,
+    ) {
+        if let Some(bridge) = bridge {
+            let Some(hello) = content.relay_hello() else {
+                return;
+            };
+            if self.udp_hub.is_none() && matches!(bridge.state(), MasterBridgeState::Hosting { .. })
+            {
+                let mut hub = UdpAuthorityHub::relay(hello, 1, bridge.mailbox());
+                hub.attach_bootstrap(Arc::clone(&bridge.bootstrap));
+                self.commands.insert_resource(hub);
+            }
+            if self.udp_link.is_none()
+                && matches!(
+                    bridge.state(),
+                    MasterBridgeState::Joining { .. } | MasterBridgeState::Joined { .. }
+                )
+            {
+                let mut link = UdpClientLink::relay(hello, bridge.mailbox());
+                link.attach_bootstrap(Arc::clone(&bridge.bootstrap));
+                diag::info!(
+                    Net,
+                    "master client relay mailbox — protocol={} offering map={:016x} weapons={:016x} classes={:016x}",
+                    crate::PROTOCOL_VERSION,
+                    hello.content.map,
+                    hello.content.weapons,
+                    hello.content.classes
+                );
+                self.commands.insert_resource(link);
+            }
+            return;
+        }
+        match &intent.0 {
+            MasterLaunchMode::Disabled | MasterLaunchMode::Browser(_) => {}
+            MasterLaunchMode::Host(config) => {
+                if *role != frame::RuntimeRole::Listen || self.udp_hub.is_some() {
+                    return;
+                }
+                let relay = spawn_host(config.clone(), settings.player_name.clone());
+                diag::info!(
+                    Net,
+                    "master public lobby arming for {}",
+                    config.target.address
+                );
+                self.commands.insert_resource(relay);
+            }
+            MasterLaunchMode::Join(config) => {
+                if *role != frame::RuntimeRole::Client || self.udp_link.is_some() {
+                    return;
+                }
+                let relay = spawn_join(config.clone(), settings.player_name.clone());
+                diag::info!(
+                    Net,
+                    "master joining lobby advert {} through {} ({}/{})",
+                    config.advert_id,
+                    config.target.address,
+                    config.map,
+                    config.mode
+                );
+                self.commands.insert_resource(relay);
+            }
+        }
+    }
+}
+
 pub fn arm_master_bridge(
     settings: Res<frame::GameSettings>,
     intent: Res<MasterLaunchIntent>,
     role: Res<frame::RuntimeRole>,
-    authority: Option<Res<AuthorityWorld>>,
-    prediction: Option<Res<crate::ClientPredictionState>>,
-    descriptor: Option<Res<crate::MatchDescriptor>>,
+    content: MasterMatchHandshake,
     bridge: Option<Res<MasterBridge>>,
-    udp_hub: Option<Res<UdpAuthorityHub>>,
-    udp_link: Option<Res<UdpClientLink>>,
-    mut commands: Commands,
+    channels: MasterRelayChannels,
 ) {
-    if let Some(bridge) = bridge {
-        let Some(descriptor) = descriptor.as_deref() else {
-            return;
-        };
-        let world = authority
-            .as_ref()
-            .map(|authority| &authority.0)
-            .or_else(|| prediction.as_ref().map(|prediction| prediction.0.world()));
-        if world.is_none_or(|world| !world.has_world_clip()) {
-            return;
-        }
-        let Some(mut hello) = handshake_for_match(world, Some(descriptor)) else {
-            return;
-        };
-        hello.limits.max_packet_bytes = RELAY_PACKET_BYTES as u32;
-        if udp_hub.is_none() && matches!(bridge.state(), MasterBridgeState::Hosting { .. }) {
-            let mut hub = UdpAuthorityHub::relay(hello, 1, bridge.mailbox());
-            hub.attach_bootstrap(Arc::clone(&bridge.bootstrap));
-            commands.insert_resource(hub);
-        }
-        if udp_link.is_none()
-            && matches!(
-                bridge.state(),
-                MasterBridgeState::Joining { .. } | MasterBridgeState::Joined { .. }
-            )
-        {
-            let mut link = UdpClientLink::relay(hello, bridge.mailbox());
-            link.attach_bootstrap(Arc::clone(&bridge.bootstrap));
-            diag::info!(
-                Net,
-                "master client relay mailbox — protocol={} offering map={:016x} weapons={:016x} classes={:016x}",
-                crate::PROTOCOL_VERSION,
-                hello.content.map,
-                hello.content.weapons,
-                hello.content.classes
-            );
-            commands.insert_resource(link);
-        }
-        return;
-    }
-    match &intent.0 {
-        MasterLaunchMode::Disabled | MasterLaunchMode::Browser(_) => {}
-        MasterLaunchMode::Host(config) => {
-            if *role != frame::RuntimeRole::Listen || udp_hub.is_some() {
-                return;
-            }
-            let relay = spawn_host(config.clone(), settings.player_name.clone());
-            diag::info!(
-                Net,
-                "master public lobby arming for {}",
-                config.target.address
-            );
-            commands.insert_resource(relay);
-        }
-        MasterLaunchMode::Join(config) => {
-            if *role != frame::RuntimeRole::Client || udp_link.is_some() {
-                return;
-            }
-            let relay = spawn_join(config.clone(), settings.player_name.clone());
-            diag::info!(
-                Net,
-                "master joining lobby advert {} through {} ({}/{})",
-                config.advert_id,
-                config.target.address,
-                config.map,
-                config.mode
-            );
-            commands.insert_resource(relay);
-        }
-    }
+    channels.arm(settings, intent, role, content, bridge);
 }
 
 fn arm_master_browser(
@@ -1050,11 +1081,11 @@ fn arm_master_browser(
         return;
     }
     let state = Arc::new(Mutex::new(MasterBrowserSnapshot {
-        community_name: updater::selected()
+        community_name: community::selected()
             .map(|community| community.name.clone())
-            .unwrap_or_default(),
+            .unwrap_or(String::new()),
         loading: true,
-        have: browser_config.have,
+        have: browser_config.have.clone(),
         ..default()
     }));
     let refresh = Arc::new(AtomicU64::new(0));
@@ -1076,158 +1107,175 @@ fn arm_master_browser(
     });
 }
 
-fn apply_master_menu_action(
-    dvars: Res<frame::UiMenuDvars>,
-    mut pending: ResMut<PendingMasterMenuAction>,
-    mut intent: ResMut<MasterLaunchIntent>,
-    mut role: ResMut<frame::RuntimeRole>,
-    settings: Res<frame::GameSettings>,
-    browser: Option<Res<MasterBrowser>>,
-    bridge: Option<Res<MasterBridge>>,
-    mut commands: Commands,
-) {
-    let Some(action) = pending.0.take() else {
-        return;
-    };
-    match action {
-        MasterMenuAction::Refresh => {
-            if let Some(browser) = browser {
-                browser.refresh();
-            }
+#[derive(bevy::ecs::system::SystemParam)]
+struct MasterMenuTransition<'w, 's> {
+    pending: ResMut<'w, PendingMasterMenuAction>,
+    intent: ResMut<'w, MasterLaunchIntent>,
+    role: ResMut<'w, frame::RuntimeRole>,
+    commands: Commands<'w, 's>,
+}
+
+impl MasterMenuTransition<'_, '_> {
+    fn apply(
+        mut self,
+        dvars: Res<frame::UiMenuDvars>,
+        settings: Res<frame::GameSettings>,
+        browser: Option<Res<MasterBrowser>>,
+        bridge: Option<Res<MasterBridge>>,
+    ) {
+        let Some(action) = self.pending.0.take() else {
             return;
-        }
-        MasterMenuAction::SetPassword { password } => {
-            if let Some(bridge) = bridge {
-                bridge.send(MasterBridgeCommand::SetPassword { password });
-            }
-            return;
-        }
-        MasterMenuAction::UpdateLobby { map, mode } => {
-            if let Some(bridge) = bridge {
-                if let Some(families) = bridge.state().families()
-                    && let Err(error) = families.require_map(&map)
-                {
-                    diag::warn!(Net, "{error}");
-                    return;
+        };
+        match action {
+            MasterMenuAction::Refresh => {
+                if let Some(browser) = browser {
+                    browser.refresh();
                 }
-                bridge.send(MasterBridgeCommand::UpdateLobby { map, mode });
-            } else {
-                diag::warn!(Net, "master lobby update requested without a live bridge");
+                return;
             }
-            return;
-        }
-        MasterMenuAction::StartMatch { map, mode } => {
-            if let Some(bridge) = bridge {
-                if let Some(families) = bridge.state().families()
-                    && let Err(error) = families.require_map(&map)
-                {
-                    diag::warn!(Net, "{error}");
-                    return;
+            MasterMenuAction::SetPassword { password } => {
+                if let Some(bridge) = bridge {
+                    bridge.send(MasterBridgeCommand::SetPassword { password });
                 }
-                bridge.send(MasterBridgeCommand::StartMatch { map, mode });
-            } else {
-                diag::warn!(Net, "master lobby start requested without a live bridge");
+                return;
             }
-            return;
-        }
-        MasterMenuAction::VoteToSkip => {
-            if let Some(bridge) = bridge {
-                bridge.send(MasterBridgeCommand::VoteToSkip);
-            } else {
-                diag::warn!(Net, "master lobby vote requested without a live bridge");
-            }
-            return;
-        }
-        MasterMenuAction::LeaveLobby => {
-            if let Some(bridge) = bridge {
-                bridge.leave();
-                commands.remove_resource::<MasterBridge>();
-            }
-            commands.remove_resource::<UdpAuthorityHub>();
-            commands.remove_resource::<UdpClientLink>();
-            let browser = match &intent.0 {
-                MasterLaunchMode::Browser(config) => Some(config.clone()),
-                MasterLaunchMode::Host(config) => Some(BrowserConfig {
-                    target: config.target.clone(),
-                    have: config.have,
-                }),
-                MasterLaunchMode::Join(config) => Some(BrowserConfig {
-                    target: config.target.clone(),
-                    have: config.have,
-                }),
-                MasterLaunchMode::Disabled => None,
-            };
-            if let Some(browser) = browser {
-                intent.0 = MasterLaunchMode::Browser(browser);
-            }
-            *role = frame::RuntimeRole::Listen;
-            return;
-        }
-        MasterMenuAction::Host { .. } | MasterMenuAction::Join { .. } => {}
-    }
-    let MasterLaunchMode::Browser(browser) = &intent.0 else {
-        return;
-    };
-    let browser = browser.clone();
-    match action {
-        MasterMenuAction::Refresh
-        | MasterMenuAction::SetPassword { .. }
-        | MasterMenuAction::UpdateLobby { .. }
-        | MasterMenuAction::StartMatch { .. }
-        | MasterMenuAction::VoteToSkip
-        | MasterMenuAction::LeaveLobby => unreachable!(),
-        MasterMenuAction::Host {
-            map,
-            mode,
-            password,
-        } => {
-            let requires = match frame::AssetFamilies::from_inventory(browser.have.0, &dvars)
-                .and_then(|families| {
-                    families.require_map(&map)?;
-                    Ok(ContentFlags(families.0))
-                }) {
-                Ok(value) => value,
-                Err(error) => {
-                    diag::warn!(Net, "master host content: {error}");
-                    return;
-                }
-            };
-            intent.0 = MasterLaunchMode::Host(HostConfig {
-                password,
-                auto_start_map: false,
-                target: browser.target,
-                name: settings.player_name.clone(),
-                map,
-                mode,
-                max_players: match parse_max_players() {
-                    Ok(value) => value,
-                    Err(error) => {
-                        diag::warn!(Net, "master host settings: {error}");
+            MasterMenuAction::UpdateLobby { map, mode } => {
+                if let Some(bridge) = bridge {
+                    if let Some(families) = bridge.state().families()
+                        && let Err(error) = families.require_map(&map)
+                    {
+                        diag::warn!(Net, "{error}");
                         return;
                     }
-                },
-                requires,
-                have: browser.have,
-            });
-            *role = frame::RuntimeRole::Listen;
+                    bridge.send(MasterBridgeCommand::UpdateLobby { map, mode });
+                } else {
+                    diag::warn!(Net, "master lobby update requested without a live bridge");
+                }
+                return;
+            }
+            MasterMenuAction::StartMatch { map, mode } => {
+                if let Some(bridge) = bridge {
+                    if let Some(families) = bridge.state().families()
+                        && let Err(error) = families.require_map(&map)
+                    {
+                        diag::warn!(Net, "{error}");
+                        return;
+                    }
+                    bridge.send(MasterBridgeCommand::StartMatch { map, mode });
+                } else {
+                    diag::warn!(Net, "master lobby start requested without a live bridge");
+                }
+                return;
+            }
+            MasterMenuAction::VoteToSkip => {
+                if let Some(bridge) = bridge {
+                    bridge.send(MasterBridgeCommand::VoteToSkip);
+                } else {
+                    diag::warn!(Net, "master lobby vote requested without a live bridge");
+                }
+                return;
+            }
+            MasterMenuAction::LeaveLobby => {
+                if let Some(bridge) = bridge {
+                    bridge.leave();
+                    self.commands.remove_resource::<MasterBridge>();
+                }
+                self.commands.remove_resource::<UdpAuthorityHub>();
+                self.commands.remove_resource::<UdpClientLink>();
+                let browser = match &self.intent.0 {
+                    MasterLaunchMode::Browser(config) => Some(config.clone()),
+                    MasterLaunchMode::Host(config) => Some(BrowserConfig {
+                        target: config.target.clone(),
+                        have: config.have.clone(),
+                    }),
+                    MasterLaunchMode::Join(config) => Some(BrowserConfig {
+                        target: config.target.clone(),
+                        have: config.have.clone(),
+                    }),
+                    MasterLaunchMode::Disabled => None,
+                };
+                if let Some(browser) = browser {
+                    self.intent.0 = MasterLaunchMode::Browser(browser);
+                }
+                *self.role = frame::RuntimeRole::Listen;
+                return;
+            }
+            MasterMenuAction::Host { .. } | MasterMenuAction::Join { .. } => {}
         }
-        MasterMenuAction::Join {
-            password,
-            advert_id,
-            map,
-            mode,
-        } => {
-            intent.0 = MasterLaunchMode::Join(JoinConfig {
+        let MasterLaunchMode::Browser(browser) = &self.intent.0 else {
+            return;
+        };
+        let browser = browser.clone();
+        match action {
+            MasterMenuAction::Refresh
+            | MasterMenuAction::SetPassword { .. }
+            | MasterMenuAction::UpdateLobby { .. }
+            | MasterMenuAction::StartMatch { .. }
+            | MasterMenuAction::VoteToSkip
+            | MasterMenuAction::LeaveLobby => unreachable!(),
+            MasterMenuAction::Host {
+                map,
+                mode,
                 password,
-                target: browser.target,
+            } => {
+                let requires = match frame::AssetFamilies::from_inventory(&browser.have, &dvars)
+                    .and_then(|families| {
+                        families.require_map(&map)?;
+                        Ok(families.0)
+                    }) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        diag::warn!(Net, "master host content: {error}");
+                        return;
+                    }
+                };
+                self.intent.0 = MasterLaunchMode::Host(HostConfig {
+                    password,
+                    auto_start_map: false,
+                    target: browser.target,
+                    name: settings.player_name.clone(),
+                    map,
+                    mode,
+                    max_players: match parse_max_players() {
+                        Ok(value) => value,
+                        Err(error) => {
+                            diag::warn!(Net, "master host settings: {error}");
+                            return;
+                        }
+                    },
+                    requires,
+                    have: browser.have,
+                });
+                *self.role = frame::RuntimeRole::Listen;
+            }
+            MasterMenuAction::Join {
+                password,
                 advert_id,
                 map,
                 mode,
-                have: browser.have,
-            });
-            *role = frame::RuntimeRole::Client;
+            } => {
+                self.intent.0 = MasterLaunchMode::Join(JoinConfig {
+                    password,
+                    target: browser.target,
+                    advert_id,
+                    map,
+                    mode,
+                    have: browser.have,
+                });
+                *self.role = frame::RuntimeRole::Client;
+            }
         }
     }
+}
+
+fn apply_master_menu_action(
+    transition: MasterMenuTransition,
+    dvars: Res<frame::UiMenuDvars>,
+    settings: Res<frame::GameSettings>,
+    browser: Option<Res<MasterBrowser>>,
+    bridge: Option<Res<MasterBridge>>,
+) {
+    transition.apply(dvars, settings, browser, bridge);
 }
 
 fn browser_worker(
@@ -1248,21 +1296,22 @@ fn browser_worker(
             let Err(error) = browse(&target, &state, &refresh, &cancel).await else {
                 return;
             };
-            let mut current = state.lock().expect("master browser state poisoned");
-            current.loading = false;
-            current.ping_ms = None;
-            let message = error.to_string();
-            if !cancel.is_cancelled() && current.error.as_deref() != Some(message.as_str()) {
-                diag::warn!(
-                    Net,
-                    "master browser request failed target={} server_name={}: {}",
-                    target.address,
-                    target.server_name,
-                    message
-                );
+            {
+                let mut current = state.lock().expect("master browser state poisoned");
+                current.loading = false;
+                current.ping_ms = None;
+                let message = error.to_string();
+                if !cancel.is_cancelled() && current.error.as_deref() != Some(message.as_str()) {
+                    diag::warn!(
+                        Net,
+                        "master browser request failed target={} server_name={}: {}",
+                        target.address,
+                        target.server_name,
+                        message
+                    );
+                }
+                current.error = Some(message);
             }
-            current.error = Some(message);
-            drop(current);
             if !wait_for_refresh(&refresh, &cancel).await {
                 return;
             }
@@ -1334,30 +1383,31 @@ async fn browse(
                 }
             }
         };
-        let mut current = state.lock().expect("master browser state poisoned");
-        current.loading = false;
-        current.ping_ms = Some(connection.rtt().as_millis().max(1) as u64);
-        current.generation = generation;
-        let have = current.have;
-        current.adverts = adverts
-            .into_iter()
-            .map(|advert| MasterAdvert {
-                id: advert.id,
-                name: advert.name,
-                map: advert.map,
-                mode: advert.mode,
-                players: advert.players,
-                max_players: advert.max_players,
-                locked: advert.locked,
-                in_match: advert.in_match,
-                requires: advert.requires,
-                available: advert.available,
-                password_protected: advert.password_protected,
-                missing: advert.requires.missing_from(have),
-            })
-            .collect();
-        current.error = None;
-        drop(current);
+        {
+            let mut current = state.lock().expect("master browser state poisoned");
+            current.loading = false;
+            current.ping_ms = Some(connection.rtt().as_millis().max(1) as u64);
+            current.generation = generation;
+            let have = current.have.clone();
+            current.adverts = adverts
+                .into_iter()
+                .map(|advert| MasterAdvert {
+                    id: advert.id,
+                    name: advert.name,
+                    map: advert.map,
+                    mode: advert.mode,
+                    players: advert.players,
+                    max_players: advert.max_players,
+                    locked: advert.locked,
+                    in_match: advert.in_match,
+                    requires: advert.requires.clone(),
+                    available: advert.available,
+                    password_protected: advert.password_protected,
+                    missing: advert.requires.missing_from(&have),
+                })
+                .collect();
+            current.error = None;
+        }
         if !wait_for_refresh(refresh, cancel).await {
             return Ok(());
         }
@@ -1383,7 +1433,6 @@ struct WorkerCtx {
     state: Arc<Mutex<MasterBridgeState>>,
     commands: Arc<Mutex<Vec<QueuedCommand>>>,
     outcomes: Arc<Mutex<VecDeque<MasterOperationResult>>>,
-    installed_load: Arc<Mutex<Option<frame::LocalLoadKey>>>,
     mailbox: RelayMailbox,
     bootstrap: Arc<BootstrapLane>,
     cancel: CancellationToken,
@@ -1418,7 +1467,6 @@ fn spawn_worker(role: &'static str, kind: SessionKind, player_name: String) -> M
     let state = Arc::new(Mutex::new(MasterBridgeState::Connecting { identity }));
     let commands = Arc::new(Mutex::new(Vec::new()));
     let outcomes = Arc::new(Mutex::new(VecDeque::new()));
-    let installed_load = Arc::new(Mutex::new(None));
     let bootstrap = BootstrapLane::new();
     let mailbox = RelayMailbox::new(HOST_DATA_CAP);
     let cancel = CancellationToken::new();
@@ -1430,7 +1478,6 @@ fn spawn_worker(role: &'static str, kind: SessionKind, player_name: String) -> M
         state: Arc::clone(&state),
         commands: Arc::clone(&commands),
         outcomes: Arc::clone(&outcomes),
-        installed_load: Arc::clone(&installed_load),
         mailbox: mailbox.clone(),
         bootstrap: Arc::clone(&bootstrap),
         cancel: cancel.clone(),
@@ -1454,7 +1501,6 @@ fn spawn_worker(role: &'static str, kind: SessionKind, player_name: String) -> M
         state,
         commands,
         outcomes,
-        installed_load,
         mailbox,
         bootstrap,
         close,
@@ -1534,30 +1580,38 @@ fn apply_master_lifecycle(
     }
 }
 
+#[derive(Resource, Default)]
+struct ReportedAuthorityProgress(Option<(u64, frame::MatchKey, sim::Tick)>);
+
+#[derive(Resource, Default)]
+struct HostedWorldStart(Option<(u64, frame::MatchKey)>);
+
 pub fn register_master_bridge(app: &mut App) {
-    app.init_resource::<PendingMasterMenuAction>()
+    app.scoped::<ReportedAuthorityProgress>(frame::MatchScope::Live)
+        .scoped::<HostedWorldStart>(frame::MatchScope::Live)
+        .init_resource::<PendingMasterMenuAction>()
         .add_systems(
-            Update,
+            PreUpdate,
             population::poll_communities.in_set(crate::ClientSet::Load),
         )
         .add_systems(
-            Update,
+            PreUpdate,
             (arm_master_browser, apply_master_menu_action)
                 .chain()
                 .in_set(crate::ClientSet::Load),
         )
         .add_systems(
-            Update,
+            PreUpdate,
             (
                 arm_master_bridge,
-                open_hosted_epoch_when_world_is_live,
+                open_hosted_epoch_when_world_is_live.in_set(frame::InMatch),
                 apply_master_lifecycle,
             )
                 .chain()
                 .in_set(crate::ClientSet::Load),
         )
         .add_systems(
-            Update,
+            PreUpdate,
             crate::signon::drive_match_boundary
                 .in_set(crate::ClientSet::Load)
                 .after(frame::SessionSwapApplied),
@@ -1570,7 +1624,9 @@ pub fn register_master_bridge(app: &mut App) {
         );
         app.add_systems(
             FixedUpdate,
-            report_committed_authority_progress.after(crate::AuthoritySet::Snapshot),
+            report_committed_authority_progress
+                .in_set(frame::InMatch)
+                .after(crate::AuthoritySet::Snapshot),
         );
     }
 }
@@ -1580,7 +1636,7 @@ fn report_committed_authority_progress(
     server_tick: Option<Res<crate::authority::runtime::ServerTick>>,
     hold: Option<Res<crate::AuthorityLoadHold>>,
     installed: Option<Res<frame::InstalledMatch>>,
-    mut reported: Local<Option<(u64, frame::LocalLoadKey, sim::Tick)>>,
+    mut reported: ResMut<ReportedAuthorityProgress>,
 ) {
     let Some(bridge) = bridge else {
         return;
@@ -1597,13 +1653,13 @@ fn report_committed_authority_progress(
     ) else {
         return;
     };
-    let context = (bridge.incarnation(), installed.load_key);
-    if reported.is_some_and(|(incarnation, key, previous)| {
+    let context = (bridge.incarnation(), installed.match_key);
+    if reported.0.is_some_and(|(incarnation, key, previous)| {
         (incarnation, key) == context && tick.0 <= previous.0
     }) {
         return;
     }
-    *reported = Some((context.0, context.1, tick));
+    reported.0 = Some((context.0, context.1, tick));
     bridge.report_authority_progress();
 }
 
@@ -1614,7 +1670,7 @@ fn open_hosted_epoch_when_world_is_live(
     has_world: Option<Res<State<frame::MatchScope>>>,
     launch: Option<Res<frame::LaunchIdentity>>,
     hold: Option<Res<crate::AuthorityLoadHold>>,
-    mut sent: Local<Option<(u64, frame::LocalLoadKey)>>,
+    mut sent: ResMut<HostedWorldStart>,
 ) {
     let Some(bridge) = bridge else {
         return;
@@ -1629,15 +1685,11 @@ fn open_hosted_epoch_when_world_is_live(
         return;
     }
 
-    let Some(load) = admission
-        .core
-        .installed()
-        .filter(|load| load.match_key.is_none())
-    else {
+    let Some(load) = admission.core.installed().filter(|load| load.is_none()) else {
         return;
     };
     let key = (bridge.incarnation(), load);
-    if *sent == Some(key) {
+    if sent.0 == Some(key) {
         return;
     }
     let MasterBridgeState::Hosting {
@@ -1650,7 +1702,7 @@ fn open_hosted_epoch_when_world_is_live(
         return;
     };
     bridge.start_hosted_match(launch.zone.clone(), config.mode.clone());
-    *sent = Some(key);
+    sent.0 = Some(key);
 }
 
 fn observe_master_bridge(
@@ -1855,13 +1907,12 @@ async fn session_main(
         state,
         commands,
         outcomes,
-        installed_load,
         mailbox,
         bootstrap,
         cancel,
         close,
         facts,
-        mut identity,
+        identity,
         role,
     } = ctx;
     let early_close = tokio::spawn({
@@ -2002,8 +2053,8 @@ async fn session_main(
                 map: config.map.clone(),
                 mode: config.mode.clone(),
                 max_players: config.max_players,
-                requires: config.requires,
-                available: config.have,
+                requires: config.requires.clone(),
+                available: config.have.clone(),
                 password: config.password.clone(),
             },
         }
@@ -2014,7 +2065,7 @@ async fn session_main(
             body: RequestBody::JoinRoom {
                 room_id: config.advert_id,
                 password: config.password.clone(),
-                have: config.have,
+                have: config.have.clone(),
             },
         }
     };
@@ -2024,13 +2075,20 @@ async fn session_main(
     }
     enqueue_control(&control_tx, ControlFrame::Request(first), role)?;
 
-    let mut session = SessionCore::for_connection(identity.room_id.0, identity.attempt_id);
-    let mut host_match = HostMatchCore::default();
-    let mut members: HashSet<MemberId> = HashSet::new();
-    let mut skip_voters: HashSet<MemberId> = HashSet::new();
+    let mut lifecycle = MasterControlSession {
+        session: SessionCore::for_connection(identity.room_id.0, identity.attempt_id),
+        installed_match: None,
+        host_match: HostMatchCore::default(),
+        members: HashSet::new(),
+        skip_voters: HashSet::new(),
+        last_view: None,
+        started_epoch: 0,
+        request_id,
+        identity,
+        role,
+        is_host,
+    };
     let map_ready = &bootstrap.host_map_ready;
-    let mut last_view: Option<RoomView> = None;
-    let mut started_epoch = 0_u32;
     let mut leave_request: Option<u64> = None;
     let mut leave_at: Option<tokio::time::Instant> = None;
     let mut closing = false;
@@ -2047,14 +2105,13 @@ async fn session_main(
         }
         if !closing
             && let Err(error) = pump_local_queues(
-                identity.match_key(),
+                lifecycle.identity.match_key(),
                 &bootstrap,
                 &control_tx,
                 &bootstrap_jobs,
                 role,
                 is_host,
-                &mut request_id,
-                map_ready,
+                &mut lifecycle.request_id,
             )
         {
             break Err(error);
@@ -2100,18 +2157,7 @@ async fn session_main(
             Err(error) => break Err(error),
         };
         for command in queued {
-            match handle_command(
-                command,
-                &installed_load,
-                &control_tx,
-                &mut request_id,
-                &facts,
-                &mut host_match,
-                map_ready,
-                role,
-                is_host,
-                closing,
-            ) {
+            match lifecycle.handle_command(command, &control_tx, &facts, &bootstrap, closing) {
                 Ok(CommandEffect::Continue) => {}
                 Ok(CommandEffect::BeginClose { request_id }) => {
                     diag::info!(
@@ -2135,7 +2181,7 @@ async fn session_main(
         tokio::select! {
             _ = cancel.cancelled() => break Ok(()),
             _ = close.cancelled(), if !closing => {
-                let id = take_id(&mut request_id);
+                let id = take_id(&mut lifecycle.request_id);
                 let body = if is_host { RequestBody::CloseRoom } else { RequestBody::LeaveRoom };
                 if let Err(error) = enqueue_control(&control_tx, ControlFrame::Request(ControlRequest { request_id: id, body }), role) { break Err(error); }
                 closing = true;
@@ -2163,13 +2209,13 @@ async fn session_main(
                         "prepared mailbox closed",
                     ));
                 };
-                let applied = apply_host(&mut host_match, event);
+                let applied = apply_host(&mut lifecycle.host_match, event);
                 if let Err(error) = execute_host_match_effects(
                     applied.effects,
                     map_ready,
                     &facts,
                     &control_tx,
-                    &mut request_id,
+                    &mut lifecycle.request_id,
                     role,
                 ) {
                     break Err(error);
@@ -2177,13 +2223,13 @@ async fn session_main(
             }
             _ = watchdog.tick() => {
                 if is_host {
-                    let tick = apply_host(&mut host_match, HostMatchEvent::Tick { now_ms: now_ms() });
+                    let tick = apply_host(&mut lifecycle.host_match, HostMatchEvent::Tick { now_ms: now_ms() });
                     if let Err(error) = execute_host_match_effects(
                         tick.effects,
                         map_ready,
                         &facts,
                         &control_tx,
-                        &mut request_id,
+                        &mut lifecycle.request_id,
                         role,
                     ) {
                         break Err(error);
@@ -2217,24 +2263,7 @@ async fn session_main(
                                 ControlFrame::Closed { .. } => true,
                                 _ => false,
                             };
-                        if let Err(error) = handle_frame(
-                            frame,
-                            &state,
-                            &facts,
-                            &control_tx,
-                            &mut request_id,
-                            &bootstrap,
-                            &mut session,
-                            &mut host_match,
-                            &mut identity,
-                            &mut members,
-                            &mut skip_voters,
-                            map_ready,
-                            &mut last_view,
-                            &mut started_epoch,
-                            is_host,
-                            role,
-                        ) {
+                        if let Err(error) = lifecycle.handle_frame(frame, &state, &facts, &control_tx, &bootstrap) {
                             break Err(error);
                         }
                         if close_now {
@@ -2277,7 +2306,7 @@ async fn session_main(
     })
     .await;
     if outcome.is_ok() && closing {
-        publish_left(&state, identity);
+        publish_left(&state, lifecycle.identity);
     }
     outcome
 }
@@ -2418,7 +2447,7 @@ fn publish_room_view(
             max_players: view.max_players,
             skip_votes,
             in_match,
-            families: frame::AssetFamilies(view.requires.0),
+            families: frame::AssetFamilies(view.requires.clone()),
         };
         return;
     }
@@ -2433,7 +2462,7 @@ fn publish_room_view(
             max_players: view.max_players,
             skip_votes,
             in_match,
-            families: frame::AssetFamilies(view.requires.0),
+            families: frame::AssetFamilies(view.requires.clone()),
         };
     } else {
         *current = MasterBridgeState::Joining { identity };
@@ -2474,7 +2503,7 @@ fn sync_membership_facts(
 ) {
     let previous_members: HashSet<MemberId> = previous
         .map(|view| view.members.iter().copied().collect())
-        .unwrap_or_default();
+        .unwrap_or_else(HashSet::new);
     let next: HashSet<MemberId> = view.members.iter().copied().collect();
 
     for member_id in previous_members.difference(&next) {
@@ -2483,535 +2512,400 @@ fn sync_membership_facts(
     *members = next;
 }
 
-fn handle_command(
-    command: MasterBridgeCommand,
-    installed_load: &Mutex<Option<frame::LocalLoadKey>>,
-    control_tx: &ControlSender,
-    request_id: &mut u64,
-    facts: &Mutex<Vec<MasterLifecycleFact>>,
-    host_match: &mut HostMatchCore,
-    map_ready: &Mutex<HashSet<MemberId>>,
+struct MasterControlSession {
+    last_view: Option<RoomView>,
+    skip_voters: HashSet<MemberId>,
+    members: HashSet<MemberId>,
+    host_match: HostMatchCore,
+    installed_match: Option<frame::MatchKey>,
+    session: SessionCore,
+    request_id: u64,
+    identity: SessionIdentity,
+    started_epoch: u32,
     role: &'static str,
     is_host: bool,
-    closing: bool,
-) -> std::result::Result<CommandEffect, TransportFault> {
-    if closing {
-        return Ok(CommandEffect::Continue);
-    }
-    match command {
-        MasterBridgeCommand::SetPassword { password } => {
-            enqueue_control(
-                control_tx,
-                ControlFrame::Request(ControlRequest {
-                    request_id: take_id(request_id),
-                    body: RequestBody::SetPassword { password },
-                }),
-                role,
-            )?;
+}
+
+impl MasterControlSession {
+    fn handle_command(
+        &mut self,
+        command: MasterBridgeCommand,
+        control_tx: &ControlSender,
+        facts: &Mutex<Vec<MasterLifecycleFact>>,
+        bootstrap: &BootstrapLane,
+        closing: bool,
+    ) -> std::result::Result<CommandEffect, TransportFault> {
+        let role = self.role;
+        let is_host = self.is_host;
+        let map_ready = &bootstrap.host_map_ready;
+        if closing {
+            return Ok(CommandEffect::Continue);
         }
-        MasterBridgeCommand::UpdateLobby { map, mode } => {
-            enqueue_control(
-                control_tx,
-                ControlFrame::Request(ControlRequest {
-                    request_id: take_id(request_id),
-                    body: RequestBody::SetOptions {
-                        map,
-                        mode,
-                        joinable: true,
-                    },
-                }),
-                role,
-            )?;
-        }
-        MasterBridgeCommand::StartMatch { map, mode } => {
-            enqueue_control(
-                control_tx,
-                ControlFrame::Request(ControlRequest {
-                    request_id: take_id(request_id),
-                    body: RequestBody::StartMatch { map, mode },
-                }),
-                role,
-            )?;
-        }
-        MasterBridgeCommand::VoteToSkip => {
-            enqueue_control(
-                control_tx,
-                ControlFrame::Request(ControlRequest {
-                    request_id: take_id(request_id),
-                    body: RequestBody::VoteToSkip,
-                }),
-                role,
-            )?;
-        }
-        MasterBridgeCommand::MapLoaded {
-            epoch,
-            map,
-            weapons,
-            classes,
-        } => {
-            enqueue_control(
-                control_tx,
-                ControlFrame::Request(ControlRequest {
-                    request_id: take_id(request_id),
-                    body: RequestBody::MapLoaded {
-                        epoch,
-                        map,
-                        weapons,
-                        classes,
-                    },
-                }),
-                role,
-            )?;
-            if is_host {
-                let applied = apply_host(
-                    host_match,
-                    HostMatchEvent::MapLoaded {
-                        member: MemberId([0; 16]),
-                        loaded: HostWorldReady {
-                            epoch,
-                            map,
-                            weapons,
-                            classes,
-                        },
-                        now_ms: now_ms(),
-                    },
-                );
-                execute_host_match_effects(
-                    applied.effects,
-                    map_ready,
-                    facts,
+        match command {
+            MasterBridgeCommand::InstalledMatch(installed) => {
+                self.installed_match = installed;
+            }
+            MasterBridgeCommand::SetPassword { password } => {
+                enqueue_control(
                     control_tx,
-                    request_id,
+                    ControlFrame::Request(ControlRequest {
+                        request_id: take_id(&mut self.request_id),
+                        body: RequestBody::SetPassword { password },
+                    }),
                     role,
                 )?;
             }
-        }
-        MasterBridgeCommand::HostWorldReady {
-            epoch,
-            map,
-            weapons,
-            classes,
-            load_key,
-        } => {
-            let installed = installed_load.lock().expect("installed load poisoned");
-            if !is_host
-                || *installed != Some(load_key)
-                || !load_key.belongs_to(host_match.match_key())
-                || epoch != load_key.match_key.match_epoch
-            {
-                return Ok(CommandEffect::Continue);
+            MasterBridgeCommand::UpdateLobby { map, mode } => {
+                enqueue_control(
+                    control_tx,
+                    ControlFrame::Request(ControlRequest {
+                        request_id: take_id(&mut self.request_id),
+                        body: RequestBody::SetOptions {
+                            map,
+                            mode,
+                            joinable: true,
+                        },
+                    }),
+                    role,
+                )?;
             }
-            host_match.set_incarnation(load_key.incarnation);
-            host_match.set_local_load_id(Some(load_key.local_load_request_id));
-            let ready = HostWorldReady {
+            MasterBridgeCommand::StartMatch { map, mode } => {
+                enqueue_control(
+                    control_tx,
+                    ControlFrame::Request(ControlRequest {
+                        request_id: take_id(&mut self.request_id),
+                        body: RequestBody::StartMatch { map, mode },
+                    }),
+                    role,
+                )?;
+            }
+            MasterBridgeCommand::VoteToSkip => {
+                enqueue_control(
+                    control_tx,
+                    ControlFrame::Request(ControlRequest {
+                        request_id: take_id(&mut self.request_id),
+                        body: RequestBody::VoteToSkip,
+                    }),
+                    role,
+                )?;
+            }
+            MasterBridgeCommand::MapLoaded {
                 epoch,
                 map,
                 weapons,
                 classes,
-            };
-            let mut applied = apply_host(
-                host_match,
-                HostMatchEvent::AuthorityReady {
-                    ready,
-                    now_ms: now_ms(),
-                },
-            );
-            if applied.accepted {
-                applied.effects.insert(
-                    0,
-                    HostMatchEffect::PublishReady {
-                        match_key: load_key.match_key,
+            } => {
+                enqueue_control(
+                    control_tx,
+                    ControlFrame::Request(ControlRequest {
+                        request_id: take_id(&mut self.request_id),
+                        body: RequestBody::MapLoaded {
+                            epoch,
+                            map,
+                            weapons,
+                            classes,
+                        },
+                    }),
+                    role,
+                )?;
+                if is_host {
+                    let applied = apply_host(
+                        &mut self.host_match,
+                        HostMatchEvent::MapLoaded {
+                            member: MemberId([0; 16]),
+                            loaded: HostWorldReady {
+                                epoch,
+                                map,
+                                weapons,
+                                classes,
+                            },
+                            now_ms: now_ms(),
+                        },
+                    );
+                    execute_host_match_effects(
+                        applied.effects,
+                        map_ready,
+                        facts,
+                        control_tx,
+                        &mut self.request_id,
+                        role,
+                    )?;
+                }
+            }
+            MasterBridgeCommand::HostWorldReady {
+                epoch,
+                map,
+                weapons,
+                classes,
+                match_key,
+            } => {
+                if !is_host
+                    || self.installed_match != Some(match_key)
+                    || (match_key.is_none() || match_key != self.host_match.match_key())
+                    || epoch != match_key.match_epoch
+                {
+                    return Ok(CommandEffect::Continue);
+                }
+                let ready = HostWorldReady {
+                    epoch,
+                    map,
+                    weapons,
+                    classes,
+                };
+                let mut applied = apply_host(
+                    &mut self.host_match,
+                    HostMatchEvent::AuthorityReady {
                         ready,
+                        now_ms: now_ms(),
                     },
                 );
-            }
-            execute_host_match_effects(
-                applied.effects,
-                map_ready,
-                facts,
-                control_tx,
-                request_id,
-                role,
-            )?;
-        }
-        MasterBridgeCommand::MatchEnded { match_key } => {
-            if !is_host {
-                return Ok(CommandEffect::Continue);
-            }
-            let mut applied = apply_host(host_match, HostMatchEvent::MatchEnded { match_key });
-            if applied.accepted {
-                applied
-                    .effects
-                    .push(HostMatchEffect::PublishEnd { match_key });
-            }
-            execute_host_match_effects(
-                applied.effects,
-                map_ready,
-                facts,
-                control_tx,
-                request_id,
-                role,
-            )?;
-        }
-        MasterBridgeCommand::AuthorityProgress { now_ms } => {
-            if !is_host {
-                return Ok(CommandEffect::Continue);
-            }
-            let applied = apply_host(host_match, HostMatchEvent::AuthorityProgress { now_ms });
-            execute_host_match_effects(
-                applied.effects,
-                map_ready,
-                facts,
-                control_tx,
-                request_id,
-                role,
-            )?;
-        }
-
-        MasterBridgeCommand::AdmitEnter {
-            member_id,
-            epoch,
-            bootstrap_id,
-            connection_id,
-            client_id,
-        } => {
-            if !is_host {
-                return Ok(CommandEffect::Continue);
-            }
-            let applied = apply_host(
-                host_match,
-                HostMatchEvent::Applied {
-                    match_key: frame::MatchKey::new(host_match.match_key().session_id, epoch),
-                    member: member_id,
-                    bootstrap_id,
-                    connection_id,
-                },
-            );
-            if !applied.accepted {
-                return Ok(CommandEffect::Continue);
-            }
-            execute_host_match_effects(
-                applied.effects,
-                map_ready,
-                facts,
-                control_tx,
-                request_id,
-                role,
-            )?;
-            enqueue_control(
-                control_tx,
-                ControlFrame::Request(ControlRequest {
-                    request_id: take_id(request_id),
-                    body: RequestBody::EnterMatch {
-                        member_id,
-                        epoch,
-                        bootstrap_id,
-                        connection_id: connection_id.unwrap_or(0),
-                        client_id,
-                    },
-                }),
-                role,
-            )?;
-        }
-        MasterBridgeCommand::Shutdown => {
-            let id = take_id(request_id);
-            let body = if is_host {
-                RequestBody::CloseRoom
-            } else {
-                RequestBody::LeaveRoom
-            };
-            enqueue_control(
-                control_tx,
-                ControlFrame::Request(ControlRequest {
-                    request_id: id,
-                    body,
-                }),
-                role,
-            )?;
-            return Ok(CommandEffect::BeginClose { request_id: id });
-        }
-    }
-    Ok(CommandEffect::Continue)
-}
-
-fn handle_frame(
-    frame: ControlFrame,
-    state: &Mutex<MasterBridgeState>,
-    facts: &Mutex<Vec<MasterLifecycleFact>>,
-    control_tx: &ControlSender,
-    request_id: &mut u64,
-    bootstrap: &BootstrapLane,
-    session: &mut SessionCore,
-    host_match: &mut HostMatchCore,
-    identity: &mut SessionIdentity,
-    members: &mut HashSet<MemberId>,
-    skip_voters: &mut HashSet<MemberId>,
-    map_ready: &Mutex<HashSet<MemberId>>,
-    last_view: &mut Option<RoomView>,
-    started_epoch: &mut u32,
-    is_host: bool,
-    role: &'static str,
-) -> std::result::Result<(), TransportFault> {
-    match frame {
-        ControlFrame::Relay(_) => Err(TransportFault::new(
-            "control_relay",
-            role,
-            "relay must be consumed before lifecycle",
-        )),
-        ControlFrame::Hello(_) => Ok(()),
-        ControlFrame::Request(_) => Err(TransportFault::new(
-            "control_read",
-            role,
-            "service sent a request on the client stream",
-        )),
-        ControlFrame::Response(response) => {
-            let deadline = control_tx.complete_response(&response);
-            let Some(deadline) = deadline else {
-                return Ok(());
-            };
-            if deadline <= tokio::time::Instant::now() {
-                return Err(TransportFault::new(
-                    "control_response",
-                    role,
-                    format!(
-                        "request {} deadline; remote outcome unknown",
-                        response.request_id
-                    ),
-                ));
-            }
-            let (view, member) = match response.body {
-                ResponseBody::RoomCreated { member_id, view }
-                | ResponseBody::RoomJoined { member_id, view } => (view, member_id),
-                ResponseBody::RoomUpdated { view } => (view, identity.member_id),
-                ResponseBody::Error(error) => {
-                    let message = match &error {
-                        master_protocol::ServiceError::MissingContent { requires, have } => {
-                            frame::AssetFamilies(requires.0)
-                                .missing_notice(have.0)
-                                .unwrap_or_else(|| error.to_string())
-                        }
-                        _ => error.to_string(),
-                    };
-                    return Err(TransportFault::new("control_rpc", role, message));
+                if applied.accepted {
+                    applied
+                        .effects
+                        .insert(0, HostMatchEffect::PublishReady { match_key, ready });
                 }
-                ResponseBody::RoomLeft
-                | ResponseBody::Ack
-                | ResponseBody::Status(_)
-                | ResponseBody::Population { .. }
-                | ResponseBody::RoomList { .. } => return Ok(()),
-            };
-            apply_room_view(
+                execute_host_match_effects(
+                    applied.effects,
+                    map_ready,
+                    facts,
+                    control_tx,
+                    &mut self.request_id,
+                    role,
+                )?;
+            }
+            MasterBridgeCommand::MatchEnded { match_key } => {
+                if !is_host {
+                    return Ok(CommandEffect::Continue);
+                }
+                let mut applied = apply_host(
+                    &mut self.host_match,
+                    HostMatchEvent::MatchEnded { match_key },
+                );
+                if applied.accepted {
+                    applied
+                        .effects
+                        .push(HostMatchEffect::PublishEnd { match_key });
+                }
+                execute_host_match_effects(
+                    applied.effects,
+                    map_ready,
+                    facts,
+                    control_tx,
+                    &mut self.request_id,
+                    role,
+                )?;
+            }
+            MasterBridgeCommand::AuthorityProgress { now_ms } => {
+                if !is_host {
+                    return Ok(CommandEffect::Continue);
+                }
+                let applied = apply_host(
+                    &mut self.host_match,
+                    HostMatchEvent::AuthorityProgress { now_ms },
+                );
+                execute_host_match_effects(
+                    applied.effects,
+                    map_ready,
+                    facts,
+                    control_tx,
+                    &mut self.request_id,
+                    role,
+                )?;
+            }
+
+            MasterBridgeCommand::AdmitEnter {
+                member_id,
+                epoch,
+                bootstrap_id,
+                connection_id,
+                client_id,
+            } => {
+                if !is_host {
+                    return Ok(CommandEffect::Continue);
+                }
+                let match_key = frame::MatchKey::new(self.host_match.match_key().session_id, epoch);
+                let applied = apply_host(
+                    &mut self.host_match,
+                    HostMatchEvent::Applied {
+                        match_key,
+                        member: member_id,
+                        bootstrap_id,
+                        connection_id,
+                    },
+                );
+                if !applied.accepted {
+                    return Ok(CommandEffect::Continue);
+                }
+                execute_host_match_effects(
+                    applied.effects,
+                    map_ready,
+                    facts,
+                    control_tx,
+                    &mut self.request_id,
+                    role,
+                )?;
+                enqueue_control(
+                    control_tx,
+                    ControlFrame::Request(ControlRequest {
+                        request_id: take_id(&mut self.request_id),
+                        body: RequestBody::EnterMatch {
+                            member_id,
+                            epoch,
+                            bootstrap_id,
+                            connection_id: connection_id.unwrap_or(0),
+                            client_id,
+                        },
+                    }),
+                    role,
+                )?;
+            }
+            MasterBridgeCommand::Shutdown => {
+                let id = take_id(&mut self.request_id);
+                let body = if is_host {
+                    RequestBody::CloseRoom
+                } else {
+                    RequestBody::LeaveRoom
+                };
+                enqueue_control(
+                    control_tx,
+                    ControlFrame::Request(ControlRequest {
+                        request_id: id,
+                        body,
+                    }),
+                    role,
+                )?;
+                return Ok(CommandEffect::BeginClose { request_id: id });
+            }
+        }
+        Ok(CommandEffect::Continue)
+    }
+
+    fn handle_frame(
+        &mut self,
+        frame: ControlFrame,
+        state: &Mutex<MasterBridgeState>,
+        facts: &Mutex<Vec<MasterLifecycleFact>>,
+        control_tx: &ControlSender,
+        bootstrap: &BootstrapLane,
+    ) -> std::result::Result<(), TransportFault> {
+        let role = self.role;
+        match frame {
+            ControlFrame::Relay(_) => Err(TransportFault::new(
+                "control_relay",
+                role,
+                "relay must be consumed before lifecycle",
+            )),
+            ControlFrame::Hello(_) => Ok(()),
+            ControlFrame::Request(_) => Err(TransportFault::new(
+                "control_read",
+                role,
+                "service sent a request on the client stream",
+            )),
+            ControlFrame::Response(response) => {
+                let deadline = control_tx.complete_response(&response);
+                let Some(deadline) = deadline else {
+                    return Ok(());
+                };
+                if deadline <= tokio::time::Instant::now() {
+                    return Err(TransportFault::new(
+                        "control_response",
+                        role,
+                        format!(
+                            "request {} deadline; remote outcome unknown",
+                            response.request_id
+                        ),
+                    ));
+                }
+                let (view, member) = match response.body {
+                    ResponseBody::RoomCreated { member_id, view }
+                    | ResponseBody::RoomJoined { member_id, view } => (view, member_id),
+                    ResponseBody::RoomUpdated { view } => (view, self.identity.member_id),
+                    ResponseBody::Error(error) => {
+                        let message = match &error {
+                            master_protocol::ServiceError::MissingContent { requires, have } => {
+                                frame::AssetFamilies(requires.clone())
+                                    .missing_notice(have)
+                                    .unwrap_or_else(|| error.to_string())
+                            }
+                            _ => error.to_string(),
+                        };
+                        return Err(TransportFault::new("control_rpc", role, message));
+                    }
+                    ResponseBody::RoomLeft
+                    | ResponseBody::Ack
+                    | ResponseBody::Status(_)
+                    | ResponseBody::Population { .. }
+                    | ResponseBody::RoomList { .. } => return Ok(()),
+                };
+                self.apply_room_view(view, member, state, facts, control_tx, bootstrap)
+            }
+            ControlFrame::RoomView(view) => self.apply_room_view(
                 view,
-                member,
+                self.identity.member_id,
                 state,
                 facts,
                 control_tx,
-                request_id,
                 bootstrap,
-                session,
-                host_match,
-                identity,
-                members,
-                skip_voters,
-                map_ready,
-                last_view,
-                started_epoch,
-                is_host,
-                role,
-            )
-        }
-        ControlFrame::RoomView(view) => apply_room_view(
-            view,
-            identity.member_id,
-            state,
-            facts,
-            control_tx,
-            request_id,
-            bootstrap,
-            session,
-            host_match,
-            identity,
-            members,
-            skip_voters,
-            map_ready,
-            last_view,
-            started_epoch,
-            is_host,
-            role,
-        ),
-        ControlFrame::Closed {
-            room_id,
-            epoch,
-            reason,
-        } => {
-            if room_id != identity.room_id || epoch != identity.epoch {
-                return Ok(());
+            ),
+            ControlFrame::Closed {
+                room_id,
+                epoch,
+                reason,
+            } => {
+                if room_id != self.identity.room_id || epoch != self.identity.epoch {
+                    return Ok(());
+                }
+                self.session.apply(SessionEvent::CloseSession);
+                push_fact(facts, MasterLifecycleFact::SessionClosed { reason });
+                publish_closed(state, self.identity, reason);
+                Ok(())
             }
-            session.apply(SessionEvent::CloseSession);
-            push_fact(facts, MasterLifecycleFact::SessionClosed { reason });
-            publish_closed(state, *identity, reason);
-            Ok(())
+            ControlFrame::PeerEvent(event) => {
+                self.apply_peer_event(event, facts, control_tx, bootstrap, state)
+            }
         }
-        ControlFrame::PeerEvent(event) => apply_peer_event(
-            event,
-            facts,
-            control_tx,
-            request_id,
-            session,
-            host_match,
-            identity,
-            skip_voters,
-            map_ready,
-            bootstrap,
-            is_host,
-            role,
-            state,
-            last_view,
-        ),
-    }
-}
-
-fn apply_room_view(
-    view: RoomView,
-    local_member: MemberId,
-    state: &Mutex<MasterBridgeState>,
-    facts: &Mutex<Vec<MasterLifecycleFact>>,
-    control_tx: &ControlSender,
-    request_id: &mut u64,
-    bootstrap: &BootstrapLane,
-    session: &mut SessionCore,
-    host_match: &mut HostMatchCore,
-    identity: &mut SessionIdentity,
-    members: &mut HashSet<MemberId>,
-    skip_voters: &mut HashSet<MemberId>,
-    map_ready: &Mutex<HashSet<MemberId>>,
-    last_view: &mut Option<RoomView>,
-    started_epoch: &mut u32,
-    is_host: bool,
-    role: &'static str,
-) -> std::result::Result<(), TransportFault> {
-    // Acceptance owns the first mutation. Rejected views cannot touch bridge
-    // identity, membership, bootstrap atomics, admission, or UI projection.
-    let skip_votes =
-        u8::try_from(skip_voters.iter().filter(|id| view.contains(**id)).count()).unwrap_or(0);
-    if !apply_authoritative_view(session, &view, local_member, skip_votes) {
-        return Ok(());
-    }
-    identity.member_id = local_member;
-    identity.room_id = view.room_id;
-    identity.epoch = view.epoch;
-    sync_membership_facts(
-        last_view.as_ref(),
-        &view,
-        members,
-        skip_voters,
-        map_ready,
-        facts,
-    );
-    if is_host && view.phase.in_match() && view.epoch != 0 && *started_epoch != view.epoch {
-        let applied = apply_host(
-            host_match,
-            HostMatchEvent::Start {
-                match_key: identity.match_key(),
-                now_ms: now_ms(),
-            },
-        );
-        execute_host_match_effects(
-            applied.effects,
-            map_ready,
-            facts,
-            control_tx,
-            request_id,
-            role,
-        )?;
-        *started_epoch = view.epoch;
-    }
-    if is_host && view.phase.in_match() {
-        let applied = apply_host(
-            host_match,
-            HostMatchEvent::PeerRoster {
-                match_key: identity.match_key(),
-                members: view
-                    .members
-                    .iter()
-                    .copied()
-                    .filter(|member| *member != local_member)
-                    .collect(),
-                now_ms: now_ms(),
-            },
-        );
-        execute_host_match_effects(
-            applied.effects,
-            map_ready,
-            facts,
-            control_tx,
-            request_id,
-            role,
-        )?;
-    }
-    if is_host && !view.phase.in_match() && *started_epoch != 0 {
-        let applied = apply_host(
-            host_match,
-            HostMatchEvent::MatchEnded {
-                match_key: frame::MatchKey::new(view.room_id.0, *started_epoch),
-            },
-        );
-        execute_host_match_effects(
-            applied.effects,
-            map_ready,
-            facts,
-            control_tx,
-            request_id,
-            role,
-        )?;
     }
 
-    let live = session.view();
-    bootstrap.set_epoch(if live.in_match { live.start_nonce } else { 0 });
-    publish_room_view(
-        state,
-        *identity,
-        &view,
-        u8::try_from(skip_voters.len()).unwrap_or(0),
-        is_host,
-        identity.member_id,
-    );
-    *last_view = Some(view);
-    Ok(())
-}
-
-fn apply_peer_event(
-    event: master_protocol::PeerEvent,
-    facts: &Mutex<Vec<MasterLifecycleFact>>,
-    control_tx: &ControlSender,
-    request_id: &mut u64,
-    session: &mut SessionCore,
-    host_match: &mut HostMatchCore,
-    identity: &SessionIdentity,
-    skip_voters: &mut HashSet<MemberId>,
-    map_ready: &Mutex<HashSet<MemberId>>,
-    bootstrap: &BootstrapLane,
-    is_host: bool,
-    role: &'static str,
-    state: &Mutex<MasterBridgeState>,
-    last_view: &Option<RoomView>,
-) -> std::result::Result<(), TransportFault> {
-    match event {
-        master_protocol::PeerEvent::HostWorldReady {
-            epoch,
-            map,
-            weapons,
-            classes,
-        } if is_host => {
+    fn apply_room_view(
+        &mut self,
+        view: RoomView,
+        local_member: MemberId,
+        state: &Mutex<MasterBridgeState>,
+        facts: &Mutex<Vec<MasterLifecycleFact>>,
+        control_tx: &ControlSender,
+        bootstrap: &BootstrapLane,
+    ) -> std::result::Result<(), TransportFault> {
+        let role = self.role;
+        let is_host = self.is_host;
+        let map_ready = &bootstrap.host_map_ready;
+        // Acceptance owns the first mutation. Rejected views cannot touch bridge
+        // identity, membership, bootstrap atomics, admission, or UI projection.
+        let skip_votes = u8::try_from(
+            self.skip_voters
+                .iter()
+                .filter(|id| view.contains(**id))
+                .count(),
+        )
+        .unwrap_or(0);
+        if !apply_authoritative_view(&mut self.session, &view, local_member, skip_votes) {
+            return Ok(());
+        }
+        self.identity.member_id = local_member;
+        self.identity.room_id = view.room_id;
+        self.identity.epoch = view.epoch;
+        sync_membership_facts(
+            self.last_view.as_ref(),
+            &view,
+            &mut self.members,
+            &mut self.skip_voters,
+            map_ready,
+            facts,
+        );
+        if is_host && view.phase.in_match() && view.epoch != 0 && self.started_epoch != view.epoch {
             let applied = apply_host(
-                host_match,
-                HostMatchEvent::AuthorityReady {
-                    ready: HostWorldReady {
-                        epoch,
-                        map,
-                        weapons,
-                        classes,
-                    },
+                &mut self.host_match,
+                HostMatchEvent::Start {
+                    match_key: self.identity.match_key(),
                     now_ms: now_ms(),
                 },
             );
@@ -3020,23 +2914,87 @@ fn apply_peer_event(
                 map_ready,
                 facts,
                 control_tx,
-                request_id,
+                &mut self.request_id,
+                role,
+            )?;
+            self.started_epoch = view.epoch;
+        }
+        if is_host && view.phase.in_match() {
+            let applied = apply_host(
+                &mut self.host_match,
+                HostMatchEvent::PeerRoster {
+                    match_key: self.identity.match_key(),
+                    members: view
+                        .members
+                        .iter()
+                        .copied()
+                        .filter(|member| *member != local_member)
+                        .collect(),
+                    now_ms: now_ms(),
+                },
+            );
+            execute_host_match_effects(
+                applied.effects,
+                map_ready,
+                facts,
+                control_tx,
+                &mut self.request_id,
                 role,
             )?;
         }
-        master_protocol::PeerEvent::MapLoaded {
-            member_id,
-            epoch,
-            map,
-            weapons,
-            classes,
-        } => {
-            if is_host {
+        if is_host && !view.phase.in_match() && self.started_epoch != 0 {
+            let applied = apply_host(
+                &mut self.host_match,
+                HostMatchEvent::MatchEnded {
+                    match_key: frame::MatchKey::new(view.room_id.0, self.started_epoch),
+                },
+            );
+            execute_host_match_effects(
+                applied.effects,
+                map_ready,
+                facts,
+                control_tx,
+                &mut self.request_id,
+                role,
+            )?;
+        }
+
+        let live = self.session.view();
+        bootstrap.set_epoch(if live.in_match { live.start_nonce } else { 0 });
+        publish_room_view(
+            state,
+            self.identity,
+            &view,
+            u8::try_from(self.skip_voters.len()).unwrap_or(0),
+            is_host,
+            self.identity.member_id,
+        );
+        self.last_view = Some(view);
+        Ok(())
+    }
+
+    fn apply_peer_event(
+        &mut self,
+        event: master_protocol::PeerEvent,
+        facts: &Mutex<Vec<MasterLifecycleFact>>,
+        control_tx: &ControlSender,
+        bootstrap: &BootstrapLane,
+        state: &Mutex<MasterBridgeState>,
+    ) -> std::result::Result<(), TransportFault> {
+        let role = self.role;
+        let is_host = self.is_host;
+        let map_ready = &bootstrap.host_map_ready;
+        match event {
+            master_protocol::PeerEvent::HostWorldReady {
+                epoch,
+                map,
+                weapons,
+                classes,
+            } if is_host => {
                 let applied = apply_host(
-                    host_match,
-                    HostMatchEvent::MapLoaded {
-                        member: member_id,
-                        loaded: HostWorldReady {
+                    &mut self.host_match,
+                    HostMatchEvent::AuthorityReady {
+                        ready: HostWorldReady {
                             epoch,
                             map,
                             weapons,
@@ -3045,92 +3003,125 @@ fn apply_peer_event(
                         now_ms: now_ms(),
                     },
                 );
-                // MapLoaded can arrive before AuthorityReady. The core retains
-                // that report and offers its bootstrap when the host is ready.
-                // Repeated reports from an admitted peer also need no effect.
-                if !applied.accepted {
-                    diag::warn!(
-                        Net,
-                        "peer map loaded rejected: epoch={epoch} host_phase={:?} host_match={:?} host_world={:?} peer={:?} transition={}",
-                        host_match.phase(),
-                        host_match.match_key(),
-                        host_match.host_world(),
-                        host_match.peer(member_id).map(|peer| peer.phase),
-                        applied.transition,
-                    );
-                }
                 execute_host_match_effects(
                     applied.effects,
                     map_ready,
                     facts,
                     control_tx,
-                    request_id,
+                    &mut self.request_id,
                     role,
                 )?;
             }
-        }
+            master_protocol::PeerEvent::MapLoaded {
+                member_id,
+                epoch,
+                map,
+                weapons,
+                classes,
+            } => {
+                if is_host {
+                    let applied = apply_host(
+                        &mut self.host_match,
+                        HostMatchEvent::MapLoaded {
+                            member: member_id,
+                            loaded: HostWorldReady {
+                                epoch,
+                                map,
+                                weapons,
+                                classes,
+                            },
+                            now_ms: now_ms(),
+                        },
+                    );
+                    // MapLoaded can arrive before AuthorityReady. The core retains
+                    // that report and offers its bootstrap when the host is ready.
+                    // Repeated reports from an admitted peer also need no effect.
+                    if !applied.accepted {
+                        diag::warn!(
+                            Net,
+                            "peer map loaded rejected: epoch={epoch} host_phase={:?} host_match={:?} host_world={:?} peer={:?} transition={}",
+                            self.host_match.phase(),
+                            self.host_match.match_key(),
+                            self.host_match.host_world(),
+                            self.host_match.peer(member_id).map(|peer| peer.phase),
+                            applied.transition,
+                        );
+                    }
+                    execute_host_match_effects(
+                        applied.effects,
+                        map_ready,
+                        facts,
+                        control_tx,
+                        &mut self.request_id,
+                        role,
+                    )?;
+                }
+            }
 
-        master_protocol::PeerEvent::BootstrapApplied {
-            member_id,
-            epoch,
-            bootstrap_id,
-            snapshot_seq,
-            connection: connection_id,
-        } if is_host => {
-            if let Err(error) = bootstrap.push_ack(BootstrapAck {
+            master_protocol::PeerEvent::BootstrapApplied {
                 member_id,
                 epoch,
                 bootstrap_id,
                 snapshot_seq,
-                connection: crate::transport::protocol::ConnectionId(connection_id),
-            }) {
-                return Err(TransportFault::new("bootstrap_ack", role, error));
-            }
-        }
-        master_protocol::PeerEvent::AdmissionFailed {
-            member_id,
-            epoch,
-            reason,
-        } if !is_host => {
-            if member_id != identity.member_id || !epoch_applies(epoch, identity.epoch) {
-                return Ok(());
-            }
-            return Err(TransportFault::new("admission", role, reason.to_string()));
-        }
-        master_protocol::PeerEvent::EnterMatch {
-            member_id,
-            epoch,
-            bootstrap_id,
-            client_id,
-            ..
-        } => {
-            if member_id == identity.member_id {
-                bootstrap.note_entered(bootstrap_id, client_id);
-                let applied = session.apply(SessionEvent::EnterMatch {
+                connection: connection_id,
+            } if is_host => {
+                if let Err(error) = bootstrap.push_ack(BootstrapAck {
+                    member_id,
                     epoch,
                     bootstrap_id,
-                });
-                if applied.changed {
-                    diag::info!(Net, "session-transition {}", applied.transition);
+                    snapshot_seq,
+                    connection: crate::transport::protocol::ConnectionId(connection_id),
+                }) {
+                    return Err(TransportFault::new("bootstrap_ack", role, error));
                 }
             }
-        }
-        master_protocol::PeerEvent::VoteToSkip { member_id } => {
-            skip_voters.insert(member_id);
-            if let Some(view) = last_view {
-                publish_room_view(
-                    state,
-                    *identity,
-                    view,
-                    u8::try_from(skip_voters.len()).unwrap_or(0),
-                    is_host,
-                    identity.member_id,
-                );
+            master_protocol::PeerEvent::AdmissionFailed {
+                member_id,
+                epoch,
+                reason,
+            } if !is_host => {
+                if member_id != self.identity.member_id
+                    || !epoch_applies(epoch, self.identity.epoch)
+                {
+                    return Ok(());
+                }
+                return Err(TransportFault::new("admission", role, reason.to_string()));
             }
+            master_protocol::PeerEvent::EnterMatch {
+                member_id,
+                epoch,
+                bootstrap_id,
+                client_id,
+                ..
+            } => {
+                if member_id == self.identity.member_id {
+                    bootstrap.note_entered(bootstrap_id, client_id);
+                    let applied = self.session.apply(SessionEvent::EnterMatch {
+                        epoch,
+                        bootstrap_id,
+                    });
+                    if applied.changed {
+                        diag::info!(Net, "session-transition {}", applied.transition);
+                    }
+                }
+            }
+            master_protocol::PeerEvent::VoteToSkip { member_id } => {
+                self.skip_voters.insert(member_id);
+                if let Some(view) = &self.last_view {
+                    publish_room_view(
+                        state,
+                        self.identity,
+                        view,
+                        u8::try_from(self.skip_voters.len()).unwrap_or(0),
+                        is_host,
+                        self.identity.member_id,
+                    );
+                }
+            }
+            _ => {}
         }
-        _ => {}
+        Ok(())
     }
-    Ok(())
 }
 
 struct BootstrapSender {
@@ -3193,8 +3184,8 @@ fn pump_local_queues(
     role: &'static str,
     is_host: bool,
     request_id: &mut u64,
-    map_ready: &Mutex<HashSet<MemberId>>,
 ) -> std::result::Result<(), TransportFault> {
+    let map_ready = &bootstrap.host_map_ready;
     bootstrap
         .check_deadline()
         .map_err(|error| TransportFault::new("bootstrap_queue", role, error))?;
@@ -3311,60 +3302,64 @@ async fn datagram_ingress(
     let mut reassemblers: HashMap<MemberId, (Reassembler, Instant)> = HashMap::new();
     loop {
         tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
-            datagram = connection.read_datagram() => {
-                let bytes = match datagram {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        return Err(TransportFault::with_connection(
-                            "read_datagram",
-                            role,
-                            error,
-                            &connection,
-                        ));
-                    }
-                };
-                let decoded = match decode_relay(&bytes) {
-                    Ok(decoded) => decoded,
-                    Err(error) => {
-                        diag::warn!(Net, "master {role} ignored relay datagram: {error}");
-                        continue;
-                    }
-                };
-                let (member, payload) = match decoded {
-                    RelayDatagram::ServiceToHost { member_id, payload } if is_host => {
-                        (member_id, payload)
-                    }
-                    RelayDatagram::ServiceToMember(payload) if !is_host => {
-                        (MemberId([0; 16]), payload)
-                    }
-                    other => {
-                        diag::warn!(Net, "master {role} ignored unexpected datagram {other:?}");
-                        continue;
-                    }
-                };
-                let now = Instant::now();
-                reassemblers.retain(|_, (_, seen)| now.duration_since(*seen) < limits::values().queue_age);
-                if !reassemblers.contains_key(&member)
-                    && reassemblers.len() >= master_protocol::MAX_SESSION_MEMBERS as usize
-                {
-                    continue;
-                }
-                let (reassembler, seen) = reassemblers.entry(member).or_insert_with(|| (relay_reassembler(), now));
-                *seen = now;
-                match reassembler.push(payload) {
-                    Ok(Some(packet)) => {
-                        if mailbox.push_inbound(member, packet) {
-                            perf::net_leg("mail_drop_in", 0, 1);
+                    _ = cancel.cancelled() => return Ok(()),
+                    datagram = connection.read_datagram() => {
+                        let bytes = match datagram {
+                            Ok(bytes) => bytes,
+                            Err(error) => {
+                                return Err(TransportFault::with_connection(
+                                    "read_datagram",
+                                    role,
+                                    error,
+                                    &connection,
+                                ));
+                            }
+                        };
+                        let decoded = match decode_relay(&bytes) {
+                            Ok(decoded) => decoded,
+                            Err(error) => {
+                                diag::warn!(Net, "master {role} ignored relay datagram: {error}");
+                                continue;
+                            }
+                        };
+                        let (member, payload) = match decoded {
+                            RelayDatagram::ServiceToHost { member_id, payload } if is_host => {
+                                (member_id, payload)
+                            }
+                            RelayDatagram::ServiceToMember(payload) if !is_host => {
+                                (MemberId([0; 16]), payload)
+                            }
+                            other => {
+                                diag::warn!(Net, "master {role} ignored unexpected datagram {other:?}");
+                                continue;
+                            }
+                        };
+                        let now = Instant::now();
+                        reassemblers.retain(|_, (_, seen)| now.duration_since(*seen) < limits::values().queue_age);
+                        if !reassemblers.contains_key(&member)
+                            && reassemblers.len() >= master_protocol::MAX_SESSION_MEMBERS as usize
+                        {
+                            continue;
+                        }
+                        let (reassembler, seen) = reassemblers.entry(member).or_insert_with(|| (relay_reassembler(), now));
+                        *seen = now;
+                        match reassembler.push(payload) {
+                            Ok(Some(packet)) => {
+                                if mailbox.push_inbound(member, packet) {
+                                    perf::instant!("net_leg", "iw4l.sim", |ctx| { let (leg, key, bytes,): (&str, u32, u32,) = ("mail_drop_in", 0, 1,);
+        ctx.arg("leg", leg);
+                ctx.arg("key", i64::from(key));
+                ctx.arg("bytes", i64::from(bytes));
+        });
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                diag::warn!(Net, "master {role} fragment refused: {error}");
+                            }
                         }
                     }
-                    Ok(None) => {}
-                    Err(error) => {
-                        diag::warn!(Net, "master {role} fragment refused: {error}");
-                    }
                 }
-            }
-        }
     }
 }
 
@@ -3452,94 +3447,94 @@ async fn gameplay_egress(
     let mut sampled = tokio::time::Instant::now();
     loop {
         tokio::select! {
-            _ = cancel.cancelled() => return Ok(()),
-            _ = tick.tick() => {
-                if sampled.elapsed() >= Duration::from_millis(100) {
-                    sampled = tokio::time::Instant::now();
-                    let stats = connection.stats();
-                    perf::net_path(
-                        role,
-                        stats.path.rtt.as_micros() as u64,
-                        stats.path.cwnd,
-                        stats.path.lost_packets,
-                        stats.path.congestion_events,
-                        empty_buffer_space.saturating_sub(connection.datagram_send_buffer_space()) as u64,
-                    );
-                }
-                for (member, packet) in mailbox.take_outbound() {
-                    // Gameplay packets carry the newest input/snapshot plus
-                    // unacknowledged reliable rows. Replace unsent older state
-                    // for this peer rather than building a latency backlog.
-                    if let Some((_, previous, _)) = pending.iter_mut().find(|(id, _, _)| *id == member) {
-                        *previous = packet;
-                    } else {
-                        if pending.len() >= master_protocol::MAX_SESSION_MEMBERS as usize {
-                            return Err(TransportFault::new("send_datagram", role, "pending peer budget exhausted"));
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = tick.tick() => {
+                        if sampled.elapsed() >= Duration::from_millis(100) {
+                            sampled = tokio::time::Instant::now();
+                            let stats = connection.stats();
+                            perf::instant!("net_path", "iw4l.sim", |ctx| { let (rtt_us, cwnd, lost, congestion, queued,): (u64, u64, u64, u64, u64,) = (stats.path.rtt.as_micros() as u64, stats.path.cwnd, stats.path.lost_packets, stats.path.congestion_events, empty_buffer_space.saturating_sub(connection.datagram_send_buffer_space()) as u64,);
+        ctx.arg("role", role);
+                ctx.arg("rtt_us", rtt_us as i64);
+                ctx.arg("cwnd", cwnd as i64);
+                ctx.arg("lost", lost as i64);
+                ctx.arg("congestion", congestion as i64);
+                ctx.arg("queued", queued as i64);
+        });
                         }
-                        pending.push_back((member, packet, tokio::time::Instant::now() + limits::values().queue_age));
-                    }
-                }
-                while let Some((member, packet, deadline)) = pending.front() {
-                    if *deadline <= tokio::time::Instant::now() {
-                        return Err(TransportFault::new("send_datagram", role, "gameplay queue deadline"));
-                    }
-                    let fragments = match fragmenter.split(packet) {
-                        Ok(fragments) => fragments,
-                        Err(error) => {
-                            diag::warn!(Net, "master {role} packet not splittable: {error}");
-                            pending.pop_front();
-                            continue;
-                        }
-                    };
-                    let mut datagrams = Vec::with_capacity(fragments.len());
-                    for fragment in &fragments {
-                        let datagram = if is_host {
-                            RelayDatagram::HostToMember {
-                                member_id: *member,
-                                payload: fragment,
+                        for (member, packet) in mailbox.take_outbound() {
+                            // Gameplay packets carry the newest input/snapshot plus
+                            // unacknowledged reliable rows. Replace unsent older state
+                            // for this peer rather than building a latency backlog.
+                            if let Some((_, previous, _)) = pending.iter_mut().find(|(id, _, _)| *id == member) {
+                                *previous = packet;
+                            } else {
+                                if pending.len() >= master_protocol::MAX_SESSION_MEMBERS as usize {
+                                    return Err(TransportFault::new("send_datagram", role, "pending peer budget exhausted"));
+                                }
+                                pending.push_back((member, packet, tokio::time::Instant::now() + limits::values().queue_age));
                             }
-                        } else {
-                            RelayDatagram::ClientToHost(fragment)
-                        };
-                        datagrams.push(encode_relay(datagram).map_err(|error| {
-                            TransportFault::with_connection("encode_relay", role, error, &connection)
-                        })?);
-                    }
-                    let wire_bytes = datagrams.iter().map(Vec::len).sum::<usize>();
-                    if wire_bytes > DATAGRAM_SEND_BUFFER {
-                        return Err(TransportFault::with_connection(
-                            "send_datagram",
-                            role,
-                            "fragmented gameplay packet exceeds the send buffer",
-                            &connection,
-                        ));
-                    }
-                    let free = connection.datagram_send_buffer_space();
-                    let queued = empty_buffer_space.saturating_sub(free);
-                    let window = connection.stats().path.cwnd as usize;
-                    // Queue complete packets together. Quinn discards oldest
-                    // datagrams when its buffer fills, which can otherwise leave
-                    // every fragmented snapshot incomplete. One packet may exceed
-                    // the congestion window, but never enqueue a history behind it.
-                    if wire_bytes > free
-                        || (queued != 0 && queued.saturating_add(wire_bytes) > window)
-                    {
-                        break;
-                    }
-                    pending.pop_front();
-                    for bytes in datagrams {
-                        if let Err(error) = connection.send_datagram(bytes.into()) {
-                            return Err(TransportFault::with_connection(
-                                "send_datagram",
-                                role,
-                                error,
-                                &connection,
-                            ));
+                        }
+                        while let Some((member, packet, deadline)) = pending.front() {
+                            if *deadline <= tokio::time::Instant::now() {
+                                return Err(TransportFault::new("send_datagram", role, "gameplay queue deadline"));
+                            }
+                            let fragments = match fragmenter.split(packet) {
+                                Ok(fragments) => fragments,
+                                Err(error) => {
+                                    diag::warn!(Net, "master {role} packet not splittable: {error}");
+                                    pending.pop_front();
+                                    continue;
+                                }
+                            };
+                            let mut datagrams = Vec::with_capacity(fragments.len());
+                            for fragment in &fragments {
+                                let datagram = if is_host {
+                                    RelayDatagram::HostToMember {
+                                        member_id: *member,
+                                        payload: fragment,
+                                    }
+                                } else {
+                                    RelayDatagram::ClientToHost(fragment)
+                                };
+                                datagrams.push(encode_relay(datagram).map_err(|error| {
+                                    TransportFault::with_connection("encode_relay", role, error, &connection)
+                                })?);
+                            }
+                            let wire_bytes = datagrams.iter().map(Vec::len).sum::<usize>();
+                            if wire_bytes > DATAGRAM_SEND_BUFFER {
+                                return Err(TransportFault::with_connection(
+                                    "send_datagram",
+                                    role,
+                                    "fragmented gameplay packet exceeds the send buffer",
+                                    &connection,
+                                ));
+                            }
+                            let free = connection.datagram_send_buffer_space();
+                            let queued = empty_buffer_space.saturating_sub(free);
+                            let window = connection.stats().path.cwnd as usize;
+                            // Queue complete packets together. Quinn discards oldest
+                            // datagrams when its buffer fills, which can otherwise leave
+                            // every fragmented snapshot incomplete. One packet may exceed
+                            // the congestion window, but never enqueue a history behind it.
+                            if wire_bytes > free
+                                || (queued != 0 && queued.saturating_add(wire_bytes) > window)
+                            {
+                                break;
+                            }
+                            pending.pop_front();
+                            for bytes in datagrams {
+                                if let Err(error) = connection.send_datagram(bytes.into()) {
+                                    return Err(TransportFault::with_connection(
+                                        "send_datagram",
+                                        role,
+                                        error,
+                                        &connection,
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
-            }
-        }
     }
 }
 
@@ -3681,7 +3676,7 @@ async fn dns_timeout<T>(
 
 fn client_config(target: &MasterTarget) -> Result<quinn::ClientConfig> {
     let mut crypto = rustls::ClientConfig::builder()
-        .with_root_certificates(updater::trust_roots(&target.ca_pem)?)
+        .with_root_certificates(community::trust_roots(&target.ca_pem)?)
         .with_no_client_auth();
     crypto.alpn_protocols = vec![ALPN.to_vec()];
     let mut client_config = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(crypto)?));
@@ -3792,7 +3787,7 @@ async fn connect(
 }
 
 fn handshake_for_match(
-    world: Option<&sim::SimWorld>,
+    live: Option<ContentFingerprint>,
     descriptor: Option<&MatchDescriptor>,
 ) -> Option<HandshakeHello> {
     let descriptor = descriptor?;
@@ -3803,8 +3798,7 @@ fn handshake_for_match(
         gameplay: 0,
         models: 0,
     };
-    if let Some(world) = world.filter(|world| world.has_world_clip()) {
-        let live = ContentFingerprint::from_world(world);
+    if let Some(live) = live {
         content.gameplay = live.gameplay;
         content.models = live.models;
     }
@@ -3825,7 +3819,13 @@ fn refresh_relay_authority_hello(
     let Some(authority) = authority else {
         return;
     };
-    let Some(hello) = handshake_for_match(Some(&authority.0), Some(descriptor)) else {
+    let Some(hello) = handshake_for_match(
+        authority
+            .0
+            .has_world_clip()
+            .then(|| ContentFingerprint::from_world(&authority.0)),
+        Some(descriptor),
+    ) else {
         return;
     };
     let content = hello.content;

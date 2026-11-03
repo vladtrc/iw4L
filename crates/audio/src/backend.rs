@@ -7,22 +7,14 @@ use crate::runtime::AudioRuntime;
 use frame::MatchScope;
 
 pub(crate) fn register(app: &mut App) {
-    app.add_systems(
-        StateTransition,
-        sync_presentation_epoch
-            .in_set(bevy::state::state::StateTransitionSystems::TransitionSchedules)
-            .after(frame::scope::ScopeRetired),
-    );
+    app.add_systems(OnExit(frame::Timeline::Live), stop_timeline_audio)
+        .add_systems(OnExit(frame::Timeline::Killcam), stop_timeline_audio);
+
     app.add_systems(
         OnExit(MatchScope::Live),
         release_audio.in_set(frame::ScopeSet::Release),
     );
-    app.init_resource::<net::FireVerdictState>();
-    let verdicts = app.world().resource::<net::FireVerdictState>().clone();
     app.init_resource::<AudioRuntime>();
-    app.world()
-        .resource::<AudioRuntime>()
-        .set_fire_verdicts(verdicts);
     app.add_systems(
         Update,
         publish_audio_context
@@ -38,85 +30,96 @@ pub(crate) fn register(app: &mut App) {
     );
 }
 
-pub(crate) fn publish_audio_context(
-    epoch: Option<Res<net::EntityEventCursor>>,
-    runtime: Res<AudioRuntime>,
-    verdicts: Option<Res<net::FireVerdictState>>,
-    clips: Option<Res<crate::ClipStore>>,
-    frontend: Option<Res<crate::frontend::FrontendAudio>>,
-    mut mix: Option<ResMut<crate::script_mix::ScriptAudioMix>>,
-    mut channels: Option<ResMut<crate::script_mix::ChannelAudioMix>>,
-    listeners: Query<&Transform, With<crate::AmbientListener>>,
-    generation: Option<Res<frame::WorldGeneration>>,
-    presented: Option<Res<net::PresentedSnapshot>>,
-    events: Option<Res<net::EntityEventCursor>>,
-    local: Option<Res<net::LocalPresentClient>>,
-    adopted: Option<Res<net::LastAdoptedSnapshot>>,
-    prediction: Option<Res<net::ClientPredictionState>>,
-    view: Option<Res<frame::ViewSubject>>,
-) {
-    if let Some(verdicts) = verdicts {
-        runtime.set_fire_verdicts(verdicts.clone());
-    }
-    runtime.set_presentation_epoch(crate::backend::presentation_epoch(epoch.as_deref()));
-    runtime.set_event_context(
-        generation
-            .and_then(|generation| generation.0)
-            .zip(presented.as_ref().and_then(|presented| {
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct AudioPresentation<'w> {
+    presented: Option<Res<'w, net::PresentedSnapshot>>,
+    local: Option<Res<'w, net::LocalPresentClient>>,
+    adopted: Option<Res<'w, net::LastAdoptedSnapshot>>,
+    prediction: Option<Res<'w, net::ClientPredictionState>>,
+    view: Option<Res<'w, frame::ViewSubject>>,
+}
+
+impl AudioPresentation<'_> {
+    fn event_context(&self) -> Option<crate::event::EventContext> {
+        self.presented
+            .as_ref()
+            .and_then(|presented| {
                 presented.snapshot().map(|snapshot| {
-                    if view.as_ref().is_some_and(|view| view.in_killcam()) {
-                        local
+                    if self.view.as_ref().is_some_and(|view| view.in_killcam()) {
+                        self.local
                             .as_ref()
                             .map_or(snapshot.tick, |local| snapshot.view_tick(local.0))
                             .0
                     } else {
-                        adopted
+                        self.adopted
                             .as_ref()
                             .and_then(|adopted| adopted.next())
                             .map_or(snapshot.tick.0, |latest| latest.tick.0.max(snapshot.tick.0))
                     }
                 })
-            }))
-            .zip(events.as_ref().map(|events| events.timeline()))
-            .map(|((world, tick), timeline)| crate::event::EventContext {
-                local_life: local.as_ref().and_then(|local| {
-                    let snapshot = if view.as_ref().is_some_and(|view| view.in_killcam()) {
-                        presented.as_ref()?.snapshot()?
+            })
+            .map(|tick| crate::event::EventContext {
+                killcam: self.view.as_ref().is_some_and(|view| view.in_killcam()),
+                local_life: self.local.as_ref().and_then(|local| {
+                    let snapshot = if self.view.as_ref().is_some_and(|view| view.in_killcam()) {
+                        self.presented.as_ref()?.snapshot()?
                     } else {
-                        adopted
+                        self.adopted
                             .as_ref()
                             .and_then(|adopted| adopted.next())
-                            .or_else(|| presented.as_ref()?.snapshot())?
+                            .or_else(|| self.presented.as_ref()?.snapshot())?
                     };
                     let meta = snapshot.meta.for_client(local.0)?;
                     (meta.lifecycle == sim::ClientLifecycle::Alive)
                         .then_some((local.0.0, meta.life_sequence.0))
                 }),
-                world,
-                timeline,
                 tick,
-                owner_tick: prediction
+                owner_tick: self
+                    .prediction
                     .as_ref()
                     .and_then(|prediction| prediction.0.history().newest())
                     .map(|latest| latest.tick.0),
-            }),
-    );
-    runtime.set_media_service(
-        clips
+            })
+    }
+
+    fn snapshot(&self) -> Option<&sim::Snapshot> {
+        self.presented.as_deref().and_then(|p| p.snapshot())
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct AudioMediaSource<'w> {
+    clips: Option<Res<'w, crate::ClipStore>>,
+    frontend: Option<Res<'w, crate::frontend::FrontendAudio>>,
+}
+
+impl AudioMediaSource<'_> {
+    fn service(&self) -> Option<crate::clip_store::MediaService> {
+        self.clips
             .as_ref()
             .map(|clips| clips.service())
-            .or_else(|| frontend.as_ref().map(|frontend| frontend.clips.service())),
-    );
-    if let Some(mix) = mix.as_mut() {
-        mix.reset_epoch(crate::backend::presentation_epoch(epoch.as_deref()));
+            .or_else(|| {
+                self.frontend
+                    .as_ref()
+                    .map(|frontend| frontend.clips.service())
+            })
     }
-    if let Some(channels) = channels.as_mut() {
-        channels.reset_epoch(crate::backend::presentation_epoch(epoch.as_deref()));
-    }
+}
+
+pub(crate) fn publish_audio_context(
+    runtime: Res<AudioRuntime>,
+    presentation: AudioPresentation,
+    media: AudioMediaSource,
+    mix: Option<Res<crate::script_mix::ScriptAudioMix>>,
+    channels: Option<Res<crate::script_mix::ChannelAudioMix>>,
+    listeners: Query<&Transform, With<crate::AmbientListener>>,
+    level: Option<Res<net::ClientLevel>>,
+) {
+    runtime.set_event_context(presentation.event_context());
+    runtime.set_media_service(media.service());
     runtime.set_cue_mix(
         mix.zip(channels)
             .map(|(mix, channels)| crate::cue_execution::CueMix {
-                epoch: crate::backend::presentation_epoch(epoch.as_deref()),
                 gain: mix.gain.clone(),
                 channels: channels.bindings(),
             }),
@@ -124,10 +127,9 @@ pub(crate) fn publish_audio_context(
     let mut listener = listeners.iter();
     let pose = listener.next();
     assert!(listener.next().is_none(), "more than one ambient listener");
-    runtime.set_listener(pose.map(|pose| crate::spatial::ListenerSnapshot {
-        origin_inches: crate::transform_inches(pose.translation),
-        right: (pose.rotation * Vec3::X).to_array(),
-    }));
+    runtime.set_listener(
+        pose.map(|pose| listener_snapshot(pose, level.as_deref(), presentation.snapshot())),
+    );
 }
 
 fn cancel_audio_on_exit(mut exit: MessageReader<AppExit>, runtime: Res<AudioRuntime>) {
@@ -165,66 +167,101 @@ fn cancel_audio_on_exit(mut exit: MessageReader<AppExit>, runtime: Res<AudioRunt
     );
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct PresentedAudioSources<'w, 's> {
+    destructibles: Option<Res<'w, crate::destructible_loops::DestructibleSources>>,
+    projectiles: Query<'w, 's, &'static crate::projectile_loops::ProjectileLoop>,
+    flames: Query<'w, 's, &'static crate::flame_loops::FlameStream>,
+    map: Option<Res<'w, crate::ambient::MapSources>>,
+    menu: Option<Res<'w, crate::frontend::MenuSources>>,
+    shellshock: Option<Res<'w, crate::shellshock::ShellshockSources>>,
+    breath: Option<Res<'w, crate::breath::BreathSources>>,
+}
+
+impl PresentedAudioSources<'_, '_> {
+    fn collect(self) -> Vec<crate::sources::DesiredSource> {
+        let mut desired = Vec::new();
+        if let Some(destructibles) = self.destructibles {
+            desired.extend(destructibles.desired.iter().cloned());
+        }
+        desired.extend(self.projectiles.iter().map(|source| source.source.clone()));
+        desired.extend(
+            self.flames
+                .iter()
+                .filter_map(|stream| stream.source.clone()),
+        );
+        if let Some(map) = self.map {
+            desired.extend(map.desired.iter().cloned());
+        }
+        if let Some(menu) = self.menu {
+            desired.extend(menu.source.iter().cloned());
+        }
+        if let Some(shellshock) = self.shellshock {
+            desired.extend(shellshock.source.iter().cloned());
+        }
+        if let Some(breath) = self.breath {
+            desired.extend(breath.source.iter().cloned());
+        }
+        desired
+    }
+}
+
 fn submit_presented_audio(
     mut runtime: ResMut<AudioRuntime>,
-    epoch: Option<Res<net::EntityEventCursor>>,
+    sources: PresentedAudioSources,
     settings: Option<Res<frame::GameSettings>>,
     listeners: Query<&Transform, With<crate::AmbientListener>>,
-    destructibles: Option<Res<crate::destructible_loops::DestructibleSources>>,
-    projectiles: Option<Res<crate::projectile_loops::ProjectileSources>>,
-    flames: Option<Res<crate::flame_loops::FlameSources>>,
-    map: Option<Res<crate::ambient::MapSources>>,
-    menu: Option<Res<crate::frontend::MenuSources>>,
-    shellshock: Option<Res<crate::shellshock::ShellshockSources>>,
-    breath: Option<Res<crate::breath::BreathSources>>,
+    level: Option<Res<net::ClientLevel>>,
+    presented: Option<Res<net::PresentedSnapshot>>,
 ) {
-    runtime.set_presentation_epoch(crate::backend::presentation_epoch(epoch.as_deref()));
     let mut listener = listeners.iter();
     let pose = listener.next();
     assert!(listener.next().is_none(), "more than one ambient listener");
-    runtime.set_listener(pose.map(|pose| crate::spatial::ListenerSnapshot {
-        origin_inches: crate::transform_inches(pose.translation),
-        right: (pose.rotation * Vec3::X).to_array(),
+    runtime.set_listener(pose.map(|pose| {
+        listener_snapshot(
+            pose,
+            level.as_deref(),
+            presented.as_deref().and_then(|p| p.snapshot()),
+        )
     }));
     if let Some(settings) = settings {
         runtime.set_master_volume(settings.master_volume);
     }
-    let mut desired = Vec::new();
-    if let Some(destructibles) = destructibles {
-        desired.extend(destructibles.desired.iter().cloned());
-    }
-    if let Some(projectiles) = projectiles {
-        desired.extend(projectiles.desired.iter().cloned());
-    }
-    if let Some(flames) = flames {
-        desired.extend(flames.desired.iter().cloned());
-    }
-    if let Some(map) = map {
-        desired.extend(map.desired.iter().cloned());
-    }
-    if let Some(menu) = menu {
-        desired.extend(menu.source.iter().cloned());
-    }
-    if let Some(shellshock) = shellshock {
-        desired.extend(shellshock.source.iter().cloned());
-    }
-    if let Some(breath) = breath {
-        desired.extend(breath.source.iter().cloned());
-    }
+    let desired = sources.collect();
     runtime.set_sources(desired);
 }
 
-pub(crate) fn presentation_epoch(cursor: Option<&net::EntityEventCursor>) -> u64 {
-    cursor.map_or(0, net::EntityEventCursor::timeline)
-}
-
-fn sync_presentation_epoch(epoch: Option<Res<net::EntityEventCursor>>, runtime: Res<AudioRuntime>) {
-    runtime.set_presentation_epoch(crate::backend::presentation_epoch(epoch.as_deref()));
-}
-
-fn release_audio(mut runtime: ResMut<AudioRuntime>) {
+fn release_audio(runtime: Res<AudioRuntime>) {
     runtime.set_media_service(None);
     runtime.set_event_context(None);
     runtime.set_cue_mix(None);
-    runtime.set_sources(Vec::new());
+}
+
+fn stop_timeline_audio(runtime: Res<AudioRuntime>) {
+    runtime.stop_scope(AudioScope::Match);
+}
+
+fn listener_snapshot(
+    pose: &Transform,
+    level: Option<&net::ClientLevel>,
+    snapshot: Option<&sim::Snapshot>,
+) -> crate::spatial::ListenerSnapshot {
+    let origin_inches = crate::transform_inches(pose.translation);
+    let portals = level
+        .and_then(|level| level.content.atlas())
+        .filter(|atlas| !atlas.portals.is_empty())
+        .map(|atlas| {
+            std::sync::Arc::new(crate::portal_space::PortalSpace::new(
+                atlas,
+                snapshot.map_or(&[], |s| {
+                    s.meta.world_objects.portal_blocked_exits.as_slice()
+                }),
+                origin_inches,
+            ))
+        });
+    crate::spatial::ListenerSnapshot {
+        origin_inches,
+        right: (pose.rotation * Vec3::X).to_array(),
+        portals,
+    }
 }

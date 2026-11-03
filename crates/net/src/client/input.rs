@@ -1,8 +1,7 @@
 use bevy::prelude::Resource;
 use input_iw4::{
-    ANGLE2SHORT, AdjustAnglesInput, CL_ANGLESPEEDKEY_DEFAULT, CL_PITCHSPEED_DEFAULT,
-    CL_YAWSPEED_DEFAULT, ClientInput, CreateCmdInput, adjust_angles, axis_to_move, create_cmd,
-    mouse_move_angles, sample_move,
+    ANGLE2SHORT, AdjustAnglesInput, CL_YAWSPEED_DEFAULT, ClientInput, CreateCmdInput, KbuttonSet,
+    adjust_angles, axis_to_move, create_cmd, mouse_move_angles, sample_move,
 };
 use playerstate_iw4::UserCmd;
 use playerstate_iw4::buttons;
@@ -122,33 +121,12 @@ pub fn look_angles_from_degrees(viewangles: [f32; 3]) -> [i32; 3] {
     ]
 }
 
-pub fn accumulate_look(
-    dt: f32,
-    now_msec: i32,
-    frame_msec: u32,
-    client: &mut ClientInput,
-    look: &mut LookState,
-    cl_yawspeed: f32,
-    frozen: bool,
-    cgame_max_pitch_speed: f32,
-    cgame_max_yaw_speed: f32,
-) {
-    let (pitch_deg, yaw_deg) = adjust_angles(
-        &mut client.kb,
-        AdjustAnglesInput {
-            dt,
-            now_msec,
-            frame_msec,
-            cl_yawspeed,
-            cl_pitchspeed: CL_PITCHSPEED_DEFAULT,
-            cl_anglespeedkey: CL_ANGLESPEEDKEY_DEFAULT,
-            cgame_max_yaw_speed,
-            cgame_max_pitch_speed,
-            frozen,
-        },
-    );
-    look.angles[0] = look.angles[0].wrapping_add((pitch_deg * ANGLE2SHORT) as i32);
-    look.angles[1] = look.angles[1].wrapping_add((yaw_deg * ANGLE2SHORT) as i32);
+impl LookState {
+    pub fn accumulate_keyboard(&mut self, kb: &mut KbuttonSet, input: AdjustAnglesInput) {
+        let (pitch_deg, yaw_deg) = adjust_angles(kb, input);
+        self.angles[0] = self.angles[0].wrapping_add((pitch_deg * ANGLE2SHORT) as i32);
+        self.angles[1] = self.angles[1].wrapping_add((yaw_deg * ANGLE2SHORT) as i32);
+    }
 }
 
 pub fn build_usercmd(input: &mut ClientActionInput, look: &LookState, server_time: i32) -> UserCmd {

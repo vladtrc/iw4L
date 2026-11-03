@@ -23,41 +23,6 @@ impl core::fmt::Display for DisplayResolution {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OtherGame {
-    BlackOps,
-    BlackOps2,
-    ModernWarfare3,
-}
-
-impl OtherGame {
-    pub const ALL: [Self; 3] = [Self::BlackOps, Self::BlackOps2, Self::ModernWarfare3];
-
-    pub const fn key(self) -> &'static str {
-        match self {
-            Self::BlackOps => "black_ops",
-            Self::BlackOps2 => "black_ops_2",
-            Self::ModernWarfare3 => "modern_warfare_3",
-        }
-    }
-
-    pub const fn title(self) -> &'static str {
-        match self {
-            Self::BlackOps => "Black Ops",
-            Self::BlackOps2 => "Black Ops II",
-            Self::ModernWarfare3 => "Modern Warfare 3",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|game| game.key() == key)
-    }
-
-    const fn index(self) -> usize {
-        self as usize
-    }
-}
-
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub struct GameSettings {
     pub resolution: DisplayResolution,
@@ -73,7 +38,7 @@ pub struct GameSettings {
     pub sensitivity: f32,
     pub invert_mouse: bool,
     pub player_name: String,
-    pub game_folders: [String; 3],
+    pub game_folders: std::collections::BTreeMap<asset_core::FamilyId, String>,
 
     pub pad_layout: u8,
     pub pad_stick_layout: u8,
@@ -144,12 +109,15 @@ impl GameSettings {
 
     pub const PAD_LAYOUT_CUSTOM: u8 = 255;
 
-    pub fn game_folder(&self, game: OtherGame) -> &str {
-        &self.game_folders[game.index()]
+    pub fn game_folder(&self, game: asset_core::FamilyId) -> &str {
+        self.game_folders
+            .get(&game)
+            .map(String::as_str)
+            .unwrap_or("")
     }
 
-    pub fn set_game_folder(&mut self, game: OtherGame, folder: String) {
-        self.game_folders[game.index()] = folder;
+    pub fn set_game_folder(&mut self, game: asset_core::FamilyId, folder: String) {
+        self.game_folders.insert(game, folder);
     }
 
     pub fn touch(&mut self) {

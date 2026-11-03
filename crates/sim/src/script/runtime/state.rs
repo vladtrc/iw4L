@@ -6,10 +6,11 @@ use crate::script::host;
 use crate::script::{ArrayKey, Fault, Native, Program, StringTable, Value};
 
 #[derive(Resource, Clone, Debug)]
-pub(crate) struct RoundScript {
+pub struct RoundScript {
     pub(crate) program: Option<Arc<Program>>,
     pub(crate) natives: Vec<Native>,
     pub(crate) next_serial: u64,
+    pub(super) threads: indexmap::IndexMap<u64, crate::script::Thread>,
     pub fault: Option<Fault>,
     pub(crate) fault_reported: bool,
     pub(crate) errors: BTreeMap<(String, String), u64>,
@@ -27,22 +28,22 @@ pub(crate) struct RoundScript {
     pub(crate) spawned: Vec<u64>,
     pub(crate) waiters: Vec<crate::script::Waiter>,
     pub(crate) loading: bool,
-    pub(crate) presented: BTreeMap<&'static str, Vec<Value>>,
+    pub presented: BTreeMap<&'static str, Vec<Value>>,
     pub(crate) unsupported: BTreeMap<&'static str, u64>,
     pub(crate) budget: usize,
     pub(crate) suspended: Vec<u64>,
     pub(crate) suspended_frames: usize,
     /// Endons that fired on a suspended thread; applied when its child yields.
     pub(crate) pending_unwinds: Vec<(u64, usize)>,
-    pub(crate) entities: BTreeMap<u64, host::entities::ScriptEntity>,
+    pub entities: BTreeMap<u64, host::entities::ScriptEntity>,
     pub(crate) hud_slots: BTreeMap<u64, usize>,
     pub(crate) next_entity_number: i32,
-    pub(crate) tables: Arc<BTreeMap<String, StringTable>>,
+    pub tables: Arc<BTreeMap<String, StringTable>>,
     pub(crate) rng: u32,
     pub(crate) pending_notifies: Vec<(Value, Arc<str>, Vec<Value>)>,
     pub(crate) signals: Vec<Arc<str>>,
     pub(crate) engine: host::entities::EngineState,
-    pub(crate) players: BTreeMap<u32, host::players::PlayerSlot>,
+    pub players: BTreeMap<u32, host::players::PlayerSlot>,
     pub(crate) menu_answers: BTreeMap<u32, VecDeque<host::players::MenuAnswer>>,
     pub(crate) team_ranks: BTreeMap<u32, (i32, i32)>,
     pub(crate) ranks_sent: bool,
@@ -58,7 +59,7 @@ pub(crate) struct RoundScript {
     pub(crate) shown: BTreeMap<u64, host::presence::Shown>,
     pub(crate) retired_presence: Vec<(crate::ScriptModelId, bool)>,
     pub(crate) blasts: Vec<host::entity_damage::ScriptBlast>,
-    pub(crate) hits: Vec<host::entity_damage::ScriptHit>,
+    pub hits: Vec<host::entity_damage::ScriptHit>,
     pub(crate) use_held: std::collections::BTreeSet<u32>,
     pub(crate) fired_once: std::collections::BTreeSet<u64>,
     pub(crate) require_look_at: std::collections::BTreeSet<u64>,
@@ -73,7 +74,7 @@ pub(crate) struct RoundScript {
     pub(crate) vehicles: BTreeMap<u64, host::vehicles::Heli>,
     pub(crate) planes: BTreeMap<u64, host::vehicles::Plane>,
     pub(crate) use_selected: BTreeMap<u32, u64>,
-    pub(crate) t5: host::natives::t5::T5State,
+    pub extensions: crate::script::extensions::RoundExtensions,
     pub(crate) restart: Option<Arc<host::restart::RestartPlan>>,
     pub(crate) finished: bool,
     pub(crate) pending_restart: Option<bool>,
@@ -86,6 +87,7 @@ impl RoundScript {
             program: Default::default(),
             natives: Default::default(),
             next_serial: Default::default(),
+            threads: Default::default(),
             fault: Default::default(),
             fault_reported: Default::default(),
             errors: Default::default(),
@@ -146,7 +148,7 @@ impl RoundScript {
             vehicles: Default::default(),
             planes: Default::default(),
             use_selected: Default::default(),
-            t5: Default::default(),
+            extensions: Default::default(),
             restart: Default::default(),
             finished: Default::default(),
             pending_restart: Default::default(),
@@ -154,11 +156,7 @@ impl RoundScript {
         }
     }
 
-    pub(crate) fn program_fingerprint(&self) -> Option<[u8; 32]> {
-        self.program.as_ref().map(|program| program.fingerprint())
-    }
-
-    pub(crate) fn live(&self, id: &u64) -> bool {
+    pub fn live(&self, id: &u64) -> bool {
         self.objects.contains_key(id) && !self.dead.contains(id)
     }
 

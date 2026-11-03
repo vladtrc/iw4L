@@ -193,13 +193,6 @@ pub(crate) fn set_dvar(world: &mut World, name: &str, value: &str) {
 }
 
 pub(crate) fn deliver_local_presentation_dvars(world: &mut World) {
-    if !world
-        .resource::<crate::step::StepRequest>()
-        .reason
-        .advances_authority_world()
-    {
-        return;
-    }
     let Some(client) = world
         .resource::<crate::script::MatchScript>()
         .local_presentation_client
@@ -278,7 +271,7 @@ fn dvar_value(args: &[Value]) -> Result<String, String> {
     string(args, 1)
 }
 
-pub(crate) fn atoi(text: &str) -> i32 {
+pub fn atoi(text: &str) -> i32 {
     let text = text.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
     let (negative, digits) = match text.as_bytes().first() {
         Some(b'-') => (true, &text[1..]),
@@ -305,7 +298,7 @@ pub(crate) fn atoi(text: &str) -> i32 {
     }
 }
 
-pub(crate) fn atof(text: &str) -> f64 {
+pub fn atof(text: &str) -> f64 {
     let text = text.trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c']);
     let bytes = text.as_bytes();
     let mut end = usize::from(matches!(bytes.first(), Some(b'-' | b'+')));

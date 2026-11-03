@@ -70,9 +70,9 @@ fn finish_replay_playback(
     }
     match swap.as_mut() {
         Some(swap) => match swap.request_leave() {
-            Ok(id) => diag::info!(
+            Ok(()) => diag::info!(
                 Console,
-                "demo: ended after {} ticks — disconnect to menu (swap #{id})",
+                "demo: ended after {} ticks — disconnect to menu",
                 playback.ticks()
             ),
             Err(error) => diag::info!(
@@ -96,6 +96,7 @@ pub(crate) fn register_diagnostics_mirror(app: &mut App) {
         (
             mirror_runtime_diagnostics,
             drain_pending_console_lines,
+            crate::feature_dispatch::drive_film_render,
             finish_replay_playback,
             update_showpos_overlay.in_set(frame::InMatch),
         )

@@ -147,12 +147,16 @@ pub(crate) fn mix_draw_membership(id: &mut u64, item: &RetainedDrawItem) {
     );
     let (kind_tag, a, b, c) = match item.kind {
         RetainedDrawKind::World {
-            surf, run, run_off, ..
+            surf,
+            run,
+            run_off,
+            brush_model,
+            ..
         } => (
             0u64,
             u64::from(surf) | (u64::from(run) << 16),
             u64::from(run_off),
-            0,
+            brush_model.map_or(0, |model| u64::from(model) + 1),
         ),
         RetainedDrawKind::Smodel {
             placement,
@@ -205,6 +209,28 @@ pub(crate) fn mix_draw_membership(id: &mut u64, item: &RetainedDrawItem) {
     crate::assemble::drawsurf::list::mix_content_id(id, a);
     crate::assemble::drawsurf::list::mix_content_id(id, b);
     crate::assemble::drawsurf::list::mix_content_id(id, c);
+    if let RetainedDrawKind::XModel {
+        world_from_local,
+        portal_slice,
+        portal_aperture,
+        ..
+    } = item.kind
+    {
+        for value in world_from_local.to_cols_array() {
+            crate::assemble::drawsurf::list::mix_content_id(id, u64::from(value.to_bits()));
+        }
+        crate::assemble::drawsurf::list::mix_content_id(id, u64::from(portal_slice.is_some()));
+        crate::assemble::drawsurf::list::mix_content_id(id, u64::from(portal_aperture.is_some()));
+        if let Some(aperture) = portal_aperture {
+            crate::assemble::drawsurf::list::mix_content_id(id, u64::from(aperture.is_clone));
+            for value in aperture.planes.into_iter().flatten() {
+                crate::assemble::drawsurf::list::mix_content_id(id, value.to_bits());
+            }
+        }
+        for value in portal_slice.into_iter().flatten() {
+            crate::assemble::drawsurf::list::mix_content_id(id, value.to_bits());
+        }
+    }
 }
 
 pub(super) fn merge_presorted_retained(

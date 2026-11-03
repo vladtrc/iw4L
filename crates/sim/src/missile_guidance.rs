@@ -13,6 +13,14 @@ pub enum MissileTarget {
         life: crate::LifeSequence,
         offset: [f32; 3],
     },
+    /// An embedded blade follows the hit bone, including its death animation.
+    PlayerBone {
+        client: crate::ClientId,
+        life: crate::LifeSequence,
+        bone: u16,
+        offset: [f32; 3],
+        angles: [f32; 3],
+    },
 }
 
 impl MissileTarget {
@@ -21,7 +29,11 @@ impl MissileTarget {
     }
 
     pub(crate) fn resolve(self, world: &FrameWorld) -> Option<[f32; 3]> {
+        if let Self::PlayerBone { .. } = self {
+            return self.attached_pose(world).map(|(origin, _)| origin);
+        }
         let (origin, angles, offset) = match self {
+            Self::PlayerBone { .. } => unreachable!(),
             Self::Point(point) => return Some(point),
             Self::Entity { entity, offset } => {
                 world.entity_kernel().resolve(entity).ok()?;
@@ -45,6 +57,23 @@ impl MissileTarget {
         Some(core::array::from_fn(|i| {
             origin[i] + offset[0] * axis[0][i] + offset[1] * axis[1][i] + offset[2] * axis[2][i]
         }))
+    }
+    pub(crate) fn attached_pose(self, world: &FrameWorld) -> Option<([f32; 3], [f32; 3])> {
+        let Self::PlayerBone {
+            client,
+            life,
+            bone,
+            offset,
+            angles,
+        } = self
+        else {
+            return None;
+        };
+        let frame = world
+            .player_attachment_bones(client, life, world.player(client))?
+            .into_iter()
+            .find(|b| b.bone == bone)?;
+        Some(bone_attachment_pose(&frame, offset, angles))
     }
 }
 
@@ -193,4 +222,36 @@ pub(crate) fn steer(
         tr_base: projectile.origin,
     };
     projectile.apos = entity_iw4::fire_missile_apos(direction.to_array());
+}
+
+fn bone_basis(bone: &xmodel_runtime::CollisionBone) -> glam::Mat3 {
+    glam::Mat3::from_cols_array_2d(&bone.axes)
+}
+
+pub(crate) fn bone_attachment_local(
+    bone: &xmodel_runtime::CollisionBone,
+    origin: [f32; 3],
+    angles: [f32; 3],
+) -> ([f32; 3], [f32; 3]) {
+    let inverse = bone_basis(bone).transpose();
+    let offset = inverse * (Vec3::from_array(origin) - Vec3::from_array(bone.center));
+    let rotation = inverse * glam::Mat3::from_cols_array_2d(&math_iw4::angles_to_axis(angles));
+    (
+        offset.to_array(),
+        math_iw4::axis_to_angles(rotation.to_cols_array_2d()),
+    )
+}
+
+fn bone_attachment_pose(
+    bone: &xmodel_runtime::CollisionBone,
+    offset: [f32; 3],
+    angles: [f32; 3],
+) -> ([f32; 3], [f32; 3]) {
+    let basis = bone_basis(bone);
+    let origin = Vec3::from_array(bone.center) + basis * Vec3::from_array(offset);
+    let rotation = basis * glam::Mat3::from_cols_array_2d(&math_iw4::angles_to_axis(angles));
+    (
+        origin.to_array(),
+        math_iw4::axis_to_angles(rotation.to_cols_array_2d()),
+    )
 }

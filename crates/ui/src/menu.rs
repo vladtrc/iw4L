@@ -9,8 +9,11 @@ use crate::classes::store::{
 pub struct MenuMapList(pub Vec<asset_transport::MapPack>);
 
 impl MenuMapList {
-    pub fn maps(&self) -> impl Iterator<Item = &String> {
-        self.0.iter().flat_map(|pack| &pack.maps)
+    pub fn maps(&self) -> impl Iterator<Item = &str> {
+        self.0
+            .iter()
+            .flat_map(|pack| &pack.maps)
+            .map(String::as_str)
     }
 
     pub fn contains(&self, map: &str) -> bool {
@@ -57,6 +60,7 @@ impl Plugin for MenuPlugin {
 
 pub fn install_frontend_menus(catalog: &mut asset_game::MenuCatalog) -> Result<(), String> {
     catalog.load_definitions(include_str!("../menus/frontend.json"))?;
+    populate_asset_family_menu(catalog);
     if let Some(mut backdrop) = catalog.get("iw4l_main").cloned() {
         backdrop.name = "iw4l_theater_background".into();
         backdrop.static_flags = 0x0010_0000;
@@ -76,6 +80,7 @@ pub fn install_frontend_menus(catalog: &mut asset_game::MenuCatalog) -> Result<(
     catalog.load_definitions(include_str!("../menus/settings.json"))?;
     catalog.load_definitions(include_str!("../menus/controller.json"))?;
     catalog.load_definitions(include_str!("../menus/game_folders.json"))?;
+    populate_game_folder_menu(catalog);
     catalog.load_definitions(include_str!("../menus/community_servers.json"))?;
     let chat_bindings: Vec<_> = catalog
         .get("pc_options_actions")
@@ -351,3 +356,107 @@ fn add_rule_rows(items: &mut Vec<asset_game::MenuItem>) {
 
 pub const MAX_RULE_ENEMY_BOTS: u32 = 9;
 pub const MAX_RULE_FRIENDLY_BOTS: u32 = 8;
+
+fn populate_game_folder_menu(catalog: &mut asset_game::MenuCatalog) {
+    let Some(menu) = catalog.menus.get_mut("options_game_folders") else {
+        return;
+    };
+    let templates: Vec<_> = ["browse", "label", "path"]
+        .into_iter()
+        .filter_map(|suffix| {
+            menu.items
+                .iter()
+                .find(|item| item.name == format!("game_folder_template_{suffix}"))
+                .cloned()
+        })
+        .collect();
+    if templates.len() != 3 {
+        return;
+    }
+    menu.items
+        .retain(|item| !item.name.starts_with("game_folder_template_"));
+    let families = asset_core::game_folder_families();
+    for (index, (_, policy)) in families.iter().enumerate() {
+        let y = 28.0 + index as f32 * 44.0;
+        for (slot, template) in templates.iter().enumerate() {
+            let mut item = template.clone();
+            let suffix = ["browse", "label", "path"][slot];
+            item.name = format!("game_folder_{}_{suffix}", policy.key);
+            item.rect.y = y + if slot == 2 { 18.0 } else { 0.0 };
+            match slot {
+                0 => {
+                    item.handlers.action = vec![asset_game::MenuEvent::Script(format!(
+                        "play mouse_click; setdvar ui_pick_game_folder {};",
+                        policy.key
+                    ))]
+                }
+                1 => item.text_key = policy.title.to_owned(),
+                _ => {
+                    let key = format!("ui_game_folder_{}", policy.key);
+                    let encoded: String = key.bytes().map(|byte| format!("{byte:02x}")).collect();
+                    item.text_exp = format!("op 38 s:{encoded} op 1");
+                }
+            }
+            menu.items.push(item);
+        }
+    }
+    let reset_y = 28.0 + families.len() as f32 * 44.0;
+    for item in &mut menu.items {
+        match item.name.as_str() {
+            "game_folders_reset" | "game_folders_reset_label" => item.rect.y = reset_y,
+            "game_folders_hint" => item.rect.y = reset_y + 28.0,
+            _ => {}
+        }
+    }
+}
+
+fn populate_asset_family_menu(catalog: &mut asset_game::MenuCatalog) {
+    let Some(menu) = catalog.menus.get_mut("lobby_game_assets") else {
+        return;
+    };
+    let Some(template) = menu
+        .items
+        .iter()
+        .find(|item| item.name == "assets_template")
+        .cloned()
+    else {
+        return;
+    };
+    menu.items.retain(|item| item.name != "assets_template");
+    let settings = frame::AssetFamilies::settings();
+    for (index, (id, _)) in settings.iter().enumerate() {
+        let family = id.as_str();
+        let mut item = template.clone();
+        item.name = format!("assets_{family}");
+        item.rect.y = 24.0 + 20.0 * index as f32;
+        let expression = |key: &str| {
+            let encoded: String = key.bytes().map(|byte| format!("{byte:02x}")).collect();
+            format!("op 38 s:{encoded} op 1")
+        };
+        item.text_exp = expression(&format!("ui_assets_{family}"));
+        item.disabled_exp = format!(
+            "{} op 12 s:31",
+            expression(&format!("ui_assets_{family}_blocked"))
+        );
+        item.handlers.action = vec![asset_game::MenuEvent::Script(format!(
+            "play mouse_click; exec \"ui_asset_family {family}\";"
+        ))];
+        menu.items.push(item);
+    }
+    let height = 56.0 + 20.0 * settings.len() as f32;
+    menu.rect.h = height;
+    for (target, expression) in &mut menu.float_exp {
+        if *target == 3 {
+            *expression = height.to_string();
+        }
+    }
+    for item in &mut menu.items {
+        match item.name.as_str() {
+            "assets_back" => item.rect.y = 28.0 + 20.0 * settings.len() as f32,
+            "assets_panel_16" | "assets_panel_17" => {
+                item.rect.h = 56.0 + 20.0 * settings.len() as f32
+            }
+            _ => {}
+        }
+    }
+}

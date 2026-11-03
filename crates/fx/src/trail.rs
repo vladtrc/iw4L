@@ -4,7 +4,7 @@ use fx_iw4::{
     collide_substep_schedule, collision_reflect_base_vel_delta, compress_basis_from_axis,
     elem_dies_on_touch, elem_gravity_accel_z_sampled, elem_skips_position_update,
     elem_update_has_velocity_graph, elem_uses_collision, elem_uses_vel_local, elem_uses_vel_world,
-    get_orientation, get_velocity_at_time, impact_child_speed_allows, integrate_velocity_graph,
+    get_orientation, impact_child_speed_allows, integrate_velocity_graph,
     orientation_pos_from_world, orientation_pos_to_world, sample_life_span_msec,
     sample_reflection_factor, sample_u16, spawn_origin_world, status_is_unique_done, trace_mask,
     trail_elem_base_vel_z_pack, trail_elem_handle_for_slot, trail_elem_keep, trail_elem_norm_ages,
@@ -14,7 +14,6 @@ use fx_iw4::{
 };
 
 use crate::def::FxElemDefInfo;
-use crate::gaps::FxGapCause;
 use crate::system::FxSystemHost;
 
 pub const FX_TRAIL_HANDLE_NONE: u16 = 0xffff;
@@ -123,68 +122,83 @@ fn free_trail_elem_first(
     trail_slot: usize,
     handle: u16,
 ) {
-    free_trail_elem(host, effect_slot, trail_slot, handle, FX_TRAIL_HANDLE_NONE);
+    TrailSampleCursor {
+        effect_slot,
+        trail_slot,
+        elem_handle: handle,
+        prev_elem_handle: FX_TRAIL_HANDLE_NONE,
+    }
+    .remove(host);
 }
 
-fn free_trail_elem(
-    host: &mut FxSystemHost,
+struct TrailSampleCursor {
     effect_slot: usize,
     trail_slot: usize,
-    handle: u16,
-    prev_handle: u16,
-) {
-    if prev_handle == FX_TRAIL_HANDLE_NONE {
-        if host.trails.get(trail_slot).map(|t| t.first_elem_handle) != Some(handle) {
-            return;
+    elem_handle: u16,
+    prev_elem_handle: u16,
+}
+
+impl TrailSampleCursor {
+    fn remove(self, host: &mut FxSystemHost) {
+        let Self {
+            effect_slot,
+            trail_slot,
+            elem_handle: handle,
+            prev_elem_handle: prev_handle,
+        } = self;
+        if prev_handle == FX_TRAIL_HANDLE_NONE {
+            if host.trails.get(trail_slot).map(|t| t.first_elem_handle) != Some(handle) {
+                return;
+            }
+        } else {
+            let Some(prev_slot) = trail_elem_slot_for_handle(prev_handle) else {
+                return;
+            };
+            if host
+                .trail_elems
+                .get(prev_slot)
+                .map(|e| e.next_trail_elem_handle)
+                != Some(handle)
+            {
+                return;
+            }
         }
-    } else {
-        let Some(prev_slot) = trail_elem_slot_for_handle(prev_handle) else {
+        let Some(elem_slot) = trail_elem_slot_for_handle(handle) else {
             return;
         };
-        if host
-            .trail_elems
-            .get(prev_slot)
-            .map(|e| e.next_trail_elem_handle)
-            != Some(handle)
-        {
+        if !host.trail_elems.get(elem_slot).is_some_and(|e| e.occupied) {
             return;
         }
-    }
-    let Some(elem_slot) = trail_elem_slot_for_handle(handle) else {
-        return;
-    };
-    if !host.trail_elems.get(elem_slot).is_some_and(|e| e.occupied) {
-        return;
-    }
-    let next = host.trail_elems[elem_slot].next_trail_elem_handle;
-    if host.trails[trail_slot].last_elem_handle == handle {
-        host.trails[trail_slot].last_elem_handle = prev_handle;
-    }
-    if prev_handle == FX_TRAIL_HANDLE_NONE {
-        host.trails[trail_slot].first_elem_handle = next;
-    } else if let Some(prev_slot) = trail_elem_slot_for_handle(prev_handle) {
-        host.trail_elems[prev_slot].next_trail_elem_handle = next;
-    }
-    let next_free = host
-        .trail_elem_first_free
-        .map(|d| d as u16)
-        .unwrap_or(FX_TRAIL_HANDLE_NONE);
-    host.trail_elems[elem_slot] = FxTrailElemSlot {
-        occupied: false,
-        next_trail_elem_handle: next_free,
-        ..FxTrailElemSlot::default()
-    };
-    host.trail_elem_first_free = Some(elem_slot);
-    host.trail_elem_live_count = host.trail_elem_live_count.saturating_sub(1);
-    let (own_handle, unique) = match host.effect_at(effect_slot) {
-        Some(e) => (e.own_handle, status_is_unique_done(e.status)),
-        None => return,
-    };
-    if unique {
-        host.del_ref_to_effect(own_handle);
-    }
-    if let Some(effect) = host.effect_at_mut(effect_slot) {
-        effect.status = effect.status.wrapping_sub(1);
+        let next = host.trail_elems[elem_slot].next_trail_elem_handle;
+        if host.trails[trail_slot].last_elem_handle == handle {
+            host.trails[trail_slot].last_elem_handle = prev_handle;
+        }
+        if prev_handle == FX_TRAIL_HANDLE_NONE {
+            host.trails[trail_slot].first_elem_handle = next;
+        } else if let Some(prev_slot) = trail_elem_slot_for_handle(prev_handle) {
+            host.trail_elems[prev_slot].next_trail_elem_handle = next;
+        }
+        let next_free = host
+            .trail_elem_first_free
+            .map(|d| d as u16)
+            .unwrap_or(FX_TRAIL_HANDLE_NONE);
+        host.trail_elems[elem_slot] = FxTrailElemSlot {
+            occupied: false,
+            next_trail_elem_handle: next_free,
+            ..FxTrailElemSlot::default()
+        };
+        host.trail_elem_first_free = Some(elem_slot);
+        host.trail_elem_live_count = host.trail_elem_live_count.saturating_sub(1);
+        let unique = match host.effect_at(effect_slot) {
+            Some(e) => status_is_unique_done(e.status),
+            None => return,
+        };
+        if unique {
+            host.request_garbage_collection();
+        }
+        if let Some(effect) = host.effect_at_mut(effect_slot) {
+            effect.status = effect.status.wrapping_sub(1);
+        }
     }
 }
 
@@ -213,69 +227,72 @@ fn trail_graph_integrate(
     )
 }
 
-fn trail_apply_get_graph_delta(
-    origin: [f32; 3],
-    flags: i32,
-    age0: f32,
-    age1: f32,
+struct TrailMotion<'a> {
+    velocity: fx_iw4::FxVelocityField<'a>,
+    gravity: f32,
     life_ms: f32,
-    vel_local: &[fx_iw4::FxElemVec3Range],
-    vel_world: &[fx_iw4::FxElemVec3Range],
-    orient: fx_iw4::FxOrientation,
+    orientation: fx_iw4::FxOrientation,
     seed: u64,
-) -> [f32; 3] {
-    let mut stored = origin;
-    if elem_uses_vel_local(flags) && vel_local.len() >= 2 {
-        let d = integrate_velocity_graph(vel_local, age0, age1, life_ms, seed);
-        stored[0] += d[0];
-        stored[1] += d[1];
-        stored[2] += d[2];
-    }
-    let mut world = orientation_pos_to_world(orient.origin, orient.axis, stored);
-    if elem_uses_vel_world(flags) && vel_world.len() >= 2 {
-        let d = integrate_velocity_graph(vel_world, age0, age1, life_ms, seed);
-        world[0] += d[0];
-        world[1] += d[1];
-        world[2] += d[2];
-    }
-    orientation_pos_from_world(orient.origin, orient.axis, world)
 }
 
-fn trail_update_elem_motion(
-    origin: [f32; 3],
-    bvz: f32,
-    dt: f32,
-    g: f32,
-    flags: i32,
-    age0: f32,
-    age1: f32,
-    life_ms: f32,
-    vel_local: &[fx_iw4::FxElemVec3Range],
-    vel_world: &[fx_iw4::FxElemVec3Range],
-    orient: fx_iw4::FxOrientation,
-    seed: u64,
-) -> ([f32; 3], f32) {
-    let after = trail_apply_get_graph_delta(
-        origin, flags, age0, age1, life_ms, vel_local, vel_world, orient, seed,
-    );
-    trail_graph_integrate(after, bvz, dt, g, orient)
+impl TrailMotion<'_> {
+    fn graph_position(&self, origin: [f32; 3], age0: f32, age1: f32) -> [f32; 3] {
+        let &Self {
+            life_ms,
+            orientation: orient,
+            seed,
+            ..
+        } = self;
+        let fx_iw4::FxVelocityField {
+            flags,
+            local_samples: vel_local,
+            world_samples: vel_world,
+        } = self.velocity;
+        let mut stored = origin;
+        if elem_uses_vel_local(flags) && vel_local.len() >= 2 {
+            let d = integrate_velocity_graph(vel_local, age0, age1, life_ms, seed);
+            stored[0] += d[0];
+            stored[1] += d[1];
+            stored[2] += d[2];
+        }
+        let mut world = orientation_pos_to_world(orient.origin, orient.axis, stored);
+        if elem_uses_vel_world(flags) && vel_world.len() >= 2 {
+            let d = integrate_velocity_graph(vel_world, age0, age1, life_ms, seed);
+            world[0] += d[0];
+            world[1] += d[1];
+            world[2] += d[2];
+        }
+        orientation_pos_from_world(orient.origin, orient.axis, world)
+    }
+
+    fn advance(
+        &self,
+        origin: [f32; 3],
+        bvz: f32,
+        dt: f32,
+        age0: f32,
+        age1: f32,
+    ) -> ([f32; 3], f32) {
+        let after = self.graph_position(origin, age0, age1);
+        trail_graph_integrate(after, bvz, dt, self.gravity, self.orientation)
+    }
+}
+
+struct TrailUpdateFrame<'a> {
+    prev_msec: i32,
+    msec_now: i32,
+    now: &'a FxOrientFrame,
+    alt: &'a FxOrientFrame,
+    random_seed: u64,
 }
 
 fn apply_trail_sample_position(
     host: &mut FxSystemHost,
-    effect_slot: usize,
-    trail_slot: usize,
-    elem_handle: u16,
-    prev_elem_handle: u16,
+    cursor: TrailSampleCursor,
     def: FxElemDefInfo,
     def_index: u8,
-    prev_msec: i32,
-    msec_now: i32,
-    now: &FxOrientFrame,
-    alt: &FxOrientFrame,
-    random_seed: u64,
-    vel_local: &[fx_iw4::FxElemVec3Range],
-    vel_world: &[fx_iw4::FxElemVec3Range],
+    frame: &TrailUpdateFrame<'_>,
+    velocity: fx_iw4::FxVelocityField<'_>,
     on_trail_trace: &mut impl FnMut(
         [f32; 3],
         [f32; 3],
@@ -284,6 +301,18 @@ fn apply_trail_sample_position(
         u32,
     ) -> Option<FxTrailCollideHit>,
 ) {
+    let TrailSampleCursor {
+        effect_slot,
+        elem_handle,
+        ..
+    } = cursor;
+    let &TrailUpdateFrame {
+        prev_msec,
+        msec_now,
+        now,
+        alt,
+        random_seed,
+    } = frame;
     if elem_skips_position_update(def.elem_type, def.flags) {
         return;
     }
@@ -315,6 +344,13 @@ fn apply_trail_sample_position(
     let orient = get_orientation(def.flags, now, alt, Some(spawn));
     let g = elem_gravity_accel_z_sampled(def.gravity_base, def.gravity_amp, seed);
     let graph = elem_update_has_velocity_graph(def.flags);
+    let motion = TrailMotion {
+        velocity,
+        gravity: g,
+        life_ms: life_f,
+        orientation: orient,
+        seed,
+    };
     if elem_uses_collision(def.flags) {
         let mut origin = elem.origin;
         let mut bvz = elem.base_vel_z as f32;
@@ -330,16 +366,15 @@ fn apply_trail_sample_position(
                 }
                 let dt = (t_end.wrapping_sub(t0) as f32) * 0.001;
                 let (age0, age1) = trail_elem_norm_ages(t0, t_end, msec_begin, life);
-                let (end_origin, end_bvz) = trail_update_elem_motion(
-                    origin, bvz, dt, g, def.flags, age0, age1, life_f, vel_local, vel_world,
-                    orient, seed,
-                );
+                let (end_origin, end_bvz) = motion.advance(origin, bvz, dt, age0, age1);
                 let start_w = orientation_pos_to_world(orient.origin, orient.axis, origin);
                 let end_w = orientation_pos_to_world(orient.origin, orient.axis, end_origin);
                 let Some(hit) = on_trail_trace(start_w, end_w, def.coll_mins, def.coll_maxs, mask)
                 else {
-                    host.gaps
-                        .raise(FxGapCause::NoWorldClipForCollide { def_index });
+                    diag::warn_once!(
+                        World,
+                        "elem {def_index} collides and no world clip was given"
+                    );
                     return;
                 };
                 if hit.startsolid || hit.allsolid {
@@ -359,13 +394,10 @@ fn apply_trail_sample_position(
                 origin = orientation_pos_from_world(orient.origin, orient.axis, hit_w);
                 let age_at_hit_msec = (t0.saturating_sub(msec_begin)).max(0) as f32
                     + (t_end.saturating_sub(t0)).max(0) as f32 * hit.fraction;
-                let pre_vel = get_velocity_at_time(
-                    def.flags,
+                let pre_vel = motion.velocity.at_time(
                     [0.0, 0.0, end_bvz],
                     age_at_hit_msec,
                     life_f,
-                    vel_local,
-                    vel_world,
                     now.axis,
                     seed,
                 );
@@ -398,7 +430,7 @@ fn apply_trail_sample_position(
                         });
                 }
                 if elem_dies_on_touch(def.flags) {
-                    free_trail_elem(host, effect_slot, trail_slot, elem_handle, prev_elem_handle);
+                    cursor.remove(host);
                     return;
                 }
                 let reflection =
@@ -424,10 +456,7 @@ fn apply_trail_sample_position(
     let bvz = elem.base_vel_z as f32;
     if graph {
         let dt = (msec_now.wrapping_sub(prev) as f32) * 0.001;
-        let (stored, bvz) = trail_update_elem_motion(
-            origin, bvz, dt, g, def.flags, ages.0, ages.1, life_f, vel_local, vel_world, orient,
-            seed,
-        );
+        let (stored, bvz) = motion.advance(origin, bvz, dt, ages.0, ages.1);
         let Some(elem) = host.trail_elems.get_mut(elem_slot) else {
             return;
         };
@@ -436,9 +465,7 @@ fn apply_trail_sample_position(
         return;
     }
 
-    let stored = trail_apply_get_graph_delta(
-        origin, def.flags, ages.0, ages.1, life_f, vel_local, vel_world, orient, seed,
-    );
+    let stored = motion.graph_position(origin, ages.0, ages.1);
     let Some(elem) = host.trail_elems.get_mut(elem_slot) else {
         return;
     };
@@ -480,11 +507,14 @@ pub fn update_trail(
     effect_slot: usize,
     trail_handle: u16,
     elem_def: FxElemDefInfo,
-    sample_origin: [f32; 3],
-    sample_axis: [[f32; 3]; 3],
-    msec: i32,
+    pose: crate::FxPlayPose,
     spawn_dist: f32,
 ) -> bool {
+    let crate::FxPlayPose {
+        origin: sample_origin,
+        axis: sample_axis,
+        msec,
+    } = pose;
     let Some(trail_slot) = trail_slot_for_handle(trail_handle) else {
         return false;
     };
@@ -537,10 +567,16 @@ pub fn update_trail(
         sample_axis,
         elem_def.spawn_origin,
         elem_def.flags,
-        elem_def.spawn_offset_radius_base,
-        elem_def.spawn_offset_radius_amp,
-        elem_def.spawn_offset_height_base,
-        elem_def.spawn_offset_height_amp,
+        fx_iw4::FxSpawnOffset {
+            radius: [
+                elem_def.spawn_offset_radius_base,
+                elem_def.spawn_offset_radius_amp,
+            ],
+            height: [
+                elem_def.spawn_offset_height_base,
+                elem_def.spawn_offset_height_amp,
+            ],
+        },
         seed,
     );
     host.trail_elems[elem_dense] = FxTrailElemSlot {
@@ -561,13 +597,16 @@ pub fn update_trail(
 pub fn update_effect_trails(
     host: &mut FxSystemHost,
     effect_slot: usize,
-    def_index_begin: i32,
-    def_index_end: i32,
+    def_indices: std::ops::Range<i32>,
     prev_msec: i32,
     msec_now: i32,
     camera_origin: [f32; 3],
     mut on_trail_def: impl FnMut(u16, u8) -> Option<FxElemDefInfo>,
 ) {
+    let std::ops::Range {
+        start: def_index_begin,
+        end: def_index_end,
+    } = def_indices;
     let (catalog_index, mut handle, begin, end, distance, looping, msec_begin) =
         match host.effect_at(effect_slot) {
             Some(e) if e.ring_resident => (
@@ -604,9 +643,11 @@ pub fn update_effect_trails(
         let def_index = i32::from(trail_def_index);
         if def_index_begin <= def_index && def_index < def_index_end {
             let Some(elem_def) = on_trail_def(catalog_index, trail.def_index as u8) else {
-                host.gaps.raise(FxGapCause::TrailDefNotFound {
-                    def_index: trail_def_index,
-                });
+                diag::warn_once!(
+                    World,
+                    "elem {def_index} has no trail def in the catalog",
+                    def_index = trail_def_index
+                );
                 handle = next;
                 continue;
             };
@@ -617,9 +658,11 @@ pub fn update_effect_trails(
                     effect_slot,
                     handle,
                     elem_def,
-                    begin.origin,
-                    begin.axis,
-                    prev_msec,
+                    crate::FxPlayPose {
+                        origin: begin.origin,
+                        axis: begin.axis,
+                        msec: prev_msec,
+                    },
                     distance,
                 );
             } else if looping && prev_msec < msec_now {
@@ -629,7 +672,13 @@ pub fn update_effect_trails(
                 while let Some(slot) = trail_elem_slot_for_handle(prev) {
                     let next = host.trail_elems[slot].next_trail_elem_handle;
                     if next == last {
-                        free_trail_elem(host, effect_slot, trail_slot, last, prev);
+                        TrailSampleCursor {
+                            effect_slot,
+                            trail_slot,
+                            elem_handle: last,
+                            prev_elem_handle: prev,
+                        }
+                        .remove(host);
                         host.trails[trail_slot].sequence =
                             host.trails[trail_slot].sequence.wrapping_sub(1);
                         break;
@@ -675,9 +724,11 @@ pub fn update_effect_trails(
                                 effect_slot,
                                 handle,
                                 elem_def,
-                                sample_origin,
-                                sample_axis,
-                                msec,
+                                crate::FxPlayPose {
+                                    origin: sample_origin,
+                                    axis: sample_axis,
+                                    msec,
+                                },
                                 distance + distance_delta * t,
                             );
                         }
@@ -688,15 +739,34 @@ pub fn update_effect_trails(
                     effect_slot,
                     handle,
                     elem_def,
-                    end.origin,
-                    end.axis,
-                    msec_now,
+                    crate::FxPlayPose {
+                        origin: end.origin,
+                        axis: end.axis,
+                        msec: msec_now,
+                    },
                     distance + distance_delta,
                 );
             }
         }
         handle = next;
     }
+}
+
+pub trait FxTrailUpdateHooks {
+    fn trail_def(&mut self, index: u16, def_index: u8) -> Option<FxElemDefInfo>;
+    fn trail_trace(
+        &mut self,
+        start: [f32; 3],
+        end: [f32; 3],
+        mins: [f32; 3],
+        maxs: [f32; 3],
+        mask: u32,
+    ) -> Option<FxTrailCollideHit>;
+    fn trail_vel_graphs(
+        &mut self,
+        index: u16,
+        def_index: u8,
+    ) -> (Vec<fx_iw4::FxElemVec3Range>, Vec<fx_iw4::FxElemVec3Range>);
 }
 
 pub fn apply_partial_last_trail_spawn_dist(
@@ -706,19 +776,7 @@ pub fn apply_partial_last_trail_spawn_dist(
     msec_now: i32,
     spawn_dist: f32,
     looping: bool,
-    mut on_trail_def: impl FnMut(u16, u8) -> Option<FxElemDefInfo>,
-    mut on_trail_trace: impl FnMut(
-        [f32; 3],
-        [f32; 3],
-        [f32; 3],
-        [f32; 3],
-        u32,
-    ) -> Option<FxTrailCollideHit>,
-    mut on_trail_vel_graphs: impl FnMut(
-        u16,
-        u8,
-    )
-        -> (Vec<fx_iw4::FxElemVec3Range>, Vec<fx_iw4::FxElemVec3Range>),
+    hooks: &mut impl FxTrailUpdateHooks,
 ) {
     let (catalog_index, now, alt, random_seed, mut handle) = match host.effect_at(effect_slot) {
         Some(e) if e.ring_resident => (
@@ -729,6 +787,13 @@ pub fn apply_partial_last_trail_spawn_dist(
             e.first_trail_handle,
         ),
         _ => return,
+    };
+    let frame = TrailUpdateFrame {
+        prev_msec,
+        msec_now,
+        now: &now,
+        alt: &alt,
+        random_seed,
     };
     let origin = now.origin;
     let axis = now.axis;
@@ -742,7 +807,7 @@ pub fn apply_partial_last_trail_spawn_dist(
         let next_trail = trail.next_trail_handle;
         let last = trail.last_elem_handle;
         let def_index = trail.def_index as u8;
-        let elem_def = on_trail_def(catalog_index, def_index);
+        let elem_def = hooks.trail_def(catalog_index, def_index);
         {
             let mut prev = FX_TRAIL_HANDLE_NONE;
             let mut still_prefix = true;
@@ -786,7 +851,7 @@ pub fn apply_partial_last_trail_spawn_dist(
         if prev_msec != msec_now
             && let Some(def) = elem_def
         {
-            let (vel_local, vel_world) = on_trail_vel_graphs(catalog_index, def_index);
+            let (vel_local, vel_world) = hooks.trail_vel_graphs(catalog_index, def_index);
             let mut prev_elem = FX_TRAIL_HANDLE_NONE;
             let mut cur = host.trails[trail_slot].first_elem_handle;
             while cur != FX_TRAIL_HANDLE_NONE {
@@ -799,20 +864,23 @@ pub fn apply_partial_last_trail_spawn_dist(
                 let next_elem = elem.next_trail_elem_handle;
                 apply_trail_sample_position(
                     host,
-                    effect_slot,
-                    trail_slot,
-                    cur,
-                    prev_elem,
+                    TrailSampleCursor {
+                        effect_slot,
+                        trail_slot,
+                        elem_handle: cur,
+                        prev_elem_handle: prev_elem,
+                    },
                     def,
                     def_index,
-                    prev_msec,
-                    msec_now,
-                    &now,
-                    &alt,
-                    random_seed,
-                    vel_local.as_slice(),
-                    vel_world.as_slice(),
-                    &mut on_trail_trace,
+                    &frame,
+                    fx_iw4::FxVelocityField {
+                        flags: def.flags,
+                        local_samples: vel_local.as_slice(),
+                        world_samples: vel_world.as_slice(),
+                    },
+                    &mut |start, end, mins, maxs, mask| {
+                        hooks.trail_trace(start, end, mins, maxs, mask)
+                    },
                 );
                 if host.trail_elems.get(elem_slot).is_some_and(|e| e.occupied) {
                     prev_elem = cur;
@@ -833,10 +901,16 @@ pub fn apply_partial_last_trail_spawn_dist(
                             axis,
                             elem_def.spawn_origin,
                             elem_def.flags,
-                            elem_def.spawn_offset_radius_base,
-                            elem_def.spawn_offset_radius_amp,
-                            elem_def.spawn_offset_height_base,
-                            elem_def.spawn_offset_height_amp,
+                            fx_iw4::FxSpawnOffset {
+                                radius: [
+                                    elem_def.spawn_offset_radius_base,
+                                    elem_def.spawn_offset_radius_amp,
+                                ],
+                                height: [
+                                    elem_def.spawn_offset_height_base,
+                                    elem_def.spawn_offset_height_amp,
+                                ],
+                            },
                             seed,
                         );
                         elem.basis = compress_basis_from_axis(axis);

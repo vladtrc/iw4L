@@ -8,14 +8,14 @@ mod zone_link;
 pub use definitions::{
     AssetPointerIdentity, AssetRefDumpCensus, AuthoredImage, AuthoredMaterial, AuthoredShader,
     AuthoredVertexDecl, CrossGameReason, CrossGameTechsetResolution, ImageVariantId,
-    MaterialConstant, MaterialDefinitions, MaterialImageMemory, MaterialTextureBinding,
-    OwnedMaterialPass, OwnedShaderArgument, OwnedShaderRef, OwnedTechnique, OwnedTechniqueGraph,
-    ShaderSourceCensus, StandInTextures, T5TechniqueOccupancy, TS_2D, TS_COLOR_MAP, TS_DETAIL_MAP,
-    TS_FUNCTION, TS_NORMAL_MAP, TS_SPECULAR_MAP, TS_T5_COLOR0_MAP, TS_T5_COLOR15_MAP,
-    TS_T5_THROW_MAP, TS_WATER_MAP, TechniqueSetFacts, TechniqueTable, TechsetKey, TechsetResolve,
-    VertexDeclStreamCensus, t5_feature_token_stripped,
+    MaterialConstant, MaterialDefinitions, MaterialImageMemory, MaterialLinkAddress,
+    MaterialTextureBinding, OwnedMaterialPass, OwnedShaderArgument, OwnedShaderRef, OwnedTechnique,
+    OwnedTechniqueGraph, ShaderSourceCensus, SourceTechniqueOccupancy, StandInTextures, TS_2D,
+    TS_COLOR_MAP, TS_DETAIL_MAP, TS_FUNCTION, TS_NORMAL_MAP, TS_SPECULAR_MAP, TS_T5_COLOR0_MAP,
+    TS_T5_COLOR15_MAP, TS_T5_THROW_MAP, TS_WATER_MAP, TechniqueSetFacts, TechniqueTable,
+    TechsetKey, TechsetResolve, VertexDeclStreamCensus, alternate_techset_name,
 };
-use zone_link::{LinkKind, ZoneLinkState};
+pub use zone_link::{LinkKind, ZoneLinkState};
 
 /// The build. It owns the definitions while they are still being assembled,
 /// plus the state that assembling needs; `publish` hands the definitions on and
@@ -26,7 +26,7 @@ pub struct MaterialCatalog {
 
     link: ZoneLinkState,
     capture_zone: crate::asset_graph::ZoneOwner,
-    capture_ns: Option<crate::AssetNamespace>,
+    capture_ns: Option<crate::FamilyId>,
 
     cross_zone_link: bool,
 }
@@ -64,22 +64,34 @@ impl MaterialCatalog {
 }
 
 impl MaterialCatalog {
+    pub fn links(&self) -> &ZoneLinkState {
+        &self.link
+    }
+    pub fn links_mut(&mut self) -> &mut ZoneLinkState {
+        &mut self.link
+    }
+    pub fn capture_zone(&self) -> crate::ZoneOwner {
+        self.capture_zone
+    }
     pub fn set_capture_zone(&mut self, zone: crate::asset_graph::ZoneOwner) {
         self.capture_zone = zone;
     }
 
-    pub fn set_capture_ns(&mut self, ns: crate::AssetNamespace) {
+    pub fn set_capture_ns(&mut self, ns: crate::FamilyId) {
         self.capture_ns = Some(ns);
     }
 
-    pub fn capture_ns(&self) -> crate::AssetNamespace {
+    pub fn capture_ns(&self) -> crate::FamilyId {
         self.capture_ns
             .expect("asset capture requires an explicit family")
     }
 
     /// Pointer→row lookup: this is the walk's question, and it only has an
     /// answer while the walk is still on.
-    pub fn material_index(&self, slot: Ptr) -> Option<crate::WalkLocalMaterialIndex> {
+    pub fn material_index(
+        &self,
+        slot: impl Into<AssetPointerIdentity>,
+    ) -> Option<crate::WalkLocalMaterialIndex> {
         self.link
             .resolve(LinkKind::Material, slot)
             .map(crate::WalkLocalMaterialIndex::from_walk)
@@ -136,7 +148,7 @@ impl MaterialCatalog {
         }
     }
 
-    fn take_image_slot(&mut self, incoming: AuthoredImage) -> usize {
+    pub fn take_image_slot(&mut self, incoming: AuthoredImage) -> usize {
         if self.cross_zone_link {
             self.link_image(incoming)
         } else {
@@ -167,7 +179,7 @@ impl MaterialCatalog {
         }
     }
 
-    fn take_material_slot(&mut self, incoming: AuthoredMaterial) -> usize {
+    pub fn take_material_slot(&mut self, incoming: AuthoredMaterial) -> usize {
         if self.cross_zone_link {
             self.link_material(incoming)
         } else {
@@ -188,7 +200,7 @@ impl MaterialCatalog {
         }
     }
 
-    pub(crate) fn link_shader(&mut self, incoming: AuthoredShader) -> usize {
+    pub fn link_shader(&mut self, incoming: AuthoredShader) -> usize {
         if let Some(index) = self.shaders.iter().position(|owned| {
             owned.namespace == incoming.namespace
                 && owned.kind == incoming.kind
@@ -207,7 +219,7 @@ impl MaterialCatalog {
         }
     }
 
-    fn take_shader_slot(&mut self, incoming: AuthoredShader) -> usize {
+    pub fn take_shader_slot(&mut self, incoming: AuthoredShader) -> usize {
         if self.cross_zone_link {
             self.link_shader(incoming)
         } else {
@@ -217,9 +229,9 @@ impl MaterialCatalog {
         }
     }
 
-    pub(crate) fn link_vertex_decl(&mut self, incoming: AuthoredVertexDecl) -> usize {
+    pub fn link_vertex_decl(&mut self, incoming: AuthoredVertexDecl) -> usize {
         if let Some(index) = self.vertex_decls.iter().position(|owned| {
-            owned.family == incoming.family
+            owned.layout == incoming.layout
                 && if incoming.name.is_empty() {
                     owned == &incoming
                 } else {
@@ -240,7 +252,7 @@ impl MaterialCatalog {
         }
     }
 
-    fn take_vertex_decl_slot(&mut self, incoming: AuthoredVertexDecl) -> usize {
+    pub fn take_vertex_decl_slot(&mut self, incoming: AuthoredVertexDecl) -> usize {
         if self.cross_zone_link && !incoming.name.is_empty() {
             self.link_vertex_decl(incoming)
         } else {
@@ -267,8 +279,8 @@ impl MaterialCatalog {
             .iter()
             .position(|owned| Self::same_techset_identity(owned, &facts))
         {
-            let existing_occ = self.techsets[index].t5_occupancy;
-            let merged_occ = merge_t5_occupancy(facts.t5_occupancy, existing_occ);
+            let existing_occ = self.techsets[index].source_occupancy.clone();
+            let merged_occ = merge_source_occupancy(facts.source_occupancy.clone(), existing_occ);
             if let Some(mut incoming) = facts.table.take() {
                 if let Some(existing) = &self.techsets[index].table {
                     incoming.slots |= existing.slots;
@@ -306,21 +318,18 @@ impl MaterialCatalog {
                 }
                 let existing_wvf = self.techsets[index].world_vert_format;
                 let fallback = facts
-                    .iw5_fallback_table
+                    .fallback_table
                     .clone()
-                    .or_else(|| self.techsets[index].iw5_fallback_table.clone());
-                let t5_fallback = facts
-                    .t5_fallback_table
-                    .clone()
-                    .or_else(|| self.techsets[index].t5_fallback_table.clone());
+                    .or_else(|| self.techsets[index].fallback_table.clone());
+
                 self.techsets[index] = TechniqueSetFacts {
                     namespace: facts.namespace,
                     name: facts.name,
                     zone: facts.zone,
                     table: Some(incoming),
-                    t5_occupancy: merged_occ,
-                    iw5_fallback_table: fallback,
-                    t5_fallback_table: t5_fallback,
+                    source_occupancy: merged_occ,
+                    fallback_table: fallback,
+
                     world_vert_format: merge_world_vert_format(
                         facts.world_vert_format,
                         existing_wvf,
@@ -331,12 +340,9 @@ impl MaterialCatalog {
                     self.techsets[index].name = facts.name.clone();
                     self.techsets[index].zone = facts.zone;
                 }
-                self.techsets[index].t5_occupancy = merged_occ;
-                if self.techsets[index].iw5_fallback_table.is_none() {
-                    self.techsets[index].iw5_fallback_table = facts.iw5_fallback_table;
-                }
-                if self.techsets[index].t5_fallback_table.is_none() {
-                    self.techsets[index].t5_fallback_table = facts.t5_fallback_table;
+                self.techsets[index].source_occupancy = merged_occ;
+                if self.techsets[index].fallback_table.is_none() {
+                    self.techsets[index].fallback_table = facts.fallback_table;
                 }
                 self.techsets[index].world_vert_format = merge_world_vert_format(
                     facts.world_vert_format,
@@ -351,7 +357,7 @@ impl MaterialCatalog {
         }
     }
 
-    fn take_techset_slot(&mut self, facts: TechniqueSetFacts) -> usize {
+    pub fn take_techset_slot(&mut self, facts: TechniqueSetFacts) -> usize {
         let index = if self.cross_zone_link {
             self.link_techset(facts)
         } else {
@@ -361,22 +367,6 @@ impl MaterialCatalog {
         };
         self.link.select_techset(self.techsets.get(index).cloned());
         index
-    }
-
-    fn note_leftover_iw5_arg(&mut self, iw5_type: u16, raw: [u8; 8]) {
-        let index = u16::from_le_bytes([raw[4], raw[5]]);
-        let key = format!("t{iw5_type}i{index}");
-        self.leftover_iw5_arg_n = self.leftover_iw5_arg_n.saturating_add(1);
-        *self.leftover_iw5_arg_hits.entry(key).or_default() += 1;
-    }
-
-    fn note_leftover_t5_arg(&mut self, raw: [u8; 8]) {
-        let dest = u16::from_le_bytes([raw[2], raw[3]]);
-        let index = u16::from_le_bytes([raw[4], raw[5]]);
-        let name = crate::t5_code_remap::t5_code_const_name(index).unwrap_or("?");
-        let key = format!("d{dest}i{index}:{name}");
-        self.leftover_t5_arg_n = self.leftover_t5_arg_n.saturating_add(1);
-        *self.leftover_t5_arg_hits.entry(key).or_default() += 1;
     }
 
     pub fn resolve_technique_set_edges(&mut self) {
@@ -430,21 +420,20 @@ impl MaterialCatalog {
                     techsets,
                     materials,
                     cross_game_techset_resolutions,
-                    leftover_iw5_arg_n,
-                    leftover_iw5_arg_hits,
-                    leftover_t5_arg_n,
-                    leftover_t5_arg_hits,
+                    argument_gaps,
                     ..
                 },
             ..
         } = donor;
-        self.leftover_iw5_arg_n = self.leftover_iw5_arg_n.saturating_add(leftover_iw5_arg_n);
-        for (key, count) in leftover_iw5_arg_hits {
-            *self.leftover_iw5_arg_hits.entry(key).or_default() += count;
-        }
-        self.leftover_t5_arg_n = self.leftover_t5_arg_n.saturating_add(leftover_t5_arg_n);
-        for (key, count) in leftover_t5_arg_hits {
-            *self.leftover_t5_arg_hits.entry(key).or_default() += count;
+        for (family, hits) in argument_gaps {
+            for (key, count) in hits {
+                *self
+                    .argument_gaps
+                    .entry(family)
+                    .or_default()
+                    .entry(key)
+                    .or_default() += count;
+            }
         }
         let image_ids = images
             .into_iter()
@@ -482,8 +471,7 @@ impl MaterialCatalog {
             .extend(cross_game_techset_resolutions);
         for mut facts in techsets {
             facts.table = facts.table.map(&rebase_table);
-            facts.iw5_fallback_table = facts.iw5_fallback_table.map(&rebase_table);
-            facts.t5_fallback_table = facts.t5_fallback_table.map(&rebase_table);
+            facts.fallback_table = facts.fallback_table.map(&rebase_table);
             self.link_techset(facts);
         }
 
@@ -515,15 +503,20 @@ impl MaterialCatalog {
                     techsets,
                     materials,
                     cross_game_techset_resolutions,
-                    leftover_t5_arg_n,
-                    leftover_t5_arg_hits,
+                    argument_gaps,
                     ..
                 },
             ..
         } = donor;
-        self.leftover_t5_arg_n = self.leftover_t5_arg_n.saturating_add(leftover_t5_arg_n);
-        for (key, count) in leftover_t5_arg_hits {
-            *self.leftover_t5_arg_hits.entry(key).or_default() += count;
+        for (family, hits) in argument_gaps {
+            for (key, count) in hits {
+                *self
+                    .argument_gaps
+                    .entry(family)
+                    .or_default()
+                    .entry(key)
+                    .or_default() += count;
+            }
         }
         let image_ids = images
             .into_iter()
@@ -584,8 +577,7 @@ impl MaterialCatalog {
                 continue;
             }
             facts.table = facts.table.map(&rebase_table);
-            facts.iw5_fallback_table = facts.iw5_fallback_table.map(&rebase_table);
-            facts.t5_fallback_table = facts.t5_fallback_table.map(&rebase_table);
+            facts.fallback_table = facts.fallback_table.map(&rebase_table);
             self.link_techset(facts);
         }
         for mut material in materials {
@@ -602,7 +594,7 @@ impl MaterialCatalog {
         }
     }
 
-    fn real_image_index(&self, namespace: crate::AssetNamespace, name: &AssetRef) -> Option<usize> {
+    fn real_image_index(&self, namespace: crate::FamilyId, name: &AssetRef) -> Option<usize> {
         self.images.iter().position(|owned| {
             owned.namespace == namespace && owned.name.is_real() && owned.name.same_name(name)
         })
@@ -610,7 +602,7 @@ impl MaterialCatalog {
 
     fn real_shader_index(
         &self,
-        namespace: crate::AssetNamespace,
+        namespace: crate::FamilyId,
         name: &AssetRef,
         kind: AssetType,
     ) -> Option<usize> {
@@ -627,15 +619,11 @@ impl MaterialCatalog {
             return None;
         }
         self.vertex_decls.iter().position(|owned| {
-            owned.name.is_real() && owned.family == decl.family && owned.name.same_name(&decl.name)
+            owned.name.is_real() && owned.layout == decl.layout && owned.name.same_name(&decl.name)
         })
     }
 
-    fn real_techset_index(
-        &self,
-        namespace: crate::AssetNamespace,
-        name: &AssetRef,
-    ) -> Option<usize> {
+    fn real_techset_index(&self, namespace: crate::FamilyId, name: &AssetRef) -> Option<usize> {
         self.techsets.iter().position(|owned| {
             owned.namespace == namespace && owned.name.is_real() && owned.name.same_name(name)
         })
@@ -696,19 +684,18 @@ impl MaterialCatalog {
                         name: facts.name.clone(),
                         zone: facts.zone,
                         table,
-                        t5_occupancy: None,
-                        iw5_fallback_table: None,
-                        t5_fallback_table: None,
+                        source_occupancy: None,
+                        fallback_table: None,
                         world_vert_format: facts.world_vert_format,
                     });
                 }
                 did = true;
             }
-            if facts.t5_occupancy.is_some()
+            if facts.source_occupancy.is_some()
                 && !self.techsets.iter().any(|owned| {
                     owned.namespace == facts.namespace
                         && owned.name.same_name(&facts.name)
-                        && owned.t5_occupancy.is_some()
+                        && owned.source_occupancy.is_some()
                 })
             {
                 if let Some(owned) = self.techsets.iter_mut().find(|owned| {
@@ -718,7 +705,7 @@ impl MaterialCatalog {
                         owned.name = facts.name.clone();
                         owned.zone = facts.zone;
                     }
-                    owned.t5_occupancy = facts.t5_occupancy;
+                    owned.source_occupancy = facts.source_occupancy.clone();
                     owned.world_vert_format =
                         merge_world_vert_format(facts.world_vert_format, owned.world_vert_format);
                 } else {
@@ -727,9 +714,8 @@ impl MaterialCatalog {
                         name: facts.name.clone(),
                         zone: facts.zone,
                         table: None,
-                        t5_occupancy: facts.t5_occupancy,
-                        iw5_fallback_table: None,
-                        t5_fallback_table: None,
+                        source_occupancy: facts.source_occupancy.clone(),
+                        fallback_table: None,
                         world_vert_format: facts.world_vert_format,
                     });
                 }
@@ -742,7 +728,7 @@ impl MaterialCatalog {
         absorbed
     }
 
-    pub fn absorb_t5_feature_token_donors(&mut self) -> usize {
+    pub fn absorb_feature_variant_donors(&mut self) -> usize {
         let mut copies = Vec::new();
         let mut keep_fallback = Vec::new();
         for (index, owned) in self.techsets.iter().enumerate() {
@@ -755,7 +741,7 @@ impl MaterialCatalog {
             }
 
             if owned
-                .t5_fallback_table
+                .fallback_table
                 .as_ref()
                 .is_some_and(table_shader_identity_ready)
             {
@@ -763,10 +749,10 @@ impl MaterialCatalog {
                 continue;
             }
 
-            if owned.t5_occupancy.is_none() && owned.name.is_real() {
+            if owned.source_occupancy.is_none() && owned.name.is_real() {
                 continue;
             }
-            let stripped = t5_feature_token_stripped(owned.name.as_str());
+            let stripped = alternate_techset_name(owned.namespace, owned.name.as_str());
             if stripped == owned.name.as_str() {
                 continue;
             }
@@ -794,7 +780,7 @@ impl MaterialCatalog {
                 .as_ref()
                 .is_some_and(table_shader_identity_ready)
             {
-                self.techsets[index].table = self.techsets[index].t5_fallback_table.clone();
+                self.techsets[index].table = self.techsets[index].fallback_table.clone();
             }
         }
         let absorbed = copies.len();
@@ -808,7 +794,7 @@ impl MaterialCatalog {
                 want_name: self.techsets[index].name.as_str().to_owned(),
                 got_namespace: donor_ns,
                 got_name: donor_name,
-                reason: CrossGameReason::T5FeatureTokenDonor,
+                reason: CrossGameReason::FeatureVariantDonor,
             };
             self.cross_game_techset_resolutions.push(resolution);
             self.techsets[index].table = table;
@@ -862,20 +848,13 @@ impl MaterialCatalog {
         routed
     }
 
-    pub fn promote_iw5_fallback_tables(&mut self) -> usize {
+    pub fn promote_fallback_tables(&mut self) -> usize {
         let mut promoted = 0usize;
         for facts in &mut self.techsets {
             if facts.table.is_some() {
                 continue;
             }
-            let Some(table) = facts
-                .t5_fallback_table
-                .as_ref()
-                .filter(|table| table_shader_identity_ready(table))
-                .cloned()
-                .or_else(|| facts.iw5_fallback_table.clone())
-                .or_else(|| facts.t5_fallback_table.clone())
-            else {
+            let Some(table) = facts.fallback_table.clone() else {
                 continue;
             };
             facts.table = Some(table);
@@ -886,7 +865,7 @@ impl MaterialCatalog {
 
     fn resolve_technique_table(
         techsets: &[TechniqueSetFacts],
-        namespace: crate::AssetNamespace,
+        namespace: crate::FamilyId,
         technique_set: impl AsRef<str>,
     ) -> Option<TechniqueTable> {
         match MaterialDefinitions::resolve_technique_set_in(
@@ -1031,16 +1010,16 @@ impl MaterialCatalog {
                 info_game_flags: geometry.info_game_flags,
                 texture_atlas: Some(geometry.texture_atlas),
                 surface_type_bits: geometry.surface_type_bits,
-                t5_layered_surface_types: None,
+                layered_surface_types: None,
                 state_flags: geometry.state_flags,
                 camera_region: geometry.camera_region,
-                state_bits: read_state_bits(
+                state_bits: read_material_state_bits(
                     |offset| s.u32_at(geometry.state_bits?, offset).ok(),
                     geometry.state_bits_count,
                 ),
                 state_bits_entry: geometry.state_bits_entry,
-                t5_state_bits_entry: None,
-                iw5_state_bits_entry: None,
+                native_state_bits_entry: None,
+
                 technique_table: table,
                 route,
                 textures,
@@ -1210,7 +1189,7 @@ impl MaterialCatalog {
             .name
             .and_then(|name| s.cstr(name).ok())
             .map(AssetRef::decode)
-            .unwrap_or_default();
+            .unwrap_or_else(|| AssetRef::Real(String::new()));
 
         let graph = s
             .latest_technique_graph()
@@ -1243,9 +1222,8 @@ impl MaterialCatalog {
                 name,
                 zone: self.capture_zone,
                 table,
-                t5_occupancy: None,
-                iw5_fallback_table: None,
-                t5_fallback_table: None,
+                source_occupancy: None,
+                fallback_table: None,
                 world_vert_format: geometry.world_vert_format,
             }),
         )
@@ -1281,9 +1259,9 @@ impl MaterialCatalog {
             .name
             .and_then(|name| s.cstr(name).ok())
             .map(AssetRef::decode)
-            .unwrap_or_default();
+            .unwrap_or_else(|| AssetRef::Real(String::new()));
         Some(self.take_vertex_decl_slot(AuthoredVertexDecl {
-            family: crate::VertexLayoutFamily::Iw4,
+            layout: render_material::IW4_VERTEX_LAYOUT,
             name,
             stream_count: geometry.stream_count,
             has_optional_source: geometry.has_optional_source,
@@ -1413,25 +1391,44 @@ fn table_shader_identity_ready(table: &TechniqueTable) -> bool {
     })
 }
 
-fn merge_t5_occupancy(
-    incoming: Option<T5TechniqueOccupancy>,
-    existing: Option<T5TechniqueOccupancy>,
-) -> Option<T5TechniqueOccupancy> {
+pub fn merge_source_occupancy(
+    incoming: Option<SourceTechniqueOccupancy>,
+    existing: Option<SourceTechniqueOccupancy>,
+) -> Option<SourceTechniqueOccupancy> {
     match (incoming, existing) {
         (None, None) => None,
         (Some(occupancy), None) | (None, Some(occupancy)) => Some(occupancy),
         (Some(mut incoming), Some(existing)) => {
-            for i in 0..fastfile_t5::TECHNIQUE_OCCUPANCY_WORDS {
-                incoming.slots[i] |= existing.slots[i];
-                incoming.scanned[i] |= existing.scanned[i];
+            incoming
+                .slots
+                .resize(incoming.slots.len().max(existing.slots.len()), 0);
+            incoming
+                .scanned
+                .resize(incoming.scanned.len().max(existing.scanned.len()), 0);
+            for (slot, word) in incoming.slots.iter_mut().zip(existing.slots) {
+                *slot |= word;
+            }
+            for (slot, word) in incoming.scanned.iter_mut().zip(existing.scanned) {
+                *slot |= word;
             }
             incoming.max_pass_count = incoming.max_pass_count.max(existing.max_pass_count);
             if incoming.technique0_flags == 0 {
                 incoming.technique0_flags = existing.technique0_flags;
             }
-            for i in 0..fastfile_t5::TECHNIQUE_SLOT_COUNT {
-                if incoming.pass_count_by_slot[i] == 0 {
-                    incoming.pass_count_by_slot[i] = existing.pass_count_by_slot[i];
+            incoming.pass_count_by_slot.resize(
+                incoming
+                    .pass_count_by_slot
+                    .len()
+                    .max(existing.pass_count_by_slot.len()),
+                0,
+            );
+            for (count, existing) in incoming
+                .pass_count_by_slot
+                .iter_mut()
+                .zip(existing.pass_count_by_slot)
+            {
+                if *count == 0 {
+                    *count = existing;
                 }
             }
             Some(incoming)
@@ -1472,7 +1469,7 @@ fn argument_is_model_lighting_const(argument: &OwnedShaderArgument) -> bool {
     )
 }
 
-pub(crate) fn graph_slots_bind_model_lighting_const(slots: &[Option<OwnedTechnique>]) -> bool {
+pub fn graph_slots_bind_model_lighting_const(slots: &[Option<OwnedTechnique>]) -> bool {
     slots.iter().flatten().any(|technique| {
         technique
             .passes
@@ -1481,7 +1478,10 @@ pub(crate) fn graph_slots_bind_model_lighting_const(slots: &[Option<OwnedTechniq
     })
 }
 
-fn read_state_bits(mut word: impl FnMut(usize) -> Option<u32>, count: usize) -> Vec<[u32; 2]> {
+pub fn read_material_state_bits(
+    mut word: impl FnMut(usize) -> Option<u32>,
+    count: usize,
+) -> Vec<[u32; 2]> {
     let mut table = Vec::with_capacity(count);
     for index in 0..count {
         let offset = index * asset_iw4::size::GFX_STATE_BITS;
@@ -1493,154 +1493,7 @@ fn read_state_bits(mut word: impl FnMut(usize) -> Option<u32>, count: usize) -> 
     table
 }
 
-fn t5_colour_keeps_prepass_depth(
-    entry: Option<&[u8; fastfile_t5::TECHNIQUE_SLOT_COUNT]>,
-    mut table: Vec<[u32; 2]>,
-) -> Vec<[u32; 2]> {
-    const DEPTH_PREPASS: usize = 0;
-    let prepass_writes_depth = entry
-        .map(|entry| usize::from(entry[DEPTH_PREPASS]))
-        .and_then(|row| table.get(row))
-        .is_some_and(|bits| bits[1] & asset_iw4::GFXS1_DEPTHWRITE != 0);
-    if !prepass_writes_depth {
-        return table;
-    }
-    for bits in &mut table {
-        let unblended = matches!(
-            crate::MaterialDrawMode::from_state_bits(*bits),
-            crate::MaterialDrawMode::Opaque | crate::MaterialDrawMode::AlphaTest { .. }
-        );
-        if unblended && bits[1] & asset_iw4::GFXS1_DEPTHTEST_DISABLE == 0 {
-            bits[1] |= asset_iw4::GFXS1_DEPTHWRITE;
-        }
-    }
-    table
-}
-
-fn iw4_ptr(p: fastfile_t5::Ptr) -> Ptr {
-    Ptr {
-        block: p.block,
-        offset: p.offset,
-    }
-}
-
-fn remap_iw5_code_const_source(iw5: u16) -> Option<u16> {
-    crate::iw5_tech_map::remap_code_const_index(iw5)
-        .or_else(|| crate::iw5_tech_map::leftover_iw5_code_bank(iw5))
-}
-
-fn remap_iw5_owned_shader_argument(argument: OwnedShaderArgument) -> Option<OwnedShaderArgument> {
-    match argument {
-        OwnedShaderArgument::CodeVertexConstant {
-            destination,
-            index,
-            first_row,
-            row_count,
-        } => remap_iw5_code_const_source(index).map(|index| {
-            OwnedShaderArgument::CodeVertexConstant {
-                destination,
-                index,
-                first_row,
-                row_count,
-            }
-        }),
-        OwnedShaderArgument::CodePixelConstant {
-            destination,
-            index,
-            first_row,
-            row_count,
-        } => {
-            remap_iw5_code_const_source(index).map(|index| OwnedShaderArgument::CodePixelConstant {
-                destination,
-                index,
-                first_row,
-                row_count,
-            })
-        }
-        OwnedShaderArgument::CodePixelSampler { destination, index } => {
-            crate::iw5_tech_map::remap_code_texture_index(index)
-                .map(|index| OwnedShaderArgument::CodePixelSampler { destination, index })
-        }
-        other => Some(other),
-    }
-}
-
-fn take_iw5_pass_argument(
-    raw: [u8; 8],
-    literal_words: [u32; 4],
-    literal_present: bool,
-) -> Option<OwnedShaderArgument> {
-    let iw5_type = u16::from_le_bytes([raw[0], raw[1]]);
-    let argument_type = crate::iw5_tech_map::remap_shader_arg_type(iw5_type)?;
-    remap_iw5_owned_shader_argument(owned_shader_argument(
-        argument_type,
-        raw,
-        literal_words,
-        literal_present,
-    ))
-}
-
-fn remap_t5_owned_shader_argument(argument: OwnedShaderArgument) -> Option<OwnedShaderArgument> {
-    match argument {
-        OwnedShaderArgument::CodeVertexConstant {
-            destination,
-            index,
-            first_row,
-            row_count,
-        } => crate::t5_code_remap::remap_t5_code_const_source(index).map(|index| {
-            OwnedShaderArgument::CodeVertexConstant {
-                destination,
-                index,
-                first_row,
-                row_count,
-            }
-        }),
-        OwnedShaderArgument::CodePixelConstant {
-            destination,
-            index,
-            first_row,
-            row_count,
-        } => crate::t5_code_remap::remap_t5_code_const_source(index).map(|index| {
-            OwnedShaderArgument::CodePixelConstant {
-                destination,
-                index,
-                first_row,
-                row_count,
-            }
-        }),
-        OwnedShaderArgument::CodePixelSampler { destination, index }
-            if (0x1d..=0x20).contains(&index) =>
-        {
-            Some(OwnedShaderArgument::MaterialPixelSampler {
-                destination,
-                name_hash: crate::t5_code_remap::terrain_scorch_binding_hash(
-                    (index - 0x1d) as usize,
-                ),
-            })
-        }
-        OwnedShaderArgument::CodePixelSampler { destination, index } => {
-            crate::t5_code_remap::remap_code_texture_index(index)
-                .map(|index| OwnedShaderArgument::CodePixelSampler { destination, index })
-        }
-        other => Some(other),
-    }
-}
-
-fn take_t5_pass_argument(
-    raw: [u8; 8],
-    literal_words: [u32; 4],
-    literal_present: bool,
-) -> Option<OwnedShaderArgument> {
-    let argument_type = u16::from_le_bytes([raw[0], raw[1]]);
-    remap_t5_owned_shader_argument(owned_shader_argument(
-        argument_type,
-        raw,
-        literal_words,
-        literal_present,
-    ))
-}
-
-fn owned_shader_argument(
+pub fn decode_reference_shader_argument(
     argument_type: u16,
     raw: [u8; 8],
     literal_words: [u32; 4],
@@ -1703,926 +1556,5 @@ fn owned_shader_argument(
             }
         }
         _ => OwnedShaderArgument::Unknown { argument_type, raw },
-    }
-}
-
-fn iw5_ptr(p: fastfile_iw5::Ptr) -> Ptr {
-    Ptr {
-        block: p.block,
-        offset: p.offset,
-    }
-}
-
-impl MaterialCatalog {
-    pub fn t5_loaded(
-        &mut self,
-        s: &fastfile_t5::ZoneStream<'_>,
-        ty: fastfile_t5::AssetType,
-        slot: fastfile_t5::Ptr,
-        insert_slot: Option<fastfile_t5::Ptr>,
-    ) {
-        use fastfile_t5::AssetType as T5;
-        let slot = iw4_ptr(slot);
-        let insert_slot = insert_slot.map(iw4_ptr);
-        let (map, index) = match ty {
-            T5::Image => {
-                let Some(geometry) = s.latest_image() else {
-                    self.capture_gaps += 1;
-                    return;
-                };
-                let Some(index) = self.capture_image_t5(s, geometry) else {
-                    self.capture_gaps += 1;
-                    return;
-                };
-                (LinkKind::Image, index)
-            }
-            T5::Material => {
-                let Some(index) = self.capture_material_t5(s) else {
-                    self.capture_gaps += 1;
-                    return;
-                };
-                (LinkKind::Material, index)
-            }
-            T5::TechniqueSet => {
-                let Some(index) = self.capture_technique_set_t5(s) else {
-                    self.capture_gaps += 1;
-                    return;
-                };
-                (LinkKind::Techset, index)
-            }
-            _ => return,
-        };
-        self.link.bind_direct(map, slot, index);
-        if let Some(insert_slot) = insert_slot {
-            self.link.bind_direct(map, insert_slot, index);
-        }
-    }
-
-    pub fn t5_alias(
-        &mut self,
-        ty: fastfile_t5::AssetType,
-        slot: fastfile_t5::Ptr,
-        target: fastfile_t5::Ptr,
-    ) {
-        use fastfile_t5::AssetType as T5;
-        let slot = iw4_ptr(slot);
-        let target = iw4_ptr(target);
-        let map = match ty {
-            T5::Image => LinkKind::Image,
-            T5::Material => LinkKind::Material,
-            T5::TechniqueSet => {
-                self.link.select_techset(
-                    self.link
-                        .resolve(LinkKind::Techset, target)
-                        .and_then(|index| self.techsets.get(index).cloned()),
-                );
-                LinkKind::Techset
-            }
-            _ => return,
-        };
-        self.link.bind_alias(map, slot, target);
-    }
-
-    pub fn t5_nested_shader(
-        &mut self,
-        s: &fastfile_t5::ZoneStream<'_>,
-        kind: fastfile_t5::NestedShaderKind,
-        slot: fastfile_t5::Ptr,
-    ) {
-        let kind = match kind {
-            fastfile_t5::NestedShaderKind::Vertex => AssetType::VertexShader,
-            fastfile_t5::NestedShaderKind::Pixel => AssetType::PixelShader,
-        };
-        let Some(index) = self.capture_shader_t5(s, kind) else {
-            self.capture_gaps += 1;
-            return;
-        };
-        let links = match kind {
-            AssetType::VertexShader => LinkKind::VertexShader,
-            AssetType::PixelShader => LinkKind::PixelShader,
-            _ => return,
-        };
-        let slot = iw4_ptr(slot);
-        self.link.bind_direct(links, slot, index);
-        if let Some(header) = s.latest_shader().and_then(|g| g.header) {
-            self.link.bind_direct(links, iw4_ptr(header), index);
-        }
-    }
-
-    pub fn t5_nested_shader_alias(
-        &mut self,
-        kind: fastfile_t5::NestedShaderKind,
-        slot: fastfile_t5::Ptr,
-        target: fastfile_t5::Ptr,
-    ) {
-        let links = match kind {
-            fastfile_t5::NestedShaderKind::Vertex => LinkKind::VertexShader,
-            fastfile_t5::NestedShaderKind::Pixel => LinkKind::PixelShader,
-        };
-        self.link.bind_alias(links, iw4_ptr(slot), iw4_ptr(target));
-    }
-
-    pub fn t5_nested_vertex_decl(
-        &mut self,
-        s: &fastfile_t5::ZoneStream<'_>,
-        slot: fastfile_t5::Ptr,
-    ) {
-        let Some(index) = self.capture_vertex_decl_t5(s) else {
-            self.capture_gaps += 1;
-            return;
-        };
-        let slot = iw4_ptr(slot);
-        self.link.bind_direct(LinkKind::VertexDecl, slot, index);
-        if let Some(header) = s.latest_vertex_decl().and_then(|g| g.header) {
-            self.link
-                .bind_direct(LinkKind::VertexDecl, iw4_ptr(header), index);
-        }
-    }
-
-    pub fn t5_nested_vertex_decl_alias(
-        &mut self,
-        slot: fastfile_t5::Ptr,
-        target: fastfile_t5::Ptr,
-    ) {
-        self.link
-            .bind_alias(LinkKind::VertexDecl, iw4_ptr(slot), iw4_ptr(target));
-    }
-
-    pub fn iw5_loaded(
-        &mut self,
-        s: &fastfile_iw5::ZoneStream<'_>,
-        ty: fastfile_iw5::AssetType,
-        slot: fastfile_iw5::Ptr,
-        insert_slot: Option<fastfile_iw5::Ptr>,
-    ) {
-        use fastfile_iw5::AssetType as Iw5;
-        let slot = iw5_ptr(slot);
-        let insert_slot = insert_slot.map(iw5_ptr);
-        let (map, index) = match ty {
-            Iw5::Image => {
-                let Some(geometry) = s.latest_image() else {
-                    self.capture_gaps += 1;
-                    return;
-                };
-                let Some(index) = self.capture_image_iw5(s, geometry) else {
-                    self.capture_gaps += 1;
-                    return;
-                };
-                (LinkKind::Image, index)
-            }
-            Iw5::Material => {
-                let Some(index) = self.capture_material_iw5(s) else {
-                    self.capture_gaps += 1;
-                    return;
-                };
-                (LinkKind::Material, index)
-            }
-            Iw5::TechniqueSet => {
-                let Some(index) = self.capture_technique_set_iw5(s) else {
-                    self.capture_gaps += 1;
-                    return;
-                };
-                (LinkKind::Techset, index)
-            }
-            Iw5::VertexDecl => {
-                let Some(index) = self.capture_vertex_decl_iw5(s) else {
-                    self.capture_gaps += 1;
-                    return;
-                };
-                (LinkKind::VertexDecl, index)
-            }
-            Iw5::PixelShader | Iw5::VertexShader => {
-                let Some(index) = self.capture_shader_iw5(s, ty) else {
-                    self.capture_gaps += 1;
-                    return;
-                };
-                let links = match ty {
-                    Iw5::VertexShader => LinkKind::VertexShader,
-                    Iw5::PixelShader => LinkKind::PixelShader,
-                    _ => unreachable!("shader arm accepts only vertex or pixel assets"),
-                };
-                self.link.bind_direct(links, slot, index);
-                if let Some(insert_slot) = insert_slot {
-                    self.link.bind_direct(links, insert_slot, index);
-                }
-                return;
-            }
-            _ => return,
-        };
-        self.link.bind_direct(map, slot, index);
-        if let Some(insert_slot) = insert_slot {
-            self.link.bind_direct(map, insert_slot, index);
-        }
-    }
-
-    pub fn iw5_alias(
-        &mut self,
-        ty: fastfile_iw5::AssetType,
-        slot: fastfile_iw5::Ptr,
-        target: fastfile_iw5::Ptr,
-    ) {
-        use fastfile_iw5::AssetType as Iw5;
-        let slot = iw5_ptr(slot);
-        let target = iw5_ptr(target);
-        let map = match ty {
-            Iw5::Image => LinkKind::Image,
-            Iw5::Material => LinkKind::Material,
-            Iw5::TechniqueSet => {
-                self.link.select_techset(
-                    self.link
-                        .resolve(LinkKind::Techset, target)
-                        .and_then(|index| self.techsets.get(index).cloned()),
-                );
-                LinkKind::Techset
-            }
-            Iw5::VertexDecl => LinkKind::VertexDecl,
-            Iw5::VertexShader => LinkKind::VertexShader,
-            Iw5::PixelShader => LinkKind::PixelShader,
-            _ => return,
-        };
-        self.link.bind_alias(map, slot, target);
-    }
-
-    fn capture_image_t5(
-        &mut self,
-        s: &fastfile_t5::ZoneStream<'_>,
-        geometry: fastfile_t5::GfxImageGeometry,
-    ) -> Option<usize> {
-        let name = geometry
-            .name
-            .and_then(|name| s.cstr(name).ok())
-            .map(AssetRef::decode)?;
-        let payload = if geometry.source_len == 0 {
-            Vec::new()
-        } else {
-            s.source_slice(geometry.source_offset, geometry.source_len)
-                .ok()?
-                .to_vec()
-        };
-        Some(
-            self.take_image_slot(AuthoredImage {
-                namespace: self
-                    .capture_ns
-                    .expect("asset capture requires an explicit family"),
-                name,
-                map_type: geometry.map_type,
-                semantic: geometry.semantic,
-                category: geometry.category,
-                use_srgb_reads: geometry.use_srgb_reads,
-                width: geometry.width,
-                height: geometry.height,
-                depth: geometry.depth,
-                level_count: geometry.level_count,
-                format: geometry.format,
-                payload: Arc::new(payload),
-                decoded: None,
-                common_owned: false,
-                decoded_variant: None,
-                decoded_by: None,
-                pending_decode: None,
-            }),
-        )
-    }
-
-    fn capture_material_t5(&mut self, s: &fastfile_t5::ZoneStream<'_>) -> Option<usize> {
-        let geometry = s.latest_material()?;
-        let name = geometry
-            .name
-            .and_then(|name| s.cstr(name).ok())
-            .map(AssetRef::decode)?;
-        let technique_set = self.link.take_techset()?;
-        let mut textures = Vec::with_capacity(geometry.texture_count);
-        if let Some(table) = geometry.textures {
-            for i in 0..geometry.texture_count {
-                let texture = table.at(i * 16);
-                let semantic = s.u8_at(texture, 7).ok()?;
-                textures.push(MaterialTextureBinding {
-                    name_hash: s.u32_at(texture, 0).ok()?,
-                    name_start: s.u8_at(texture, 4).ok()?,
-                    name_end: s.u8_at(texture, 5).ok()?,
-                    sampler_state: s.u8_at(texture, 6).ok()?,
-                    semantic,
-                    image: (semantic != 11)
-                        .then(|| self.link.resolve(LinkKind::Image, iw4_ptr(texture.at(12))))
-                        .flatten(),
-                });
-            }
-        }
-        let mut constants = Vec::with_capacity(geometry.constant_count);
-        if let Some(table) = geometry.constants {
-            for i in 0..geometry.constant_count {
-                let constant = table.at(i * 32);
-                let mut name = [0; 12];
-                for (offset, byte) in name.iter_mut().enumerate() {
-                    *byte = s.u8_at(constant, 4 + offset).ok()?;
-                }
-                constants.push(MaterialConstant {
-                    name_hash: s.u32_at(constant, 0).ok()?,
-                    name,
-                    literal: [
-                        s.f32_at(constant, 16).ok()?,
-                        s.f32_at(constant, 20).ok()?,
-                        s.f32_at(constant, 24).ok()?,
-                        s.f32_at(constant, 28).ok()?,
-                    ],
-                });
-            }
-        }
-        Some(
-            self.take_material_slot(AuthoredMaterial {
-                name,
-                namespace: self
-                    .capture_ns
-                    .expect("asset capture requires an explicit family"),
-                technique_set_edge: if technique_set.name.is_empty() {
-                    crate::AssetEdge::Absent
-                } else {
-                    crate::AssetEdge::Unresolved(crate::AssetEdgeReason::CatalogMiss)
-                },
-                technique_set: technique_set.name,
-                draw_surf: geometry.draw_surf,
-                sort_key: geometry.sort_key,
-
-                info_game_flags: geometry.info_game_flags,
-                texture_atlas: Some(geometry.texture_atlas),
-                surface_type_bits: Some(geometry.surface_type_bits),
-                t5_layered_surface_types: Some(geometry.layered_surface_types),
-                state_flags: geometry.state_flags,
-                camera_region: geometry.camera_region,
-                state_bits: t5_colour_keeps_prepass_depth(
-                    geometry.state_bits_entry.as_ref(),
-                    read_state_bits(
-                        |offset| s.u32_at(geometry.state_bits?, offset).ok(),
-                        geometry.state_bits_count,
-                    ),
-                ),
-
-                state_bits_entry: geometry
-                    .state_bits_entry
-                    .as_ref()
-                    .map(crate::t5_tech_map::remap_t5_state_bits_entry),
-                t5_state_bits_entry: geometry.state_bits_entry,
-                iw5_state_bits_entry: None,
-                technique_table: None,
-                route: None,
-                textures,
-                constants,
-                zone: self.capture_zone,
-            }),
-        )
-    }
-
-    fn capture_technique_set_t5(&mut self, s: &fastfile_t5::ZoneStream<'_>) -> Option<usize> {
-        let geometry = s.latest_technique_set()?;
-        let name = geometry
-            .name
-            .and_then(|name| s.cstr(name).ok())
-            .map(AssetRef::decode)
-            .unwrap_or_default();
-        let occupancy =
-            fastfile_t5::occupancy_any(&geometry.technique_slots).then_some(T5TechniqueOccupancy {
-                slots: geometry.technique_slots,
-                scanned: geometry.technique_slots_scanned,
-                technique0_flags: geometry.technique0_flags,
-                max_pass_count: geometry.max_pass_count,
-                pass_count_by_slot: geometry.pass_count_by_slot,
-            });
-
-        let fallback = s.latest_technique_graph().and_then(|graph| {
-            fastfile_t5::occupancy_any(&geometry.technique_slots)
-                .then(|| self.capture_owned_technique_graph_t5(geometry, graph))
-        });
-        if let Some(graph) = s.latest_technique_graph() {
-            if graph.rows_truncated != 0 || graph.arguments_truncated != 0 {
-                diag::warn!(
-                    Zone,
-                    "T5 technique graph truncated for {name}: rows_truncated={} arguments_truncated={}",
-                    graph.rows_truncated,
-                    graph.arguments_truncated
-                );
-            }
-        }
-        Some(
-            self.take_techset_slot(TechniqueSetFacts {
-                namespace: self
-                    .capture_ns
-                    .expect("asset capture requires an explicit family"),
-                name,
-                zone: self.capture_zone,
-                table: None,
-                t5_occupancy: occupancy,
-                iw5_fallback_table: None,
-                t5_fallback_table: fallback,
-                world_vert_format: geometry.world_vert_format,
-            }),
-        )
-    }
-
-    fn capture_owned_technique_graph_t5(
-        &mut self,
-        geometry: fastfile_t5::TechniqueSetGeometry,
-        graph: &fastfile_t5::TechniqueGraphGeometry,
-    ) -> TechniqueTable {
-        let slots_bits = crate::t5_tech_map::remap_occupancy_bits(&geometry.technique_slots);
-        let scanned_bits =
-            crate::t5_tech_map::remap_occupancy_bits(&geometry.technique_slots_scanned);
-        let pass_count_by_slot =
-            crate::t5_tech_map::remap_pass_count_by_slot(&geometry.pass_count_by_slot);
-        let flags_by_slot =
-            crate::t5_tech_map::remap_technique_flags_by_slot(&geometry.technique_flags_by_slot);
-        let mut slots = Vec::with_capacity(asset_iw4::size::TECHNIQUE_SLOT_COUNT);
-        for iw4_slot in 0..asset_iw4::size::TECHNIQUE_SLOT_COUNT {
-            if slots_bits & (1u64 << iw4_slot) == 0 {
-                slots.push(None);
-                continue;
-            }
-            let mut passes = Vec::new();
-            for row in graph.iter_rows() {
-                if crate::t5_tech_map::iw4_slot_to_t5(iw4_slot) != Some(usize::from(row.tech_slot))
-                {
-                    continue;
-                }
-                let authored = graph.arguments_for(row);
-                let prim_n = usize::from(row.per_prim_arg_count);
-                let obj_n = usize::from(row.per_obj_arg_count);
-                let mut arguments = Vec::with_capacity(authored.len());
-                let mut per_prim_arg_count = 0u8;
-                let mut per_obj_arg_count = 0u8;
-                let mut stable_arg_count = 0u8;
-                for (index, argument) in authored.iter().enumerate() {
-                    match take_t5_pass_argument(
-                        argument.raw,
-                        argument.literal_words,
-                        argument.literal_present,
-                    ) {
-                        Some(owned) => {
-                            arguments.push(owned);
-                            if index < prim_n {
-                                per_prim_arg_count = per_prim_arg_count.saturating_add(1);
-                            } else if index < prim_n.saturating_add(obj_n) {
-                                per_obj_arg_count = per_obj_arg_count.saturating_add(1);
-                            } else {
-                                stable_arg_count = stable_arg_count.saturating_add(1);
-                            }
-                        }
-                        None => self.note_leftover_t5_arg(argument.raw),
-                    }
-                }
-                let vertex_decl_slot = iw4_ptr(row.vertex_decl_slot);
-                let vertex_shader_slot = iw4_ptr(row.vertex_shader_slot);
-                let pixel_shader_slot = iw4_ptr(row.pixel_shader_slot);
-                passes.push(OwnedMaterialPass {
-                    pass_index: row.pass_index,
-                    vertex_decl_identity: vertex_decl_slot.into(),
-                    vertex_decl: self.link.resolve(LinkKind::VertexDecl, vertex_decl_slot),
-                    vertex_shader: OwnedShaderRef {
-                        pointer_identity: vertex_shader_slot.into(),
-                        shader: self
-                            .link
-                            .resolve(LinkKind::VertexShader, vertex_shader_slot),
-                    },
-                    pixel_shader: OwnedShaderRef {
-                        pointer_identity: pixel_shader_slot.into(),
-                        shader: self.link.resolve(LinkKind::PixelShader, pixel_shader_slot),
-                    },
-                    per_prim_arg_count,
-                    per_obj_arg_count,
-                    stable_arg_count,
-                    custom_sampler_flags: crate::t5_code_remap::remap_t5_custom_sampler_flags(
-                        row.custom_sampler_flags,
-                    ),
-                    t5_custom_sampler_flags: row.custom_sampler_flags,
-                    arguments,
-                    arguments_truncated: row.arguments_truncated,
-                });
-            }
-            let scanned = scanned_bits & (1u64 << iw4_slot) != 0;
-            let t5_slot = crate::t5_tech_map::iw4_slot_to_t5(iw4_slot);
-            let technique = if scanned {
-                Some(OwnedTechnique {
-                    source_selection: None,
-                    flags: flags_by_slot[iw4_slot],
-                    passes,
-                    body_scanned: true,
-                })
-            } else {
-                t5_slot
-                    .and_then(|slot| geometry.technique_body_by_slot.get(slot).copied().flatten())
-                    .and_then(|body| self.link.technique(iw4_ptr(body)))
-            };
-            if let (Some(slot), Some(technique)) = (t5_slot, &technique) {
-                if let Some(body) = geometry.technique_body_by_slot.get(slot).copied().flatten() {
-                    self.link
-                        .remember_technique(iw4_ptr(body), technique.clone());
-                }
-            }
-            slots.push(technique);
-        }
-        TechniqueTable {
-            slots: slots_bits,
-            scanned: scanned_bits,
-            technique0_flags: geometry.technique0_flags,
-            model_lighting_const: Some(graph_slots_bind_model_lighting_const(&slots)),
-            max_pass_count: geometry.max_pass_count,
-            pass_count_by_slot,
-            graph: Some(OwnedTechniqueGraph {
-                slots,
-                rows_truncated: graph.rows_truncated,
-                arguments_truncated: graph.arguments_truncated,
-            }),
-        }
-    }
-
-    fn capture_shader_t5(
-        &mut self,
-        s: &fastfile_t5::ZoneStream<'_>,
-        kind: AssetType,
-    ) -> Option<usize> {
-        let geometry = s.latest_shader()?;
-        let name = geometry
-            .name
-            .and_then(|name| s.cstr(name).ok())
-            .map(AssetRef::decode)
-            .unwrap_or_default();
-        let mut bytes = Vec::with_capacity(geometry.program_words * 4);
-        if let Some(program) = geometry.program {
-            for i in 0..geometry.program_words {
-                bytes.extend_from_slice(&s.u32_at(program, i * 4).ok()?.to_le_bytes());
-            }
-        }
-        Some(
-            self.take_shader_slot(AuthoredShader {
-                namespace: self
-                    .capture_ns
-                    .expect("asset capture requires an explicit family"),
-                name,
-                kind,
-                program: bytes,
-            }),
-        )
-    }
-
-    fn capture_vertex_decl_t5(&mut self, s: &fastfile_t5::ZoneStream<'_>) -> Option<usize> {
-        let geometry = s.latest_vertex_decl()?;
-        let mut routing = [[0u8; 2]; asset_iw4::vertex_decl::ROUTING_COUNT];
-        for (index, pair) in geometry.routing.iter().enumerate() {
-            if let Some(slot) = routing.get_mut(index) {
-                *slot = *pair;
-            }
-        }
-        Some(self.take_vertex_decl_slot(AuthoredVertexDecl {
-            family: crate::VertexLayoutFamily::T5,
-            name: AssetRef::default(),
-            stream_count: geometry.stream_count,
-            has_optional_source: geometry.has_optional_source,
-            routing,
-        }))
-    }
-
-    fn capture_image_iw5(
-        &mut self,
-        s: &fastfile_iw5::ZoneStream<'_>,
-        geometry: fastfile_iw5::GfxImageGeometry,
-    ) -> Option<usize> {
-        let name = geometry
-            .name
-            .and_then(|name| s.cstr(name).ok())
-            .map(AssetRef::decode)?;
-        let payload = if geometry.source_len == 0 {
-            Vec::new()
-        } else {
-            s.source_slice(geometry.source_offset, geometry.source_len)
-                .ok()?
-                .to_vec()
-        };
-        Some(
-            self.take_image_slot(AuthoredImage {
-                namespace: self
-                    .capture_ns
-                    .expect("asset capture requires an explicit family"),
-                name,
-                map_type: geometry.map_type,
-                semantic: geometry.semantic,
-                category: geometry.category,
-                use_srgb_reads: geometry.use_srgb_reads,
-                width: geometry.width,
-                height: geometry.height,
-                depth: geometry.depth,
-                level_count: geometry.level_count,
-                format: geometry.format,
-                payload: Arc::new(payload),
-                decoded: None,
-                common_owned: false,
-                decoded_variant: None,
-                decoded_by: None,
-                pending_decode: None,
-            }),
-        )
-    }
-
-    fn capture_material_iw5(&mut self, s: &fastfile_iw5::ZoneStream<'_>) -> Option<usize> {
-        let geometry = s.latest_material()?;
-        let name = geometry
-            .name
-            .and_then(|name| s.cstr(name).ok())
-            .map(AssetRef::decode)?;
-        let technique_set = self.link.take_techset()?;
-        let mut textures = Vec::with_capacity(geometry.texture_count);
-        if let Some(table) = geometry.textures {
-            for i in 0..geometry.texture_count {
-                let texture = table.at(i * s.layout(fastfile_iw5::size::MATERIAL_TEXTURE_DEF, 16));
-                let semantic = s.u8_at(texture, 7).ok()?;
-                textures.push(MaterialTextureBinding {
-                    name_hash: s.u32_at(texture, 0).ok()?,
-                    name_start: s.u8_at(texture, 4).ok()?,
-                    name_end: s.u8_at(texture, 5).ok()?,
-                    sampler_state: s.u8_at(texture, 6).ok()?,
-                    semantic,
-                    image: (semantic != 11)
-                        .then(|| {
-                            self.link.resolve(
-                                LinkKind::Image,
-                                iw5_ptr(texture.at(fastfile_iw5::size::MATERIAL_TEXTURE_DEF_U_OFF)),
-                            )
-                        })
-                        .flatten(),
-                });
-            }
-        }
-        let mut constants = Vec::with_capacity(geometry.constant_count);
-        if let Some(table) = geometry.constants {
-            for i in 0..geometry.constant_count {
-                let constant = table.at(i * 32);
-                let mut name = [0; 12];
-                for (offset, byte) in name.iter_mut().enumerate() {
-                    *byte = s.u8_at(constant, 4 + offset).ok()?;
-                }
-                constants.push(MaterialConstant {
-                    name_hash: s.u32_at(constant, 0).ok()?,
-                    name,
-                    literal: [
-                        s.f32_at(constant, 16).ok()?,
-                        s.f32_at(constant, 20).ok()?,
-                        s.f32_at(constant, 24).ok()?,
-                        s.f32_at(constant, 28).ok()?,
-                    ],
-                });
-            }
-        }
-        let header = geometry.header?;
-
-        let info_game_flags = s.u8_at(header, s.layout(4, 8)).ok()?;
-        let counts = s.layout(fastfile_iw5::size::MATERIAL_TEXTURE_COUNT_OFF, 86);
-        let state_flags = s.u8_at(header, counts + 3).ok()?;
-        let camera_region = s.u8_at(header, counts + 4).ok()?;
-        let iw5_state_bits_entry = geometry.state_bits_entry;
-        let state_bits_entry = iw5_state_bits_entry
-            .as_ref()
-            .map(crate::iw5_tech_map::remap_state_bits_entry);
-        Some(
-            self.take_material_slot(AuthoredMaterial {
-                name,
-                namespace: self
-                    .capture_ns
-                    .expect("asset capture requires an explicit family"),
-                technique_set_edge: if technique_set.name.is_empty() {
-                    crate::AssetEdge::Absent
-                } else {
-                    crate::AssetEdge::Unresolved(crate::AssetEdgeReason::CatalogMiss)
-                },
-                technique_set: technique_set.name,
-                draw_surf: geometry.draw_surf,
-                sort_key: geometry.sort_key,
-                info_game_flags,
-                texture_atlas: None,
-                surface_type_bits: None,
-                t5_layered_surface_types: None,
-                state_flags,
-                camera_region,
-                state_bits: read_state_bits(
-                    |offset| s.u32_at(geometry.state_bits?, offset).ok(),
-                    geometry.state_bits_count,
-                ),
-                state_bits_entry,
-                t5_state_bits_entry: None,
-                iw5_state_bits_entry,
-                technique_table: technique_set.table,
-                route: None,
-                textures,
-                constants,
-                zone: self.capture_zone,
-            }),
-        )
-    }
-
-    fn capture_technique_set_iw5(&mut self, s: &fastfile_iw5::ZoneStream<'_>) -> Option<usize> {
-        let geometry = s.latest_technique_set()?;
-        let name = geometry
-            .name
-            .and_then(|name| s.cstr(name).ok())
-            .map(AssetRef::decode)
-            .unwrap_or_default();
-        let fallback = s.latest_technique_graph().and_then(|graph| {
-            (geometry.occupancy != 0)
-                .then(|| self.capture_owned_technique_graph_iw5(geometry, graph))
-        });
-        if let Some(graph) = s.latest_technique_graph() {
-            if graph.rows_truncated != 0 || graph.arguments_truncated != 0 {
-                diag::warn!(
-                    Zone,
-                    "IW5 technique graph truncated for {name}: rows_truncated={} arguments_truncated={}",
-                    graph.rows_truncated,
-                    graph.arguments_truncated
-                );
-            }
-        }
-
-        Some(
-            self.take_techset_slot(TechniqueSetFacts {
-                namespace: self
-                    .capture_ns
-                    .expect("asset capture requires an explicit family"),
-                name,
-                zone: self.capture_zone,
-                table: None,
-                t5_occupancy: None,
-                iw5_fallback_table: fallback,
-                t5_fallback_table: None,
-                world_vert_format: geometry.world_vert_format,
-            }),
-        )
-    }
-
-    fn capture_owned_technique_graph_iw5(
-        &mut self,
-        geometry: fastfile_iw5::TechniqueSetGeometry,
-        graph: &fastfile_iw5::TechniqueGraphGeometry,
-    ) -> TechniqueTable {
-        let slots_bits = crate::iw5_tech_map::remap_occupancy_bits(geometry.occupancy);
-        let scanned_bits = crate::iw5_tech_map::remap_occupancy_bits(geometry.occupancy_scanned);
-        let pass_count_by_slot =
-            crate::iw5_tech_map::remap_pass_count_by_slot(&geometry.pass_count_by_slot);
-        let flags_by_slot =
-            crate::iw5_tech_map::remap_technique_flags_by_slot(&geometry.technique_flags_by_slot);
-        let mut slots = Vec::with_capacity(asset_iw4::size::TECHNIQUE_SLOT_COUNT);
-        for iw4_slot in 0..asset_iw4::size::TECHNIQUE_SLOT_COUNT {
-            if slots_bits & (1u64 << iw4_slot) == 0 {
-                slots.push(None);
-                continue;
-            }
-            let mut passes = Vec::new();
-            for row in graph.iter_rows() {
-                let Some(mapped) = crate::iw5_tech_map::iw5_slot_to_iw4(usize::from(row.tech_slot))
-                else {
-                    continue;
-                };
-                if mapped != iw4_slot {
-                    continue;
-                }
-                let authored = graph.arguments_for(row);
-                let prim_n = usize::from(row.per_prim_arg_count);
-                let obj_n = usize::from(row.per_obj_arg_count);
-                let mut arguments = Vec::with_capacity(authored.len());
-                let mut per_prim_arg_count = 0u8;
-                let mut per_obj_arg_count = 0u8;
-                let mut stable_arg_count = 0u8;
-                for (index, argument) in authored.iter().enumerate() {
-                    match take_iw5_pass_argument(
-                        argument.raw,
-                        argument.literal_words,
-                        argument.literal_present,
-                    ) {
-                        Some(owned) => {
-                            arguments.push(owned);
-                            if index < prim_n {
-                                per_prim_arg_count = per_prim_arg_count.saturating_add(1);
-                            } else if index < prim_n.saturating_add(obj_n) {
-                                per_obj_arg_count = per_obj_arg_count.saturating_add(1);
-                            } else {
-                                stable_arg_count = stable_arg_count.saturating_add(1);
-                            }
-                        }
-                        None => {
-                            let iw5_type = u16::from_le_bytes([argument.raw[0], argument.raw[1]]);
-                            self.note_leftover_iw5_arg(iw5_type, argument.raw);
-                        }
-                    }
-                }
-                let vertex_decl_slot = iw5_ptr(row.vertex_decl_slot);
-                let vertex_shader_slot = iw5_ptr(row.vertex_shader_slot);
-                let pixel_shader_slot = iw5_ptr(row.pixel_shader_slot);
-                passes.push(OwnedMaterialPass {
-                    pass_index: row.pass_index,
-                    vertex_decl_identity: vertex_decl_slot.into(),
-                    vertex_decl: self.link.resolve(LinkKind::VertexDecl, vertex_decl_slot),
-                    vertex_shader: OwnedShaderRef {
-                        pointer_identity: vertex_shader_slot.into(),
-                        shader: self
-                            .link
-                            .resolve(LinkKind::VertexShader, vertex_shader_slot),
-                    },
-                    pixel_shader: OwnedShaderRef {
-                        pointer_identity: pixel_shader_slot.into(),
-                        shader: self.link.resolve(LinkKind::PixelShader, pixel_shader_slot),
-                    },
-                    per_prim_arg_count,
-                    per_obj_arg_count,
-                    stable_arg_count,
-                    custom_sampler_flags: row.custom_sampler_flags,
-                    t5_custom_sampler_flags: 0,
-                    arguments,
-                    arguments_truncated: row.arguments_truncated,
-                });
-            }
-            let scanned = scanned_bits & (1u64 << iw4_slot) != 0;
-            let iw5_slot = crate::iw5_tech_map::iw4_slot_to_iw5(iw4_slot);
-            let technique = if scanned {
-                Some(OwnedTechnique {
-                    source_selection: None,
-                    flags: flags_by_slot[iw4_slot],
-                    passes,
-                    body_scanned: true,
-                })
-            } else {
-                iw5_slot
-                    .and_then(|slot| geometry.technique_body_by_slot.get(slot).copied().flatten())
-                    .and_then(|body| self.link.technique(iw5_ptr(body)))
-            };
-            if let (Some(slot), Some(technique)) = (iw5_slot, &technique) {
-                if let Some(body) = geometry.technique_body_by_slot.get(slot).copied().flatten() {
-                    self.link
-                        .remember_technique(iw5_ptr(body), technique.clone());
-                }
-            }
-            slots.push(technique);
-        }
-        TechniqueTable {
-            slots: slots_bits,
-            scanned: scanned_bits,
-            technique0_flags: geometry.technique0_flags,
-            model_lighting_const: Some(graph_slots_bind_model_lighting_const(&slots)),
-            max_pass_count: geometry.max_pass_count,
-            pass_count_by_slot,
-            graph: Some(OwnedTechniqueGraph {
-                slots,
-                rows_truncated: graph.rows_truncated,
-                arguments_truncated: graph.arguments_truncated,
-            }),
-        }
-    }
-
-    fn capture_shader_iw5(
-        &mut self,
-        s: &fastfile_iw5::ZoneStream<'_>,
-        kind: fastfile_iw5::AssetType,
-    ) -> Option<usize> {
-        let geometry = s.latest_shader()?;
-        let name = geometry
-            .name
-            .and_then(|name| s.cstr(name).ok())
-            .map(AssetRef::decode)?;
-        let mut bytes = Vec::with_capacity(geometry.program_words * 4);
-        if let Some(program) = geometry.program {
-            for i in 0..geometry.program_words {
-                bytes.extend_from_slice(&s.u32_at(program, i * 4).ok()?.to_le_bytes());
-            }
-        }
-        let kind = match kind {
-            fastfile_iw5::AssetType::VertexShader => AssetType::VertexShader,
-            fastfile_iw5::AssetType::PixelShader => AssetType::PixelShader,
-            _ => return None,
-        };
-        Some(
-            self.take_shader_slot(AuthoredShader {
-                namespace: self
-                    .capture_ns
-                    .expect("asset capture requires an explicit family"),
-                name,
-                kind,
-                program: bytes,
-            }),
-        )
-    }
-
-    fn capture_vertex_decl_iw5(&mut self, s: &fastfile_iw5::ZoneStream<'_>) -> Option<usize> {
-        let geometry = s.latest_vertex_decl()?;
-        let name = geometry
-            .name
-            .and_then(|name| s.cstr(name).ok())
-            .map(AssetRef::decode)
-            .unwrap_or_default();
-        let mut routing = [[0u8; 2]; asset_iw4::vertex_decl::ROUTING_COUNT];
-        for (index, pair) in geometry.routing.iter().enumerate() {
-            if let Some(slot) = routing.get_mut(index) {
-                *slot = *pair;
-            }
-        }
-        Some(self.take_vertex_decl_slot(AuthoredVertexDecl {
-            family: crate::VertexLayoutFamily::Iw4,
-            name,
-            stream_count: geometry.stream_count,
-            has_optional_source: geometry.has_optional_source,
-            routing,
-        }))
     }
 }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bevy::asset::{AssetId, Assets, Handle};
 use bevy::shader::Shader;
 
-use super::sm3_wgsl::ValidatedPassWgsl;
+use super::shader_wgsl::ValidatedPassWgsl;
 use super::{MaterialProgramCompile, RuntimeProgramRegistry};
 
 fn shader_from_generated_wgsl(source: String, path: String) -> Shader {

@@ -139,11 +139,8 @@ fn leftover_x_token_aliased(
     source: &crate::MaterialDefinitions,
     material: &crate::AuthoredMaterial,
 ) -> bool {
-    if material.namespace != asset_core::AssetNamespace::T5 {
-        return false;
-    }
     let want = asset_core::AssetRef::bare_name(material.technique_set.as_str());
-    let stripped = crate::t5_feature_token_stripped(want);
+    let stripped = crate::alternate_techset_name(material.namespace, want);
     stripped != want
         && source.technique_set_facts().iter().any(|facts| {
             facts.name.is_real() && facts.name.as_str() == stripped && facts.table.is_some()
@@ -370,36 +367,19 @@ fn skip_cause_key(cause: &CatalogBuildError) -> &'static str {
     }
 }
 
-fn leftover_t5_common_yields_capacity(material: &crate::AuthoredMaterial) -> bool {
-    leftover_t5_common_yields_capacity_parts(
-        material.t5_state_bits_entry.is_some(),
-        material.zone.as_str(),
-    )
-}
-
-fn leftover_t5_common_yields_capacity_parts(has_t5_state_bits: bool, zone: &str) -> bool {
-    has_t5_state_bits && zone == asset_core::ZoneOwner::COMMON_MP.as_str()
-}
-
-fn leftover_iw5_common_yields_capacity(material: &crate::AuthoredMaterial) -> bool {
-    leftover_iw5_common_yields_capacity_parts(
-        material.iw5_state_bits_entry.is_some(),
-        material.zone.as_str(),
-    )
-}
-
-fn leftover_iw5_common_yields_capacity_parts(has_iw5_state_bits: bool, zone: &str) -> bool {
-    has_iw5_state_bits && zone == asset_core::ZoneOwner::COMMON_MP.as_str()
-}
-
-fn leftover_t6_yields_capacity(material: &crate::AuthoredMaterial) -> bool {
-    material.namespace == asset_core::AssetNamespace::T6
-}
-
-fn is_foreign_common_leftover(material: &crate::AuthoredMaterial) -> bool {
-    leftover_t5_common_yields_capacity(material)
-        || leftover_iw5_common_yields_capacity(material)
-        || leftover_t6_yields_capacity(material)
+fn is_foreign_common_leftover(
+    source: &crate::MaterialDefinitions,
+    material: &crate::AuthoredMaterial,
+) -> bool {
+    if source.sort_leftover_zones.contains(material.zone.as_str()) {
+        return true;
+    }
+    super::compiler::compiler_for(material.namespace).is_some_and(|compiler| {
+        compiler.yields_sort_capacity(
+            material.zone.as_str(),
+            material.native_state_bits_entry.is_some(),
+        )
+    })
 }
 
 fn insertion_sort_by_comparator(
@@ -510,7 +490,7 @@ pub(super) fn build_sorted_material_table(
             .materials
             .get(usize::from(record.asset_id.0))
             .expect("comparator record asset id is a catalog slot");
-        if is_foreign_common_leftover(leftover) {
+        if is_foreign_common_leftover(source, leftover) {
             leftover_records.push(record);
         } else {
             iw4_records.push(record);

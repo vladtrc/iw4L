@@ -102,8 +102,9 @@ fn fill_fx(out: &mut GlassZoneCensus, s: &ZoneStream<'_>) {
         for i in 0..g.def_count {
             let d = defs.at(i * s.layout(sz::FX_GLASS_DEF, 48));
             out.fx_def_materials.push((
-                material_name_at(s, d.at(DEF_MATERIAL)).unwrap_or_default(),
-                material_name_at(s, d.at(s.layout(DEF_MATERIAL_SHATTERED, 32))).unwrap_or_default(),
+                material_name_at(s, d.at(DEF_MATERIAL)).unwrap_or(String::new()),
+                material_name_at(s, d.at(s.layout(DEF_MATERIAL_SHATTERED, 32)))
+                    .unwrap_or(String::new()),
             ));
         }
     }
@@ -122,7 +123,8 @@ fn fill_g_glass(out: &mut GlassZoneCensus, s: &ZoneStream<'_>) {
     out.g_names.reserve(g.name_count);
     for i in 0..g.name_count {
         let row = names.at(i * s.layout(sz::G_GLASS_NAME, 24));
-        out.g_names.push(cstr_field(s, row, 0).unwrap_or_default());
+        out.g_names
+            .push(cstr_field(s, row, 0).unwrap_or(String::new()));
     }
 }
 
@@ -136,7 +138,7 @@ pub struct FxGlassReset {
 
     pub defs: Vec<[u8; FX_GLASS_DEF]>,
 
-    pub namespace: asset_material::AssetNamespace,
+    pub namespace: asset_material::FamilyId,
     pub def_materials: Vec<(String, String)>,
 
     pub def_material_edges: Vec<(
@@ -254,12 +256,12 @@ pub fn build_fx_glass_reset(stream: &ZoneStream<'_>) -> Option<FxGlassReset> {
         piece_states,
         geo_data,
         defs,
-        namespace: asset_material::AssetNamespace::Iw4,
+        namespace: asset_material::FamilyId::IW4,
         def_materials: Vec::new(),
         def_material_edges: Vec::new(),
         half_thickness,
         lighting_handles: copy_u16s(stream, g.init_piece_indices, g.init_piece_count)
-            .unwrap_or_default(),
+            .unwrap_or(Vec::new()),
         geo_cursor,
         piece_limit: g.piece_limit,
         geo_data_limit: g.geo_data_limit,
@@ -372,7 +374,7 @@ pub fn build_map_content(
 }
 
 fn glass_material_edge(
-    namespace: asset_material::AssetNamespace,
+    namespace: asset_material::FamilyId,
     hint: &str,
     materials: &MaterialDefinitions,
 ) -> crate::AssetEdge<crate::MaterialSpace> {

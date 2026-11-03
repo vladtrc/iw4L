@@ -3,6 +3,7 @@ use std::sync::Arc;
 use asset_audio::{SoundCatalog, load_mp_sound_bank};
 use asset_transport::GamesRoot;
 use assets::{NamespaceSoundIwd, NamespaceTrees};
+use bevy::ecs::system::SystemParam;
 use bevy::{
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, TaskPool, futures_lite::future},
@@ -14,7 +15,7 @@ use frame::{
 use crate::{
     ClipStore, SoundClass,
     clip_store::CueFeedback,
-    playback::{MissingAliasGaps, SoundBank, play_alias_oneshot},
+    playback::{MissingAliasGaps, SoundBank, play_oneshot_recorded},
     start::StartDecisions,
 };
 
@@ -47,7 +48,7 @@ pub(crate) fn register_frontend_audio(app: &mut App) {
     app.init_resource::<MenuSources>()
         .init_resource::<FrontendCueFeedback>()
         .add_systems(
-            Update,
+            PreUpdate,
             (
                 start_frontend_audio_prepare,
                 install_frontend_audio_prepare.after(start_frontend_audio_prepare),
@@ -146,21 +147,31 @@ fn install_frontend_audio_prepare(
 #[derive(Resource, Default)]
 struct FrontendCueFeedback(CueFeedback);
 
+#[derive(SystemParam)]
+struct UiSoundBank<'w> {
+    bank: Option<Res<'w, SoundBank>>,
+    frontend: Option<Res<'w, FrontendAudio>>,
+}
+
+impl UiSoundBank<'_> {
+    fn resolve(&self) -> Option<&Arc<SoundCatalog>> {
+        self.bank
+            .as_ref()
+            .map(|bank| &bank.0)
+            .or_else(|| self.frontend.as_ref().map(|frontend| &frontend.bank))
+    }
+}
+
 fn play_ui_sound_messages(
     mut events: MessageReader<UiPlaySound>,
     runtime: Res<crate::AudioRuntime>,
     mut gaps: ResMut<MissingAliasGaps>,
     mut pending: ResMut<FrontendCueFeedback>,
     mut decisions: ResMut<StartDecisions>,
-    bank: Option<Res<SoundBank>>,
-    frontend: Option<Res<FrontendAudio>>,
-    epoch: Option<Res<net::EntityEventCursor>>,
+    sound_bank: UiSoundBank,
     namespace: Option<Res<crate::ambient::SoundBankNamespace>>,
 ) {
-    let bank = bank
-        .as_ref()
-        .map(|bank| &bank.0)
-        .or_else(|| frontend.as_ref().map(|frontend| &frontend.bank));
+    let bank = sound_bank.resolve();
     let Some(bank) = bank else {
         for event in events.read().filter(|_| !crate::AudioSilent::active()) {
             diag::warn!(
@@ -178,20 +189,26 @@ fn play_ui_sound_messages(
         let (ns, alias) = crate::aliases::match_ui_alias(
             namespace
                 .as_deref()
-                .map_or(asset_core::AssetNamespace::Iw4, |ns| ns.namespace),
+                .map_or(asset_core::FamilyId::IW4, |ns| ns.namespace),
             &event.alias,
         );
-        let outcome = play_alias_oneshot(
-            bank,
-            ns,
-            alias,
-            None,
+        let outcome = play_oneshot_recorded(
             &runtime,
             &mut pending.0,
             &mut decisions,
-            Some(crate::SND_ENT_LOCAL),
-            SoundClass::Ui,
-            crate::backend::presentation_epoch(epoch.as_deref()),
+            crate::cue_execution::CueTrigger {
+                event: None,
+                bank: Arc::clone(bank),
+                namespace: ns,
+                alias: alias.to_owned(),
+                bound: None,
+                origin_inches: None,
+                emitter: Some(crate::SND_ENT_LOCAL),
+                class: SoundClass::Ui,
+                pitch_scale: 1.0,
+                volume_scale: 1.0,
+                fallbacks: Vec::new(),
+            },
         );
         if outcome.allows_binding_fallback() {
             gaps.record(&event.alias);
@@ -203,10 +220,17 @@ fn play_ui_music_messages(
     mut play_events: MessageReader<UiPlayMusic>,
     mut stop_events: MessageReader<UiStopMusic>,
     mut desired: ResMut<MenuSources>,
-    bank: Option<Res<SoundBank>>,
-    frontend: Option<Res<FrontendAudio>>,
+    sound_bank: UiSoundBank,
     runtime: Res<crate::AudioRuntime>,
+    scope: Res<State<frame::MatchScope>>,
 ) {
+    if *scope.get() != frame::MatchScope::Absent {
+        play_events.clear();
+        stop_events.clear();
+        desired.alias = None;
+        desired.source = None;
+        return;
+    }
     if stop_events.read().count() > 0 {
         desired.alias = None;
         desired.source = None;
@@ -227,20 +251,16 @@ fn play_ui_music_messages(
         return;
     }
     desired.source = None;
-    let bank = bank
-        .as_ref()
-        .map(|bank| &bank.0)
-        .or_else(|| frontend.as_ref().map(|frontend| &frontend.bank));
+    let bank = sound_bank.resolve();
     let Some(bank) = bank else {
         return;
     };
     let Some(cue) = runtime.source_cue(crate::sources::SourceCueRequest {
         bank: bank.clone(),
-        namespace: asset_core::AssetNamespace::Iw4,
+        namespace: asset_core::FamilyId::IW4,
         alias,
         emitter: None,
         scope: crate::backend::AudioScope::Menu,
-        epoch: 0,
         group: None,
     }) else {
         return;
@@ -252,7 +272,6 @@ fn play_ui_music_messages(
     desired.source = Some(crate::sources::DesiredSource {
         key: crate::sources::SourceKey {
             scope: crate::backend::AudioScope::Menu,
-            epoch: 0,
             object: 0,
             slot: 4,
         },

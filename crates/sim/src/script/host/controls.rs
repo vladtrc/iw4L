@@ -378,16 +378,12 @@ pub(crate) fn select_location(
         return;
     }
     let pressed = cmd.buttons & !old_buttons;
-    let authority = world
-        .resource::<crate::step::StepRequest>()
-        .reason
-        .advances_authority_world();
     let receiver = world
         .resource::<RoundScript>()
         .players
         .get(&client)
         .map(|slot| Value::Object(slot.object));
-    if let (true, Some(receiver)) = (authority, receiver) {
+    if let Some(receiver) = receiver {
         if pressed & buttons::LOCATION_SELECT != 0 {
             let map = world.resource::<RoundScript>().engine.minimap;
             let loc = |byte: u8| (f32::from(byte as i8) + 128.0) / 255.0;
@@ -430,13 +426,6 @@ pub(crate) fn command_buttons(command: &str) -> u32 {
 }
 
 fn raise_commands(world: &mut World, client: u32, fired: impl Fn(&str) -> bool) {
-    if !world
-        .resource::<crate::step::StepRequest>()
-        .reason
-        .advances_authority_world()
-    {
-        return;
-    }
     let Some((receiver, notifies)) =
         world
             .resource::<RoundScript>()

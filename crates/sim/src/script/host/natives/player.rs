@@ -9,7 +9,7 @@ use crate::script_player;
 use crate::world::ClientId;
 use bevy_ecs::prelude::World;
 
-pub(crate) fn player(world: &World, receiver: &Value) -> Result<u32, String> {
+pub fn player(world: &World, receiver: &Value) -> Result<u32, String> {
     match receiver {
         Value::Object(id) => world
             .resource::<RoundScript>()
@@ -31,7 +31,7 @@ fn slot<'w>(
         .ok_or_else(|| "player has disconnected".into())
 }
 
-pub(crate) fn present(
+pub fn present(
     world: &mut World,
     receiver: &Value,
     key: &'static str,
@@ -49,7 +49,7 @@ pub(crate) fn text(value: &Value) -> Result<Arc<str>, String> {
         Value::Int(n) => Ok(n.to_string().into()),
         Value::Vector(v) => Ok(format!("{} {} {}", v[0], v[1], v[2]).into()),
         Value::Float(f) => Ok(runtime::to_text(&Value::Float(*f))
-            .unwrap_or_default()
+            .unwrap_or(String::new())
             .into()),
         other => Err(format!("{} is not a string", kind(other))),
     }
@@ -601,7 +601,7 @@ fn entity_kind(
         .map(|e| (*id, e.kind.clone()))
 }
 
-pub(crate) fn corpse_anim(world: &World, receiver: &Value) -> Result<Option<Arc<str>>, String> {
+pub fn corpse_anim(world: &World, receiver: &Value) -> Result<Option<Arc<str>>, String> {
     match entity_kind(world, receiver) {
         Some((_, super::super::entities::EntityKind::Corpse { anim, .. })) => Ok(anim),
         _ => Err("receiver is not a corpse".into()),
@@ -1413,7 +1413,7 @@ fn register_inventory(registry: &mut NativeRegistry) {
                         .map(|t| Value::String(t.as_str().into()))
                         .collect()
                 })
-                .unwrap_or_default();
+                .unwrap_or(Vec::new());
             new_array(world, tags)
         },
     );
@@ -1421,22 +1421,18 @@ fn register_inventory(registry: &mut NativeRegistry) {
         let id = client_of(world, receiver)?;
         let named = weapon_arg(world, args, 0)?;
         let weapon = player_weapon(world, id, args, 0)?;
-        let t5 = world
-            .resource::<RoundScript>()
-            .program
-            .as_ref()
-            .is_some_and(|program| program.rules() == crate::script::Realm::T5);
-        let model = if t5 {
-            (optional(args, 2, int)?.unwrap_or(0) & 63) as u8
-        } else {
-            optional(args, 1, int)?.unwrap_or(0).clamp(0, 15) as u8
-        };
+        let policy = crate::script::families::policy_for_world(world);
+        let model =
+            (policy.decode_weapon_model)(optional(args, policy.model_argument, int)?.unwrap_or(0));
         let model = if named != weapon {
             super::super::players::selected_camouflage(world, id.0, weapon).unwrap_or(model)
         } else {
             model
         };
-        let akimbo = !t5 && optional(args, 2, int)?.unwrap_or(0) != 0;
+        let akimbo = match policy.akimbo_argument {
+            Some(index) => optional(args, index, int)?.unwrap_or(0) != 0,
+            None => false,
+        };
         script_player::give_weapon(&mut FrameWorld::from_world(world), id, weapon, akimbo)?;
         script_player::set_weapon_model(&mut FrameWorld::from_world(world), id, weapon, model);
         super::super::players::give_carried_insertion(world, id.0, receiver, named)?;

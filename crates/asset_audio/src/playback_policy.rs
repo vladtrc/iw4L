@@ -1,8 +1,8 @@
-mod compiler;
+pub mod compiler;
 
 use std::sync::Arc;
 
-use crate::{AssetNamespace, CapturedAlias, ChannelKey, EntChannel, VoicePriority};
+use crate::{CapturedAlias, ChannelKey, EntChannel, FamilyId, VoicePriority};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VoiceLimitMode {
@@ -39,8 +39,8 @@ pub struct ChannelAdmission {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpatialPolicyFailure {
-    Unsupported(AssetNamespace),
-    MissingChannel(AssetNamespace),
+    Unsupported(FamilyId),
+    MissingChannel(FamilyId),
     MissingFalloffCurve,
     InvalidFalloffCurve,
 }
@@ -173,9 +173,8 @@ impl LoopingPolicy {
 
 #[derive(Clone, Debug)]
 pub struct AliasPlaybackPolicy {
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     looping: LoopingPolicy,
-    streamed_decode: crate::StreamedDecodePolicy,
     pub channel: Option<ChannelKey>,
     pub channel_admission: Option<ChannelAdmission>,
     pub priority: Option<VoicePriority>,
@@ -196,10 +195,6 @@ impl AliasPlaybackPolicy {
 
     pub fn pitch(&self, random: f32) -> f32 {
         self.pitch_range.sample(random)
-    }
-
-    pub fn streamed_decode(&self) -> crate::StreamedDecodePolicy {
-        self.streamed_decode
     }
 
     pub fn looping(&self) -> LoopingPolicy {

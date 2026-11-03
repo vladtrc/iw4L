@@ -5,10 +5,10 @@ pub use capture_types::{
 };
 use capture_types::{capture_loaded_edge, is_null_sound_name};
 mod capture_iw4;
-pub(crate) use capture_iw4::capture_stereo_speaker_gains;
+pub use capture_iw4::capture_stereo_speaker_gains;
 use capture_iw4::*;
 mod binding;
-pub use binding::{BoundSound, BoundSoundMedia, SoundBindingRefusal, SoundHandle};
+pub use binding::{BoundSound, BoundSoundMedia, SoundHandle};
 use std::collections::HashMap;
 
 use asset_iw4::size as sz;
@@ -25,9 +25,9 @@ use asset_iw4::snd_alias::{
 };
 use fastfile_iw4::{AssetLinkSink, AssetType, Ptr, Result, ZonePtr, ZoneStream};
 
+use crate::FamilyId;
 use crate::asset_graph::{AssetEdge, AssetEdgeCensus, AssetEdgeReason, ZoneOwner};
 use crate::ent_channel::{EntChannel, parse_ent_channel_file};
-use crate::{AssetNamespace, ZoneGame};
 
 pub use asset_iw4::{advance_lcg, lerp_range, pick_weighted_variant_index, unit_random};
 
@@ -37,12 +37,12 @@ pub type LoadedSoundEdgeReason = AssetEdgeReason;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SoundAliasKey {
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub name: String,
 }
 
 impl SoundAliasKey {
-    pub fn new(namespace: AssetNamespace, name: impl Into<String>) -> Self {
+    pub fn new(namespace: FamilyId, name: impl Into<String>) -> Self {
         Self {
             namespace,
             name: name.into(),
@@ -50,7 +50,7 @@ impl SoundAliasKey {
     }
 
     pub fn host(name: impl Into<String>) -> Self {
-        Self::new(AssetNamespace::Iw4, name)
+        Self::new(FamilyId::IW4, name)
     }
 }
 
@@ -60,8 +60,8 @@ fn mint_revision() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
-fn ns_of(game: ZoneGame) -> AssetNamespace {
-    AssetNamespace::from_zone_game(game)
+fn ns_of(game: FamilyId) -> FamilyId {
+    game
 }
 
 #[derive(Clone, Debug, Default)]
@@ -69,18 +69,18 @@ pub struct SoundCatalog {
     pub(crate) sounds: Vec<CapturedSound>,
     pub(crate) loaded: Vec<LoadedSoundPcm>,
 
-    pub(crate) curves: HashMap<(AssetNamespace, String), CapturedSndCurve>,
+    pub(crate) curves: HashMap<(FamilyId, String), CapturedSndCurve>,
 
-    pub(crate) rawfiles: HashMap<(AssetNamespace, String), Vec<u8>>,
+    pub(crate) rawfiles: HashMap<(FamilyId, String), Vec<u8>>,
 
-    pub(crate) ent_channels: HashMap<AssetNamespace, Vec<EntChannel>>,
+    pub(crate) ent_channels: HashMap<FamilyId, Vec<EntChannel>>,
 
-    group_volumes: HashMap<AssetNamespace, Vec<std::result::Result<f32, crate::MixerGroupError>>>,
-    mixer_groups: HashMap<AssetNamespace, Vec<crate::MixerGroup>>,
-    by_alias: HashMap<(AssetNamespace, String), usize>,
+    group_volumes: HashMap<FamilyId, Vec<std::result::Result<f32, crate::MixerGroupError>>>,
+    mixer_groups: HashMap<FamilyId, Vec<crate::MixerGroup>>,
+    by_alias: HashMap<(FamilyId, String), usize>,
 
-    by_alias_ci: HashMap<(AssetNamespace, String), usize>,
-    by_loaded: HashMap<(AssetNamespace, String), usize>,
+    by_alias_ci: HashMap<(FamilyId, String), usize>,
+    by_loaded: HashMap<(FamilyId, String), usize>,
 
     file_to_loaded: HashMap<(u8, u32), String>,
 
@@ -91,7 +91,7 @@ pub struct SoundCatalog {
     curve_by_ptr: HashMap<(u8, u32), String>,
     last_loaded_name: Option<String>,
     last_curve_name: Option<String>,
-    capture_game: Option<ZoneGame>,
+    capture_game: Option<FamilyId>,
     pub capture_gaps: usize,
 
     pub alias_flags_missing: usize,
@@ -100,18 +100,25 @@ pub struct SoundCatalog {
     capture_zone: ZoneOwner,
 
     revision: u64,
-    playback: Vec<Vec<crate::AliasPlaybackPolicy>>,
+    playback: Vec<Option<Vec<crate::AliasPlaybackPolicy>>>,
     selection_weights: Vec<Vec<f32>>,
 }
 
 impl SoundCatalog {
+    fn namespaces(&self) -> std::collections::BTreeSet<FamilyId> {
+        self.by_alias
+            .keys()
+            .map(|(id, _)| *id)
+            .chain(self.rawfiles.keys().map(|(id, _)| *id))
+            .collect()
+    }
     pub fn sounds(&self) -> &[CapturedSound] {
         &self.sounds
     }
     pub fn loaded_sounds(&self) -> &[LoadedSoundPcm] {
         &self.loaded
     }
-    pub fn channels_in(&self, namespace: AssetNamespace) -> Option<&[EntChannel]> {
+    pub fn channels_in(&self, namespace: FamilyId) -> Option<&[EntChannel]> {
         self.ent_channels.get(&namespace).map(Vec::as_slice)
     }
 
@@ -235,39 +242,32 @@ impl SoundCatalog {
     }
 
     fn resolve_volume_mod_groups(&mut self) {
-        if self.group_volumes.contains_key(&AssetNamespace::Iw5) {
-            return;
+        let families: std::collections::BTreeSet<_> =
+            self.rawfiles.keys().map(|(id, _)| *id).collect();
+        for id in families {
+            if let Some(family) = crate::audio_family(id) {
+                (family.finalize_catalog)(self);
+            }
         }
-        let Some(file) = self.rawfiles.get(&(
-            AssetNamespace::Iw5,
-            "soundaliases/volumemodgroups.svmod".to_owned(),
-        )) else {
-            return;
-        };
-        let volumes = String::from_utf8_lossy(file)
-            .lines()
-            .filter_map(|line| {
-                let mut fields = line.split(',').map(str::trim);
-                let name = fields.next()?;
-                if name.is_empty() || name.starts_with('#') {
-                    return None;
-                }
-                Some(fields.next().and_then(|value| value.parse::<f32>().ok()))
-            })
-            .enumerate()
-            .map(|(group, value)| match value {
-                Some(gain) if gain.is_finite() && gain >= 0.0 => Ok(gain),
-                _ => Err(crate::MixerGroupError::InvalidAttenuation { group }),
-            })
-            .collect();
-        self.group_volumes.insert(AssetNamespace::Iw5, volumes);
     }
 
-    pub fn ingest_mixer_groups(
+    pub fn has_group_volumes(&self, id: FamilyId) -> bool {
+        self.group_volumes.contains_key(&id)
+    }
+    pub fn ingest_group_volumes(
         &mut self,
-        namespace: AssetNamespace,
-        groups: Vec<crate::MixerGroup>,
+        id: FamilyId,
+        values: Vec<std::result::Result<f32, crate::MixerGroupError>>,
     ) {
+        self.group_volumes.insert(id, values);
+        self.playback.clear();
+        self.selection_weights.clear();
+    }
+    pub fn curve_in(&self, id: FamilyId, name: &str) -> Option<&CapturedSndCurve> {
+        self.curves.get(&(id, name.to_owned()))
+    }
+
+    pub fn ingest_mixer_groups(&mut self, namespace: FamilyId, groups: Vec<crate::MixerGroup>) {
         self.mixer_groups.insert(namespace, groups);
         self.group_volumes.remove(&namespace);
         self.playback.clear();
@@ -279,7 +279,7 @@ impl SoundCatalog {
         index: usize,
         variant: usize,
     ) -> Option<&crate::AliasPlaybackPolicy> {
-        self.playback.get(index)?.get(variant)
+        self.playback.get(index)?.as_ref()?.get(variant)
     }
 
     pub fn publish(&mut self) {
@@ -290,10 +290,7 @@ impl SoundCatalog {
         self.playback = (0..self.sounds.len())
             .map(|alias| {
                 (0..self.sounds[alias].aliases.len())
-                    .map(|variant| {
-                        crate::AliasPlaybackPolicy::compile(self, alias, variant)
-                            .expect("captured alias variant")
-                    })
+                    .map(|variant| crate::AliasPlaybackPolicy::compile(self, alias, variant))
                     .collect()
             })
             .collect();
@@ -319,7 +316,7 @@ impl SoundCatalog {
 
     pub(crate) fn mixer_group_volumes_in(
         &self,
-        namespace: AssetNamespace,
+        namespace: FamilyId,
     ) -> Option<&[std::result::Result<f32, crate::MixerGroupError>]> {
         self.group_volumes.get(&namespace).map(Vec::as_slice)
     }
@@ -328,7 +325,7 @@ impl SoundCatalog {
         self.revision
     }
 
-    pub(crate) fn ingest_rawfile(&mut self, name: &str, data: &[u8], zlib_compressed: bool) {
+    pub fn ingest_rawfile(&mut self, name: &str, data: &[u8], zlib_compressed: bool) {
         let bytes = if zlib_compressed {
             asset_transport::inflate_zlib(data).unwrap_or_else(|_| data.to_vec())
         } else {
@@ -352,15 +349,15 @@ impl SoundCatalog {
         }
     }
 
-    pub(crate) fn capture_zone_for_ingest(&self) -> ZoneOwner {
+    pub fn capture_zone_for_ingest(&self) -> ZoneOwner {
         self.capture_zone
     }
 
-    pub(crate) fn ingest_loaded(&mut self, loaded: LoadedSoundPcm) {
+    pub fn ingest_loaded(&mut self, loaded: LoadedSoundPcm) {
         self.register_loaded(loaded);
     }
 
-    pub(crate) fn ingest_sound(&mut self, mut sound: CapturedSound) {
+    pub fn ingest_sound(&mut self, mut sound: CapturedSound) {
         sound.game = self
             .capture_game
             .expect("asset capture requires an explicit family");
@@ -368,7 +365,7 @@ impl SoundCatalog {
         self.register_sound(sound);
     }
 
-    pub(crate) fn ingest_curve(&mut self, curve: CapturedSndCurve) {
+    pub fn ingest_curve(&mut self, curve: CapturedSndCurve) {
         self.insert_curve(
             ns_of(
                 self.capture_game
@@ -486,7 +483,7 @@ impl SoundCatalog {
         self.capture_zone = zone;
     }
 
-    pub fn set_capture_game(&mut self, game: ZoneGame) {
+    pub fn set_capture_game(&mut self, game: FamilyId) {
         self.capture_game = Some(game);
     }
 
@@ -494,7 +491,7 @@ impl SoundCatalog {
         self.loaded
             .get(index)
             .map(|pcm| pcm.zone)
-            .unwrap_or_default()
+            .unwrap_or(asset_core::ZoneOwner::UNKNOWN)
     }
 
     fn register_sound(&mut self, sound: CapturedSound) {
@@ -530,12 +527,12 @@ impl SoundCatalog {
                 let looping = sound.aliases.first().and_then(CapturedAlias::is_looping);
                 let qualified = format!("{}:{name}", namespace.as_str());
                 std::iter::once((qualified, looping))
-                    .chain((namespace == AssetNamespace::Iw4).then_some((name, looping)))
+                    .chain((namespace == FamilyId::IW4).then_some((name, looping)))
             })
             .collect()
     }
 
-    pub fn index_in(&self, ns: AssetNamespace, alias: &str) -> Option<usize> {
+    pub fn index_in(&self, ns: FamilyId, alias: &str) -> Option<usize> {
         if let Some(&i) = self.by_alias.get(&(ns, alias.to_owned())) {
             return Some(i);
         }
@@ -545,12 +542,12 @@ impl SoundCatalog {
     }
 
     pub fn index_by_name(&self, alias: &str) -> Option<usize> {
-        self.index_in(AssetNamespace::Iw4, alias)
+        self.index_in(FamilyId::IW4, alias)
     }
 
     pub fn index_unique(&self, alias: &str) -> Option<usize> {
         let mut found = None;
-        for ns in AssetNamespace::ALL {
+        for ns in self.namespaces() {
             if let Some(i) = self.index_in(ns, alias) {
                 if found.is_some() {
                     return None;
@@ -565,22 +562,22 @@ impl SoundCatalog {
         self.sounds.get(index)
     }
 
-    pub fn sound_in(&self, ns: AssetNamespace, alias: &str) -> Option<&CapturedSound> {
+    pub fn sound_in(&self, ns: FamilyId, alias: &str) -> Option<&CapturedSound> {
         self.index_in(ns, alias).map(|i| &self.sounds[i])
     }
 
     pub fn sound(&self, alias: &str) -> Option<&CapturedSound> {
-        self.sound_in(AssetNamespace::Iw4, alias)
+        self.sound_in(FamilyId::IW4, alias)
     }
 
-    pub fn loaded_index_in(&self, ns: AssetNamespace, name: &str) -> Option<usize> {
+    pub fn loaded_index_in(&self, ns: FamilyId, name: &str) -> Option<usize> {
         let bare = crate::AssetRef::bare_name(name);
         self.by_loaded.get(&(ns, bare.to_owned())).copied()
     }
 
     fn conventional_loaded_index(
         &self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         alias: &str,
     ) -> std::result::Result<Option<(usize, crate::LoadedBindingOrigin)>, usize> {
         if let Some(idx) = self.loaded_index_in(ns, alias) {
@@ -614,12 +611,15 @@ impl SoundCatalog {
         self.sounds.get(index).map(|s| s.name.as_str())
     }
 
-    pub fn namespace_of_alias(&self, index: usize) -> Option<AssetNamespace> {
+    pub fn namespace_of_alias(&self, index: usize) -> Option<FamilyId> {
         self.sounds.get(index).map(|s| ns_of(s.game))
     }
 
     pub fn zone_of_alias(&self, index: usize) -> ZoneOwner {
-        self.sounds.get(index).map(|s| s.zone).unwrap_or_default()
+        self.sounds
+            .get(index)
+            .map(|s| s.zone)
+            .unwrap_or(asset_core::ZoneOwner::UNKNOWN)
     }
 
     fn loaded_name_for_offset(&self, s: &ZoneStream<'_>, p: Ptr) -> Option<String> {
@@ -630,13 +630,13 @@ impl SoundCatalog {
         })
     }
 
-    fn curve_with_knots(&self, namespace: AssetNamespace, key: &str) -> Option<&CapturedSndCurve> {
+    fn curve_with_knots(&self, namespace: FamilyId, key: &str) -> Option<&CapturedSndCurve> {
         self.curves
             .get(&(namespace, key.to_owned()))
             .filter(|c| !c.knots.is_empty())
     }
 
-    fn curve_lookup(&self, namespace: AssetNamespace, name: &str) -> Option<CapturedSndCurve> {
+    fn curve_lookup(&self, namespace: FamilyId, name: &str) -> Option<CapturedSndCurve> {
         if let Some(curve) = self.curve_with_knots(namespace, name) {
             return Some(curve.clone());
         }
@@ -662,7 +662,7 @@ impl SoundCatalog {
     }
 
     pub fn resolve_ent_channels(&mut self) {
-        for namespace in AssetNamespace::ALL {
+        for namespace in self.namespaces() {
             if self.ent_channels.contains_key(&namespace) {
                 continue;
             }
@@ -685,7 +685,7 @@ impl SoundCatalog {
         }
     }
 
-    fn rawfile_named(&self, namespace: AssetNamespace, want: &str) -> Option<&[u8]> {
+    fn rawfile_named(&self, namespace: FamilyId, want: &str) -> Option<&[u8]> {
         if let Some(data) = self.rawfiles.get(&(namespace, want.to_owned())) {
             return Some(data);
         }
@@ -706,7 +706,7 @@ impl SoundCatalog {
         Some(data)
     }
 
-    fn insert_curve(&mut self, namespace: AssetNamespace, curve: CapturedSndCurve) {
+    fn insert_curve(&mut self, namespace: FamilyId, curve: CapturedSndCurve) {
         if curve.knots.is_empty() {
             let bare = crate::AssetRef::bare_name(&curve.name);
             if self
@@ -802,10 +802,11 @@ impl SoundCatalog {
             let namespace = ns_of(self.sounds[i].game);
             for j in 0..self.sounds[i].aliases.len() {
                 if self.sounds[i].aliases[j].volume_falloff.is_none()
-                    && let Some([dry, near]) = self.sounds[i].aliases[j].t5_distance_curves
+                    && let Some([dry, near]) =
+                        self.sounds[i].aliases[j].distance_curve_names.clone()
                 {
-                    let dry = self.curves.get(&(namespace, format!("t5/curve/{dry}")));
-                    let near = self.curves.get(&(namespace, format!("t5/curve/{near}")));
+                    let dry = self.curves.get(&(namespace, dry));
+                    let near = self.curves.get(&(namespace, near));
 
                     if let (Some(dry), Some(near)) = (dry, near) {
                         self.sounds[i].aliases[j].near_falloff = Some(near.clone());
@@ -838,7 +839,7 @@ impl SoundCatalog {
 
     pub fn pcm_for_variant(
         &self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         alias: &str,
         variant: usize,
     ) -> Option<&LoadedSoundPcm> {
@@ -851,10 +852,10 @@ impl SoundCatalog {
 
     pub fn streamed_for_variant(
         &self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         alias: &str,
         variant: usize,
-    ) -> Option<(AssetNamespace, String, String)> {
+    ) -> Option<(FamilyId, String, String)> {
         let sound = self.sound_in(ns, alias)?;
         let row = sound.aliases.get(variant)?;
         self.streamed_from_row(ns, row)
@@ -864,7 +865,7 @@ impl SoundCatalog {
         &self,
         index: usize,
         variant: usize,
-    ) -> Option<(AssetNamespace, String, String)> {
+    ) -> Option<(FamilyId, String, String)> {
         let sound = self.sounds.get(index)?;
         let row = sound.aliases.get(variant)?;
         self.streamed_from_row(ns_of(sound.game), row)
@@ -872,24 +873,11 @@ impl SoundCatalog {
 
     fn streamed_from_row(
         &self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         row: &CapturedAlias,
-    ) -> Option<(AssetNamespace, String, String)> {
+    ) -> Option<(FamilyId, String, String)> {
         let (dir, name) = row.streamed.as_ref()?;
         if name.is_empty() || name == ",null.wav" {
-            return None;
-        }
-        if ns == AssetNamespace::T5 && dir.is_empty() {
-            let path = name.replace('\\', "/");
-            let relative = path.strip_prefix("sound/").or_else(|| {
-                let (_, rest) = path.split_once('/')?;
-                rest.strip_prefix("sound/")
-            });
-            if let Some(relative) = relative
-                && let Some((directory, file)) = relative.rsplit_once('/')
-            {
-                return Some((ns, directory.to_owned(), file.to_owned()));
-            }
             return None;
         }
         if dir.is_empty() {
@@ -898,14 +886,14 @@ impl SoundCatalog {
         Some((ns, dir.clone(), name.clone()))
     }
 
-    fn rawfile_text_in(&self, ns: AssetNamespace, name: &str) -> Option<&str> {
+    fn rawfile_text_in(&self, ns: FamilyId, name: &str) -> Option<&str> {
         let data = self.rawfiles.get(&(ns, name.to_owned()))?;
         std::str::from_utf8(data).ok()
     }
 
     fn rawfile_text_unique(&self, name: &str) -> Option<&str> {
         let mut found = None;
-        for ns in AssetNamespace::ALL {
+        for ns in self.namespaces() {
             if let Some(text) = self.rawfile_text_in(ns, name) {
                 if found.is_some() {
                     return None;
@@ -920,44 +908,39 @@ impl SoundCatalog {
         std::str::from_utf8(self.rawfile_bytes(name)?).ok()
     }
 
-    pub fn rawfiles_in(&self, namespace: AssetNamespace) -> impl Iterator<Item = (&str, &[u8])> {
+    pub fn rawfiles_in(&self, namespace: FamilyId) -> impl Iterator<Item = (&str, &[u8])> {
         self.rawfiles.iter().filter_map(move |((ns, name), bytes)| {
             (*ns == namespace).then_some((name.as_str(), bytes.as_slice()))
         })
     }
 
-    pub fn rawfile_bytes_in(&self, namespace: AssetNamespace, name: &str) -> Option<&[u8]> {
+    pub fn rawfile_bytes_in(&self, namespace: FamilyId, name: &str) -> Option<&[u8]> {
         self.rawfiles
             .get(&(namespace, name.to_owned()))
             .map(Vec::as_slice)
     }
 
     pub fn rawfile_bytes(&self, name: &str) -> Option<&[u8]> {
-        self.rawfiles
-            .get(&(AssetNamespace::Iw4, name.to_owned()))
-            .map(Vec::as_slice)
-            .or_else(|| {
-                let mut found = None;
-                for ns in [AssetNamespace::T5, AssetNamespace::Iw5] {
-                    if let Some(data) = self.rawfiles.get(&(ns, name.to_owned())) {
-                        if found.is_some() {
-                            return None;
-                        }
-                        found = Some(data.as_slice());
-                    }
-                }
-                found
-            })
+        if let Some(bytes) = self.rawfile_bytes_in(FamilyId::IW4, name) {
+            return Some(bytes);
+        }
+        let mut candidates = self
+            .rawfiles
+            .iter()
+            .filter(|((_, key), _)| key == name)
+            .map(|(_, value)| value.as_slice());
+        let first = candidates.next()?;
+        candidates.next().is_none().then_some(first)
     }
 
-    fn rawfile_text_for_map(&self, ns: AssetNamespace, name: &str) -> Option<&str> {
+    fn rawfile_text_for_map(&self, ns: FamilyId, name: &str) -> Option<&str> {
         self.rawfile_text_in(ns, name)
             .or_else(|| self.rawfile_text_unique(name))
     }
 
     pub fn createfx_loop_sounds(
         &self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         map: &str,
     ) -> Vec<crate::createfx::CreateFxLoopSound> {
         let stem = map.strip_prefix("maps/mp/").unwrap_or(map);
@@ -968,14 +951,14 @@ impl SoundCatalog {
             return self
                 .rawfile_text_for_map(ns, &alt)
                 .map(crate::createfx::parse_createfx_loop_sounds)
-                .unwrap_or_default();
+                .unwrap_or(Vec::new());
         };
         crate::createfx::parse_createfx_loop_sounds(src)
     }
 
     pub fn createfx_oneshots(
         &self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         map: &str,
     ) -> Vec<crate::createfx::CreateFxOneshot> {
         let stem = map.strip_prefix("maps/mp/").unwrap_or(map);

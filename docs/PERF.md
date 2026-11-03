@@ -8,7 +8,8 @@ rather than one frame, is [`BENCH.md`](BENCH.md).
 ```bash
 make bench-live                            # record + compact p50/p90/p95/p99/hot-path report
 make bench-overhead                        # 10 alternating on/off pairs + paired 95% CI
-make bench-overhead VAR=IW4L_BENCH         # the same, for the in-process bench recorder
+make bench-overhead VAR=IW4L_BENCH         # the same, for load observations
+make perf-compare fc3d8eaf acc57a5c        # build both commits, alternating heavy runs, report per hash
 cargo xtask perf-overhead --pairs 10 --bin target/play/iw4l --zone mp_highrise --cmds 'wait world; wait 8s; quit' --focus script_model:192
 make scenario                              # scripted match: IW4L_PERF=1, then cargo xtask scenario
 make chaos                                 # RPG splash run: IW4L_PERF=1, then cargo xtask chaos
@@ -41,3 +42,8 @@ which writes one `iw4l-artifacts/dumps/*.txt`; it contains no history or timing.
 Per-item overlay/draw spans are forbidden. `IW4L_PERF_FOCUS` admits one owner;
 without it there is no owner census. Semantic events stay rare (`player_tick`,
 death, feel, …).
+
+`prediction_errors.sql` counts validated fields against the acked authoritative
+state. Distance is absolute scalar error, the largest vector component error,
+or the number of differing array elements. Nonfinite values remain explicit;
+the percentile uses finite samples only. Reconciliation tolerances are unchanged.

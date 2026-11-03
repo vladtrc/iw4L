@@ -6,6 +6,7 @@ license.workspace = true
 description = "Client UI state, settings and loading overlays."
 
 [dependencies]
+community.workspace = true
 diag.workspace = true
 bevy.workspace = true
 asset_core.workspace = true
@@ -14,8 +15,7 @@ asset_material.workspace = true
 asset_transport.workspace = true
 assets.workspace = true
 frame.workspace = true
-net = { path = "../net" }
-updater = { path = "../updater" }
+net = { workspace = true }
 session.workspace = true
 sim.workspace = true
 

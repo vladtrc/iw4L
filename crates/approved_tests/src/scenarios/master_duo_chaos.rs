@@ -149,6 +149,13 @@ fn launch(
         format!("resolution=960x540\nfullscreen=false\nvsync=false\nplayer_name=approved-{role}\n"),
     )
     .map_err(|e| e.to_string())?;
+    let artifacts = directory.join("iw4l-artifacts");
+    fs::create_dir_all(&artifacts).map_err(|e| e.to_string())?;
+    fs::write(
+        artifacts.join("community.json"),
+        serde_json::to_vec(descriptor).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     let mut command = Command::new(binary);
     for (key, _) in std::env::vars_os() {
         let name = key.to_string_lossy();
@@ -159,9 +166,8 @@ fn launch(
     let child = command
         .arg("menu")
         .current_dir(cwd)
-        .env("IW4L_COMMUNITY", descriptor)
         .env("IW4L_GAMES", games)
-        .env("IW4L_ARTIFACTS_DIR", directory.join("iw4l-artifacts"))
+        .env("IW4L_ARTIFACTS_DIR", &artifacts)
         .env("IW4L_SETTINGS_PATH", directory.join("settings.cfg"))
         .env("IW4L_ACCOUNT_PATH", directory.join("account.dat"))
         .env("IW4L_MASTER_STATUS_FILE", directory.join("master.status"))
@@ -190,18 +196,14 @@ pub fn run(root: &Path, source: &Path) -> Result<bool> {
     if cfg!(windows) {
         return Err("master_duo_chaos currently requires Linux".into());
     }
-    let cwd = root
-        .join("context/simulated-iw4l-folder")
+    let games = asset_transport::games_root()?
+        .0
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    let descriptor = cwd.join(
-        std::env::var_os("IW4L_COMMUNITY")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("community-dev.iw4l-server")),
-    );
+    let descriptor = games.join("community-dev.iw4l-server");
     let bytes =
         fs::read_to_string(&descriptor).map_err(|e| format!("{}: {e}", descriptor.display()))?;
-    let community: updater::Community = toml::from_str(&bytes).map_err(|e| e.to_string())?;
+    let community: community::Community = toml::from_str(&bytes).map_err(|e| e.to_string())?;
     let dev_host = community
         .master
         .address
@@ -213,23 +215,18 @@ pub fn run(root: &Path, source: &Path) -> Result<bool> {
     {
         return Err("scenario requires the dev master (port 4434, TLS name iw4l-dev or the descriptor host)".into());
     }
-    let games = asset_transport::games_root_from_env()?
-        .0
-        .canonicalize()
-        .map_err(|e| e.to_string())?;
     let source = source.canonicalize().map_err(|e| e.to_string())?;
-    let binary = cwd.join("iw4l");
-    let temporary = cwd.join(format!("iw4l.stage-{}", std::process::id()));
-    fs::hard_link(&source, &temporary)
-        .or_else(|_| fs::copy(&source, &temporary).map(drop))
-        .map_err(|e| e.to_string())?;
-    fs::rename(&temporary, &binary).map_err(|e| e.to_string())?;
     let run = root.join("iw4l-artifacts/approved-tests").join(format!(
         "{}-{NAME}-{}",
         crate::utc_stamp(),
         std::process::id()
     ));
-    fs::create_dir_all(&run).map_err(|e| e.to_string())?;
+    let cwd = run.join("install");
+    fs::create_dir_all(&cwd).map_err(|e| e.to_string())?;
+    let binary = cwd.join("iw4l");
+    fs::hard_link(&source, &binary)
+        .or_else(|_| fs::copy(&source, &binary).map(drop))
+        .map_err(|e| e.to_string())?;
     fs::write(run.join("community-dev.iw4l-server"), &bytes).map_err(|e| e.to_string())?;
     let mut manifest = json!({"scenario": NAME, "result": "running", "cwd": cwd,
         "binary": binary, "build": crate::report::build_facts(root, &source),
@@ -328,6 +325,7 @@ fn execute(
         player.mark("final")?;
     }
     for player in [&mut client, &mut host] {
+        player.send("disconnect; wait torn; wait 0.1s; mark sources_torn")?;
         player.finish()?;
     }
     manifest["gameplay_elapsed_ms"] = json!(started.elapsed().as_millis());
@@ -337,6 +335,8 @@ fn execute(
         let start = event(&output, "movement.begin").ok_or("movement begin missing")?;
         let end = event(&output, "movement.end").ok_or("movement end missing")?;
         let final_event = event(&output, "final").ok_or("final mark missing")?;
+        assertions.push(json!({"name": format!("{}.sources_torn", player.role),
+            "passed": event(&output, "sources_torn").is_some()}));
         let tick_delta = final_event
             .num("tick")
             .zip(start.num("tick"))

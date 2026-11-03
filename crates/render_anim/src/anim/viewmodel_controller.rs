@@ -592,8 +592,10 @@ impl ViewmodelController {
             let Some(clip) = self.weapon.clip_at(node) else {
                 continue;
             };
+            // A loop never finishes; deferring idle to it would hold e.g.
+            // SprintLoop forever when the sim skips SprintOut.
             if clip.looping {
-                return true;
+                continue;
             }
             let time = self.tree.time(node).unwrap_or(0.0);
             if time < clip.duration() {

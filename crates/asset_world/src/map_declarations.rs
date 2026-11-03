@@ -25,17 +25,8 @@ impl MapDeclarations {
         }
     }
 
-    pub fn from_t5_map_main(source: &str) -> Self {
-        let compass = source
-            .split("setupMiniMap")
-            .skip(1)
-            .filter_map(|call| call.split('"').nth(1))
-            .find(|name| name.starts_with("compass_map_") && !name.ends_with("_wager"))
-            .map(str::to_owned);
-        Self {
-            compass,
-            ..Self::default()
-        }
+    pub fn set_compass(&mut self, compass: Option<String>) {
+        self.compass = compass;
     }
 
     pub fn set_teams(&mut self, attackers: &str, defenders: &str) {

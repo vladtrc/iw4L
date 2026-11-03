@@ -9,7 +9,7 @@ use crate::{MenuCatalog, MenuDef, MenuEvent, MenuItem};
 #[serde(untagged)]
 enum Definition {
     Variant(Variant),
-    Complete(MenuDef),
+    Complete(Box<MenuDef>),
 }
 
 #[derive(Deserialize)]
@@ -109,7 +109,7 @@ pub(crate) fn load(source: &str, catalog: &MenuCatalog) -> Result<Vec<MenuDef>, 
     let mut resolved = BTreeMap::<String, MenuDef>::new();
     for definition in definitions {
         let def = match definition {
-            Definition::Complete(def) => def,
+            Definition::Complete(def) => *def,
             Definition::Variant(variant) => {
                 let base = resolved
                     .get(&variant.base)

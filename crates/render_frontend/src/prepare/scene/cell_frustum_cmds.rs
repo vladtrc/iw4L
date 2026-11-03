@@ -31,7 +31,7 @@ pub fn register_cell_frustum_cmds(app: &mut App) {
         enqueue_cell_frustum_cmds_after_vis
             .in_set(frame::InMatch)
             .after(crate::prepare::scene::cull::apply_dpvs_cull)
-            .in_set(frame::WorkerCmdSet::CellStatic),
+            .in_set(frame::WorkerCmdSet::WorldVisibility),
     );
 }
 

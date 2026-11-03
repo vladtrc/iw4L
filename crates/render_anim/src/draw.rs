@@ -124,6 +124,10 @@ pub struct ScriptModelDrawPlan {
 }
 
 impl ScriptModelDrawPlan {
+    pub fn owners(&self) -> &[ScriptModelOwnerDraw] {
+        &self.owners
+    }
+
     pub fn asset_index(
         &self,
         key: &asset_world::MapXModelAssetKey,
@@ -213,6 +217,10 @@ pub struct DynEntDrawPlan {
 }
 
 impl DynEntDrawPlan {
+    pub fn owners(&self) -> &[DynEntOwnerDraw] {
+        &self.owners
+    }
+
     pub fn asset(
         &self,
         key: &asset_world::MapXModelAssetKey,
@@ -241,12 +249,6 @@ pub struct FpvDrawPlan {
     pub hands_plan_n: Option<u32>,
     pub gun_plan_n: Option<u32>,
 
-    pub gun_colormap_skip_n: Option<u32>,
-
-    pub gun_ordinal_skip_n: Option<u32>,
-
-    pub gun_colormap_skip_names: Option<String>,
-
     pub scope_plan_n: Option<u32>,
 
     pub scope_house_plan_n: Option<u32>,
@@ -254,8 +256,6 @@ pub struct FpvDrawPlan {
     pub scope_lens_plan_n: Option<u32>,
 
     pub plan_draw_n: Option<u32>,
-
-    pub plan_mat_hints: Option<String>,
 
     pub plan_skip_n: Option<u32>,
 

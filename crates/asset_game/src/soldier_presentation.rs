@@ -227,19 +227,9 @@ impl SoldierPresentation {
         if body.namespace != family {
             return Err("soldier body differs from map family".into());
         }
-        let choice = if family == FamilyId::T6 {
-            kit.arms
-                .as_ref()
-                .map(|name| FpvHands::FromKit {
-                    namespace: family,
-                    name: name.clone(),
-                })
-                .map(Some)
-                .ok_or_else(|| "T6 soldier kit hands missing".to_owned())
-        } else {
-            let choice = FpvHands::resolve(meshes, family, Some(&kit), None, family);
-            Ok(choice.key().is_some().then_some(choice))
-        };
+        let choice = (asset_model::model_family(family)
+            .ok_or("soldier model family missing")?
+            .soldier_hands)(meshes, family, &kit);
         let mut presentation = Self {
             head: SoldierHead::prepare(bodies, &kit, family),
             animation: SoldierBodyAnimation::prepare(bodies, &kit, sources, catalog),

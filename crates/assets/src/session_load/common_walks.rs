@@ -8,14 +8,18 @@ pub struct MatchMaterialSeed {
 pub fn load_match_material_seed(
     progress: &LoadProgress,
 ) -> Result<(MatchMaterialSeed, Vec<String>), String> {
-    let root = games_root_from_env()?;
+    let root = games_root()?;
     let runtime = find_zone_file_version(&root, "common_mp", fastfile_iw4::ZONE_VERSION_PC)?;
 
     let (catalog, mut report, _, _, _) = bevy::tasks::futures_lite::future::block_on(
         walk_startup_material_zones(Some(&runtime.path), progress),
     );
-    let catalog =
-        walk_t5_leftover_materials(Some(runtime.path.as_path()), progress, catalog, &mut report);
+    let catalog = walk_supplemental_material_seed(
+        Some(runtime.path.as_path()),
+        progress,
+        catalog,
+        &mut report,
+    );
     let (catalog, common_report) = walk_material_file(&runtime.path, progress, catalog);
     report.extend(common_report);
     report.push(format!(
@@ -35,7 +39,7 @@ pub fn apply_match_material_map(
     progress: &LoadProgress,
 ) -> (MaterialCatalog, Vec<String>) {
     let mut report = Vec::new();
-    let runtime = games_root_from_env()
+    let runtime = games_root()
         .ok()
         .and_then(|root| find_runtime_common_mp(&root, zone_ff).ok());
     let (foreign, foreign_report) = walk_foreign_material_population(
@@ -51,11 +55,11 @@ pub fn apply_match_material_map(
     let (mut catalog, map_report) = walk_material_file(zone_ff, progress, catalog);
     report.extend(map_report);
     let absorbed = catalog.absorb_technique_set_tables(&common_techsets);
-    let promoted = catalog.promote_iw5_fallback_tables();
-    let t5_alias = catalog.absorb_t5_feature_token_donors();
+    let promoted = catalog.promote_fallback_tables();
+    let feature_aliases = catalog.absorb_feature_variant_donors();
     let stub_routed = catalog.reroute_stub_materials();
     report.push(format!(
-        "material route (census): absorbed_techsets={absorbed} t5_tech_alias={t5_alias} iw5_promoted={promoted} stub_routed={stub_routed} unrouted={}",
+        "material route (census): absorbed_techsets={absorbed} feature_variant_aliases={feature_aliases} fallback_tables_promoted={promoted} stub_routed={stub_routed} unrouted={}",
         catalog.unrouted_material_count()
     ));
     (catalog, report)
@@ -76,7 +80,7 @@ fn walk_material_file(
     progress: &LoadProgress,
     seed: MaterialCatalog,
 ) -> (MaterialCatalog, Vec<String>) {
-    let population = walk_population_file(path, progress, seed);
+    let (_, population) = walk_population_file(path, progress, seed);
     (population.materials, population.report)
 }
 
@@ -84,7 +88,7 @@ pub(super) fn walk_population_file(
     path: &Path,
     progress: &LoadProgress,
     seed: MaterialCatalog,
-) -> crate::lane::MaterialPopulation {
+) -> (Option<asset_core::FamilyId>, crate::MaterialPopulation) {
     let zone_name = path
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
@@ -93,100 +97,80 @@ pub(super) fn walk_population_file(
     let opened = open_zone_shared(path);
     finish_zone_open(stage, &opened);
     match opened {
-        Ok(image) => lane(image.game).load_material_population(path, &image, progress, seed),
-        Err(error) => crate::lane::MaterialPopulation {
-            materials: seed,
-            report: vec![format!("match materials: open {}: {error}", path.display())],
-            ..Default::default()
-        },
+        Ok(image) => (
+            Some(image.game),
+            match lane(image.game) {
+                Some(selected) => selected.load_material_population(path, &image, progress, seed),
+                None => crate::MaterialPopulation {
+                    materials: seed,
+                    report: vec![format!("zone lane not installed: {}", image.game.as_str())],
+                    ..Default::default()
+                },
+            },
+        ),
+        Err(error) => (
+            None,
+            crate::MaterialPopulation {
+                materials: seed,
+                report: vec![format!("match materials: open {}: {error}", path.display())],
+                ..Default::default()
+            },
+        ),
     }
 }
 
-fn walk_t5_leftover_materials(
+fn walk_supplemental_material_seed(
     runtime_common: Option<&Path>,
     progress: &LoadProgress,
-    seed: MaterialCatalog,
+    mut seed: MaterialCatalog,
     report: &mut Vec<String>,
 ) -> MaterialCatalog {
-    let root = match games_root_from_env() {
+    let root = match games_root() {
         Ok(root) => root,
         Err(error) => {
-            report.push(format!("t5 leftover common: {error}"));
+            report.push(format!("supplemental material seed: {error}"));
             return seed;
         }
     };
-    let donor = match find_common_mp_for_envelope(&root, fastfile_t5::ZONE_VERSION_PC) {
-        Ok(donor) => donor,
-        Err(error) => {
-            report.push(format!("t5 leftover common: {error}"));
-            return seed;
+    for (family, plan) in crate::plan_common_material_seeds(&root, runtime_common, report) {
+        report.extend(plan.report);
+        if plan.common.is_none() && plan.startup.is_empty() {
+            continue;
         }
-    };
-    if runtime_common.is_some_and(|path| path == donor.path.as_path()) {
+        let (startup, _, startup_report) = walk_planned_startup_materials(&plan.startup, progress);
+        report.extend(startup_report);
+        let count = startup.materials.len();
+        seed.absorb_missing_reals(startup);
         report.push(format!(
-            "t5 leftover common: runtime path is already {} — skip",
-            donor.path.display()
+            "{} startup material seed: donor={count} host={}",
+            family.as_str(),
+            seed.materials.len()
         ));
-        return seed;
+        if let Some(common) = plan.common {
+            let (catalog, walked) = walk_material_file(&common, progress, seed);
+            report.extend(walked);
+            seed = catalog;
+        }
     }
-    let (leftover_startup, _, leftover_startup_report) =
-        leftover_walk_t5_startup_materials(progress);
-    report.extend(leftover_startup_report);
-    let leftover_startup_n = leftover_startup.materials.len();
-    let mut seed = seed;
-    seed.absorb_missing_reals(leftover_startup);
-    report.push(format!(
-        "t5 leftover startup gfx absorb_missing_reals: donor={leftover_startup_n} host now {}",
-        seed.materials.len()
-    ));
-    let (catalog, walked) = walk_material_file(&donor.path, progress, seed);
-    report.extend(walked);
-    report.push(format!(
-        "t5 leftover common: path={} materials={}",
-        donor.path.display(),
-        catalog.materials.len(),
-    ));
-    catalog
+    seed
 }
 
-fn leftover_walk_t5_startup_materials(
+fn walk_planned_startup_materials(
+    sources: &[crate::CommonStartupSource],
     progress: &LoadProgress,
-) -> (
-    MaterialCatalog,
-    Vec<asset_game::CapturedStringTable>,
-    Vec<String>,
-) {
-    let mut report = Vec::new();
-    let root = match games_root_from_env() {
-        Ok(root) => root,
-        Err(error) => {
-            report.push(format!("t5 leftover startup gfx: {error}"));
-            return (MaterialCatalog::default(), Vec::new(), report);
-        }
-    };
-    const ZONES: [&str; 3] = ["code_post_gfx_mp", "localized_code_post_gfx_mp", "patch_mp"];
+) -> (MaterialCatalog, Vec<CommonTables>, Vec<String>) {
     let mut seed = MaterialCatalog::default();
-    let mut stats = Vec::new();
-    for zone in ZONES {
-        let found = match find_zone_file_version(&root, zone, fastfile_t5::ZONE_VERSION_PC) {
-            Ok(found) => found,
-            Err(error) => {
-                report.push(format!("t5 leftover startup gfx gap: {zone}: {error}"));
-                continue;
-            }
-        };
-        let population = walk_population_file(&found.path, progress, seed);
+    let mut tables = Vec::new();
+    let mut report = Vec::new();
+    for source in sources {
+        let (owner, population) = walk_population_file(&source.path, progress, seed);
         report.extend(population.report);
-        if zone == "code_post_gfx_mp" {
-            stats = population.cac_tables;
+        if source.collect_tables {
+            tables.push(CommonTables::capture(owner, population.cac_tables));
         }
         seed = population.materials;
     }
-    report.push(format!(
-        "t5 leftover startup gfx: materials={}",
-        seed.materials.len()
-    ));
-    (seed, stats, report)
+    (seed, tables, report)
 }
 
 fn walk_foreign_material_population(
@@ -195,43 +179,19 @@ fn walk_foreign_material_population(
     progress: &LoadProgress,
 ) -> (MaterialCatalog, Vec<String>) {
     let mut report = Vec::new();
-    let Some(zone_ff) = zone_ff else {
+    let Some(donor) = resolve_foreign_material_donor(
+        zone_ff,
+        runtime_common,
+        &mut report,
+        frame::AssetFamilies::all_installed(),
+    ) else {
         return (MaterialCatalog::default(), report);
     };
-    let donor = match find_common_mp_for_zone(zone_ff) {
-        Ok(donor) => donor,
-        Err(error) => {
-            report.push(format!(
-                "foreign data common: no same-tree common_mp ({error})"
-            ));
-            return (MaterialCatalog::default(), report);
-        }
-    };
-    if runtime_common.is_some_and(|path| path == donor.path.as_path()) {
-        return (MaterialCatalog::default(), report);
-    }
-    match peek_zone_version(&donor.path) {
-        Some(fastfile_iw5::ZONE_VERSION_PC) => {}
-        Some(version) => {
-            report.push(format!(
-                "foreign data common: skip envelope {version:#x} at {} (IW5 material data only)",
-                donor.path.display()
-            ));
-            return (MaterialCatalog::default(), report);
-        }
-        None => {
-            report.push(format!(
-                "foreign data common: unreadable envelope at {}",
-                donor.path.display()
-            ));
-            return (MaterialCatalog::default(), report);
-        }
-    }
-    let (materials, walked) = walk_material_file(&donor.path, progress, MaterialCatalog::default());
+    let (materials, walked) = walk_material_file(&donor, progress, MaterialCatalog::default());
     report.extend(walked);
     report.push(format!(
         "foreign data common: path={} materials={} techsets={} (weapons discarded)",
-        donor.path.display(),
+        donor.display(),
         materials.materials.len(),
         materials.technique_set_facts().len(),
     ));
@@ -242,73 +202,24 @@ pub(super) fn resolve_foreign_material_donor(
     zone_ff: Option<&Path>,
     runtime_common: Option<&Path>,
     report: &mut Vec<String>,
+    enabled: frame::AssetFamilies,
 ) -> Option<PathBuf> {
-    let zone_ff = zone_ff?;
-    let donor = match find_common_mp_for_zone(zone_ff) {
-        Ok(donor) => donor,
-        Err(error) => {
-            report.push(format!(
-                "foreign data common: no same-tree common_mp ({error})"
-            ));
-            return None;
-        }
-    };
-    if runtime_common.is_some_and(|path| path == donor.path.as_path()) {
-        return None;
-    }
-    match peek_zone_version(&donor.path) {
-        Some(fastfile_iw5::ZONE_VERSION_PC) => Some(donor.path),
-        Some(version) => {
-            report.push(format!(
-                "foreign data common: skip envelope {version:#x} at {} (IW5 material data only)",
-                donor.path.display()
-            ));
-            None
-        }
-        None => {
-            report.push(format!(
-                "foreign data common: unreadable envelope at {}",
-                donor.path.display()
-            ));
-            None
-        }
-    }
+    crate::plan_common_material_donor(
+        zone_ff?,
+        runtime_common,
+        |family| enabled.enabled(family.as_str()),
+        report,
+    )
 }
 
-pub(super) fn walk_foreign_material_common(
+pub(super) fn capture_common_zone(
     donor: &Path,
-    progress: &LoadProgress,
-    job: load_jobs::Job,
-) -> (MaterialCatalog, Option<HeldImagePlan>, Vec<String>) {
-    let mut report = Vec::new();
-    let Some(mut census) = capture_common_zone(
-        donor,
-        "walking same-tree common_mp as material data",
-        "foreign data common",
-        progress,
-        &mut report,
-    ) else {
-        return (MaterialCatalog::default(), None, report);
-    };
-    let held_images = hold_image_plan("IW5 common_mp", census.pending_images.take(), job);
-    let materials = census.material_population;
-    report.extend(census.report);
-    report.push(format!(
-        "foreign data common: path={} materials={} techsets={} (weapons discarded)",
-        donor.display(),
-        materials.materials.len(),
-        materials.technique_set_facts().len(),
-    ));
-    (materials, held_images, report)
-}
-
-fn capture_common_zone(
-    donor: &Path,
+    expected: Option<asset_core::FamilyId>,
     stage_label: &str,
     report_label: &str,
     progress: &LoadProgress,
     report: &mut Vec<String>,
-) -> Option<crate::lane::CommonCensus> {
+) -> Option<(asset_core::FamilyId, crate::CommonCensus)> {
     if progress.is_canceled() {
         report.push(format!("{report_label}: canceled before the walk started"));
         return None;
@@ -317,13 +228,27 @@ fn capture_common_zone(
     let opened = open_zone_shared(donor);
     finish_zone_open(stage, &opened);
     match opened {
-        Ok(image) => Some(lane(image.game).load_common_mp(
-            donor,
-            &image,
-            progress,
-            true,
-            MaterialCatalog::default(),
-        )),
+        Ok(image) => {
+            if expected.is_some_and(|family| family != image.game) {
+                report.push(format!(
+                    "{report_label}: source owner mismatch at {}: captured {}",
+                    donor.display(),
+                    image.game.as_str()
+                ));
+                return None;
+            }
+            let Some(selected) = lane(image.game) else {
+                report.push(format!(
+                    "{report_label}: zone lane not installed: {}",
+                    image.game.as_str()
+                ));
+                return None;
+            };
+            Some((
+                image.game,
+                selected.load_common_mp(donor, &image, progress, true, MaterialCatalog::default()),
+            ))
+        }
         Err(error) => {
             report.push(format!("{report_label}: open {}: {error}", donor.display()));
             None
@@ -526,451 +451,279 @@ impl HeldImagePlan {
     }
 }
 
-pub(super) enum ForeignCommonWork {
-    Shared(
-        bevy::tasks::Task<(
-            MaterialCatalog,
-            Iw5WeaponBundle,
-            Option<HeldImagePlan>,
-            Vec<String>,
-        )>,
-    ),
-    Split(Option<bevy::tasks::Task<(MaterialCatalog, Option<HeldImagePlan>, Vec<String>)>>),
+pub(super) struct SeededSourcePrep {
+    family: asset_core::FamilyId,
+    donor: Option<PathBuf>,
+    opened: Option<Result<std::sync::Arc<asset_transport::ZoneImage>, String>>,
+    startup: MaterialCatalog,
+    tables: Vec<CommonTables>,
 }
 
-#[derive(Default)]
-pub(super) struct Iw5WeaponBundle {
-    pub(super) fx: FxCatalog,
-    pub(super) weapons: WeaponBuild,
-    pub(super) fpv: FpvMeshBuild,
-    pub(super) world_guns: WorldWeaponBuild,
-    pub(super) xanims: XAnimBuild,
-    pub(super) player_anim_sources: asset_anim::PlayerAnimSources,
-
-    pub(super) materials: MaterialCatalog,
-    pub(super) stats_tables: Vec<asset_game::CapturedStringTable>,
-    pub(super) scene_models: asset_world::MapXModelSceneCatalog,
-    pub(super) shared_surfaces: asset_model::SharedXModelSurfaces,
+pub(super) struct SeededCommonPrep {
+    sources: Vec<SeededSourcePrep>,
+    report: Vec<String>,
 }
 
-pub(super) fn resolve_iw5_weapon_donor(
-    runtime_common: Option<&Path>,
-    report: &mut Vec<String>,
-) -> Option<PathBuf> {
-    let Ok(root) = games_root_from_env() else {
-        report.push("iw5 weapons: IW4L_GAMES unset".into());
-        return None;
-    };
-    let donor = match find_zone_file_version(&root, "common_mp", fastfile_iw5::ZONE_VERSION_PC) {
-        Ok(donor) => donor,
-        Err(error) => {
-            report.push(format!("iw5 weapons: {error}"));
-            return None;
-        }
-    };
-    if runtime_common.is_some_and(|path| path == donor.path.as_path()) {
-        report.push(format!(
-            "iw5 weapons: skip, runtime common is already IW5 ({})",
-            donor.path.display()
-        ));
-        return None;
-    }
-    Some(donor.path)
-}
-
-pub(super) fn walk_iw5_weapon_bundle(
-    donor: &Path,
+pub(super) fn prepare_seeded_common(
+    runtime: Option<&Path>,
     progress: &LoadProgress,
-    job: load_jobs::Job,
-) -> (Iw5WeaponBundle, Option<HeldImagePlan>, Vec<String>) {
-    let mut report = Vec::new();
-    let Some(mut census) = capture_common_zone(
-        donor,
-        "walking IW5 common_mp as weapon bundle",
-        "iw5 weapons",
-        progress,
-        &mut report,
-    ) else {
-        return (Iw5WeaponBundle::default(), None, report);
+    enabled: frame::AssetFamilies,
+) -> SeededCommonPrep {
+    let mut prep = SeededCommonPrep {
+        sources: Vec::new(),
+        report: Vec::new(),
     };
-    let held_images = hold_image_plan("IW5 weapon bundle", census.pending_images.take(), job);
-    report.extend(census.report);
-    report.push(format!(
-        "iw5 weapons: path={} ids={} gun_named={} fpv={} world_guns={} xanims={} materials={}",
-        donor.display(),
-        census.weapons.len(),
-        census.weapons.gun_xmodel_count(),
-        census.fpv.len(),
-        census.world_weapons.len(),
-        census.xanims.len(),
-        census.material_population.materials.len(),
-    ));
-    (
-        Iw5WeaponBundle {
-            fx: census.fx,
-            weapons: census.weapons,
-            fpv: census.fpv,
-            world_guns: census.world_weapons,
-            xanims: census.xanims,
-            player_anim_sources: census.player_anim_sources,
-            materials: census.material_population,
-            stats_tables: census.cac_tables,
-            scene_models: census.scene_models,
-            shared_surfaces: census.shared_surfaces,
-        },
-        held_images,
-        report,
-    )
-}
-
-pub(super) fn walk_shared_iw5_common(
-    donor: &Path,
-    progress: &LoadProgress,
-    job: load_jobs::Job,
-) -> (
-    MaterialCatalog,
-    Iw5WeaponBundle,
-    Option<HeldImagePlan>,
-    Vec<String>,
-) {
-    let mut report = Vec::new();
-    let Some(mut census) = capture_common_zone(
-        donor,
-        "walking IW5 common_mp as material data + weapon bundle",
-        "iw5 common",
-        progress,
-        &mut report,
-    ) else {
-        return (
-            MaterialCatalog::default(),
-            Iw5WeaponBundle::default(),
-            None,
-            report,
-        );
-    };
-    // One capture serves the material seed and the weapon bundle, so there is
-    // one plan here, not two: the donor is walked once and its images are
-    // claimed once.
-    let held_images = hold_image_plan("IW5 common_mp", census.pending_images.take(), job);
-    report.extend(census.report);
-    let materials = census.material_population;
-    report.push(format!(
-        "iw5 common (shared capture): path={} materials={} techsets={} ids={} gun_named={} fpv={} world_guns={} xanims={} — one read/inflate/walk serves both the material seed and the weapon bundle; leftover materials are the seeded rows, not a second donor",
-        donor.display(),
-        materials.materials.len(),
-        materials.technique_set_facts().len(),
-        census.weapons.len(),
-        census.weapons.gun_xmodel_count(),
-        census.fpv.len(),
-        census.world_weapons.len(),
-        census.xanims.len(),
-    ));
-
-    (
-        materials,
-        Iw5WeaponBundle {
-            fx: census.fx,
-            weapons: census.weapons,
-            fpv: census.fpv,
-            world_guns: census.world_weapons,
-            xanims: census.xanims,
-            player_anim_sources: census.player_anim_sources,
-            materials: MaterialCatalog::default(),
-            stats_tables: census.cac_tables,
-            scene_models: census.scene_models,
-            shared_surfaces: census.shared_surfaces,
-        },
-        held_images,
-        report,
-    )
-}
-
-pub(super) enum T5CommonPrep {
-    Skip(Vec<String>),
-    Ready {
-        donor: PathBuf,
-        opened: Result<std::sync::Arc<asset_transport::ZoneImage>, String>,
-        leftover_startup: MaterialCatalog,
-        leftover_stats: Vec<asset_game::CapturedStringTable>,
-        report: Vec<String>,
-    },
-}
-
-pub(super) fn t5_weapon_common_prep(
-    runtime_common: Option<&Path>,
-    progress: &LoadProgress,
-) -> T5CommonPrep {
-    let mut report = Vec::new();
-    let root = match games_root_from_env() {
+    let root = match games_root() {
         Ok(root) => root,
         Err(error) => {
-            report.push(format!("t5 weapon common: {error}"));
-            return T5CommonPrep::Skip(report);
+            prep.report.push(error);
+            return prep;
         }
     };
-    let donor = match find_common_mp_for_envelope(&root, fastfile_t5::ZONE_VERSION_PC) {
-        Ok(donor) => donor,
-        Err(error) => {
-            report.push(format!("t5 weapon common: {error}"));
-            return T5CommonPrep::Skip(report);
+    for (family, policy) in crate::common_source_families() {
+        if !enabled.enabled(family.as_str()) {
+            continue;
         }
-    };
-    if runtime_common.is_some_and(|path| path == donor.path.as_path()) {
-        report.push(format!(
-            "t5 weapon common: runtime path is already {} — skip absorb",
-            donor.path.display()
-        ));
-        return T5CommonPrep::Skip(report);
+        let Some(planner) = policy.material_seed else {
+            continue;
+        };
+        let plan = match planner(&root, runtime) {
+            Ok(plan) => plan,
+            Err(error) => {
+                prep.report
+                    .push(format!("{} seeded common: {error}", family.as_str()));
+                continue;
+            }
+        };
+        prep.report.extend(plan.report);
+        let donor = plan.common;
+        if donor.is_none() && plan.startup.is_empty() {
+            continue;
+        }
+        let (startup, tables, report) = walk_planned_startup_materials(&plan.startup, progress);
+        prep.report.extend(report);
+        let opened = donor.as_ref().map(|path| {
+            let stage = progress.begin_scoped(StageId::CommonAssets, "seeded common", None);
+            let opened = open_zone_shared(path).map_err(|error| error.to_string());
+            stage.finish_from(&opened);
+            opened
+        });
+        prep.sources.push(SeededSourcePrep {
+            family,
+            donor,
+            opened,
+            startup,
+            tables,
+        });
     }
-    let (leftover_startup, leftover_stats, leftover_startup_report) =
-        leftover_walk_t5_startup_materials(progress);
-    report.extend(leftover_startup_report);
-    let stage = progress.begin_scoped(StageId::CommonAssets, "t5_weapons", None);
-    let opened = open_zone_shared(&donor.path).map_err(|error| error.to_string());
-    stage.finish_from(&opened);
-    T5CommonPrep::Ready {
-        donor: donor.path,
-        opened,
-        leftover_startup,
-        leftover_stats,
-        report,
-    }
+    prep
 }
 
-pub(super) struct T5WeaponCommon {
-    pub(super) weapons: WeaponBuild,
-    pub(super) fpv: FpvMeshBuild,
-    pub(super) world_guns: WorldWeaponBuild,
-    pub(super) material_seed: MaterialCatalog,
-    pub(super) xanims: XAnimBuild,
-    pub(super) player_anim_sources: asset_anim::PlayerAnimSources,
-    pub(super) fx: FxCatalog,
-    pub(super) impact_fx: Option<asset_game::OwnedFxImpactTable>,
-    pub(super) projectiles: asset_model::ProjectileMeshBuild,
-    pub(super) teamsets: std::collections::HashMap<String, asset_game::MapTeamSettings>,
-    pub(super) scene_models: asset_world::MapXModelSceneCatalog,
-    pub(super) images: Option<HeldImagePlan>,
-    pub(super) stats_tables: (
-        Vec<asset_game::CapturedStringTable>,
-        Vec<asset_game::CapturedStringTable>,
-    ),
+pub(super) struct SeededCommonSource {
+    pub(super) path: PathBuf,
+    pub(super) family: asset_core::FamilyId,
+    pub(super) census: crate::CommonCensus,
+}
+
+pub(super) struct SeededCommonProducts {
+    pub(super) materials: MaterialCatalog,
+    pub(super) sources: Vec<SeededCommonSource>,
+    pub(super) tables: Vec<CommonTables>,
+    pub(super) images: Vec<(&'static str, HeldImagePlan)>,
     pub(super) report: Vec<String>,
 }
 
-impl T5WeaponCommon {
-    pub(super) fn empty(material_seed: MaterialCatalog, report: Vec<String>) -> Self {
-        Self {
-            weapons: asset_game::WeaponBuild::default(),
-            fpv: FpvMeshBuild::default(),
-            world_guns: WorldWeaponBuild::default(),
-            material_seed,
-            xanims: XAnimBuild::default(),
-            player_anim_sources: asset_anim::PlayerAnimSources::default(),
-            fx: FxCatalog::default(),
-            impact_fx: None,
-            projectiles: asset_model::ProjectileMeshBuild::default(),
-            teamsets: Default::default(),
-            scene_models: Default::default(),
-            images: None,
-            stats_tables: (Vec::new(), Vec::new()),
-            report,
-        }
-    }
-}
-
-pub(super) fn walk_t5_weapon_common(
-    prep: T5CommonPrep,
+pub(super) fn walk_seeded_common(
+    prep: SeededCommonPrep,
     progress: &LoadProgress,
-    material_seed: MaterialCatalog,
-    job: load_jobs::Job,
-) -> T5WeaponCommon {
-    let (donor, opened, leftover_startup, leftover_stats, mut report) = match prep {
-        T5CommonPrep::Skip(report) => return T5WeaponCommon::empty(material_seed, report),
-        T5CommonPrep::Ready {
-            donor,
-            opened,
-            leftover_startup,
-            leftover_stats,
-            report,
-        } => (donor, opened, leftover_startup, leftover_stats, report),
-    };
-    let leftover_startup_n = leftover_startup.materials.len();
-    let mut material_seed = material_seed;
-    material_seed.absorb_missing_reals(leftover_startup);
-    report.push(format!(
-        "t5 leftover startup gfx absorb_missing_reals: donor={leftover_startup_n} host now {}",
-        material_seed.materials.len()
-    ));
-    let image = match opened {
-        Ok(image) => image,
-        Err(error) => {
+    mut materials: MaterialCatalog,
+) -> SeededCommonProducts {
+    let mut sources = Vec::new();
+    let mut tables = Vec::new();
+    let mut images = Vec::new();
+    let mut report = prep.report;
+    for source in prep.sources {
+        materials.absorb_missing_reals(source.startup);
+        // Startup tables survive a subsequent failed common capture.
+        let table_start = tables.len();
+        tables.extend(source.tables);
+        let Some(opened) = source.opened else {
+            continue;
+        };
+        let donor = source.donor.expect("opened common source path");
+        let image = match opened {
+            Ok(image) => image,
+            Err(error) => {
+                report.push(format!("seeded common {}: {error}", donor.display()));
+                continue;
+            }
+        };
+        if image.game != source.family {
             report.push(format!(
-                "t5 weapon common: open {}: {error}",
-                donor.display()
+                "seeded common owner mismatch: {} planned {}, captured {}",
+                donor.display(),
+                source.family.as_str(),
+                image.game.as_str()
             ));
-            let mut empty = T5WeaponCommon::empty(material_seed, report);
-            empty.stats_tables.0 = leftover_stats;
-            return empty;
+            continue;
         }
-    };
-    let mut census = lane(image.game).load_common_mp(&donor, &image, progress, true, material_seed);
-    let images = hold_image_plan("T5 common_mp", census.pending_images.take(), job);
-    report.extend(census.report);
-    report.push(format!(
-        "t5 weapon common: path={} weapons={} fpv={} world_guns={} materials={} xanims={} fx={}",
-        donor.display(),
-        census.weapons.len(),
-        census.fpv.len(),
-        census.world_weapons.len(),
-        census.material_population.materials.len(),
-        census.xanims.len(),
-        census.fx.len(),
-    ));
-    T5WeaponCommon {
-        weapons: census.weapons,
-        fpv: census.fpv,
-        world_guns: census.world_weapons,
-        material_seed: census.material_population,
-        xanims: census.xanims,
-        player_anim_sources: census.player_anim_sources,
-        fx: census.fx,
-        impact_fx: census.impact_fx,
-        projectiles: census.projectile_meshes,
-        teamsets: census.teamsets,
-        scene_models: census.scene_models,
+        let Some(selected) = lane(image.game) else {
+            report.push(format!("zone lane not installed: {}", image.game.as_str()));
+            continue;
+        };
+        let mut census = selected.load_common_mp(&donor, &image, progress, true, materials);
+        materials = std::mem::take(&mut census.material_population);
+        for table in &tables[table_start..] {
+            if table.owner() == Some(image.game) {
+                census.weapons.apply_stats_tables(&table.tables);
+            }
+        }
+        report.append(&mut census.report);
+        if let Some(plan) = hold_image_plan(
+            "seeded common",
+            census.pending_images.take(),
+            load_jobs::open(JobKind::ImageDecode).namespace(source.family.as_str()),
+        ) {
+            images.push((source.family.as_str(), plan));
+        }
+        tables.push(CommonTables::capture(
+            Some(image.game),
+            std::mem::take(&mut census.cac_tables),
+        ));
+        sources.push(SeededCommonSource {
+            path: donor,
+            family: image.game,
+            census,
+        });
+    }
+    SeededCommonProducts {
+        materials,
+        sources,
+        tables,
         images,
-        stats_tables: (leftover_stats, census.cac_tables),
         report,
     }
 }
 
-fn t6_class_tables(
-    root: &asset_transport::GamesRoot,
-    report: &mut Vec<String>,
-) -> Vec<asset_game::CapturedStringTable> {
-    let zone = match find_zone_file_version(root, "patch_mp", fastfile_t6::ZONE_VERSION_PC) {
-        Ok(zone) => zone,
-        Err(error) => {
-            report.push(format!("t6 class tables: {error}"));
-            return Vec::new();
-        }
-    };
-    let image = match asset_transport::open_t6_zone(&zone.path) {
-        Ok(image) => image,
-        Err(error) => {
-            report.push(format!("t6 class tables: {error}"));
-            return Vec::new();
-        }
-    };
-    let schema = match fastfile_t6::schema::parse() {
-        Ok(schema) => schema,
-        Err(error) => {
-            report.push(format!("t6 class tables: load plan {error:?}"));
-            return Vec::new();
-        }
-    };
-    let (load, walked) = fastfile_t6::load_zone(&schema, &image.bytes, |_, _| true);
-    if let Err(error) = walked {
-        report.push(format!("t6 class tables: patch_mp walk stopped: {error:?}"));
-    }
-    let tables: Vec<_> = load
-        .assets
-        .iter()
-        .filter_map(|asset| asset_game::capture_t6_string_table(&load, asset))
-        .filter(|table| {
-            asset_game::is_stats_table_name(&table.name)
-                || table.name.eq_ignore_ascii_case("mp/attachmentTable.csv")
-                || table.name.eq_ignore_ascii_case("mp/mapstable.csv")
-                || table.name.eq_ignore_ascii_case("mp/rankTable.csv")
-                || table.name.eq_ignore_ascii_case("mp/unlockTable.csv")
-        })
-        .collect();
-    report.push(format!(
-        "t6 class tables: {} from {}",
-        tables.len(),
-        zone.path.display()
-    ));
-    tables
+pub(super) struct SupplementalCommonSource {
+    pub(super) family: asset_core::FamilyId,
+    pub(super) path: Option<PathBuf>,
+    pub(super) census: Option<crate::CommonCensus>,
+    pub(super) startup: MaterialCatalog,
+    pub(super) startup_light_defs: Vec<asset_world::CapturedLightDef>,
+    pub(super) tables: Vec<CommonTables>,
 }
 
-pub(super) fn walk_t6_weapon_bundle(
+pub(super) struct SupplementalCommonProducts {
+    pub(super) sources: Vec<SupplementalCommonSource>,
+    pub(super) images: Vec<(&'static str, HeldImagePlan)>,
+    pub(super) report: Vec<String>,
+}
+
+pub(super) fn walk_supplemental_common(
+    runtime: Option<&Path>,
     progress: &LoadProgress,
-) -> (
-    WeaponBuild,
-    Option<Box<dyn crate::lane::CommonFamilyCompiler>>,
-    Vec<asset_game::CapturedStringTable>,
-    Vec<String>,
-    Vec<(String, asset_material::material_images::ZoneUiImage)>,
-    asset_anim::PlayerAnimSources,
-) {
-    let mut report = Vec::new();
-    let root = match games_root_from_env() {
+    enabled: frame::AssetFamilies,
+) -> SupplementalCommonProducts {
+    let mut products = SupplementalCommonProducts {
+        sources: Vec::new(),
+        images: Vec::new(),
+        report: Vec::new(),
+    };
+    let root = match games_root() {
         Ok(root) => root,
         Err(error) => {
-            report.push(format!("t6 weapons: {error}"));
-            return (
-                WeaponBuild::default(),
-                None,
-                Vec::new(),
-                report,
-                Vec::new(),
-                Default::default(),
-            );
+            products.report.push(error);
+            return products;
         }
     };
-    let donor = match find_common_mp_for_envelope(&root, fastfile_t6::ZONE_VERSION_PC) {
-        Ok(donor) => donor,
-        Err(error) => {
-            report.push(format!("t6 weapons: {error}"));
-            return (
-                WeaponBuild::default(),
-                None,
-                Vec::new(),
-                report,
-                Vec::new(),
-                Default::default(),
-            );
+    for (family, policy) in crate::common_source_families() {
+        if !enabled.enabled(family.as_str()) || policy.material_seed.is_some() {
+            continue;
         }
-    };
-    let stage = progress.begin_scoped(StageId::CommonAssets, "t6_weapons", None);
-    let opened = open_zone_shared(&donor.path).map_err(|error| error.to_string());
-    stage.finish_from(&opened);
-    let image = match opened {
-        Ok(image) => image,
-        Err(error) => {
-            report.push(format!(
-                "t6 weapons: open {}: {error}",
-                donor.path.display()
-            ));
-            return (
-                WeaponBuild::default(),
-                None,
-                Vec::new(),
-                report,
-                Vec::new(),
-                Default::default(),
-            );
+        let Some(planner) = policy.supplemental else {
+            continue;
+        };
+        let plan = match planner(&root, runtime) {
+            Ok(plan) => plan,
+            Err(error) => {
+                products
+                    .report
+                    .push(format!("{} common sources: {error}", family.as_str()));
+                continue;
+            }
+        };
+        products.report.extend(plan.report);
+        let mut startup = MaterialCatalog::default();
+        let mut startup_light_defs = Vec::new();
+        let mut tables = Vec::new();
+        for source in plan.startup {
+            let (owner, population) = walk_population_file(&source.path, progress, startup);
+            products.report.extend(population.report);
+            startup = population.materials;
+            startup_light_defs.extend(population.light_defs);
+            if source.collect_tables {
+                tables.push(CommonTables::capture(owner, population.cac_tables));
+            }
         }
-    };
-    let tables = t6_class_tables(&root, &mut report);
-    let census = lane(image.game).load_common_mp(
-        &donor.path,
-        &image,
-        progress,
-        false,
-        MaterialCatalog::default(),
-    );
-    report.extend(census.report);
-    let mut weapons = census.weapons;
-    weapons.apply_stats_tables(&tables);
-    (
-        weapons,
-        census.preparation,
-        tables,
-        report,
-        census.ui_images,
-        census.player_anim_sources,
-    )
+        let path = plan.common;
+        let captured = path.as_deref().and_then(|path| {
+            capture_common_zone(
+                path,
+                Some(family),
+                "supplemental common",
+                "supplemental common",
+                progress,
+                &mut products.report,
+            )
+        });
+        let mut captured_census = None;
+        if let Some((owner, mut census)) = captured {
+            if owner != family {
+                products.report.push(format!(
+                    "common source owner mismatch: planned {}, captured {}",
+                    family.as_str(),
+                    owner.as_str()
+                ));
+            } else {
+                for source in &tables {
+                    if source.owner() == Some(owner) {
+                        census.weapons.apply_stats_tables(&source.tables);
+                    }
+                }
+                tables.push(CommonTables::capture(
+                    Some(owner),
+                    std::mem::take(&mut census.cac_tables),
+                ));
+                match asset_game::supplemental_weapon_tables(owner, &root) {
+                    Ok(extra) => {
+                        products.report.extend(extra.report);
+                        census.weapons.apply_stats_tables(&extra.tables);
+                        tables.push(CommonTables::capture(Some(owner), extra.tables));
+                    }
+                    Err(error) => products.report.push(error.into()),
+                }
+                products.report.append(&mut census.report);
+                if let Some(plan) = hold_image_plan(
+                    "supplemental common",
+                    census.pending_images.take(),
+                    load_jobs::open(JobKind::ImageDecode).namespace(owner.as_str()),
+                ) {
+                    products.images.push((owner.as_str(), plan));
+                }
+                captured_census = Some(census);
+            }
+        }
+        products.sources.push(SupplementalCommonSource {
+            family,
+            path,
+            census: captured_census,
+            startup,
+            startup_light_defs,
+            tables,
+        });
+    }
+    products
 }
 
 pub(super) async fn walk_startup_material_zones(
@@ -979,7 +732,7 @@ pub(super) async fn walk_startup_material_zones(
 ) -> (
     MaterialCatalog,
     Vec<String>,
-    Vec<asset_game::CapturedStringTable>,
+    CommonTables,
     Vec<asset_world::CapturedLightDef>,
     crate::ScriptSources,
 ) {
@@ -988,12 +741,12 @@ pub(super) async fn walk_startup_material_zones(
         return (
             MaterialCatalog::default(),
             Vec::new(),
-            Vec::new(),
+            CommonTables::default(),
             Vec::new(),
             crate::ScriptSources::default(),
         );
     };
-    let games = games_root_from_env().ok();
+    let games = games_root().ok();
 
     let opened = STARTUP_ZONES
         .map(|zone| {
@@ -1024,7 +777,7 @@ pub(super) async fn walk_startup_material_zones(
     let mut reuse_mat = 0usize;
     let mut reuse_img = 0usize;
     let mut zones_ok = 0usize;
-    let mut stats = Vec::new();
+    let mut stats = CommonTables::default();
     let mut light_defs = Vec::new();
     let mut scripts = crate::ScriptSources::default();
     for (zone, task) in STARTUP_ZONES.into_iter().zip(opened) {
@@ -1033,7 +786,11 @@ pub(super) async fn walk_startup_material_zones(
                 let envelope = peek_zone_version(&path)
                     .map(|v| format!("{v:#x}"))
                     .unwrap_or_else(|| "unreadable".into());
-                let pop = lane(image.game).load_material_population(&path, &image, progress, seed);
+                let Some(selected) = lane(image.game) else {
+                    report.push(format!("zone lane not installed: {}", image.game.as_str()));
+                    continue;
+                };
+                let pop = selected.load_material_population(&path, &image, progress, seed);
                 report.extend(pop.report);
                 reuse_mat = reuse_mat.saturating_add(pop.materials.link_reused_materials);
                 reuse_img = reuse_img.saturating_add(pop.materials.link_reused_images);
@@ -1048,7 +805,7 @@ pub(super) async fn walk_startup_material_zones(
                 light_defs.extend(pop.light_defs);
                 scripts.overlay(pop.scripts);
                 if zone == "code_post_gfx_mp" {
-                    stats = pop.cac_tables;
+                    stats = CommonTables::capture(Some(image.game), pop.cac_tables);
                 }
                 zones_ok += 1;
             }
@@ -1076,73 +833,19 @@ pub(super) fn load_localized_strings_beside(
     stage: &asset_transport::progress::StageHandle,
 ) -> LocalizeCatalog {
     let mut catalog = LocalizeCatalog::default();
-    let root = match games_root_from_env() {
+    let root = match games_root() {
         Ok(root) => root,
         Err(error) => {
             report.push(format!("localize gap: IW4L_GAMES unset ({error})"));
             return catalog;
         }
     };
-    let lanes: [(asset_core::AssetNamespace, u32, &[&str]); 4] = [
-        (
-            asset_core::AssetNamespace::Iw4,
-            fastfile_iw4::ZONE_VERSION_PC,
-            MP_LOCALIZED_ZONES,
-        ),
-        (
-            asset_core::AssetNamespace::T5,
-            fastfile_t5::ZONE_VERSION_PC,
-            &["code_post_gfx_mp", "common_mp", "ui_mp"],
-        ),
-        (
-            asset_core::AssetNamespace::Iw5,
-            fastfile_iw5::ZONE_VERSION_PC,
-            MP_LOCALIZED_ZONES,
-        ),
-        (
-            asset_core::AssetNamespace::T6,
-            fastfile_t6::ZONE_VERSION_PC,
-            &[],
-        ),
-    ];
     let runtime_language = find_runtime_common_mp(&root, zone_ff)
         .ok()
         .and_then(|zone| zone.path.parent()?.file_name()?.to_str().map(str::to_owned));
-    let mut plan = Vec::new();
-    for (namespace, version, names) in lanes {
-        let found: Vec<_> = if matches!(
-            namespace,
-            asset_core::AssetNamespace::T5 | asset_core::AssetNamespace::T6
-        ) {
-            match find_zone_file_version(&root, "common_mp", version).and_then(|zone| {
-                let language = runtime_language.as_deref();
-                if namespace == asset_core::AssetNamespace::T6 {
-                    asset_transport::discover::find_t6_localized_zones(&zone.path, language)
-                } else {
-                    asset_transport::discover::find_t5_localized_zones(&zone.path, language)
-                }
-            }) {
-                Ok(zones) => zones,
-                Err(error) => {
-                    report.push(format!("localize gap: {error}"));
-                    Vec::new()
-                }
-            }
-        } else {
-            names
-                .iter()
-                .filter_map(|name| {
-                    if namespace == asset_core::AssetNamespace::Iw4 {
-                        find_runtime_zone(&root, zone_ff, name)
-                    } else {
-                        find_zone_file_version(&root, name, version)
-                    }
-                    .ok()
-                })
-                .collect()
-        };
-        plan.extend(found.into_iter().map(|found| (namespace, found)));
-    }
+    let planned = asset_game::plan_localization(&root, zone_ff, runtime_language.as_deref());
+    report.extend(planned.report);
+    let plan = planned.sources;
     // The plan only closes once every lane has been searched: a zone that is
     // not there is not part of the volume, and counting it would report work
     // nobody is going to do.

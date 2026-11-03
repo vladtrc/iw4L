@@ -92,16 +92,6 @@ pub struct SkinBatchLimits {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SkinRefusal {
-    InvalidShape,
-    InvalidPalette,
-    InvalidRange,
-    OverlappingOutput,
-    UnsupportedProduct,
-    ResidencyPressure,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkinBatchFull {
     OutputPage,
     Palette,
@@ -122,7 +112,7 @@ pub fn plan_skin_batches(
     jobs: &[PackedSkinJob],
     output_bytes: u64,
     limits: SkinBatchLimits,
-) -> Result<Vec<SkinBatch>, SkinRefusal> {
+) -> Result<Vec<SkinBatch>, &'static str> {
     let stride = 48_u64.next_multiple_of(limits.uniform_alignment.max(1));
     let alignment = limits.storage_alignment.max(32).next_multiple_of(32);
     let mut order: Vec<usize> = (0..jobs.len())
@@ -135,13 +125,13 @@ pub fn plan_skin_batches(
         let job = &jobs[index];
         let vertices = job.shape.vertices().len() as u64;
         if vertices == 0 || !job.shape.valid || job.offset.iter().any(|n| !n.is_finite()) {
-            return Err(SkinRefusal::InvalidShape);
+            return Err("invalid skin shape");
         }
         if job.bones.is_empty()
             || job.shape.required_bones() > job.bones.len()
             || job.bones.iter().flatten().flatten().any(|n| !n.is_finite())
         {
-            return Err(SkinRefusal::InvalidPalette);
+            return Err("invalid skin palette");
         }
         if job.ranges.iter().any(|range| {
             range
@@ -149,22 +139,18 @@ pub fn plan_skin_batches(
                 .checked_add(range.count)
                 .is_none_or(|end| end as u64 > vertices)
         }) {
-            return Err(SkinRefusal::InvalidRange);
+            return Err("invalid skin range");
         }
         let start = u64::from(job.destination) * 32;
         let end = start
-            .checked_add(
-                vertices
-                    .checked_mul(32)
-                    .ok_or(SkinRefusal::UnsupportedProduct)?,
-            )
-            .ok_or(SkinRefusal::UnsupportedProduct)?;
+            .checked_add(vertices.checked_mul(32).ok_or("unsupported skin product")?)
+            .ok_or("unsupported skin product")?;
         if start < covered {
-            return Err(SkinRefusal::OverlappingOutput);
+            return Err("overlapping skin output");
         }
         covered = end;
         if end > output_bytes {
-            return Err(SkinRefusal::InvalidRange);
+            return Err("invalid skin range");
         }
         let palette = job.bones.len() as u64 * 64;
         let parameters = job.ranges.iter().filter(|range| range.count != 0).count() as u64 * stride;
@@ -178,7 +164,7 @@ pub fn plan_skin_batches(
                 .iter()
                 .any(|range| range.count.div_ceil(64) > limits.dispatch_groups)
         {
-            return Err(SkinRefusal::UnsupportedProduct);
+            return Err("unsupported skin product");
         }
         let full = batches.last().and_then(|batch| {
             if end - batch.output_offset > limits.storage_bytes {

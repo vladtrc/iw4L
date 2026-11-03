@@ -10,6 +10,12 @@ pub struct ModelIndexStream {
     closed: Vec<Vec<u32>>,
 }
 
+impl Default for ModelIndexStream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModelIndexStream {
     pub fn new() -> Self {
         Self::with_open(0, Vec::new(), DYNAMIC_INDEX_BUFFER_CAPACITY)

@@ -5,13 +5,13 @@ use super::{
     ArrayKey, Binary, Callee, Fault, Frame, Global, Location, Op, Program, Thread, ThreadState,
     Unary, Value, VecDeque, Waiter, WaiterKind,
 };
-use bevy_ecs::entity::Entity;
-use bevy_ecs::prelude::{Resource, World};
+use bevy_ecs::prelude::World;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-pub(crate) use lifecycle::{copy_state, install, install_level, reset, reset_round};
-pub(crate) use state::{MatchScript, RoundScript};
+pub(crate) use lifecycle::{install, install_level, reset, reset_round};
+pub(crate) use state::MatchScript;
+pub use state::RoundScript;
 
 /// Instructions one resumed thread may run before it is killed as a runaway loop.
 /// Level startup runs in one frame and needs over a million on the larger maps.
@@ -39,17 +39,21 @@ pub(super) fn return_from(world: &mut World, function: &str, now: i64) -> usize 
         return 0;
     };
     let inside: Vec<_> = world
-        .query::<(Entity, &Thread)>()
-        .iter(world)
-        .filter_map(|(entity, thread)| {
+        .resource::<RoundScript>()
+        .threads
+        .iter()
+        .filter_map(|(serial, thread)| {
             let depth = thread.frames.iter().position(|f| f.function == function)?;
-            Some((entity, depth))
+            Some((*serial, depth))
         })
         .collect();
-    for &(entity, depth) in &inside {
-        let mut thread = world.entity_mut(entity).take::<Thread>().unwrap();
+    for &(serial, depth) in &inside {
+        let mut thread = take_thread(world, serial).unwrap();
         unwind(world, &mut thread, depth, now, false);
-        world.entity_mut(entity).insert(thread);
+        world
+            .resource_mut::<RoundScript>()
+            .threads
+            .insert(thread.serial, thread);
     }
     inside.len()
 }
@@ -186,7 +190,10 @@ pub(super) fn run_now(
     if thread.state == ThreadState::Complete {
         retire(&mut world.resource_mut::<RoundScript>(), thread.serial);
     } else {
-        world.spawn(thread);
+        world
+            .resource_mut::<RoundScript>()
+            .threads
+            .insert(thread.serial, thread);
     }
     match world.resource::<RoundScript>().fault.clone() {
         Some(fault) => Err(fault),
@@ -204,7 +211,10 @@ fn spawn_thread(
     let thread = new_thread(world, program, function, receiver, args)?;
     let serial = thread.serial;
     world.resource_mut::<RoundScript>().spawned.push(serial);
-    world.spawn(thread);
+    world
+        .resource_mut::<RoundScript>()
+        .threads
+        .insert(thread.serial, thread);
     Ok(serial)
 }
 
@@ -295,7 +305,10 @@ fn run_inline(
     if child.state == ThreadState::Complete {
         retire(&mut runtime, child.serial);
     } else {
-        world.spawn(child);
+        world
+            .resource_mut::<RoundScript>()
+            .threads
+            .insert(child.serial, child);
     }
     parent.stack.push(Value::Undefined);
     resume_suspended(world, parent, now)
@@ -1100,29 +1113,11 @@ fn register(
     });
 }
 
-#[derive(Resource, Default)]
-struct ThreadIndex(std::collections::HashMap<u64, Entity>);
-
-fn find_thread(world: &mut World, serial: u64) -> Option<Entity> {
-    if let Some(entity) = world
-        .get_resource::<ThreadIndex>()
-        .and_then(|index| index.0.get(&serial).copied())
-        && world
-            .get::<Thread>(entity)
-            .is_some_and(|thread| thread.serial == serial)
-    {
-        return Some(entity);
-    }
-    let mut index = std::collections::HashMap::new();
-    let mut found = None;
-    for (entity, thread) in world.query::<(Entity, &Thread)>().iter(world) {
-        index.insert(thread.serial, entity);
-        if thread.serial == serial {
-            found = Some(entity);
-        }
-    }
-    world.insert_resource(ThreadIndex(index));
-    found
+fn take_thread(world: &mut World, serial: u64) -> Option<Thread> {
+    world
+        .resource_mut::<RoundScript>()
+        .threads
+        .swap_remove(&serial)
 }
 
 fn with_thread<R>(
@@ -1134,13 +1129,13 @@ fn with_thread<R>(
     if serial == current.serial {
         return Some(f(world, current, true));
     }
-    let entity = find_thread(world, serial)?;
-    let mut thread = world.entity_mut(entity).take::<Thread>().unwrap();
+    let mut thread = take_thread(world, serial)?;
     let result = f(world, &mut thread, false);
-    if thread.state == ThreadState::Complete {
-        world.despawn(entity);
-    } else {
-        world.entity_mut(entity).insert(thread);
+    if thread.state != ThreadState::Complete {
+        world
+            .resource_mut::<RoundScript>()
+            .threads
+            .insert(thread.serial, thread);
     }
     Some(result)
 }
@@ -1266,8 +1261,11 @@ fn notify(
     }
 }
 
-fn kill(world: &mut World, entity: Entity, serial: u64) {
-    world.despawn(entity);
+fn kill(world: &mut World, serial: u64) {
+    world
+        .resource_mut::<RoundScript>()
+        .threads
+        .swap_remove(&serial);
     retire(&mut world.resource_mut::<RoundScript>(), serial);
 }
 
@@ -1275,9 +1273,6 @@ const HEAP_COLLECT_TICKS: u32 = 10;
 
 pub(crate) fn advance_scheduler(world: &mut World) {
     let request = world.resource::<crate::step::StepRequest>();
-    if !request.reason.advances_authority_world() {
-        return;
-    }
     let tick = request.tick;
     let runtime = world.resource::<RoundScript>();
     if runtime.fault.is_some() {
@@ -1310,14 +1305,15 @@ pub(crate) fn advance_scheduler(world: &mut World) {
         Vec::new()
     } else {
         world
-            .query::<(Entity, &Thread)>()
-            .iter(world)
-            .filter(|(_, thread)| doomed.contains(&thread.serial))
-            .map(|(entity, thread)| (entity, thread.serial))
+            .resource::<RoundScript>()
+            .threads
+            .values()
+            .filter(|thread| doomed.contains(&thread.serial))
+            .map(|thread| thread.serial)
             .collect()
     };
-    for (entity, serial) in dead {
-        kill(world, entity, serial);
+    for serial in dead {
+        kill(world, serial);
     }
     {
         let mut runtime = world.resource_mut::<RoundScript>();
@@ -1380,22 +1376,25 @@ fn run_ready(world: &mut World, program: &Program, now: i64) {
         let Some(serial) = next else {
             break;
         };
-        let Some(entity) = find_thread(world, serial) else {
+        let Some(thread) = world.resource::<RoundScript>().threads.get(&serial) else {
             continue;
         };
-        let receivers = entity_receivers(world, world.get::<Thread>(entity).unwrap());
+        let receivers = entity_receivers(world, thread);
         if any_deleted(world, &receivers) {
-            kill(world, entity, serial);
+            kill(world, serial);
             continue;
         }
-        let mut thread = world.entity_mut(entity).take::<Thread>().unwrap();
+        let mut thread = take_thread(world, serial).unwrap();
         thread.state = ThreadState::Runnable;
         world.resource_mut::<RoundScript>().budget = INSTRUCTION_BUDGET;
         execute(world, program, &mut thread, now);
         if thread.state == ThreadState::Complete {
-            kill(world, entity, serial);
+            kill(world, serial);
         } else {
-            world.entity_mut(entity).insert(thread);
+            world
+                .resource_mut::<RoundScript>()
+                .threads
+                .insert(thread.serial, thread);
         }
         if world.resource::<RoundScript>().fault.is_some() {
             break;
@@ -1551,20 +1550,12 @@ fn report(world: &mut World, fault: &Fault) {
     }
 }
 
-pub(crate) fn healthy(runtime: bevy_ecs::prelude::Res<RoundScript>) -> bool {
-    runtime.fault.is_none()
-}
-
-pub(crate) fn preflight(
-    world: &World,
-    tick: crate::Tick,
-    reason: crate::StepReason,
-) -> Result<(), Fault> {
+pub(crate) fn preflight(world: &World, tick: crate::Tick) -> Result<(), Fault> {
     let runtime = world.resource::<RoundScript>();
     if let Some(fault) = &runtime.fault {
         return Err(fault.clone());
     }
-    if reason.advances_authority_world() && runtime.last_tick.is_some_and(|last| last.0 >= tick.0) {
+    if runtime.last_tick.is_some_and(|last| last.0 >= tick.0) {
         return Err(Fault::at(
             &Location {
                 module: "<scheduler>".into(),
@@ -1575,7 +1566,7 @@ pub(crate) fn preflight(
             "authority script ticks must increase; restore the runtime before replaying",
         ));
     }
-    if reason.advances_authority_world() && (!runtime.started || runtime.program.is_none()) {
+    if !runtime.started || runtime.program.is_none() {
         return Err(Fault::at(
             &Location {
                 module: "<runtime>".into(),
@@ -1711,7 +1702,7 @@ impl RoundScript {
                 .iter()
                 .flat_map(|(_, _, args)| args.iter().cloned()),
         );
-        self.t5.roots(pending);
+        self.extensions.trace_values(pending);
     }
 }
 
@@ -1740,7 +1731,7 @@ fn collect_heap(world: &mut World) {
     for id in world.resource::<RoundScript>().entities.keys() {
         marks.reach(&Value::Object(*id));
     }
-    for thread in world.query::<&Thread>().iter(world) {
+    for thread in world.resource::<RoundScript>().threads.values() {
         thread.stack.iter().for_each(|value| marks.reach(value));
         for frame in &thread.frames {
             marks.reach(&frame.receiver);

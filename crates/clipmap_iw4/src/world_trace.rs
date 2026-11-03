@@ -2,8 +2,8 @@ use alloc::vec::Vec;
 use trace_iw4::{Trace, trace_box_into};
 
 use crate::{
-    BrushView, ClipLeaf, ClipMapRef, ClipMeshRef, MeshWalkCensus, TraceExtents,
-    leaves_have_coll_aabb, trace_linear_with_glass, trace_through_mesh_into, walk_clip_tree,
+    BrushView, ClipLeaf, ClipMapRef, ClipMeshRef, TraceExtents, leaves_have_coll_aabb,
+    trace_linear_with_glass, trace_through_mesh_into, walk_clip_tree,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -26,14 +26,6 @@ impl ClipWorldWinner {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct WorldTraceCensus {
-    pub leaves_visited: u32,
-    pub early_out_n: u32,
-    pub brush_ids_n: u32,
-    pub mesh: MeshWalkCensus,
-}
-
 pub fn trace_brush_and_mesh<B: BrushView>(
     map: &ClipMapRef<'_, B>,
     mesh: &ClipMeshRef<'_>,
@@ -49,27 +41,16 @@ pub fn trace_brush_and_mesh_with_winner<B: BrushView>(
     ext: &TraceExtents,
     glass_is_solid: &dyn Fn(u16) -> bool,
 ) -> (Trace, ClipWorldWinner) {
-    let (hit, winner, _census) = trace_brush_and_mesh_with_census(map, mesh, ext, glass_is_solid);
-    (hit, winner)
-}
-
-pub fn trace_brush_and_mesh_with_census<B: BrushView>(
-    map: &ClipMapRef<'_, B>,
-    mesh: &ClipMeshRef<'_>,
-    ext: &TraceExtents,
-    glass_is_solid: &dyn Fn(u16) -> bool,
-) -> (Trace, ClipWorldWinner, WorldTraceCensus) {
     let mut best = Trace {
         fraction: 1.0,
         endpos: ext.end,
         ..Trace::default()
     };
     let mut winner = ClipWorldWinner::Open;
-    let mut census = WorldTraceCensus::default();
     let no_brushes = map.brushes.is_empty();
     let no_mesh = mesh.tri_indices.len() < 3;
     if no_brushes && no_mesh {
-        return (best, winner, census);
+        return (best, winner);
     }
 
     if map.nodes.is_empty() || map.leaves.is_empty() {
@@ -79,29 +60,26 @@ pub fn trace_brush_and_mesh_with_census<B: BrushView>(
         }
         if !no_mesh {
             let f0 = best.fraction;
-            trace_through_mesh_into(mesh, ext, &mut best, &mut census.mesh);
-            census.mesh.forest_fallback = 1;
+            trace_through_mesh_into(mesh, ext, &mut best);
             if best.fraction < f0 {
                 winner = ClipWorldWinner::Mesh;
             }
         }
         finalize_winner(&best, &mut winner);
-        return (best, winner, census);
+        return (best, winner);
     }
 
     let has_leaf_aabbs = !no_mesh && leaves_have_coll_aabb(map.leaves);
     let frac = core::cell::Cell::new(1.0_f32);
     let mut scratch = Vec::new();
-    let walk = walk_clip_tree(map, ext, &|| frac.get(), &mut |leaf| {
-        census.leaves_visited = census.leaves_visited.saturating_add(1);
+    walk_clip_tree(map, ext, &|| frac.get(), &mut |leaf| {
         if best.fraction == 0.0 {
             frac.set(0.0);
             return;
         }
         if !no_brushes {
             let f0 = best.fraction;
-            let n = trace_leaf_brushes_into(map, leaf, ext, glass_is_solid, &mut best);
-            census.brush_ids_n = census.brush_ids_n.saturating_add(n);
+            trace_leaf_brushes_into(map, leaf, ext, glass_is_solid, &mut best);
             if best.fraction < f0 {
                 winner = ClipWorldWinner::Brush;
             }
@@ -112,34 +90,18 @@ pub fn trace_brush_and_mesh_with_census<B: BrushView>(
         }
         if !no_mesh {
             let f0 = best.fraction;
-            trace_leaf_mesh_into(
-                mesh,
-                leaf,
-                ext,
-                has_leaf_aabbs,
-                &mut best,
-                &mut census.mesh,
-                &mut scratch,
-            );
+            trace_leaf_mesh_into(mesh, leaf, ext, has_leaf_aabbs, &mut best, &mut scratch);
             if best.fraction < f0 {
                 winner = ClipWorldWinner::Mesh;
             }
         }
         frac.set(best.fraction);
     });
-    census.early_out_n = walk.early_out_n;
     if !no_mesh {
-        finish_mesh_forest_fallback(
-            mesh,
-            has_leaf_aabbs,
-            ext,
-            &mut best,
-            &mut winner,
-            &mut census.mesh,
-        );
+        finish_mesh_forest_fallback(mesh, has_leaf_aabbs, ext, &mut best, &mut winner);
     }
     finalize_winner(&best, &mut winner);
-    (best, winner, census)
+    (best, winner)
 }
 
 pub fn trace_leaf_brushes_into<B: BrushView>(
@@ -148,13 +110,12 @@ pub fn trace_leaf_brushes_into<B: BrushView>(
     ext: &TraceExtents,
     glass_is_solid: &dyn Fn(u16) -> bool,
     best: &mut Trace,
-) -> u32 {
+) {
     let first = leaf.first_brush as usize;
     let last = first + leaf.num_brushes as usize;
     let Some(ids) = map.leafbrushes.get(first..last) else {
-        return 0;
+        return;
     };
-    let n = ids.len() as u32;
     let selected = ids
         .iter()
         .filter_map(|&id| map.brushes.get(id as usize))
@@ -163,7 +124,6 @@ pub fn trace_leaf_brushes_into<B: BrushView>(
     let _ = trace_box_into(
         selected, ext.start, ext.end, ext.mins, ext.maxs, ext.mask, best,
     );
-    n
 }
 
 pub fn trace_leaf_mesh_into(
@@ -172,7 +132,6 @@ pub fn trace_leaf_mesh_into(
     ext: &TraceExtents,
     has_leaf_aabbs: bool,
     best: &mut Trace,
-    census: &mut MeshWalkCensus,
     scratch: &mut Vec<u16>,
 ) {
     if !has_leaf_aabbs {
@@ -193,7 +152,7 @@ pub fn trace_leaf_mesh_into(
         partitions: mesh.partitions,
         aabb_roots: scratch.as_slice(),
     };
-    trace_through_mesh_into(&staged, ext, best, census);
+    trace_through_mesh_into(&staged, ext, best);
 }
 
 pub fn finish_mesh_forest_fallback(
@@ -202,7 +161,6 @@ pub fn finish_mesh_forest_fallback(
     ext: &TraceExtents,
     best: &mut Trace,
     winner: &mut ClipWorldWinner,
-    census: &mut MeshWalkCensus,
 ) {
     if has_leaf_aabbs {
         return;
@@ -211,8 +169,7 @@ pub fn finish_mesh_forest_fallback(
         return;
     }
     let f0 = best.fraction;
-    census.forest_fallback = 1;
-    trace_through_mesh_into(mesh, ext, best, census);
+    trace_through_mesh_into(mesh, ext, best);
     if best.fraction < f0 {
         *winner = ClipWorldWinner::Mesh;
     }

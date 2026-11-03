@@ -77,6 +77,8 @@ struct ScriptModelPoseLocals<'w, 's> {
     lod_skinned: Res<'w, render_scene::LodRampSkinnedDvar>,
     gfx_scene: Res<'w, HostGfxScene>,
     sun_casters: Res<'w, render_scene::PreparedSunShadowFrame>,
+    cell_vis: Res<'w, render_scene::PublishedCellVis>,
+    native_cells: Res<'w, render_scene::WorldDpvsCells>,
 }
 
 #[derive(SystemParam)]
@@ -274,7 +276,7 @@ pub fn register_script_model_systems(app: &mut App) {
             )
                 .chain()
                 .in_set(frame::RenderSet::Anim)
-                .before(frame::WorkerCmdSet::CellDynModel)
+                .before(frame::WorkerCmdSet::DynamicModels)
                 .in_set(ScriptModelDrawSet)
                 .in_set(render_scene::GfxSceneAdd)
                 .in_set(AnimSceneSubmit))
@@ -292,10 +294,9 @@ pub fn register_script_model_systems(app: &mut App) {
             )
                 .chain()
                 .after(occupy_script_model_scene_ents)
-                .after(frame::WorkerCmdSet::CellSceneEnt)
-                .after(frame::WorkerCmdSet::DpvsEnt)
+                .after(frame::WorkerCmdSet::SceneVisibility)
                 .in_set(ScriptModelSkinSet)
-                .in_set(frame::WorkerCmdSet::SkinModel))
+                .in_set(frame::WorkerCmdSet::ModelPose))
             .in_set(frame::InMatch),
         );
 }
@@ -489,8 +490,7 @@ fn occupy_script_model_scene_ents(
     persist: Res<ScriptModelDobjs>,
     mut scene_submissions: MessageWriter<AnimDObjSceneSubmission>,
     lod_skinned: Res<render_scene::LodRampSkinnedDvar>,
-    presented: Res<net::PresentedSnapshot>,
-    local: Res<net::LocalPresentClient>,
+    presentation: net::LocalPresentation,
 ) {
     let Some(assets) = assets else {
         return;
@@ -501,7 +501,7 @@ fn occupy_script_model_scene_ents(
         .map(|(xf, _, _)| xf.translation().to_array());
     let skinned_ramp = lod_skinned.args();
     for (owner, transform, visibility) in &owners {
-        if is_weapon_camera_vehicle(owner, &presented, local.0) {
+        if is_weapon_camera_vehicle(owner, &presentation.presented, presentation.local.0) {
             continue;
         }
         if *visibility == Visibility::Hidden {
@@ -516,7 +516,7 @@ fn occupy_script_model_scene_ents(
             &skel_refs,
             transform.translation.to_array(),
             eye,
-            skinned_ramp,
+            &skinned_ramp,
         ) {
             continue;
         }
@@ -528,7 +528,7 @@ fn occupy_script_model_scene_ents(
         let lod_view = Some(DObjLodView {
             origin,
             eye: eye.map(Vec3::from_array),
-            ramp: skinned_ramp,
+            ramp: &skinned_ramp,
         });
         let camera_lods: Vec<Option<u8>> = skels
             .iter()
@@ -590,6 +590,8 @@ fn pose_script_models(
         lod_skinned,
         gfx_scene,
         sun_casters,
+        cell_vis,
+        native_cells,
     } = locals;
     live_assets.clear();
     live_ids.clear();
@@ -636,9 +638,11 @@ fn pose_script_models(
         let entnum = owner.gentity_number.map(u32::from);
 
         let slot = entnum.map(|entnum| script_scene_slot(&gfx_scene.scene, entnum));
-        let walk_hidden = entnum.is_some_and(|entnum| gfx_scene.scene.scene_ent_hidden(entnum));
+        let portal_views = !cell_vis.views.is_empty();
+        let mut walk_hidden = entnum.is_some_and(|entnum| gfx_scene.scene.scene_ent_hidden(entnum));
         if let Some(why) = slot.as_ref().and_then(|slot| slot.skip)
             && !walk_hidden
+            && !portal_views
         {
             if let Some(id) = focused_owner_id {
                 focus.refuse(id, &owner.current_model.0, why);
@@ -658,14 +662,32 @@ fn pose_script_models(
             .unwrap_or(1.0)
             .max(1.0);
         let caster_bound = render_scene::XModelCasterBound { origin, radius };
-        if walk_hidden && !sun_casters.admits(caster_bound) {
+        let world = sim::world_graph::world_at(origin);
+        let visible_in_view = portal_views.then(|| {
+            native_cells.for_world(world).is_some_and(|cells| {
+                cell_vis.views.iter().any(|view| {
+                    view.world == world
+                        && view.admits_bounds(
+                            cells,
+                            dpvs_iw4::Bounds::from_mid_half(origin, [radius; 3]),
+                        )
+                })
+            })
+        });
+        if let Some(visible) = visible_in_view {
+            walk_hidden = !visible;
+        }
+        if walk_hidden
+            && ((portal_views && world != cell_vis.world) || !sun_casters.admits(caster_bound))
+        {
             if let Some(id) = focused_owner_id {
                 focus.refuse(id, &owner.current_model.0, "scene_ent_hidden");
             }
             continue;
         }
 
-        if lod_culled(&skels, origin, eye, skinned_ramp) {
+        let eye = crate::occupancy::dyn_ent::portal_lod_eye(&cell_vis, origin, eye);
+        if lod_culled(&skels, origin, eye, &skinned_ramp) {
             if let Some(id) = focused_owner_id {
                 focus.refuse(id, &owner.current_model.0, "lod_culled");
             }
@@ -674,7 +696,7 @@ fn pose_script_models(
         let lod_view = Some(DObjLodView {
             origin,
             eye: eye.map(Vec3::from_array),
-            ramp: skinned_ramp,
+            ramp: &skinned_ramp,
         });
         let camera_lods: Vec<Option<u8>> = skels
             .iter()
@@ -689,12 +711,9 @@ fn pose_script_models(
                 continue;
             }
             live_ids.insert(id);
-            let request = owner.dobj_state.resolve_request(|name| {
-                xanims
-                    .as_ref()?
-                    .0
-                    .clip(asset_core::AssetNamespace::Iw4, name)
-            });
+            let request = owner
+                .dobj_state
+                .resolve_request(|name| xanims.as_ref()?.0.clip(asset_core::FamilyId::IW4, name));
             let index = if let Some(index) =
                 product.asset_index(&owner.current_model, &owner.dobj_state, &camera_lods)
             {
@@ -706,10 +725,23 @@ fn pose_script_models(
                 let Ok(request) = request else {
                     continue;
                 };
-                let skin_entries = slot.as_ref().map(|slot| slot.skin_entries).unwrap_or(&[]);
+                // Host scene-ent culling/skin streams are not a foreign view's
+                // visibility or LOD. Pose that view from its native skeleton.
+                let skin_entries = if portal_views {
+                    &[][..]
+                } else {
+                    slot.as_ref().map(|slot| slot.skin_entries).unwrap_or(&[])
+                };
                 let Some((surfaces, surface_materials)) = pose_script_dobj_with_materials(
                     Some(&assets),
                     &skels,
+                    &owner
+                        .dobj_state
+                        .composition
+                        .models
+                        .iter()
+                        .map(|model| model.model.as_str())
+                        .collect::<Vec<_>>(),
                     &slot_dobj.dobj,
                     &request,
                     lod_view,
@@ -734,7 +766,14 @@ fn pose_script_models(
                     .filter(|node| node.state.weight > 0.0)
                     .find_map(|node| node.clip.as_deref())
             });
-            perf::truck(id, None, None, clip, Some("posed"));
+            perf::instant!("truck", "iw4l.sim", |ctx| {
+                let (script_model_id, death_clip, present_gap): (u32, Option<&str>, Option<&str>) =
+                    (id, clip, Some("posed"));
+                ctx.arg("script_model_id", i64::from(script_model_id));
+
+                ctx.arg("death_clip", death_clip);
+                ctx.arg("present_gap", present_gap);
+            });
             index
         } else {
             let Some(index) =
@@ -756,7 +795,10 @@ fn pose_script_models(
             model: owner.current_model.clone(),
             world_from_local: transform.to_matrix(),
             entnum,
-            camera_hidden: walk_hidden || sphere_behind_frustum(origin, radius, &planes),
+            camera_hidden: visible_in_view.map_or_else(
+                || walk_hidden || sphere_behind_frustum(origin, radius, &planes),
+                |visible| !visible,
+            ),
             lighting_origin: owner.lighting_origin,
             lookup_fallback: atpoint.fallback(owner.lighting_origin, box_half),
             caster_bound,
@@ -1083,10 +1125,7 @@ pub(crate) fn presented_skel_arcs(
     let mut skels = Vec::with_capacity(state.composition.models.len());
     for descriptor in &state.composition.models {
         let skel = match catalog.get_name(&descriptor.model)? {
-            asset_world::MapXModelSceneAsset::Iw4(skel)
-            | asset_world::MapXModelSceneAsset::Iw5(skel)
-            | asset_world::MapXModelSceneAsset::T6(skel)
-            | asset_world::MapXModelSceneAsset::T5(skel) => std::sync::Arc::clone(skel),
+            asset_world::MapXModelSceneAsset::Captured { skel, .. } => std::sync::Arc::clone(skel),
             asset_world::MapXModelSceneAsset::Unavailable { .. } => return None,
         };
         if skel.pose.is_none() {
@@ -1104,10 +1143,7 @@ pub(crate) fn presented_skels<'a>(
     let mut skels = Vec::with_capacity(state.composition.models.len());
     for descriptor in &state.composition.models {
         let skel = match catalog.get_name(&descriptor.model)? {
-            asset_world::MapXModelSceneAsset::Iw4(skel)
-            | asset_world::MapXModelSceneAsset::Iw5(skel)
-            | asset_world::MapXModelSceneAsset::T6(skel)
-            | asset_world::MapXModelSceneAsset::T5(skel) => skel.as_ref(),
+            asset_world::MapXModelSceneAsset::Captured { skel, .. } => skel.as_ref(),
             asset_world::MapXModelSceneAsset::Unavailable { .. } => return None,
         };
         if skel.pose.is_none() {
@@ -1132,10 +1168,7 @@ pub fn collect_presented_models<'a>(
     let mut attaches = Vec::with_capacity(state.composition.models.len());
     for (index, descriptor) in state.composition.models.iter().enumerate() {
         let skel = match catalog.get_name(&descriptor.model)? {
-            asset_world::MapXModelSceneAsset::Iw4(skel)
-            | asset_world::MapXModelSceneAsset::Iw5(skel)
-            | asset_world::MapXModelSceneAsset::T6(skel)
-            | asset_world::MapXModelSceneAsset::T5(skel) => skel,
+            asset_world::MapXModelSceneAsset::Captured { skel, .. } => skel,
             asset_world::MapXModelSceneAsset::Unavailable { .. } => return None,
         };
         let attach = match (descriptor.parent_model, descriptor.attach_tag.as_ref()) {
@@ -1193,12 +1226,15 @@ fn compose_or_reuse_script_dobj(
     Some(())
 }
 
+/// Material keys follow DObj model order and retain each map's capture domain;
+/// the skeleton itself keeps its native model name.
 pub fn pose_script_dobj_with_materials(
     catalog: Option<&asset_world::MapXModelSceneCatalog>,
     skels: &[&asset_model::ModelSkel],
+    material_keys: &[&str],
     dobj: &xmodel_runtime::DObj,
     request: &xmodel_runtime::DObjPoseRequest,
-    lod_view: Option<DObjLodView>,
+    lod_view: Option<DObjLodView<'_>>,
     skin_entries: &[dpvs_iw4::SceneEntSkinEntry],
 ) -> Option<(Vec<PosedModelSurface>, Vec<Option<assets::MaterialIndex>>)> {
     let world = xmodel_runtime::pose_dobj(dobj, request, Mat4::IDENTITY).ok()?;
@@ -1233,7 +1269,13 @@ pub fn pose_script_dobj_with_materials(
             },
             lod,
         )?;
-        let key = asset_world::MapXModelAssetKey(skel.name.clone());
+        let key = asset_world::MapXModelAssetKey(
+            material_keys
+                .get(model)
+                .copied()
+                .unwrap_or(&skel.name)
+                .to_owned(),
+        );
         let mut posed = posed;
         for surface in &mut posed {
             surface.model = model as u16;
@@ -1249,15 +1291,15 @@ pub fn pose_script_dobj_with_materials(
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct DObjLodView {
+pub struct DObjLodView<'a> {
     pub origin: [f32; 3],
     pub eye: Option<Vec3>,
-    pub ramp: LodRampArgs,
+    pub ramp: &'a LodRampArgs,
 }
 
 pub(crate) fn submodel_camera_lod(
     skel: &asset_model::ModelSkel,
-    view: Option<DObjLodView>,
+    view: Option<DObjLodView<'_>>,
 ) -> Option<u8> {
     let Some(view) = view else {
         return Some(0);
@@ -1269,7 +1311,7 @@ fn lod_culled(
     skels: &[&asset_model::ModelSkel],
     origin: [f32; 3],
     eye: Option<[f32; 3]>,
-    ramp: LodRampArgs,
+    ramp: &LodRampArgs,
 ) -> bool {
     let Some(eye) = eye else {
         return false;

@@ -101,6 +101,50 @@ impl SimContent {
         &self.data.map
     }
 
+    pub fn weapon_combat_row(&self, weapon: u32) -> Option<weapon_iw4::WeaponCombatFacts> {
+        self.data
+            .weapons
+            .weapon_combat
+            .get(weapon as usize)
+            .copied()
+    }
+
+    pub fn weapon_combat_facts(&self, weapon: u32) -> Option<weapon_iw4::WeaponCombatFacts> {
+        self.weapon_combat_row(weapon)
+            .filter(|facts| facts.is_usable())
+    }
+    pub fn equipment_facts_for(&self, weapon: u32) -> Option<crate::EquipmentRuntimeFacts> {
+        self.data
+            .weapons
+            .equipment_runtime
+            .get(weapon as usize)
+            .copied()
+            .filter(|facts| facts.is_usable())
+    }
+    pub fn missile_launch_facts(&self, weapon: u32) -> Option<crate::EquipmentRuntimeFacts> {
+        self.data
+            .weapons
+            .equipment_runtime
+            .get(weapon as usize)
+            .copied()
+            .filter(|facts| facts.projectile_speed > 0)
+    }
+    pub fn weapon_script_name(&self, weapon: u32) -> &str {
+        self.data
+            .weapons
+            .weapon_script_names
+            .get(weapon as usize)
+            .map_or("", String::as_str)
+    }
+
+    pub fn weapon_combat_len(&self) -> usize {
+        self.data.weapons.weapon_combat.len()
+    }
+
+    pub fn has_world_clip(&self) -> bool {
+        !self.clip_brushes().is_empty() || self.clip_mesh().tables.tri_count() >= 1
+    }
+
     pub fn collision_complete(&self) -> bool {
         self.data.collision_complete
     }
@@ -116,6 +160,9 @@ impl SimContent {
     pub fn clip_cmodels(&self) -> &SimClipCmodels {
         &self.data.clip_cmodels
     }
+    pub fn atlas(&self) -> Option<&Arc<crate::world_graph::Atlas>> {
+        self.data.atlas.as_ref()
+    }
 }
 
 #[derive(Debug)]
@@ -129,6 +176,7 @@ struct ContentData {
     clip_bsp: SimClipBsp,
     clip_mesh: SimClipMesh,
     clip_cmodels: SimClipCmodels,
+    atlas: Option<Arc<crate::world_graph::Atlas>>,
     player_kits: [PlayerKitCollision; 2],
     player_anim_tree: Option<Arc<xmodel_runtime::XAnimTreeDefinition>>,
     player_anim_node_names: Vec<String>,
@@ -177,6 +225,7 @@ impl SimContentBuilder {
                 clip_bsp: Default::default(),
                 clip_mesh: Default::default(),
                 clip_cmodels: Default::default(),
+                atlas: None,
                 player_kits: Default::default(),
                 player_anim_tree: Default::default(),
                 player_anim_node_names: Default::default(),
@@ -330,12 +379,20 @@ impl SimContentBuilder {
         self.data.clip_mesh = mesh;
         self.data.clip_cmodels = cmodels;
     }
+
+    pub fn set_atlas(&mut self, atlas: Option<Arc<crate::world_graph::Atlas>>) {
+        self.data.atlas = atlas;
+    }
 }
 
 impl SimContent {
-    pub(super) fn weapons(&self) -> &Arc<crate::SimWeaponContent> {
+    pub(crate) fn weapons(&self) -> &Arc<crate::SimWeaponContent> {
         &self.data.weapons
     }
+    pub fn pen_table_loaded(&self) -> bool {
+        self.weapons().pen_table_loaded
+    }
+
     pub(super) fn script_fx(&self) -> &std::collections::BTreeSet<String> {
         &self.data.script_fx
     }
@@ -351,7 +408,7 @@ impl SimContent {
     pub(super) fn player_anim_tree(&self) -> &Option<Arc<xmodel_runtime::XAnimTreeDefinition>> {
         &self.data.player_anim_tree
     }
-    pub(super) fn player_anim_node_names(&self) -> &Vec<String> {
+    pub(super) fn player_anim_node_names(&self) -> &[String] {
         &self.data.player_anim_node_names
     }
     pub(super) fn player_axis_anim_tree(
@@ -359,7 +416,7 @@ impl SimContent {
     ) -> &Option<Arc<xmodel_runtime::XAnimTreeDefinition>> {
         &self.data.player_axis_anim_tree
     }
-    pub(super) fn player_anim_properties(&self) -> &Vec<xmodel_runtime::PlayerAnimProperties> {
+    pub(super) fn player_anim_properties(&self) -> &[xmodel_runtime::PlayerAnimProperties] {
         &self.data.player_anim_properties
     }
     pub(super) fn player_body_branches(&self) -> &Option<xmodel_runtime::PlayerBodyBranches> {
@@ -370,7 +427,7 @@ impl SimContent {
     ) -> &std::collections::BTreeMap<String, crate::ScriptModelPlayAnim> {
         &self.data.script_model_anims
     }
-    pub(super) fn xanims(&self) -> &Arc<crate::MantleXAnimBind> {
+    pub(crate) fn xanims(&self) -> &Arc<crate::MantleXAnimBind> {
         &self.data.xanims
     }
     pub(super) fn vehicle_turrets(&self) -> &std::collections::BTreeMap<String, String> {
@@ -391,7 +448,22 @@ impl SimContent {
     pub(super) fn shocks(&self) -> &std::collections::BTreeMap<String, hud_iw4::ShockParams> {
         &self.data.shocks
     }
-    pub(super) fn player_anim_script(&self) -> &Option<Arc<PlayerAnimScript>> {
+    pub(crate) fn player_anim_script(&self) -> &Option<Arc<PlayerAnimScript>> {
         &self.data.player_anim_script
+    }
+}
+
+impl weapon_iw4::WeaponFacts for SimContent {
+    fn weapon_combat_row(&self, weapon: u32) -> Option<weapon_iw4::WeaponCombatFacts> {
+        SimContent::weapon_combat_row(self, weapon)
+    }
+    fn weapon_combat_facts(&self, weapon: u32) -> Option<weapon_iw4::WeaponCombatFacts> {
+        SimContent::weapon_combat_facts(self, weapon)
+    }
+    fn equipment_facts_for(&self, weapon: u32) -> Option<crate::EquipmentRuntimeFacts> {
+        SimContent::equipment_facts_for(self, weapon)
+    }
+    fn weapon_script_name(&self, weapon: u32) -> &str {
+        SimContent::weapon_script_name(self, weapon)
     }
 }

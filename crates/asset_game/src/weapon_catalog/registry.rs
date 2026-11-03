@@ -14,8 +14,7 @@ impl WeaponRegistry {
             .iter()
             .rev()
             .find(|(ns, table)| {
-                *ns == crate::AssetNamespace::Iw4
-                    && table.name.eq_ignore_ascii_case("mp/rankTable.csv")
+                *ns == crate::FamilyId::IW4 && table.name.eq_ignore_ascii_case("mp/rankTable.csv")
             })
             .map(|(_, table)| table)
             .ok_or("rank.missing_table")?;
@@ -95,7 +94,7 @@ impl WeaponRegistry {
             .iter()
             .rev()
             .find(|(ns, table)| {
-                *ns == crate::AssetNamespace::Iw4
+                *ns == crate::FamilyId::IW4
                     && table.name.eq_ignore_ascii_case("mp/rankIconTable.csv")
             })
             .map(|(_, table)| table.clone())
@@ -132,97 +131,11 @@ impl WeaponRegistry {
 
     pub fn item_unlock_requirement(
         &self,
-        namespace: crate::AssetNamespace,
+        namespace: crate::FamilyId,
         name: &str,
     ) -> Result<gamemode_iw4::progression::UnlockRequirement, &'static str> {
-        let infinity = matches!(
-            namespace,
-            crate::AssetNamespace::Iw4 | crate::AssetNamespace::Iw5
-        );
-        let table_name = if infinity {
-            "mp/unlockTable.csv"
-        } else {
-            "mp/statsTable.csv"
-        };
-        let table = self
-            .family_tables
-            .iter()
-            .rev()
-            .find(|(ns, t)| *ns == namespace && t.name.eq_ignore_ascii_case(table_name))
-            .ok_or("unlock.missing_table")?;
-        let column = if infinity { 0 } else { 4 };
-        let row = table
-            .1
-            .lookup_row_in_col(column, name)
-            .or_else(|| table.1.lookup_row_in_col(column, &format!("{name}_mp")))
-            .or_else(|| {
-                infinity
-                    .then(|| {
-                        table.1.lookup_row_in_col(
-                            column,
-                            &format!("specialty_{}", name.replace('_', "")),
-                        )
-                    })
-                    .flatten()
-            });
-        let Some(row) = row else {
-            let native_perk = infinity
-                && self.family_tables.iter().any(|(ns, table)| {
-                    *ns == namespace
-                        && table.name.eq_ignore_ascii_case("mp/perkTable.csv")
-                        && table.lookup_row_in_col(1, name).is_some()
-                });
-            let native_weapon = infinity
-                && self
-                    .families
-                    .find(&crate::FamilyKey::new(namespace, name))
-                    .is_some();
-            return if native_perk || native_weapon {
-                Ok(Default::default())
-            } else {
-                Err("unlock.missing_item")
-            };
-        };
-        if infinity {
-            return gamemode_iw4::progression::UnlockRequirement::capture(
-                table.1.cell(row, 2),
-                table.1.cell(row, 3),
-            );
-        }
-        let native = &table.1;
-        let rank = native.cell(row, 10);
-        let mut requirement = gamemode_iw4::progression::UnlockRequirement::capture(
-            if rank.is_empty() { "0" } else { rank },
-            "",
-        )?;
-        if namespace == crate::AssetNamespace::T5 {
-            let classified = native.cell(row, 15);
-            let purchases = if classified.is_empty() {
-                0
-            } else {
-                classified
-                    .parse::<u32>()
-                    .map_err(|_| "unlock.invalid_classified")?
-            };
-            if purchases > 0 {
-                let group = native.cell(row, 2);
-                let ranks = (0..native.rows as i32)
-                    .filter(|&other| native.cell(other, 2) == group)
-                    .filter(|&other| !native.cell(other, 10).is_empty())
-                    .map(|other| {
-                        native
-                            .cell(other, 10)
-                            .parse::<u32>()
-                            .map_err(|_| "unlock.invalid_rank")
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                requirement.rank = ranks
-                    .into_iter()
-                    .max()
-                    .ok_or("unlock.missing_classified_group")?;
-            }
-        }
-        Ok(requirement)
+        let policy = crate::weapon_policy(namespace).ok_or("unlock.unknown_family")?;
+        (policy.unlock)(self, namespace, name)
     }
 
     pub fn weapon_unlock_requirement(
@@ -262,15 +175,15 @@ impl WeaponRegistry {
         self.world_catalog_identity
     }
 
-    pub(crate) fn iw5_configuration_of(&self, id: u32) -> Option<(u32, Iw5AttachmentSelection)> {
-        self.rows.get(id as usize)?.iw5_configuration
+    pub fn native_capture_of(&self, id: u32) -> Option<&crate::WeaponNativeCapture> {
+        Some(&self.rows.get(id as usize)?.native_capture)
     }
 
     pub(super) fn rebuild_name_maps(&mut self) {
         self.by_name.clear();
         self.by_namespaced.clear();
         for (id, row) in self.rows.iter().enumerate().skip(1) {
-            if row.iw5_configuration.is_some() {
+            if !row.indexed_name {
                 continue;
             }
             self.by_namespaced
@@ -522,7 +435,7 @@ impl WeaponRegistry {
             .map(|(_, kind, name)| WeaponDependencyGap {
                 id,
                 kind,
-                name: name.clone().unwrap_or_default(),
+                name: name.clone().unwrap_or(String::new()),
             })
             .collect();
         for (name, edge) in row
@@ -710,7 +623,7 @@ impl WeaponRegistry {
         index: u32,
         slot: WeaponSoundSlot,
         catalog: &'a crate::SoundCatalog,
-    ) -> Option<(crate::AssetNamespace, &'a str)> {
+    ) -> Option<(crate::FamilyId, &'a str)> {
         let alias = self.authored_weapon_sound(index, slot)?;
         let ns = self.sound_namespace_for(index, alias)?;
         sound_alias_in_bank(Some(alias), ns, catalog)
@@ -758,7 +671,7 @@ impl WeaponRegistry {
 
     pub fn melee_weapon_of(&self, index: u32) -> u32 {
         self.semantic_policy_of(index)
-            .map_or(index, |policy| policy.melee_weapon.weapon(index))
+            .map_or(index, |policy| policy.melee_weapon.unwrap_or(index))
     }
 
     pub fn melee_impact_sound_key<'a>(
@@ -767,7 +680,7 @@ impl WeaponRegistry {
         knife: bool,
         impact: crate::MeleeImpact,
         catalog: &'a crate::SoundCatalog,
-    ) -> Option<(crate::AssetNamespace, &'a str)> {
+    ) -> Option<(crate::FamilyId, &'a str)> {
         let row = self.rows.get(index as usize)?;
         let semantics = row.semantics.as_ref()?;
         let policy = semantics.melee_cues;
@@ -781,8 +694,8 @@ impl WeaponRegistry {
             |knife| sound_alias_in_bank(Some(policy.generic(knife, impact)), namespace, catalog);
         let knife_alias = || knife.then(|| generic(true)).flatten();
         match policy.precedence {
-            crate::MeleeCuePrecedence::T5AuthoredFirstCompatibility => own().or_else(knife_alias),
-            crate::MeleeCuePrecedence::KnifeFirstCompatibility => knife_alias().or_else(own),
+            crate::MeleeCuePrecedence::AuthoredFirst => own().or_else(knife_alias),
+            crate::MeleeCuePrecedence::KnifeFirst => knife_alias().or_else(own),
         }
         .or_else(|| generic(false))
     }
@@ -829,14 +742,14 @@ impl WeaponRegistry {
         }
     }
 
-    pub fn identity_namespace_of(&self, index: u32) -> Option<crate::AssetNamespace> {
+    pub fn identity_namespace_of(&self, index: u32) -> Option<crate::FamilyId> {
         if index == 0 {
             return None;
         }
         self.rows.get(index as usize).map(|row| row.namespace)
     }
 
-    pub fn sound_namespace_for(&self, index: u32, alias: &str) -> Option<crate::AssetNamespace> {
+    pub fn sound_namespace_for(&self, index: u32, alias: &str) -> Option<crate::FamilyId> {
         self.rows
             .get(index as usize)
             .filter(|_| index != 0)?
@@ -844,10 +757,7 @@ impl WeaponRegistry {
             .namespace_for(WeaponComponent::Sound, alias)
     }
 
-    pub fn projectile_model_reference_of(
-        &self,
-        index: u32,
-    ) -> Option<(crate::AssetNamespace, &str)> {
+    pub fn projectile_model_reference_of(&self, index: u32) -> Option<(crate::FamilyId, &str)> {
         let row = self.rows.get(index as usize)?;
         let name = row.projectile_model.as_deref()?;
         row.projectile_model_edge.bound_index()?;
@@ -862,14 +772,14 @@ impl WeaponRegistry {
         &self,
         index: u32,
         component: WeaponComponent,
-    ) -> Option<crate::AssetNamespace> {
+    ) -> Option<crate::FamilyId> {
         self.rows
             .get(index as usize)
             .filter(|_| index != 0)?
             .component_namespace(component)
     }
 
-    pub fn host_namespace_of(&self, index: u32) -> Option<crate::AssetNamespace> {
+    pub fn host_namespace_of(&self, index: u32) -> Option<crate::FamilyId> {
         self.rows
             .get(index as usize)
             .filter(|_| index != 0)
@@ -898,7 +808,7 @@ impl WeaponRegistry {
         crate::AssetKey::new(ns, crate::AssetKind::Weapon, gsc_weapon_script_name(name)).ok()
     }
 
-    pub fn namespace_count(&self, ns: crate::AssetNamespace) -> usize {
+    pub fn namespace_count(&self, ns: crate::FamilyId) -> usize {
         self.rows
             .iter()
             .skip(1)
@@ -941,15 +851,14 @@ impl WeaponRegistry {
         let Some(row) = self.rows.get(id as usize) else {
             return false;
         };
-        if row.namespace != crate::AssetNamespace::T5 {
-            return true;
-        }
-        if row.facts.dual_wield {
-            return row.secondary_gun_xmodel.is_some()
-                && xanims_idle(&row.sz_xanims_left).is_some();
-        }
-        !row.gun_xmodel.as_deref().is_some_and(|name| {
-            name.ends_with("_dw_rh") || name.ends_with("_dw_lh") || name.ends_with("_lh_viewmodel")
+        let Some(policy) = crate::weapon_policy(row.namespace) else {
+            return false;
+        };
+        (policy.runtime.supports)(crate::WeaponSupportInputs {
+            dual_wield: row.facts.dual_wield,
+            secondary_model: row.secondary_gun_xmodel.is_some(),
+            left_idle: xanims_idle(&row.sz_xanims_left).is_some(),
+            gun_model: row.gun_xmodel.as_deref(),
         })
     }
 
@@ -998,7 +907,7 @@ impl WeaponRegistry {
                 }
                 label
             }
-            None => self.namespaced_key_of(id).unwrap_or_default(),
+            None => self.namespaced_key_of(id).unwrap_or(String::new()),
         }
     }
 
@@ -1236,7 +1145,7 @@ impl WeaponRegistry {
         }
     }
 
-    pub fn hud_icon_namespace_of(&self, index: u32) -> Option<crate::AssetNamespace> {
+    pub fn hud_icon_namespace_of(&self, index: u32) -> Option<crate::FamilyId> {
         self.component_namespace_of(index, WeaponComponent::HudIconImage)
     }
 
@@ -1334,5 +1243,16 @@ impl WeaponRegistry {
             .skip(1)
             .filter(|row| row.sz_xanims.iter().any(|n| n.is_some()))
             .count()
+    }
+}
+
+impl crate::WeaponUnlockContent for WeaponRegistry {
+    fn tables(&self) -> &[(crate::FamilyId, crate::CapturedStringTable)] {
+        &self.family_tables
+    }
+    fn contains_family(&self, namespace: crate::FamilyId, name: &str) -> bool {
+        self.families
+            .find(&crate::FamilyKey::new(namespace, name))
+            .is_some()
     }
 }

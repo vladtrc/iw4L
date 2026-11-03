@@ -5,7 +5,7 @@ impl WeaponCatalog {
         self.strings = strings;
     }
 
-    pub fn set_capture_ns(&mut self, ns: crate::AssetNamespace) {
+    pub fn set_capture_ns(&mut self, ns: crate::FamilyId) {
         self.capture_ns = Some(ns);
     }
 
@@ -393,7 +393,7 @@ impl WeaponCatalog {
 
 pub(super) fn material_hint_edge(
     hint: Option<&str>,
-    namespace: crate::AssetNamespace,
+    namespace: crate::FamilyId,
     authored_slot: bool,
     materials: &crate::MaterialDefinitions,
 ) -> AssetEdge<MaterialSpace> {
@@ -409,7 +409,7 @@ pub(super) fn material_hint_edge(
 
 pub(super) fn stamp_fx_edge(
     slot: Option<Ptr>,
-    ns: crate::AssetNamespace,
+    ns: crate::FamilyId,
     fx: &crate::FxCatalog,
     edge: &mut AssetEdge<FxSpace>,
     hint: &mut Option<String>,
@@ -431,7 +431,7 @@ pub(super) fn stamp_fx_edge(
 pub(super) fn stamp_combat_fx(
     combat: &mut WeaponCombatFx,
     slots: CombatFxSlots,
-    ns: crate::AssetNamespace,
+    ns: crate::FamilyId,
     fx: &crate::FxCatalog,
     tracers: &crate::TracerCatalog,
 ) {
@@ -539,7 +539,7 @@ pub(super) fn stamp_mw2_tracer(
         return;
     };
     combat.tracer_hint = Some(name.to_owned());
-    combat.tracer = match tracers.index_named(crate::AssetNamespace::Iw4, name) {
+    combat.tracer = match tracers.index_named(crate::FamilyId::IW4, name) {
         Some(index) => AssetEdge::bind_order(index, tracers.zone_of(index)),
         None => AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss),
     };

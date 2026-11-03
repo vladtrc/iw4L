@@ -6,7 +6,7 @@ use crate::world::ClientId;
 use bevy_ecs::prelude::World;
 
 #[derive(Clone, Debug)]
-pub(crate) struct EntityHit {
+pub struct EntityHit {
     pub target: ScriptModelId,
     pub amount: i32,
     pub attacker: Option<ClientId>,
@@ -44,7 +44,7 @@ const MEANS: &[&str] = &[
     "MOD_DOGS",
 ];
 
-pub(crate) fn means_named(name: &str) -> Result<&'static str, String> {
+pub fn means_named(name: &str) -> Result<&'static str, String> {
     MEANS
         .iter()
         .copied()
@@ -53,7 +53,7 @@ pub(crate) fn means_named(name: &str) -> Result<&'static str, String> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ScriptBlast {
+pub struct ScriptBlast {
     pub origin: [f32; 3],
     pub radius: f32,
     pub max: f32,
@@ -65,7 +65,7 @@ pub(crate) struct ScriptBlast {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ScriptHit {
+pub struct ScriptHit {
     pub piece: Option<i32>,
     pub target: HitTarget,
     pub amount: i32,
@@ -79,7 +79,7 @@ pub(crate) struct ScriptHit {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum HitTarget {
+pub enum HitTarget {
     Player(ClientId),
     Entity(ScriptModelId),
 }
@@ -99,7 +99,7 @@ pub(crate) fn apply_script_blasts(world: &mut World, tick: crate::Tick) {
             }
             HitTarget::Entity(target) => {
                 if let Some(piece) = hit.piece {
-                    crate::t5_destructible::apply_piece_hit(
+                    crate::model_behaviors::apply_piece_hit(
                         &mut FrameWorld::from_world(world),
                         tick,
                         crate::AuthorityModelOwner::ScriptModel(target),
@@ -240,7 +240,7 @@ pub(crate) fn damage_entity(world: &mut World, hit: &EntityHit) -> bool {
                 .and_then(|dobj| dobj.bone_name(bone))
                 .map(str::to_owned)
         })
-        .unwrap_or_default();
+        .unwrap_or(String::new());
     let weapon = crate::script_player::weapon_name(&frame, hit.weapon);
     let attacker = hit.attacker.map_or(Value::Undefined, |a| {
         super::players::player_object(world, a.0)
@@ -288,7 +288,7 @@ pub(crate) fn damage_entity(world: &mut World, hit: &EntityHit) -> bool {
     true
 }
 
-pub(crate) fn destructible_callback(
+pub fn destructible_callback(
     world: &mut World,
     owner: crate::AuthorityModelOwner,
     entry: &str,
@@ -300,22 +300,21 @@ pub(crate) fn destructible_callback(
     else {
         return;
     };
-    let name = format!("iw4l_maps/destructibles::{entry}");
     let now = super::players::now_ms(world);
     if let Err(fault) =
-        crate::script::runtime::run_now(world, &name, Value::Object(object), args, now)
+        crate::script::runtime::run_now(world, entry, Value::Object(object), args, now)
     {
         diag::warn!(Sim, "destructible callback unavailable: {fault:?}");
     }
 }
 
-pub(crate) fn destructible_attacker(world: &World, attacker: Option<crate::ClientId>) -> Value {
+pub fn destructible_attacker(world: &World, attacker: Option<crate::ClientId>) -> Value {
     attacker.map_or(Value::Undefined, |client| {
         super::players::player_object(world, client.0)
     })
 }
 
-pub(crate) fn destructible_effect(
+pub fn destructible_effect(
     world: &mut World,
     name: String,
     origin: [f32; 3],
@@ -347,13 +346,13 @@ pub(crate) fn destructible_effect(
     Some(id)
 }
 
-pub(crate) fn stop_destructible_effect(world: &mut World, id: u64) {
+pub fn stop_destructible_effect(world: &mut World, id: u64) {
     if let Some(mut runtime) = world.get_resource_mut::<RoundScript>() {
         runtime.delete_entity(id);
     }
 }
 
-pub(crate) fn set_destructible_model(
+pub fn set_destructible_model(
     world: &mut World,
     owner: crate::AuthorityModelOwner,
     model: Option<&str>,
@@ -371,7 +370,7 @@ pub(crate) fn set_destructible_model(
     runtime.entities.get_mut(&object).unwrap().loop_sound = sound.map(std::sync::Arc::from);
 }
 
-pub(crate) fn destructible_debris(
+pub fn destructible_debris(
     world: &mut World,
     dobj: crate::AuthorityDObjState,
     offset: [f32; 3],

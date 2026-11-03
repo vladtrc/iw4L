@@ -172,6 +172,10 @@ fn build<T: SizedSample + FromSample<f32>>(
         config.clone(),
         move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
             shared.device_callbacks.fetch_add(1, Ordering::Release);
+            if shared.capture.armed.load(Ordering::Acquire) {
+                output.fill(T::EQUILIBRIUM);
+                return;
+            }
             let mut next = || {
                 if position == QUANTUM {
                     shared.render_for(&mut block, Some(true));

@@ -1,4 +1,4 @@
-use crate::{ConsoleCommand, ConsoleLine, ConsoleSettings, ConsoleState};
+use crate::ConsoleCommand;
 use bevy::prelude::*;
 use render_frontend::assemble::drawsurf::fog::{FogDvars, MapFrameFog};
 use render_frontend::prepare::scene::view_parms::PreparedSceneView;
@@ -237,9 +237,7 @@ pub(crate) fn route(
     mut map: Option<ResMut<MapFrameFog>>,
     clock: Option<Res<net::FrameClock>>,
     prepared: Res<PreparedSceneView>,
-    mut console: ResMut<ConsoleState>,
-    settings: Res<ConsoleSettings>,
-    mut line: ResMut<ConsoleLine>,
+    mut output: crate::feature_dispatch::ConsoleEcho,
 ) {
     for cmd in commands.read() {
         if !CONTROLS.contains(&cmd.name.as_str()) && !READONLY.contains(&cmd.name.as_str()) {
@@ -253,8 +251,6 @@ pub(crate) fn route(
             &prepared,
         )
         .unwrap_or_else(|reason| format!("{}: refused: {reason}", cmd.name));
-        diag::info!(Console, "{msg}");
-        line.0 = msg.clone();
-        console.echo(msg, settings.log_capacity);
+        output.write(msg);
     }
 }

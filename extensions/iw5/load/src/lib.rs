@@ -1,0 +1,10 @@
+pub const ID: asset_core::FamilyId = asset_core::FamilyId::new("iw5");
+use ext_iw5_audio::sound;
+use ext_iw5_gameplay::presentation;
+use ext_iw5_gameplay::weapons;
+use ext_iw5_material::material;
+use ext_iw5_world::anim;
+use ext_iw5_world::model;
+use ext_iw5_world::world;
+use ext_iw5_zone::zone;
+pub mod lane;

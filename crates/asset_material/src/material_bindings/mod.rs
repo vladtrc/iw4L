@@ -2,23 +2,21 @@ use bevy::math::{Mat4, Vec3};
 use render_material::{
     MaterialGenerationId, RuntimeArgumentBinding, RuntimeCodeSources, RuntimeMaterialCatalog,
 };
-mod fog;
-mod iw5;
+pub mod fog;
 mod plan;
-mod sky;
-mod t5;
-mod t6;
-use plan::FrameStep;
+pub mod sky;
+pub use plan::FrameStep;
+mod families;
+pub use families::*;
 mod local_light;
-mod t5_light;
-pub use local_light::{MaterialLightOverrides, MaterialLocalLightInputs};
+pub use local_light::{LocalLightWriter, MaterialLightOverrides, MaterialLocalLightInputs};
 
 #[derive(Clone, Debug)]
 pub struct PreparedMaterialBindings {
     generation: MaterialGenerationId,
     requested: Vec<u16>,
-    frame_steps: Vec<FrameStep>,
-    local_light_ops: Vec<local_light::LightOperation>,
+    frame_steps: Vec<(asset_core::FamilyId, Vec<FrameStep>)>,
+    local_light_ops: Vec<std::sync::Arc<dyn LocalLightProducer>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -36,9 +34,19 @@ pub struct MaterialFrameBindingInputs {
     pub sun: Option<MaterialSunInputs>,
 }
 
+/// The world inputs of one more map drawn in the frame, an atlas layer: its
+/// family's code constants are bound from these, not the camera map's.
+#[derive(Clone, Copy, Debug)]
+pub struct MaterialLayerBindingInputs {
+    pub world: MaterialWorldBindingInputs,
+    pub exposure: Option<f32>,
+    pub fog: Option<MaterialFogInputs>,
+    pub sun: Option<MaterialSunInputs>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct MaterialWorldBindingInputs {
-    pub source_namespace: Option<asset_core::AssetNamespace>,
+    pub source_namespace: Option<asset_core::FamilyId>,
     pub exposure_stops: Option<f32>,
     pub model_lighting_decode_scale: f32,
     pub reflection_probe_alpha_weight: f32,
@@ -129,6 +137,7 @@ impl PreparedMaterialBindings {
         catalog: &RuntimeMaterialCatalog,
         sources: &mut RuntimeCodeSources,
         inputs: &MaterialFrameBindingInputs,
+        layers: &[MaterialLayerBindingInputs],
     ) -> Result<(), StaleMaterialBindings> {
         let generation = catalog.generation_id();
         if generation != self.generation {
@@ -142,26 +151,54 @@ impl PreparedMaterialBindings {
             sources,
         };
         let sources = &mut writer;
-        for step in &self.frame_steps {
-            step.execute(sources, inputs);
+        for (family, steps) in &self.frame_steps {
+            // A family that only a layer's map is in reads that map's inputs.
+            let layer = (inputs.world.source_namespace != Some(*family))
+                .then(|| {
+                    layers
+                        .iter()
+                        .find(|layer| layer.world.source_namespace == Some(*family))
+                })
+                .flatten();
+            let layered;
+            let inputs = match layer {
+                Some(layer) => {
+                    layered = MaterialFrameBindingInputs {
+                        world: layer.world,
+                        exposure: layer.exposure,
+                        fog: layer.fog.unwrap_or(inputs.fog),
+                        fog_enabled: inputs.fog_enabled && layer.fog.is_some(),
+                        sun: layer.sun.or(inputs.sun),
+                        ..*inputs
+                    };
+                    &layered
+                }
+                None => inputs,
+            };
+            for step in steps {
+                step.execute(sources, inputs);
+            }
         }
 
         Ok(())
     }
 }
 
-struct BindingWriter<'a> {
+pub struct BindingWriter<'a> {
     requested: &'a [u16],
     sources: &'a mut RuntimeCodeSources,
 }
-impl BindingWriter<'_> {
-    fn set_constant_rows(&mut self, index: u16, rows: &[[u32; 4]]) {
+impl<'a> BindingWriter<'a> {
+    pub fn new(requested: &'a [u16], sources: &'a mut RuntimeCodeSources) -> Self {
+        Self { requested, sources }
+    }
+    pub fn set_constant_rows(&mut self, index: u16, rows: &[[u32; 4]]) {
         if self.requested.binary_search(&index).is_ok() {
             self.sources.set_constant_rows(index, rows);
         }
     }
 }
-fn float4_bits(row: [f32; 4]) -> [u32; 4] {
+pub fn float4_bits(row: [f32; 4]) -> [u32; 4] {
     row.map(f32::to_bits)
 }
 pub fn fog_color_linear_and_gamma(rgb: [f32; 3], alpha: f32) -> ([f32; 4], [f32; 4]) {
@@ -184,10 +221,10 @@ pub fn fog_color_linear_and_gamma(rgb: [f32; 3], alpha: f32) -> ([f32; 4], [f32;
     (linear, gamma)
 }
 
-fn demands_any(requested: &[u16], indices: &[u16]) -> bool {
+pub fn demands_any(requested: &[u16], indices: &[u16]) -> bool {
     indices.iter().any(|i| requested.binary_search(i).is_ok())
 }
-fn push_static(steps: &mut Vec<FrameStep>, requested: &[u16], rows: Vec<(u16, [u32; 4])>) {
+pub fn push_static(steps: &mut Vec<FrameStep>, requested: &[u16], rows: Vec<(u16, [u32; 4])>) {
     let rows: Vec<_> = rows
         .into_iter()
         .filter(|(i, _)| requested.binary_search(i).is_ok())

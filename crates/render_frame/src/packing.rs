@@ -90,34 +90,9 @@ pub fn pack_sun_shadow_frontend(
                     world_vertex_count,
                 );
             }
-            PackKind::SmodelRigid {
-                surface,
-                lighting_handle,
-            } => push_smodel(
-                &mut packed.smodel,
-                &mut packed.smodel_draw_indices,
-                &mut packed.skipped_empty_ib,
-                draw_index as u32,
-                draw.key,
-                draw.material_rank,
-                surface,
-                lighting_handle,
-                smodel_ranges,
-            ),
-            PackKind::SmodelSkinned {
-                surface,
-                lighting_handle,
-            } => push_smodel(
-                &mut packed.smodel_skinned,
-                &mut packed.smodel_skinned_draw_indices,
-                &mut packed.skipped_empty_ib,
-                draw_index as u32,
-                draw.key,
-                draw.material_rank,
-                surface,
-                lighting_handle,
-                smodel_ranges,
-            ),
+            PackKind::SmodelRigid { .. } | PackKind::SmodelSkinned { .. } => {
+                push_smodel(&mut packed, draw_index as u32, draw, smodel_ranges);
+            }
             PackKind::SmodelPretess {
                 lighting_handle,
                 dest,
@@ -258,26 +233,42 @@ fn push_world(
 }
 
 fn push_smodel(
-    dest: &mut Vec<GfxSmodelRigidEntry>,
-    draw_indices: &mut Vec<u32>,
-    skipped_empty_ib: &mut u32,
+    packed: &mut PackedFrontendLists,
     draw_index: u32,
-    key: u64,
-    material_rank: u32,
-    surface: u32,
-    lighting_handle: u32,
+    draw: &PackDraw,
     smodel_ranges: &[(u32, u32)],
 ) {
+    let (dest, draw_indices, surface, lighting_handle) = match draw.kind {
+        PackKind::SmodelRigid {
+            surface,
+            lighting_handle,
+        } => (
+            &mut packed.smodel,
+            &mut packed.smodel_draw_indices,
+            surface,
+            lighting_handle,
+        ),
+        PackKind::SmodelSkinned {
+            surface,
+            lighting_handle,
+        } => (
+            &mut packed.smodel_skinned,
+            &mut packed.smodel_skinned_draw_indices,
+            surface,
+            lighting_handle,
+        ),
+        _ => unreachable!("smodel packing requires a rigid or skinned draw"),
+    };
     let Some(&(index_start, index_count)) = smodel_ranges.get(surface as usize) else {
-        *skipped_empty_ib += 1;
+        packed.skipped_empty_ib += 1;
         return;
     };
     if index_count < 3 {
-        *skipped_empty_ib += 1;
+        packed.skipped_empty_ib += 1;
         return;
     }
     dest.push(GfxSmodelRigidEntry {
-        packed_key: backend_setup_key(key, material_rank),
+        packed_key: backend_setup_key(draw.key, draw.material_rank),
         tri_count: (index_count / 3) as u16,
         index_byte_offset: index_start.saturating_mul(2),
         lighting_handle: lighting_handle as u16,

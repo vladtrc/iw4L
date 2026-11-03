@@ -351,7 +351,7 @@ pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink)
         alternate_drop_time_ms: weap_def
             .map(|body| s.i32_at(body, s.layout(0x290, 984)))
             .transpose()?
-            .unwrap_or_default(),
+            .unwrap_or(0),
         view_flash_slot: authored_material_slot(s, weap_def, s.layout(0x48, 112))?,
         world_flash_slot: authored_material_slot(s, weap_def, s.layout(0x4c, 120))?,
         view_shell_eject_slot: authored_material_slot(s, weap_def, s.layout(0x110, 512))?,

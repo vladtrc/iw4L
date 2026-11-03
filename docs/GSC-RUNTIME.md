@@ -8,8 +8,8 @@ player connect/spawn/damage/killed, the in-game menus, and the sounds they play.
 ## Sources and installation
 
 Matches support IW4 modes only (dm, war, dom, sd, sab, ctf, koth, dd).
-T5 and IW5 maps supply entities and map declarations; their gameplay/UI scripts
-are excluded. Menu/HUD layout and match flow stay IW4, with weapon and team icons
+Installed map-script policies supply native entities and declarations and
+select packaged or projected host-rule sources. Menu/HUD layout and match flow stay IW4, with weapon and team icons
 from the corresponding game. Objective models, materials, shaders and effects
 come from the map's game, including the plant/defuse weapon viewmodels and animations.
 `ObjectiveVisuals` binds IW4 names to those assets at
@@ -52,7 +52,7 @@ never resolve to builtins. A developer builtin used as a statement compiles to n
 (arguments are not evaluated); using its value or referencing it fails the load.
 `prof_begin`/`prof_end` statements compile to nothing. SHA-256 covers decompressed source bytes
 after terminator removal. Fingerprints hash IR version 5 and each module's
-`(site, realm, origin)`; server modules of the IW4 and T5 realms are instantiated. Calls, `::f` references (script
+`(site, realm, origin)`; server modules of installed script families are instantiated. Calls, `::f` references (script
 `Function` or native `Builtin`), locals (per-function slots) and field names (symbol ids)
 are resolved at load, and `install` binds native slots once.
 UTF-8 and single-byte sources are supported; developer blocks are excluded.
@@ -146,13 +146,13 @@ modules, and `Parser` stays in the parent.
 
 `SoundExists(alias)` checks the composed match sound-alias catalog, installed
 before script entry points run even when audio output is disabled. Host aliases
-resolve case-insensitively; imported aliases use an explicit `t5:` or `iw5:`
+resolve case-insensitively; imported aliases use an explicit installed-family token
 prefix. A missing catalog reports an unavailable native error. Arguments use the usual
 script string conversion.
 
 `Objective_Team(index, player)` is an extension: given a player instead of a team
 name, the objective shows to that player alone, in team and free-for-all modes
-(T6 sensor grenade pings, `iw4l_t6/equipment`). The compass draws objectives in
+(for example, a family-owned sensor grenade script). The compass draws objectives in
 free-for-all only when they are addressed this way.
 
 `AmbientPlay(alias, [fadeSeconds])`, `AmbientStop([fadeSeconds])` and
@@ -280,14 +280,11 @@ part of `game` (and `pers` when asked to persist).
 Disconnect requests from transport are queued for an authority frame. The player
 callback runs before Rust removes the player state and metadata; it can still read
 the name, score and team while the scripts remove the player from their lists.
-Scripts run and are checked only on authority frames (`try_step`/`step` with
-`StepReason::AuthorityFrame`); prediction of new and replayed commands steps a
-script-less world. Per-client script control constraints travel in snapshots and are
+Scripts run only in the authority world (`try_step`/`step`); the client predicts
+without a world. Per-client script control constraints travel in snapshots and are
 restored before prediction and command replay. Button-query natives sample raw commands
 from the current authority frame, including presses between its first and last commands.
-Clones preserve program, heap, threads and waits. Shutdown resets them. Restoring
-snapshots into an installed authority VM rejects absent script state. Persistent
-replay pinning/restoration and client-role lifecycle evidence are still missing.
+Clones preserve program, heap, threads and waits. Shutdown resets them.
 Only terminal faults (exhausted identifiers, inconsistent IR) are sticky; they end the
 match and return the host to the lobby. Earlier
 writes are not rolled back.

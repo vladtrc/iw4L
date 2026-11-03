@@ -1,25 +1,32 @@
-pub mod adopt;
+pub mod door_exit;
+pub use weapon_iw4::WeaponCarry;
+pub mod bg;
+mod collision_scene;
+pub mod projectile_flight;
+pub mod world_graph;
+pub use clipmap_iw4::TraceExtents;
+pub use collision_scene::CollisionScene;
 pub mod bullet;
 mod shield;
 pub use shield::{ShieldAttachment, ShieldCarrierCollision};
 pub mod bullet_collision;
 mod carrier;
 pub mod chat;
-pub mod collision_census;
 pub mod combat;
 pub mod content;
 mod corpse;
 mod damage;
 mod entity_run;
 mod equipment;
-mod frame;
+pub mod frame;
 mod gentity;
 pub mod hudelem;
 pub mod identities;
 pub mod input;
+pub mod input_program;
 mod item;
 mod local_profile;
-pub use item::ITEM_USE_HOLD_MS;
+pub use item::{DroppedItem, ITEM_USE_HOLD_MS, advance_item};
 pub use local_profile::LocalPlayerProfile;
 mod mantle_xanim;
 pub mod match_state;
@@ -45,46 +52,43 @@ pub mod rules;
 mod score;
 mod skill_rating;
 pub use skill_rating::{SKILL_RATING_BYTES, SkillRating, SkillRatingError, SkillRatings};
-pub mod script_gaps;
-mod script_player;
+pub mod extensions;
+pub mod model_behaviors;
+pub mod script_player;
 mod smodel_grid;
 mod snapshot;
 mod sound_alias_cs;
 pub mod spawn;
 mod step;
-pub mod t5_destructible;
 mod world;
 pub mod world_objects;
 
-pub use adopt::{ADOPT_GAP_COUNT, ADOPT_GAPS, AdoptGap, AdoptReport};
 pub use bullet_collision::{
     AuthorityDObjCollision, AuthorityDObjCollisionBone, AuthorityDObjState, AuthorityModelOwner,
     BulletHitKind, BulletPath, BulletTraceQuery, BulletTraceSegment, COLLISION_COVERAGE,
     COLLISION_HISTORY_TICKS, CONTENTS_SOLID, ColliderId, CollisionCoverageRow, CollisionHistory,
     CoverageSupport, CurrentAuthorityReason, EntityCollisionCapabilities, EntityCollisionEpoch,
     EntityCollisionFrame, EntityCollisionHistory, EntityCollisionSample, EntityCollisionTraceGeom,
-    HistoryClampReason, HistoryFrame, HistoryPhase, HistoryRefusalReason, HistorySample,
-    HistorySampleVerdict, HitVolumeKind, LAGCOMP_MAX_REWIND_TICKS, LagcompQuery,
-    LinkedBrushCollisionBrush, MASK_BULLET_WORLD, MASK_PLAYER_SOLID, MASK_SHOT, PLAYER_MAXS,
-    PLAYER_MINS, PlayerCollisionPose, ScriptModelPlayAnim, ShotSampleProvenance, ShotSampleQuality,
-    TraceInvalidReason, TraceOutcome, bullet_trace, bullet_trace_segments,
-    bullet_trace_segments_with_entity_models, bullet_trace_with_entity_models, contents_match_mask,
-    glass_piece_from_hit, lagcomp_rewind_ticks,
+    HistoryClampReason, HistoryFrame, HistoryPhase, HistorySample, HistorySampleVerdict,
+    HitVolumeKind, LAGCOMP_MAX_REWIND_TICKS, LagcompQuery, LinkedBrushCollisionBrush,
+    MASK_BULLET_WORLD, MASK_PLAYER_SOLID, MASK_SHOT, PLAYER_MAXS, PLAYER_MINS, PlayerCollisionPose,
+    ScriptModelPlayAnim, ShotSampleProvenance, ShotSampleQuality, TraceInvalidReason, TraceOutcome,
+    bullet_trace, bullet_trace_segments, bullet_trace_segments_with_entity_models,
+    bullet_trace_with_entity_models, contents_match_mask, glass_piece_from_hit,
+    lagcomp_rewind_ticks,
 };
-pub use carrier::{SimWorld, StepReason, step, try_step};
-pub use collision_census::{
-    CollisionCensus, EntityClipCensus, ModelCollisionCensus, PlayerClipCensus, WorldClipCensus,
-};
+pub use carrier::{SimWorld, step, try_step};
 pub use combat::{
-    AcceptedShot, Emission, EntityClipKind, PlayerCollisionRepresentation, ShotCollisionGeometry,
-    ShotCollisionVerdict, TracePhaseOutput, spread_direction_on_plane, spread_pellet_direction,
+    AcceptedShot, Emission, EntityClipKind, OwnerShotEffects, PlayerCollisionRepresentation,
+    ShotCollisionGeometry, ShotCollisionVerdict, TracePhaseOutput, owner_shot_effects,
+    spread_direction_on_plane, spread_pellet_direction,
 };
 pub use content::{CONTENT_DIGEST_SCHEME, ContentComponents, content_components, content_digest};
 pub use corpse::{PlayerCorpsePool, PlayerCorpseSlot, level_time_ms};
-pub use damage::{DamageAttempt, DamageOutcome, DamageRefusal, DeathCommit};
+pub use damage::{DamageAttempt, DamageOutcome, DeathCommit};
 pub use equipment::{
-    EquipmentRuntimeFacts, ProjectileHitGeometry, ProjectileImpact, ProjectileState,
-    projectile_birth_ms,
+    EquipmentRuntimeFacts, GrenadeLaunchKind, LaunchMotion, ProjectileHitGeometry,
+    ProjectileImpact, ProjectileLaunch, ProjectileState, projectile_birth_ms,
 };
 pub use gentity::{
     EntityAllocError, EntityKernel, EntityKernelOccupiedSnapshot, EntityKernelSlotSnapshot,
@@ -104,10 +108,11 @@ pub use identities::{
     PelletId, PendingBrass, ProjectileId, RNG_DOMAIN_SCHEME, RngDomain, ScriptModelId, ShotId,
 };
 pub use input::{
-    ActionRequestId, ClassId, ClientAction, CommandSequence, MENU_RESPONSE_BYTES, PlayerCommand,
-    SpawnPick, TickInput, action_request_id, menu_response_field, menu_response_text,
+    ClassId, ClientAction, CommandSequence, MENU_RESPONSE_BYTES, PlayerCommand, SpawnPick,
+    TickInput, menu_response_field, menu_response_text,
 };
 pub use mantle_xanim::MantleXAnimBind;
+pub use missile::shot_launch_motion;
 
 pub const CONSTANT_RADAR_DVAR: &str = "scr_game_constantradar";
 pub const ENEMY_BOTS_DVAR: &str = "scr_game_enemybots";
@@ -115,15 +120,13 @@ pub const FRIENDLY_BOTS_DVAR: &str = "scr_game_friendlybots";
 
 pub const TEAM_MENU: &str = "team_marinesopfor";
 pub use match_state::{
-    ClassDef, ClassRejectReason, ClientLifecycle, ClientSnapshotMeta,
-    ConfigurationChangeRejectReason, DroppedItemAmmo, EntityEventPayload, EntityEventRecord,
-    EventAudience, EventRecord, GiveRejectReason, HealthRegenCensus, InputReceipt,
+    ClassDef, ClassRejectReason, ClientLifecycle, ClientSnapshotMeta, DroppedItemAmmo,
+    EntityEventPayload, EntityEventRecord, EventAudience, EventRecord, InputReceipt,
     ItemPickupRecord, KillcamHud, LinkedWeaponView, LoadoutSpec, LocationSelection,
     MENU_COMMAND_TAIL, MatchEndReason, MenuCommand, MenuCommandKind, PelletFxRecord, PersonalClass,
-    RadarMode, RemoteMissile, RngDebugMeta, SIM_EVENT_ROSTER, ScriptBlur, ScriptControls,
-    ScriptDepthOfField, ScriptDvars, ScriptSeat, SimEvent, SimEventRow, SnapshotMeta,
-    TargetBoxDvar, UNRELIABLE_SIM_EVENT_COUNT, ViewEffects, VisionChange, is_postfx_dvar,
-    sim_event_is_reliable,
+    RadarMode, RemoteMissile, SIM_EVENT_ROSTER, ScriptBlur, ScriptControls, ScriptDepthOfField,
+    ScriptDvars, ScriptSeat, SimEvent, SimEventRow, SnapshotMeta, TargetBoxDvar,
+    UNRELIABLE_SIM_EVENT_COUNT, ViewEffects, VisionChange, is_postfx_dvar, sim_event_is_reliable,
 };
 pub use player_anim_script::{
     AnimConditions, AnimScriptCommand, AnimScriptCondition, AnimScriptItem, PlayerAnimScript,
@@ -131,7 +134,6 @@ pub use player_anim_script::{
 };
 pub use rules::{FFA, FreeForAllRules};
 pub use score::{MATCH_TICK_MS, bootstrap_score_defaults};
-pub use script_gaps::ScriptGaps;
 pub use snapshot::{
     AreaEntityLinkSnapshot, AreaEntityWorldSnapshot, AreaEntityWorldSnapshotError,
     AreaSectorSnapshot, Snapshot,
@@ -144,8 +146,8 @@ pub use sound_alias_cs::{
 };
 pub use spawn::{
     AuthoredSpawnPoint, HostCheats, HostGameModeSelection, MatchBootstrap, SPAWN_BAD_DIST,
-    SPAWN_IDEAL_DIST, SpawnAttemptReport, SpawnDecision, SpawnReject, host_game_mode_kind,
-    pick_ffa_spawn, spawn_candidate_indices, spawn_candidate_indices_for,
+    SPAWN_IDEAL_DIST, SpawnAttemptReport, SpawnDecision, host_game_mode_kind, pick_ffa_spawn,
+    set_host_game_mode_kind, spawn_candidate_indices, spawn_candidate_indices_for,
 };
 pub use step::phase_materialize_entity_dobjs;
 
@@ -162,9 +164,10 @@ pub use world::{
 pub use world_objects::{
     DestructibleLoopSound, GLASS_BLAST_DAMAGE_SCALE, GLASS_BLAST_RADIUS_CAP,
     GLASS_DAMAGE_TO_DESTROY, GLASS_DAMAGE_TO_WEAKEN, GLASS_FRACTURE_PROFILE_VERSION,
-    GLASS_MELEE_DAMAGE, GLASS_PROJECTILE_PANE_HOPS, GlassBreakRecord, GlassCause, GlassPaneBasis,
-    GlassPieceId, GlassPieceSnapshot, GlassPieceState, GlassShatterSeed, MISSILE_GLASS_SHATTER_VEL,
-    WorldObjectSnapshot, WorldObjectState, glass_blast_integer_damage,
+    GLASS_MELEE_DAMAGE, GLASS_PROJECTILE_PANE_HOPS, GlassBlastCone, GlassBlastFalloff,
+    GlassBreakRecord, GlassCause, GlassHit, GlassPaneBasis, GlassPieceId, GlassPieceSnapshot,
+    GlassPieceState, GlassShatterSeed, MISSILE_GLASS_SHATTER_VEL, WorldObjectSnapshot,
+    WorldObjectState, glass_blast_integer_damage,
 };
 
 mod scene_effects;
@@ -179,11 +182,9 @@ pub use objectives::{
     VehicleHudTarget,
 };
 
-pub use world::{SimContent, SimContentBuilder};
+pub use world::{SimContent, SimContentBuilder, trace_world_clip};
 mod weapon_content;
-pub use weapon_content::{
-    SimWeaponContent, SimWeaponContentRefusal, SimWeaponRow, WeaponScriptSounds, WeaponSetup,
-};
+pub use weapon_content::{SimWeaponContent, SimWeaponRow, WeaponScriptSounds, WeaponSetup};
 
 mod script_audio;
 pub use script_audio::{ScriptAmbient, ScriptAudioCommand};
@@ -191,7 +192,4 @@ pub use script_audio::{ScriptAmbient, ScriptAudioCommand};
 pub use input::PlayerProfile;
 
 mod tick_result;
-pub use tick_result::{
-    ActionOutcome, ActionResult, FireCommandOutcome, FireCommandRefusal, FireCommandResult,
-    TickEffects, TickResult,
-};
+pub use tick_result::{TickEffects, TickResult};

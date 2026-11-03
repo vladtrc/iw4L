@@ -142,6 +142,7 @@ pub struct EntityKernelSlotSnapshot {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityKernelSnapshot {
+    pub reserved_generations: Vec<u32>,
     pub slots: Vec<EntityKernelSlotSnapshot>,
     pub high_water: i32,
     pub free_fifo: Vec<i32>,
@@ -160,6 +161,7 @@ pub enum EntityKernelSnapshotError {
 impl Default for EntityKernelSnapshot {
     fn default() -> Self {
         Self {
+            reserved_generations: vec![0; GENTITY_RESERVED_COUNT as usize],
             slots: Vec::new(),
             high_water: GENTITY_RESERVED_COUNT,
             free_fifo: Vec::new(),
@@ -196,7 +198,21 @@ impl EntityKernelSnapshot {
             .map(|occupied| occupied.kind)
     }
 
+    pub fn generation(&self, number: u16) -> Option<u32> {
+        let index = usize::from(number);
+        if index < GENTITY_RESERVED_COUNT as usize {
+            self.reserved_generations.get(index).copied()
+        } else {
+            self.slots
+                .get(index - GENTITY_RESERVED_COUNT as usize)
+                .map(|slot| slot.generation)
+        }
+    }
+
     pub fn validate(&self) -> Result<(), EntityKernelSnapshotError> {
+        if self.reserved_generations.len() != GENTITY_RESERVED_COUNT as usize {
+            return Err(EntityKernelSnapshotError::SlotCountMismatch);
+        }
         if !(GENTITY_RESERVED_COUNT..=i32::from(ENTITYNUM_WORLD)).contains(&self.high_water) {
             return Err(EntityKernelSnapshotError::HighWaterOutOfRange);
         }
@@ -303,8 +319,20 @@ impl Default for EntityKernel {
 }
 
 impl EntityKernel {
+    pub(crate) fn occupy_reserved(&mut self, number: i32) {
+        assert!((0..GENTITY_RESERVED_COUNT).contains(&number));
+        let generation = &mut self.slots[number as usize].generation;
+        *generation = generation
+            .checked_add(1)
+            .expect("entity generation exhausted");
+    }
+
     pub fn to_snapshot(&self) -> EntityKernelSnapshot {
         EntityKernelSnapshot {
+            reserved_generations: self.slots[..GENTITY_RESERVED_COUNT as usize]
+                .iter()
+                .map(|slot| slot.generation)
+                .collect(),
             slots: self.slots[GENTITY_RESERVED_COUNT as usize..self.high_water as usize]
                 .iter()
                 .map(|slot| EntityKernelSlotSnapshot {
@@ -331,6 +359,9 @@ impl EntityKernel {
     ) -> Result<Self, EntityKernelSnapshotError> {
         snapshot.validate()?;
         let mut slots = vec![EntitySlot::default(); usize::from(ENTITYNUM_WORLD)];
+        for (slot, generation) in slots.iter_mut().zip(&snapshot.reserved_generations) {
+            slot.generation = *generation;
+        }
         for (index, source) in snapshot.slots.iter().enumerate() {
             slots[GENTITY_RESERVED_COUNT as usize + index] = EntitySlot {
                 generation: source.generation,
@@ -352,6 +383,13 @@ impl EntityKernel {
             level_time_ms: snapshot.level_time_ms,
             frame_serial: snapshot.frame_serial,
         })
+    }
+
+    pub fn generations(&self) -> Vec<u32> {
+        self.slots[..self.high_water as usize]
+            .iter()
+            .map(|slot| slot.generation)
+            .collect()
     }
 
     pub fn begin_frame(&mut self, level_time_ms: i32) {

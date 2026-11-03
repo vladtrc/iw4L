@@ -8,19 +8,21 @@ use fx_iw4::{
     FX_GLASS_PIECE_DYNAMICS, FX_GLASS_PIECE_PLACE, FX_GLASS_PIECE_STATE, FX_GLASS_RESTITUTION,
     FX_GLASS_SETTLED_CAP, FX_GLASS_SETTLED_FADE_MSEC, FX_GLASS_SETTLED_LIFETIME_MSEC,
     FX_GLASS_SHARD_LIFETIME_MSEC, FX_GLASS_SHARD_MAX, FX_GLASS_SPLIT_OP_CAP,
-    FX_GLASS_STATE_AREA_X2, FX_GLASS_STATE_FLAG_CHILD_CLEAR, FX_GLASS_STATE_FLAG_DAMAGED,
-    FX_GLASS_STATE_FLAG_SIMPLE, FX_GLASS_VERT_SCALE, FxGlassCrackRand, FxGlassCrackWork,
-    FxGlassPieceGeo, FxGlassShard, glass_alloc_piece, glass_ballistic_origin, glass_clamp_to_piece,
-    glass_cross3, glass_decode_geo, glass_dynamics_avel, glass_dynamics_fall_time,
-    glass_dynamics_init_row, glass_dynamics_phys_obj, glass_dynamics_software_launch,
-    glass_dynamics_vel, glass_extract_shards, glass_free_piece, glass_fringe_cap, glass_is_in_use,
-    glass_launch_avel, glass_launch_dir, glass_lerp_range, glass_life_fade, glass_loop_area_x2,
-    glass_needs_size_split, glass_normalize3, glass_piece_speed_scale, glass_piece_tex_vecs,
-    glass_place_origin, glass_place_quat, glass_place_radius, glass_place_set_origin,
-    glass_place_set_quat, glass_point_in_piece, glass_recenter_offset, glass_reset_copy_geo,
-    glass_reset_copy_piece, glass_reset_free_list, glass_set_in_use, glass_software_rotate_quat,
-    glass_splitmix64, glass_state_area_x2, glass_state_def_index, glass_state_flags,
-    glass_state_geo_span, glass_state_geo_start, glass_state_set_flags, glass_state_set_geo_start,
+    FX_GLASS_STATE_AREA_X2, FX_GLASS_STATE_CRACK_DATA_COUNT, FX_GLASS_STATE_FAN_DATA_COUNT,
+    FX_GLASS_STATE_FLAG_CHILD_CLEAR, FX_GLASS_STATE_FLAG_DAMAGED, FX_GLASS_STATE_FLAG_SIMPLE,
+    FX_GLASS_STATE_HOLE_DATA_COUNT, FX_GLASS_STATE_VERT_COUNT, FX_GLASS_VERT_SCALE,
+    FxGlassCrackRand, FxGlassCrackWork, FxGlassPieceGeo, FxGlassShard, glass_ballistic_origin,
+    glass_clamp_to_piece, glass_cross3, glass_decode_geo, glass_dynamics_avel,
+    glass_dynamics_fall_time, glass_dynamics_init_row, glass_dynamics_phys_obj,
+    glass_dynamics_software_launch, glass_dynamics_vel, glass_extract_shards, glass_free_piece,
+    glass_fringe_cap, glass_is_in_use, glass_launch_avel, glass_launch_dir, glass_lerp_range,
+    glass_life_fade, glass_loop_area_x2, glass_needs_size_split, glass_normalize3,
+    glass_piece_speed_scale, glass_piece_tex_vecs, glass_place_next_free, glass_place_origin,
+    glass_place_quat, glass_place_radius, glass_place_set_origin, glass_place_set_quat,
+    glass_point_in_piece, glass_recenter_offset, glass_reset_copy_geo, glass_reset_copy_piece,
+    glass_reset_free_list, glass_set_in_use, glass_software_rotate_quat, glass_splitmix64,
+    glass_state_area_x2, glass_state_def_index, glass_state_flags, glass_state_geo_span,
+    glass_state_geo_start, glass_state_set_flags, glass_state_set_geo_start,
     glass_state_set_support_mask, glass_state_support_mask, glass_support_frac, unit_quat_to_axis,
 };
 
@@ -77,6 +79,18 @@ pub struct FxGlassSystemHost {
     last_landing_msec: i32,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct GlassImpact {
+    pub position: [f32; 3],
+    pub direction: [f32; 3],
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GlassBreakPresentation {
+    pub launch_airborne: bool,
+    pub play_oneshot: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GlassPresentationEvent {
     pub pane: u32,
@@ -114,6 +128,19 @@ fn local_to_world(origin: [f32; 3], axis: [[f32; 3]; 3], vert: [i16; 2]) -> [f32
         origin[1] + axis[0][1] * x + axis[1][1] * y,
         origin[2] + axis[0][2] * x + axis[1][2] * y,
     ]
+}
+
+#[derive(Clone, Copy)]
+enum ShardLaunch {
+    Radial {
+        dir: [f32; 3],
+        hit: [f32; 3],
+        radius: f32,
+        axis: [[f32; 3]; 3],
+    },
+    Collapse {
+        axis: [[f32; 3]; 3],
+    },
 }
 
 impl FxGlassSystemHost {
@@ -198,19 +225,35 @@ impl FxGlassSystemHost {
     }
 
     pub fn alloc(&mut self, vert: u8, hole: u8, crack: u8, fan: u8) -> u32 {
-        glass_alloc_piece(
-            &mut self.piece_places,
-            &mut self.piece_states,
-            &mut self.is_in_use,
-            &mut self.first_free_piece,
-            &mut self.active_piece_count,
-            &mut self.geo_data_count,
-            self.geo_data_limit,
-            vert,
-            hole,
-            crack,
-            fan,
-        )
+        let piece = self.first_free_piece;
+        if piece == FX_GLASS_FREE_SENTINEL {
+            return FX_GLASS_FREE_SENTINEL;
+        }
+        let need = self.geo_data_count
+            + u32::from(vert)
+            + u32::from(hole)
+            + u32::from(crack)
+            + u32::from(fan);
+        if self.geo_data_limit < need {
+            return FX_GLASS_FREE_SENTINEL;
+        }
+        let Some(place) = self.piece_places.get_mut(piece as usize) else {
+            return FX_GLASS_FREE_SENTINEL;
+        };
+        self.first_free_piece = glass_place_next_free(place);
+        self.active_piece_count = self.active_piece_count.saturating_add(1);
+        glass_set_in_use(&mut self.is_in_use, piece);
+        let Some(state) = self.piece_states.get_mut(piece as usize) else {
+            return FX_GLASS_FREE_SENTINEL;
+        };
+        state[FX_GLASS_STATE_VERT_COUNT] = vert;
+        state[FX_GLASS_STATE_HOLE_DATA_COUNT] = hole;
+        state[FX_GLASS_STATE_CRACK_DATA_COUNT] = crack;
+        state[FX_GLASS_STATE_FAN_DATA_COUNT] = fan;
+        glass_state_set_geo_start(state, self.geo_data_count as u16);
+        glass_state_set_flags(state, 0);
+        self.geo_data_count = need;
+        piece
     }
 
     pub fn free(&mut self, piece: u32) {
@@ -516,11 +559,15 @@ impl FxGlassSystemHost {
             self.piece_places[piece as usize] = place;
             if self.shatter_caused(
                 piece,
-                hit,
-                delta,
+                GlassImpact {
+                    position: hit,
+                    direction: delta,
+                },
                 Some(seed ^ u64::from(piece)),
-                true,
-                true,
+                GlassBreakPresentation {
+                    launch_airborne: true,
+                    play_oneshot: true,
+                },
                 0,
                 0,
             ) {
@@ -550,20 +597,39 @@ impl FxGlassSystemHost {
     }
 
     pub fn shatter(&mut self, piece: u32, hit: [f32; 3], dir: [f32; 3]) -> bool {
-        self.shatter_caused(piece, hit, dir, None, true, true, 0, 1)
+        self.shatter_caused(
+            piece,
+            GlassImpact {
+                position: hit,
+                direction: dir,
+            },
+            None,
+            GlassBreakPresentation {
+                launch_airborne: true,
+                play_oneshot: true,
+            },
+            0,
+            1,
+        )
     }
 
     pub fn shatter_caused(
         &mut self,
         piece: u32,
-        hit: [f32; 3],
-        dir: [f32; 3],
+        impact: GlassImpact,
         seed: Option<u64>,
-        launch_airborne: bool,
-        play_oneshot: bool,
+        presentation: GlassBreakPresentation,
         cause: u8,
         revision: u32,
     ) -> bool {
+        let GlassImpact {
+            position: hit,
+            direction: dir,
+        } = impact;
+        let GlassBreakPresentation {
+            launch_airborne,
+            play_oneshot,
+        } = presentation;
         if !self.is_in_use(piece) {
             return false;
         }
@@ -720,12 +786,17 @@ impl FxGlassSystemHost {
             } else {
                 glass_fringe_cap(original_area)
             },
-            launch_dir,
-            hit,
-            glass_place_radius(&place),
-            axis,
+            if cause == 2 {
+                ShardLaunch::Collapse { axis }
+            } else {
+                ShardLaunch::Radial {
+                    dir: launch_dir,
+                    hit,
+                    radius: glass_place_radius(&place),
+                    axis,
+                }
+            },
             launch_airborne,
-            cause,
         );
         self.compact_geo();
         self.push_break_event(event_pane, origin, axis[2], play_oneshot, cause, revision);
@@ -772,12 +843,8 @@ impl FxGlassSystemHost {
         &mut self,
         children: &[u32],
         retained_area_limit: f32,
-        dir: [f32; 3],
-        hit: [f32; 3],
-        radius: f32,
-        axis: [[f32; 3]; 3],
+        launch: ShardLaunch,
         launch_airborne: bool,
-        cause: u8,
     ) {
         let n = children.len();
         let mut areas = vec![0.0f32; n];
@@ -846,7 +913,7 @@ impl FxGlassSystemHost {
             if bounce {
                 accents = accents.saturating_add(1);
             }
-            self.launch_software_shard(children[i], areas[i], dir, hit, radius, axis, cause);
+            self.launch_software_shard(children[i], areas[i], launch);
             if self.is_in_use(children[i]) {
                 launched = launched.saturating_add(1);
             }
@@ -860,21 +927,20 @@ impl FxGlassSystemHost {
         }
     }
 
-    fn launch_software_shard(
-        &mut self,
-        piece: u32,
-        area_x2: f32,
-        dir: [f32; 3],
-        hit: [f32; 3],
-        radius: f32,
-        axis: [[f32; 3]; 3],
-        cause: u8,
-    ) {
+    fn launch_software_shard(&mut self, piece: u32, area_x2: f32, launch: ShardLaunch) {
         if self.airborne_count() >= FX_GLASS_AIRBORNE_CAP {
             self.free(piece);
             return;
         }
-        let collapse = cause == 2;
+        let (collapse, dir, hit, radius, axis) = match launch {
+            ShardLaunch::Radial {
+                dir,
+                hit,
+                radius,
+                axis,
+            } => (false, dir, hit, radius, axis),
+            ShardLaunch::Collapse { axis } => (true, [0.0, 0.0, -1.0], [0.0; 3], 0.0, axis),
+        };
         let scale = glass_piece_speed_scale(area_x2);
         let lin_r = self.next_rand();
         let mut speed =
@@ -1065,7 +1131,7 @@ impl FxGlassSystemHost {
                 .get(piece as usize)
                 .map(|p| unit_quat_to_axis(glass_place_quat(p)))
                 .unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
-            self.launch_software_shard(piece, area, [0.0, 0.0, -1.0], [0.0; 3], 0.0, axis, 2);
+            self.launch_software_shard(piece, area, ShardLaunch::Collapse { axis });
             if let Some(mode) = self.contact_mode.get_mut(piece as usize) {
                 *mode = CONTACT_DISAPPEAR;
             }

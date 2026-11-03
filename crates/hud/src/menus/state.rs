@@ -109,7 +109,7 @@ impl ScriptMenus {
                 .collect();
             open.items = ids
                 .iter()
-                .map(|id| states.remove(id).unwrap_or_default())
+                .map(|id| states.remove(id).unwrap_or_else(ItemState::default))
                 .collect();
             open.item_ids = ids;
         }

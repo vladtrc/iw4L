@@ -250,7 +250,7 @@ impl DObj {
                 };
 
                 bones.push(Bone {
-                    name: model.bone_names.get(bone).cloned().unwrap_or_default(),
+                    name: model.bone_names.get(bone).cloned().unwrap_or(String::new()),
                     model: index,
                     parent,
                     bind_rotation,

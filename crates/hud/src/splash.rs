@@ -13,7 +13,6 @@ use hud_iw4::{
 
 use crate::chrome::{ChromeAssets, ChromeFrame, execute_chrome_menu_with_anim};
 use crate::draw2d::{Draw2dOp, tessellate_fonts};
-use crate::gaps::{GapCause, HudGap, HudPresentationGaps};
 use crate::gpu_list::{HudTessPass, TessJob};
 use crate::images::HudImages;
 use crate::scorebar::milliseconds;
@@ -222,7 +221,7 @@ impl ExprHost for SplashExprHost<'_> {
         Ok(Operand::Str(
             t.lookup_row_in_col(col0, key)
                 .map(|row| t.cell(row, result_col).to_owned())
-                .unwrap_or_default(),
+                .unwrap_or(String::new()),
         ))
     }
     fn table_lookup_by_row(&self, table: &str, row: i32, col: i32) -> Result<Operand, ExprError> {
@@ -248,10 +247,6 @@ pub(crate) fn spawn_splash(root: &mut ChildSpawnerCommands) {
         },
         FocusPolicy::Pass,
     ));
-}
-
-fn hide(pass: &mut HudTessPass) {
-    pass.splash = TessJob::Hide;
 }
 
 fn activate_pending(
@@ -282,210 +277,251 @@ fn expire_slots(slots: &mut SplashSlots, now_ms: i32) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct SplashDisplay<'w, 's> {
+    clock: Res<'w, net::FrameClock>,
+    received: MessageReader<'w, 's, net::SvcHudSplash>,
+    pending: ResMut<'w, PendingSplash>,
+    slots: ResMut<'w, SplashSlots>,
+    hud_images: ResMut<'w, HudImages>,
+    images: ResMut<'w, Assets<Image>>,
+    exprs: ResMut<'w, crate::expr_cache::MenuExprCache>,
+    pass: ResMut<'w, HudTessPass>,
+}
+
+impl SplashDisplay<'_, '_> {
+    fn hide(&mut self) {
+        self.pass.splash = TessJob::Hide;
+    }
+
+    fn update(
+        &mut self,
+        surface: Res<crate::surface::Hud2dSurface>,
+        catalog: Option<Res<MenuCatalog>>,
+        strings: Option<Res<PreparedLocalizedStrings>>,
+        input: Option<Res<frame::HudInputView>>,
+        presentation: net::LocalPresentation,
+    ) {
+        if !surface.is_ready() {
+            return;
+        }
+        for cmd in self.received.read().filter(|cmd| cmd.slot == 0) {
+            self.pending
+                .queued
+                .push_back((cmd.key.clone(), cmd.optional));
+        }
+        let now_ms = if self.clock.started() {
+            self.clock.time()
+        } else {
+            milliseconds() as i32
+        };
+        expire_slots(&mut self.slots, now_ms);
+        if self.pending.key.is_none() && !self.slots.slots.iter().any(|s| s.live()) {
+            if let Some((key, optional)) = self.pending.queued.pop_front() {
+                self.pending.key = Some(key);
+                self.pending.optional_number = optional;
+            }
+        }
+        let table = catalog
+            .as_ref()
+            .and_then(|c| c.string_table(SPLASH_TABLE_NAME));
+        if self.pending.key.is_some() && catalog.is_some() && table.is_none() {
+            diag::warn_once!(
+                Ui,
+                "mp/splashTable.csv was not in the UI-zone StringTable walk"
+            );
+        }
+        if let Some(miss) = activate_pending(&mut self.pending, &mut self.slots, table, now_ms) {
+            diag::warn_once!(Ui, "splashTable has no row `{key}`", key = miss);
+            self.hide();
+            return;
+        }
+
+        let live = self.slots.slots.iter().find(|s| s.live()).copied();
+        let Some(live) = live else {
+            self.hide();
+            return;
+        };
+
+        let Some(table) = table else {
+            diag::warn_once!(
+                Ui,
+                "mp/splashTable.csv was not in the UI-zone StringTable walk"
+            );
+            self.hide();
+            return;
+        };
+        let menu_name = table.cell(live.row, SPLASH_COL_MENU);
+        if menu_name.is_empty() {
+            diag::warn_once!(
+                Ui,
+                "MenuCatalog has no `{name}` for this splash row",
+                name = String::new()
+            );
+            self.hide();
+            return;
+        }
+
+        let Some(menu) = catalog.as_ref().and_then(|c| c.get(menu_name)) else {
+            diag::warn_once!(
+                Ui,
+                "MenuCatalog has no `{name}` for this splash row",
+                name = menu_name.to_owned()
+            );
+            self.hide();
+            return;
+        };
+
+        let mut promotion;
+        let menu = if menu_name.eq_ignore_ascii_case("promotion") {
+            promotion = menu.clone();
+            let rank = presentation
+                .snapshot()
+                .and_then(|snap| snap.meta.for_client(presentation.client_id()));
+            let icon = rank
+                .and_then(|meta| {
+                    let column = meta.prestige.checked_add(1).filter(|column| *column > 0)?;
+                    catalog
+                        .as_ref()?
+                        .string_table("mp/rankIconTable.csv")
+                        .map(|table| table.lookup_col(&meta.rank.to_string(), column))
+                })
+                .unwrap_or("");
+            let title = rank
+                .and_then(|meta| {
+                    catalog
+                        .as_ref()?
+                        .string_table("mp/rankTable.csv")
+                        .map(|table| table.lookup_col(&meta.rank.to_string(), 5))
+                })
+                .unwrap_or("");
+            for item in &mut promotion.items {
+                if item.name.starts_with("promotion_rank_icon") {
+                    item.material_exp.clear();
+                    item.background = icon.to_owned();
+                } else if item.name.starts_with("promotion_rank_text") {
+                    item.text_exp.clear();
+                    item.text_key = if title.is_empty() {
+                        String::new()
+                    } else {
+                        format!("@{}", title.trim_start_matches('@'))
+                    };
+                    item.text_literal = false;
+                }
+            }
+            &promotion
+        } else {
+            menu
+        };
+
+        let material = table.cell(live.row, SPLASH_COL_MATERIAL);
+        let host = SplashExprHost {
+            menu,
+            ms: now_ms,
+            slots: &self.slots.slots,
+            table: Some(table),
+            catalog: catalog.as_deref(),
+            localize: strings.as_ref().map(|s| &s.0),
+            input: input.as_deref(),
+        };
+        let lerp = item_run_script_lerp(&menu.on_open, live.start_ms);
+        for command in &lerp.leftover {
+            diag::warn_once!(
+                Ui,
+                "{menu}: menu script `{command}` is not executed",
+                menu = menu_name.to_owned(),
+                command = command.clone()
+            );
+        }
+        let anim = lerp.anim(now_ms);
+        let ChromeFrame {
+            list,
+            coverage: _,
+            vis_errors,
+        } = execute_chrome_menu_with_anim(
+            menu,
+            &host,
+            &surface,
+            ChromeAssets {
+                catalog: catalog.as_deref(),
+                localize: strings.as_ref().map(|s| &s.0),
+            },
+            anim,
+            &mut self.exprs,
+        );
+        for (item, err) in vis_errors {
+            diag::warn_once!(
+                Ui,
+                "{menu}[{item}] expression: {err}",
+                menu = menu_name.to_owned()
+            );
+        }
+
+        let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
+        for cmd in &list.cmds {
+            let _ = self.hud_images.get(
+                crate::images::HUD_CHROME_NAMESPACE,
+                &cmd.material,
+                &mut self.images,
+            );
+        }
+        if let Some(cat) = catalog.as_deref() {
+            for cmd in &list.cmds {
+                if let Draw2dOp::TextRun { font, .. } = &cmd.op {
+                    if fonts.contains_key(font) {
+                        continue;
+                    }
+                    if let Some(def) = cat.font(font) {
+                        fonts.insert(font.clone(), def);
+                    }
+                }
+            }
+        }
+
+        if !material.is_empty()
+            && self
+                .hud_images
+                .get(
+                    crate::images::HUD_CHROME_NAMESPACE,
+                    material,
+                    &mut self.images,
+                )
+                .is_none()
+        {
+            diag::warn_once!(
+                Ui,
+                "splash image `{name}` is {miss}",
+                name = material.to_owned(),
+                miss = if self.hud_images.has_games_root() {
+                    "not a zone atlas and not in the IWD"
+                } else {
+                    "no games root is set"
+                }
+            );
+        }
+
+        let (quads, _) = tessellate_fonts(&list, &fonts);
+        if quads.is_empty() {
+            self.hide();
+            diag::warn_once!(
+                Ui,
+                "`{name}` paint emitted no tess quads for a live splash slot",
+                name = menu_name.to_owned()
+            );
+            return;
+        }
+
+        self.pass.splash = TessJob::Quads(quads);
+    }
+}
+
 pub(crate) fn update_splash(
     surface: Res<crate::surface::Hud2dSurface>,
     catalog: Option<Res<MenuCatalog>>,
     strings: Option<Res<PreparedLocalizedStrings>>,
-    mut hud_images: ResMut<HudImages>,
-    mut images: ResMut<Assets<Image>>,
-    mut gaps: ResMut<HudPresentationGaps>,
-    mut pass: ResMut<HudTessPass>,
-    mut exprs: ResMut<crate::expr_cache::MenuExprCache>,
-    mut pending: ResMut<PendingSplash>,
-    mut slots: ResMut<SplashSlots>,
-    mut received: MessageReader<net::SvcHudSplash>,
     input: Option<Res<frame::HudInputView>>,
-    presented: Res<net::PresentedSnapshot>,
-    local: Res<net::LocalPresentClient>,
+    presentation: net::LocalPresentation,
+    mut display: SplashDisplay,
 ) {
-    if !surface.is_ready() {
-        return;
-    }
-    for cmd in received.read().filter(|cmd| cmd.slot == 0) {
-        pending.queued.push_back((cmd.key.clone(), cmd.optional));
-    }
-    let now_ms = milliseconds() as i32;
-    expire_slots(&mut slots, now_ms);
-    if pending.key.is_none() && !slots.slots.iter().any(|s| s.live()) {
-        if let Some((key, optional)) = pending.queued.pop_front() {
-            pending.key = Some(key);
-            pending.optional_number = optional;
-        }
-    }
-    let table = catalog
-        .as_ref()
-        .and_then(|c| c.string_table(SPLASH_TABLE_NAME));
-    if pending.key.is_some() && catalog.is_some() && table.is_none() {
-        gaps.raise(GapCause::SplashNoTable);
-    }
-    if let Some(miss) = activate_pending(&mut pending, &mut slots, table, now_ms) {
-        gaps.raise(GapCause::SplashKeyMissing { key: miss });
-        hide(&mut pass);
-        return;
-    }
-
-    let live = slots.slots.iter().find(|s| s.live()).copied();
-    let Some(live) = live else {
-        if pending.key.is_none() {
-            gaps.clear(HudGap::EngineSplash);
-        }
-        hide(&mut pass);
-        return;
-    };
-
-    let Some(table) = table else {
-        gaps.raise(GapCause::SplashNoTable);
-        hide(&mut pass);
-        return;
-    };
-    let menu_name = table.cell(live.row, SPLASH_COL_MENU);
-    if menu_name.is_empty() {
-        gaps.raise(GapCause::SplashNoMenu {
-            name: String::new(),
-        });
-        hide(&mut pass);
-        return;
-    }
-
-    let Some(menu) = catalog.as_ref().and_then(|c| c.get(menu_name)) else {
-        gaps.raise(GapCause::SplashNoMenu {
-            name: menu_name.to_owned(),
-        });
-        hide(&mut pass);
-        return;
-    };
-
-    let mut promotion;
-    let menu = if menu_name.eq_ignore_ascii_case("promotion") {
-        promotion = menu.clone();
-        let rank = presented
-            .snapshot()
-            .and_then(|snap| snap.meta.for_client(local.0));
-        let icon = rank
-            .and_then(|meta| {
-                let column = meta.prestige.checked_add(1).filter(|column| *column > 0)?;
-                catalog
-                    .as_ref()?
-                    .string_table("mp/rankIconTable.csv")
-                    .map(|table| table.lookup_col(&meta.rank.to_string(), column))
-            })
-            .unwrap_or_default();
-        let title = rank
-            .and_then(|meta| {
-                catalog
-                    .as_ref()?
-                    .string_table("mp/rankTable.csv")
-                    .map(|table| table.lookup_col(&meta.rank.to_string(), 5))
-            })
-            .unwrap_or_default();
-        for item in &mut promotion.items {
-            if item.name.starts_with("promotion_rank_icon") {
-                item.material_exp.clear();
-                item.background = icon.to_owned();
-            } else if item.name.starts_with("promotion_rank_text") {
-                item.text_exp.clear();
-                item.text_key = if title.is_empty() {
-                    String::new()
-                } else {
-                    format!("@{}", title.trim_start_matches('@'))
-                };
-                item.text_literal = false;
-            }
-        }
-        &promotion
-    } else {
-        menu
-    };
-
-    let material = table.cell(live.row, SPLASH_COL_MATERIAL);
-    let host = SplashExprHost {
-        menu,
-        ms: now_ms,
-        slots: &slots.slots,
-        table: Some(table),
-        catalog: catalog.as_deref(),
-        localize: strings.as_ref().map(|s| &s.0),
-        input: input.as_deref(),
-    };
-    let lerp = item_run_script_lerp(&menu.on_open, live.start_ms);
-    for command in &lerp.leftover {
-        gaps.raise(GapCause::MenuScriptUnsupported {
-            menu: menu_name.to_owned(),
-            command: command.clone(),
-        });
-    }
-    let anim = lerp.anim(now_ms);
-    let ChromeFrame {
-        list,
-        coverage: _,
-        vis_errors,
-    } = execute_chrome_menu_with_anim(
-        menu,
-        &host,
-        &surface,
-        ChromeAssets {
-            catalog: catalog.as_deref(),
-            localize: strings.as_ref().map(|s| &s.0),
-        },
-        anim,
-        &mut exprs,
-    );
-    for (item, err) in vis_errors {
-        gaps.raise(GapCause::MenuExpression {
-            menu: menu_name.to_owned(),
-            item,
-            err,
-        });
-    }
-
-    let mut fonts: HashMap<String, &asset_game::FontDef> = HashMap::new();
-    for cmd in &list.cmds {
-        let _ = hud_images.get(
-            crate::images::HUD_CHROME_NAMESPACE,
-            &cmd.material,
-            &mut images,
-        );
-    }
-    if let Some(cat) = catalog.as_deref() {
-        for cmd in &list.cmds {
-            if let Draw2dOp::TextRun { font, .. } = &cmd.op {
-                if fonts.contains_key(font) {
-                    continue;
-                }
-                if let Some(def) = cat.font(font) {
-                    fonts.insert(font.clone(), def);
-                }
-            }
-        }
-    }
-    let mut image_missing = false;
-    if !material.is_empty()
-        && hud_images
-            .get(crate::images::HUD_CHROME_NAMESPACE, material, &mut images)
-            .is_none()
-    {
-        image_missing = true;
-        gaps.raise(GapCause::SplashImageMissing {
-            name: material.to_owned(),
-            miss: if hud_images.has_games_root() {
-                crate::gaps::ImageMiss::NotDecoded
-            } else {
-                crate::gaps::ImageMiss::NoGamesRoot
-            },
-        });
-    }
-
-    let (quads, _) = tessellate_fonts(&list, &fonts);
-    if quads.is_empty() {
-        hide(&mut pass);
-        gaps.raise(GapCause::SplashEmptyPaint {
-            name: menu_name.to_owned(),
-        });
-        return;
-    }
-    if !image_missing {
-        gaps.clear(HudGap::EngineSplash);
-    }
-    pass.splash = TessJob::Quads(quads);
+    display.update(surface, catalog, strings, input, presentation);
 }

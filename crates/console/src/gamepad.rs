@@ -1,6 +1,25 @@
+use bevy::ecs::system::SystemParam;
 use bevy::input::gamepad::{Gamepad, GamepadAxis, GamepadButton, GamepadConnection, GamepadEvent};
 use bevy::prelude::*;
 use frame::{UiMenuKey, UiMenuRequest};
+
+#[derive(SystemParam)]
+pub(crate) struct ActiveGamepad<'w, 's> {
+    gamepads: Query<'w, 's, &'static Gamepad>,
+    active: Res<'w, frame::ActivePad>,
+}
+
+impl ActiveGamepad<'_, '_> {
+    pub(crate) fn get(&self) -> Option<&Gamepad> {
+        self.active
+            .0
+            .and_then(|entity| self.gamepads.get(entity).ok())
+    }
+
+    pub(crate) fn entity(&self) -> Option<Entity> {
+        self.active.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Sticks {
@@ -154,8 +173,7 @@ const REPEAT_DELAY: f32 = 0.4;
 const REPEAT_EVERY: f32 = 0.12;
 
 pub(crate) fn drive_menus_with_pad(
-    gamepads: Query<&Gamepad>,
-    active: Res<frame::ActivePad>,
+    gamepad: ActiveGamepad,
     overlay: Res<frame::UiOverlayInput>,
     script_menus: hud::MenuState<'_>,
     (devices, console, capture): (
@@ -171,10 +189,7 @@ pub(crate) fn drive_menus_with_pad(
         *repeat = None;
         return;
     }
-    let pad = active
-        .0
-        .and_then(|entity| gamepads.get(entity).ok())
-        .filter(|_| capture.command.is_none());
+    let pad = gamepad.get().filter(|_| capture.command.is_none());
     let Some(pad) = pad else {
         *repeat = None;
         return;

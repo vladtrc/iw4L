@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -14,7 +15,6 @@ use crate::anim::fpv_rig::{
     FpvMandatoryRefusal, FpvMaterialAdmission, FpvSurfaceVerdict, PreparedFpvComposition,
     PreparedFpvModel, PreparedFpvRig, compose_clip_tracks,
 };
-use crate::gaps::RenderGapCause;
 
 const PREPARE_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
 
@@ -24,10 +24,7 @@ const NO_COLOUR_MAP: &str = "technique samples no colour map";
 mod table;
 pub use table::FpvOwnerInputs;
 use table::FpvPreparationOwner;
-pub use table::{
-    BoundFpvTable, FpvBindingRefusal, FpvPreparationCensus, FpvRigSet, FpvViewCensus,
-    FpvWeaponSlot, FpvWeaponTable, FpvWeaponView,
-};
+pub use table::{BoundFpvTable, FpvRigSet, FpvWeaponSlot, FpvWeaponTable, FpvWeaponView};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FpvPreparationStage {
@@ -42,7 +39,6 @@ type RigKey = (usize, bool, Vec<Option<usize>>, Vec<Option<usize>>);
 struct FpvPreparationJob {
     owner: FpvPreparationOwner,
     stage: FpvPreparationStage,
-    started: std::time::Instant,
     progress: Option<asset_transport::StageHandle>,
     work_total: u64,
     work_done: u64,
@@ -194,7 +190,6 @@ impl FpvPreparationJob {
         Self {
             owner,
             stage: FpvPreparationStage::Admit,
-            started: std::time::Instant::now(),
             progress,
             work_total,
             work_done: 0,
@@ -397,44 +392,6 @@ impl FpvPreparationJob {
         rig
     }
 
-    fn census_of(&self, fpv: &FpvMeshCatalog, gun: FpvMeshIndex) -> FpvViewCensus {
-        let mut census = FpvViewCensus::default();
-        let order = gun.order();
-        let Some(entry) = fpv.get_at(order) else {
-            return census;
-        };
-        for (surface, verdict) in self.admission.verdicts_of(order) {
-            let name = entry
-                .material_keys
-                .get(*surface)
-                .and_then(|key| Some(key.as_ref()?.name.as_str()));
-            match verdict {
-                FpvSurfaceVerdict::Admitted(_) => {
-                    if let Some(name) = name
-                        && census.mat_hints.len() < 12
-                        && !census.mat_hints.iter().any(|seen| seen == name)
-                    {
-                        census.mat_hints.push(name.to_owned());
-                    }
-                }
-                FpvSurfaceVerdict::Inapplicable(NO_COLOUR_MAP) => {
-                    census.gun_colormap_skip_n = census.gun_colormap_skip_n.saturating_add(1);
-                    if let Some(name) = name
-                        && census.gun_colormap_skip_names.len() < 8
-                        && !census
-                            .gun_colormap_skip_names
-                            .iter()
-                            .any(|seen| seen == name)
-                    {
-                        census.gun_colormap_skip_names.push(name.to_owned());
-                    }
-                }
-                _ => {}
-            }
-        }
-        census
-    }
-
     fn camo_swaps(
         &self,
         fpv: &FpvMeshCatalog,
@@ -568,7 +525,12 @@ impl FpvPreparationJob {
             return;
         }
         let Some(gun_index) = gun else {
-            let cause = || RenderGapCause::FpvGunXModelUnresolved { weapon_id: id };
+            let cause = || {
+                Cow::<'static, str>::Owned(format!(
+                    "gunXModel[0] unresolved for weapon {weapon_id}",
+                    weapon_id = id
+                ))
+            };
             let sides = [
                 FpvWeaponSlot::Refused(cause()),
                 FpvWeaponSlot::Refused(cause()),
@@ -612,7 +574,6 @@ impl FpvPreparationJob {
             .get_at(gun_index.order())
             .map(|entry| entry.skel.name.clone())
             .unwrap_or_else(String::new);
-        let census = self.census_of(fpv, gun_index);
         let camos = self.camo_swaps(fpv, id, gun_index);
         let right_orders: Vec<Option<usize>> = right.clip_orders().to_vec();
         let left_orders: Vec<Option<usize>> = left
@@ -645,21 +606,23 @@ impl FpvPreparationJob {
             });
         let sides: [FpvWeaponSlot; 2] = [false, true].map(|axis| {
             if !sources_match {
-                return FpvWeaponSlot::Refused(RenderGapCause::FpvDependencyUnresolved {
-                    weapon_id: id,
-                    role: "FPV track publication",
-                    name: "clip or mesh source differs from the prepared mapping".into(),
-                });
+                return FpvWeaponSlot::Refused(Cow::<'static, str>::Owned(format!(
+                    "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
+                    weapon_id = id,
+                    role = "FPV track publication",
+                    name = String::from("clip or mesh source differs from the prepared mapping")
+                )));
             }
             let (Some((hands, hands_index)), Some(assemblies)) = (
                 registry.fpv_hands_of(id, axis),
                 registry.fpv_assemblies_for(id, parent, axis),
             ) else {
-                return FpvWeaponSlot::Refused(RenderGapCause::FpvDependencyUnresolved {
-                    weapon_id: id,
-                    role: "FPV skeleton",
-                    name: registry.fpv_assembly_gap_of(id, axis),
-                });
+                return FpvWeaponSlot::Refused(Cow::<'static, str>::Owned(format!(
+                    "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
+                    weapon_id = id,
+                    role = "FPV skeleton",
+                    name = registry.fpv_assembly_gap_of(id, axis)
+                )));
             };
             let bare = self.composition(&assemblies.bare);
             let rocket = assemblies
@@ -669,11 +632,12 @@ impl FpvPreparationJob {
             let (bare, rocket) = match (bare, rocket.transpose()) {
                 (Ok(bare), Ok(rocket)) => (bare, rocket),
                 (Err(error), _) | (_, Err(error)) => {
-                    return FpvWeaponSlot::Refused(RenderGapCause::FpvDependencyUnresolved {
-                        weapon_id: id,
-                        role: "FPV layout",
-                        name: error,
-                    });
+                    return FpvWeaponSlot::Refused(Cow::<'static, str>::Owned(format!(
+                        "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
+                        weapon_id = id,
+                        role = "FPV layout",
+                        name = error
+                    )));
                 }
             };
             let refusal: Option<FpvMandatoryRefusal> = bare
@@ -681,11 +645,12 @@ impl FpvPreparationJob {
                 .or_else(|| rocket.as_ref().and_then(|rocket| rocket.refusal()))
                 .cloned();
             if let Some(refusal) = refusal {
-                return FpvWeaponSlot::Refused(RenderGapCause::FpvDependencyUnresolved {
-                    weapon_id: id,
-                    role: "FPV material",
-                    name: refusal.to_string(),
-                });
+                return FpvWeaponSlot::Refused(Cow::<'static, str>::Owned(format!(
+                    "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
+                    weapon_id = id,
+                    role = "FPV material",
+                    name = refusal.to_string()
+                )));
             }
             let melee = match assemblies
                 .melee
@@ -695,19 +660,21 @@ impl FpvPreparationJob {
             {
                 Ok(melee) => melee,
                 Err(error) => {
-                    return FpvWeaponSlot::Refused(RenderGapCause::FpvDependencyUnresolved {
-                        weapon_id: id,
-                        role: "melee FPV layout",
-                        name: error,
-                    });
+                    return FpvWeaponSlot::Refused(Cow::<'static, str>::Owned(format!(
+                        "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
+                        weapon_id = id,
+                        role = "melee FPV layout",
+                        name = error
+                    )));
                 }
             };
             if let Some(refusal) = melee.as_ref().and_then(|composition| composition.refusal()) {
-                return FpvWeaponSlot::Refused(RenderGapCause::FpvDependencyUnresolved {
-                    weapon_id: id,
-                    role: "melee FPV material",
-                    name: refusal.to_string(),
-                });
+                return FpvWeaponSlot::Refused(Cow::<'static, str>::Owned(format!(
+                    "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
+                    weapon_id = id,
+                    role = "melee FPV material",
+                    name = refusal.to_string()
+                )));
             }
             let ads = match assemblies
                 .ads
@@ -717,19 +684,21 @@ impl FpvPreparationJob {
             {
                 Ok(ads) => ads,
                 Err(error) => {
-                    return FpvWeaponSlot::Refused(RenderGapCause::FpvDependencyUnresolved {
-                        weapon_id: id,
-                        role: "ADS FPV layout",
-                        name: error,
-                    });
+                    return FpvWeaponSlot::Refused(Cow::<'static, str>::Owned(format!(
+                        "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
+                        weapon_id = id,
+                        role = "ADS FPV layout",
+                        name = error
+                    )));
                 }
             };
             if let Some(refusal) = ads.as_ref().and_then(|composition| composition.refusal()) {
-                return FpvWeaponSlot::Refused(RenderGapCause::FpvDependencyUnresolved {
-                    weapon_id: id,
-                    role: "ADS FPV material",
-                    name: refusal.to_string(),
-                });
+                return FpvWeaponSlot::Refused(Cow::<'static, str>::Owned(format!(
+                    "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
+                    weapon_id = id,
+                    role = "ADS FPV material",
+                    name = refusal.to_string()
+                )));
             }
             let jammed = match assemblies
                 .jammed
@@ -780,7 +749,6 @@ impl FpvPreparationJob {
                 left: left.clone(),
                 idle_name: idle_name.clone(),
                 rigs,
-                census: census.clone(),
                 camos: camos.clone(),
             }))
         });
@@ -804,44 +772,6 @@ impl FpvPreparationJob {
     }
 
     fn finish(self) -> (FpvPreparationOwner, FpvWeaponTable) {
-        let ready = self
-            .slots
-            .iter()
-            .chain(self.alternate_slots.values())
-            .flatten()
-            .filter(|slot| matches!(slot, FpvWeaponSlot::Ready(_)))
-            .count();
-        let refused_n = self
-            .slots
-            .iter()
-            .chain(self.alternate_slots.values())
-            .flatten()
-            .filter(|slot| matches!(slot, FpvWeaponSlot::Refused(_)))
-            .count();
-        let inapplicable = self
-            .models
-            .iter()
-            .flat_map(|&order| self.admission.verdicts_of(order))
-            .filter(|(_, verdict)| matches!(verdict, FpvSurfaceVerdict::Inapplicable(_)))
-            .count();
-        let census = FpvPreparationCensus {
-            models: self.models.len(),
-            layouts: self.layouts.len(),
-            compositions: self.compositions.len(),
-            rigs: self.rigs.len(),
-            materials: self.admission.materials.len(),
-            elapsed_ms: self.started.elapsed().as_secs_f64() * 1000.0,
-        };
-        diag::info!(
-            Fpv,
-            "fpv prepared before Ready: models={} layouts={} compositions={} rigs={} materials={} inapplicable_surfaces={inapplicable} sides ready={ready} refused={refused_n} elapsed={:.1}ms",
-            census.models,
-            census.layouts,
-            census.compositions,
-            census.rigs,
-            census.materials,
-            census.elapsed_ms,
-        );
         for line in &self.refused {
             diag::info!(Fpv, "fpv refused before use: {line}");
         }
@@ -856,7 +786,6 @@ impl FpvPreparationJob {
             guns: self.guns,
             slots: self.slots,
             alternate_slots: self.alternate_slots,
-            census,
         };
         (self.owner, table)
     }
@@ -865,7 +794,7 @@ impl FpvPreparationJob {
 fn refused_table(
     owner: &FpvPreparationOwner,
     fpv: &FpvMeshCatalog,
-    cause: RenderGapCause,
+    cause: Cow<'static, str>,
 ) -> FpvWeaponTable {
     let registry = &owner.weapons;
     let weapon_n = registry.len() as u32;
@@ -877,7 +806,6 @@ fn refused_table(
         guns: Vec::with_capacity(weapon_n as usize + 1),
         slots: Vec::with_capacity(weapon_n as usize + 1),
         alternate_slots: HashMap::new(),
-        census: FpvPreparationCensus::default(),
     };
     for id in 0..=weapon_n {
         table.facts.push(
@@ -963,12 +891,12 @@ pub fn prepare_fpv_compositions(inputs: PrepareFpvInputs, mut prepared: ResMut<P
         prepared.clear();
         let shared_refusal = if !sorted_ready {
             Some((
-                RenderGapCause::FpvCatalogMissing,
+                Cow::Borrowed("FPV catalog missing"),
                 "the material generation has no sorted table",
             ))
         } else if lighting.is_none() {
             Some((
-                RenderGapCause::FpvNoLightingAtlas,
+                Cow::Borrowed("FPV hidden: ModelLightingCache atlas missing"),
                 "no model lighting atlas in this world",
             ))
         } else {

@@ -1,3 +1,5 @@
+mod families;
+pub use families::*;
 mod animtree;
 mod atr_compile;
 mod clip_scheduler;

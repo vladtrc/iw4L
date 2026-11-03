@@ -7,7 +7,7 @@ pub struct StringTable {
     pub cells: Vec<String>,
 }
 impl StringTable {
-    pub(crate) fn cell(&self, row: usize, column: usize) -> Option<&str> {
+    pub fn cell(&self, row: usize, column: usize) -> Option<&str> {
         if row >= self.rows || column >= self.columns {
             return None;
         }
@@ -68,7 +68,7 @@ pub fn parse_radiant_keys(text: &str) -> Result<BTreeMap<String, KeyType>, Strin
     Ok(keys)
 }
 
-pub(crate) fn table_key(name: &str) -> String {
+pub fn table_key(name: &str) -> String {
     name.replace('\\', "/").to_ascii_lowercase()
 }
 
@@ -154,7 +154,7 @@ pub(crate) struct PersistentFx {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum EntityKind {
+pub enum EntityKind {
     Map,
     Spawned,
     HudElem,
@@ -166,7 +166,7 @@ pub(crate) enum EntityKind {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Link {
+pub struct Link {
     pub parent: u64,
     pub origin: [f32; 3],
     pub angles: [f32; 3],
@@ -183,7 +183,7 @@ pub(crate) struct Usable {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ScriptEntity {
+pub struct ScriptEntity {
     pub number: i32,
     pub kind: EntityKind,
     pub classname: Arc<str>,
@@ -197,7 +197,7 @@ pub(crate) struct ScriptEntity {
     pub light: f32,
     pub attachments: Vec<(Arc<str>, Arc<str>)>,
     pub contents: i32,
-    pub audience: HudAudience,
+    pub(crate) audience: HudAudience,
     pub presence: Option<crate::ScriptModelId>,
     pub missile_owner: Option<u64>,
     pub can_damage: bool,
@@ -205,8 +205,8 @@ pub(crate) struct ScriptEntity {
     pub part_ops: Vec<(Arc<str>, bool)>,
     pub anim_op: Option<Option<Arc<str>>>,
     pub loop_sound: Option<Arc<str>>,
-    pub usable: Option<Usable>,
-    pub trigger_policy: super::triggers::TriggerPolicy,
+    pub(crate) usable: Option<Usable>,
+    pub(crate) trigger_policy: super::triggers::TriggerPolicy,
 }
 
 impl ScriptEntity {
@@ -242,7 +242,7 @@ impl RoundScript {
             .unwrap_or(Value::Undefined)
     }
 
-    pub(crate) fn set_object_field(&mut self, id: u64, name: &str, value: Value) {
+    pub fn set_object_field(&mut self, id: u64, name: &str, value: Value) {
         let field = self.symbol(name);
         if let Some(fields) = self.objects.get_mut(&id) {
             if value == Value::Undefined {
@@ -368,7 +368,7 @@ impl RoundScript {
         Ok(id)
     }
 
-    pub(crate) fn player_client_of(&self, value: &Value) -> Option<u32> {
+    pub fn player_client_of(&self, value: &Value) -> Option<u32> {
         match value {
             Value::Object(id) => self.player_client(*id),
             _ => None,
@@ -417,7 +417,7 @@ impl RoundScript {
         }
     }
 
-    pub(crate) fn entity(&self, value: &Value) -> Option<(u64, &ScriptEntity)> {
+    pub fn entity(&self, value: &Value) -> Option<(u64, &ScriptEntity)> {
         match value {
             Value::Object(id) => self.entities.get(id).map(|e| (*id, e)),
             _ => None,
@@ -433,10 +433,7 @@ impl RoundScript {
             Value::Array(id) => Some(id),
             _ => None,
         };
-        let t5 = self
-            .program
-            .as_ref()
-            .is_some_and(|p| p.rules() == crate::script::Realm::T5);
+        let policy = crate::script::families::policy_for_round(self);
         for (ordinal, pairs) in entities.iter().enumerate() {
             let classname = pairs
                 .iter()
@@ -494,8 +491,9 @@ impl RoundScript {
                     }
                     "spawnflags" | "count" | "health" | "dmg" | "maxhealth" | "threshold"
                     | "accumulate" => Value::Int(super::natives::iw4::atoi(value)),
-                    // T5 compares exploder numbers as ints.
-                    "script_exploder" if t5 => Value::Int(super::natives::iw4::atoi(value)),
+                    _ if policy.integer_entity_fields.contains(&key.as_str()) => {
+                        Value::Int(super::natives::iw4::atoi(value))
+                    }
                     "speed" | "radius" | "height" | "wait" => {
                         let number = super::natives::iw4::atof(value) as f32;
                         match key.as_str() {

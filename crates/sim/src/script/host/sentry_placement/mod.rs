@@ -46,15 +46,17 @@ impl Queries<'_> {
     fn players_clear(&self, start: [f32; 3], end: [f32; 3], radius: f32) -> bool {
         self.players.iter().all(|origin| {
             let hit = clipmap_iw4::transformed_temp_capsule_trace(
-                start,
-                end,
-                [-radius; 3],
-                [radius; 3],
+                &clipmap_iw4::TraceExtents {
+                    start,
+                    end,
+                    mins: [-radius; 3],
+                    maxs: [radius; 3],
+                    mask: MASK_PLAYER_SOLID,
+                },
                 *origin,
                 PLAYER_MINS,
                 PLAYER_MAXS,
                 CONTENTS_BODY,
-                MASK_PLAYER_SOLID,
             );
             hit.contents == 0 && hit.startsolid == 0 && hit.allsolid == 0
         })
@@ -139,13 +141,6 @@ pub(super) fn place(
                     .is_some_and(|meta| meta.lifecycle == ClientLifecycle::Alive)
         })
         .filter_map(|id| frame.player(id).map(|ps| ps.origin))
-        .chain(
-            frame
-                .prediction_remote_bodies()
-                .iter()
-                .filter(|body| body.client.0 != client)
-                .map(|body| body.origin),
-        )
         .collect();
     let mut backend = Queries {
         frame,

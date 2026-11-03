@@ -4,14 +4,13 @@
 
 ```text
 human ─┐
-bot    ├─→ TickInput ─→ sim::step ─→ Snapshot ─→ client / theater / demo
-replay ┘
+bot    ┴─→ TickInput ─→ sim::step ─→ Snapshot ─→ client / theater / demo
 
 pub fn step(world: &mut SimWorld, tick: Tick, input: &TickInput,
-            msec: i32, reason: StepReason) -> Snapshot;
+            msec: i32) -> TickResult;
 ```
 
-Headless, prediction and replay call exactly this one.
+Only the authority steps the world; the client predicts its player without one.
 `msec` is the step length; time enters **only** as an argument. The shape of
 the funnel is [`SIM-STEP.md`](SIM-STEP.md), the code `crates/sim/src/lib.rs`.
 

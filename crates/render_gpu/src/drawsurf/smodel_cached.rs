@@ -53,22 +53,27 @@ pub fn inject_cached_lighting_attribute(
     location: u32,
     lighting_register: Option<&str>,
 ) -> Option<String> {
-    const SIG_END: &str = ") -> Sm3Varyings {";
     let start = source.find("@vertex")?;
-    let sig = source[start..].find(SIG_END)? + start;
+    let output = if source[start..].contains(") -> Sm3VertexOut {") {
+        "Sm3VertexOut"
+    } else {
+        "Sm3Varyings"
+    };
+    let sig_end = format!(") -> {output} {{");
+    let sig = source[start..].find(&sig_end)? + start;
     let mut out = String::with_capacity(source.len() + 160);
     out.push_str(&source[..sig]);
     out.push_str(&format!(
         "    @location({location}) attribute_{location}: vec4<f32>,\n"
     ));
-    out.push_str(SIG_END);
-    let after_sig = sig + SIG_END.len();
+    out.push_str(&sig_end);
+    let after_sig = sig + sig_end.len();
     out.push_str(&format!(
         "\n    let lighting_coords = attribute_{location};\n"
     ));
     if let Some(register) = lighting_register {
-        const RET: &str = "    return Sm3Varyings(";
-        let rel = source[after_sig..].find(RET)?;
+        let ret = format!("    return {output}(");
+        let rel = source[after_sig..].find(&ret)?;
         let at = after_sig + rel;
         out.push_str(&source[after_sig..at]);
         out.push_str(&format!("    {register} = lighting_coords;\n"));

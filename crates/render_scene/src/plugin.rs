@@ -33,6 +33,7 @@ impl Plugin for RenderScenePlugin {
             .init_resource::<RZnearDepthhackDvar>()
             .init_resource::<RSubwindowDvar>()
             .init_resource::<RLockPvs>()
+            .init_resource::<crate::PortalRenderControls>()
             .init_resource::<SmEnableDvar>()
             .init_resource::<SmSunEnableDvar>();
     }

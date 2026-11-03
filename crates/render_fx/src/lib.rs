@@ -14,10 +14,7 @@ pub mod tracer;
 
 pub use drawsurf::*;
 pub use entity_marks::{EntityMarkAttachment, EntityMarkRequest, EntityMarkStore, EntityMarks};
-pub use fire_occurrence::{
-    FireFxBudgetStats, FireFxOccurrence, FireFxOutcome, FireFxRequest, FireFxResult, FireFxStats,
-    PresentedFireFx,
-};
+pub use fire_occurrence::{FireFxOccurrence, FireFxOutcome, FireFxRequest, PresentedFireFx};
 pub use fire_weapon_fx::fire_weapon_fx_should_client_trace;
 pub use host::{
     CombatFxDump, FxCameraOrigin, FxDumpRequest, FxJournalCursor, FxMarkDvars, FxWorldColorImages,
@@ -33,8 +30,8 @@ pub use product::{
     publish_empty_fx_owned_plans,
 };
 pub use tracer::{
-    PreparedTracers, QueuedBeam, TracerDrawGate, TracerSpawnSkip, TracerWorld, tick_tracer_beams,
-    try_spawn_tracer,
+    PreparedTracers, QueuedBeam, TracerDrawGate, TracerPellet, TracerSegment, TracerSpawnSkip,
+    TracerWorld, tick_tracer_beams,
 };
 
 pub use model_draw::{FxModelStaging, PreparedFxModelGeometry};

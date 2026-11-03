@@ -269,12 +269,14 @@ pub(crate) fn stamp_destructible_death_edges(
             husk_hint: hint.husk,
             clip: {
                 let index = xanims
-                    .index_by_name(asset_core::AssetNamespace::Iw4, hint.clip)
+                    .index_by_name(asset_core::FamilyId::IW4, hint.clip)
                     .map(CatalogIndex::<XAnimSpace>::from_order);
                 edge_from_index(
                     hint.clip,
                     index,
-                    index.map(|i| xanims.zone_of(i.order())).unwrap_or_default(),
+                    index
+                        .map(|i| xanims.zone_of(i.order()))
+                        .unwrap_or(asset_core::ZoneOwner::UNKNOWN),
                 )
             },
             husk: {
@@ -284,7 +286,9 @@ pub(crate) fn stamp_destructible_death_edges(
                 edge_from_index(
                     hint.husk,
                     index,
-                    index.map(|i| models.zone_of(i.order())).unwrap_or_default(),
+                    index
+                        .map(|i| models.zone_of(i.order()))
+                        .unwrap_or(asset_core::ZoneOwner::UNKNOWN),
                 )
             },
         })
@@ -326,63 +330,75 @@ impl AssetGraphCensus {
     }
 }
 
-pub fn resolve_after_absorb(
-    materials: &MaterialDefinitions,
-    tracers: &mut TracerCatalog,
-    fx: &mut FxCatalog,
-    weapons: Option<&mut WeaponCatalog>,
-    bodies: Option<&mut BodyMeshBuild>,
-    world_weapons: Option<&mut WorldWeaponBuild>,
-    sounds: Option<&mut SoundCatalog>,
-    fpv: Option<&mut FpvMeshBuild>,
-    projectiles: Option<&mut ProjectileMeshBuild>,
-) -> AssetGraphCensus {
-    tracers.resolve_materials(materials);
-    fx.resolve_materials(materials);
-    fx.resolve_nested_edges();
-    let mut census = AssetGraphCensus {
-        tracer_materials: tracers.material_edge_census(),
-        fx_elem_materials: fx.material_edge_census(),
-        fx_nested_children: fx.nested_child_edge_census(),
-        fx_runner_children: fx.runner_child_edge_census(),
-        weapon_tracer_type: AssetEdgeCensus::default(),
-        xmodel_body_materials: AssetEdgeCensus::default(),
-        xmodel_gun_materials: AssetEdgeCensus::default(),
-        xmodel_fpv_materials: AssetEdgeCensus::default(),
-        weapon_combat_fx: AssetEdgeCensus::default(),
-        weapon_projectile_fx: AssetEdgeCensus::default(),
-        weapon_hud_materials: AssetEdgeCensus::default(),
-        loaded_sounds: AssetEdgeCensus::default(),
-    };
-    if let Some(weapons) = weapons {
-        weapons.resolve_combat_fx(fx, tracers);
-        weapons.resolve_projectile_fx_edges(fx);
-        weapons.resolve_reticle_images(materials);
-        census.weapon_tracer_type = weapons.tracer_type_census();
-        census.weapon_combat_fx = weapons.combat_fx_census();
-        census.weapon_projectile_fx = weapons.projectile_fx_edge_census();
-        census.weapon_hud_materials = weapons.hud_material_edge_census();
+pub struct AssetGraphLinker<'a> {
+    pub materials: &'a MaterialDefinitions,
+    pub tracers: &'a mut TracerCatalog,
+    pub fx: &'a mut FxCatalog,
+}
+
+impl AssetGraphLinker<'_> {
+    pub fn resolve_after_absorb(
+        self,
+        weapons: Option<&mut WeaponCatalog>,
+        bodies: Option<&mut BodyMeshBuild>,
+        world_weapons: Option<&mut WorldWeaponBuild>,
+        sounds: Option<&mut SoundCatalog>,
+        fpv: Option<&mut FpvMeshBuild>,
+        projectiles: Option<&mut ProjectileMeshBuild>,
+    ) -> AssetGraphCensus {
+        let Self {
+            materials,
+            tracers,
+            fx,
+        } = self;
+
+        tracers.resolve_materials(materials);
+        fx.resolve_materials(materials);
+        fx.resolve_nested_edges();
+        let mut census = AssetGraphCensus {
+            tracer_materials: tracers.material_edge_census(),
+            fx_elem_materials: fx.material_edge_census(),
+            fx_nested_children: fx.nested_child_edge_census(),
+            fx_runner_children: fx.runner_child_edge_census(),
+            weapon_tracer_type: AssetEdgeCensus::default(),
+            xmodel_body_materials: AssetEdgeCensus::default(),
+            xmodel_gun_materials: AssetEdgeCensus::default(),
+            xmodel_fpv_materials: AssetEdgeCensus::default(),
+            weapon_combat_fx: AssetEdgeCensus::default(),
+            weapon_projectile_fx: AssetEdgeCensus::default(),
+            weapon_hud_materials: AssetEdgeCensus::default(),
+            loaded_sounds: AssetEdgeCensus::default(),
+        };
+        if let Some(weapons) = weapons {
+            weapons.resolve_combat_fx(fx, tracers);
+            weapons.resolve_projectile_fx_edges(fx);
+            weapons.resolve_reticle_images(materials);
+            census.weapon_tracer_type = weapons.tracer_type_census();
+            census.weapon_combat_fx = weapons.combat_fx_census();
+            census.weapon_projectile_fx = weapons.projectile_fx_edge_census();
+            census.weapon_hud_materials = weapons.hud_material_edge_census();
+        }
+        if let Some(bodies) = bodies {
+            bodies.resolve_materials(materials);
+            census.xmodel_body_materials = bodies.material_edge_census();
+        }
+        if let Some(world_weapons) = world_weapons {
+            world_weapons.resolve_materials(materials);
+            census.xmodel_gun_materials = world_weapons.material_edge_census();
+        }
+        if let Some(sounds) = sounds {
+            sounds.resolve_loaded_edges();
+            census.loaded_sounds = sounds.loaded_edge_census();
+        }
+        if let Some(fpv) = fpv {
+            fpv.resolve_materials(materials);
+            census.xmodel_fpv_materials = fpv.material_edge_census();
+        }
+        if let Some(projectiles) = projectiles {
+            projectiles.resolve_materials(materials);
+        }
+        census
     }
-    if let Some(bodies) = bodies {
-        bodies.resolve_materials(materials);
-        census.xmodel_body_materials = bodies.material_edge_census();
-    }
-    if let Some(world_weapons) = world_weapons {
-        world_weapons.resolve_materials(materials);
-        census.xmodel_gun_materials = world_weapons.material_edge_census();
-    }
-    if let Some(sounds) = sounds {
-        sounds.resolve_loaded_edges();
-        census.loaded_sounds = sounds.loaded_edge_census();
-    }
-    if let Some(fpv) = fpv {
-        fpv.resolve_materials(materials);
-        census.xmodel_fpv_materials = fpv.material_edge_census();
-    }
-    if let Some(projectiles) = projectiles {
-        projectiles.resolve_materials(materials);
-    }
-    census
 }
 
 pub(crate) fn stamp_match_destructible_death(

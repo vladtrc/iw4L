@@ -760,46 +760,6 @@ pub fn glass_reset_free_list(
     init_piece_count
 }
 
-pub fn glass_alloc_piece(
-    places: &mut [[u8; FX_GLASS_PIECE_PLACE]],
-    states: &mut [[u8; FX_GLASS_PIECE_STATE]],
-    is_in_use: &mut [u32],
-    first_free: &mut u32,
-    active: &mut u32,
-    geo_count: &mut u32,
-    geo_limit: u32,
-    vert: u8,
-    hole: u8,
-    crack: u8,
-    fan: u8,
-) -> u32 {
-    let piece = *first_free;
-    if piece == FX_GLASS_FREE_SENTINEL {
-        return FX_GLASS_FREE_SENTINEL;
-    }
-    let need = *geo_count + u32::from(vert) + u32::from(hole) + u32::from(crack) + u32::from(fan);
-    if geo_limit < need {
-        return FX_GLASS_FREE_SENTINEL;
-    }
-    let Some(place) = places.get_mut(piece as usize) else {
-        return FX_GLASS_FREE_SENTINEL;
-    };
-    *first_free = glass_place_next_free(place);
-    *active = active.saturating_add(1);
-    glass_set_in_use(is_in_use, piece);
-    let Some(state) = states.get_mut(piece as usize) else {
-        return FX_GLASS_FREE_SENTINEL;
-    };
-    state[FX_GLASS_STATE_VERT_COUNT] = vert;
-    state[FX_GLASS_STATE_HOLE_DATA_COUNT] = hole;
-    state[FX_GLASS_STATE_CRACK_DATA_COUNT] = crack;
-    state[FX_GLASS_STATE_FAN_DATA_COUNT] = fan;
-    write_u16(state, FX_GLASS_STATE_GEO_DATA_START, *geo_count as u16);
-    write_u16(state, FX_GLASS_STATE_FLAGS, 0);
-    *geo_count = need;
-    piece
-}
-
 pub fn glass_free_piece(
     places: &mut [[u8; FX_GLASS_PIECE_PLACE]],
     is_in_use: &mut [u32],

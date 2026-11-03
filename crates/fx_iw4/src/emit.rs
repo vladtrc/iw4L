@@ -68,63 +68,72 @@ pub fn emit_unpack_residual_start(emit_residual: u8, max_dist_per_emit: f32) -> 
     -((emit_residual as f32) * max_dist_per_emit * (FX_EMIT_RESIDUAL_TO_DIST as f32))
 }
 
-pub fn process_emitting_schedule(
-    emit_residual: u8,
-    origin_begin: [f32; 3],
-    origin_end: [f32; 3],
-    msec_update_begin: i32,
-    msec_update_end: i32,
-    base_dist_per_emit: f32,
-    max_dist_per_emit: f32,
-    mut next_spacing01: impl FnMut() -> f32,
-) -> FxEmitSchedule {
-    let mut out = FxEmitSchedule {
-        new_residual: emit_residual,
-        spawn_count: 0,
-        spawns: [FxEmitSpawn {
-            lerp: 0.0,
-            msec_at_spawn: 0,
-        }; FX_EMIT_SPAWN_CAP],
-    };
-    let delta = [
-        origin_end[0] - origin_begin[0],
-        origin_end[1] - origin_begin[1],
-        origin_end[2] - origin_begin[2],
-    ];
-    let dist_sq = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
-    if dist_sq <= 1e-12 || max_dist_per_emit <= 0.0 {
-        return out;
-    }
-    let dist_in_update = libm::sqrtf(dist_sq);
-    let mut dist_next = emit_unpack_residual_start(emit_residual, max_dist_per_emit);
-    let mut dist_last;
-    let msec_span = (msec_update_end.saturating_sub(msec_update_begin)).max(0) as f32;
-    let var_amp = (max_dist_per_emit - base_dist_per_emit).max(0.0);
+#[derive(Clone, Copy, Debug)]
+pub struct FxEmitSegment {
+    pub origin_begin: [f32; 3],
+    pub origin_end: [f32; 3],
+    pub msec_begin: i32,
+    pub msec_end: i32,
+}
 
-    loop {
-        dist_last = dist_next;
-        let u01 = next_spacing01();
-        dist_next = u01 * var_amp + base_dist_per_emit + dist_next;
-        if dist_next > dist_in_update {
-            break;
-        }
-        let clamped = if dist_next < 0.0 { 0.0 } else { dist_next };
-        dist_next = clamped;
-        let lerp = clamped / dist_in_update;
-        let msec_at_spawn = msec_update_begin.wrapping_add(libm::floorf(msec_span * lerp) as i32);
-        if out.spawn_count >= FX_EMIT_SPAWN_CAP {
-            break;
-        }
-        out.spawns[out.spawn_count] = FxEmitSpawn {
-            lerp,
-            msec_at_spawn,
+impl FxEmitSegment {
+    pub fn schedule(
+        &self,
+        emit_residual: u8,
+        base_dist_per_emit: f32,
+        max_dist_per_emit: f32,
+        mut next_spacing01: impl FnMut() -> f32,
+    ) -> FxEmitSchedule {
+        let mut out = FxEmitSchedule {
+            new_residual: emit_residual,
+            spawn_count: 0,
+            spawns: [FxEmitSpawn {
+                lerp: 0.0,
+                msec_at_spawn: 0,
+            }; FX_EMIT_SPAWN_CAP],
         };
-        out.spawn_count += 1;
-    }
+        let delta = [
+            self.origin_end[0] - self.origin_begin[0],
+            self.origin_end[1] - self.origin_begin[1],
+            self.origin_end[2] - self.origin_begin[2],
+        ];
+        let dist_sq = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
+        if dist_sq <= 1e-12 || max_dist_per_emit <= 0.0 {
+            return out;
+        }
+        let dist_in_update = libm::sqrtf(dist_sq);
+        let mut dist_next = emit_unpack_residual_start(emit_residual, max_dist_per_emit);
+        let mut dist_last;
+        let msec_span = (self.msec_end.saturating_sub(self.msec_begin)).max(0) as f32;
+        let var_amp = (max_dist_per_emit - base_dist_per_emit).max(0.0);
 
-    let residual_dist = dist_in_update - dist_last;
-    out.new_residual = emit_pack_residual(residual_dist, max_dist_per_emit);
-    out
+        loop {
+            dist_last = dist_next;
+            let u01 = next_spacing01();
+            dist_next = u01 * var_amp + base_dist_per_emit + dist_next;
+            if dist_next > dist_in_update {
+                break;
+            }
+            let clamped = if dist_next < 0.0 { 0.0 } else { dist_next };
+            dist_next = clamped;
+            let lerp = clamped / dist_in_update;
+            let msec_at_spawn = self
+                .msec_begin
+                .wrapping_add(libm::floorf(msec_span * lerp) as i32);
+            if out.spawn_count >= FX_EMIT_SPAWN_CAP {
+                break;
+            }
+            out.spawns[out.spawn_count] = FxEmitSpawn {
+                lerp,
+                msec_at_spawn,
+            };
+            out.spawn_count += 1;
+        }
+
+        let residual_dist = dist_in_update - dist_last;
+        out.new_residual = emit_pack_residual(residual_dist, max_dist_per_emit);
+        out
+    }
 }
 
 #[inline]

@@ -3,7 +3,7 @@ use std::fmt;
 
 use bevy::prelude::*;
 
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 
 const START_DECISION_CAP: usize = 32;
 
@@ -60,11 +60,11 @@ pub enum StartFailure {
     NoPcm,
     NoListener,
     NoFalloffCurve,
-    UnsupportedSpatialPolicy(asset_core::AssetNamespace),
-    MissingChannelPolicy(asset_core::AssetNamespace),
+    UnsupportedSpatialPolicy(asset_core::FamilyId),
+    MissingChannelPolicy(asset_core::FamilyId),
     FalloffEval,
     DecodeFailed,
-    UnsupportedCodec(asset_audio::SabCodec),
+    UnsupportedCodec(asset_audio::ExternalAudioCodec),
     UnsupportedCueFeatures(std::sync::Arc<[asset_audio::UnsupportedCueFeature]>),
     MediaMetadataMismatch,
     MediaReadFailed,
@@ -151,7 +151,7 @@ impl fmt::Display for StartOutcome {
 #[derive(Clone, Debug)]
 pub struct StartDecision {
     pub event: Option<crate::AudioEvent>,
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub alias: String,
     pub variant: Option<usize>,
     pub loaded_binding_origin: Option<asset_audio::LoadedBindingOrigin>,

@@ -1,6 +1,6 @@
 use bevy::prelude::*;
-use dpvs_iw4::{xmodel_get_lod_for_dist, xmodel_lod_camera_dist, xmodel_lod_scaled_dists};
 use render_material::RuntimeMaterialCatalog;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SmodelPassMaterial {
@@ -25,34 +25,134 @@ pub struct SmodelPassMaterial {
     pub material_sorted_index: Option<u32>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug)]
+pub struct FamilyLodView {
+    policy: asset_model::ModelLodPolicy,
+    pub controls: asset_model::LodControls,
+    pub projection: asset_model::LodProjectionState,
+}
+
+#[derive(Clone, Debug)]
+pub struct LodViewProfiles(Arc<BTreeMap<asset_core::FamilyId, FamilyLodView>>);
+
+impl LodViewProfiles {
+    pub fn new(skinned: bool) -> Self {
+        Self(Arc::new(
+            asset_model::model_families()
+                .iter()
+                .map(|(id, family)| {
+                    (
+                        id,
+                        FamilyLodView {
+                            policy: family.lod,
+                            controls: if skinned {
+                                family.lod.skinned
+                            } else {
+                                family.lod.rigid
+                            },
+                            projection: asset_model::LodProjectionState::default(),
+                        },
+                    )
+                })
+                .collect(),
+        ))
+    }
+    pub fn update(&mut self, tan_half_fov_y: f32) {
+        for view in Arc::make_mut(&mut self.0).values_mut() {
+            (view.policy.update_view)(&mut view.projection, tan_half_fov_y, view.controls);
+        }
+    }
+    pub fn set_scale(&mut self, scale: f32) {
+        for view in Arc::make_mut(&mut self.0).values_mut() {
+            view.controls.scale = scale;
+        }
+    }
+    pub fn set_bias(&mut self, bias: f32) {
+        for view in Arc::make_mut(&mut self.0).values_mut() {
+            view.controls.bias = bias;
+        }
+    }
+    pub fn snapshot(&self) -> Arc<BTreeMap<asset_core::FamilyId, FamilyLodView>> {
+        self.0.clone()
+    }
+    pub fn summary(&self) -> String {
+        self.0
+            .iter()
+            .map(|(id, view)| {
+                format!(
+                    "{} scale/bias/applied={}/{}/{}",
+                    id.as_str(),
+                    view.controls.scale,
+                    view.controls.bias,
+                    view.projection.applied_scale
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LodViewKey {
+    eye_bits: Option<[u32; 3]>,
+    ramp_bits: [Option<u32>; 3],
+    world_unit_bits: Option<u32>,
+    no_cull_out: bool,
+    family_bits: Vec<(asset_core::FamilyId, [u32; 6])>,
+}
+
+#[derive(Clone, Debug)]
 pub struct LodRampArgs {
     pub scale_mid: Option<f32>,
     pub bias_mid: Option<f32>,
     pub scale_last: Option<f32>,
-
     pub world_unit: Option<f32>,
-
-    pub t5: asset_model::t5_lod::LodParmsAxis,
-
-    pub t5_no_lod_cull_out: bool,
+    pub profiles: Arc<BTreeMap<asset_core::FamilyId, FamilyLodView>>,
+    pub no_lod_cull_out: bool,
 }
-
-impl LodRampArgs {
-    #[must_use]
-    pub fn call_dists(self, dist: f32) -> (f32, f32) {
-        match (self.scale_mid, self.bias_mid, self.scale_last) {
-            (Some(s), Some(b), Some(l)) => xmodel_lod_scaled_dists(dist, s, b, l),
-            (Some(s), Some(b), None) => {
-                let (mid, _) = xmodel_lod_scaled_dists(dist, s, b, 0.0);
-                (mid, dist)
-            }
-            (None, None, Some(l)) => {
-                let (_, last) = xmodel_lod_scaled_dists(dist, 0.0, 0.0, l);
-                (dist, last)
-            }
-            _ => (dist, dist),
+impl Default for LodRampArgs {
+    fn default() -> Self {
+        Self {
+            scale_mid: None,
+            bias_mid: None,
+            scale_last: None,
+            world_unit: None,
+            profiles: LodViewProfiles::new(false).snapshot(),
+            no_lod_cull_out: false,
         }
+    }
+}
+impl LodRampArgs {
+    pub fn view_key(&self, eye: Option<[f32; 3]>) -> LodViewKey {
+        LodViewKey {
+            eye_bits: eye.map(|eye| eye.map(f32::to_bits)),
+            ramp_bits: [
+                self.scale_mid.map(f32::to_bits),
+                self.bias_mid.map(f32::to_bits),
+                self.scale_last.map(f32::to_bits),
+            ],
+            world_unit_bits: self.world_unit.map(f32::to_bits),
+            no_cull_out: self.no_lod_cull_out,
+            family_bits: self.family_bits(),
+        }
+    }
+    pub fn family_bits(&self) -> Vec<(asset_core::FamilyId, [u32; 6])> {
+        self.profiles
+            .iter()
+            .map(|(&id, view)| {
+                (
+                    id,
+                    [
+                        view.controls.scale.to_bits(),
+                        view.controls.bias.to_bits(),
+                        view.controls.fov_threshold.to_bits(),
+                        view.projection.applied_scale.to_bits(),
+                        view.projection.distance_scale.to_bits(),
+                        view.projection.distance_bias.to_bits(),
+                    ],
+                )
+            })
+            .collect()
     }
 }
 
@@ -61,43 +161,25 @@ pub fn smodel_camera_lod(
     origin: [f32; 3],
     scale: f32,
     eye: Option<Vec3>,
-    ramp: LodRampArgs,
+    ramp: &LodRampArgs,
 ) -> Option<u8> {
     let (Some(eye), Some(lod)) = (eye, lod) else {
         return Some(0);
     };
-    match lod {
-        asset_model::ModelLodSelector::Iw4 {
-            lod_start,
-            num_lods,
-            lod_dist,
-        } => {
-            let d = xmodel_lod_camera_dist(
-                eye.x - origin[0],
-                eye.y - origin[1],
-                eye.z - origin[2],
-                scale,
-                ramp.world_unit,
-            );
-            let (mid, last) = ramp.call_dists(d);
-            xmodel_get_lod_for_dist(lod_start, num_lods, lod_dist, mid, last)
-        }
-
-        asset_model::ModelLodSelector::T5 { num_lods, lod_dist } => {
-            let dx = eye.x - origin[0];
-            let dy = eye.y - origin[1];
-            let dz = eye.z - origin[2];
-            let d = (dx * dx + dy * dy + dz * dz).sqrt();
-            let (ramped, base) = ramp.t5.smodel_call_dists(d, scale);
-            asset_model::t5_lod::xmodel_get_lod_for_dist(
-                num_lods,
-                lod_dist,
-                ramped,
-                base,
-                ramp.t5_no_lod_cull_out,
-            )
-        }
-    }
+    let view = ramp.profiles.get(&lod.family)?;
+    (view.policy.select)(
+        lod,
+        asset_model::LodSelectionSample {
+            offset: [eye.x - origin[0], eye.y - origin[1], eye.z - origin[2]],
+            placement_scale: scale,
+            scale_mid: ramp.scale_mid,
+            bias_mid: ramp.bias_mid,
+            scale_last: ramp.scale_last,
+            world_unit: ramp.world_unit,
+            no_cull_out: ramp.no_lod_cull_out,
+        },
+        view.projection,
+    )
 }
 
 pub fn runtime_cull_face(cull_mode: Option<u8>) -> Option<bevy::render::render_resource::Face> {
@@ -141,18 +223,14 @@ pub fn runtime_maps(
     }
 }
 
-#[derive(Resource, Clone, Copy, Debug)]
+#[derive(Resource, Clone, Debug)]
 pub struct LodRampSkinnedDvar {
     pub scale_mid: Option<f32>,
     pub bias_mid: Option<f32>,
     pub scale_last: Option<f32>,
     pub world_unit: Option<f32>,
-    pub t5_scale: f32,
-    pub t5_bias: f32,
-    pub t5_fov_threshold: f32,
-    pub t5: asset_model::t5_lod::LodParmsAxis,
+    pub profiles: LodViewProfiles,
 }
-
 impl Default for LodRampSkinnedDvar {
     fn default() -> Self {
         Self {
@@ -160,24 +238,19 @@ impl Default for LodRampSkinnedDvar {
             bias_mid: None,
             scale_last: None,
             world_unit: None,
-            t5_scale: asset_model::t5_lod::R_LOD_SCALE_SKINNED_DEFAULT,
-            t5_bias: asset_model::t5_lod::R_LOD_BIAS_SKINNED_DEFAULT,
-            t5_fov_threshold: asset_model::t5_lod::R_FOV_SCALE_THRESHOLD_DEFAULT,
-            t5: asset_model::t5_lod::LodParmsAxis::default(),
+            profiles: LodViewProfiles::new(true),
         }
     }
 }
-
 impl LodRampSkinnedDvar {
-    #[must_use]
-    pub fn args(self) -> LodRampArgs {
+    pub fn args(&self) -> LodRampArgs {
         LodRampArgs {
             scale_mid: self.scale_mid,
             bias_mid: self.bias_mid,
             scale_last: self.scale_last,
             world_unit: self.world_unit,
-            t5: self.t5,
-            t5_no_lod_cull_out: false,
+            profiles: self.profiles.snapshot(),
+            no_lod_cull_out: false,
         }
     }
 }

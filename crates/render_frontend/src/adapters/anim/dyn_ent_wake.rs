@@ -2,6 +2,7 @@ use frame::ScopeApp;
 use std::collections::HashMap;
 use std::time::Instant;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use entity_iw4::EntityEventKind;
 
@@ -216,23 +217,32 @@ const EXPLODING_BULLET_DVARS: ExplosionDvars = ExplosionDvars {
     min_force: DYNENT_EXPLODING_BULLET_MIN_FORCE,
 };
 
-pub(crate) fn explosion_falloff(
-    dist: f32,
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ExplosionFalloff {
     inner_radius: f32,
     outer_radius: f32,
-    in_scale: f32,
-) -> Option<f32> {
-    if outer_radius <= 0.0 || dist >= outer_radius {
-        return None;
-    }
-    let mut scale = in_scale;
-    if dist > inner_radius && inner_radius < outer_radius {
-        scale *= (dist - outer_radius) / (inner_radius - outer_radius);
-        if scale < 0.0 {
-            scale = 0.0;
+    magnitude: f32,
+}
+
+impl ExplosionFalloff {
+    fn at_distance(self, dist: f32) -> Option<f32> {
+        let Self {
+            inner_radius,
+            outer_radius,
+            magnitude: in_scale,
+        } = self;
+        if outer_radius <= 0.0 || dist >= outer_radius {
+            return None;
         }
+        let mut scale = in_scale;
+        if dist > inner_radius && inner_radius < outer_radius {
+            scale *= (dist - outer_radius) / (inner_radius - outer_radius);
+            if scale < 0.0 {
+                scale = 0.0;
+            }
+        }
+        Some(scale)
     }
-    Some(scale)
 }
 
 pub(crate) fn explosion_damage(inner_damage: i32, outer_damage: i32, scale: f32) -> i32 {
@@ -259,9 +269,7 @@ fn is_destroyable(ty: asset_world::DynEntType) -> bool {
 pub(crate) fn explosion_impulse(
     origin: Vec3,
     pose: Vec3,
-    inner_radius: f32,
-    outer_radius: f32,
-    in_scale: f32,
+    falloff: ExplosionFalloff,
     explosive_scale: f32,
     explicit: Vec3,
     cylinder: bool,
@@ -271,7 +279,7 @@ pub(crate) fn explosion_impulse(
         return None;
     }
     let dist = pose.distance(origin);
-    let scale = explosion_falloff(dist, inner_radius, outer_radius, in_scale)?;
+    let scale = falloff.at_distance(dist)?;
     let force = scale * explosive_scale * dvars.force;
     if !force.is_finite() {
         return None;
@@ -378,49 +386,7 @@ fn axis_from_rotation(rot: Quat) -> [[f32; 3]; 3] {
     ]
 }
 
-fn kill_dyn_ent(
-    entity: Entity,
-    inst: &mut WorldDynEntInstance,
-    transform: &Transform,
-    visibility: &mut Visibility,
-    phys: &mut DynEntPhysWorld,
-    host: Option<&mut HostFxSystem>,
-    fx: Option<&PreparedFxCatalog>,
-    scene: Option<&WorldScene>,
-    marks: &EntityMarks,
-) {
-    inst.dead = true;
-    inst.health = 0;
-    *visibility = Visibility::Hidden;
-    phys.destroy_body(entity);
-    let Some(name) = inst.destroy_fx.as_deref() else {
-        return;
-    };
-    let Some(host) = host else {
-        return;
-    };
-    let Some(fx) = fx else {
-        return;
-    };
-    let cache = FxElemInfoCache::default();
-    let _ = play_named_oriented_in_world(
-        &mut host.0,
-        &fx.0,
-        &cache,
-        fx.0.map_fx_name(name),
-        transform.translation.to_array(),
-        axis_from_rotation(transform.rotation),
-        FrontendFxScene::wrap(scene, marks)
-            .as_ref()
-            .map(|s| s as &dyn render_fx::present::FxScene),
-    );
-}
-
-fn apply_radius_hit(
-    entity: Entity,
-    inst: &mut WorldDynEntInstance,
-    transform: &Transform,
-    visibility: &mut Visibility,
+struct DynEntBlast {
     origin: Vec3,
     inner: f32,
     outer: f32,
@@ -428,69 +394,145 @@ fn apply_radius_hit(
     dvars: ExplosionDvars,
     inner_damage: i32,
     outer_damage: i32,
-    impulses: &mut MessageWriter<DynEntPhysImpulse>,
-    phys: &mut DynEntPhysWorld,
-    host: Option<&mut HostFxSystem>,
-    fx: Option<&PreparedFxCatalog>,
-    scene: Option<&WorldScene>,
-    marks: &EntityMarks,
-) {
-    if inst.dead {
-        return;
-    }
-    let dist = transform.translation.distance(origin);
-    let Some(scale) = explosion_falloff(dist, inner, outer, 1.0) else {
-        return;
-    };
-    if let Some(preset) = can_wake(inst) {
-        if let Some(impulse) = explosion_impulse(
-            origin,
-            transform.translation,
-            inner,
-            outer,
-            1.0,
-            preset.explosive_force_scale,
-            explicit,
-            false,
-            dvars,
-        ) {
-            impulses.write(DynEntPhysImpulse { entity, impulse });
-        }
-    }
-    if !is_destroyable(inst.ty) {
-        return;
-    }
-    let damage = explosion_damage(inner_damage, outer_damage, scale);
-    if apply_health(&mut inst.health, damage) {
-        kill_dyn_ent(
-            entity, inst, transform, visibility, phys, host, fx, scene, marks,
+}
+
+struct DynEntTarget<'a> {
+    entity: Entity,
+    inst: &'a mut WorldDynEntInstance,
+    transform: &'a Transform,
+    visibility: &'a mut Visibility,
+}
+
+impl DynEntTarget<'_> {
+    fn kill(
+        &mut self,
+        phys: &mut DynEntPhysWorld,
+        host: Option<&mut HostFxSystem>,
+        fx: Option<&PreparedFxCatalog>,
+        scene: Option<&WorldScene>,
+        marks: &EntityMarks,
+    ) {
+        let entity = self.entity;
+        let inst = &mut *self.inst;
+        let transform = self.transform;
+        let visibility = &mut *self.visibility;
+
+        inst.dead = true;
+        inst.health = 0;
+        *visibility = Visibility::Hidden;
+        phys.destroy_body(entity);
+        let Some(name) = inst.destroy_fx.as_deref() else {
+            return;
+        };
+        let Some(host) = host else {
+            return;
+        };
+        let Some(fx) = fx else {
+            return;
+        };
+        let cache = FxElemInfoCache::default();
+        let _ = play_named_oriented_in_world(
+            &mut host.0,
+            &fx.0,
+            &cache,
+            fx.0.map_fx_name(name),
+            transform.translation.to_array(),
+            axis_from_rotation(transform.rotation),
+            FrontendFxScene::wrap(scene, marks)
+                .as_ref()
+                .map(|s| s as &dyn render_fx::present::FxScene),
         );
     }
+
+    fn apply_radius_hit(
+        &mut self,
+        blast: &DynEntBlast,
+        impulses: &mut MessageWriter<DynEntPhysImpulse>,
+    ) -> bool {
+        let entity = self.entity;
+        let inst = &mut *self.inst;
+        let transform = self.transform;
+        let DynEntBlast {
+            origin,
+            inner,
+            outer,
+            explicit,
+            dvars,
+            inner_damage,
+            outer_damage,
+        } = *blast;
+
+        if inst.dead {
+            return false;
+        }
+        let dist = transform.translation.distance(origin);
+        let falloff = ExplosionFalloff {
+            inner_radius: inner,
+            outer_radius: outer,
+            magnitude: 1.0,
+        };
+        let Some(scale) = falloff.at_distance(dist) else {
+            return false;
+        };
+        if let Some(preset) = can_wake(inst) {
+            if let Some(impulse) = explosion_impulse(
+                origin,
+                transform.translation,
+                falloff,
+                preset.explosive_force_scale,
+                explicit,
+                false,
+                dvars,
+            ) {
+                impulses.write(DynEntPhysImpulse { entity, impulse });
+            }
+        }
+        if !is_destroyable(inst.ty) {
+            return false;
+        }
+        let damage = explosion_damage(inner_damage, outer_damage, scale);
+        apply_health(&mut inst.health, damage)
+    }
+}
+
+#[derive(SystemParam)]
+pub(crate) struct DynEntDamageTargets<'w, 's> {
+    instances: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static mut WorldDynEntInstance,
+            &'static Transform,
+            &'static mut Visibility,
+        ),
+        With<DynEntModelEntity>,
+    >,
+    impulses: MessageWriter<'w, DynEntPhysImpulse>,
+    phys: ResMut<'w, DynEntPhysWorld>,
+    host: Option<ResMut<'w, HostFxSystem>>,
+    fx: Option<Res<'w, PreparedFxCatalog>>,
+    scene: Option<Res<'w, WorldScene>>,
+    entity_marks: Res<'w, EntityMarks>,
 }
 
 pub(crate) fn on_entity_explosion(
     explosion: On<EntityExplosion>,
     weapons: Option<Res<PreparedWeapons>>,
     mut broadphase: ResMut<DynEntWakeBroadphase>,
-    mut instances: Query<
-        (
-            Entity,
-            &mut WorldDynEntInstance,
-            &Transform,
-            &mut Visibility,
-        ),
-        With<DynEntModelEntity>,
-    >,
-    mut impulses: MessageWriter<DynEntPhysImpulse>,
-    mut phys: ResMut<DynEntPhysWorld>,
-    mut host: Option<ResMut<HostFxSystem>>,
-    fx: Option<Res<PreparedFxCatalog>>,
-    scene: Option<Res<WorldScene>>,
-    entity_marks: Res<EntityMarks>,
+    targets: DynEntDamageTargets,
 ) {
-    let weapons = weapons
-        .as_deref()
-        .and_then(|weapons| weapons.for_event(explosion.event.world).ok());
+    let DynEntDamageTargets {
+        mut instances,
+        mut impulses,
+        mut phys,
+        mut host,
+        fx,
+        scene,
+        entity_marks,
+    } = targets;
+
+    let weapons = weapons.as_deref().map(|weapons| weapons.bound());
     let payload = explosion.event.payload;
     let Some((inner, outer)) = weapon_radii(weapons.as_ref(), payload.weapon) else {
         return;
@@ -519,50 +561,62 @@ pub(crate) fn on_entity_explosion(
             else {
                 continue;
             };
-            apply_radius_hit(
+            let mut target = DynEntTarget {
                 entity,
-                &mut inst,
+                inst: &mut inst,
                 transform,
-                &mut visibility,
-                origin,
-                inner,
-                outer,
-                explicit,
-                GRENADE_EXPLODE_DVARS,
-                inner_damage,
-                outer_damage,
+                visibility: &mut visibility,
+            };
+            let phys = phys.as_mut();
+            let host = host.as_deref_mut();
+            if target.apply_radius_hit(
+                &DynEntBlast {
+                    origin,
+                    inner,
+                    outer,
+                    explicit,
+                    dvars: GRENADE_EXPLODE_DVARS,
+                    inner_damage,
+                    outer_damage,
+                },
                 &mut impulses,
-                phys.as_mut(),
-                host.as_deref_mut(),
-                fx,
-                scene,
-                marks,
-            );
+            ) {
+                target.kill(phys, host, fx, scene, marks);
+            }
         }
     } else {
         for (entity, mut inst, transform, mut visibility) in &mut instances {
-            apply_radius_hit(
+            let mut target = DynEntTarget {
                 entity,
-                &mut inst,
+                inst: &mut inst,
                 transform,
-                &mut visibility,
-                origin,
-                inner,
-                outer,
-                explicit,
-                GRENADE_EXPLODE_DVARS,
-                inner_damage,
-                outer_damage,
+                visibility: &mut visibility,
+            };
+            let phys = phys.as_mut();
+            let host = host.as_deref_mut();
+            if target.apply_radius_hit(
+                &DynEntBlast {
+                    origin,
+                    inner,
+                    outer,
+                    explicit,
+                    dvars: GRENADE_EXPLODE_DVARS,
+                    inner_damage,
+                    outer_damage,
+                },
                 &mut impulses,
-                phys.as_mut(),
-                host.as_deref_mut(),
-                fx,
-                scene,
-                marks,
-            );
+            ) {
+                target.kill(phys, host, fx, scene, marks);
+            }
         }
     }
     broadphase.query_ms += started.elapsed().as_secs_f32() * 1000.0;
+}
+
+struct DynEntSegmentHit {
+    entity: Entity,
+    pose: Vec3,
+    bullet_scale: f32,
 }
 
 fn closest_segment_hit(
@@ -579,7 +633,7 @@ fn closest_segment_hit(
         ),
         With<DynEntModelEntity>,
     >,
-) -> Option<(Entity, Vec3, f32)> {
+) -> Option<DynEntSegmentHit> {
     let mut best: Option<(f32, Entity, Vec3, f32)> = None;
     let started = Instant::now();
     if let Some(candidates) = broadphase.segment_candidates(start, end) {
@@ -613,82 +667,79 @@ fn closest_segment_hit(
         }
     }
     broadphase.query_ms += started.elapsed().as_secs_f32() * 1000.0;
-    best.map(|(_, entity, pose, scale)| (entity, pose, scale))
+    best.map(|(_, entity, pose, bullet_scale)| DynEntSegmentHit {
+        entity,
+        pose,
+        bullet_scale,
+    })
 }
 
-fn hit_one_dyn_ent(
-    entity: Entity,
-    pose: Vec3,
-    start: Vec3,
-    end: Vec3,
-    bullet_scale: f32,
-    damage: i32,
-    instances: &mut Query<
-        (
-            Entity,
-            &mut WorldDynEntInstance,
-            &Transform,
-            &mut Visibility,
-        ),
-        With<DynEntModelEntity>,
-    >,
-    impulses: &mut MessageWriter<DynEntPhysImpulse>,
-    phys: &mut DynEntPhysWorld,
-    host: Option<&mut HostFxSystem>,
-    fx: Option<&PreparedFxCatalog>,
-    scene: Option<&WorldScene>,
-    marks: &EntityMarks,
-) {
-    let mut dir = end - start;
-    if dir.length_squared() < 1e-12 {
-        dir = pose - start;
-    }
-    if let Some(impulse) = bullet_impulse(dir, bullet_scale) {
-        impulses.write(DynEntPhysImpulse { entity, impulse });
-    }
-    let Ok((_, mut inst, transform, mut visibility)) = instances.get_mut(entity) else {
-        return;
-    };
-    if !is_destroyable(inst.ty) {
-        return;
-    }
-    if apply_health(&mut inst.health, damage) {
-        kill_dyn_ent(
+impl DynEntSegmentHit {
+    fn apply<'a>(
+        self,
+        start: Vec3,
+        end: Vec3,
+        damage: i32,
+        instances: &'a mut Query<
+            (
+                Entity,
+                &mut WorldDynEntInstance,
+                &Transform,
+                &mut Visibility,
+            ),
+            With<DynEntModelEntity>,
+        >,
+        impulses: &mut MessageWriter<DynEntPhysImpulse>,
+    ) -> Option<DynEntTarget<'a>> {
+        let Self {
             entity,
-            &mut inst,
-            transform,
-            &mut visibility,
-            phys,
-            host,
-            fx,
-            scene,
-            marks,
-        );
+            pose,
+            bullet_scale,
+        } = self;
+
+        let mut dir = end - start;
+        if dir.length_squared() < 1e-12 {
+            dir = pose - start;
+        }
+        if let Some(impulse) = bullet_impulse(dir, bullet_scale) {
+            impulses.write(DynEntPhysImpulse { entity, impulse });
+        }
+        let Ok((_, mut inst, transform, visibility)) = instances.get_mut(entity) else {
+            return None;
+        };
+        if !is_destroyable(inst.ty) {
+            return None;
+        }
+        if apply_health(&mut inst.health, damage) {
+            Some(DynEntTarget {
+                entity,
+                inst: inst.into_inner(),
+                transform,
+                visibility: visibility.into_inner(),
+            })
+        } else {
+            None
+        }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn hit_dyn_ents_from_pellets(
     mut hits: MessageReader<net::AcceptedImpact>,
     weapons: Option<Res<PreparedWeapons>>,
     catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
     mut broadphase: ResMut<DynEntWakeBroadphase>,
-    mut instances: Query<
-        (
-            Entity,
-            &mut WorldDynEntInstance,
-            &Transform,
-            &mut Visibility,
-        ),
-        With<DynEntModelEntity>,
-    >,
-    mut impulses: MessageWriter<DynEntPhysImpulse>,
-    mut phys: ResMut<DynEntPhysWorld>,
-    mut host: Option<ResMut<HostFxSystem>>,
-    fx: Option<Res<PreparedFxCatalog>>,
-    scene: Option<Res<WorldScene>>,
-    entity_marks: Res<EntityMarks>,
+    targets: DynEntDamageTargets,
 ) {
+    let DynEntDamageTargets {
+        mut instances,
+        mut impulses,
+        mut phys,
+        mut host,
+        fx,
+        scene,
+        entity_marks,
+    } = targets;
+
     let catalog = catalog.as_deref();
     let fx = fx.as_deref();
     let scene = scene.as_deref();
@@ -701,25 +752,18 @@ pub(crate) fn hit_dyn_ents_from_pellets(
             &mut broadphase,
             &instances,
         );
-        let weapons = weapons
-            .as_deref()
-            .and_then(|weapons| weapons.for_event(hit.world).ok());
-        if let Some((entity, pose, bullet_scale)) = direct {
-            hit_one_dyn_ent(
-                entity,
-                pose,
-                Vec3::from_array(hit.record.start),
-                Vec3::from_array(hit.record.end),
-                bullet_scale,
-                weapon_hit_damage(weapons.as_ref(), hit.record.weapon),
-                &mut instances,
-                &mut impulses,
-                phys.as_mut(),
-                host.as_deref_mut(),
-                fx,
-                scene,
-                marks,
-            );
+        let weapons = weapons.as_deref().map(|weapons| weapons.bound());
+        if let Some(direct) = direct {
+            let start = Vec3::from_array(hit.record.start);
+            let end = Vec3::from_array(hit.record.end);
+            let damage = weapon_hit_damage(weapons.as_ref(), hit.record.weapon);
+            let phys = phys.as_mut();
+            let host = host.as_deref_mut();
+            if let Some(mut target) =
+                direct.apply(start, end, damage, &mut instances, &mut impulses)
+            {
+                target.kill(phys, host, fx, scene, marks);
+            }
         }
         let Some((inner, outer)) = weapon_radii(weapons.as_ref(), hit.record.weapon) else {
             continue;
@@ -734,47 +778,53 @@ pub(crate) fn hit_dyn_ents_from_pellets(
                 else {
                     continue;
                 };
-                apply_radius_hit(
+                let mut target = DynEntTarget {
                     entity,
-                    &mut inst,
+                    inst: &mut inst,
                     transform,
-                    &mut visibility,
-                    origin,
-                    inner,
-                    outer,
-                    Vec3::ZERO,
-                    EXPLODING_BULLET_DVARS,
-                    inner_damage,
-                    outer_damage,
+                    visibility: &mut visibility,
+                };
+                let phys = phys.as_mut();
+                let host = host.as_deref_mut();
+                if target.apply_radius_hit(
+                    &DynEntBlast {
+                        origin,
+                        inner,
+                        outer,
+                        explicit: Vec3::ZERO,
+                        dvars: EXPLODING_BULLET_DVARS,
+                        inner_damage,
+                        outer_damage,
+                    },
                     &mut impulses,
-                    phys.as_mut(),
-                    host.as_deref_mut(),
-                    fx,
-                    scene,
-                    marks,
-                );
+                ) {
+                    target.kill(phys, host, fx, scene, marks);
+                }
             }
         } else {
             for (entity, mut inst, transform, mut visibility) in &mut instances {
-                apply_radius_hit(
+                let mut target = DynEntTarget {
                     entity,
-                    &mut inst,
+                    inst: &mut inst,
                     transform,
-                    &mut visibility,
-                    origin,
-                    inner,
-                    outer,
-                    Vec3::ZERO,
-                    EXPLODING_BULLET_DVARS,
-                    inner_damage,
-                    outer_damage,
+                    visibility: &mut visibility,
+                };
+                let phys = phys.as_mut();
+                let host = host.as_deref_mut();
+                if target.apply_radius_hit(
+                    &DynEntBlast {
+                        origin,
+                        inner,
+                        outer,
+                        explicit: Vec3::ZERO,
+                        dvars: EXPLODING_BULLET_DVARS,
+                        inner_damage,
+                        outer_damage,
+                    },
                     &mut impulses,
-                    phys.as_mut(),
-                    host.as_deref_mut(),
-                    fx,
-                    scene,
-                    marks,
-                );
+                ) {
+                    target.kill(phys, host, fx, scene, marks);
+                }
             }
         }
         broadphase.query_ms += started.elapsed().as_secs_f32() * 1000.0;
@@ -786,28 +836,22 @@ pub(crate) fn on_entity_event_sound(
     weapons: Option<Res<PreparedWeapons>>,
     catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
     mut broadphase: ResMut<DynEntWakeBroadphase>,
-    mut instances: Query<
-        (
-            Entity,
-            &mut WorldDynEntInstance,
-            &Transform,
-            &mut Visibility,
-        ),
-        With<DynEntModelEntity>,
-    >,
-    mut impulses: MessageWriter<DynEntPhysImpulse>,
-    mut phys: ResMut<DynEntPhysWorld>,
-    mut host: Option<ResMut<HostFxSystem>>,
-    fx: Option<Res<PreparedFxCatalog>>,
-    scene: Option<Res<WorldScene>>,
-    entity_marks: Res<EntityMarks>,
+    targets: DynEntDamageTargets,
 ) {
+    let DynEntDamageTargets {
+        mut instances,
+        mut impulses,
+        mut phys,
+        mut host,
+        fx,
+        scene,
+        entity_marks,
+    } = targets;
+
     if sound.event.event != EntityEventKind::MELEE_HIT {
         return;
     }
-    let weapons = weapons
-        .as_deref()
-        .and_then(|weapons| weapons.for_event(sound.event.world).ok());
+    let weapons = weapons.as_deref().map(|weapons| weapons.bound());
     let payload = sound.event.payload;
     let start = Vec3::from_array(payload.origin2);
     let end = Vec3::from_array(payload.origin);
@@ -816,26 +860,15 @@ pub(crate) fn on_entity_event_sound(
     let fx = fx.as_deref();
     let scene = scene.as_deref();
     let marks = entity_marks.as_ref();
-    let Some((entity, pose, bullet_scale)) =
-        closest_segment_hit(start, end, catalog, &mut broadphase, &instances)
-    else {
+    let Some(direct) = closest_segment_hit(start, end, catalog, &mut broadphase, &instances) else {
         return;
     };
-    hit_one_dyn_ent(
-        entity,
-        pose,
-        start,
-        end,
-        bullet_scale,
-        weapon_hit_damage(weapons.as_ref(), payload.weapon),
-        &mut instances,
-        &mut impulses,
-        phys.as_mut(),
-        host.as_deref_mut(),
-        fx,
-        scene,
-        marks,
-    );
+    let damage = weapon_hit_damage(weapons.as_ref(), payload.weapon);
+    let phys = phys.as_mut();
+    let host = host.as_deref_mut();
+    if let Some(mut target) = direct.apply(start, end, damage, &mut instances, &mut impulses) {
+        target.kill(phys, host, fx, scene, marks);
+    }
 }
 
 pub(crate) fn wake_player_overlap(
@@ -896,9 +929,11 @@ fn on_physics_sphere(
         if let Some(impulse) = explosion_impulse(
             origin,
             transform.translation,
-            sphere.inner_radius,
-            sphere.outer_radius,
-            sphere.magnitude,
+            ExplosionFalloff {
+                inner_radius: sphere.inner_radius,
+                outer_radius: sphere.outer_radius,
+                magnitude: sphere.magnitude,
+            },
             preset.explosive_force_scale,
             Vec3::ZERO,
             false,
@@ -980,7 +1015,7 @@ pub fn register_dyn_ent_wake(app: &mut App) {
             Update,
             wake_player_overlap
                 .in_set(frame::InMatch)
-                .in_set(frame::WorkerCmdSet::Physics)
+                .in_set(net::ClientSet::Present)
                 .before(render_anim::occupancy::dyn_ent_phys::step_phys_world0),
         );
 }

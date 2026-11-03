@@ -264,7 +264,7 @@ pub struct EquippedFpv {
     pub gun_xmodel: String,
     pub gun_index: assets::FpvMeshIndex,
     pub hands_index: assets::FpvMeshIndex,
-    pub namespace: asset_core::AssetNamespace,
+    pub namespace: asset_core::FamilyId,
     pub hands: asset_model::FpvHands,
     pub controller: ViewmodelController,
 
@@ -276,7 +276,7 @@ impl EquippedFpv {
         gun_xmodel: impl Into<String>,
         gun_index: assets::FpvMeshIndex,
         hands_index: assets::FpvMeshIndex,
-        namespace: asset_core::AssetNamespace,
+        namespace: asset_core::FamilyId,
         hands: asset_model::FpvHands,
         controller: ViewmodelController,
         left: Option<ViewmodelController>,
@@ -321,15 +321,12 @@ pub struct FpvNotetracks {
 impl FpvNotetracks {
     pub fn into_audio_batch(
         self,
-        generation: frame::WorldStamp,
-        timeline: u64,
         client: sim::ClientId,
         life: sim::LifeSequence,
         weapon: u32,
         tick: sim::Tick,
     ) -> audio::ViewmodelNotetracks {
         audio::ViewmodelNotetracks {
-            generation,
             client,
             life,
             weapon,
@@ -340,8 +337,6 @@ impl FpvNotetracks {
                     let notify = record.notification;
                     audio::ViewmodelNotetrack {
                         event: audio::AudioEvent::from_animation(
-                            generation,
-                            timeline,
                             client,
                             tick,
                             audio::AnimationMarkerId {

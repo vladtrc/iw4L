@@ -482,10 +482,7 @@ pub fn pack_smodel_meshes(
     (plan, mesh_authored, mesh_collision, copy_meshes)
 }
 
-pub fn expand_smodel_cached_vertices(
-    plan: &mut SmodelGpuPlan,
-    _lighting_for_slot: impl Fn(usize) -> Option<[u8; 4]>,
-) {
+pub fn reset_smodel_cached_geometry(plan: &mut SmodelGpuPlan) {
     plan.cached_vertices.clear();
     plan.cached_indices.clear();
     plan.cached_placement_n = 0;
@@ -801,7 +798,7 @@ pub(crate) fn build_smodel_gpu_plan(
     );
     plan.shadow_draw_insts = shadow_draw_insts;
 
-    expand_smodel_cached_vertices(&mut plan, |_| None);
+    reset_smodel_cached_geometry(&mut plan);
     scene.smodel_mark_cpu = Some(crate::prepare::scene::world::SmodelMarkCpu {
         positions: plan.decoded_vertices().iter().map(|v| v.position).collect(),
         normals: plan.decoded_vertices().iter().map(|v| v.normal).collect(),

@@ -126,12 +126,12 @@ impl SessionClassStore {
     }
 
     pub fn server_families(&self) -> Option<frame::AssetFamilies> {
-        self.server_families
+        self.server_families.clone()
     }
 
     pub fn lock_reason(&self, index: usize) -> Option<String> {
         let slot = self.slots.get(index)?;
-        if let Some(families) = self.server_families {
+        if let Some(families) = &self.server_families {
             for reference in [&slot.primary, &slot.secondary, &slot.lethal, &slot.tactical] {
                 if let Some(key) = asset_game::FamilyKey::parse(reference)
                     && !families.enabled(key.namespace.as_str())

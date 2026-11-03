@@ -1,13 +1,13 @@
 use crate::anim::fpv_rig::PreparedFpvRig;
-use crate::gaps::RenderGapCause;
 use asset_anim::XAnimCatalog;
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 use asset_game::{FpvSideAssemblies, WeaponAnimations, WeaponFpvFacts, WeaponRegistry};
 use asset_model::{FpvHands, FpvMeshCatalog};
 use assets::FpvMeshIndex;
 use bevy::prelude::*;
 use render_material::RuntimeMaterialCatalog;
 use render_scene::SmodelPassMaterial;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -44,25 +44,17 @@ impl FpvRigSet {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct FpvViewCensus {
-    pub gun_colormap_skip_n: u32,
-    pub gun_colormap_skip_names: Vec<String>,
-    pub mat_hints: Vec<String>,
-}
-
 pub struct FpvWeaponView {
     pub gun_name: String,
     pub gun_index: FpvMeshIndex,
     pub hands: FpvHands,
     pub hands_index: FpvMeshIndex,
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub assemblies: FpvSideAssemblies,
     pub right: WeaponAnimations,
     pub left: Option<WeaponAnimations>,
     pub idle_name: Option<String>,
     pub rigs: FpvRigSet,
-    pub census: FpvViewCensus,
     pub camos: Vec<(u8, Result<Arc<HashMap<usize, SmodelPassMaterial>>, String>)>,
 }
 
@@ -85,20 +77,10 @@ impl FpvWeaponView {
 pub enum FpvWeaponSlot {
     Absent,
     Ready(Arc<FpvWeaponView>),
-    Refused(RenderGapCause),
+    Refused(Cow<'static, str>),
 }
 
 static ABSENT_SLOT: FpvWeaponSlot = FpvWeaponSlot::Absent;
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct FpvPreparationCensus {
-    pub models: usize,
-    pub layouts: usize,
-    pub compositions: usize,
-    pub rigs: usize,
-    pub materials: usize,
-    pub elapsed_ms: f64,
-}
 
 pub struct FpvWeaponTable {
     pub(super) owner: FpvPreparationOwner,
@@ -108,14 +90,9 @@ pub struct FpvWeaponTable {
     pub(super) guns: Vec<Option<FpvMeshIndex>>,
     pub(super) slots: Vec<[FpvWeaponSlot; 2]>,
     pub(super) alternate_slots: HashMap<(u32, u32), [FpvWeaponSlot; 2]>,
-    pub(super) census: FpvPreparationCensus,
 }
 
 impl FpvWeaponTable {
-    pub fn census(&self) -> FpvPreparationCensus {
-        self.census
-    }
-
     pub fn material_catalog(&self) -> &Arc<RuntimeMaterialCatalog> {
         &self.owner.materials
     }
@@ -158,7 +135,7 @@ impl FpvWeaponTable {
         materials: &Arc<RuntimeMaterialCatalog>,
         images: &Arc<Vec<Option<Handle<Image>>>>,
         atlas: Option<bevy::asset::AssetId<Image>>,
-    ) -> Result<BoundFpvTable<'a>, FpvBindingRefusal> {
+    ) -> Result<BoundFpvTable<'a>, &'static str> {
         if self.owner.weapons.revision() != weapons.revision()
             || !Arc::ptr_eq(&self.owner.meshes, meshes)
             || !Arc::ptr_eq(&self.owner.clips, clips)
@@ -166,7 +143,7 @@ impl FpvWeaponTable {
             || !Arc::ptr_eq(&self.owner.images, images)
             || self.owner.atlas != atlas
         {
-            return Err(FpvBindingRefusal::ForeignOwner);
+            return Err("FPV owner differs from prepared content");
         }
         Ok(BoundFpvTable(self))
     }
@@ -205,12 +182,6 @@ impl FpvPreparationOwner {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FpvBindingRefusal {
-    ForeignOwner,
-    InvalidAlternateParent,
-}
-
 pub struct BoundFpvTable<'a>(&'a FpvWeaponTable);
 
 impl<'a> BoundFpvTable<'a> {
@@ -219,15 +190,15 @@ impl<'a> BoundFpvTable<'a> {
         weapon: asset_game::WeaponHandle,
         parent: Option<asset_game::WeaponHandle>,
         axis: bool,
-    ) -> Result<&'a FpvWeaponSlot, FpvBindingRefusal> {
+    ) -> Result<&'a FpvWeaponSlot, &'static str> {
         let registry = &self.0.owner.weapons;
         let weapon = registry
             .bind(weapon)
-            .map_err(|_| FpvBindingRefusal::ForeignOwner)?;
+            .map_err(|_| "FPV owner differs from prepared content")?;
         let parent = parent
             .map(|p| registry.bind(p))
             .transpose()
-            .map_err(|_| FpvBindingRefusal::ForeignOwner)?;
+            .map_err(|_| "FPV owner differs from prepared content")?;
         let id = weapon.wire_id();
         let parent_id = parent.map_or(0, |p| p.wire_id());
         if weapon.fpv_facts().is_some_and(|f| f.is_alternate())
@@ -236,7 +207,7 @@ impl<'a> BoundFpvTable<'a> {
                 .alternate_fpv_pairs()
                 .any(|pair| pair == (id, parent_id))
         {
-            return Err(FpvBindingRefusal::InvalidAlternateParent);
+            return Err("invalid alternate FPV parent");
         }
         Ok(self.0.slot_unchecked(id, parent_id, axis))
     }
@@ -267,11 +238,10 @@ impl FpvOwnerInputs<'_> {
     }
     pub(crate) fn handles(
         &self,
-        epoch: Option<u32>,
         weapon: u32,
         parent: u32,
     ) -> Option<(asset_game::WeaponHandle, Option<asset_game::WeaponHandle>)> {
-        let bound = self.weapons.as_ref()?.for_snapshot(epoch).ok()?;
+        let bound = self.weapons.as_ref()?.bound();
         let weapon = bound.row(weapon)?.handle();
         let parent = if parent == 0 {
             None

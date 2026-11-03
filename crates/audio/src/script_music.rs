@@ -1,6 +1,7 @@
 use crate::aliases::namespace_alias;
 use crate::cue::CueHandle;
 use crate::cue_execution::CueTrigger;
+use crate::playback::TrackedCuePlayback;
 use crate::{SoundBank, SoundClass};
 use bevy::prelude::*;
 use frame::ScopeApp;
@@ -12,18 +13,14 @@ pub(crate) struct ScriptMusicPlayback {
 }
 
 pub(crate) fn update_script_music(
-    epoch: Option<Res<net::EntityEventCursor>>,
     ready: Res<crate::AudioReady>,
-    generation: Res<frame::WorldGeneration>,
-    runtime: Res<crate::AudioRuntime>,
+    mut cues: TrackedCuePlayback,
     loading: Option<Res<assets::LoadingScreen>>,
     mut events: MessageReader<net::SvcScriptAudio>,
     bank: Option<Res<SoundBank>>,
     mut playback: ResMut<ScriptMusicPlayback>,
     mut mix: ResMut<crate::script_mix::ScriptAudioMix>,
-    mut feedback: ResMut<crate::clip_store::CueFeedback>,
 ) {
-    mix.reset_epoch(crate::backend::presentation_epoch(epoch.as_deref()));
     if playback
         .active
         .as_ref()
@@ -46,13 +43,13 @@ pub(crate) fn update_script_music(
                 playback.pending = Some(alias.clone());
             }
             sim::ScriptAudioCommand::SoundFade { volume, fade_ms } => {
-                mix.fade(runtime.audio_frame(), *volume, *fade_ms);
+                mix.fade(cues.audio_frame(), *volume, *fade_ms);
             }
             sim::ScriptAudioCommand::MusicStop { fade_ms } => {
                 playback.pending = None;
                 if let Some(handle) = &playback.active {
                     handle.release(
-                        runtime.audio_frame(),
+                        cues.audio_frame(),
                         (*fade_ms).max(0) as u64 * u64::from(crate::render_core::SAMPLE_RATE)
                             / 1000,
                     );
@@ -63,8 +60,7 @@ pub(crate) fn update_script_music(
             }
         }
     }
-    if !ready.0.ready_for(generation.stamp()) || loading.is_some_and(|screen| !screen.is_complete())
-    {
+    if !ready.0.is_ready() || loading.is_some_and(|screen| !screen.is_complete()) {
         return;
     }
     let Some(bank) = bank else { return };
@@ -72,7 +68,7 @@ pub(crate) fn update_script_music(
         return;
     };
     let (namespace, name) = namespace_alias(&alias);
-    let handle = runtime.trigger_cue(CueTrigger {
+    let handle = cues.trigger(CueTrigger {
         event: None,
         bank: bank.0.clone(),
         namespace,
@@ -81,17 +77,15 @@ pub(crate) fn update_script_music(
         origin_inches: None,
         emitter: None,
         class: SoundClass::Music,
-        epoch: crate::backend::presentation_epoch(epoch.as_deref()),
         pitch_scale: 1.0,
         volume_scale: 1.0,
         fallbacks: Vec::new(),
     });
-    feedback.push(CueHandle(handle.0.clone()));
     playback.active = Some(handle);
 }
 
 pub(crate) fn register(app: &mut App) {
-    app.scoped::<ScriptMusicPlayback>(frame::MatchScope::Live)
+    app.scoped::<ScriptMusicPlayback>(frame::Timeline::Live)
         .add_systems(
             Update,
             update_script_music

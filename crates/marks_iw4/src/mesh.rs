@@ -8,35 +8,11 @@ pub const GFX_MARK_MESH_VERTEX_STRIDE: usize = 0x2c;
 
 pub const GFX_MARK_MESH_BINORMAL_SIGN: f32 = -1.0;
 
-pub const R_WARN_GFX_MARK_VERT_LIMIT: u32 = 0x2c;
-
-pub const R_WARN_GFX_MARK_INDEX_LIMIT: u32 = 0x2b;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GfxMarkMeshBudget {
     pub surf_n: u32,
     pub vert_n: u32,
     pub index_n: u32,
-    pub surf_warn: u32,
-    pub vert_warn: u32,
-    pub index_warn: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GfxMarkMeshRefuse {
-    SurfLimit,
-    VertLimit,
-    IndexLimit,
-}
-
-impl GfxMarkMeshRefuse {
-    pub const fn warn_id(self) -> u32 {
-        match self {
-            Self::SurfLimit => crate::R_WARN_GFX_MARK_SURF_LIMIT,
-            Self::VertLimit => R_WARN_GFX_MARK_VERT_LIMIT,
-            Self::IndexLimit => R_WARN_GFX_MARK_INDEX_LIMIT,
-        }
-    }
 }
 
 #[inline]
@@ -55,11 +31,10 @@ pub const fn mark_context_is_world_list(context0: u8) -> bool {
 pub fn reserve_mark_mesh_verts(
     budget: &mut GfxMarkMeshBudget,
     vert_count: u16,
-) -> Result<u16, GfxMarkMeshRefuse> {
+) -> Result<u16, &'static str> {
     let next = budget.vert_n.saturating_add(u32::from(vert_count));
     if next > GFX_MARK_SURF_VERT_LIMIT {
-        budget.vert_warn = budget.vert_warn.saturating_add(1);
-        return Err(GfxMarkMeshRefuse::VertLimit);
+        return Err("mark vertex limit exceeded");
     }
     let base = budget.vert_n as u16;
     budget.vert_n = next;
@@ -69,11 +44,10 @@ pub fn reserve_mark_mesh_verts(
 pub fn reserve_mark_mesh_indices(
     budget: &mut GfxMarkMeshBudget,
     index_count: u32,
-) -> Result<u32, GfxMarkMeshRefuse> {
+) -> Result<u32, &'static str> {
     let next = budget.index_n.saturating_add(index_count);
     if next > GFX_MARK_SURF_INDEX_LIMIT {
-        budget.index_warn = budget.index_warn.saturating_add(1);
-        return Err(GfxMarkMeshRefuse::IndexLimit);
+        return Err("mark index limit exceeded");
     }
     let base = budget.index_n;
     budget.index_n = next;
@@ -83,10 +57,9 @@ pub fn reserve_mark_mesh_indices(
 pub fn add_mark_mesh_draw_surf(
     budget: &mut GfxMarkMeshBudget,
     _index_count: u32,
-) -> Result<u32, GfxMarkMeshRefuse> {
+) -> Result<u32, &'static str> {
     if budget.surf_n > GFX_MARK_SURF_LIMIT - 1 {
-        budget.surf_warn = budget.surf_warn.saturating_add(1);
-        return Err(GfxMarkMeshRefuse::SurfLimit);
+        return Err("mark surface limit exceeded");
     }
     let slot = budget.surf_n;
     budget.surf_n = budget.surf_n.saturating_add(1);
@@ -174,7 +147,7 @@ pub fn generate_mark_verts_begin(
     budget: &mut GfxMarkMeshBudget,
     point_count: i16,
     tri_count: u8,
-) -> Result<(u16, u32), GfxMarkMeshRefuse> {
+) -> Result<(u16, u32), &'static str> {
     let points = if point_count < 0 {
         0
     } else {

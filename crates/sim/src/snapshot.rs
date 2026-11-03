@@ -243,13 +243,4 @@ impl Snapshot {
         };
         Tick(self.tick.0.saturating_sub(offset))
     }
-
-    pub fn unpublished(tick: Tick) -> Self {
-        Self {
-            tick,
-            players: Vec::new(),
-            projectiles: Vec::new(),
-            meta: SnapshotMeta::default(),
-        }
-    }
 }

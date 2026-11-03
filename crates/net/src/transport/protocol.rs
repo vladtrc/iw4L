@@ -239,7 +239,7 @@ pub enum ClientPacket {
         cmds: Vec<(CmdSeq, UserCmd)>,
 
         samples: Vec<(CmdSeq, sim::ShotSampleProvenance)>,
-        actions: Vec<ClientAction>,
+        actions: Vec<(u16, ClientAction)>,
 
         reliable_ack: u16,
     },
@@ -265,6 +265,7 @@ pub enum ServerPacket {
     Snapshot {
         header: PacketHeader,
 
+        action_ack: u16,
         baseline_seq: u32,
         snapshot_seq: u32,
 
@@ -531,7 +532,8 @@ impl ClientPacket {
                     encode_shot_sample(out, sample);
                 }
                 out.put_u16(actions.len() as u16);
-                for action in actions {
+                for (seq, action) in actions {
+                    out.put_u16(*seq);
                     encode_action(out, action);
                 }
             }
@@ -568,7 +570,7 @@ impl ClientPacket {
                 let action_count = input.get_u16()? as usize;
                 let mut actions = Vec::with_capacity(action_count.min(64));
                 for _ in 0..action_count {
-                    actions.push(decode_action(input)?);
+                    actions.push((input.get_u16()?, decode_action(input)?));
                 }
                 Ok(Self::Commands {
                     header,
@@ -624,6 +626,7 @@ impl ServerPacket {
             }
             Self::Snapshot {
                 header,
+                action_ack,
                 baseline_seq,
                 snapshot_seq,
                 payload,
@@ -636,6 +639,7 @@ impl ServerPacket {
                     } => {
                         out.put_u8(TAG_SERVER_BASELINE_SNAPSHOT);
                         put_header(out, header);
+                        out.put_u16(*action_ack);
                         out.put_u32(*baseline_seq);
                         out.put_u32(*snapshot_seq);
                         out.put_u32(*decoded_len);
@@ -658,6 +662,7 @@ impl ServerPacket {
                     TAG_SERVER_SNAPSHOT
                 });
                 put_header(out, header);
+                out.put_u16(*action_ack);
                 out.put_u32(*baseline_seq);
                 out.put_u32(*snapshot_seq);
                 if let Some(compressed) = &compressed {
@@ -690,6 +695,7 @@ impl ServerPacket {
             TAG_SERVER_REJECT => Ok(Self::Reject(get_reject(input)?)),
             TAG_SERVER_BASELINE_SNAPSHOT => {
                 let header = get_header(input)?;
+                let action_ack = input.get_u16()?;
                 let baseline_seq = input.get_u32()?;
                 let snapshot_seq = input.get_u32()?;
                 let decoded_len = input.get_u32()?;
@@ -704,6 +710,7 @@ impl ServerPacket {
                 input.get_bytes(&mut compressed)?;
                 Ok(Self::Snapshot {
                     header,
+                    action_ack,
                     baseline_seq,
                     snapshot_seq,
                     payload: SnapshotPayload::AgainstBaseline {
@@ -714,6 +721,7 @@ impl ServerPacket {
             }
             tag @ (TAG_SERVER_SNAPSHOT | TAG_SERVER_COMPRESSED_SNAPSHOT) => {
                 let header = get_header(input)?;
+                let action_ack = input.get_u16()?;
                 let baseline_seq = input.get_u32()?;
                 let snapshot_seq = input.get_u32()?;
                 let decoded_len = if tag == TAG_SERVER_COMPRESSED_SNAPSHOT {
@@ -740,6 +748,7 @@ impl ServerPacket {
                 }
                 Ok(Self::Snapshot {
                     header,
+                    action_ack,
                     baseline_seq,
                     snapshot_seq,
                     payload: SnapshotPayload::Plain(payload),
@@ -859,3 +868,5 @@ impl core::fmt::Display for IdentityError {
         }
     }
 }
+
+impl std::error::Error for IdentityError {}

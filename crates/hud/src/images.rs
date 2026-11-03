@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 use asset_game::{HUD_CHROME_MENUS, MenuCatalog};
 use asset_material::{TS_2D, TS_COLOR_MAP};
 use assets::{NamespaceTrees, SessionCompass};
@@ -13,9 +13,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use gamemode_iw4::DAMAGE_FEEDBACK_SHADER;
 use hud_iw4::{COMPASS_ENEMY_FIRING_PING_IMAGE, COMPASS_RADAR_LINE_IMAGE};
 
-use crate::gaps::ImageMiss;
-
-pub const HUD_CHROME_NAMESPACE: AssetNamespace = AssetNamespace::Iw4;
+pub const HUD_CHROME_NAMESPACE: FamilyId = FamilyId::IW4;
 
 const DATA_SAMPLED_IMAGES: &[&str] = &[BLOOD_OVERLAY_MASK, BLOOD_OVERLAY_COLOR];
 
@@ -52,13 +50,13 @@ impl HudSampling {
     }
 }
 
-type IwdKey = (AssetNamespace, String, HudSampling, Option<u8>);
+type IwdKey = (FamilyId, String, HudSampling, Option<u8>);
 
 type ZoneKey = (String, HudSampling, Option<u8>);
 
 type CachedRgba = Option<(u32, u32, Vec<u8>)>;
 
-fn iwd_key(ns: AssetNamespace, name: &str, sampling: HudSampling, sampler: Option<u8>) -> IwdKey {
+fn iwd_key(ns: FamilyId, name: &str, sampling: HudSampling, sampler: Option<u8>) -> IwdKey {
     (ns, cache_key(name), sampling, sampler)
 }
 
@@ -96,7 +94,8 @@ fn blood_material_binding(catalog: &MenuCatalog) -> Result<BloodMaterialBinding,
         ));
     }
     let state =
-        asset_material::compile_material_state(HUD_CHROME_NAMESPACE, plan.unlit_pass_states[0]);
+        asset_material::compile_material_state(HUD_CHROME_NAMESPACE, plan.unlit_pass_states[0])
+            .map_err(|error| error.to_string())?;
     if let Some(fields) = state.unsupported_host_fields() {
         return Err(format!("{pass}: unsupported material state: {fields:?}"));
     }
@@ -140,9 +139,9 @@ pub struct HudImages {
     trees: NamespaceTrees,
     adopted_zone: Option<PathBuf>,
 
-    map_namespace: Option<AssetNamespace>,
+    map_namespace: Option<FamilyId>,
     by_name: HashMap<IwdKey, Option<Handle<Image>>>,
-    rgba_by_name: HashMap<(AssetNamespace, String), CachedRgba>,
+    rgba_by_name: HashMap<(FamilyId, String), CachedRgba>,
     zone_rgba: HashMap<String, (u32, u32, Arc<Vec<u8>>)>,
     zone_handles: HashMap<ZoneKey, Handle<Image>>,
     zone_image_name: HashMap<String, String>,
@@ -155,6 +154,26 @@ pub struct HudImages {
     zone_identity: Option<asset_game::ImageProductRevision>,
     zone_uploaded: bool,
     iwd_warmed: bool,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct HudImageLoader<'w> {
+    cache: ResMut<'w, HudImages>,
+    images: ResMut<'w, Assets<Image>>,
+}
+
+impl HudImageLoader<'_> {
+    pub(crate) fn load(&mut self, namespace: FamilyId, material: &str) -> Option<Handle<Image>> {
+        self.cache.get(namespace, material, &mut self.images)
+    }
+
+    pub(crate) fn zone_image_name(&self, material: &str) -> Option<&str> {
+        self.cache.zone_image_name(material)
+    }
+
+    pub(crate) fn miss_reason(&self) -> &'static str {
+        self.cache.miss_reason()
+    }
 }
 
 impl HudImages {
@@ -203,7 +222,7 @@ impl HudImages {
         self.log_trees();
     }
 
-    pub fn map_namespace(&self) -> Option<AssetNamespace> {
+    pub fn map_namespace(&self) -> Option<FamilyId> {
         self.map_namespace
     }
 
@@ -278,7 +297,14 @@ impl HudImages {
         }
         for (name, state) in catalog.material_state_bits() {
             let compiled = state.agreed().and_then(|words| {
-                let compiled = asset_material::compile_material_state(HUD_CHROME_NAMESPACE, words);
+                let compiled =
+                    match asset_material::compile_material_state(HUD_CHROME_NAMESPACE, words) {
+                        Ok(state) => state,
+                        Err(error) => {
+                            diag::warn!(Ui, "hud material state refused: {name}: {error}");
+                            return None;
+                        }
+                    };
                 if let Some(fields) = compiled.unsupported_host_fields() {
                     diag::warn!(Ui, "hud material state refused: {name}: {fields:?}");
                     None
@@ -304,7 +330,7 @@ impl HudImages {
 
     pub fn material_state(
         &self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         name: &str,
     ) -> Option<render_material::CompiledPassState> {
         if ns == HUD_CHROME_NAMESPACE {
@@ -332,17 +358,17 @@ impl HudImages {
         self.zone_image_name.get(&key).map(String::as_str)
     }
 
-    pub fn miss_reason(&self) -> ImageMiss {
+    pub fn miss_reason(&self) -> &'static str {
         if self.has_games_root() || self.zone_installed || !self.trees.is_empty() {
-            ImageMiss::NotDecoded
+            "not a zone atlas and not in the IWD"
         } else {
-            ImageMiss::NoGamesRoot
+            "no games root is set"
         }
     }
 
     pub fn get(
         &mut self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         name: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
@@ -351,7 +377,7 @@ impl HudImages {
 
     pub(crate) fn get_native(
         &mut self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         name: &str,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
@@ -379,7 +405,7 @@ impl HudImages {
 
     pub fn get_sampled(
         &mut self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         name: &str,
         sampling: HudSampling,
         images: &mut Assets<Image>,
@@ -389,7 +415,7 @@ impl HudImages {
 
     pub(crate) fn get_sampled_with_sampler(
         &mut self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         name: &str,
         sampling: HudSampling,
         sampler: Option<u8>,
@@ -430,7 +456,7 @@ impl HudImages {
         decoded
     }
 
-    pub fn ensure_rgba(&mut self, ns: AssetNamespace, name: &str) {
+    pub fn ensure_rgba(&mut self, ns: FamilyId, name: &str) {
         let key = (ns, cache_key(name));
         if ns == HUD_CHROME_NAMESPACE && self.zone_states.get(&key.1) == Some(&None) {
             self.rgba_by_name.insert(key, None);
@@ -450,7 +476,7 @@ impl HudImages {
         self.rgba_by_name.insert(key, decoded);
     }
 
-    pub fn rgba(&self, ns: AssetNamespace, name: &str) -> Option<&(u32, u32, Vec<u8>)> {
+    pub fn rgba(&self, ns: FamilyId, name: &str) -> Option<&(u32, u32, Vec<u8>)> {
         self.rgba_by_name
             .get(&(ns, cache_key(name)))
             .and_then(Option::as_ref)
@@ -545,7 +571,7 @@ impl HudImages {
 
     fn decode_iwd(
         &self,
-        ns: AssetNamespace,
+        ns: FamilyId,
         name: &str,
         sampling: HudSampling,
         sampler: Option<u8>,
@@ -559,7 +585,7 @@ impl HudImages {
         }
     }
 
-    fn decode_iwd_rgba(&self, ns: AssetNamespace, name: &str) -> CachedRgba {
+    fn decode_iwd_rgba(&self, ns: FamilyId, name: &str) -> CachedRgba {
         if cache_key(name) == "white" {
             return Some((1, 1, vec![255; 4]));
         }
@@ -578,7 +604,7 @@ impl HudImages {
             name
         };
         let key = format!("{}:material/{requested}", ns.as_str());
-        match asset_material::decode_ui_image(&self.ui_images, &self.games_root, &key) {
+        match asset_material::decode_ui_image(&self.ui_images, &key) {
             Ok(image) => return image,
             Err(error) => diag::warn!(Ui, "hud: {key}: {error}"),
         }

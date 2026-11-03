@@ -313,7 +313,7 @@ impl ClientCommandInbox {
                 .queued
                 .get_mut(&id)
                 .map(|queue| queue.drain(..take).collect())
-                .unwrap_or_default();
+                .unwrap_or(Vec::new());
             if drained.iter().all(|(seq, _, _)| seq.is_none()) && drained.len() > 1 {
                 drained.drain(..drained.len() - 1);
             }
@@ -372,148 +372,107 @@ impl ClientCommandInbox {
 pub const MAX_PENDING_ACTIONS_PER_CLIENT: usize = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ActionEnqueueError {
-    QueueFull { pending: usize },
-
-    DuplicateRequestId { request_id: sim::ActionRequestId },
+pub struct ActionEnqueueError {
+    pub pending: usize,
 }
 
 impl core::fmt::Display for ActionEnqueueError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::QueueFull { pending } => {
-                write!(f, "action queue full ({pending} unresolved requests)")
-            }
-            Self::DuplicateRequestId { request_id } => {
-                write!(
-                    f,
-                    "request_id {request_id} is already pending with another payload"
-                )
-            }
-        }
+        write!(f, "action queue full ({} queued actions)", self.pending)
     }
 }
 
 #[derive(Resource, Debug, Default)]
 pub struct ClientActionInbox {
     pending: Vec<(ClientId, sim::ClientAction)>,
-    started: HashMap<(ClientId, sim::ActionRequestId), std::time::Instant>,
-
-    received: Vec<(ClientId, sim::ClientAction)>,
+    outgoing: Option<crate::transport::reliable::ReliableQueue<sim::ClientAction>>,
     overflowed: std::collections::HashSet<ClientId>,
 }
 
 impl ClientActionInbox {
+    pub fn remote() -> Self {
+        Self {
+            outgoing: Some(Default::default()),
+            ..Default::default()
+        }
+    }
+
     pub fn push(
         &mut self,
         id: ClientId,
         action: sim::ClientAction,
     ) -> Result<(), ActionEnqueueError> {
-        let request_id = sim::action_request_id(&action);
-        for (owner, existing) in &self.pending {
-            if *owner != id || sim::action_request_id(existing) != request_id {
-                continue;
+        if let Some(queue) = self.outgoing.as_mut() {
+            let held = queue.pending_len();
+            if held >= MAX_PENDING_ACTIONS_PER_CLIENT {
+                return Err(ActionEnqueueError { pending: held });
             }
-            if *existing == action {
-                return Ok(());
-            }
-            return Err(ActionEnqueueError::DuplicateRequestId { request_id });
+            queue.push(action);
+        } else {
+            self.enqueue(id, action)?;
         }
+        perf::counter!("client_actions_sent", "iw4l.sim", 1.0);
+        Ok(())
+    }
+
+    fn enqueue(
+        &mut self,
+        id: ClientId,
+        action: sim::ClientAction,
+    ) -> Result<(), ActionEnqueueError> {
         let held = self
             .pending
             .iter()
             .filter(|(owner, _)| *owner == id)
             .count();
         if held >= MAX_PENDING_ACTIONS_PER_CLIENT {
-            return Err(ActionEnqueueError::QueueFull { pending: held });
+            return Err(ActionEnqueueError { pending: held });
         }
         self.pending.push((id, action));
         Ok(())
     }
 
-    pub fn mark_dispatched(&mut self, id: ClientId, request_id: sim::ActionRequestId) {
-        if self
-            .pending
-            .iter()
-            .any(|(owner, action)| *owner == id && sim::action_request_id(action) == request_id)
-        {
-            self.started
-                .entry((id, request_id))
-                .or_insert_with(std::time::Instant::now);
-        }
-    }
-
-    pub fn push_from_peer(&mut self, id: ClientId, action: sim::ClientAction) {
-        if self.received.contains(&(id, action)) {
-            return;
-        }
-        if self
-            .received
-            .iter()
-            .filter(|(owner, _)| *owner == id)
-            .count()
-            >= MAX_PENDING_ACTIONS_PER_CLIENT
-        {
+    pub fn push_from_peer(&mut self, id: ClientId, action: sim::ClientAction) -> bool {
+        if self.enqueue(id, action).is_err() {
             self.overflowed.insert(id);
-            return;
+            return false;
         }
-        self.received.push((id, action));
+        true
     }
 
     pub fn take_overflowed(&mut self) -> impl Iterator<Item = ClientId> + '_ {
         self.overflowed.drain()
     }
 
-    pub fn timed_out(&self) -> bool {
-        self.started
-            .values()
-            .any(|at| at.elapsed() > std::time::Duration::from_secs(8))
+    pub fn pending(&self) -> &[(u16, sim::ClientAction)] {
+        self.outgoing.as_ref().map_or(&[], |queue| queue.pending())
     }
 
-    pub fn pending_len(&self) -> usize {
-        self.pending.len()
+    pub fn is_pending(&self) -> bool {
+        !self.pending.is_empty() || !self.pending().is_empty()
     }
 
-    pub fn pending(&self) -> &[(ClientId, sim::ClientAction)] {
-        &self.pending
-    }
-
-    pub fn pending_for(&self, id: ClientId) -> impl Iterator<Item = sim::ClientAction> + '_ {
-        self.pending
-            .iter()
-            .filter(move |(owner, _)| *owner == id)
-            .map(|(_, action)| *action)
-    }
-
-    pub fn retire(&mut self, id: ClientId, request_id: sim::ActionRequestId) -> bool {
-        self.started.remove(&(id, request_id));
-        let before = self.pending.len();
-        self.pending
-            .retain(|(owner, action)| *owner != id || sim::action_request_id(action) != request_id);
-        self.pending.len() != before
+    pub fn ack(&mut self, through: u16) {
+        if let Some(queue) = self.outgoing.as_mut() {
+            queue.ack(through);
+        }
     }
 
     pub fn retire_client(&mut self, id: ClientId) {
-        self.started.retain(|(owner, _), _| *owner != id);
         self.pending.retain(|(owner, _)| *owner != id);
-        self.received.retain(|(owner, _)| *owner != id);
         self.overflowed.remove(&id);
     }
 
     pub fn clear(&mut self) {
-        self.started.clear();
         self.pending.clear();
-        self.received.clear();
         self.overflowed.clear();
+        if let Some(queue) = self.outgoing.as_mut() {
+            *queue = Default::default();
+        }
     }
 
     pub fn gather(&mut self) -> Vec<(ClientId, sim::ClientAction)> {
-        let mut out = self.pending.clone();
-        for (id, action) in &out {
-            self.mark_dispatched(*id, sim::action_request_id(action));
-        }
-        out.append(&mut self.received);
-        out
+        std::mem::take(&mut self.pending)
     }
 }
 
@@ -533,7 +492,6 @@ pub fn run_fixed_authority_stream(
                 sim::Tick(tick),
                 &sim::TickInput::from_cmds(cmds),
                 AUTHORITY_MS,
-                sim::StepReason::AuthorityFrame,
             )
             .snapshot,
         );

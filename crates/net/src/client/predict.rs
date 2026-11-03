@@ -1,15 +1,11 @@
-use entity_iw4::{EntityEventAction, adjust_position_for_mover, entity_event_action};
+use entity_iw4::adjust_position_for_mover;
 use playerstate_iw4::{PlayerState, UserCmd, buttons, eflags, other_flags, pm_flags};
-use sim::{
-    AdoptReport, ClientId, EntityEventRecord, EventAudience, EventSequence, SimWorld, Snapshot,
-    Tick, TickInput,
-};
+use sim::{ClientId, EventSequence, Snapshot, Tick};
 use std::collections::VecDeque;
 
 use crate::ServerTime;
 use crate::client::predicted_error::PredictedError;
-use crate::reconciliation::CorrectionBoundary;
-use crate::transport::netfields::{Deviation, ps_deviation};
+use crate::transport::netfields::{Deviation, field_error_magnitude, ps_deviation, ps_deviations};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CmdSeq(pub u32);
@@ -29,6 +25,7 @@ pub struct MoveRecord {
     pub cmd: UserCmd,
     pub input: PlayerState,
     pub output: PlayerState,
+    pub sent: std::time::Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -184,30 +181,18 @@ impl PredictionMetrics {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct ReconcileOutcome {
-    pub adopted: bool,
-
-    pub acked: bool,
-
-    pub retired_ack: bool,
-
-    pub deviation: Option<Deviation>,
-
-    pub replayed_moves: usize,
-
-    pub forced_adopt: bool,
-
-    pub report: AdoptReport,
-}
-
 pub const MAX_UNACKED_SNAPSHOTS: u32 = 20;
 
-#[derive(Debug)]
+use crate::client::prediction_scene::PredictionScene;
 pub struct ClientPrediction {
     local: ClientId,
-    world: SimWorld,
+    meta: Option<sim::ClientSnapshotMeta>,
+    phase: sim::MatchPhase,
+    command_state: sim::bg::predict_player::PlayerCommandState,
+    actions: Vec<(Tick, weapon_iw4::WeaponAction)>,
+    next_owner_event: EventSequence,
     history: MoveHistory,
+    roundtrip: Option<std::time::Duration>,
     armed: bool,
     next_seq: CmdSeq,
 
@@ -227,12 +212,6 @@ pub struct ClientPrediction {
     last_predict_msec: Option<i32>,
 
     had_local_last_snap: bool,
-
-    tick_input: TickInput,
-
-    owner_events: Vec<(EntityEventRecord, std::time::Instant)>,
-    next_owner_event: EventSequence,
-    owner_pellet_fx: Vec<(sim::PelletFxRecord, std::time::Instant)>,
 }
 
 impl ClientPrediction {
@@ -241,10 +220,15 @@ impl ClientPrediction {
     }
 
     pub fn with_history_cap(local: ClientId, cap: usize) -> Self {
-        let mut pred = Self {
+        Self {
             local,
-            world: SimWorld::new(),
+            meta: None,
+            phase: Default::default(),
+            command_state: Default::default(),
+            actions: Vec::new(),
+            next_owner_event: EventSequence(1),
             history: MoveHistory::with_cap(cap),
+            roundtrip: None,
             armed: false,
             next_seq: CmdSeq(1),
             next_tick: 0,
@@ -257,13 +241,7 @@ impl ClientPrediction {
             replay_floor: None,
             last_predict_msec: None,
             had_local_last_snap: false,
-            tick_input: TickInput::default(),
-            owner_events: Vec::new(),
-            next_owner_event: EventSequence(1),
-            owner_pellet_fx: Vec::new(),
-        };
-        pred.world.suppress_snapshot_publish();
-        pred
+        }
     }
 
     pub fn local(&self) -> ClientId {
@@ -279,16 +257,16 @@ impl ClientPrediction {
     }
 
     pub fn disarm(&mut self) {
-        let local = self.local;
-        *self = Self::new(local);
-    }
-
-    pub fn world(&self) -> &SimWorld {
-        &self.world
+        *self = Self::new(self.local);
     }
 
     pub fn history(&self) -> &MoveHistory {
         &self.history
+    }
+
+    /// Last observed send-to-ack time of a predicted command.
+    pub fn roundtrip(&self) -> Option<std::time::Duration> {
+        self.roundtrip
     }
 
     pub fn metrics(&self) -> PredictionMetrics {
@@ -320,41 +298,28 @@ impl ClientPrediction {
     }
 
     pub fn local_life(&self) -> Option<sim::LifeSequence> {
-        self.world
-            .client_meta(self.local)
-            .map(|meta| meta.life_sequence)
+        self.meta.as_ref().map(|meta| meta.life_sequence)
     }
 
-    pub fn take_owner_events(&mut self) -> Vec<EntityEventRecord> {
-        let now = std::time::Instant::now();
-        std::mem::take(&mut self.owner_events)
-            .into_iter()
-            .filter(|(_, at)| now.duration_since(*at) < std::time::Duration::from_secs(5))
-            .map(|(event, _)| event)
-            .collect()
-    }
-
-    pub fn take_owner_pellet_fx(&mut self) -> Vec<sim::PelletFxRecord> {
-        std::mem::take(&mut self.owner_pellet_fx)
-            .into_iter()
-            .filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(5))
-            .map(|(record, _)| record)
-            .collect()
-    }
-
-    pub fn arm_from_content(&mut self, authority: &SimWorld) {
-        self.world.initialize_prediction_from(authority);
-        self.world
-            .persistent_data_mut()
-            .install_schemas(authority.persistent_data().schemas().clone())
-            .expect("validated match schemas must install into prediction");
+    pub fn arm(&mut self) {
         self.armed = true;
+    }
+
+    pub(crate) fn next_owner_event(&mut self) -> EventSequence {
+        let sequence = self.next_owner_event;
+        self.next_owner_event = sequence.next();
+        sequence
+    }
+
+    pub fn take_actions(&mut self) -> Vec<(Tick, weapon_iw4::WeaponAction)> {
+        std::mem::take(&mut self.actions)
     }
 
     pub fn predict(
         &mut self,
         mut cmd: UserCmd,
         server_time: ServerTime,
+        scene: &mut PredictionScene,
     ) -> Option<(CmdSeq, UserCmd)> {
         if !self.armed || self.history.len() >= self.history.cap() {
             return None;
@@ -382,11 +347,9 @@ impl ClientPrediction {
         self.next_tick = self.next_tick.wrapping_add(1);
 
         let output = if msec > 0 {
-            let events_from = self.world.next_entity_event_sequence();
             let output = self
-                .step_predicted(tick, seq, cmd, msec, sim::StepReason::PredictNew)
+                .step_predicted(tick, seq, cmd, msec, true, scene)
                 .unwrap_or(input);
-            self.collect_owner_events(events_from);
             output
         } else {
             input
@@ -398,6 +361,7 @@ impl ClientPrediction {
             cmd,
             input,
             output,
+            sent: std::time::Instant::now(),
         });
         if evicted {
             self.metrics.evicted_moves += 1;
@@ -427,30 +391,26 @@ impl ClientPrediction {
         let _ = self.apply_ack(ack);
     }
 
-    fn apply_ack(&mut self, ack: Option<CmdSeq>) -> (ReconcileOutcome, Option<MoveRecord>) {
-        let mut outcome = ReconcileOutcome::default();
-
+    fn apply_ack(&mut self, ack: Option<CmdSeq>) -> Option<MoveRecord> {
         let replay_ack = ack.map(|seq| {
             self.replay_floor
                 .map_or(seq, |(floor, _)| if seq.0 < floor.0 { floor } else { seq })
         });
-        let source = match replay_ack {
+        match replay_ack {
             Some(seq) => match self.history.clear_acknowledged(seq) {
                 AckMatch::Matched(record) => {
+                    self.roundtrip = Some(record.sent.elapsed());
                     self.acknowledged_cmd = Some(record.cmd);
-                    outcome.acked = true;
                     self.metrics.acks_matched += 1;
                     self.snapshots_since_ack = 0;
                     Some(record)
                 }
                 AckMatch::Retired => {
-                    outcome.retired_ack = true;
                     self.metrics.retired_acks += 1;
                     self.snapshots_since_ack = 0;
                     None
                 }
                 AckMatch::Broken => {
-                    outcome.forced_adopt = true;
                     self.metrics.forced_adopts += 1;
                     self.drop_history();
                     None
@@ -463,20 +423,23 @@ impl ClientPrediction {
             None => {
                 self.snapshots_since_ack = self.snapshots_since_ack.saturating_add(1);
                 if self.snapshots_since_ack > MAX_UNACKED_SNAPSHOTS {
-                    outcome.forced_adopt = true;
                     self.metrics.forced_adopts += 1;
                     self.drop_history();
                     self.snapshots_since_ack = 0;
                 }
                 None
             }
-        };
-        (outcome, source)
+        }
     }
 
-    pub fn on_authority(&mut self, snapshot: &Snapshot, ack: Option<CmdSeq>) -> ReconcileOutcome {
+    pub fn on_authority(
+        &mut self,
+        snapshot: &Snapshot,
+        ack: Option<CmdSeq>,
+        scene: &mut PredictionScene,
+    ) {
         if !self.armed {
-            return ReconcileOutcome::default();
+            return;
         }
         self.metrics.snapshots += 1;
 
@@ -484,15 +447,15 @@ impl ClientPrediction {
         let pre_view = pre_state.map(|ps| ps.origin);
         let pre_e_flags = self.predicted_local.map(|ps| ps.e_flags);
 
-        let boundary = CorrectionBoundary::after(snapshot.tick);
-        let report = self.world.adopt_prediction_snapshot(snapshot, self.local);
+        let replay_tick = snapshot.tick.0.wrapping_add(1);
         let authoritative = snapshot_local(snapshot, self.local);
-
-        let mut outcome = ReconcileOutcome {
-            adopted: true,
-            report,
-            ..ReconcileOutcome::default()
-        };
+        let was_present = self.had_local_last_snap;
+        self.meta = snapshot.meta.for_client(self.local).cloned();
+        self.phase = snapshot.meta.phase;
+        self.predicted_local = authoritative;
+        self.had_local_last_snap = authoritative.is_some();
+        self.command_state.old_buttons = 0;
+        self.command_state.old_angles = None;
 
         if authoritative.is_some_and(|ps| !pmove_runs_for(&ps)) {
             if let Some(cmd) = self.last_cmd {
@@ -500,16 +463,14 @@ impl ClientPrediction {
             }
             self.history.clear();
             self.predicted_local = authoritative;
-            self.next_tick = boundary.replay_tick.0;
+            self.next_tick = replay_tick;
         } else {
-            let (ack_outcome, source) = self.apply_ack(ack);
-            outcome.acked = ack_outcome.acked;
-            outcome.retired_ack = ack_outcome.retired_ack;
-            outcome.forced_adopt = ack_outcome.forced_adopt;
+            let source = self.apply_ack(ack);
 
             if let (Some(source), Some(authoritative)) = (source.as_ref(), authoritative.as_ref()) {
-                outcome.deviation = ps_deviation(&source.output, authoritative);
-                if let Some(deviation) = outcome.deviation {
+                if let Some(deviation) =
+                    record_prediction_errors(source, authoritative, snapshot.tick, "current")
+                {
                     self.metrics.deviations += 1;
                     self.metrics.last_deviation = Some((deviation.field, deviation.distance));
                 }
@@ -517,10 +478,9 @@ impl ClientPrediction {
 
             self.seed_old_cmd(source.as_ref());
 
-            self.next_tick = boundary.replay_tick.0;
+            self.next_tick = replay_tick;
 
-            outcome.replayed_moves = self.replay();
-            self.metrics.replayed_moves += outcome.replayed_moves as u64;
+            self.metrics.replayed_moves += self.replay(scene) as u64;
 
             self.predicted_local = self.local_state().or(authoritative);
         }
@@ -530,7 +490,7 @@ impl ClientPrediction {
             (ps.other_flags & (other_flags::PLAYER | other_flags::DEAD_KILLCAM_TPV)) != 0
         });
         let post_origin = self.predicted_local.map(|ps| ps.origin);
-        if player_view && in_now && !self.had_local_last_snap {
+        if player_view && in_now && !was_present {
             if let (Some(pre), Some(post)) = (pre_view, post_origin) {
                 self.predicted_error.note_teleport_delta(pre, post);
             }
@@ -540,7 +500,7 @@ impl ClientPrediction {
                 (Some(a), Some(b)) => (a ^ b) & eflags::TELEPORT != 0,
                 _ => false,
             };
-            if teleported {
+            if teleported || sim::world_graph::world_at(pre) != sim::world_graph::world_at(post) {
                 self.predicted_error.note_teleport_delta(pre, post);
                 self.predicted_error.reset();
             } else if pre_state
@@ -558,24 +518,17 @@ impl ClientPrediction {
             }
         }
         self.had_local_last_snap = in_now;
-
-        outcome
     }
 
-    fn replay(&mut self) -> usize {
+    fn replay(&mut self, scene: &mut PredictionScene) -> usize {
         let mut tick = self.next_tick;
         let pending = self.history.len();
-        let local = self.local;
 
         for index in 0..pending {
             let cmd = self.history.moves[index].cmd;
             let sequence = self.history.moves[index].seq;
 
-            let input = self
-                .world
-                .player(local)
-                .copied()
-                .unwrap_or(PlayerState::ZERO);
+            let input = self.local_state().unwrap_or(PlayerState::ZERO);
 
             if cmd.server_time <= input.command_time {
                 continue;
@@ -583,7 +536,7 @@ impl ClientPrediction {
 
             let msec = cmd.server_time.wrapping_sub(input.command_time);
             let output = self
-                .step_predicted(Tick(tick), sequence, cmd, msec, sim::StepReason::Replay)
+                .step_predicted(Tick(tick), sequence, cmd, msec, false, scene)
                 .unwrap_or(input);
 
             let record = &mut self.history.moves[index];
@@ -599,68 +552,8 @@ impl ClientPrediction {
         pending
     }
 
-    fn collect_owner_events(&mut self, events_from: EventSequence) {
-        let local = i32::try_from(self.local.0).unwrap_or(-1);
-        let mut owner_events = std::mem::take(&mut self.owner_events);
-        let mut next = self.next_owner_event;
-        for record in self.world.entity_events() {
-            if (record.sequence == events_from || record.sequence.is_newer_than(events_from))
-                && record.payload.number == local
-                && record.audience.projects_to(self.local)
-                && matches!(
-                    entity_event_action(record.event),
-                    Ok(EntityEventAction::WeaponFire
-                        | EntityEventAction::EjectBrass
-                        | EntityEventAction::BulletHit)
-                )
-            {
-                owner_events.push((
-                    EntityEventRecord {
-                        sequence: next,
-                        audience: EventAudience::Client(self.local),
-                        ..record.clone()
-                    },
-                    std::time::Instant::now(),
-                ));
-                next = next.next();
-            }
-        }
-        self.owner_pellet_fx.extend(
-            self.world
-                .pellet_fx()
-                .iter()
-                .copied()
-                .filter(|record| record.attacker == local)
-                .map(|record| (record, std::time::Instant::now())),
-        );
-        self.next_owner_event = next;
-        let life = self.local_life();
-        let now = std::time::Instant::now();
-        owner_events.retain(|(event, at)| {
-            now.duration_since(*at) < std::time::Duration::from_secs(5)
-                && event
-                    .payload
-                    .fire_cause
-                    .is_none_or(|cause| Some(cause.life) == life)
-        });
-        let excess = owner_events.len().saturating_sub(DEFAULT_HISTORY_CAP * 32);
-        owner_events.drain(..excess);
-        self.owner_events = owner_events;
-        self.owner_pellet_fx.retain(|(record, at)| {
-            now.duration_since(*at) < std::time::Duration::from_secs(5)
-                && record
-                    .fire_cause
-                    .is_some_and(|cause| Some(cause.life) == life)
-        });
-        let excess = self
-            .owner_pellet_fx
-            .len()
-            .saturating_sub(DEFAULT_HISTORY_CAP * 32);
-        self.owner_pellet_fx.drain(..excess);
-    }
-
     fn local_state(&self) -> Option<PlayerState> {
-        self.world.player(self.local).copied()
+        self.predicted_local.filter(|_| self.had_local_last_snap)
     }
 
     fn seed_old_cmd(&mut self, acked: Option<&MoveRecord>) {
@@ -676,8 +569,7 @@ impl ClientPrediction {
             None => {
                 let mut seeded = 0;
                 if self
-                    .world
-                    .player(self.local)
+                    .local_state()
                     .is_some_and(|ps| (ps.pm_flags & pm_flags::SPRINTING) != 0)
                 {
                     seeded |= buttons::SPRINT;
@@ -685,7 +577,8 @@ impl ClientPrediction {
                 (seeded, [0; 3])
             }
         };
-        self.world.set_old_cmd(self.local, buttons, angles);
+        self.command_state.old_buttons = buttons;
+        self.command_state.old_angles = Some(angles);
     }
 
     fn step_predicted(
@@ -693,21 +586,42 @@ impl ClientPrediction {
         tick: Tick,
         sequence: CmdSeq,
         cmd: UserCmd,
-        msec: i32,
-        reason: sim::StepReason,
+        _msec: i32,
+        new_command: bool,
+        scene: &mut PredictionScene,
     ) -> Option<PlayerState> {
-        let local = self.local;
-        let mut input = std::mem::take(&mut self.tick_input);
-        input.cmds.clear();
-        input.actions.clear();
-        input.cmds.push(sim::PlayerCommand::sequenced(
-            local,
-            cmd,
-            sim::CommandSequence(sequence.0),
-        ));
-        let _ = sim::try_step(&mut self.world, tick, &input, msec, reason);
-        self.tick_input = input;
-        self.world.player(local).copied()
+        if self.had_local_last_snap {
+            if let (Some(ps), Some(meta)) = (self.predicted_local.as_mut(), self.meta.as_mut()) {
+                let actions = sim::bg::predict_player::predict_player(
+                    ps,
+                    meta,
+                    &mut self.command_state,
+                    sim::bg::predict_player::PredictionWorld {
+                        content: &scene.level.content,
+                        collision: scene.collision,
+                        bodies: &scene.bodies,
+                    },
+                    self.phase,
+                    scene.level.root_seed,
+                    sim::bg::predict_player::PredictionCommand {
+                        local: self.local,
+                        tick,
+                        sequence: sim::CommandSequence(sequence.0),
+                        cmd,
+                    },
+                );
+                scene.advance_items(ps, meta, tick, self.phase);
+                if new_command {
+                    self.actions
+                        .extend(actions.into_iter().map(|action| (tick, action)));
+                }
+                Some(*ps)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 }
 
@@ -744,4 +658,46 @@ pub fn snapshot_ground_e_type(snapshot: &Snapshot, mover_num: i32) -> Option<i32
         return Some(entity_iw4::ET_PLAYER_CORPSE);
     }
     None
+}
+
+fn record_prediction_errors(
+    source: &MoveRecord,
+    authoritative: &PlayerState,
+    tick: Tick,
+    arm: &'static str,
+) -> Option<Deviation> {
+    if !perf::enabled() {
+        return ps_deviation(&source.output, authoritative);
+    }
+    let frame = perf::frames::open_index();
+    perf::instant!("prediction_check", "iw4l.sim", |ctx| {
+        ctx.arg("arm", arm);
+        ctx.arg("frame", frame as i64);
+        ctx.arg("command", i64::from(source.seq.0));
+        ctx.arg("tick", i64::from(tick.0));
+        ctx.arg(
+            "predicted_command_time",
+            i64::from(source.output.command_time),
+        );
+        ctx.arg(
+            "authority_command_time",
+            i64::from(authoritative.command_time),
+        );
+    });
+    let mut first = None;
+    for deviation in ps_deviations(&source.output, authoritative) {
+        perf::instant!("prediction_field_error", "iw4l.sim", |ctx| {
+            ctx.arg("arm", arm);
+            ctx.arg("frame", frame as i64);
+            ctx.arg("command", i64::from(source.seq.0));
+            ctx.arg("tick", i64::from(tick.0));
+            ctx.arg("field", deviation.field);
+            ctx.arg(
+                "distance",
+                field_error_magnitude(&source.output, authoritative, deviation.index),
+            );
+        });
+        first.get_or_insert(deviation);
+    }
+    first
 }

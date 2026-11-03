@@ -240,19 +240,40 @@ pub fn lens_world_from_parent_child(parent: Transform, child: Transform) -> Mat4
     parent.to_matrix() * child.to_matrix()
 }
 
+pub struct SceneViewProjection {
+    pub fov: f32,
+    pub aspect: f32,
+    pub near: f32,
+    pub far: f32,
+    pub dpvs_z_near: f32,
+    pub depth_hack_near: f32,
+}
+
+pub struct SceneViewTarget {
+    pub width: i32,
+    pub height: i32,
+    pub viewport: hud_iw4::GfxViewport,
+}
+
 #[must_use]
 pub fn prepare_scene_view(
     world_from_local: Mat4,
-    fov: f32,
-    aspect: f32,
-    near: f32,
-    far: f32,
-    rt_w: i32,
-    rt_h: i32,
-    dpvs_z_near: f32,
-    depth_hack_near: f32,
-    scene_viewport: hud_iw4::GfxViewport,
+    projection: SceneViewProjection,
+    target: SceneViewTarget,
 ) -> PreparedSceneView {
+    let SceneViewProjection {
+        fov,
+        aspect,
+        near,
+        far,
+        dpvs_z_near,
+        depth_hack_near,
+    } = projection;
+    let SceneViewTarget {
+        width: rt_w,
+        height: rt_h,
+        viewport: scene_viewport,
+    } = target;
     let eye = world_from_local.transform_point3(Vec3::ZERO);
     let view_from_world = world_from_local.inverse();
     let clip_from_view = host_clip_from_view(fov, aspect, near);

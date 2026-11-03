@@ -283,21 +283,19 @@ pub(crate) fn route(
     dvars.set("ui_barracks_status", &state.status);
 }
 
+#[derive(Resource, Default)]
+pub(crate) struct SentPlayerProfile(Option<(sim::ClientId, sim::PlayerProfile)>);
+
 pub(crate) fn sync_profile(
     profile: Res<BarracksProfile>,
-    (generation, has_world, role): (
-        Res<frame::WorldGeneration>,
-        Res<State<frame::MatchScope>>,
-        Res<frame::RuntimeRole>,
-    ),
+    role: Res<frame::RuntimeRole>,
     local: Option<Res<net::LocalPresentClient>>,
     link: Option<Res<net::UdpClientLink>>,
     mut inbox: Option<ResMut<net::ClientActionInbox>>,
-    mut seq: ResMut<net::ActionRequestIds>,
-    mut sent: Local<Option<(frame::WorldStamp, sim::ClientId, sim::PlayerProfile)>>,
+    mut sent: ResMut<SentPlayerProfile>,
 ) {
-    if !(*has_world.get() == frame::MatchScope::Live) || *role == frame::RuntimeRole::Replay {
-        *sent = None;
+    if *role == frame::RuntimeRole::Replay {
+        sent.0 = None;
         return;
     }
     let (Some(local), Some(inbox)) = (local, inbox.as_deref_mut()) else {
@@ -308,30 +306,23 @@ pub(crate) fn sync_profile(
             || link.assigned_client != Some(local.0)
             || !link.has_entered_match())
     {
-        *sent = None;
+        sent.0 = None;
         return;
     }
     if !profile.loaded {
         return;
     }
     let selection = profile.selection;
-    let next = (generation.stamp(), local.0, selection);
-    if sent.as_ref() == Some(&next) {
+    let next = (local.0, selection);
+    if sent.0.as_ref() == Some(&next) {
         return;
     }
-    let request_id = seq.allocate();
     if let Err(error) = inbox.push(
         local.0,
-        sim::ClientAction::SetProfile {
-            request_id,
-            profile: selection,
-        },
+        sim::ClientAction::SetProfile { profile: selection },
     ) {
-        diag::warn!(
-            Console,
-            "profile: request_id={request_id} not queued — {error}"
-        );
+        diag::warn!(Console, "profile: not queued — {error}");
     } else {
-        *sent = Some(next);
+        sent.0 = Some(next);
     }
 }

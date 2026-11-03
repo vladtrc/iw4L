@@ -43,10 +43,8 @@ pub struct GfxMarkMeshSurf {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct GfxMarkMeshCensus {
+pub struct GfxMarkMesh {
     pub budget: GfxMarkMeshBudget,
-    pub first_xyz: Option<[f32; 3]>,
-    pub verts: Vec<FxMarkStagingPoint>,
     pub packed: Vec<[u8; GFX_MARK_MESH_VERTEX_STRIDE]>,
     pub indices: Vec<u16>,
     pub surfs: Vec<GfxMarkMeshSurf>,
@@ -371,8 +369,8 @@ impl FxMarksSystemHost {
         }
     }
 
-    pub fn generate_world_mark_verts(&self) -> GfxMarkMeshCensus {
-        let mut census = GfxMarkMeshCensus::default();
+    pub fn generate_world_mark_verts(&self) -> GfxMarkMesh {
+        let mut mesh = GfxMarkMesh::default();
         for slot in 0..FX_MARKS_LIMIT {
             let Some(mark) = self.constructed[slot as usize] else {
                 continue;
@@ -381,45 +379,42 @@ impl FxMarksSystemHost {
                 continue;
             }
             if self
-                .emit_one_world_mark(&mut census, slot as u16, mark, &|point| point)
+                .emit_one_world_mark(&mut mesh, slot as u16, mark, &|point| point)
                 .is_err()
             {
                 break;
             }
         }
-        census
+        mesh
     }
 
     pub fn append_model_mark(
         &self,
-        census: &mut GfxMarkMeshCensus,
+        mesh: &mut GfxMarkMesh,
         slot: u16,
         origin: [f32; 3],
         tex_coord_axis: [f32; 3],
         transform_point: &dyn Fn(FxMarkStagingPoint) -> FxMarkStagingPoint,
-    ) -> Result<(), marks_iw4::GfxMarkMeshRefuse> {
+    ) -> Result<(), &'static str> {
         let Some(mut mark) = self.constructed(slot).copied() else {
             return Ok(());
         };
         mark.origin = origin;
         mark.tex_coord_axis = tex_coord_axis;
-        self.emit_one_world_mark(census, slot, mark, transform_point)
+        self.emit_one_world_mark(mesh, slot, mark, transform_point)
     }
 
     fn emit_one_world_mark(
         &self,
-        census: &mut GfxMarkMeshCensus,
+        mesh: &mut GfxMarkMesh,
         mark_slot: u16,
         mark: FxMarkConstructed,
         transform_point: &dyn Fn(FxMarkStagingPoint) -> FxMarkStagingPoint,
-    ) -> Result<(), marks_iw4::GfxMarkMeshRefuse> {
+    ) -> Result<(), &'static str> {
         let (base_vert, _) =
-            generate_mark_verts_begin(&mut census.budget, mark.point_count, mark.tri_count)?;
-        census
-            .verts
-            .resize(census.budget.vert_n as usize, FxMarkStagingPoint::ZERO);
-        census.packed.resize(
-            census.budget.vert_n as usize,
+            generate_mark_verts_begin(&mut mesh.budget, mark.point_count, mark.tri_count)?;
+        mesh.packed.resize(
+            mesh.budget.vert_n as usize,
             [0u8; GFX_MARK_MESH_VERTEX_STRIDE],
         );
         let mut remaining_pts = mark.point_count.max(0) as u16;
@@ -432,10 +427,7 @@ impl FxMarksSystemHost {
             let take = remaining_pts.min(2);
             for k in 0..take {
                 let pt = transform_point(group.points[k as usize]);
-                if let Some(slot) = census.verts.get_mut(out_i) {
-                    *slot = pt;
-                }
-                if let Some(row) = census.packed.get_mut(out_i) {
+                if let Some(row) = mesh.packed.get_mut(out_i) {
                     let pack = if matches!(mark.context as u8, 0 | 2) {
                         pack_mark_world_vertex
                     } else {
@@ -448,9 +440,6 @@ impl FxMarksSystemHost {
                         mark.tex_coord_axis,
                         mark.native_color,
                     );
-                }
-                if census.first_xyz.is_none() {
-                    census.first_xyz = Some(pt.xyz);
                 }
                 out_i += 1;
             }
@@ -465,7 +454,7 @@ impl FxMarksSystemHost {
         let mut tri_handle = mark.tris;
         let mut cur_context: Option<[u8; 7]> = None;
         let mut batch_index_count: u32 = 0;
-        let mut batch_index_start = census.indices.len() as u32;
+        let mut batch_index_start = mesh.indices.len() as u32;
         while remaining_tri > 0 {
             let Some(group) = self.tri_group(tri_handle) else {
                 break;
@@ -473,14 +462,14 @@ impl FxMarksSystemHost {
             let n = remaining_tri.min(group.tri_count);
             if let Some(ctx) = cur_context {
                 if !mark_contexts_equal(&ctx, &group.context) && batch_index_count != 0 {
-                    let _ = add_mark_mesh_draw_surf(&mut census.budget, batch_index_count);
-                    census.surfs.push(GfxMarkMeshSurf {
+                    let _ = add_mark_mesh_draw_surf(&mut mesh.budget, batch_index_count);
+                    mesh.surfs.push(GfxMarkMeshSurf {
                         index_start: batch_index_start,
                         index_count: batch_index_count,
                         mark_slot,
                         context: ctx,
                     });
-                    batch_index_start = census.indices.len() as u32;
+                    batch_index_start = mesh.indices.len() as u32;
                     batch_index_count = 0;
                 }
             }
@@ -488,7 +477,7 @@ impl FxMarksSystemHost {
             for t in 0..n {
                 let idx = group.indices[t as usize];
                 for c in 0..3 {
-                    census.indices.push(base_vert.wrapping_add(idx[c as usize]));
+                    mesh.indices.push(base_vert.wrapping_add(idx[c as usize]));
                 }
                 batch_index_count = batch_index_count.saturating_add(3);
             }
@@ -498,8 +487,8 @@ impl FxMarksSystemHost {
             }
             tri_handle = group.next;
         }
-        let _ = add_mark_mesh_draw_surf(&mut census.budget, batch_index_count);
-        census.surfs.push(GfxMarkMeshSurf {
+        let _ = add_mark_mesh_draw_surf(&mut mesh.budget, batch_index_count);
+        mesh.surfs.push(GfxMarkMeshSurf {
             index_start: batch_index_start,
             index_count: batch_index_count,
             mark_slot,

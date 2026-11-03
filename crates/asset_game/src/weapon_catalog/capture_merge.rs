@@ -1,77 +1,11 @@
 use super::*;
 
-pub(super) fn leftover_hip_spread_block(
-    read: impl Fn(usize) -> f32,
-    stand_min: usize,
-) -> [f32; 12] {
-    core::array::from_fn(|i| read(stand_min + i * 4))
-}
-
-pub(super) fn apply_leftover_hip_spread(facts: &mut WeaponBodyFacts, block: [f32; 12]) {
-    facts.hip_spread_stand_min = block[0];
-    facts.hip_spread_ducked_min = block[1];
-    facts.hip_spread_prone_min = block[2];
-    facts.hip_spread_stand_max = block[3];
-    facts.hip_spread_ducked_max = block[4];
-    facts.hip_spread_prone_max = block[5];
-    facts.hip_spread_decay_rate = block[6];
-    facts.hip_spread_fire_add = block[7];
-    facts.hip_spread_turn_add = block[8];
-    facts.hip_spread_move_add = block[9];
-    facts.hip_spread_ducked_decay = block[10];
-    facts.hip_spread_prone_decay = block[11];
-}
-
 pub(super) fn read_name(stream: &ZoneStream<'_>, ptr: Ptr) -> Option<String> {
     stream
         .cstr(ptr)
         .ok()
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
-}
-
-pub(super) fn apply_leftover_default_anim_overrides(
-    sz: &mut [Option<String>; WEAPON_ANIM_SLOTS],
-    overrides: &[LeftoverAnimOverride],
-) {
-    for ov in overrides {
-        if ov.attachment1 != 0 || ov.attachment2 != 0 {
-            continue;
-        }
-        let Some(slot) = iw5_anim_tree_type_to_iw4_slot(ov.anim_tree_type) else {
-            continue;
-        };
-        if let Some(name) = ov.override_anim.clone() {
-            sz[slot] = Some(name);
-        }
-    }
-}
-
-pub(super) fn apply_leftover_default_sound_overrides(sounds: &mut WeaponSoundAliases) {
-    use fastfile_iw5::size as sz;
-    for ov in &sounds.leftover_sound_overrides {
-        if ov.attachment1 != 0 || ov.attachment2 != 0 {
-            continue;
-        }
-        match ov.sound_type {
-            x if x == sz::SND_OVERRIDE_TYPE_FIRE => {
-                if sounds.fire.is_none() {
-                    sounds.fire = ov.override_sound.clone();
-                }
-            }
-            x if x == sz::SND_OVERRIDE_TYPE_PLAYER_FIRE => {
-                if sounds.fire_player.is_none() {
-                    sounds.fire_player = ov.override_sound.clone();
-                }
-            }
-            x if x == sz::SND_OVERRIDE_TYPE_PLAYER_LASTSHOT => {
-                if sounds.fire_last_player.is_none() {
-                    sounds.fire_last_player = ov.override_sound.clone();
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 pub(super) fn read_hide_tags(

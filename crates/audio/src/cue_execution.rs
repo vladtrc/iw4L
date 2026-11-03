@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 
-use crate::cue::{CueRequest, CueResolver, ResolvedCue};
+use crate::cue::{CueResolver, CueSubmission, ResolvedCue};
 use crate::media::{LiveGain, LivePan, RenderMedia};
 use crate::pending::PendingTicket;
 use crate::render_core::AudioScope;
@@ -16,36 +16,63 @@ const CANCEL_KEYS: usize = 4096;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct CancelKey {
-    namespace: AssetNamespace,
+    namespace: FamilyId,
     alias: String,
     emitter: Option<u32>,
-    epoch: u64,
     scope: AudioScope,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum CancelKind {
+    All,
+    Loops,
+}
+
+#[derive(Default)]
+struct CancelClock {
+    all: AtomicU64,
+    loops: AtomicU64,
+}
+
+impl CancelClock {
+    fn cancel(&self, kind: CancelKind) {
+        match kind {
+            CancelKind::All => &self.all,
+            CancelKind::Loops => &self.loops,
+        }
+        .fetch_add(1, Ordering::AcqRel);
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct CueLease {
     version: u64,
-    clock: Arc<AtomicU64>,
+    loop_version: u64,
+    looping: bool,
+    clock: Arc<CancelClock>,
 }
 
 impl CueLease {
     pub(crate) fn cancelled(&self) -> bool {
-        self.clock.load(Ordering::Acquire) != self.version
+        self.clock.all.load(Ordering::Acquire) != self.version
+            || (self.looping && self.clock.loops.load(Ordering::Acquire) != self.loop_version)
+    }
+
+    fn set_looping(&mut self, looping: bool) {
+        self.looping = looping;
     }
 }
 
 #[derive(Default)]
-pub(crate) struct CueCancellation(Mutex<HashMap<CancelKey, Weak<AtomicU64>>>);
+pub(crate) struct CueCancellation(Mutex<HashMap<CancelKey, Weak<CancelClock>>>);
 
 impl CueCancellation {
     pub(crate) fn lease(
         &self,
-        namespace: AssetNamespace,
+        namespace: FamilyId,
         alias: &str,
         emitter: Option<u32>,
         scope: AudioScope,
-        epoch: u64,
     ) -> Option<CueLease> {
         let mut keys = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
         let key = CancelKey {
@@ -53,11 +80,12 @@ impl CueCancellation {
             alias: alias.into(),
             emitter,
             scope,
-            epoch,
         };
         if let Some(clock) = keys.get(&key).and_then(Weak::upgrade) {
             return Some(CueLease {
-                version: clock.load(Ordering::Acquire),
+                version: clock.all.load(Ordering::Acquire),
+                loop_version: clock.loops.load(Ordering::Acquire),
+                looping: false,
                 clock,
             });
         }
@@ -65,17 +93,35 @@ impl CueCancellation {
         if keys.len() == CANCEL_KEYS {
             return None;
         }
-        let clock = Arc::new(AtomicU64::new(0));
+        let clock = Arc::new(CancelClock::default());
         keys.insert(key, Arc::downgrade(&clock));
-        Some(CueLease { version: 0, clock })
+        Some(CueLease {
+            version: 0,
+            loop_version: 0,
+            looping: false,
+            clock,
+        })
+    }
+
+    pub(crate) fn cancel_scope(&self, scope: AudioScope) {
+        let mut keys = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
+        keys.retain(|key, clock| {
+            let Some(clock) = clock.upgrade() else {
+                return false;
+            };
+            if key.scope == scope {
+                clock.cancel(CancelKind::All);
+            }
+            true
+        });
     }
 
     pub(crate) fn cancel(
         &self,
-        namespace: Option<AssetNamespace>,
+        namespace: Option<FamilyId>,
         alias: Option<&str>,
         emitter: Option<Option<u32>>,
-        epoch: u64,
+        kind: CancelKind,
     ) {
         let mut keys = self.0.lock().unwrap_or_else(|poison| poison.into_inner());
         keys.retain(|key, clock| {
@@ -83,12 +129,11 @@ impl CueCancellation {
                 return false;
             };
             if key.scope == AudioScope::Match
-                && key.epoch == epoch
                 && namespace.is_none_or(|namespace| namespace == key.namespace)
                 && alias.is_none_or(|alias| alias == key.alias)
                 && emitter.is_none_or(|emitter| emitter == key.emitter)
             {
-                clock.fetch_add(1, Ordering::AcqRel);
+                clock.cancel(kind);
             }
             true
         });
@@ -97,7 +142,6 @@ impl CueCancellation {
 
 #[derive(Clone)]
 pub(crate) struct CueMix {
-    pub epoch: u64,
     pub gain: LiveGain,
     pub channels: Arc<HashMap<asset_audio::ChannelKey, LiveGain>>,
 }
@@ -105,13 +149,12 @@ pub(crate) struct CueMix {
 pub(crate) struct CueTrigger {
     pub event: Option<crate::AudioEvent>,
     pub bank: Arc<asset_audio::SoundCatalog>,
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub alias: String,
     pub bound: Option<usize>,
     pub origin_inches: Option<[f32; 3]>,
     pub emitter: Option<u32>,
     pub class: SoundClass,
-    pub epoch: u64,
     pub pitch_scale: f32,
     pub volume_scale: f32,
     pub fallbacks: Vec<String>,
@@ -131,7 +174,7 @@ pub(crate) struct CueIntent {
 }
 
 pub(crate) struct CueWork {
-    pub request: CueRequest,
+    pub request: CueSubmission,
     pub resolved: Option<ResolvedCue>,
     secondary: Option<(String, StartOutcome)>,
     pub source: Option<(crate::sources::SourceKey, u64)>,
@@ -155,7 +198,10 @@ pub(crate) enum CueStep {
 }
 
 impl CueWork {
-    pub(crate) fn new(request: CueRequest) -> Self {
+    pub(crate) fn new(mut request: CueSubmission) -> Self {
+        // Secondary layers resolve their own policy; inheriting a parent's
+        // looping selector would cancel an unresolved one-shot child.
+        request.execution.lease.set_looping(false);
         Self {
             request,
             resolved: None,
@@ -208,7 +254,7 @@ impl CueWork {
     pub(crate) fn step(
         &mut self,
         resolver: &mut CueResolver,
-        listener: Option<ListenerSnapshot>,
+        listener: Option<&ListenerSnapshot>,
         children: &mut Vec<CueWork>,
         output_available: bool,
     ) -> CueStep {
@@ -242,6 +288,10 @@ impl CueWork {
                         ));
                     }
                     self.request.state.resolved(Ok(cue.clone()));
+                    self.request
+                        .execution
+                        .lease
+                        .set_looping(self.source.is_some() || cue.policy.looping.is_looping());
                     self.resolved = Some(cue);
                 }
                 Err(reason) => {
@@ -253,6 +303,11 @@ impl CueWork {
                     return self.fail(failure);
                 }
             }
+        }
+        // A loop may resolve after its emitter has already retired. Its lease
+        // remembers the earlier loop generation, so it cannot start late.
+        if self.request.execution.lease.cancelled() {
+            return self.fail(StartFailure::CueRefused(crate::CueFailure::Cancelled));
         }
         self.secondary(asset_audio::SecondaryActivation::OnResolution, children);
         let cue = self.resolved.as_ref().expect("resolved cue");
@@ -337,7 +392,11 @@ impl CueWork {
                     priority: cue.policy.priority.clone(),
                     base_volume: volume.max(0.0),
                 };
-                let distance = origin
+                let Some(position) = source.position(listener) else {
+                    self.complete(StartOutcome::Suppressed(SuppressReason::Inaudible));
+                    return CueStep::Finished;
+                };
+                let distance = position
                     .iter()
                     .zip(listener.origin_inches)
                     .map(|(source, listener)| (source - listener).powi(2))
@@ -436,7 +495,7 @@ impl CueWork {
         let asset_audio::LayerFailure::Independent = layer.failure;
         let asset_audio::LayerPitch::IndependentAuthoredRange = layer.pitch;
         let state = self.request.state.child(alias);
-        let mut child = CueWork::new(CueRequest {
+        let mut child = CueWork::new(CueSubmission {
             state,
             bank: self.request.bank.clone(),
             media: self.request.media.clone(),
@@ -444,7 +503,6 @@ impl CueWork {
             alias: alias.clone(),
             bound: None,
             scope: self.request.scope,
-            epoch: self.request.epoch,
             pitch_scale: 1.0,
             volume_scale: self.request.volume_scale,
             execution: CueIntent {

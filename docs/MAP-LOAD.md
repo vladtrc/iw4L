@@ -43,7 +43,7 @@ their scoped in-match equivalents.
 
 The single entry point; the composition root sees no `fastfile_*` and no
 `AssetSink`. Inside are parallel walks on `load_pool()`: the archive, startup
-materials, `common_mp`, the IW5/T5/T6 weapon bundles, language zones. `common_mp`
+materials, `common_mp`, installed-family weapon bundles, language zones. `common_mp`
 goes **before** the map — its techset tables are needed before
 `build_world_draw`. Output is `MatchLoadOutcome::Ready` with a `PreparedMatch`
 (world, one material population, clip, weapons, catalogs and `PreparedMap`).
@@ -53,7 +53,7 @@ one row per image name. Two plans resolving the *same* archive entry into the
 same payload share one decode; a name three games spell alike but fill
 differently is an override, not a duplicate, and `load_jobs.csv`
 ([`BENCH.md`](BENCH.md)) counts the two apart. The per-game adapter is
-`assets::lane` (`ZoneGame` → iw4/iw5/t5/t6); a lane gap is a typed `LaneGap`, never
+`assets::ZoneLanes` (installed `FamilyId` → family-owned lane); a lane gap is a typed `LaneGap`, never
 silence.
 
 `ZoneLane::load_common_mp` returns owned common builders and diagnostics. A lane whose preparation needs already assembled donors can retain a private, consumed-once `CommonFamilyCompiler` inside that result. The shared loader supplies owned weapon, material, FPV, world-model, projectile, animation and effect builders; compilation returns them together with dependency refusals. This stage finishes before the common set is published or cloned for a match. It is not invoked by frame execution.

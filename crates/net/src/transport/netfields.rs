@@ -71,6 +71,18 @@ macro_rules! ps_netfields {
             0.0
         }
 
+        pub(crate) fn field_error_magnitude(a: &PlayerState, b: &PlayerState, index: usize) -> f64 {
+            let mut i = 0usize;
+            $(
+                if i == index {
+                    return magnitude_by_kind!($kind, a.$rust, b.$rust);
+                }
+                i += 1;
+            )*
+            let _ = i;
+            0.0
+        }
+
         pub(crate) fn write_field(out: &mut WireWriter, ps: &PlayerState, index: usize) {
             let mut i = 0usize;
             $(
@@ -162,6 +174,38 @@ macro_rules! distance_by_kind {
     };
     (opaque, $a:expr, $b:expr) => {
         if $a == $b { 0.0f32 } else { f32::INFINITY }
+    };
+}
+
+macro_rules! magnitude_by_kind {
+    (i32, $a:expr, $b:expr) => {
+        (f64::from($a) - f64::from($b)).abs()
+    };
+    (u32, $a:expr, $b:expr) => {
+        (f64::from($a) - f64::from($b)).abs()
+    };
+    (f32, $a:expr, $b:expr) => {{
+        let distance = (f64::from($a) - f64::from($b)).abs();
+        if distance.is_nan() {
+            f64::INFINITY
+        } else {
+            distance
+        }
+    }};
+    (vec3, $a:expr, $b:expr) => {{
+        $a.iter()
+            .zip($b.iter())
+            .map(|(a, b)| {
+                if a.to_bits() == b.to_bits() {
+                    0.0
+                } else {
+                    magnitude_by_kind!(f32, *a, *b)
+                }
+            })
+            .fold(0.0_f64, f64::max)
+    }};
+    ($kind:ident, $a:expr, $b:expr) => {
+        $a.iter().zip($b.iter()).filter(|(a, b)| a != b).count() as f64
     };
 }
 
@@ -379,31 +423,39 @@ pub fn player_state_diff(a: &PlayerState, b: &PlayerState) -> Vec<&'static str> 
 }
 
 pub fn ps_deviation(predicted: &PlayerState, authoritative: &PlayerState) -> Option<Deviation> {
-    for (index, row) in PS_NETFIELDS.iter().enumerate() {
-        match row.validation {
-            Validation::AdoptOnly(_) => continue,
-            Validation::Exact => {
-                if field_differs(predicted, authoritative, index) {
-                    return Some(Deviation {
-                        field: row.rust_name,
-                        index,
-                        distance: field_distance(predicted, authoritative, index),
-                    });
+    ps_deviations(predicted, authoritative).next()
+}
+
+pub fn ps_deviations<'a>(
+    predicted: &'a PlayerState,
+    authoritative: &'a PlayerState,
+) -> impl Iterator<Item = Deviation> + 'a {
+    PS_NETFIELDS
+        .iter()
+        .enumerate()
+        .filter_map(move |(index, row)| {
+            let distance = match row.validation {
+                Validation::AdoptOnly(_) => return None,
+                Validation::Exact => {
+                    if !field_differs(predicted, authoritative, index) {
+                        return None;
+                    }
+                    field_distance(predicted, authoritative, index)
                 }
-            }
-            Validation::Tolerance { epsilon, .. } => {
-                let distance = field_distance(predicted, authoritative, index);
-                if distance > epsilon {
-                    return Some(Deviation {
-                        field: row.rust_name,
-                        index,
-                        distance,
-                    });
+                Validation::Tolerance { epsilon, .. } => {
+                    let distance = field_distance(predicted, authoritative, index);
+                    if !(distance > epsilon) {
+                        return None;
+                    }
+                    distance
                 }
-            }
-        }
-    }
-    None
+            };
+            Some(Deviation {
+                field: row.rust_name,
+                index,
+                distance,
+            })
+        })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

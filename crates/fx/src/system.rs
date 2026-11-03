@@ -9,7 +9,6 @@ use fx_iw4::{
 };
 
 use crate::elem::{FX_ELEM_HANDLE_NONE, FxElemSlot};
-use crate::gaps::FxGaps;
 use crate::trail::{FX_TRAIL_HANDLE_NONE, FxTrailElemSlot, FxTrailSlot};
 
 pub const FX_CATALOG_INDEX_NONE: u16 = u16::MAX;
@@ -286,8 +285,6 @@ pub struct FxSystemHost {
 
     pub vis_blocker_read: fx_iw4::FxVisBlockerBuf,
 
-    pub gaps: FxGaps,
-
     pub glass: crate::glass::FxGlassSystemHost,
 
     handles: Vec<u16>,
@@ -381,22 +378,6 @@ pub struct FxSystemHost {
 
     pub mark_box_surfaces_run: Option<u32>,
 
-    pub gfx_mark_surf_n: Option<u32>,
-
-    pub gfx_mark_vert_n: Option<u32>,
-
-    pub gfx_mark_index_n: Option<u32>,
-
-    pub gfx_mark_surf_warn: Option<u32>,
-
-    pub gfx_mark_vert_warn: Option<u32>,
-
-    pub gfx_mark_index_warn: Option<u32>,
-
-    pub gfx_mark_mesh_xyz0: Option<[f32; 3]>,
-
-    pub gfx_mark_packed_n: Option<u32>,
-
     pub gfx_mark_draw_n: Option<u32>,
     pub gfx_mark_draw_tri: Option<u32>,
     pub gfx_mark_draw_skip_why: Option<String>,
@@ -411,7 +392,7 @@ pub struct FxSystemHost {
 
     pub last_mark_lmap_page_n: Option<u32>,
 
-    pub last_mark_mesh: Option<crate::GfxMarkMeshCensus>,
+    pub last_mark_mesh: Option<crate::GfxMarkMesh>,
 
     pub last_decal_color: Option<u32>,
 
@@ -547,7 +528,6 @@ impl FxSystemHost {
             spark_fountain_holdrand: fx_iw4::MSVCRT_HOLDRAND_DEFAULT,
             vis_blocker_write: fx_iw4::FxVisBlockerBuf::default(),
             vis_blocker_read: fx_iw4::FxVisBlockerBuf::default(),
-            gaps: FxGaps::default(),
             glass: crate::glass::FxGlassSystemHost::default(),
             handles,
             first_active_effect: 0,
@@ -602,14 +582,6 @@ impl FxSystemHost {
             last_models_surf_keep: None,
             mark_box_surfaces_skip: Some(0),
             mark_box_surfaces_run: Some(0),
-            gfx_mark_surf_n: None,
-            gfx_mark_vert_n: None,
-            gfx_mark_index_n: None,
-            gfx_mark_surf_warn: None,
-            gfx_mark_vert_warn: None,
-            gfx_mark_index_warn: None,
-            gfx_mark_mesh_xyz0: None,
-            gfx_mark_packed_n: None,
             gfx_mark_draw_n: None,
             gfx_mark_draw_tri: None,
             gfx_mark_draw_skip_why: None,
@@ -676,6 +648,26 @@ impl FxSystemHost {
                     .then_some(slot)
             })
             .collect();
+        self.kill_slots(slots);
+    }
+
+    pub fn kill_bolted(&mut self, dobj: u32) {
+        let slots = self
+            .effects
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, effect)| {
+                (effect.ring_resident
+                    && effect.has_refs()
+                    && !fx_iw4::bolt_handle_is_none(effect.bolt_packed)
+                    && fx_iw4::bolt_dobj(effect.bolt_packed) == dobj)
+                    .then_some(slot)
+            })
+            .collect();
+        self.kill_slots(slots);
+    }
+
+    fn kill_slots(&mut self, slots: Vec<usize>) {
         if slots.is_empty() {
             return;
         }
@@ -792,8 +784,10 @@ impl FxSystemHost {
 
     pub fn note_world_go_skip(&mut self, def_index: u8) {
         self.mark_go_world_skip = Some(self.mark_go_world_skip.unwrap_or(0) + 1);
-        self.gaps
-            .raise(crate::FxGapCause::MarkFragmentsSkipped { def_index });
+        diag::warn_once!(
+            World,
+            "elem {def_index} impact mark entered Generate; mark fragments are not supported"
+        );
     }
 
     pub fn note_world_go_fire(&mut self) {
@@ -803,8 +797,10 @@ impl FxSystemHost {
 
     pub fn note_models_go_skip(&mut self, def_index: u8) {
         self.mark_go_models_skip = Some(self.mark_go_models_skip.unwrap_or(0) + 1);
-        self.gaps
-            .raise(crate::FxGapCause::MarkFragmentsSkipped { def_index });
+        diag::warn_once!(
+            World,
+            "elem {def_index} impact mark entered Generate; mark fragments are not supported"
+        );
     }
 
     pub fn note_models_go_fire(&mut self) {
@@ -813,8 +809,10 @@ impl FxSystemHost {
     }
 
     pub fn note_impact_mark_outer_skip(&mut self, def_index: u8) {
-        self.gaps
-            .raise(crate::FxGapCause::ElemDecalSpawnSkipped { def_index });
+        diag::warn_once!(
+            World,
+            "elem {def_index} SpawnDecal sampled; impact mark did not enter"
+        );
     }
 
     pub fn generate_world_mark_verts(&mut self) {
@@ -823,27 +821,11 @@ impl FxSystemHost {
             return;
         }
         let mesh = self.marks.generate_world_mark_verts();
-        self.gfx_mark_surf_n = Some(mesh.budget.surf_n);
-        self.gfx_mark_vert_n = Some(mesh.budget.vert_n);
-        self.gfx_mark_index_n = Some(mesh.budget.index_n);
-        self.gfx_mark_surf_warn = Some(mesh.budget.surf_warn);
-        self.gfx_mark_vert_warn = Some(mesh.budget.vert_warn);
-        self.gfx_mark_index_warn = Some(mesh.budget.index_warn);
-        self.gfx_mark_mesh_xyz0 = mesh.first_xyz;
-        self.gfx_mark_packed_n = Some(mesh.packed.len() as u32);
         self.last_mark_mesh = Some(mesh);
     }
 
     fn stamp_empty_world_mark_mesh(&mut self) {
-        let mesh = crate::GfxMarkMeshCensus::default();
-        self.gfx_mark_surf_n = Some(0);
-        self.gfx_mark_vert_n = Some(0);
-        self.gfx_mark_index_n = Some(0);
-        self.gfx_mark_surf_warn = Some(mesh.budget.surf_warn);
-        self.gfx_mark_vert_warn = Some(mesh.budget.vert_warn);
-        self.gfx_mark_index_warn = Some(mesh.budget.index_warn);
-        self.gfx_mark_mesh_xyz0 = None;
-        self.gfx_mark_packed_n = Some(0);
+        let mesh = crate::GfxMarkMesh::default();
         self.last_mark_mesh = Some(mesh);
     }
 
@@ -871,13 +853,12 @@ impl FxSystemHost {
     pub fn spawn_effect(
         &mut self,
         def_name: &str,
-        origin: [f32; 3],
-        axis: [[f32; 3]; 3],
-        msec: i32,
+        pose: crate::FxPlayPose,
         bolt: u32,
         wants_spotlight: bool,
         catalog_index: u16,
     ) -> Result<u16, SpawnFail> {
+        let crate::FxPlayPose { origin, axis, msec } = pose;
         if wants_spotlight && self.spotlight_count >= FX_SPOT_LIGHT_LIMIT {
             return Err(SpawnFail::TooManySpotlights);
         }
@@ -945,7 +926,7 @@ impl FxSystemHost {
         Ok(handle)
     }
 
-    pub fn del_ref_to_effect(&mut self, _handle: u16) {
+    pub fn request_garbage_collection(&mut self) {
         self.needs_garbage_collection = true;
     }
 
@@ -955,7 +936,7 @@ impl FxSystemHost {
             .map(|e| status_is_unique_done(e.status))
             .unwrap_or(false);
         if unique {
-            self.del_ref_to_effect(handle);
+            self.request_garbage_collection();
         }
         if let Some(effect) = self.slot_for_handle_mut(handle) {
             effect.status = effect.status.wrapping_sub(1);
@@ -1075,13 +1056,11 @@ impl FxSystemHost {
 
     pub fn mark_profile_line(&self) -> String {
         format!(
-            "fx_mark_profile live={}/512 alloced={} tri_free={} point_free={} gfx_surf={} gfx_draw={} unlinked={} ents_AddEntity=typed_gap draw_gate={}",
+            "fx_mark_profile live={}/512 alloced={} tri_free={} point_free={} gfx_draw={} unlinked={} ents_AddEntity=typed_gap draw_gate={}",
             self.marks.live_count(),
             self.marks.alloced_count(),
             self.marks.tri_first_free(),
             self.marks.point_first_free(),
-            self.gfx_mark_surf_n
-                .map_or_else(|| "null".to_owned(), |n| n.to_string()),
             self.gfx_mark_draw_n
                 .map_or_else(|| "null".to_owned(), |n| n.to_string()),
             self.marks.live_count(),

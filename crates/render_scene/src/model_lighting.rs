@@ -9,9 +9,7 @@ pub enum ModelLightingOwner {
     Corpse(Entity),
     ScriptModel(Entity),
 
-    Missile(u32),
-
-    PredictedMissile { owner: u32, weapon: u32 },
+    Missile(Entity),
 
     Item(u32),
 

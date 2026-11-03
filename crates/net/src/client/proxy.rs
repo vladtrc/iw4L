@@ -259,7 +259,7 @@ impl RemoteProxy {
         let epoch = || {
             self.buffer.iter().rev().take_while(|entry| {
                 player_row(&entry.snap.players, client)
-                    .is_some_and(|ps| same_presentation_epoch(ps, &newest))
+                    .is_some_and(|ps| same_view_discontinuity(ps, &newest))
             })
         };
         epoch()
@@ -280,7 +280,7 @@ impl RemoteProxy {
             .rev()
             .take_while(|entry| {
                 player_row(&entry.snap.players, client)
-                    .is_some_and(|ps| same_presentation_epoch(ps, &newest))
+                    .is_some_and(|ps| same_view_discontinuity(ps, &newest))
             })
             .filter(|entry| entry.time_ms > effective)
             .last()
@@ -300,7 +300,7 @@ impl RemoteProxy {
         let (Some(sampled), Some((_, newest))) = (sampled, self.last_sample(client)) else {
             return sample;
         };
-        if same_presentation_epoch(sampled, &newest) {
+        if same_view_discontinuity(sampled, &newest) {
             return sample;
         }
         let first_after = self
@@ -310,7 +310,7 @@ impl RemoteProxy {
             .filter_map(|entry| {
                 player_row(&entry.snap.players, client).map(|ps| (entry.snap.tick, ps))
             })
-            .take_while(|(_, ps)| same_presentation_epoch(ps, &newest))
+            .take_while(|(_, ps)| same_view_discontinuity(ps, &newest))
             .last();
         let Some((tick, ps)) = first_after else {
             return sample;
@@ -409,7 +409,7 @@ impl RemoteProxy {
             .for_client(client)
             .zip(right.snap.meta.for_client(client))
             .is_some_and(|(a, b)| a.life_sequence != b.life_sequence);
-        if life_changed || !same_presentation_epoch(ps0, ps1) {
+        if life_changed || !same_view_discontinuity(ps0, ps1) {
             return ProxySample::Pose {
                 ps: *ps1,
                 provenance: PresentationSampleProvenance {
@@ -444,8 +444,9 @@ impl RemoteProxy {
     }
 }
 
-fn same_presentation_epoch(a: &PlayerState, b: &PlayerState) -> bool {
-    a.is_live_frame() == b.is_live_frame()
+fn same_view_discontinuity(a: &PlayerState, b: &PlayerState) -> bool {
+    sim::world_graph::world_at(a.origin) == sim::world_graph::world_at(b.origin)
+        && a.is_live_frame() == b.is_live_frame()
         && a.kill_cam_client_num == b.kill_cam_client_num
         && (a.e_flags & playerstate_iw4::eflags::TELEPORT)
             == (b.e_flags & playerstate_iw4::eflags::TELEPORT)
@@ -476,7 +477,10 @@ fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 
 fn lerp_player_state(a: &PlayerState, b: &PlayerState, alpha: f32) -> PlayerState {
     let mut out = *a;
-    if (a.e_flags ^ b.e_flags) & playerstate_iw4::eflags::TELEPORT != 0 || a.pm_type != b.pm_type {
+    if (a.e_flags ^ b.e_flags) & playerstate_iw4::eflags::TELEPORT != 0
+        || a.pm_type != b.pm_type
+        || sim::world_graph::world_at(a.origin) != sim::world_graph::world_at(b.origin)
+    {
         return out;
     }
     out.origin = lerp3(a.origin, b.origin, alpha);

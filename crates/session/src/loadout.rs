@@ -224,13 +224,13 @@ pub fn project_class(
     }
     .and_then(|loadout| {
         loadout
-            .definition(sim::ClassId(class_id), 1)
+            .definition(sim::ClassId(class_id))
             .ok_or_else(|| "class.invalid_definition".to_owned())
     });
     let (mut def, mut lock_reason) = match resolved {
         Ok(def) => (def, None),
         Err(reason) => (
-            sim::ClassDef::primary_secondary(sim::ClassId(class_id), 1, 0, 0),
+            sim::ClassDef::primary_secondary(sim::ClassId(class_id), 0, 0),
             Some(reason),
         ),
     };

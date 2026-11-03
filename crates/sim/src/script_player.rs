@@ -110,13 +110,13 @@ pub(crate) fn spawn(
         meta.dead_since_tick = None;
         meta.item_use_spawn_ms = crate::corpse::level_time_ms(tick);
         meta.item_use_entity = None;
-        meta.clear_ammo_inventory();
-        meta.weapon_shot_count = 0;
-        meta.burst_latch = false;
-        meta.burst_latch_secondary = false;
-        meta.rechamber_pending = false;
-        meta.rechamber_pending_secondary = false;
-        meta.pending_brass = [None; 2];
+        meta.weapon_carry.clear_ammo_inventory();
+        meta.weapon_carry.weapon_shot_count = 0;
+        meta.weapon_carry.burst_latch = false;
+        meta.weapon_carry.burst_latch_secondary = false;
+        meta.weapon_carry.rechamber_pending = false;
+        meta.weapon_carry.rechamber_pending_secondary = false;
+        meta.weapon_carry.pending_brass = [None; 2];
         meta.life_sequence
     };
     let class_id = world
@@ -471,7 +471,7 @@ pub(crate) fn move_to_forced_spawn(world: &mut FrameWorld, id: ClientId, pick: c
     world.link_player_standing_area(id);
 }
 
-pub(crate) fn weapon_named(world: &FrameWorld, name: &str) -> Result<u32, String> {
+pub fn weapon_named(world: &FrameWorld, name: &str) -> Result<u32, String> {
     if name == "none" {
         return Ok(0);
     }
@@ -481,7 +481,7 @@ pub(crate) fn weapon_named(world: &FrameWorld, name: &str) -> Result<u32, String
         .ok_or_else(|| format!("unknown weapon '{name}'"))
 }
 
-pub(crate) fn weapon_name(world: &FrameWorld, weapon: u32) -> String {
+pub fn weapon_name(world: &FrameWorld, weapon: u32) -> String {
     if weapon == 0 {
         "none".into()
     } else {
@@ -530,7 +530,10 @@ pub(crate) fn give_weapon(
         None => weapon_iw4::spawn_clip_stock(&facts, i32::from(akimbo)),
     };
     seed_ps_ammo_tables(ps, weapon, &facts, clip, clip_alt, akimbo, stock);
-    world.client_meta_mut(id).set_ammo(weapon, clip, stock);
+    world
+        .client_meta_mut(id)
+        .weapon_carry
+        .set_ammo(weapon, clip, stock);
     Ok(())
 }
 
@@ -556,7 +559,9 @@ pub(crate) fn take_weapon(world: &mut FrameWorld, id: ClientId, weapon: u32) {
         ps.weapon_primary = 0;
     }
     let meta = world.client_meta_mut(id);
-    meta.ammo_by_weapon.retain(|row| row.0 != weapon);
+    meta.weapon_carry
+        .ammo_by_weapon
+        .retain(|row| row.0 != weapon);
     if meta.controls.switch_to == weapon {
         meta.controls.switch_to = 0;
     }
@@ -576,7 +581,7 @@ pub(crate) fn take_all_weapons(world: &mut FrameWorld, id: ClientId) {
     ps.offhand_primary = 0;
     ps.offhand_secondary = 0;
     let meta = world.client_meta_mut(id);
-    meta.clear_ammo_inventory();
+    meta.weapon_carry.clear_ammo_inventory();
     meta.controls.switch_to = 0;
 }
 
@@ -589,7 +594,9 @@ pub(crate) fn set_spawn_weapon(
     let facts = world
         .combat_facts_for(weapon)
         .unwrap_or_else(weapon_iw4::WeaponCombatFacts::none);
-    let ammo = world.client_meta(id).map(|m| m.ammo_for(weapon));
+    let ammo = world
+        .client_meta(id)
+        .map(|m| m.weapon_carry.ammo_for(weapon));
     let ps = world.player_mut(id).expect("checked above");
     let (ammo_before, clip_before) = (ps.ammo, ps.ammoclip);
     ps.weapon = weapon;
@@ -599,9 +606,9 @@ pub(crate) fn set_spawn_weapon(
     ps.ammoclip = clip_before;
     let meta = world.client_meta_mut(id);
     if let Some((clip, stock)) = ammo {
-        meta.set_ammo(weapon, clip, stock);
+        meta.weapon_carry.set_ammo(weapon, clip, stock);
     }
-    meta.mirror_held_ammo(weapon);
+    meta.weapon_carry.mirror_held_ammo(weapon);
     meta.controls.switch_to = 0;
     Ok(())
 }
@@ -631,12 +638,12 @@ pub(crate) fn switch_to_weapon_immediate(
         weapon_iw4::weap_anim_event::IDLE,
     );
     let meta = world.client_meta_mut(id);
-    meta.weapon_shot_count = 0;
-    meta.burst_latch = false;
-    meta.burst_latch_secondary = false;
-    meta.rechamber_pending = false;
-    meta.rechamber_pending_secondary = false;
-    meta.pending_brass = [None; 2];
+    meta.weapon_carry.weapon_shot_count = 0;
+    meta.weapon_carry.burst_latch = false;
+    meta.weapon_carry.burst_latch_secondary = false;
+    meta.weapon_carry.rechamber_pending = false;
+    meta.weapon_carry.rechamber_pending_secondary = false;
+    meta.weapon_carry.pending_brass = [None; 2];
     Ok(())
 }
 
@@ -650,7 +657,7 @@ pub(crate) fn switch_to_weapon(world: &mut FrameWorld, id: ClientId, weapon: u32
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WeaponList {
+pub enum WeaponList {
     All,
     Primaries,
     Offhands,
@@ -658,7 +665,7 @@ pub(crate) enum WeaponList {
     Exclusives,
 }
 
-pub(crate) fn weapons(world: &FrameWorld, id: ClientId, list: WeaponList) -> Vec<u32> {
+pub fn weapons(world: &FrameWorld, id: ClientId, list: WeaponList) -> Vec<u32> {
     let Some(ps) = world.player(id) else {
         return Vec::new();
     };
@@ -686,7 +693,7 @@ pub(crate) fn has_weapon(world: &FrameWorld, id: ClientId, weapon: u32) -> bool 
             .is_some_and(|ps| ps.weapons.contains(&(weapon as i32)))
 }
 
-pub(crate) fn ammo_clip(world: &FrameWorld, id: ClientId, weapon: u32) -> i32 {
+pub fn ammo_clip(world: &FrameWorld, id: ClientId, weapon: u32) -> i32 {
     let (Some(ps), Some(facts)) = (world.player(id), world.combat_facts_for(weapon)) else {
         return 0;
     };
@@ -694,7 +701,7 @@ pub(crate) fn ammo_clip(world: &FrameWorld, id: ClientId, weapon: u32) -> i32 {
     weapon_iw4::get_clip_for_hand(&ps.ammoclip, key, 0)
 }
 
-pub(crate) fn ammo_stock(world: &FrameWorld, id: ClientId, weapon: u32) -> i32 {
+pub fn ammo_stock(world: &FrameWorld, id: ClientId, weapon: u32) -> i32 {
     let (Some(ps), Some(facts)) = (world.player(id), world.combat_facts_for(weapon)) else {
         return 0;
     };
@@ -712,7 +719,10 @@ pub(crate) fn set_ammo_clip(world: &mut FrameWorld, id: ClientId, weapon: u32, c
         let _ = weapon_iw4::set_clip_for_hand(&mut ps.ammoclip, key, 0, count);
     }
     let stock = ammo_stock(world, id, weapon);
-    world.client_meta_mut(id).set_ammo(weapon, count, stock);
+    world
+        .client_meta_mut(id)
+        .weapon_carry
+        .set_ammo(weapon, count, stock);
 }
 
 pub(crate) fn set_ammo_stock(world: &mut FrameWorld, id: ClientId, weapon: u32, count: i32) {
@@ -725,7 +735,10 @@ pub(crate) fn set_ammo_stock(world: &mut FrameWorld, id: ClientId, weapon: u32, 
         let _ = weapon_iw4::set_ammo_not_in_clip(&mut ps.ammo, key, count);
     }
     let clip = ammo_clip(world, id, weapon);
-    world.client_meta_mut(id).set_ammo(weapon, clip, count);
+    world
+        .client_meta_mut(id)
+        .weapon_carry
+        .set_ammo(weapon, clip, count);
 }
 
 pub(crate) fn give_max_ammo(world: &mut FrameWorld, id: ClientId, weapon: u32) {
@@ -847,40 +860,10 @@ pub(crate) fn constrain_cmd(
     id: ClientId,
     cmd: &mut playerstate_iw4::UserCmd,
 ) {
-    use playerstate_iw4::buttons;
     let held = world.player(id).map_or(0, |ps| ps.weapon);
-    let Some(mut controls) = world.client_meta(id).map(|m| m.controls) else {
+    let Some(mut controls) = world.client_meta(id).map(|meta| meta.controls) else {
         return;
     };
-    if controls.switch_to != 0 && controls.switch_to == held {
-        controls.switch_to = 0;
-        world.client_meta_mut(id).controls.switch_to = 0;
-    }
-    if controls.frozen {
-        cmd.forwardmove = 0;
-        cmd.rightmove = 0;
-        cmd.buttons &= buttons::PRONE | buttons::CROUCH | buttons::STANCE_HELD;
-    }
-    if controls.linked {
-        cmd.forwardmove = 0;
-        cmd.rightmove = 0;
-        cmd.buttons &= !(buttons::JUMP | buttons::SPRINT);
-    }
-    if controls.jump_disabled {
-        cmd.buttons &= !buttons::JUMP;
-    }
-    if controls.weapons_disabled {
-        cmd.buttons &= !(buttons::ATTACK | buttons::THROW | buttons::ADS | buttons::MELEE_CHARGE);
-    }
-    if controls.offhands_disabled || controls.weapons_disabled {
-        cmd.buttons &= !(buttons::FRAG | buttons::SMOKE);
-    }
-    if controls.usability_disabled {
-        cmd.buttons &= !(buttons::USE | buttons::USE_RELOAD);
-    }
-    if controls.switch_to != 0 {
-        cmd.weapon = controls.switch_to as u16;
-    } else if controls.switch_disabled || controls.frozen {
-        cmd.weapon = held as u16;
-    }
+    crate::bg::player_step::constrain_cmd(held, &mut controls, cmd);
+    world.client_meta_mut(id).controls = controls;
 }

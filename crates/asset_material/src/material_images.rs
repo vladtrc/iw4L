@@ -24,7 +24,8 @@ use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
+    Extent3d, TextureDataOrder, TextureDimension, TextureFormat, TextureViewDescriptor,
+    TextureViewDimension,
 };
 use bevy::tasks::TaskPool;
 
@@ -43,7 +44,6 @@ pub struct MaterialImageStats {
 }
 
 fn color_map_force_linear(
-    _is_unlit: Option<bool>,
     transform: crate::ColorMapTransform,
     takes_model_lighting: Option<bool>,
 ) -> bool {
@@ -104,13 +104,12 @@ pub fn decode_material_color_maps(
 fn requested_color_map_slots(catalog: &MaterialDefinitions) -> Vec<ImageRequest> {
     let mut requested = vec![None; catalog.images.len()];
     for material in &catalog.materials {
-        let alpha_test = catalog
-            .agreed_alpha_test_cutoff(material)
+        let alpha_test = material
+            .agreed_alpha_test_cutoff()
             .is_some_and(|cutoff| cutoff.is_some());
         let force_linear = color_map_force_linear(
-            catalog.is_unlit(material),
-            catalog.color_map_transform(material),
-            catalog.takes_model_lighting(material),
+            material.color_map_transform(),
+            material.takes_model_lighting(),
         );
         for texture in &material.textures {
             let is_normal = match texture_semantic_decodes_as_normal(texture.semantic) {
@@ -185,7 +184,7 @@ fn requested_keyed_image_slots(
     catalog: &MaterialDefinitions,
     keys: impl IntoIterator<Item = crate::MaterialKey>,
 ) -> Vec<ImageRequest> {
-    let wanted: std::collections::HashSet<(crate::AssetNamespace, String)> = keys
+    let wanted: std::collections::HashSet<(crate::FamilyId, String)> = keys
         .into_iter()
         .map(|key| {
             let name = crate::AssetRef::bare_name(&key.name).to_owned();
@@ -205,13 +204,12 @@ fn requested_keyed_image_slots(
         if bind.is_empty() || !wanted.contains(&(material.namespace, bind.to_owned())) {
             continue;
         }
-        let alpha_test = catalog
-            .agreed_alpha_test_cutoff(material)
+        let alpha_test = material
+            .agreed_alpha_test_cutoff()
             .is_some_and(|cutoff| cutoff.is_some());
         let force_linear = color_map_force_linear(
-            catalog.is_unlit(material),
-            catalog.color_map_transform(material),
-            catalog.takes_model_lighting(material),
+            material.color_map_transform(),
+            material.takes_model_lighting(),
         );
         for texture in &material.textures {
             let Some(is_normal) = texture_semantic_decodes_as_normal(texture.semantic) else {
@@ -373,12 +371,11 @@ fn decode_requests_from_trees(
             stage.advance(1);
         }
     }
-    for namespace in [
-        crate::AssetNamespace::Iw4,
-        crate::AssetNamespace::T5,
-        crate::AssetNamespace::Iw5,
-        crate::AssetNamespace::T6,
-    ] {
+    let families: std::collections::BTreeSet<_> = work
+        .iter()
+        .filter_map(|(slot, _)| images.get(*slot).map(|image| image.namespace))
+        .collect();
+    for namespace in families {
         let requests: Vec<_> = work
             .iter()
             .copied()
@@ -656,6 +653,8 @@ pub fn decode_reflection_probe_cubemap(source: &AuthoredImage) -> Result<Image, 
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
     image.texture_descriptor.mip_level_count = levels;
+    // `data` above is packed level by level, six faces per level.
+    image.data_order = TextureDataOrder::MipMajor;
     image.texture_view_descriptor = Some(TextureViewDescriptor {
         dimension: Some(TextureViewDimension::Cube),
         ..default()
@@ -771,7 +770,6 @@ pub fn decode_iwi_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
 
 pub fn decode_ui_image(
     publication: &crate::UiImagePublication,
-    _games_root: &Path,
     image_name: &str,
 ) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
     let key = asset_core::AssetKey::parse(image_name).map_err(|e| e.to_string())?;
@@ -863,18 +861,14 @@ pub fn decode_map_preview(
     zone_ff: &Path,
     map_name: &str,
 ) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
-    if asset_transport::zone_game_for_path(zone_ff) == Some(asset_core::ZoneGame::T6) {
-        return Ok(publication
-            .zone_image(
-                asset_core::AssetNamespace::T6,
-                &format!("loadscreen_{map_name}"),
-            )
-            .or_else(|| {
-                publication.zone_image(
-                    asset_core::AssetNamespace::T6,
-                    &format!("menu_{map_name}_map_select_final"),
-                )
-            })
+    if let Some((family, names)) = asset_transport::zone_game_for_path(zone_ff).and_then(|family| {
+        crate::material_compile::compiler::compiler_for(family)
+            .and_then(|compiler| compiler.zone_preview_names(map_name))
+            .map(|names| (family, names))
+    }) {
+        return Ok(names
+            .iter()
+            .find_map(|name| publication.zone_image(family, name))
             .map(|(width, height, rgba)| (width, height, rgba.as_ref().clone())));
     }
     let main = game_main_for_zone(zone_ff)?;

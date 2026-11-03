@@ -228,32 +228,57 @@ const FX_STATUS_DRAW_SKIP: u32 = 0x4000;
 
 const FX_ELEM_FLAG_TRAIL_DIR_BASIS: i32 = 0x4000;
 
+pub trait FxDrawResolver {
+    fn sprite(&mut self, ctx: FxDrawElemContext<'_>) -> Option<FxSpriteInstance>;
+    fn trail_def(&mut self, ctx: FxDrawTrailContext<'_>, def_index: u8) -> Option<FxTrailDrawDef>;
+    fn trail_sample(&mut self, ctx: FxDrawTrailSampleContext<'_>) -> Option<FxTrailSampleVisual>;
+    fn spark_size1(&mut self, ctx: FxSparkDrawQuery<'_>) -> Option<f32>;
+    fn cloud(&mut self, ctx: FxDrawElemContext<'_>) -> Option<FxCloudInstance>;
+    fn light(&mut self, ctx: FxDrawElemContext<'_>) -> Option<FxElemLightInstance>;
+    fn model(&mut self, ctx: FxDrawElemContext<'_>) -> Option<FxModelInstance>;
+}
+
 pub fn generate_verts(
     host: &FxSystemHost,
-    mut on_elem: impl FnMut(FxDrawElemContext<'_>) -> Option<FxSpriteInstance>,
+    on_elem: impl FnMut(FxDrawElemContext<'_>) -> Option<FxSpriteInstance>,
 ) -> FxGenerateVertsOut {
-    generate_verts_with_trails(
-        host,
-        &mut on_elem,
-        &mut |_, _| None,
-        &mut |_| None,
-        &mut |_| None,
-        &mut |_| None,
-        &mut |_| None,
-        &mut |_| None,
-        [0.0; 3],
-    )
+    struct Sprites<F>(F);
+    impl<F: FnMut(FxDrawElemContext<'_>) -> Option<FxSpriteInstance>> FxDrawResolver for Sprites<F> {
+        fn sprite(&mut self, ctx: FxDrawElemContext<'_>) -> Option<FxSpriteInstance> {
+            (self.0)(ctx)
+        }
+        fn trail_def(
+            &mut self,
+            _ctx: FxDrawTrailContext<'_>,
+            _def_index: u8,
+        ) -> Option<FxTrailDrawDef> {
+            None
+        }
+        fn trail_sample(
+            &mut self,
+            _ctx: FxDrawTrailSampleContext<'_>,
+        ) -> Option<FxTrailSampleVisual> {
+            None
+        }
+        fn spark_size1(&mut self, _ctx: FxSparkDrawQuery<'_>) -> Option<f32> {
+            None
+        }
+        fn cloud(&mut self, _ctx: FxDrawElemContext<'_>) -> Option<FxCloudInstance> {
+            None
+        }
+        fn light(&mut self, _ctx: FxDrawElemContext<'_>) -> Option<FxElemLightInstance> {
+            None
+        }
+        fn model(&mut self, _ctx: FxDrawElemContext<'_>) -> Option<FxModelInstance> {
+            None
+        }
+    }
+    generate_verts_with_trails(host, &mut Sprites(on_elem), [0.0; 3])
 }
 
 pub fn generate_verts_with_trails(
     host: &FxSystemHost,
-    on_elem: &mut dyn FnMut(FxDrawElemContext<'_>) -> Option<FxSpriteInstance>,
-    on_trail_def: &mut dyn FnMut(FxDrawTrailContext<'_>, u8) -> Option<FxTrailDrawDef>,
-    on_trail_sample: &mut dyn FnMut(FxDrawTrailSampleContext<'_>) -> Option<FxTrailSampleVisual>,
-    on_spark_size1: &mut dyn FnMut(FxSparkDrawQuery<'_>) -> Option<f32>,
-    on_cloud: &mut dyn FnMut(FxDrawElemContext<'_>) -> Option<FxCloudInstance>,
-    on_light: &mut dyn FnMut(FxDrawElemContext<'_>) -> Option<FxElemLightInstance>,
-    on_model: &mut dyn FnMut(FxDrawElemContext<'_>) -> Option<FxModelInstance>,
+    resolver: &mut dyn FxDrawResolver,
     camera: [f32; 3],
 ) -> FxGenerateVertsOut {
     let mut out = FxGenerateVertsOut::default();
@@ -267,18 +292,8 @@ pub fn generate_verts_with_trails(
                 .effect_at(slot)
                 .is_some_and(|effect| effect.products != crate::FxSpawnProducts::Marks)
         {
-            draw_effect_sprites(
-                host,
-                slot,
-                on_elem,
-                on_spark_size1,
-                on_cloud,
-                on_light,
-                on_model,
-                camera,
-                &mut out,
-            );
-            draw_effect_trails(host, slot, on_trail_def, on_trail_sample, &mut out);
+            draw_effect_sprites(host, slot, resolver, camera, &mut out);
+            draw_effect_trails(host, slot, resolver, &mut out);
         }
         cursor = cursor.wrapping_add(1);
     }
@@ -288,11 +303,7 @@ pub fn generate_verts_with_trails(
 fn draw_effect_sprites(
     host: &FxSystemHost,
     effect_slot: usize,
-    on_elem: &mut dyn FnMut(FxDrawElemContext<'_>) -> Option<FxSpriteInstance>,
-    on_spark_size1: &mut dyn FnMut(FxSparkDrawQuery<'_>) -> Option<f32>,
-    on_cloud: &mut dyn FnMut(FxDrawElemContext<'_>) -> Option<FxCloudInstance>,
-    on_light: &mut dyn FnMut(FxDrawElemContext<'_>) -> Option<FxElemLightInstance>,
-    on_model: &mut dyn FnMut(FxDrawElemContext<'_>) -> Option<FxModelInstance>,
+    resolver: &mut dyn FxDrawResolver,
     camera: [f32; 3],
     out: &mut FxGenerateVertsOut,
 ) {
@@ -311,18 +322,7 @@ fn draw_effect_sprites(
             let next = elem_slot_for_handle(handle)
                 .and_then(|s| host.elems.get(s).map(|e| e.next_elem_handle))
                 .unwrap_or(FX_ELEM_HANDLE_NONE);
-            draw_one_elem(
-                host,
-                effect_slot,
-                handle,
-                on_elem,
-                on_spark_size1,
-                on_cloud,
-                on_light,
-                on_model,
-                camera,
-                out,
-            );
+            draw_one_elem(host, effect_slot, handle, resolver, camera, out);
             handle = next;
         }
     }
@@ -332,11 +332,7 @@ fn draw_one_elem(
     host: &FxSystemHost,
     effect_slot: usize,
     handle: u16,
-    on_elem: &mut dyn FnMut(FxDrawElemContext<'_>) -> Option<FxSpriteInstance>,
-    on_spark_size1: &mut dyn FnMut(FxSparkDrawQuery<'_>) -> Option<f32>,
-    on_cloud: &mut dyn FnMut(FxDrawElemContext<'_>) -> Option<FxCloudInstance>,
-    on_light: &mut dyn FnMut(FxDrawElemContext<'_>) -> Option<FxElemLightInstance>,
-    on_model: &mut dyn FnMut(FxDrawElemContext<'_>) -> Option<FxModelInstance>,
+    resolver: &mut dyn FxDrawResolver,
     camera: [f32; 3],
     out: &mut FxGenerateVertsOut,
 ) {
@@ -402,7 +398,7 @@ fn draw_one_elem(
                 packed_lighting_src: effect.packed_lighting_src,
                 elem_handle: handle,
             };
-            match on_cloud(ctx) {
+            match resolver.cloud(ctx) {
                 Some(inst) if inst.cloud.placement_scale != 0.0 && inst.cloud.size0 != 0.0 => {
                     out.clouds.push(inst);
                 }
@@ -423,7 +419,7 @@ fn draw_one_elem(
                 let age = host.msec_now.wrapping_sub(elem.msec_begin);
                 let norm = elem_norm_time(age, elem.life_span_msec);
                 let seed = elem.random_seed;
-                let Some(size1) = on_spark_size1(FxSparkDrawQuery {
+                let Some(size1) = resolver.spark_size1(FxSparkDrawQuery {
                     def_name: effect.def_name.as_str(),
                     catalog_index: effect.catalog_index,
                     def_index: elem.def_index,
@@ -494,7 +490,7 @@ fn draw_one_elem(
                     packed_lighting_src: effect.packed_lighting_src,
                     elem_handle: handle,
                 };
-                match on_cloud(ctx) {
+                match resolver.cloud(ctx) {
                     Some(inst)
                         if inst.cloud.placement_scale != 0.0
                             && inst.cloud.size0 != 0.0
@@ -554,7 +550,7 @@ fn draw_one_elem(
                     packed_lighting_src: effect.packed_lighting_src,
                     elem_handle: handle,
                 };
-                match on_model(ctx) {
+                match resolver.model(ctx) {
                     Some(model) if model.scale != 0.0 => out.models.push(model),
                     _ => out.skipped_model = out.skipped_model.saturating_add(1),
                 }
@@ -588,7 +584,7 @@ fn draw_one_elem(
                     packed_lighting_src: effect.packed_lighting_src,
                     elem_handle: handle,
                 };
-                match on_light(ctx) {
+                match resolver.light(ctx) {
                     Some(inst) if inst.is_spot => out.spot_lights.push(inst),
                     Some(inst) => out.omni_lights.push(inst),
                     None if elem_ty == FxElemType::SpotLight => {
@@ -634,7 +630,7 @@ fn draw_one_elem(
         packed_lighting_src: effect.packed_lighting_src,
         elem_handle: handle,
     };
-    match on_elem(ctx) {
+    match resolver.sprite(ctx) {
         Some(mut sprite) => {
             let dobj = fx_iw4::bolt_dobj(effect.bolt_packed);
             sprite.viewmodel = (fx_iw4::FX_BOLT_VIEWMODEL_DOBJ_BASE
@@ -649,8 +645,7 @@ fn draw_one_elem(
 fn draw_effect_trails(
     host: &FxSystemHost,
     effect_slot: usize,
-    on_trail_def: &mut dyn FnMut(FxDrawTrailContext<'_>, u8) -> Option<FxTrailDrawDef>,
-    on_trail_sample: &mut dyn FnMut(FxDrawTrailSampleContext<'_>) -> Option<FxTrailSampleVisual>,
+    resolver: &mut dyn FxDrawResolver,
     out: &mut FxGenerateVertsOut,
 ) {
     let effect = match host.effect_at(effect_slot) {
@@ -676,46 +671,40 @@ fn draw_effect_trails(
         };
         let next = trail.next_trail_handle;
         let def_index = trail.def_index as u8;
-        let first_elem = trail.first_elem_handle;
-        let last_elem = trail.last_elem_handle;
         let ctx = FxDrawTrailContext {
             def_name: def_name.as_str(),
             catalog_index,
             def_index,
         };
-        let Some(trail_def) = on_trail_def(ctx, def_index) else {
+        let Some(trail_def) = resolver.trail_def(ctx, def_index) else {
             out.skipped_no_trail_def = out.skipped_no_trail_def.saturating_add(1);
             handle = next;
             continue;
         };
-        generate_trail_verts(
-            host,
-            &def_name,
-            catalog_index,
-            def_index,
-            effect_seed,
-            first_elem,
-            last_elem,
-            &trail_def,
-            on_trail_sample,
-            out,
-        );
+        generate_trail_verts(host, ctx, effect_seed, trail, &trail_def, resolver, out);
         handle = next;
     }
 }
 
 fn generate_trail_verts(
     host: &FxSystemHost,
-    def_name: &str,
-    catalog_index: u16,
-    def_index: u8,
+    ctx: FxDrawTrailContext<'_>,
     effect_seed: u64,
-    first_elem: u16,
-    last_elem: u16,
+    trail: &crate::trail::FxTrailSlot,
     trail_def: &FxTrailDrawDef,
-    on_trail_sample: &mut dyn FnMut(FxDrawTrailSampleContext<'_>) -> Option<FxTrailSampleVisual>,
+    resolver: &mut dyn FxDrawResolver,
     out: &mut FxGenerateVertsOut,
 ) {
+    let FxDrawTrailContext {
+        def_name,
+        catalog_index,
+        def_index,
+    } = ctx;
+    let &crate::trail::FxTrailSlot {
+        first_elem_handle: first_elem,
+        last_elem_handle: last_elem,
+        ..
+    } = trail;
     if trail_def.visual_count == 0 {
         out.skipped_no_visual = out.skipped_no_visual.saturating_add(1);
         return;
@@ -812,7 +801,7 @@ fn generate_trail_verts(
             life_msec,
             elem_random_seed: seed,
         };
-        let Some(visual) = on_trail_sample(sample_ctx) else {
+        let Some(visual) = resolver.trail_sample(sample_ctx) else {
             lookup_miss = true;
             sample_handle = next;
             continue;

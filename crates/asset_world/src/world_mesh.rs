@@ -66,7 +66,10 @@ pub enum WorldMeshError {
         half: f32,
     },
     Zone(fastfile_iw4::ZoneError),
-    Iw5Zone(fastfile_iw5::ZoneError),
+    Source {
+        family: asset_core::FamilyId,
+        detail: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,7 +115,9 @@ impl std::fmt::Display for WorldMeshError {
                  this box in the wrong representation (mid/half vs mins/maxs)"
             ),
             WorldMeshError::Zone(e) => write!(f, "reading world geometry: {e}"),
-            WorldMeshError::Iw5Zone(e) => write!(f, "reading IW5 world geometry: {e}"),
+            WorldMeshError::Source { family, detail } => {
+                write!(f, "reading {} world geometry: {detail}", family.as_str())
+            }
         }
     }
 }
@@ -122,12 +127,6 @@ impl std::error::Error for WorldMeshError {}
 impl From<fastfile_iw4::ZoneError> for WorldMeshError {
     fn from(e: fastfile_iw4::ZoneError) -> Self {
         Self::Zone(e)
-    }
-}
-
-impl From<fastfile_iw5::ZoneError> for WorldMeshError {
-    fn from(e: fastfile_iw5::ZoneError) -> Self {
-        Self::Iw5Zone(e)
     }
 }
 

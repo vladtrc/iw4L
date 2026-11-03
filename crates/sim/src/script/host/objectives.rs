@@ -184,7 +184,11 @@ pub(crate) fn publish(world: &mut World) {
         .server_info
         .iter()
         .map(|name| {
-            let value = match_script.dvars.get(name).cloned().unwrap_or_default();
+            let value = match_script
+                .dvars
+                .get(name)
+                .cloned()
+                .unwrap_or(String::new());
             (name.clone(), value)
         })
         .chain(engine)
@@ -200,14 +204,20 @@ pub(crate) fn publish(world: &mut World) {
         .collect();
     let game_end_time = runtime.engine.game_end_time;
     let slow_motion = runtime.engine.slow_motion;
-    let ambient = runtime
-        .program
-        .is_some()
-        .then(|| runtime.engine.ambient.clone().unwrap_or_default());
-    let ac130_ambient = runtime
-        .program
-        .is_some()
-        .then(|| runtime.engine.ac130_ambient.clone().unwrap_or_default());
+    let ambient = runtime.program.is_some().then(|| {
+        runtime
+            .engine
+            .ambient
+            .clone()
+            .unwrap_or_else(crate::ScriptAmbient::default)
+    });
+    let ac130_ambient = runtime.program.is_some().then(|| {
+        runtime
+            .engine
+            .ac130_ambient
+            .clone()
+            .unwrap_or_else(crate::ScriptAmbient::default)
+    });
     let rumble_aliases = match_script
         .precached
         .iter()

@@ -8,7 +8,7 @@ use super::{
     ExactShadowBindingCache, ExactTessBind, ExactTextureTable, ExtractedColourRefs, FrameProduct,
     FrameProductKind, GPU_SPAN_SPOT, GPU_SPAN_SUN, GpuConstantArena, HashMap, Instant,
     MaterialExecView, MaterialGenerationId, MaterialRunExecutor, ModelIndexRingCopyRefuse,
-    ModelIndexStream, PackDraw, PackedCodeConstantLane, PackedCodeConstants, PackedFrontendLists,
+    ModelIndexStream, PackDraw, PackedArenaUpdate, PackedCodeConstantLane, PackedCodeConstants,
     PassConstantBuffers, PrepareCost, PrepareTextureTables, PreparedExactDraw,
     PublishedRenderFrame, RecordCensus, RenderContext, RenderDevice, RenderQueue, RetainedDrawItem,
     RetainedDrawKind, RunPackCache, RuntimeCodeSources, RuntimeShaderStage,
@@ -17,9 +17,9 @@ use super::{
     ShadowmapSpotGpu, ShadowmapSunGpu, SmodelRigidFlush, SunShadowPartition, TableEpoch, TechType,
     TextureView, append_constant_span, as_u32, coalesce_indexed_runs, draw_spot_shadow_map,
     draw_sun_shadow_map_forced, encode, ensure_shadowmap_spot_targets, ensure_shadowmap_sun_target,
-    exec_tables, geometry, overlay_packed_code_on_banks, prim_args_from_world_flush,
-    prim_args_u32_index_span, rank_count_map, same_texture_slots, smodel_skinned,
-    texture_table_layout, upload_constant_arena, upload_packed_arena,
+    exec_tables, geometry, overlay_packed_code_on_banks, prepare_constant_bases,
+    prim_args_from_world_flush, prim_args_u32_index_span, rank_count_map, same_texture_slots,
+    smodel_skinned, texture_table_layout,
 };
 use crate::drawsurf::ExtractedRenderFrameProducts;
 use bevy::prelude::{Mat4, Resource, Vec3};
@@ -63,7 +63,7 @@ struct ShadowExecScratch {
 }
 
 #[derive(Resource, Default)]
-pub(super) struct ShadowSubmitScratch {
+pub(crate) struct ShadowSubmitScratch {
     sun_exec: ShadowExecScratch,
     spot_exec: ShadowExecScratch,
 
@@ -71,55 +71,36 @@ pub(super) struct ShadowSubmitScratch {
 
     sun_prepared: PreparedSunWork,
     spot_prepared: PreparedSpotWork,
+    spot_cache: Vec<SpotShadowContent>,
 
     pub(super) prepared_shadow_epoch: TableEpoch,
 }
 
 #[derive(Clone, Copy)]
-struct SunFlush {
+struct SunFlush<'a> {
     kind: SunFlushKind,
     draw_start: u32,
     draw_count: u32,
     ring_epoch: u32,
-}
-
-fn shadow_gpu_state_continues(
-    same_pipeline: bool,
-    same_tess: bool,
-    same_epoch: bool,
-    same_texture: bool,
-    prev_base: Option<u32>,
-    next_base: Option<u32>,
-    prev_depth: (f32, f32),
-    next_depth: (f32, f32),
-    prev_start: u32,
-    prev_count: u32,
-    next_start: u32,
-) -> bool {
-    same_pipeline
-        && same_tess
-        && same_epoch
-        && same_texture
-        && prev_base.is_some()
-        && prev_base == next_base
-        && prev_depth == next_depth
-        && prev_start.saturating_add(prev_count) == next_start
+    owner_draws: &'a [u32],
+    draw_offset: usize,
 }
 
 fn shadow_draw_run_continues(prev: &PreparedExactDraw, next: &PreparedExactDraw) -> bool {
-    shadow_gpu_state_continues(
-        prev.pipeline == next.pipeline && prev.port == next.port,
-        prev.tess == next.tess,
-        prev.ring_epoch == next.ring_epoch,
-        same_texture_slots(prev, next),
-        prev.constant_base,
-        next.constant_base,
-        (prev.depth_min, prev.depth_max),
-        (next.depth_min, next.depth_max),
-        prev.start,
-        prev.count,
-        next.start,
-    )
+    prev.slice_world == next.slice_world && prev.aperture_world == next.aperture_world && {
+        let same_pipeline = prev.pipeline == next.pipeline && prev.port == next.port;
+        let same_tess = prev.tess == next.tess;
+        let same_epoch = prev.ring_epoch == next.ring_epoch;
+        let same_texture = same_texture_slots(prev, next);
+        same_pipeline
+            && same_tess
+            && same_epoch
+            && same_texture
+            && prev.constant_base.is_some()
+            && prev.constant_base == next.constant_base
+            && (prev.depth_min, prev.depth_max) == (next.depth_min, next.depth_max)
+            && prev.start.saturating_add(prev.count) == next.start
+    }
 }
 
 fn coalesce_shadow_draws(draws: &mut Vec<PreparedExactDraw>) {
@@ -148,17 +129,23 @@ fn sun_flush_owner<'a>(
         SunFlushKind::World => "WorldProvenanceMissing",
     };
     let Some(&draw_index) = draw_indices.first() else {
-        return Err(missing.into());
+        return Err(format!("{missing}:EmptyOwners"));
     };
     for &owner in draw_indices {
         let index = (owner as usize).saturating_add(draw_offset);
-        if draws.get(index).is_none() || techs.get(index).is_none() {
-            return Err(missing.into());
+        if owner == u32::MAX {
+            return Err(format!("{missing}:MaterialRefused"));
+        }
+        if draws.get(index).is_none() {
+            return Err(format!("{missing}:OwnerOutOfRange"));
+        }
+        if techs.get(index).is_none() {
+            return Err(format!("{missing}:TechniqueOutOfRange"));
         }
     }
     let draw_index = (draw_index as usize).saturating_add(draw_offset);
     let Some(item) = draws.get(draw_index) else {
-        return Err(missing.into());
+        return Err(format!("{missing}:OwnerOutOfRange"));
     };
     let matches_kind = match (kind, &item.kind) {
         (SunFlushKind::Smodel, RetainedDrawKind::Smodel { .. }) => true,
@@ -167,7 +154,7 @@ fn sun_flush_owner<'a>(
         _ => false,
     };
     if !matches_kind {
-        return Err(missing.into());
+        return Err(format!("{missing}:WrongKind"));
     }
     let Some(&tech) = techs.get(draw_index) else {
         return Err("NoListTech".into());
@@ -259,6 +246,7 @@ enum ShadowStaticOwner {
         bsp_run_first: Option<u16>,
         setup_key_changed: bool,
         world_from_local: [u32; 16],
+        brush_model: Option<u16>,
         samplers: crate::drawsurf::SurfaceSamplerInputs,
     },
     Smodel {
@@ -269,6 +257,8 @@ enum ShadowStaticOwner {
         lighting_handle: u32,
         packed_lighting: Option<[u8; 4]>,
         placement: u32,
+        visibility_slot: u32,
+        owner_world_from_local: [u32; 16],
         stream: Option<lighting_iw4::SmodelSurfPath>,
         cache_index: Option<u16>,
         pretess: Option<render_frame::SmodelPretessRange>,
@@ -285,6 +275,7 @@ fn world_shadow_static_owner(item: &RetainedDrawItem) -> Option<ShadowStaticOwne
         bsp_run_first,
         setup_key_changed,
         world_from_local,
+        brush_model,
     } = item.kind
     else {
         return None;
@@ -298,6 +289,7 @@ fn world_shadow_static_owner(item: &RetainedDrawItem) -> Option<ShadowStaticOwne
         bsp_run_first,
         setup_key_changed,
         world_from_local: overlay_world_key(world_from_local),
+        brush_model,
         samplers: item.surface_samplers,
     })
 }
@@ -310,6 +302,8 @@ fn smodel_shadow_static_owner(item: &RetainedDrawItem) -> Option<ShadowStaticOwn
         lighting_handle,
         packed_lighting,
         placement,
+        visibility_slot,
+        owner_world_from_local,
         stream,
         cache_index,
         pretess,
@@ -325,6 +319,8 @@ fn smodel_shadow_static_owner(item: &RetainedDrawItem) -> Option<ShadowStaticOwn
         lighting_handle,
         packed_lighting,
         placement,
+        visibility_slot,
+        owner_world_from_local: overlay_world_key(owner_world_from_local),
         stream,
         cache_index,
         pretess,
@@ -783,12 +779,12 @@ impl ExactPrepare<'_> {
         &mut self,
         executor: &mut MaterialRunExecutor,
         view: Option<MaterialExecView<'_>>,
-        flush: SunFlush,
-        owner_draws: &[u32],
-        draw_offset: usize,
+        flush: SunFlush<'_>,
         product: &FrameProduct,
         target: ExactPrepareTarget,
     ) -> Result<ShadowmapSunFlushGpu, String> {
+        let owner_draws = flush.owner_draws;
+        let draw_offset = flush.draw_offset;
         let result: Result<ShadowmapSunFlushGpu, String> = (|| {
             if flush.draw_count == 0 {
                 return Err("EmptyFlush".into());
@@ -810,18 +806,18 @@ impl ExactPrepare<'_> {
             {
                 return Err("SmodelCachedNotRigidStream".into());
             }
-            let run_serial = executor.run_serial();
             let execution = executor.execution();
             let mut prepared = Vec::new();
+            self.slice_plane = match item.kind {
+                RetainedDrawKind::XModel { portal_slice, .. } => portal_slice,
+                _ => None,
+            };
             self.prepare_ready_hit(
                 item,
-                execution,
-                run_serial,
-                None,
-                item.surface_samplers,
+                executor,
                 target,
-                false,
-                false,
+                &mut None,
+                super::ShadowProductDependencies::NONE,
                 &mut prepared,
             )
             .map_err(|cause| format!("{cause:?}"))?;
@@ -842,48 +838,30 @@ impl ExactPrepare<'_> {
     }
 }
 
-fn prepare_smodel_skinned_shadow_gpu(
-    prepare: &mut ExactPrepare<'_>,
-    executor: &mut MaterialRunExecutor,
-    view: Option<MaterialExecView<'_>>,
-    packed: &PackedFrontendLists,
-    flushes: &[SmodelRigidFlush],
-    product: &FrameProduct,
-    draw_offset: usize,
-    target: ExactPrepareTarget,
-    miss: &mut u32,
-    miss_rows: &mut BTreeMap<String, u32>,
-) -> Vec<ShadowmapSunFlushGpu> {
-    let mut out = Vec::new();
-    for flush in flushes {
-        let owner_start = flush.entry_start as usize;
-        let owner_end = owner_start.saturating_add(flush.entry_count as usize);
-        let owners = packed
-            .smodel_skinned_draw_indices
-            .get(owner_start..owner_end)
-            .unwrap_or(&[]);
-        match prepare.prepare_shadow_flush_draws(
-            executor,
-            view,
+struct SkinnedShadowFlushes<'a> {
+    owner_indices: &'a [u32],
+    flushes: &'a [SmodelRigidFlush],
+}
+
+impl<'a> SkinnedShadowFlushes<'a> {
+    fn draws(self, draw_offset: usize) -> impl Iterator<Item = SunFlush<'a>> {
+        self.flushes.iter().map(move |flush| {
+            let owner_start = flush.entry_start as usize;
+            let owner_end = owner_start.saturating_add(flush.entry_count as usize);
+            let owners = self
+                .owner_indices
+                .get(owner_start..owner_end)
+                .unwrap_or(&[]);
             SunFlush {
                 kind: SunFlushKind::Smodel,
                 draw_start: 0,
                 draw_count: 1,
                 ring_epoch: 0,
-            },
-            owners,
-            draw_offset,
-            product,
-            target,
-        ) {
-            Ok(gpu) => out.push(gpu),
-            Err(cause) => {
-                *miss = miss.saturating_add(1);
-                *miss_rows.entry(cause).or_default() += 1;
+                owner_draws: owners,
+                draw_offset,
             }
-        }
+        })
     }
-    out
 }
 
 #[derive(Default)]
@@ -909,6 +887,8 @@ pub(super) struct SpotShadowSubmit {
     pub(super) gpu: u32,
     pub(super) miss: u32,
     pub(super) slots: u32,
+    pub(super) cache_hits: u32,
+    pub(super) updates: u32,
     pub(super) cause: Option<String>,
     pub(super) record_n: RecordCensus,
 }
@@ -920,14 +900,96 @@ struct PreparedSpotSlot {
     smodel_index_epochs: Vec<Buffer>,
     xmodel_index_epochs: Vec<Buffer>,
     draw_range: std::ops::Range<usize>,
+    content: Option<SpotShadowContent>,
 }
 
 #[derive(Default)]
 struct PreparedSpotWork {
+    generation: MaterialGenerationId,
+    clear_pipeline: Option<bevy::render::render_resource::RenderPipeline>,
     miss: u32,
     miss_rows: BTreeMap<String, u32>,
     all_prepared: Vec<PreparedExactDraw>,
     prepared_slots: Vec<PreparedSpotSlot>,
+}
+
+struct SpotShadowContent {
+    light: u8,
+    target: TextureView,
+    viewport: render_frame::SunShadowViewport,
+    generation: MaterialGenerationId,
+    geometry: Arc<super::ExtractedStaticGeometry>,
+    smc_revision: Option<u64>,
+    index_layout: u64,
+    // Published stream versions deliberately over-invalidate on unrelated
+    // animation; copying/sorting each light's vertex set cost more than the GPU work.
+    xmodel_revision: Option<(u64, u64)>,
+    skin_jobs: Vec<render_frame::skinning::PackedSkinJob>,
+    image_revision: (u64, u64),
+    smodel_indices: Vec<Vec<u32>>,
+    xmodel_indices: Vec<Vec<u32>>,
+    draws: Vec<PreparedExactDraw>,
+}
+
+fn same_spot_draw(a: &PreparedExactDraw, b: &PreparedExactDraw) -> bool {
+    a.pipeline == b.pipeline
+        && a.port == b.port
+        && a.constants == b.constants
+        && a.texture_slots == b.texture_slots
+        && a.start == b.start
+        && a.count == b.count
+        && a.tess == b.tess
+        && a.depth_min.to_bits() == b.depth_min.to_bits()
+        && a.depth_max.to_bits() == b.depth_max.to_bits()
+        && a.ring_epoch == b.ring_epoch
+        && a.smc_stream_off == b.smc_stream_off
+        && a.state == b.state
+        && a.slice_world == b.slice_world
+        && a.aperture_world == b.aperture_world
+}
+
+impl SpotShadowContent {
+    fn overlaps(&self, other: &Self) -> bool {
+        let a = self.viewport;
+        let b = other.viewport;
+        self.target.id() == other.target.id()
+            && a.x < b.x + b.width
+            && b.x < a.x + a.width
+            && a.y < b.y + b.height
+            && b.y < a.y + a.height
+    }
+    fn same(&self, other: &Self) -> bool {
+        let a = self.viewport;
+        let b = other.viewport;
+        self.light == other.light
+            && self.target.id() == other.target.id()
+            && [a.x, a.y, a.width, a.height] == [b.x, b.y, b.width, b.height]
+            && self.generation == other.generation
+            && Arc::ptr_eq(&self.geometry, &other.geometry)
+            && self.smc_revision == other.smc_revision
+            && self.index_layout == other.index_layout
+            && self.xmodel_revision == other.xmodel_revision
+            && self.image_revision == other.image_revision
+            && self.smodel_indices == other.smodel_indices
+            && self.xmodel_indices == other.xmodel_indices
+            && self.skin_jobs.len() == other.skin_jobs.len()
+            && self.skin_jobs.iter().zip(&other.skin_jobs).all(|(a, b)| {
+                a.shape.id() == b.shape.id()
+                    && a.bones == b.bones
+                    && a.destination == b.destination
+                    && a.offset.map(f32::to_bits) == b.offset.map(f32::to_bits)
+                    && a.ranges.len() == b.ranges.len()
+                    && a.ranges.iter().zip(b.ranges.iter()).all(|(a, b)| {
+                        a.start == b.start && a.count == b.count && a.rigid == b.rigid
+                    })
+            })
+            && self.draws.len() == other.draws.len()
+            && self
+                .draws
+                .iter()
+                .zip(&other.draws)
+                .all(|(a, b)| same_spot_draw(a, b))
+    }
 }
 
 struct PreparedSunPartition {
@@ -980,438 +1042,6 @@ fn world_shadow_zone_span(start: u32, count: u32, src_index_n: usize) -> Option<
     (end <= src_index_n).then_some((start, count))
 }
 
-fn prepare_shadowmap_spot(
-    products: &ExtractedRenderFrameProducts,
-    extracted: ExtractedColourRefs<'_>,
-    geometry: &ExactColourGeometry,
-    pipeline_res: &ExactColourPipeline,
-    registry: &ExactPipelineRegistry,
-    device: &RenderDevice,
-    queue: &RenderQueue,
-    uploaded: &RuntimeUploadedImageRegistry,
-    binding_cache: &mut ExactShadowBindingCache,
-    texture_table: &mut ExactTextureTable,
-    shadow_arena: &mut ShadowmapSpotArena,
-    shadowmap: &mut ShadowmapSpotGpu,
-    sampler_table: &SamplerTable,
-    shadow_exec: &mut ShadowExecScratch,
-    skinned_tess: &mut smodel_skinned::SmodelSkinnedTess,
-) -> PreparedSpotWork {
-    let ShadowExecScratch {
-        executor: shadow_exec_executor,
-        ..
-    } = shadow_exec;
-    shadow_exec_executor.begin_list();
-    let shadow_exec_view = exec_tables(extracted).map(|(catalog, prepared_table)| {
-        MaterialExecView::camera(catalog, prepared_table, &extracted.frame.exec_frame)
-    });
-    let spot = products.0.product(FrameProductKind::SpotShadow);
-    if spot.spot_slots.is_empty() {
-        return PreparedSpotWork::default();
-    }
-    ensure_shadowmap_spot_targets(shadowmap, device);
-    let mut slots: Vec<_> = spot.spot_slots.iter().collect();
-    slots.sort_by_key(|slot| {
-        (
-            match slot.emitted.plan.render_target_id {
-                lighting_iw4::GFX_SPOT_SHADOW_RT_SMALL => 0u8,
-                lighting_iw4::GFX_SPOT_SHADOW_RT_LARGE => 1u8,
-                _ => 2u8,
-            },
-            slot.emitted.slot_index,
-        )
-    });
-
-    let mut prepare = ExactPrepare {
-        extracted,
-        geometry,
-        pretess: None,
-        pipeline_res,
-        registry,
-        device,
-        uploaded,
-        spot_shadow_select: None,
-        sampler_table,
-        textures: PrepareTextureTables::Shadow {
-            slots: &mut binding_cache.textures,
-            table: texture_table,
-        },
-        arena: None,
-        run_pack: RunPackCache::default(),
-        cost: PrepareCost::default(),
-        skinned_tess: Some(skinned_tess),
-        skinned_shared: None,
-    };
-    let target = ExactPrepareTarget {
-        color: SHADOWMAP_SPOT_COLOR_FORMAT,
-        samples: 1,
-        depth: SHADOWMAP_SPOT_DEPTH_FORMAT,
-        forward_z: true,
-        use_world_pretess: false,
-    };
-    let mut miss = 0u32;
-    let mut miss_rows = BTreeMap::<String, u32>::new();
-    let mut overlay_intern = ShadowOverlayIntern::new();
-    let mut all_prepared = Vec::new();
-    let mut prepared_slots = Vec::new();
-
-    for slot in slots {
-        let emitted = slot.emitted;
-        let Some(view_parms) = emitted.view_parms.as_ref() else {
-            miss = miss.saturating_add(1);
-            *miss_rows
-                .entry("MissingSpotShadowViewParms".into())
-                .or_default() += 1;
-            continue;
-        };
-        let envelope = draw_spot_shadow_map(emitted.slot_index, emitted.plan, Some(&slot.packed));
-        let Some(work) = envelope.work.as_ref() else {
-            miss = miss.saturating_add(1);
-            *miss_rows.entry("MissingSpotShadowWork".into()).or_default() += 1;
-            continue;
-        };
-        let Some(color_view) = shadowmap.color_view(envelope.render_target_id).cloned() else {
-            miss = miss.saturating_add(1);
-            *miss_rows
-                .entry("MissingSpotShadowColorTarget".into())
-                .or_default() += 1;
-            continue;
-        };
-        let Some(depth_view) = shadowmap.depth_view(envelope.render_target_id).cloned() else {
-            miss = miss.saturating_add(1);
-            *miss_rows
-                .entry("MissingSpotShadowDepthTarget".into())
-                .or_default() += 1;
-            continue;
-        };
-
-        let mut flushes = Vec::<ShadowmapSunFlushGpu>::new();
-        // Receivers sample every emitted slot, so a slot whose casters all
-        // compacted away still clears its target to fully lit.
-        let work = if spot.ordered_draws.is_empty() {
-            &Default::default()
-        } else {
-            work
-        };
-        for flush in &work.world_flushes {
-            let (start, count) = prim_args_u32_index_span(prim_args_from_world_flush(*flush));
-            let Some((start, count)) =
-                world_shadow_zone_span(start, count, geometry.world_cpu_indices.len())
-            else {
-                miss = miss.saturating_add(1);
-                *miss_rows
-                    .entry("WorldShadowSpanOutsideZoneIb".into())
-                    .or_default() += 1;
-                continue;
-            };
-            let owner_start = flush.entry_start as usize;
-            let owner_end = owner_start.saturating_add(flush.entry_count as usize);
-            let owners = slot
-                .packed
-                .world_draw_indices
-                .get(owner_start..owner_end)
-                .unwrap_or(&[]);
-            match prepare.prepare_shadow_flush_draws(
-                shadow_exec_executor,
-                shadow_exec_view,
-                SunFlush {
-                    kind: SunFlushKind::World,
-                    draw_start: start,
-                    draw_count: count,
-                    ring_epoch: 0,
-                },
-                owners,
-                0,
-                spot,
-                target,
-            ) {
-                Ok(gpu) => flushes.push(gpu),
-                Err(cause) => {
-                    miss = miss.saturating_add(1);
-                    *miss_rows.entry(cause).or_default() += 1;
-                }
-            }
-        }
-
-        let mut xmodel_stream = ModelIndexStream::new();
-        let mut xmodel_spans = Vec::new();
-        for flush in &work.xmodel_flushes {
-            let owner_start = flush.entry_start as usize;
-            let owner_end = owner_start.saturating_add(flush.entry_count as usize);
-            let Some(entries) = slot.packed.xmodel.get(owner_start..owner_end) else {
-                miss = miss.saturating_add(1);
-                *miss_rows
-                    .entry("XModelDynamicProvenanceMissing".into())
-                    .or_default() += 1;
-                continue;
-            };
-            for (entry_offset, entry) in entries.iter().enumerate() {
-                let hit_start = entry.index_byte_offset / 2;
-                let hit_count = u32::from(entry.tri_count).saturating_mul(3);
-                match emit_local_xmodel_shadow_flush(
-                    &extracted.frame.xmodel_indices,
-                    hit_start,
-                    hit_count,
-                    &mut xmodel_stream,
-                ) {
-                    Ok((ring_epoch, draw_start, draw_count)) => xmodel_spans.push((
-                        ring_epoch,
-                        draw_start,
-                        draw_count,
-                        owner_start.saturating_add(entry_offset),
-                    )),
-                    Err(cause) => {
-                        miss = miss.saturating_add(1);
-                        *miss_rows.entry(cause).or_default() += 1;
-                    }
-                }
-            }
-        }
-        let xmodel_epochs = xmodel_stream.finish();
-        for (ring_epoch, draw_start, draw_count, owner) in xmodel_spans {
-            let owners = slot
-                .packed
-                .xmodel_draw_indices
-                .get(owner..owner + 1)
-                .unwrap_or(&[]);
-            match prepare.prepare_shadow_flush_draws(
-                shadow_exec_executor,
-                shadow_exec_view,
-                SunFlush {
-                    kind: SunFlushKind::XModel,
-                    draw_start,
-                    draw_count,
-                    ring_epoch,
-                },
-                owners,
-                0,
-                spot,
-                target,
-            ) {
-                Ok(gpu) => flushes.push(gpu),
-                Err(cause) => {
-                    miss = miss.saturating_add(1);
-                    *miss_rows.entry(cause).or_default() += 1;
-                }
-            }
-        }
-
-        let mut smodel_stream = ModelIndexStream::new();
-        let mut smodel_spans = Vec::new();
-        for flush in &work.smodel_flushes {
-            let owner_start = flush.entry_start as usize;
-            let owner_end = owner_start.saturating_add(flush.entry_count as usize);
-            let Some(entries) = slot.packed.smodel.get(owner_start..owner_end) else {
-                miss = miss.saturating_add(1);
-                *miss_rows
-                    .entry("SmodelDynamicProvenanceMissing".into())
-                    .or_default() += 1;
-                continue;
-            };
-            for (entry_offset, entry) in entries.iter().enumerate() {
-                let hit_start = entry.index_byte_offset / 2;
-                let hit_count = u32::from(entry.tri_count).saturating_mul(3);
-                match emit_local_smodel_shadow_flush(
-                    extracted.world.static_geometry.smodel_indices.as_slice(),
-                    hit_start,
-                    hit_count,
-                    &mut smodel_stream,
-                ) {
-                    Ok((ring_epoch, draw_start, draw_count)) => smodel_spans.push((
-                        ring_epoch,
-                        draw_start,
-                        draw_count,
-                        owner_start.saturating_add(entry_offset),
-                    )),
-                    Err(cause) => {
-                        miss = miss.saturating_add(1);
-                        *miss_rows.entry(cause).or_default() += 1;
-                    }
-                }
-            }
-        }
-        let smodel_epochs = smodel_stream.finish();
-        for (ring_epoch, draw_start, draw_count, owner) in smodel_spans {
-            let owners = slot
-                .packed
-                .smodel_draw_indices
-                .get(owner..owner + 1)
-                .unwrap_or(&[]);
-            match prepare.prepare_shadow_flush_draws(
-                shadow_exec_executor,
-                shadow_exec_view,
-                SunFlush {
-                    kind: SunFlushKind::Smodel,
-                    draw_start,
-                    draw_count,
-                    ring_epoch,
-                },
-                owners,
-                0,
-                spot,
-                target,
-            ) {
-                Ok(gpu) => flushes.push(gpu),
-                Err(cause) => {
-                    miss = miss.saturating_add(1);
-                    *miss_rows.entry(cause).or_default() += 1;
-                }
-            }
-        }
-
-        let skinned_gpu = prepare_smodel_skinned_shadow_gpu(
-            &mut prepare,
-            shadow_exec_executor,
-            shadow_exec_view,
-            &slot.packed,
-            &work.smodel_skinned_flushes,
-            spot,
-            0,
-            target,
-            &mut miss,
-            &mut miss_rows,
-        );
-        flushes.extend(skinned_gpu);
-
-        let start = all_prepared.len();
-        for flush in &flushes {
-            for (draw, code) in flush.draws.iter().zip(&flush.pass_code) {
-                let overlay = shadowmap_spot_overlay(code, view_parms, flush.world_from_local);
-                match overlay_shadow_draw_constants_with(
-                    draw,
-                    &overlay,
-                    flush.world_from_local,
-                    u8::try_from(emitted.slot_index).unwrap_or(u8::MAX),
-                    &mut overlay_intern,
-                ) {
-                    Ok(draw) => all_prepared.push(draw),
-                    Err(()) => {
-                        miss = miss.saturating_add(1);
-                        *miss_rows.entry("SpotOverlayRefused".into()).or_default() += 1;
-                    }
-                }
-            }
-        }
-        let end = all_prepared.len();
-        if start == end && !envelope.cleared {
-            continue;
-        }
-        let smodel_index_epochs =
-            shadowmap.upload_smodel_index_epochs(emitted.slot_index, device, queue, &smodel_epochs);
-        let xmodel_index_epochs =
-            shadowmap.upload_xmodel_index_epochs(emitted.slot_index, device, queue, &xmodel_epochs);
-        prepared_slots.push(PreparedSpotSlot {
-            envelope,
-            color_view,
-            depth_view,
-            smodel_index_epochs,
-            xmodel_index_epochs,
-            draw_range: start..end,
-        });
-    }
-    drop(prepare);
-
-    if !all_prepared.is_empty() {
-        let ShadowmapSpotArena { gpu, pack, .. } = shadow_arena;
-        pack.begin_list();
-        upload_constant_arena(
-            &mut all_prepared,
-            pack,
-            gpu,
-            pipeline_res,
-            registry,
-            device,
-            queue,
-            "iw4_shadowmap_spot_vs_arena",
-        );
-    }
-    PreparedSpotWork {
-        miss,
-        miss_rows,
-        all_prepared,
-        prepared_slots,
-    }
-}
-
-fn record_shadowmap_spot(
-    mut work: PreparedSpotWork,
-    pipeline_res: &ExactColourPipeline,
-    registry: &ExactPipelineRegistry,
-    geometry: &ExactColourGeometry,
-    device: &RenderDevice,
-    texture_table: &mut ExactTextureTable,
-    shadow_arena: &ShadowmapSpotArena,
-    context: &mut RenderContext,
-    smodel_skinned_vertex: Option<&Buffer>,
-    smodel_skinned_vertex_lighting: Option<&Buffer>,
-    smodel_skinned_index: Option<&Buffer>,
-) -> SpotShadowSubmit {
-    if work.prepared_slots.is_empty() {
-        return SpotShadowSubmit {
-            miss: work.miss,
-            cause: rank_count_map(&work.miss_rows, 1),
-            ..SpotShadowSubmit::default()
-        };
-    }
-    let Some(table_layout) = texture_table_layout(pipeline_res) else {
-        return SpotShadowSubmit {
-            miss: 1,
-            cause: Some("TextureTableLayoutMissing:1".into()),
-            ..SpotShadowSubmit::default()
-        };
-    };
-    let table_binds = texture_table.binds(device, registry, table_layout);
-    let diagnostics = context.diagnostic_recorder();
-    let diagnostics = diagnostics.as_deref();
-    let encoder = context.command_encoder();
-    let gpu_span = diagnostics.time_span(encoder, GPU_SPAN_SPOT);
-    let mut indexed = 0u32;
-    let mut record_n = RecordCensus::default();
-    let world_index = geometry.world_index.as_ref();
-    for slot in &work.prepared_slots {
-        let draws = &mut work.all_prepared[slot.draw_range.clone()];
-        let live = coalesce_shadow_draws_prefix(draws);
-        let result = record_shadowmap_draws(
-            encoder,
-            ShadowPassInputs {
-                device,
-                registry,
-                geometry: geometry::shadow_record_geometry(
-                    geometry,
-                    world_index,
-                    &slot.smodel_index_epochs,
-                    &slot.xmodel_index_epochs,
-                    encode::RecordMesh {
-                        vertex: smodel_skinned_vertex,
-                        index: smodel_skinned_index,
-                        lighting: smodel_skinned_vertex_lighting,
-                    },
-                ),
-                constants_bind: shadow_arena.gpu.bind_group.as_ref(),
-                textures_bind: &table_binds.scene,
-                color_view: &slot.color_view,
-                depth_view: &slot.depth_view,
-                scissor: slot.envelope.scissor,
-                viewport: slot.envelope.viewport,
-                cleared: slot.envelope.cleared,
-            },
-            &draws[..live],
-            "iw4_shadowmap_spot_slot",
-        );
-        indexed = indexed.saturating_add(result.indexed);
-        record_n.add(result.bindings);
-        result.append_refusals(&mut work.miss, &mut work.miss_rows);
-    }
-    gpu_span.end(encoder);
-    SpotShadowSubmit {
-        gpu: indexed,
-        miss: work.miss,
-        slots: work.prepared_slots.len() as u32,
-        cause: rank_count_map(&work.miss_rows, 1),
-        record_n,
-    }
-}
-
 fn sun_model_index_span(
     source_len: usize,
     start: u32,
@@ -1435,528 +1065,6 @@ struct SmodelShadowSpan {
     ring_epoch: u32,
     entry_start: u32,
     entry_count: u32,
-}
-
-fn prepare_shadowmap_sun(
-    products: &ExtractedRenderFrameProducts,
-    extracted: ExtractedColourRefs<'_>,
-    geometry: &ExactColourGeometry,
-    pipeline_res: &ExactColourPipeline,
-    registry: &ExactPipelineRegistry,
-    device: &RenderDevice,
-    queue: &RenderQueue,
-    uploaded: &RuntimeUploadedImageRegistry,
-    binding_cache: &mut ExactShadowBindingCache,
-    texture_table: &mut ExactTextureTable,
-    shadow_arena: &mut ShadowmapSunArena,
-    shadowmap: &mut ShadowmapSunGpu,
-    static_draws: &mut ResidentShadowStaticDraws,
-    sampler_table: &SamplerTable,
-    shadow_exec: &mut ShadowExecScratch,
-    skinned_tess: &mut smodel_skinned::SmodelSkinnedTess,
-) -> PreparedSunWork {
-    let sun = products.0.product(FrameProductKind::SunShadow);
-    if sun.ordered_draws.is_empty() {
-        return PreparedSunWork::done(SunShadowSubmit::default());
-    }
-    let (color_view, resized) = ensure_shadowmap_sun_target(shadowmap, device);
-    if resized {
-        binding_cache.textures.clear();
-    }
-    let Some(color_view) = color_view else {
-        return PreparedSunWork::done(SunShadowSubmit::refused("ShadowmapSunTargetMissing"));
-    };
-    let Some(depth_view) = shadowmap.depth_view().cloned() else {
-        return PreparedSunWork::done(SunShadowSubmit::refused("ShadowmapSunDepthMissing"));
-    };
-    if draw_sun_shadow_map_forced(0, None).is_none() {
-        return PreparedSunWork::done(SunShadowSubmit::refused("ShadowmapSunPartitionMissing"));
-    }
-    let generation = extracted.world.generation.get();
-
-    let ShadowExecScratch {
-        executor: shadow_exec_executor,
-        code_sources: shadow_code_sources,
-        pack_draws,
-    } = shadow_exec;
-    shadow_exec_executor.begin_list();
-    shadow_code_sources.clone_from(&extracted.frame.exec_frame.code_sources);
-    if let Some(sun_frame) = extracted.frame.sun_shadow.as_ref() {
-        shadow_code_sources.set_constant(
-            crate::drawsurf::CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0,
-            crate::drawsurf::code_transpose_matrix_rows(sun_frame.partitions[0].clip_from_world),
-        );
-    }
-    let shadow_exec_view = extracted.frame.sun_shadow.as_ref().and_then(|sun_frame| {
-        let (catalog, prepared_table) = exec_tables(extracted)?;
-        Some(MaterialExecView::shadow_partition(
-            catalog,
-            prepared_table,
-            &extracted.frame.exec_frame,
-            sun_frame.partitions[0].clip_from_world,
-            sun_frame.partitions[0].view,
-            shadow_code_sources,
-        ))
-    });
-    let mut prepare = ExactPrepare {
-        extracted,
-        geometry,
-        pretess: None,
-        pipeline_res,
-        registry,
-        device,
-        uploaded,
-        spot_shadow_select: None,
-        sampler_table,
-        textures: PrepareTextureTables::Shadow {
-            slots: &mut binding_cache.textures,
-            table: texture_table,
-        },
-        arena: None,
-        run_pack: RunPackCache::default(),
-        cost: PrepareCost::default(),
-        skinned_tess: Some(skinned_tess),
-        skinned_shared: None,
-    };
-    let mut miss = 0u32;
-    let mut miss_rows = BTreeMap::<String, u32>::new();
-    let world_ib_n = 0u32;
-    let mut retry_n = 0u32;
-    if texture_table_layout(pipeline_res).is_none() {
-        return PreparedSunWork::done(SunShadowSubmit::refused("TextureTableLayoutMissing"));
-    }
-    let mut smodel_reusable_all = true;
-    let mut any_flush = false;
-    let mut clear_partition_zero = false;
-    let mut partitions = Vec::new();
-    let mut ms_emit = 0.0f32;
-    let mut ms_prepare = 0.0f32;
-    let mut ms_patch = 0.0f32;
-    let mut ms_arena = 0.0f32;
-    let near_n = sun.sun_near_n.min(sun.ordered_draws.len());
-    for partition in 0..crate::drawsurf::SUN_SHADOW_PARTITION_COUNT {
-        let pi = partition as usize;
-        let draws = if pi == 0 {
-            &sun.ordered_draws[..near_n]
-        } else {
-            &sun.ordered_draws[near_n..]
-        };
-        if draws.is_empty() {
-            if pi == 0 {
-                clear_partition_zero = true;
-            }
-            continue;
-        }
-        let packed_fallback;
-        let packed = match &sun.sun_packed {
-            Some(lists) => &lists[pi],
-            None => {
-                packed_fallback = crate::drawsurf::backend::pack_sun_shadow_frontend(
-                    draws,
-                    &products.0.world_run_surfs,
-                    &geometry.world_surface_ranges,
-                    u32::try_from(geometry.world_vertex_count).unwrap_or(u32::MAX),
-                    &geometry.smodel_surface_ranges,
-                    &geometry.xmodel_surface_ranges,
-                    &mut *pack_draws,
-                );
-                &packed_fallback
-            }
-        };
-        let Some(envelope) = draw_sun_shadow_map_forced(partition, Some(&packed)) else {
-            continue;
-        };
-        let Some(work) = envelope.work.as_ref() else {
-            continue;
-        };
-
-        let cached_absent = packed.smodel_cached.len() + packed.smodel_pretess.len();
-        if cached_absent > 0 {
-            let n = u32::try_from(cached_absent).unwrap_or(u32::MAX);
-            miss = miss.saturating_add(n);
-            *miss_rows
-                .entry("SmodelCachedStreamAbsentFromSunAtlas".into())
-                .or_default() += n;
-        }
-        any_flush = true;
-        let smodel_identity_changed = static_draws.reset_unless_answering(
-            generation,
-            pi,
-            work.world_flushes.len(),
-            packed.smodel.len(),
-            draws,
-            packed,
-        );
-        let emit_started = Instant::now();
-        let mut xmodel_spans = Vec::with_capacity(packed.xmodel.len());
-        for flush in &work.xmodel_flushes {
-            let owner_start = flush.entry_start as usize;
-            let owner_end = owner_start.saturating_add(flush.entry_count as usize);
-            let Some(entries) = packed.xmodel.get(owner_start..owner_end) else {
-                miss = miss.saturating_add(1);
-                *miss_rows
-                    .entry("XModelDynamicProvenanceMissing".into())
-                    .or_default() += 1;
-                continue;
-            };
-            if packed
-                .xmodel_draw_indices
-                .get(owner_start..owner_end)
-                .is_none()
-            {
-                miss = miss.saturating_add(1);
-                *miss_rows
-                    .entry("XModelDynamicProvenanceMissing".into())
-                    .or_default() += 1;
-                continue;
-            }
-            for (entry_offset, entry) in entries.iter().enumerate() {
-                let hit_start = entry.index_byte_offset / 2;
-                let hit_count = u32::from(entry.tri_count).saturating_mul(3);
-                match sun_model_index_span(
-                    extracted.frame.xmodel_indices.len(),
-                    hit_start,
-                    hit_count,
-                ) {
-                    Ok((ring_epoch, draw_start, draw_count)) => {
-                        xmodel_spans.push((
-                            draw_start,
-                            draw_count,
-                            ring_epoch,
-                            u32::try_from(owner_start.saturating_add(entry_offset))
-                                .unwrap_or(u32::MAX),
-                            1,
-                        ));
-                    }
-                    Err(cause) => {
-                        miss = miss.saturating_add(1);
-                        *miss_rows.entry(cause).or_default() += 1;
-                    }
-                }
-            }
-        }
-        smodel_reusable_all &= !smodel_identity_changed;
-        let mut smodel_spans = Vec::with_capacity(packed.smodel.len());
-        for flush in &work.smodel_flushes {
-            let owner_start = flush.entry_start as usize;
-            let owner_end = owner_start.saturating_add(flush.entry_count as usize);
-            let Some(entries) = packed.smodel.get(owner_start..owner_end) else {
-                smodel_spans.extend((owner_start..owner_end).map(|_| None));
-                *miss_rows
-                    .entry("SmodelDynamicProvenanceMissing".into())
-                    .or_default() += 1;
-                continue;
-            };
-            if packed
-                .smodel_draw_indices
-                .get(owner_start..owner_end)
-                .is_none()
-            {
-                smodel_spans.extend(entries.iter().map(|_| None));
-                *miss_rows
-                    .entry("SmodelDynamicProvenanceMissing".into())
-                    .or_default() += 1;
-                continue;
-            }
-            for (entry_offset, entry) in entries.iter().enumerate() {
-                let hit_start = entry.index_byte_offset / 2;
-                let hit_count = u32::from(entry.tri_count).saturating_mul(3);
-                match sun_model_index_span(
-                    extracted.world.static_geometry.smodel_indices.len(),
-                    hit_start,
-                    hit_count,
-                ) {
-                    Ok((ring_epoch, draw_start, draw_count)) => {
-                        smodel_spans.push(Some(SmodelShadowSpan {
-                            draw_start,
-                            draw_count,
-                            ring_epoch,
-                            entry_start: u32::try_from(owner_start.saturating_add(entry_offset))
-                                .unwrap_or(u32::MAX),
-                            entry_count: 1,
-                        }));
-                    }
-                    Err(cause) => {
-                        smodel_spans.push(None);
-                        *miss_rows.entry(cause).or_default() += 1;
-                    }
-                }
-            }
-        }
-        ms_emit += emit_started.elapsed().as_secs_f32() * 1000.0;
-        let prepare_started = Instant::now();
-        let src_index_n = geometry.world_cpu_indices.len();
-        let world_spans: Vec<Option<(u32, u32)>> = work
-            .world_flushes
-            .iter()
-            .map(|flush| {
-                let (start, count) = prim_args_u32_index_span(prim_args_from_world_flush(*flush));
-                world_shadow_zone_span(start, count, src_index_n)
-            })
-            .collect();
-        let world_span_holes = as_u32(world_spans.iter().filter(|span| span.is_none()).count());
-        let smodel_span_holes = as_u32(smodel_spans.iter().filter(|span| span.is_none()).count());
-        if world_span_holes > 0 {
-            miss = miss.saturating_add(world_span_holes);
-            *miss_rows
-                .entry("WorldShadowSpanOutsideZoneIb".into())
-                .or_default() += world_span_holes;
-        }
-        if smodel_span_holes > 0 {
-            miss = miss.saturating_add(smodel_span_holes);
-            *miss_rows
-                .entry("SmodelShadowStreamRefused".into())
-                .or_default() += smodel_span_holes;
-        }
-        let retry_before = retry_n;
-        for slot_i in 0..static_draws.world[pi].len() {
-            if static_draws.world[pi][slot_i].is_some() {
-                continue;
-            }
-            let Some((src_start, count)) = world_spans[slot_i] else {
-                continue;
-            };
-            let flush = work.world_flushes[slot_i];
-            let owner_start = flush.entry_start as usize;
-            let owner_end = owner_start.saturating_add(flush.entry_count as usize);
-            let owners = packed
-                .world_draw_indices
-                .get(owner_start..owner_end)
-                .unwrap_or(&[]);
-            retry_n = retry_n.saturating_add(1);
-            match prepare.prepare_shadow_flush_draws(
-                shadow_exec_executor,
-                shadow_exec_view,
-                SunFlush {
-                    kind: SunFlushKind::World,
-                    draw_start: src_start,
-                    draw_count: count,
-                    ring_epoch: 0,
-                },
-                owners,
-                if pi == 0 { 0 } else { near_n },
-                sun,
-                ExactPrepareTarget {
-                    color: SHADOWMAP_SUN_COLOR_FORMAT,
-                    samples: 1,
-                    depth: SHADOWMAP_SUN_DEPTH_FORMAT,
-                    forward_z: true,
-                    use_world_pretess: false,
-                },
-            ) {
-                Ok(gpu) => static_draws.world[pi][slot_i] = Some(gpu),
-                Err(cause) => {
-                    miss = miss.saturating_add(1);
-                    *miss_rows.entry(cause).or_default() += 1;
-                }
-            }
-        }
-        for slot_i in 0..static_draws.smodel[pi].len() {
-            if static_draws.smodel[pi][slot_i].is_some() {
-                continue;
-            }
-            let Some(span) = smodel_spans[slot_i] else {
-                continue;
-            };
-            let owner_start = span.entry_start as usize;
-            let owner_end = owner_start.saturating_add(span.entry_count as usize);
-            let owners = packed
-                .smodel_draw_indices
-                .get(owner_start..owner_end)
-                .unwrap_or(&[]);
-            retry_n = retry_n.saturating_add(1);
-            match prepare.prepare_shadow_flush_draws(
-                shadow_exec_executor,
-                shadow_exec_view,
-                SunFlush {
-                    kind: SunFlushKind::Smodel,
-                    draw_start: span.draw_start,
-                    draw_count: span.draw_count,
-                    ring_epoch: span.ring_epoch,
-                },
-                owners,
-                if pi == 0 { 0 } else { near_n },
-                sun,
-                ExactPrepareTarget {
-                    color: SHADOWMAP_SUN_COLOR_FORMAT,
-                    samples: 1,
-                    depth: SHADOWMAP_SUN_DEPTH_FORMAT,
-                    forward_z: true,
-                    use_world_pretess: false,
-                },
-            ) {
-                Ok(gpu) => static_draws.smodel[pi][slot_i] = Some(gpu),
-                Err(cause) => {
-                    miss = miss.saturating_add(1);
-                    *miss_rows.entry(cause).or_default() += 1;
-                }
-            }
-        }
-        let mut xmodel_gpu = Vec::with_capacity(xmodel_spans.len());
-        for (draw_start, draw_count, ring_epoch, entry_start, entry_count) in xmodel_spans {
-            let start = entry_start as usize;
-            let end = start.saturating_add(entry_count as usize);
-            let owners = packed.xmodel_draw_indices.get(start..end).unwrap_or(&[]);
-            match prepare.prepare_shadow_flush_draws(
-                shadow_exec_executor,
-                shadow_exec_view,
-                SunFlush {
-                    kind: SunFlushKind::XModel,
-                    draw_start,
-                    draw_count,
-                    ring_epoch,
-                },
-                owners,
-                if pi == 0 { 0 } else { near_n },
-                sun,
-                ExactPrepareTarget {
-                    color: SHADOWMAP_SUN_COLOR_FORMAT,
-                    samples: 1,
-                    depth: SHADOWMAP_SUN_DEPTH_FORMAT,
-                    forward_z: true,
-                    use_world_pretess: false,
-                },
-            ) {
-                Ok(gpu) => xmodel_gpu.push(gpu),
-                Err(cause) => {
-                    miss = miss.saturating_add(1);
-                    *miss_rows.entry(cause).or_default() += 1;
-                }
-            }
-        }
-        let skinned_gpu = prepare_smodel_skinned_shadow_gpu(
-            &mut prepare,
-            shadow_exec_executor,
-            shadow_exec_view,
-            packed,
-            &work.smodel_skinned_flushes,
-            sun,
-            if pi == 0 { 0 } else { near_n },
-            ExactPrepareTarget {
-                color: SHADOWMAP_SUN_COLOR_FORMAT,
-                samples: 1,
-                depth: SHADOWMAP_SUN_DEPTH_FORMAT,
-                forward_z: true,
-                use_world_pretess: false,
-            },
-            &mut miss,
-            &mut miss_rows,
-        );
-        ms_prepare += prepare_started.elapsed().as_secs_f32() * 1000.0;
-        let patch_started = Instant::now();
-        let ResidentShadowStaticDraws {
-            world: resident_world,
-            smodel: resident_smodel,
-            commands,
-            ..
-        } = &mut *static_draws;
-        let plan = &mut commands[pi];
-        plan.open_frame();
-
-        if plan.generation != Some(generation)
-            || plan.world_n != resident_world[pi].len()
-            || plan.smodel_n != resident_smodel[pi].len()
-            || retry_n != retry_before
-            || smodel_identity_changed
-        {
-            plan.rebuild(generation, &resident_world[pi], &resident_smodel[pi]);
-        }
-        if plan.refused > 0 {
-            miss = miss.saturating_add(plan.refused);
-            *miss_rows.entry(sun_overlay_refusal(pi).into()).or_default() += plan.refused;
-        }
-        let refused_before = plan.refused;
-        let mut xmodel_draws = Vec::with_capacity(xmodel_gpu.len());
-        let mut xmodel_seen = HashMap::new();
-        for flush in &xmodel_gpu {
-            plan.push_flush(flush, &mut xmodel_seen, &mut xmodel_draws);
-        }
-        let dynamic_refused = plan.refused.saturating_sub(refused_before);
-        plan.refused = refused_before;
-        if dynamic_refused > 0 {
-            miss = miss.saturating_add(dynamic_refused);
-            *miss_rows.entry(sun_overlay_refusal(pi).into()).or_default() += dynamic_refused;
-        }
-        coalesce_shadow_draws(&mut xmodel_draws);
-        let mut skinned_draws = Vec::with_capacity(skinned_gpu.len());
-        let mut skinned_seen = HashMap::new();
-        for flush in &skinned_gpu {
-            plan.push_flush(flush, &mut skinned_seen, &mut skinned_draws);
-        }
-        coalesce_shadow_draws(&mut skinned_draws);
-        if plan.world_draws.is_empty()
-            && plan.smodel_draws.is_empty()
-            && xmodel_draws.is_empty()
-            && skinned_draws.is_empty()
-        {
-            continue;
-        }
-
-        let Some(frame) = extracted.frame.sun_shadow else {
-            miss = miss.saturating_add(1);
-            *miss_rows.entry("MissingSunShadowFrame".into()).or_default() += 1;
-            continue;
-        };
-        plan.patch_sun_registers(
-            &frame.partitions[pi],
-            extracted.frame.exec_frame.view_origin,
-        );
-        ms_patch += patch_started.elapsed().as_secs_f32() * 1000.0;
-        let arena_started = Instant::now();
-        let layout = if shadow_arena.gpu[pi].bind_group.is_none() {
-            plan.world_draws
-                .iter()
-                .chain(xmodel_draws.iter())
-                .chain(skinned_draws.iter())
-                .chain(plan.smodel_draws.iter())
-                .find_map(|draw| {
-                    pipeline_res
-                        .get(draw.port)
-                        .map(|port| &port.constants_layout)
-                })
-        } else {
-            None
-        };
-        upload_packed_arena(
-            &plan.bytes,
-            &[],
-            plan.bytes.len(),
-            0,
-            &plan.dirty,
-            false,
-            &mut shadow_arena.gpu[pi],
-            layout,
-            registry,
-            device,
-            queue,
-            "iw4_shadowmap_sun_vs_arena",
-        );
-        ms_arena += arena_started.elapsed().as_secs_f32() * 1000.0;
-        partitions.push(PreparedSunPartition {
-            pi,
-            envelope,
-            xmodel_draws,
-            skinned_draws,
-        });
-    }
-    drop(prepare);
-    PreparedSunWork {
-        early: None,
-        color_view: Some(color_view),
-        depth_view: Some(depth_view),
-        clear_partition_zero,
-        partitions,
-        miss,
-        miss_rows,
-        any_flush,
-        smodel_reusable_all,
-        retry_n,
-        world_ib_n,
-        emit_ms: ms_emit,
-        prepare_ms: ms_prepare,
-        patch_ms: ms_patch,
-        arena_ms: ms_arena,
-    }
 }
 
 fn finish_sun_submit(
@@ -1983,96 +1091,6 @@ fn finish_sun_submit(
     }
 }
 
-fn record_shadowmap_sun(
-    mut work: PreparedSunWork,
-    pipeline_res: &ExactColourPipeline,
-    registry: &ExactPipelineRegistry,
-    geometry: &ExactColourGeometry,
-    device: &RenderDevice,
-    texture_table: &mut ExactTextureTable,
-    shadow_arena: &ShadowmapSunArena,
-    static_draws: &ResidentShadowStaticDraws,
-    context: &mut RenderContext,
-    smodel_skinned_vertex: Option<&Buffer>,
-    smodel_skinned_vertex_lighting: Option<&Buffer>,
-    smodel_skinned_index: Option<&Buffer>,
-) -> SunShadowSubmit {
-    if let Some(submit) = work.early.take() {
-        return submit;
-    }
-    let Some(color_view) = work.color_view.take() else {
-        return SunShadowSubmit::refused("ShadowmapSunTargetMissing");
-    };
-    let Some(depth_view) = work.depth_view.take() else {
-        return SunShadowSubmit::refused("ShadowmapSunDepthMissing");
-    };
-    if !work.clear_partition_zero && work.partitions.is_empty() {
-        return finish_sun_submit(&work, 0, RecordCensus::default(), 0.0);
-    }
-    let diagnostics = context.diagnostic_recorder();
-    let diagnostics = diagnostics.as_deref();
-    let encoder = context.command_encoder();
-    let gpu_span = diagnostics.time_span(encoder, GPU_SPAN_SUN);
-    if work.clear_partition_zero {
-        clear_empty_shadowmap_sun_partition_zero(encoder, &color_view, &depth_view);
-    }
-    let mut indexed = 0u32;
-    let mut record_n = RecordCensus::default();
-    let record_started = Instant::now();
-    if !work.partitions.is_empty() {
-        let Some(table_layout) = texture_table_layout(pipeline_res) else {
-            gpu_span.end(encoder);
-            return SunShadowSubmit::refused("TextureTableLayoutMissing");
-        };
-        let table_binds = texture_table.binds(device, registry, table_layout);
-        let world_index = geometry.world_index.as_ref();
-        for part in &work.partitions {
-            let plan = &static_draws.commands[part.pi];
-            let result = record_shadowmap_draws(
-                encoder,
-                ShadowPassInputs {
-                    device,
-                    registry,
-                    geometry: geometry::shadow_record_geometry(
-                        geometry,
-                        world_index,
-                        geometry.smodel_index.as_slice(),
-                        geometry.xmodel_index_epochs(),
-                        encode::RecordMesh {
-                            vertex: smodel_skinned_vertex,
-                            index: smodel_skinned_index,
-                            lighting: smodel_skinned_vertex_lighting,
-                        },
-                    ),
-                    constants_bind: shadow_arena.gpu[part.pi].bind_group.as_ref(),
-                    textures_bind: &table_binds.sun_caster,
-                    color_view: &color_view,
-                    depth_view: &depth_view,
-                    scissor: part.envelope.scissor,
-                    viewport: part.envelope.viewport,
-                    cleared: part.envelope.cleared,
-                },
-                plan.world_draws
-                    .iter()
-                    .chain(part.xmodel_draws.iter())
-                    .chain(part.skinned_draws.iter())
-                    .chain(plan.smodel_draws.iter()),
-                "iw4_shadowmap_sun_partition",
-            );
-            indexed = indexed.saturating_add(result.indexed);
-            record_n.add(result.bindings);
-            result.append_refusals(&mut work.miss, &mut work.miss_rows);
-        }
-    }
-    let ms_record = record_started.elapsed().as_secs_f32() * 1000.0;
-    gpu_span.end(encoder);
-    if indexed == 0 {
-        return finish_sun_submit(&work, 0, RecordCensus::default(), ms_record);
-    }
-
-    finish_sun_submit(&work, indexed, record_n, ms_record)
-}
-
 pub(super) struct ShadowLane<'a> {
     pub frame: &'a PublishedRenderFrame,
     pub installed_ready: bool,
@@ -2092,76 +1110,1011 @@ pub(super) struct ShadowLane<'a> {
     pub scratch: &'a mut ShadowSubmitScratch,
 }
 
-pub(super) fn prepare_shadow_passes(lane: ShadowLane<'_>) {
-    let ShadowLane {
-        frame,
-        installed_ready,
-        geometry,
-        pipeline,
-        registry,
-        device,
-        queue,
-        uploaded,
-        binding_cache,
-        shadow_table,
-        shadow_arena,
-        spot_arena,
-        static_draws,
-        shadowmap,
-        spotmap,
-        scratch,
-    } = lane;
-    let _span = perf::Span::RenderPrepareShadowMs.enter();
-    if !installed_ready {
+impl ShadowLane<'_> {
+    fn prepare_shadowmap_spot(
+        &mut self,
+        products: &ExtractedRenderFrameProducts,
+        extracted: ExtractedColourRefs<'_>,
+        sampler_table: &SamplerTable,
+        shadow_exec: &mut ShadowExecScratch,
+    ) -> PreparedSpotWork {
+        let geometry = self.geometry;
+        let pipeline_res = self.pipeline;
+        let registry = self.registry;
+        let device = self.device;
+        let queue = self.queue;
+        let uploaded = self.uploaded;
+        let binding_cache = &mut *self.binding_cache;
+        let texture_table: &mut ExactTextureTable = &mut *self.shadow_table;
+        let shadow_arena = &mut *self.spot_arena;
+        let shadowmap = &mut *self.spotmap;
+        let skinned_tess = &mut self.scratch.skinned_tess;
+
+        let ShadowExecScratch {
+            executor: shadow_exec_executor,
+            ..
+        } = shadow_exec;
+        shadow_exec_executor.begin_list();
+        let shadow_exec_view = exec_tables(extracted).map(|(catalog, prepared_table)| {
+            MaterialExecView::camera(catalog, prepared_table, &extracted.frame.exec_frame)
+        });
+        let spot = products.0.product(FrameProductKind::SpotShadow);
+        if spot.spot_slots.is_empty() {
+            return PreparedSpotWork::default();
+        }
+        ensure_shadowmap_spot_targets(shadowmap, device);
+        let mut slots: Vec<_> = spot.spot_slots.iter().collect();
+        slots.sort_by_key(|slot| {
+            (
+                match slot.emitted.plan.render_target_id {
+                    lighting_iw4::GFX_SPOT_SHADOW_RT_SMALL => 0u8,
+                    lighting_iw4::GFX_SPOT_SHADOW_RT_LARGE => 1u8,
+                    _ => 2u8,
+                },
+                slot.emitted.slot_index,
+            )
+        });
+
+        let mut prepare = ExactPrepare {
+            portal_view: None,
+            slice_plane: None,
+            instance: 0,
+            slice_groups: Default::default(),
+            extracted,
+            geometry,
+            pretess: None,
+            pipeline_res,
+            registry,
+            device,
+            uploaded,
+            spot_shadow_select: None,
+            sampler_table,
+            textures: PrepareTextureTables::Shadow {
+                slots: &mut binding_cache.textures,
+                table: texture_table,
+            },
+            arena: None,
+            run_pack: RunPackCache::default(),
+            cost: PrepareCost::default(),
+            skinned_tess: Some(skinned_tess),
+            skinned_shared: None,
+        };
+        let target = ExactPrepareTarget {
+            color: SHADOWMAP_SPOT_COLOR_FORMAT,
+            samples: 1,
+            depth: SHADOWMAP_SPOT_DEPTH_FORMAT,
+            forward_z: true,
+            use_world_pretess: false,
+        };
+        let mut miss = 0u32;
+        let mut miss_rows = BTreeMap::<String, u32>::new();
+        let mut overlay_intern = ShadowOverlayIntern::new();
+        let mut all_prepared = Vec::new();
+        let mut prepared_slots = Vec::new();
+
+        for slot in slots {
+            let miss_before = miss;
+            let emitted = slot.emitted;
+            let Some(view_parms) = emitted.view_parms.as_ref() else {
+                miss = miss.saturating_add(1);
+                *miss_rows
+                    .entry("MissingSpotShadowViewParms".into())
+                    .or_default() += 1;
+                continue;
+            };
+            let envelope =
+                draw_spot_shadow_map(emitted.slot_index, emitted.plan, Some(&slot.packed));
+            let Some(work) = envelope.work.as_ref() else {
+                miss = miss.saturating_add(1);
+                *miss_rows.entry("MissingSpotShadowWork".into()).or_default() += 1;
+                continue;
+            };
+            let Some(color_view) = shadowmap.color_view(envelope.render_target_id).cloned() else {
+                miss = miss.saturating_add(1);
+                *miss_rows
+                    .entry("MissingSpotShadowColorTarget".into())
+                    .or_default() += 1;
+                continue;
+            };
+            let Some(depth_view) = shadowmap.depth_view(envelope.render_target_id).cloned() else {
+                miss = miss.saturating_add(1);
+                *miss_rows
+                    .entry("MissingSpotShadowDepthTarget".into())
+                    .or_default() += 1;
+                continue;
+            };
+
+            let mut flushes = Vec::<ShadowmapSunFlushGpu>::new();
+            // Receivers sample every emitted slot, so a slot whose casters all
+            // compacted away still clears its tile to fully lit.
+            let work = if spot.ordered_draws.is_empty() {
+                &Default::default()
+            } else {
+                work
+            };
+            for flush in &work.world_flushes {
+                let (start, count) = prim_args_u32_index_span(prim_args_from_world_flush(*flush));
+                let Some((start, count)) =
+                    world_shadow_zone_span(start, count, geometry.world_cpu_indices.len())
+                else {
+                    miss = miss.saturating_add(1);
+                    *miss_rows
+                        .entry("WorldShadowSpanOutsideZoneIb".into())
+                        .or_default() += 1;
+                    continue;
+                };
+                let owner_start = flush.entry_start as usize;
+                let owner_end = owner_start.saturating_add(flush.entry_count as usize);
+                let owners = slot
+                    .packed
+                    .world_draw_indices
+                    .get(owner_start..owner_end)
+                    .unwrap_or(&[]);
+                match prepare.prepare_shadow_flush_draws(
+                    shadow_exec_executor,
+                    shadow_exec_view,
+                    SunFlush {
+                        kind: SunFlushKind::World,
+                        draw_start: start,
+                        draw_count: count,
+                        ring_epoch: 0,
+                        owner_draws: owners,
+                        draw_offset: 0,
+                    },
+                    spot,
+                    target,
+                ) {
+                    Ok(gpu) => flushes.push(gpu),
+                    Err(cause) => {
+                        miss = miss.saturating_add(1);
+                        *miss_rows.entry(cause).or_default() += 1;
+                    }
+                }
+            }
+
+            let mut xmodel_stream = ModelIndexStream::new();
+            let mut xmodel_spans = Vec::new();
+            for flush in &work.xmodel_flushes {
+                let owner_start = flush.entry_start as usize;
+                let owner_end = owner_start.saturating_add(flush.entry_count as usize);
+                let Some(entries) = slot.packed.xmodel.get(owner_start..owner_end) else {
+                    miss = miss.saturating_add(1);
+                    *miss_rows
+                        .entry("XModelDynamicProvenanceMissing".into())
+                        .or_default() += 1;
+                    continue;
+                };
+                for (entry_offset, entry) in entries.iter().enumerate() {
+                    let hit_start = entry.index_byte_offset / 2;
+                    let hit_count = u32::from(entry.tri_count).saturating_mul(3);
+                    match emit_local_xmodel_shadow_flush(
+                        &extracted.frame.xmodel_indices,
+                        hit_start,
+                        hit_count,
+                        &mut xmodel_stream,
+                    ) {
+                        Ok((ring_epoch, draw_start, draw_count)) => xmodel_spans.push((
+                            ring_epoch,
+                            draw_start,
+                            draw_count,
+                            owner_start.saturating_add(entry_offset),
+                        )),
+                        Err(cause) => {
+                            miss = miss.saturating_add(1);
+                            *miss_rows.entry(cause).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            let xmodel_epochs = xmodel_stream.finish();
+            for (ring_epoch, draw_start, draw_count, owner) in xmodel_spans {
+                let owners = slot
+                    .packed
+                    .xmodel_draw_indices
+                    .get(owner..owner + 1)
+                    .unwrap_or(&[]);
+                match prepare.prepare_shadow_flush_draws(
+                    shadow_exec_executor,
+                    shadow_exec_view,
+                    SunFlush {
+                        kind: SunFlushKind::XModel,
+                        draw_start,
+                        draw_count,
+                        ring_epoch,
+                        owner_draws: owners,
+                        draw_offset: 0,
+                    },
+                    spot,
+                    target,
+                ) {
+                    Ok(gpu) => flushes.push(gpu),
+                    Err(cause) => {
+                        miss = miss.saturating_add(1);
+                        *miss_rows.entry(cause).or_default() += 1;
+                    }
+                }
+            }
+
+            let mut smodel_stream = ModelIndexStream::new();
+            let mut smodel_spans = Vec::new();
+            for flush in &work.smodel_flushes {
+                let owner_start = flush.entry_start as usize;
+                let owner_end = owner_start.saturating_add(flush.entry_count as usize);
+                let Some(entries) = slot.packed.smodel.get(owner_start..owner_end) else {
+                    miss = miss.saturating_add(1);
+                    *miss_rows
+                        .entry("SmodelDynamicProvenanceMissing".into())
+                        .or_default() += 1;
+                    continue;
+                };
+                for (entry_offset, entry) in entries.iter().enumerate() {
+                    let hit_start = entry.index_byte_offset / 2;
+                    let hit_count = u32::from(entry.tri_count).saturating_mul(3);
+                    match emit_local_smodel_shadow_flush(
+                        extracted.world.static_geometry.smodel_indices.as_slice(),
+                        hit_start,
+                        hit_count,
+                        &mut smodel_stream,
+                    ) {
+                        Ok((ring_epoch, draw_start, draw_count)) => smodel_spans.push((
+                            ring_epoch,
+                            draw_start,
+                            draw_count,
+                            owner_start.saturating_add(entry_offset),
+                        )),
+                        Err(cause) => {
+                            miss = miss.saturating_add(1);
+                            *miss_rows.entry(cause).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            let smodel_epochs = smodel_stream.finish();
+            for (ring_epoch, draw_start, draw_count, owner) in smodel_spans {
+                let owners = slot
+                    .packed
+                    .smodel_draw_indices
+                    .get(owner..owner + 1)
+                    .unwrap_or(&[]);
+                match prepare.prepare_shadow_flush_draws(
+                    shadow_exec_executor,
+                    shadow_exec_view,
+                    SunFlush {
+                        kind: SunFlushKind::Smodel,
+                        draw_start,
+                        draw_count,
+                        ring_epoch,
+                        owner_draws: owners,
+                        draw_offset: 0,
+                    },
+                    spot,
+                    target,
+                ) {
+                    Ok(gpu) => flushes.push(gpu),
+                    Err(cause) => {
+                        miss = miss.saturating_add(1);
+                        *miss_rows.entry(cause).or_default() += 1;
+                    }
+                }
+            }
+
+            let mut skinned_gpu = Vec::new();
+            for flush in (SkinnedShadowFlushes {
+                owner_indices: &slot.packed.smodel_skinned_draw_indices,
+                flushes: &work.smodel_skinned_flushes,
+            })
+            .draws(0)
+            {
+                match prepare.prepare_shadow_flush_draws(
+                    shadow_exec_executor,
+                    shadow_exec_view,
+                    flush,
+                    spot,
+                    target,
+                ) {
+                    Ok(gpu) => skinned_gpu.push(gpu),
+                    Err(cause) => {
+                        miss = miss.saturating_add(1);
+                        *miss_rows.entry(cause).or_default() += 1;
+                    }
+                }
+            }
+            flushes.extend(skinned_gpu);
+
+            let start = all_prepared.len();
+            for flush in &flushes {
+                for (draw, code) in flush.draws.iter().zip(&flush.pass_code) {
+                    let overlay = shadowmap_spot_overlay(code, view_parms, flush.world_from_local);
+                    match overlay_shadow_draw_constants_with(
+                        draw,
+                        &overlay,
+                        flush.world_from_local,
+                        u8::try_from(emitted.slot_index).unwrap_or(u8::MAX),
+                        &mut overlay_intern,
+                    ) {
+                        Ok(mut draw) => {
+                            let clip = Mat4::from_cols_array(&view_parms.view_projection)
+                                * Mat4::from_translation(-Vec3::from_array(view_parms.origin));
+                            prepare_shadow_slice(
+                                &mut draw,
+                                clip,
+                                device,
+                                &mut prepare.slice_groups,
+                            );
+                            all_prepared.push(draw);
+                        }
+                        Err(()) => {
+                            miss = miss.saturating_add(1);
+                            *miss_rows.entry("SpotOverlayRefused".into()).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            let end = all_prepared.len();
+            let smodel_index_epochs = shadowmap.upload_smodel_index_epochs(
+                emitted.slot_index,
+                device,
+                queue,
+                &smodel_epochs,
+            );
+            let xmodel_index_epochs = shadowmap.upload_xmodel_index_epochs(
+                emitted.slot_index,
+                device,
+                queue,
+                &xmodel_epochs,
+            );
+            let draws = &all_prepared[start..end];
+            let has_xmodel = draws.iter().any(|draw| draw.tess == ExactTessBind::XModel);
+            let has_cached = draws
+                .iter()
+                .any(|draw| draw.tess == ExactTessBind::SmodelCached);
+            let content = (miss == miss_before
+                && spot.code_sampler_mask == 0
+                && !(has_xmodel && extracted.frame.skin_refused)
+                && draws.iter().all(|draw| {
+                    !draw.shadow_dependencies.spot
+                        && !draw.shadow_dependencies.sun
+                        && !draw.after_scene_resolve
+                }))
+            .then(|| SpotShadowContent {
+                light: emitted.light_index,
+                target: color_view.clone(),
+                viewport: envelope.viewport,
+                generation: extracted.frame.generation,
+                geometry: Arc::clone(&extracted.world.static_geometry),
+                smc_revision: if has_cached {
+                    extracted.world.smc_revision
+                } else {
+                    None
+                },
+                index_layout: if has_cached {
+                    extracted.world.smodel_index_layout_revision
+                } else {
+                    0
+                },
+                xmodel_revision: has_xmodel.then_some((
+                    extracted.frame.xmodel_revision,
+                    extracted.frame.xmodel_topology_revision,
+                )),
+                skin_jobs: if has_xmodel {
+                    extracted.frame.skin_jobs.clone()
+                } else {
+                    Vec::new()
+                },
+                image_revision: (uploaded.views_revision(), uploaded.replaced_revision()),
+                smodel_indices: smodel_epochs,
+                xmodel_indices: xmodel_epochs,
+                draws: draws.to_vec(),
+            });
+            prepared_slots.push(PreparedSpotSlot {
+                content,
+                envelope,
+                color_view,
+                depth_view,
+                smodel_index_epochs,
+                xmodel_index_epochs,
+                draw_range: start..end,
+            });
+        }
+        drop(prepare);
+
+        if !all_prepared.is_empty() {
+            let ShadowmapSpotArena { gpu, pack, .. } = shadow_arena;
+            pack.begin_list();
+            let layout = prepare_constant_bases(&mut all_prepared, pack, pipeline_res);
+            pack.upload(
+                gpu,
+                layout,
+                registry,
+                device,
+                queue,
+                "iw4_shadowmap_spot_vs_arena",
+            );
+        }
+        PreparedSpotWork {
+            generation: extracted.frame.generation,
+            clear_pipeline: shadowmap.clear_pipeline().cloned(),
+            miss,
+            miss_rows,
+            all_prepared,
+            prepared_slots,
+        }
+    }
+
+    fn prepare_shadowmap_sun(
+        &mut self,
+        products: &ExtractedRenderFrameProducts,
+        extracted: ExtractedColourRefs<'_>,
+        sampler_table: &SamplerTable,
+        shadow_exec: &mut ShadowExecScratch,
+    ) -> PreparedSunWork {
+        let geometry = self.geometry;
+        let pipeline_res = self.pipeline;
+        let registry = self.registry;
+        let device = self.device;
+        let queue = self.queue;
+        let uploaded = self.uploaded;
+        let binding_cache = &mut *self.binding_cache;
+        let texture_table: &mut ExactTextureTable = &mut *self.shadow_table;
+        let shadow_arena = &mut *self.shadow_arena;
+        let shadowmap = &mut *self.shadowmap;
+        let static_draws = &mut *self.static_draws;
+        let skinned_tess = &mut self.scratch.skinned_tess;
+
+        let sun = products.0.product(FrameProductKind::SunShadow);
+        if sun.ordered_draws.is_empty() {
+            return PreparedSunWork::done(SunShadowSubmit::default());
+        }
+        let (color_view, resized) = ensure_shadowmap_sun_target(shadowmap, device);
+        if resized {
+            binding_cache.textures.clear();
+        }
+        let Some(color_view) = color_view else {
+            return PreparedSunWork::done(SunShadowSubmit::refused("ShadowmapSunTargetMissing"));
+        };
+        let Some(depth_view) = shadowmap.depth_view().cloned() else {
+            return PreparedSunWork::done(SunShadowSubmit::refused("ShadowmapSunDepthMissing"));
+        };
+        if draw_sun_shadow_map_forced(0, None).is_none() {
+            return PreparedSunWork::done(SunShadowSubmit::refused("ShadowmapSunPartitionMissing"));
+        }
+        let generation = extracted.world.generation.get();
+
+        let ShadowExecScratch {
+            executor: shadow_exec_executor,
+            code_sources: shadow_code_sources,
+            pack_draws,
+        } = shadow_exec;
+        shadow_exec_executor.begin_list();
+        shadow_code_sources.clone_from(&extracted.frame.exec_frame.code_sources);
+        if let Some(sun_frame) = extracted.frame.sun_shadow.as_ref() {
+            shadow_code_sources.set_constant(
+                crate::drawsurf::CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0,
+                crate::drawsurf::code_transpose_matrix_rows(
+                    sun_frame.partitions[0].clip_from_world,
+                ),
+            );
+        }
+        let shadow_exec_view = extracted.frame.sun_shadow.as_ref().and_then(|sun_frame| {
+            let (catalog, prepared_table) = exec_tables(extracted)?;
+            Some(MaterialExecView::shadow_partition(
+                catalog,
+                prepared_table,
+                &extracted.frame.exec_frame,
+                sun_frame.partitions[0].clip_from_world,
+                sun_frame.partitions[0].view,
+                shadow_code_sources,
+            ))
+        });
+        let mut prepare = ExactPrepare {
+            portal_view: None,
+            slice_plane: None,
+            instance: 0,
+            slice_groups: Default::default(),
+            extracted,
+            geometry,
+            pretess: None,
+            pipeline_res,
+            registry,
+            device,
+            uploaded,
+            spot_shadow_select: None,
+            sampler_table,
+            textures: PrepareTextureTables::Shadow {
+                slots: &mut binding_cache.textures,
+                table: texture_table,
+            },
+            arena: None,
+            run_pack: RunPackCache::default(),
+            cost: PrepareCost::default(),
+            skinned_tess: Some(skinned_tess),
+            skinned_shared: None,
+        };
+        let mut miss = 0u32;
+        let mut miss_rows = BTreeMap::<String, u32>::new();
+        let world_ib_n = 0u32;
+        let mut retry_n = 0u32;
+        if texture_table_layout(pipeline_res).is_none() {
+            return PreparedSunWork::done(SunShadowSubmit::refused("TextureTableLayoutMissing"));
+        }
+        let mut smodel_reusable_all = true;
+        let mut any_flush = false;
+        let mut clear_partition_zero = false;
+        let mut partitions = Vec::new();
+        let mut ms_emit = 0.0f32;
+        let mut ms_prepare = 0.0f32;
+        let mut ms_patch = 0.0f32;
+        let mut ms_arena = 0.0f32;
+        let near_n = sun.sun_near_n.min(sun.ordered_draws.len());
+        for partition in 0..crate::drawsurf::SUN_SHADOW_PARTITION_COUNT {
+            let pi = partition as usize;
+            let draws = if pi == 0 {
+                &sun.ordered_draws[..near_n]
+            } else {
+                &sun.ordered_draws[near_n..]
+            };
+            if draws.is_empty() {
+                if pi == 0 {
+                    clear_partition_zero = true;
+                }
+                continue;
+            }
+            let packed_fallback;
+            let packed = match &sun.sun_packed {
+                Some(lists) => &lists[pi],
+                None => {
+                    packed_fallback = crate::drawsurf::backend::pack_sun_shadow_frontend(
+                        draws,
+                        &products.0.world_run_surfs,
+                        &geometry.world_surface_ranges,
+                        u32::try_from(geometry.static_identity.world_vertex_count)
+                            .unwrap_or(u32::MAX),
+                        &geometry.smodel_surface_ranges,
+                        &geometry.xmodel_surface_ranges,
+                        &mut *pack_draws,
+                    );
+                    &packed_fallback
+                }
+            };
+            let Some(envelope) = draw_sun_shadow_map_forced(partition, Some(&packed)) else {
+                continue;
+            };
+            let Some(work) = envelope.work.as_ref() else {
+                continue;
+            };
+
+            let cached_absent = packed.smodel_cached.len() + packed.smodel_pretess.len();
+            if cached_absent > 0 {
+                let n = u32::try_from(cached_absent).unwrap_or(u32::MAX);
+                miss = miss.saturating_add(n);
+                *miss_rows
+                    .entry("SmodelCachedStreamAbsentFromSunAtlas".into())
+                    .or_default() += n;
+            }
+            any_flush = true;
+            let smodel_identity_changed = static_draws.reset_unless_answering(
+                generation,
+                pi,
+                work.world_flushes.len(),
+                packed.smodel.len(),
+                draws,
+                packed,
+            );
+            let emit_started = Instant::now();
+            let mut xmodel_spans = Vec::with_capacity(packed.xmodel.len());
+            for flush in &work.xmodel_flushes {
+                let owner_start = flush.entry_start as usize;
+                let owner_end = owner_start.saturating_add(flush.entry_count as usize);
+                let Some(entries) = packed.xmodel.get(owner_start..owner_end) else {
+                    miss = miss.saturating_add(1);
+                    *miss_rows
+                        .entry("XModelDynamicProvenanceMissing".into())
+                        .or_default() += 1;
+                    continue;
+                };
+                if packed
+                    .xmodel_draw_indices
+                    .get(owner_start..owner_end)
+                    .is_none()
+                {
+                    miss = miss.saturating_add(1);
+                    *miss_rows
+                        .entry("XModelDynamicProvenanceMissing".into())
+                        .or_default() += 1;
+                    continue;
+                }
+                for (entry_offset, entry) in entries.iter().enumerate() {
+                    let hit_start = entry.index_byte_offset / 2;
+                    let hit_count = u32::from(entry.tri_count).saturating_mul(3);
+                    match sun_model_index_span(
+                        extracted.frame.xmodel_indices.len(),
+                        hit_start,
+                        hit_count,
+                    ) {
+                        Ok((ring_epoch, draw_start, draw_count)) => {
+                            xmodel_spans.push((
+                                draw_start,
+                                draw_count,
+                                ring_epoch,
+                                u32::try_from(owner_start.saturating_add(entry_offset))
+                                    .unwrap_or(u32::MAX),
+                                1,
+                            ));
+                        }
+                        Err(cause) => {
+                            miss = miss.saturating_add(1);
+                            *miss_rows.entry(cause).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            smodel_reusable_all &= !smodel_identity_changed;
+            let mut smodel_spans = Vec::with_capacity(packed.smodel.len());
+            for flush in &work.smodel_flushes {
+                let owner_start = flush.entry_start as usize;
+                let owner_end = owner_start.saturating_add(flush.entry_count as usize);
+                let Some(entries) = packed.smodel.get(owner_start..owner_end) else {
+                    smodel_spans.extend((owner_start..owner_end).map(|_| None));
+                    *miss_rows
+                        .entry("SmodelDynamicProvenanceMissing".into())
+                        .or_default() += 1;
+                    continue;
+                };
+                if packed
+                    .smodel_draw_indices
+                    .get(owner_start..owner_end)
+                    .is_none()
+                {
+                    smodel_spans.extend(entries.iter().map(|_| None));
+                    *miss_rows
+                        .entry("SmodelDynamicProvenanceMissing".into())
+                        .or_default() += 1;
+                    continue;
+                }
+                for (entry_offset, entry) in entries.iter().enumerate() {
+                    let hit_start = entry.index_byte_offset / 2;
+                    let hit_count = u32::from(entry.tri_count).saturating_mul(3);
+                    match sun_model_index_span(
+                        extracted.world.static_geometry.smodel_indices.len(),
+                        hit_start,
+                        hit_count,
+                    ) {
+                        Ok((ring_epoch, draw_start, draw_count)) => {
+                            smodel_spans.push(Some(SmodelShadowSpan {
+                                draw_start,
+                                draw_count,
+                                ring_epoch,
+                                entry_start: u32::try_from(
+                                    owner_start.saturating_add(entry_offset),
+                                )
+                                .unwrap_or(u32::MAX),
+                                entry_count: 1,
+                            }));
+                        }
+                        Err(cause) => {
+                            smodel_spans.push(None);
+                            *miss_rows.entry(cause).or_default() += 1;
+                        }
+                    }
+                }
+            }
+            ms_emit += emit_started.elapsed().as_secs_f32() * 1000.0;
+            let prepare_started = Instant::now();
+            let src_index_n = geometry.world_cpu_indices.len();
+            let world_spans: Vec<Option<(u32, u32)>> = work
+                .world_flushes
+                .iter()
+                .map(|flush| {
+                    let (start, count) =
+                        prim_args_u32_index_span(prim_args_from_world_flush(*flush));
+                    world_shadow_zone_span(start, count, src_index_n)
+                })
+                .collect();
+            let world_span_holes = as_u32(world_spans.iter().filter(|span| span.is_none()).count());
+            let smodel_span_holes =
+                as_u32(smodel_spans.iter().filter(|span| span.is_none()).count());
+            if world_span_holes > 0 {
+                miss = miss.saturating_add(world_span_holes);
+                *miss_rows
+                    .entry("WorldShadowSpanOutsideZoneIb".into())
+                    .or_default() += world_span_holes;
+            }
+            if smodel_span_holes > 0 {
+                miss = miss.saturating_add(smodel_span_holes);
+                *miss_rows
+                    .entry("SmodelShadowStreamRefused".into())
+                    .or_default() += smodel_span_holes;
+            }
+            let retry_before = retry_n;
+            for slot_i in 0..static_draws.world[pi].len() {
+                if static_draws.world[pi][slot_i].is_some() {
+                    continue;
+                }
+                let Some((src_start, count)) = world_spans[slot_i] else {
+                    continue;
+                };
+                let flush = work.world_flushes[slot_i];
+                let owner_start = flush.entry_start as usize;
+                let owner_end = owner_start.saturating_add(flush.entry_count as usize);
+                let owners = packed
+                    .world_draw_indices
+                    .get(owner_start..owner_end)
+                    .unwrap_or(&[]);
+                retry_n = retry_n.saturating_add(1);
+                match prepare.prepare_shadow_flush_draws(
+                    shadow_exec_executor,
+                    shadow_exec_view,
+                    SunFlush {
+                        kind: SunFlushKind::World,
+                        draw_start: src_start,
+                        draw_count: count,
+                        ring_epoch: 0,
+                        owner_draws: owners,
+                        draw_offset: if pi == 0 { 0 } else { near_n },
+                    },
+                    sun,
+                    ExactPrepareTarget {
+                        color: SHADOWMAP_SUN_COLOR_FORMAT,
+                        samples: 1,
+                        depth: SHADOWMAP_SUN_DEPTH_FORMAT,
+                        forward_z: true,
+                        use_world_pretess: false,
+                    },
+                ) {
+                    Ok(gpu) => static_draws.world[pi][slot_i] = Some(gpu),
+                    Err(cause) => {
+                        miss = miss.saturating_add(1);
+                        *miss_rows.entry(cause).or_default() += 1;
+                    }
+                }
+            }
+            for slot_i in 0..static_draws.smodel[pi].len() {
+                if static_draws.smodel[pi][slot_i].is_some() {
+                    continue;
+                }
+                let Some(span) = smodel_spans[slot_i] else {
+                    continue;
+                };
+                let owner_start = span.entry_start as usize;
+                let owner_end = owner_start.saturating_add(span.entry_count as usize);
+                let owners = packed
+                    .smodel_draw_indices
+                    .get(owner_start..owner_end)
+                    .unwrap_or(&[]);
+                retry_n = retry_n.saturating_add(1);
+                match prepare.prepare_shadow_flush_draws(
+                    shadow_exec_executor,
+                    shadow_exec_view,
+                    SunFlush {
+                        kind: SunFlushKind::Smodel,
+                        draw_start: span.draw_start,
+                        draw_count: span.draw_count,
+                        ring_epoch: span.ring_epoch,
+                        owner_draws: owners,
+                        draw_offset: if pi == 0 { 0 } else { near_n },
+                    },
+                    sun,
+                    ExactPrepareTarget {
+                        color: SHADOWMAP_SUN_COLOR_FORMAT,
+                        samples: 1,
+                        depth: SHADOWMAP_SUN_DEPTH_FORMAT,
+                        forward_z: true,
+                        use_world_pretess: false,
+                    },
+                ) {
+                    Ok(gpu) => static_draws.smodel[pi][slot_i] = Some(gpu),
+                    Err(cause) => {
+                        miss = miss.saturating_add(1);
+                        *miss_rows.entry(cause).or_default() += 1;
+                    }
+                }
+            }
+            let mut xmodel_gpu = Vec::with_capacity(xmodel_spans.len());
+            for (draw_start, draw_count, ring_epoch, entry_start, entry_count) in xmodel_spans {
+                let start = entry_start as usize;
+                let end = start.saturating_add(entry_count as usize);
+                let owners = packed.xmodel_draw_indices.get(start..end).unwrap_or(&[]);
+                match prepare.prepare_shadow_flush_draws(
+                    shadow_exec_executor,
+                    shadow_exec_view,
+                    SunFlush {
+                        kind: SunFlushKind::XModel,
+                        draw_start,
+                        draw_count,
+                        ring_epoch,
+                        owner_draws: owners,
+                        draw_offset: if pi == 0 { 0 } else { near_n },
+                    },
+                    sun,
+                    ExactPrepareTarget {
+                        color: SHADOWMAP_SUN_COLOR_FORMAT,
+                        samples: 1,
+                        depth: SHADOWMAP_SUN_DEPTH_FORMAT,
+                        forward_z: true,
+                        use_world_pretess: false,
+                    },
+                ) {
+                    Ok(gpu) => xmodel_gpu.push(gpu),
+                    Err(cause) => {
+                        miss = miss.saturating_add(1);
+                        *miss_rows.entry(cause).or_default() += 1;
+                    }
+                }
+            }
+            let mut skinned_gpu = Vec::new();
+            for flush in (SkinnedShadowFlushes {
+                owner_indices: &packed.smodel_skinned_draw_indices,
+                flushes: &work.smodel_skinned_flushes,
+            })
+            .draws(if pi == 0 { 0 } else { near_n })
+            {
+                match prepare.prepare_shadow_flush_draws(
+                    shadow_exec_executor,
+                    shadow_exec_view,
+                    flush,
+                    sun,
+                    ExactPrepareTarget {
+                        color: SHADOWMAP_SUN_COLOR_FORMAT,
+                        samples: 1,
+                        depth: SHADOWMAP_SUN_DEPTH_FORMAT,
+                        forward_z: true,
+                        use_world_pretess: false,
+                    },
+                ) {
+                    Ok(gpu) => skinned_gpu.push(gpu),
+                    Err(cause) => {
+                        miss = miss.saturating_add(1);
+                        *miss_rows.entry(cause).or_default() += 1;
+                    }
+                }
+            }
+            ms_prepare += prepare_started.elapsed().as_secs_f32() * 1000.0;
+            let patch_started = Instant::now();
+            let ResidentShadowStaticDraws {
+                world: resident_world,
+                smodel: resident_smodel,
+                commands,
+                ..
+            } = &mut *static_draws;
+            let plan = &mut commands[pi];
+            plan.open_frame();
+
+            if plan.generation != Some(generation)
+                || plan.world_n != resident_world[pi].len()
+                || plan.smodel_n != resident_smodel[pi].len()
+                || retry_n != retry_before
+                || smodel_identity_changed
+            {
+                plan.rebuild(generation, &resident_world[pi], &resident_smodel[pi]);
+            }
+            if plan.refused > 0 {
+                miss = miss.saturating_add(plan.refused);
+                *miss_rows.entry(sun_overlay_refusal(pi).into()).or_default() += plan.refused;
+            }
+            let refused_before = plan.refused;
+            let mut xmodel_draws = Vec::with_capacity(xmodel_gpu.len());
+            let mut xmodel_seen = HashMap::new();
+            for flush in &xmodel_gpu {
+                plan.push_flush(flush, &mut xmodel_seen, &mut xmodel_draws);
+            }
+            let dynamic_refused = plan.refused.saturating_sub(refused_before);
+            plan.refused = refused_before;
+            if dynamic_refused > 0 {
+                miss = miss.saturating_add(dynamic_refused);
+                *miss_rows.entry(sun_overlay_refusal(pi).into()).or_default() += dynamic_refused;
+            }
+            coalesce_shadow_draws(&mut xmodel_draws);
+            let mut skinned_draws = Vec::with_capacity(skinned_gpu.len());
+            let mut skinned_seen = HashMap::new();
+            for flush in &skinned_gpu {
+                plan.push_flush(flush, &mut skinned_seen, &mut skinned_draws);
+            }
+            coalesce_shadow_draws(&mut skinned_draws);
+            if plan.world_draws.is_empty()
+                && plan.smodel_draws.is_empty()
+                && xmodel_draws.is_empty()
+                && skinned_draws.is_empty()
+            {
+                continue;
+            }
+
+            let Some(frame) = extracted.frame.sun_shadow else {
+                miss = miss.saturating_add(1);
+                *miss_rows.entry("MissingSunShadowFrame".into()).or_default() += 1;
+                continue;
+            };
+            plan.patch_sun_registers(
+                &frame.partitions[pi],
+                extracted.frame.exec_frame.view_origin,
+            );
+            // Each partition has its own projection. Colour-view clip coordinates
+            // must never be reused in a shadow pass.
+            for draw in xmodel_draws.iter_mut().chain(skinned_draws.iter_mut()) {
+                prepare_shadow_slice(
+                    draw,
+                    frame.partitions[pi].clip_from_world,
+                    device,
+                    &mut prepare.slice_groups,
+                );
+            }
+            ms_patch += patch_started.elapsed().as_secs_f32() * 1000.0;
+            let arena_started = Instant::now();
+            // A growing arena invalidates its old bind group during upload.
+            let layout = plan
+                .world_draws
+                .iter()
+                .chain(xmodel_draws.iter())
+                .chain(skinned_draws.iter())
+                .chain(plan.smodel_draws.iter())
+                .find_map(|draw| {
+                    pipeline_res
+                        .get(draw.port)
+                        .map(|port| &port.constants_layout)
+                });
+            shadow_arena.gpu[pi].upload(
+                PackedArenaUpdate {
+                    identity: &plan.bytes,
+                    placed: &[],
+                    identity_reserved: plan.bytes.len(),
+                    dirty: &plan.dirty,
+                    full_upload: false,
+                },
+                layout,
+                registry,
+                device,
+                queue,
+                "iw4_shadowmap_sun_vs_arena",
+            );
+            ms_arena += arena_started.elapsed().as_secs_f32() * 1000.0;
+            partitions.push(PreparedSunPartition {
+                pi,
+                envelope,
+                xmodel_draws,
+                skinned_draws,
+            });
+        }
+        drop(prepare);
+        PreparedSunWork {
+            early: None,
+            color_view: Some(color_view),
+            depth_view: Some(depth_view),
+            clear_partition_zero,
+            partitions,
+            miss,
+            miss_rows,
+            any_flush,
+            smodel_reusable_all,
+            retry_n,
+            world_ib_n,
+            emit_ms: ms_emit,
+            prepare_ms: ms_prepare,
+            patch_ms: ms_patch,
+            arena_ms: ms_arena,
+        }
+    }
+}
+
+pub(super) fn prepare_shadow_passes(mut lane: ShadowLane<'_>) {
+    let _span = perf::span!("prepare_shadow", "iw4l.render");
+    if !lane.installed_ready {
         return;
     }
+    let frame = lane.frame;
     let Some(sampler_table) = frame.world().sampler_table.as_ref() else {
         return;
     };
     let extracted = ExtractedColourRefs::new(frame);
     let products = &extracted.frame.frame_products;
-    let mut sun_exec = std::mem::take(&mut scratch.sun_exec);
-    let mut spot_exec = std::mem::take(&mut scratch.spot_exec);
-    scratch.skinned_tess.begin_frame();
-    let sun_prepared = prepare_shadowmap_sun(
-        products,
-        extracted,
-        geometry,
-        pipeline,
-        registry,
-        device,
-        queue,
-        uploaded,
-        binding_cache,
-        shadow_table,
-        shadow_arena,
-        shadowmap,
-        static_draws,
-        sampler_table,
-        &mut sun_exec,
-        &mut scratch.skinned_tess,
-    );
-    let spot_prepared = prepare_shadowmap_spot(
-        products,
-        extracted,
-        geometry,
-        pipeline,
-        registry,
-        device,
-        queue,
-        uploaded,
-        binding_cache,
-        shadow_table,
-        spot_arena,
-        spotmap,
-        sampler_table,
-        &mut spot_exec,
-        &mut scratch.skinned_tess,
-    );
-    scratch.sun_prepared = sun_prepared;
-    scratch.spot_prepared = spot_prepared;
-    scratch.sun_exec = sun_exec;
-    scratch.spot_exec = spot_exec;
+    let mut sun_exec = std::mem::take(&mut lane.scratch.sun_exec);
+    let mut spot_exec = std::mem::take(&mut lane.scratch.spot_exec);
+    let sun_prepared =
+        lane.prepare_shadowmap_sun(products, extracted, sampler_table, &mut sun_exec);
+    let spot_prepared =
+        lane.prepare_shadowmap_spot(products, extracted, sampler_table, &mut spot_exec);
+    lane.scratch.sun_prepared = sun_prepared;
+    lane.scratch.spot_prepared = spot_prepared;
+    lane.scratch.sun_exec = sun_exec;
+    lane.scratch.spot_exec = spot_exec;
 }
 
 impl ShadowmapSunArena {
@@ -2184,54 +2137,259 @@ impl ShadowmapSpotArena {
     }
 }
 
+pub(super) struct ShadowRecorder<'a, 'w, 's> {
+    pub(super) pipeline: &'a ExactColourPipeline,
+    pub(super) registry: &'a ExactPipelineRegistry,
+    pub(super) geometry: &'a ExactColourGeometry,
+    pub(super) device: &'a RenderDevice,
+    pub(super) table: &'a mut ExactTextureTable,
+    pub(super) context: &'a mut RenderContext<'w, 's>,
+}
+
+impl ShadowRecorder<'_, '_, '_> {
+    fn record_shadowmap_spot(
+        &mut self,
+        mut work: PreparedSpotWork,
+        cache: &mut Vec<SpotShadowContent>,
+        shadow_arena: &ShadowmapSpotArena,
+        skinned: encode::RecordMesh<'_>,
+    ) -> SpotShadowSubmit {
+        let pipeline_res = self.pipeline;
+        let registry = self.registry;
+        let geometry = self.geometry;
+        let device = self.device;
+        let texture_table = &mut *self.table;
+        let context = &mut *self.context;
+
+        if work.prepared_slots.is_empty() {
+            cache.clear();
+            return SpotShadowSubmit {
+                miss: work.miss,
+                cause: rank_count_map(&work.miss_rows, 1),
+                ..SpotShadowSubmit::default()
+            };
+        }
+        let Some(table_layout) = texture_table_layout(pipeline_res) else {
+            return SpotShadowSubmit {
+                miss: 1,
+                cause: Some("TextureTableLayoutMissing:1".into()),
+                ..SpotShadowSubmit::default()
+            };
+        };
+        let table_binds = texture_table.binds(device, registry, table_layout);
+        let diagnostics = context.diagnostic_recorder();
+        let diagnostics = diagnostics.as_deref();
+        let encoder = context.command_encoder();
+        let gpu_span = diagnostics.time_span(encoder, GPU_SPAN_SPOT);
+        perf::counter!(
+            "spot_shadow_cache_eligible",
+            "iw4l.render",
+            work.prepared_slots
+                .iter()
+                .filter(|slot| slot.content.is_some())
+                .count() as f64
+        );
+        let mut indexed = 0u32;
+        let mut cache_hits = 0;
+        let mut updates = 0;
+        let mut record_n = RecordCensus::default();
+        let world_index = geometry.world_index.as_ref();
+        cache.retain(|entry| {
+            entry.generation == work.generation
+                && work
+                    .prepared_slots
+                    .iter()
+                    .any(|slot| slot.color_view.id() == entry.target.id())
+        });
+        for slot in &mut work.prepared_slots {
+            if slot
+                .content
+                .as_ref()
+                .is_some_and(|content| cache.iter().any(|entry| entry.same(content)))
+            {
+                cache_hits += 1;
+                continue;
+            }
+            // This tile is about to change even when some caster recording fails.
+            cache.retain(|entry| {
+                if let Some(content) = &slot.content {
+                    !entry.overlaps(content)
+                } else {
+                    let a = entry.viewport;
+                    let b = slot.envelope.viewport;
+                    entry.target.id() != slot.color_view.id()
+                        || a.x >= b.x + b.width
+                        || b.x >= a.x + a.width
+                        || a.y >= b.y + b.height
+                        || b.y >= a.y + a.height
+                }
+            });
+            updates += 1;
+            let draws = &mut work.all_prepared[slot.draw_range.clone()];
+            let live = coalesce_shadow_draws_prefix(draws);
+            let result = record_shadowmap_draws(
+                encoder,
+                ShadowPassInputs {
+                    device,
+                    registry,
+                    geometry: geometry::shadow_record_geometry(
+                        geometry,
+                        world_index,
+                        &slot.smodel_index_epochs,
+                        &slot.xmodel_index_epochs,
+                        skinned,
+                    ),
+                    constants_bind: shadow_arena.gpu.bind_group.as_ref(),
+                    textures_bind: &table_binds.scene,
+                    color_view: &slot.color_view,
+                    depth_view: &slot.depth_view,
+                    scissor: slot.envelope.scissor,
+                    viewport: slot.envelope.viewport,
+                    cleared: false,
+                    tile_clear: Some(
+                        work.clear_pipeline
+                            .as_ref()
+                            .expect("prepared spot slots have a clear pipeline"),
+                    ),
+                },
+                &draws[..live],
+                "iw4_shadowmap_spot_slot",
+            );
+            if result.indexed as usize == live {
+                if let Some(content) = slot.content.take() {
+                    cache.push(content);
+                }
+            }
+            indexed = indexed.saturating_add(result.indexed);
+            record_n.add(result.bindings);
+        }
+        gpu_span.end(encoder);
+        SpotShadowSubmit {
+            cache_hits,
+            updates,
+            gpu: indexed,
+            miss: work.miss,
+            slots: work.prepared_slots.len() as u32,
+            cause: rank_count_map(&work.miss_rows, 1),
+            record_n,
+        }
+    }
+
+    fn record_shadowmap_sun(
+        &mut self,
+        mut work: PreparedSunWork,
+        shadow_arena: &ShadowmapSunArena,
+        static_draws: &ResidentShadowStaticDraws,
+        skinned: encode::RecordMesh<'_>,
+    ) -> SunShadowSubmit {
+        let pipeline_res = self.pipeline;
+        let registry = self.registry;
+        let geometry = self.geometry;
+        let device = self.device;
+        let texture_table = &mut *self.table;
+        let context = &mut *self.context;
+
+        if let Some(submit) = work.early.take() {
+            return submit;
+        }
+        let Some(color_view) = work.color_view.take() else {
+            return SunShadowSubmit::refused("ShadowmapSunTargetMissing");
+        };
+        let Some(depth_view) = work.depth_view.take() else {
+            return SunShadowSubmit::refused("ShadowmapSunDepthMissing");
+        };
+        if !work.clear_partition_zero && work.partitions.is_empty() {
+            return finish_sun_submit(&work, 0, RecordCensus::default(), 0.0);
+        }
+        let diagnostics = context.diagnostic_recorder();
+        let diagnostics = diagnostics.as_deref();
+        let encoder = context.command_encoder();
+        let gpu_span = diagnostics.time_span(encoder, GPU_SPAN_SUN);
+        if work.clear_partition_zero {
+            clear_empty_shadowmap_sun_partition_zero(encoder, &color_view, &depth_view);
+        }
+        let mut indexed = 0u32;
+        let mut record_n = RecordCensus::default();
+        let record_started = Instant::now();
+        if !work.partitions.is_empty() {
+            let Some(table_layout) = texture_table_layout(pipeline_res) else {
+                gpu_span.end(encoder);
+                return SunShadowSubmit::refused("TextureTableLayoutMissing");
+            };
+            let table_binds = texture_table.binds(device, registry, table_layout);
+            let world_index = geometry.world_index.as_ref();
+            for part in &work.partitions {
+                let plan = &static_draws.commands[part.pi];
+                let result = record_shadowmap_draws(
+                    encoder,
+                    ShadowPassInputs {
+                        device,
+                        registry,
+                        geometry: geometry::shadow_record_geometry(
+                            geometry,
+                            world_index,
+                            geometry.smodel_index.as_slice(),
+                            geometry.xmodel_index_epochs(),
+                            skinned,
+                        ),
+                        constants_bind: shadow_arena.gpu[part.pi].bind_group.as_ref(),
+                        textures_bind: &table_binds.sun_caster,
+                        color_view: &color_view,
+                        depth_view: &depth_view,
+                        scissor: part.envelope.scissor,
+                        viewport: part.envelope.viewport,
+                        cleared: part.envelope.cleared,
+                        tile_clear: None,
+                    },
+                    plan.world_draws
+                        .iter()
+                        .chain(part.xmodel_draws.iter())
+                        .chain(part.skinned_draws.iter())
+                        .chain(plan.smodel_draws.iter()),
+                    "iw4_shadowmap_sun_partition",
+                );
+                indexed = indexed.saturating_add(result.indexed);
+                record_n.add(result.bindings);
+            }
+        }
+        let ms_record = record_started.elapsed().as_secs_f32() * 1000.0;
+        gpu_span.end(encoder);
+        if indexed == 0 {
+            return finish_sun_submit(&work, 0, RecordCensus::default(), ms_record);
+        }
+
+        finish_sun_submit(&work, indexed, record_n, ms_record)
+    }
+}
+
 impl ShadowSubmitScratch {
     pub(super) fn record(
         &mut self,
-        pipeline: &ExactColourPipeline,
-        registry: &ExactPipelineRegistry,
-        geometry: &ExactColourGeometry,
-        device: &RenderDevice,
+        mut recorder: ShadowRecorder<'_, '_, '_>,
         queue: &RenderQueue,
-        table: &mut ExactTextureTable,
         sun_arena: &ShadowmapSunArena,
         spot_arena: &ShadowmapSpotArena,
         static_draws: &ResidentShadowStaticDraws,
-        context: &mut RenderContext,
         census_on: bool,
     ) -> ShadowSubmitResult {
-        self.skinned_tess.upload(device, queue);
+        self.skinned_tess.upload(recorder.device, queue);
         let vertex = self.skinned_tess.vertex_buffer().cloned();
         let lighting = self.skinned_tess.vertex_lighting_buffer().cloned();
         let index = self.skinned_tess.index_buffer().cloned();
+        let skinned = encode::RecordMesh {
+            vertex: vertex.as_ref(),
+            index: index.as_ref(),
+            lighting: lighting.as_ref(),
+        };
         let sun_prepared = std::mem::take(&mut self.sun_prepared);
         let spot_prepared = std::mem::take(&mut self.spot_prepared);
         let started = colour_census_clock(census_on);
-        let sun = record_shadowmap_sun(
-            sun_prepared,
-            pipeline,
-            registry,
-            geometry,
-            device,
-            table,
-            sun_arena,
-            static_draws,
-            context,
-            vertex.as_ref(),
-            lighting.as_ref(),
-            index.as_ref(),
-        );
-        let spot = record_shadowmap_spot(
+        let sun = recorder.record_shadowmap_sun(sun_prepared, sun_arena, static_draws, skinned);
+        let spot = recorder.record_shadowmap_spot(
             spot_prepared,
-            pipeline,
-            registry,
-            geometry,
-            device,
-            table,
+            &mut self.spot_cache,
             spot_arena,
-            context,
-            vertex.as_ref(),
-            lighting.as_ref(),
-            index.as_ref(),
+            skinned,
         );
         ShadowSubmitResult {
             sun,
@@ -2245,4 +2403,25 @@ pub(super) struct ShadowSubmitResult {
     pub(super) sun: SunShadowSubmit,
     pub(super) spot: SpotShadowSubmit,
     pub(super) submit_started: Option<Instant>,
+}
+
+fn prepare_shadow_slice(
+    draw: &mut PreparedExactDraw,
+    clip_from_world: Mat4,
+    device: &RenderDevice,
+    groups: &mut HashMap<[u32; 28], Arc<bevy::render::render_resource::BindGroup>>,
+) {
+    if let Some(plane) = draw.slice_world {
+        let planes = super::portal_scene::entity_clip_uniform(
+            clip_from_world,
+            None,
+            plane,
+            draw.aperture_world,
+            false,
+        );
+        let key = std::array::from_fn(|i| planes[i / 4][i % 4].to_bits());
+        draw.slice_clip = Some(Arc::clone(groups.entry(key).or_insert_with(|| {
+            Arc::new(super::portal_scene::clip_planes_group(device, planes))
+        })));
+    }
 }

@@ -124,7 +124,7 @@ impl WeaponPreparationRecipe {
                 self.record(
                     WeaponComponent::Tracer,
                     name,
-                    PreparedComponentTarget::Unsupported(ComponentPreparationRefusal::CatalogMiss),
+                    PreparedComponentTarget::Unsupported("component is absent from the catalog"),
                 );
                 combat.tracer = AssetEdge::Unresolved(AssetEdgeReason::CatalogMiss);
             }
@@ -148,11 +148,7 @@ impl WeaponPreparationRecipe {
             target: PreparedComponentTarget::Pending,
         });
     }
-    fn candidate_namespace(
-        &self,
-        component: WeaponComponent,
-        name: &str,
-    ) -> Option<AssetNamespace> {
+    fn candidate_namespace(&self, component: WeaponComponent, name: &str) -> Option<FamilyId> {
         self.namespace(component)?;
         if !self.closed_references {
             return self.namespace(component);
@@ -181,7 +177,7 @@ impl WeaponPreparationRecipe {
         &self,
         component: WeaponComponent,
         name: &str,
-    ) -> Option<AssetNamespace> {
+    ) -> Option<FamilyId> {
         let namespace = self.candidate_namespace(component, name)?;
         match self.reference(component, name)?.target {
             PreparedComponentTarget::Pending | PreparedComponentTarget::Unsupported(_) => None,
@@ -208,16 +204,12 @@ impl WeaponPreparationRecipe {
             policy: if native {
                 ComponentPreparationPolicy::Native
             } else {
-                ComponentPreparationPolicy::Unsupported(
-                    ComponentPreparationRefusal::UndeclaredReference,
-                )
+                ComponentPreparationPolicy::Unsupported("undeclared component reference")
             },
             target: if native {
                 target
             } else {
-                PreparedComponentTarget::Unsupported(
-                    ComponentPreparationRefusal::UndeclaredReference,
-                )
+                PreparedComponentTarget::Unsupported("undeclared component reference")
             },
         });
     }
@@ -226,9 +218,8 @@ impl WeaponPreparationRecipe {
         self.closed_references = true;
         for reference in &mut self.references {
             if reference.target == PreparedComponentTarget::Pending {
-                reference.target = PreparedComponentTarget::Unsupported(
-                    ComponentPreparationRefusal::UnrequestedCapability,
-                );
+                reference.target =
+                    PreparedComponentTarget::Unsupported("component capability was not requested");
             }
         }
     }
@@ -266,7 +257,7 @@ impl WeaponPreparationRecipe {
                 if edge.is_bound() {
                     PreparedComponentTarget::Fpv(edge)
                 } else {
-                    PreparedComponentTarget::Unsupported(ComponentPreparationRefusal::CatalogMiss)
+                    PreparedComponentTarget::Unsupported("component is absent from the catalog")
                 },
             );
         }
@@ -291,7 +282,7 @@ impl WeaponPreparationRecipe {
                 if edge.is_bound() {
                     PreparedComponentTarget::World(edge)
                 } else {
-                    PreparedComponentTarget::Unsupported(ComponentPreparationRefusal::CatalogMiss)
+                    PreparedComponentTarget::Unsupported("component is absent from the catalog")
                 },
             );
         }
@@ -318,7 +309,7 @@ impl WeaponPreparationRecipe {
                 if edge.is_bound() {
                     PreparedComponentTarget::Material(edge)
                 } else {
-                    PreparedComponentTarget::Unsupported(ComponentPreparationRefusal::CatalogMiss)
+                    PreparedComponentTarget::Unsupported("component is absent from the catalog")
                 },
             );
         }
@@ -345,7 +336,7 @@ impl WeaponPreparationRecipe {
                 if edge.is_bound() {
                     PreparedComponentTarget::Animation(edge)
                 } else {
-                    PreparedComponentTarget::Unsupported(ComponentPreparationRefusal::CatalogMiss)
+                    PreparedComponentTarget::Unsupported("component is absent from the catalog")
                 },
             );
         }
@@ -372,7 +363,7 @@ impl WeaponPreparationRecipe {
                 if edge.is_bound() {
                     PreparedComponentTarget::Effect(edge)
                 } else {
-                    PreparedComponentTarget::Unsupported(ComponentPreparationRefusal::CatalogMiss)
+                    PreparedComponentTarget::Unsupported("component is absent from the catalog")
                 },
             );
         }
@@ -403,7 +394,7 @@ impl WeaponPreparationRecipe {
                 if edge.is_bound() {
                     PreparedComponentTarget::Projectile(edge)
                 } else {
-                    PreparedComponentTarget::Unsupported(ComponentPreparationRefusal::CatalogMiss)
+                    PreparedComponentTarget::Unsupported("component is absent from the catalog")
                 },
             );
         }
@@ -415,7 +406,7 @@ impl WeaponRow {
     pub(in crate::weapon_catalog) fn component_namespace(
         &self,
         component: WeaponComponent,
-    ) -> Option<AssetNamespace> {
+    ) -> Option<FamilyId> {
         self.preparation.namespace(component)
     }
 }

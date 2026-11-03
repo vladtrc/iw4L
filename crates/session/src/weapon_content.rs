@@ -25,7 +25,7 @@ pub(crate) fn compile(
     aliases: Vec<(String, u32)>,
     pen_table: weapon_iw4::PenetrationDepthTable,
     pen_table_loaded: bool,
-) -> Result<PreparedSimWeapons, sim::SimWeaponContentRefusal> {
+) -> Result<PreparedSimWeapons, &'static str> {
     let rules = WeaponHostRules::default();
     let aliases: Vec<_> = weapons.native_script_aliases().chain(aliases).collect();
     let mut refused = Vec::new();
@@ -95,7 +95,7 @@ pub(crate) fn compile(
     });
     let ranks = weapons
         .rank_progression()
-        .map_err(|_| sim::SimWeaponContentRefusal::InvalidProgression)?;
+        .map_err(|_| "invalid rank progression")?;
     let content =
         sim::SimWeaponContent::compile(rows, aliases, pen_table, pen_table_loaded, ranks)?;
     if !refused.is_empty() {

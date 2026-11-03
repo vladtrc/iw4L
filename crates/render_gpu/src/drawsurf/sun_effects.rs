@@ -378,7 +378,6 @@ fn draw_sun_effects(
     frame: Res<super::PublishedRenderFrame>,
     gpu: Option<ResMut<SunEffectsGpu>>,
     cache: Res<PipelineCache>,
-    device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
     uploaded: Res<RuntimeUploadedImageRegistry>,
     mut context: RenderContext,
@@ -410,6 +409,7 @@ fn draw_sun_effects(
     let write = gpu.slot as usize;
     let read = 1 - write;
     queue.write_buffer(&gpu.params, 0, bytemuck::bytes_of(&pack_params(&sun)));
+    let device = context.render_device().clone();
     let encoder = context.command_encoder();
     let history_bind = bind_sun(
         &gpu,

@@ -192,6 +192,20 @@ impl PasswordVerifier {
     }
 }
 
+struct RoomContent {
+    map: String,
+    requires: master_protocol::ContentFamilies,
+    available: master_protocol::ContentFamilies,
+}
+
+impl RoomContent {
+    fn is_valid(&self) -> bool {
+        self.requires.contains_family("iw4")
+            && self.requires.missing_from(&self.available).is_empty()
+            && map_content_allowed(&self.map, &self.requires)
+    }
+}
+
 struct Room {
     view: RoomView,
     password: Option<PasswordVerifier>,
@@ -878,11 +892,13 @@ async fn handle_request(
             &mut state,
             connection_id,
             name,
-            map,
+            RoomContent {
+                map,
+                requires,
+                available,
+            },
             mode,
             max_players,
-            requires,
-            available,
             password,
         ),
         RequestBody::JoinRoom {
@@ -1013,20 +1029,19 @@ fn create_room(
     state: &mut ServiceState,
     connection_id: u64,
     name: String,
-    map: String,
+    content: RoomContent,
     mode: String,
     max_players: u8,
-    requires: master_protocol::ContentFlags,
-    available: master_protocol::ContentFlags,
     password: String,
 ) -> (ResponseBody, Vec<(u64, ControlFrame)>) {
-    if !master_protocol::ContentFlags::KNOWN.contains(requires)
-        || !requires.contains(master_protocol::ContentFlags::IW4)
-        || !requires.missing_from(available).is_empty()
-        || !map_content_allowed(&map, requires)
-    {
+    if !content.is_valid() {
         return (ResponseBody::Error(ServiceError::InvalidAdvert), Vec::new());
     }
+    let RoomContent {
+        map,
+        requires,
+        available,
+    } = content;
     if state.membership.contains_key(&connection_id) {
         return (
             ResponseBody::Error(ServiceError::AlreadyHosting),
@@ -1087,7 +1102,7 @@ fn join_room(
     state: &mut ServiceState,
     connection_id: u64,
     room_id: AdvertId,
-    have: master_protocol::ContentFlags,
+    have: master_protocol::ContentFamilies,
     password: String,
 ) -> (ResponseBody, Vec<(u64, ControlFrame)>) {
     if let Some(existing) = state.membership.get(&connection_id).copied() {
@@ -1123,10 +1138,10 @@ fn join_room(
     if !room.view.advert().allows_join_request() {
         return (ResponseBody::Error(ServiceError::Locked), Vec::new());
     }
-    if !room.view.requires.missing_from(have).is_empty() {
+    if !room.view.requires.missing_from(&have).is_empty() {
         return (
             ResponseBody::Error(ServiceError::MissingContent {
-                requires: room.view.requires,
+                requires: room.view.requires.clone(),
                 have,
             }),
             Vec::new(),
@@ -1175,8 +1190,8 @@ fn leave_room(
     (ResponseBody::RoomLeft, publishes)
 }
 
-fn map_content_allowed(map: &str, families: master_protocol::ContentFlags) -> bool {
-    master_protocol::ContentFlags::for_map(map).is_some_and(|family| families.contains(family))
+fn map_content_allowed(map: &str, families: &master_protocol::ContentFamilies) -> bool {
+    master_protocol::ContentFamilies::for_map(map).is_some_and(|family| families.contains(&family))
 }
 
 fn set_options(
@@ -1189,7 +1204,7 @@ fn set_options(
     match state.host_of(connection_id) {
         Ok(room_id) => {
             let room = state.rooms.get_mut(&room_id).expect("host room");
-            if !map_content_allowed(&map, room.view.requires)
+            if !map_content_allowed(&map, &room.view.requires)
                 || (room.view.phase.in_match() && (room.view.map != map || room.view.mode != mode))
             {
                 return (ResponseBody::Error(ServiceError::InvalidAdvert), Vec::new());
@@ -1217,7 +1232,7 @@ fn start_match(
     match state.host_of(connection_id) {
         Ok(room_id) => {
             let room = state.rooms.get_mut(&room_id).expect("host room");
-            if !map_content_allowed(&map, room.view.requires)
+            if !map_content_allowed(&map, &room.view.requires)
                 || (room.view.phase.in_match() && (room.view.map != map || room.view.mode != mode))
             {
                 return (ResponseBody::Error(ServiceError::InvalidAdvert), Vec::new());
@@ -1543,7 +1558,7 @@ async fn list(target: &ClientTarget) -> Result<()> {
             for advert in adverts {
                 writeln!(
                     output,
-                    "{}\t{}/{}\t{}\t{}\tlocked={}\tin_match={}\tgen={}\trequires=0x{:02x}\t{}",
+                    "{}\t{}/{}\t{}\t{}\tlocked={}\tin_match={}\tgen={}\trequires={}\t{}",
                     advert.id,
                     advert.players,
                     advert.max_players,
@@ -1552,7 +1567,7 @@ async fn list(target: &ClientTarget) -> Result<()> {
                     u8::from(advert.locked),
                     u8::from(advert.in_match),
                     advert.generation,
-                    advert.requires.0,
+                    advert.requires.iter().collect::<Vec<_>>().join(","),
                     advert.name
                 )?;
             }

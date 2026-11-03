@@ -25,21 +25,20 @@ impl CapsuleBounds {
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "moving hull and temporary model bounds"
-)]
 pub fn transformed_temp_capsule_trace(
-    start: [f32; 3],
-    end: [f32; 3],
-    mins: [f32; 3],
-    maxs: [f32; 3],
+    ext: &crate::TraceExtents,
     origin: [f32; 3],
     box_mins: [f32; 3],
     box_maxs: [f32; 3],
     contents: u32,
-    mask: u32,
 ) -> Trace {
+    let crate::TraceExtents {
+        start,
+        end,
+        mins,
+        maxs,
+        mask,
+    } = *ext;
     let mut trace = Trace {
         fraction: 1.0,
         endpos: end,

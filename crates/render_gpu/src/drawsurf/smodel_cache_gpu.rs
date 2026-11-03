@@ -17,12 +17,6 @@ pub struct SmodelCacheGpu {
     uploaded_revision: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SmcPatchWriteRefuse {
-    NoBuffer,
-    LockRejected,
-}
-
 impl SmodelCacheGpu {
     pub fn ensure(&mut self, device: &RenderDevice) {
         if self.vb.is_none() {
@@ -99,12 +93,12 @@ impl SmodelCacheGpu {
         queue: &RenderQueue,
         lock: SmcPatchLock,
         bytes: &[u8],
-    ) -> Result<(), SmcPatchWriteRefuse> {
+    ) -> Result<(), &'static str> {
         let Some(vb) = self.vb.as_ref() else {
-            return Err(SmcPatchWriteRefuse::NoBuffer);
+            return Err("static model patch buffer missing");
         };
         if !lock.accepts_bytes(bytes.len()) {
-            return Err(SmcPatchWriteRefuse::LockRejected);
+            return Err("static model patch lock rejected");
         }
         queue.write_buffer(vb, u64::from(lock.byte_offset), bytes);
         Ok(())
@@ -115,13 +109,13 @@ impl SmodelCacheGpu {
         queue: &RenderQueue,
         byte_offset: u32,
         bytes: &[u8],
-    ) -> Result<(), SmcPatchWriteRefuse> {
+    ) -> Result<(), &'static str> {
         let Some(ib) = self.ib.as_ref() else {
-            return Err(SmcPatchWriteRefuse::NoBuffer);
+            return Err("static model patch buffer missing");
         };
         let end = (byte_offset as usize).saturating_add(bytes.len());
         if end > SMC_INDEX_U16_N * 2 {
-            return Err(SmcPatchWriteRefuse::LockRejected);
+            return Err("static model patch lock rejected");
         }
         queue.write_buffer(ib, u64::from(byte_offset), bytes);
         Ok(())

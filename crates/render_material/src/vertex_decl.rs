@@ -1,8 +1,8 @@
-use crate::vertex_layout::VertexLayoutFamily;
+use crate::vertex_layout::VertexLayout;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeVertexDecl {
-    pub family: VertexLayoutFamily,
+    pub layout: VertexLayout,
     pub name: String,
     pub stream_count: u8,
     pub has_optional_source: u8,

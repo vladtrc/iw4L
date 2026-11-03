@@ -125,7 +125,7 @@ impl Plugin for TheaterPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TheaterState>()
             .add_systems(
-                Update,
+                PreUpdate,
                 attach_editor.in_set(ClientSet::Receive).after(ReplayPump),
             )
             .add_systems(
@@ -151,7 +151,7 @@ impl Plugin for TheaterPlugin {
             )
             .add_systems(Update, draw_editor.in_set(ClientSet::Ui))
             .add_systems(OnEnter(frame::MatchScope::Absent), release_editor)
-            .add_systems(First, sync_hud)
+            .add_systems(First, (sync_hud, clear_camera_without_replay).chain())
             .add_systems(PostUpdate, capture_previews);
         crate::browser::register(app);
         crate::navigation::register(app);
@@ -234,7 +234,10 @@ fn attach_editor(
                 state.info = info;
                 state.status = "Space pause · F3 camera · F4 controls · F2 HUD".into();
             }
-            Err(error) => state.status = error,
+            Err(error) => {
+                warn!("theater recording index failed: {error}");
+                state.status = error;
+            }
         }
     }
 }
@@ -417,11 +420,10 @@ fn apply_actions(
                         .zone_name()
                         .ok_or("recording has no map identity")?
                         .to_owned();
-                    let id = swap.request_demo(path.to_string_lossy().into_owned(), zone, false)?;
+                    swap.request_demo(path.to_string_lossy().into_owned(), zone, false)?;
                     state.seek_task = None;
                     state.seek_loading = false;
                     state.preview_segment = None;
-                    pending.request_id = Some(id);
                     pending.control = None;
                     pending.playback = Some(film);
                     pending.quit_on_end = false;
@@ -816,7 +818,6 @@ fn apply_actions(
                     state.free = None;
                     pending.playback = None;
                     pending.control = None;
-                    pending.request_id = None;
                     pending.in_place = false;
                     browser.open = false;
                 }
@@ -825,6 +826,7 @@ fn apply_actions(
             Ok(())
         })();
         if let Err(error) = result {
+            warn!("theater command refused: {error}");
             state.status = error;
         }
     }
@@ -845,7 +847,6 @@ fn apply_actions(
     {
         state.seek_task = None;
         let result = result.map(|(film, control)| {
-            pending.request_id = None;
             pending.control = Some(control);
             pending.playback = Some(film);
             pending.quit_on_end = false;
@@ -917,17 +918,22 @@ fn select_player(
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct EditorCameraInput<'w, 's> {
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    buttons: Res<'w, ButtonInput<MouseButton>>,
+    motion: Res<'w, AccumulatedMouseMotion>,
+    time: Res<'w, Time>,
+    console: Res<'w, console::ConsoleState>,
+    world_camera: Query<'w, 's, &'static Transform, With<FlyCamera>>,
+}
+
 fn update_camera(
     mut state: ResMut<TheaterState>,
     playback: Option<Res<ReplayPlayback>>,
     mut presented: ResMut<PresentedSnapshot>,
     mut camera: ResMut<SimCamera>,
-    keys: Res<ButtonInput<KeyCode>>,
-    buttons: Res<ButtonInput<MouseButton>>,
-    motion: Res<AccumulatedMouseMotion>,
-    time: Res<Time>,
-    console: Res<console::ConsoleState>,
-    world_camera: Query<&Transform, With<FlyCamera>>,
+    input: EditorCameraInput,
     collision: Res<render_anim::occupancy::dyn_ent_phys::DynEntPhysClip>,
     clock: Res<net::FrameClock>,
 ) {
@@ -952,16 +958,16 @@ fn update_camera(
         presented.set_first_person_camera();
         return;
     }
-    let Some(current) = world_camera.iter().next().copied() else {
+    let Some(current) = input.world_camera.iter().next().copied() else {
         return;
     };
     let transform = match mode {
         CameraMode::Free => {
             let mut transform = state.free.unwrap_or(current);
-            if !console.open {
-                if buttons.pressed(MouseButton::Right) {
-                    transform.rotate_z(-motion.delta.x * 0.003);
-                    transform.rotate_local_x(-motion.delta.y * 0.003);
+            if !input.console.open {
+                if input.buttons.pressed(MouseButton::Right) {
+                    transform.rotate_z(-input.motion.delta.x * 0.003);
+                    transform.rotate_local_x(-input.motion.delta.y * 0.003);
                 }
                 let mut movement = Vec3::ZERO;
                 for (key, direction) in [
@@ -972,16 +978,17 @@ fn update_camera(
                     (KeyCode::KeyQ, -Vec3::Z),
                     (KeyCode::KeyE, Vec3::Z),
                 ] {
-                    if keys.pressed(key) {
+                    if input.keys.pressed(key) {
                         movement += direction;
                     }
                 }
-                let speed = if keys.pressed(KeyCode::ShiftLeft) {
+                let speed = if input.keys.pressed(KeyCode::ShiftLeft) {
                     1200.0
                 } else {
                     200.0
                 };
-                transform.translation += movement.normalize_or_zero() * speed * time.delta_secs();
+                transform.translation +=
+                    movement.normalize_or_zero() * speed * input.time.delta_secs();
             }
             state.free = Some(transform);
             transform
@@ -1008,10 +1015,17 @@ fn update_camera(
         CameraMode::Attached => {
             let mut transform = state.free.unwrap_or(current);
             let target = state.project.attached_entity;
-            if let Some(projectile) = presented.presented_projectiles().iter().find(|p| matches!(p, net::PresentedProjectile::Authoritative(state) if target == Some(state.entnum))) {
+            if let Some(projectile) = presented.snapshot().and_then(|snapshot| {
+                snapshot
+                    .projectiles
+                    .iter()
+                    .find(|p| target == Some(p.entnum))
+            }) {
                 transform.translation = Vec3::from_array(projectile.origin_at(clock.time()));
                 state.free = Some(transform);
-            } else { state.status = "Attached object unavailable; holding camera.".into(); }
+            } else {
+                state.status = "Attached object unavailable; holding camera.".into();
+            }
             transform
         }
         CameraMode::FirstPerson => return,
@@ -1031,12 +1045,17 @@ fn sync_hud(
     playback: Option<Res<ReplayPlayback>>,
     mut hud: ResMut<frame::HudDraw>,
     mut pointer: ResMut<frame::UiPointerFree>,
-    mut camera: ResMut<SimCamera>,
 ) {
     overlay.0 = (browser.open && *screen == AppScreen::MainMenu)
         || (state.active && playback.is_some() && *screen == AppScreen::InGame);
     hud.0 = !state.active || playback.is_none() || state.show_hud;
     pointer.0 = state.active && playback.is_some() && state.show_controls;
+}
+
+fn clear_camera_without_replay(
+    playback: Option<Res<ReplayPlayback>>,
+    mut camera: ResMut<SimCamera>,
+) {
     if playback.is_none() {
         camera.view_override = None;
     }
@@ -1151,24 +1170,57 @@ fn seek_cover(
         });
 }
 
+fn editor_clock_text(seconds: f64) -> String {
+    let total = seconds.max(0.0) as u64;
+    format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct EditorView<'w, 's> {
+    roots: Query<'w, 's, Entity, With<EditorRoot>>,
+    labels: Query<'w, 's, &'static mut Text, (With<EditorLabel>, Without<PlayheadTime>)>,
+    cursors: Query<'w, 's, &'static mut Node, With<TimelineCursor>>,
+    playhead_labels: Query<'w, 's, &'static mut Text, (With<PlayheadTime>, Without<EditorLabel>)>,
+}
+
+impl EditorView<'_, '_> {
+    fn clear(&self, commands: &mut Commands) {
+        for root in &self.roots {
+            commands.entity(root).despawn();
+        }
+    }
+
+    fn is_spawned(&self) -> bool {
+        !self.roots.is_empty()
+    }
+
+    fn update_playhead(&mut self, label: &str, seconds: f64, frame: u64, total_frames: u64) {
+        for mut text in &mut self.labels {
+            text.0 = label.to_owned();
+        }
+        for mut text in &mut self.playhead_labels {
+            text.0 = editor_clock_text(seconds);
+        }
+        for mut cursor in &mut self.cursors {
+            cursor.left =
+                Val::Percent(100.0 * frame as f32 / total_frames.saturating_sub(1).max(1) as f32);
+        }
+    }
+}
+
 fn draw_editor(
     mut commands: Commands,
     state: Res<TheaterState>,
     playback: Option<Res<ReplayPlayback>>,
     screen: Res<AppScreen>,
     font: Res<ui::GameUiFont>,
-    roots: Query<Entity, With<EditorRoot>>,
-    mut labels: Query<&mut Text, (With<EditorLabel>, Without<PlayheadTime>)>,
-    mut cursors: Query<&mut Node, With<TimelineCursor>>,
-    mut playhead_labels: Query<&mut Text, (With<PlayheadTime>, Without<EditorLabel>)>,
+    mut view: EditorView,
     mut signature: Local<Option<EditorSignature>>,
 ) {
     let show =
         state.active && state.show_controls && playback.is_some() && *screen == AppScreen::InGame;
     if !show {
-        for root in &roots {
-            commands.entity(root).despawn();
-        }
+        view.clear(&mut commands);
         return;
     }
     let playback = playback.unwrap();
@@ -1181,10 +1233,6 @@ fn draw_editor(
         CameraMode::Free => "FREE CAMERA",
         CameraMode::Dolly => "DOLLY",
         CameraMode::Attached => "ATTACHED",
-    };
-    let clock = |seconds: f64| {
-        let total = seconds.max(0.0) as u64;
-        format!("{:02}:{:02}", total / 60, total % 60)
     };
     let label = format!(
         "{}   ·   PLAYER {}                      MODE: Film Editor   ·   {} {:.2}×{}",
@@ -1204,16 +1252,7 @@ fn draw_editor(
             ""
         },
     );
-    for mut text in &mut labels {
-        text.0 = label.clone();
-    }
-    for mut text in &mut playhead_labels {
-        text.0 = clock(seconds);
-    }
-    for mut cursor in &mut cursors {
-        cursor.left =
-            Val::Percent(100.0 * frame as f32 / state.info.frames.saturating_sub(1).max(1) as f32);
-    }
+    view.update_playhead(&label, seconds, frame, state.info.frames);
     let wanted = (
         state.project.segments.clone(),
         state.project.cameras.clone(),
@@ -1224,13 +1263,11 @@ fn draw_editor(
         state.camera_page,
         state.show_tools,
     );
-    if !roots.is_empty() && signature.as_ref() == Some(&wanted) {
+    if view.is_spawned() && signature.as_ref() == Some(&wanted) {
         return;
     }
     *signature = Some(wanted);
-    for root in &roots {
-        commands.entity(root).despawn();
-    }
+    view.clear(&mut commands);
     commands
         .spawn((
             EditorRoot,
@@ -1355,7 +1392,7 @@ fn draw_editor(
                 )).with_children(|cursor| {
                     cursor.spawn((
                         PlayheadTime,
-                        Text::new(clock(seconds)),
+                        Text::new(editor_clock_text(seconds)),
                         ui::game_text_font(&font.0, 20.0),
                         TextColor(Color::WHITE),
                         Node { position_type: PositionType::Absolute, top: Val::Px(-28.0), left: Val::Px(-20.0), ..default() },
@@ -1364,7 +1401,7 @@ fn draw_editor(
                 });
             });
             root.spawn((
-                Text::new(format!("{}   ·   Green: kills   Red: deaths   ·   D-pad: navigate   A / Enter: select   B / Esc: exit", clock(duration))),
+                Text::new(format!("{}   ·   Green: kills   Red: deaths   ·   D-pad: navigate   A / Enter: select   B / Esc: exit", editor_clock_text(duration))),
                 ui::game_text_font(&font.0, 14.0),
                 TextColor(Color::srgb(0.85, 0.87, 0.45)),
                 bevy::picking::Pickable::IGNORE,
@@ -1658,12 +1695,17 @@ fn arm_capture(state: &mut TheaterState, paths: Vec<PathBuf>) -> Result<(), Stri
     Ok(())
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct PreviewMedia<'w, 's> {
+    recorder: Res<'w, replay::ReplaySession>,
+    previous: Local<'s, Option<PathBuf>>,
+    played: Local<'s, Option<PathBuf>>,
+    playback: Option<Res<'w, ReplayPlayback>>,
+}
+
 fn capture_previews(
     mut state: ResMut<TheaterState>,
-    recorder: Res<replay::ReplaySession>,
-    mut previous: Local<Option<PathBuf>>,
-    mut played: Local<Option<PathBuf>>,
-    playback: Option<Res<ReplayPlayback>>,
+    mut media: PreviewMedia,
     active: Option<Res<net::GameActive>>,
     console: Res<console::ConsoleState>,
     mut events: MessageReader<console::ConsoleCommand>,
@@ -1681,6 +1723,7 @@ fn capture_previews(
                 capture.push(render::diag::capture::CaptureRequest {
                     path: path.clone(),
                     exit_after_capture: false,
+                    any_screen: false,
                 });
             }
             clean.queued = true;
@@ -1694,31 +1737,32 @@ fn capture_previews(
     }
     if !console.open
         && state.capture.is_none()
-        && let Some(playback) = playback.as_ref()
+        && let Some(playback) = media.playback.as_ref()
         && state.active
         && active.is_some_and(|active| active.0)
-        && played.as_deref() != Some(playback.path())
+        && media.played.as_deref() != Some(playback.path())
     {
         let path = playback.path().to_path_buf();
         if !path.with_extension("png").is_file() {
             let _ = arm_capture(&mut state, vec![path.with_extension("png")]);
         }
-        *played = Some(path);
+        *media.played = Some(path);
     }
-    if playback.is_none() {
-        *played = None;
+    if media.playback.is_none() {
+        *media.played = None;
     }
-    if let Some(recording) = recorder.0.as_ref() {
-        if !console.open && previous.as_deref() != Some(recording.path()) {
+    if let Some(recording) = media.recorder.0.as_ref() {
+        if !console.open && media.previous.as_deref() != Some(recording.path()) {
             let path = recording.path().to_path_buf();
             capture.push(render::diag::capture::CaptureRequest {
                 path: path.with_extension("png"),
                 exit_after_capture: false,
+                any_screen: false,
             });
-            *previous = Some(path);
+            *media.previous = Some(path);
         }
     } else {
-        *previous = None;
+        *media.previous = None;
     }
     for event in events.read() {
         if event.name == "clip"
@@ -1730,6 +1774,7 @@ fn capture_previews(
                 capture.push(render::diag::capture::CaptureRequest {
                     path: path.with_extension("png"),
                     exit_after_capture: false,
+                    any_screen: false,
                 });
             }
         }

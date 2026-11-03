@@ -11,7 +11,7 @@ pub(crate) const KILLED: &str = "maps/mp/gametypes/_callbacksetup::codecallback_
 pub(crate) const LAST_STAND: &str =
     "maps/mp/gametypes/_callbacksetup::codecallback_playerlaststand";
 
-pub(crate) fn now_ms(world: &World) -> i64 {
+pub fn now_ms(world: &World) -> i64 {
     i64::from(world.resource::<crate::step::StepRequest>().tick.0) * i64::from(crate::MATCH_TICK_MS)
 }
 
@@ -327,6 +327,7 @@ pub(crate) struct MenuAnswer {
     menu: Arc<str>,
     response: Arc<str>,
     data: Vec<(Vec<Value>, Value)>,
+    skip_if_bypassed: bool,
 }
 
 impl MenuAnswer {
@@ -343,13 +344,23 @@ pub(crate) fn answer_menu(world: &mut World, client: u32, menu: &str, response: 
             menu: menu.into(),
             response: response.into(),
             data: Vec::new(),
+            skip_if_bypassed: false,
         },
     );
 }
 
 pub(crate) fn answer_join(world: &mut World, client: u32) {
     if world.resource_mut::<RoundScript>().joined.insert(client) {
-        answer_menu(world, client, TEAM_MENU, "autoassign");
+        push_answer(
+            world,
+            client,
+            MenuAnswer {
+                menu: TEAM_MENU.into(),
+                response: "autoassign".into(),
+                data: Vec::new(),
+                skip_if_bypassed: true,
+            },
+        );
     }
 }
 
@@ -368,14 +379,8 @@ fn push_answer(world: &mut World, client: u32, answer: MenuAnswer) {
         .push_back(answer);
 }
 
-const T5_DEFAULT_CLASSES: [&str; 5] = ["smg_mp", "cqb_mp", "assault_mp", "lmg_mp", "sniper_mp"];
-
-pub(crate) fn is_t5(world: &World) -> bool {
-    world
-        .resource::<RoundScript>()
-        .program
-        .as_ref()
-        .is_some_and(|p| p.rules() == crate::script::Realm::T5)
+pub(crate) fn bot_custom_classes_allowed(world: &World) -> bool {
+    crate::script::families::policy_for_world(world).custom_bot_classes
 }
 
 pub(crate) fn choose_default_class(world: &mut World, client: u32, index: u8) {
@@ -383,68 +388,25 @@ pub(crate) fn choose_default_class(world: &mut World, client: u32, index: u8) {
         .resource_mut::<RoundScript>()
         .selected_classes
         .remove(&client);
-    let realm = world
-        .resource::<RoundScript>()
-        .program
-        .as_ref()
-        .map(|p| p.rules());
-    let response = match realm {
-        Some(crate::script::Realm::T5) => {
-            T5_DEFAULT_CLASSES[index as usize % T5_DEFAULT_CLASSES.len()].to_owned()
-        }
-        _ => format!("class{}", index % 5),
-    };
+    let policy = crate::script::families::policy_for_world(world);
+    let response = policy.default_classes[index as usize % policy.default_classes.len()].to_owned();
     answer_menu(world, client, CLASS_MENU, &response);
 }
 
-pub(crate) fn t5_class_response(class: crate::ClassId) -> Option<String> {
-    match class.0 {
-        slot @ 0..5 => Some(format!("custom{}", slot + 1)),
-        slot @ 5..10 => Some(format!("prestige{}", slot - 4)),
-        _ => None,
-    }
-}
-
-const IW4_STAND_INS: [&str; 4] = ["m4_mp", "usp_mp", "frag_grenade_mp", "flash_grenade_mp"];
-const T5_STAND_INS: [&str; 4] = ["ak47_mp", "m1911_mp", "frag_grenade_mp", "flash_grenade_mp"];
-
-pub(crate) fn stand_in_for(world: &mut World, slot: usize, weapon: u32) -> Option<u32> {
+pub fn stand_in_for(world: &mut World, slot: usize, weapon: u32) -> Option<u32> {
     let realm = world
         .resource::<RoundScript>()
         .program
         .as_ref()
-        .map_or(crate::script::Realm::Iw4, |p| p.rules());
+        .map_or(crate::script::FamilyId::IW4, |p| p.rules());
     let frame = FrameWorld::from_world(world);
     let setup = frame.weapon_setup(weapon).filter(|_| weapon != 0)?;
     if setup.realm == realm {
         return None;
     }
-    if realm == crate::script::Realm::Iw4
-        && frame
-            .weapon_combat_row(weapon)
-            .is_some_and(|facts| facts.weap_type == weapon_iw4::WEAPTYPE_SHIELD)
-    {
-        return frame.weapon_index_by_script_name("riotshield_mp");
-    }
-    if realm == crate::script::Realm::Iw4
-        && let Some(facts) = frame.missile_launch_facts(weapon)
-        && facts.require_lock_to_fire
-    {
-        let launcher = match facts.missile_guidance {
-            1 => Some("stinger_mp"),
-            3 => Some("javelin_mp"),
-            _ => None,
-        };
-        if let Some(launcher) = launcher {
-            return frame.weapon_index_by_script_name(launcher);
-        }
-    }
-    let stand_ins = if realm == crate::script::Realm::T5 {
-        T5_STAND_INS
-    } else {
-        IW4_STAND_INS
-    };
-    frame.weapon_index_by_script_name(stand_ins[slot])
+    (crate::script::families::policy_for_world(frame.ecs_ref()).foreign_weapon)(
+        &frame, slot, weapon,
+    )
 }
 
 fn bridge_class_weapon(world: &mut World, client: u32, slot: usize, weapon: u32) {
@@ -462,14 +424,14 @@ fn offhand_stand_in(world: &mut World, weapon: u32) -> Option<u32> {
         .resource::<RoundScript>()
         .program
         .as_ref()
-        .map_or(crate::script::Realm::Iw4, |p| p.rules());
+        .map_or(crate::script::FamilyId::IW4, |p| p.rules());
     let frame = FrameWorld::from_world(world);
     let stand_in = frame
         .weapon_setup(weapon)
         .filter(|setup| setup.realm != realm)
         .and_then(|setup| {
             setup.stand_in.as_deref().or_else(|| {
-                (realm == crate::script::Realm::Iw4).then(|| match setup.base.as_str() {
+                (realm == crate::script::FamilyId::IW4).then(|| match setup.base.as_str() {
                     "willy_pete" => "smoke_grenade_mp",
                     "tabun_gas" => "concussion_grenade_mp",
                     "sticky_grenade" => "semtex_mp",
@@ -701,7 +663,7 @@ pub(crate) fn bridged_weapon(world: &World, client: u32, weapon: u32) -> u32 {
         .map_or(weapon, |(_, native)| *native)
 }
 
-pub(crate) fn script_weapon(world: &mut World, client: u32, weapon: u32) -> u32 {
+pub fn script_weapon(world: &mut World, client: u32, weapon: u32) -> u32 {
     if let Some(stand_in) = world
         .resource::<crate::script::MatchScript>()
         .weapon_bridge
@@ -719,7 +681,7 @@ pub(crate) fn script_weapon(world: &mut World, client: u32, weapon: u32) -> u32 
         .weapon_bridge
         .get(&client)
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or(Vec::new());
     let frame = FrameWorld::from_world(world);
     if let Some(setup) = frame.weapon_setup(weapon)
         && let Some((stand_in, _)) = bridge
@@ -744,7 +706,7 @@ pub(crate) fn script_weapon(world: &mut World, client: u32, weapon: u32) -> u32 
     weapon
 }
 
-pub(crate) fn personal_class(
+pub fn personal_class(
     world: &World,
     client: u32,
     class: crate::ClassId,
@@ -777,21 +739,18 @@ pub(crate) fn choose_class(world: &mut World, client: u32, class: &crate::ClassD
         .resource_mut::<crate::script::MatchScript>()
         .personal_classes
         .insert((client, class.id.0), class.clone());
-    let realm = world
-        .resource::<RoundScript>()
-        .program
-        .as_ref()
-        .map(|p| p.rules());
     world
         .resource_mut::<crate::script::MatchScript>()
         .weapon_bridge
         .remove(&client);
     bridge_class_weapon(world, client, 0, class.primary);
     bridge_class_weapon(world, client, 1, class.secondary);
-    if realm == Some(crate::script::Realm::T5) {
+    if let Some(class_response) =
+        crate::script::families::policy_for_world(world).native_class_response
+    {
         bridge_class_weapon(world, client, 2, class.lethal);
         bridge_class_weapon(world, client, 3, class.tactical);
-        if let Some(response) = t5_class_response(class.id) {
+        if let Some(response) = class_response(class.id) {
             answer_menu(world, client, CLASS_MENU, &response);
         }
         return;
@@ -808,6 +767,7 @@ pub(crate) fn choose_class(world: &mut World, client: u32, class: &crate::ClassD
             menu: CLASS_MENU.into(),
             response: format!("custom{}", class.id.0 as usize % 10 + 1).into(),
             data,
+            skip_if_bypassed: false,
         },
     );
 }
@@ -917,7 +877,8 @@ fn menu_kind(menu: &str) -> Option<bool> {
 }
 
 fn deliver_answers(world: &mut World, client: u32) {
-    // Answers queued ahead of the open menu's kind were for a menu the scripts skipped.
+    // Scripts may bypass automatic team selection. Explicit choices remain
+    // ordered input even when another menu is already open.
     let runtime = world.resource::<RoundScript>();
     let Some(slot) = runtime.players.get(&client) else {
         return;
@@ -930,11 +891,16 @@ fn deliver_answers(world: &mut World, client: u32) {
         .as_deref()
         .and_then(menu_kind)
         .and_then(|open| {
-            runtime
-                .menu_answers
-                .get(&client)?
-                .iter()
-                .position(|answer| menu_kind(&answer.menu) == Some(open))
+            Some(
+                runtime
+                    .menu_answers
+                    .get(&client)?
+                    .iter()
+                    .take_while(|answer| {
+                        answer.skip_if_bypassed && menu_kind(&answer.menu) != Some(open)
+                    })
+                    .count(),
+            )
         })
         .unwrap_or(0);
     if skipped > 0 {
@@ -991,7 +957,7 @@ fn deliver_answers(world: &mut World, client: u32) {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PlayerSlot {
+pub struct PlayerSlot {
     pub object: u64,
     pub begun: bool,
     pub sessionstate: Arc<str>,
@@ -1001,7 +967,7 @@ pub(crate) struct PlayerSlot {
     pub presented: BTreeMap<&'static str, Vec<Value>>,
     pub perks: std::collections::BTreeSet<Arc<str>>,
     pub spectate: BTreeMap<Arc<str>, bool>,
-    pub spectator: super::spectators::Spectator,
+    pub(crate) spectator: super::spectators::Spectator,
     pub seat: crate::ScriptSeat,
     pub weapon: u32,
     pub switching: bool,
@@ -1009,7 +975,7 @@ pub(crate) struct PlayerSlot {
     pub has_radar: bool,
     pub radar_mode: crate::RadarMode,
     pub radar_blocked: bool,
-    pub link: Option<PlayerLink>,
+    pub(crate) link: Option<PlayerLink>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1169,13 +1135,6 @@ fn store_seat_field(seat: &mut crate::ScriptSeat, name: &str, value: &Value) -> 
 }
 
 pub(crate) fn apply_disconnects(world: &mut World) {
-    if !world
-        .resource::<crate::step::StepRequest>()
-        .reason
-        .advances_authority_world()
-    {
-        return;
-    }
     let disconnects = std::mem::take(&mut world.resource_mut::<RoundScript>().disconnects);
     for client in disconnects {
         FrameWorld::from_world(world).retire_client(ClientId(client));
@@ -1246,9 +1205,6 @@ pub(crate) fn disconnect_player(world: &mut World, client: u32) {
 
 pub(crate) fn sync_players(world: &mut World) {
     let request = world.resource::<crate::step::StepRequest>();
-    if !request.reason.advances_authority_world() {
-        return;
-    }
     let now = i64::from(request.tick.0) * i64::from(crate::MATCH_TICK_MS);
     let runtime = world.resource::<RoundScript>();
     if runtime.program.is_none() || runtime.fault.is_some() || !runtime.started {
@@ -1383,7 +1339,7 @@ pub(crate) fn load_field(world: &mut World, client: u32, name: &str) -> Option<V
     })
 }
 
-pub(crate) fn entity_field(world: &mut World, id: u64, name: &str) -> Value {
+pub fn entity_field(world: &mut World, id: u64, name: &str) -> Value {
     if let Some(client) = world.resource::<RoundScript>().player_client(id)
         && let Some(value) = load_field(world, client, name)
     {

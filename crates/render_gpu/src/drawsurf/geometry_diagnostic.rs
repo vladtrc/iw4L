@@ -82,7 +82,8 @@ pub fn geometry_diagnostic_enabled() -> bool {
 }
 
 #[derive(Default)]
-struct DiagnosticDrawScratch {
+struct DiagnosticDrawState {
+    last_census: Option<String>,
     submitted: HashSet<u64>,
     exec_ready: HashSet<u64>,
     draws: Vec<(RetainedDrawItem, bool)>,
@@ -475,6 +476,50 @@ fn prepare_views(
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct DiagnosticFrameInputs<'w> {
+    submitted: Option<Res<'w, super::colour_submit::ExactColourSubmitCensus>>,
+    extracted: Option<Res<'w, ExtractedDiagnosticGeometry>>,
+    slot: Option<Res<'w, SharedRenderStagesSlot>>,
+}
+
+impl DiagnosticFrameInputs<'_> {
+    fn prepare(&self, scratch: &mut DiagnosticDrawState) -> Option<DiagnosticStamp> {
+        if self
+            .extracted
+            .as_ref()
+            .is_some_and(|extracted| extracted.overlay_gpu_wait)
+        {
+            return None;
+        }
+        if !geometry_diagnostic_enabled() {
+            return None;
+        }
+        let stamp = DiagnosticStamp {
+            started: Instant::now(),
+            slot: self.slot.as_ref().map(|s| Arc::clone(&s.0)),
+            pass: 0,
+            draw_n: 0,
+            world_n: 0,
+            smodel_n: 0,
+            xmodel_n: 0,
+        };
+        scratch.submitted.clear();
+        scratch.exec_ready.clear();
+        scratch.draws.clear();
+
+        if let Some(census) = self.submitted.as_ref() {
+            scratch
+                .submitted
+                .extend(census.submitted_keys.iter().copied());
+            scratch
+                .exec_ready
+                .extend(census.world_exec_ready_keys.iter().copied());
+        }
+        Some(stamp)
+    }
+}
+
 fn draw_geometry_diagnostic(
     view: ViewQuery<(
         &ViewTarget,
@@ -486,48 +531,18 @@ fn draw_geometry_diagnostic(
     colour_frame: Res<super::PublishedRenderFrame>,
     geometry: Res<DiagnosticGeometry>,
     cache: Res<PipelineCache>,
-    device: Res<RenderDevice>,
     mut context: RenderContext,
-    mut last_census: Local<Option<String>>,
-    submitted: Option<Res<super::colour_submit::ExactColourSubmitCensus>>,
-    extracted: Option<Res<ExtractedDiagnosticGeometry>>,
-    slot: Option<Res<SharedRenderStagesSlot>>,
-    mut scratch: Local<DiagnosticDrawScratch>,
+    inputs: DiagnosticFrameInputs,
+    mut scratch: Local<DiagnosticDrawState>,
 ) {
     let products = &colour_frame.frame_products;
-    if extracted
-        .as_ref()
-        .is_some_and(|extracted| extracted.overlay_gpu_wait)
-    {
+    let Some(mut stamp) = inputs.prepare(&mut scratch) else {
         return;
-    }
-    if !geometry_diagnostic_enabled() {
-        return;
-    }
-    let mut stamp = DiagnosticStamp {
-        started: Instant::now(),
-        slot: slot.as_ref().map(|s| Arc::clone(&s.0)),
-        pass: 0,
-        draw_n: 0,
-        world_n: 0,
-        smodel_n: 0,
-        xmodel_n: 0,
     };
-    scratch.submitted.clear();
-    scratch.exec_ready.clear();
-    scratch.draws.clear();
-
-    if let Some(census) = submitted.as_ref() {
-        scratch
-            .submitted
-            .extend(census.submitted_keys.iter().copied());
-        scratch
-            .exec_ready
-            .extend(census.world_exec_ready_keys.iter().copied());
-    }
     let colour = products.0.product(FrameProductKind::Colour);
     let emissive = products.0.product(FrameProductKind::Emissive);
-    let DiagnosticDrawScratch {
+    let DiagnosticDrawState {
+        last_census,
         submitted,
         exec_ready,
         draws,
@@ -591,11 +606,13 @@ fn draw_geometry_diagnostic(
         },
     }));
     let smodel_instance_buffer = (!smodel_instances.is_empty()).then(|| {
-        device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("iw4_geometry_diagnostic_smodel_instances"),
-            contents: bytemuck::cast_slice(smodel_instances.as_slice()),
-            usage: BufferUsages::VERTEX,
-        })
+        context
+            .render_device()
+            .create_buffer_with_data(&BufferInitDescriptor {
+                label: Some("iw4_geometry_diagnostic_smodel_instances"),
+                contents: bytemuck::cast_slice(smodel_instances.as_slice()),
+                usage: BufferUsages::VERTEX,
+            })
     });
     let attachments = [Some(target.get_color_attachment())];
     stamp.pass = 1;

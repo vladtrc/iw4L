@@ -431,7 +431,6 @@ fn apply_hold_blend(
 }
 
 #[must_use]
-#[allow(clippy::too_many_arguments)]
 pub fn vision_sets_update(
     now: i32,
     from: VisionSetVars,

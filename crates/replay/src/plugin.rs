@@ -14,7 +14,6 @@ pub struct PendingReplayArm {
     pub playback: Option<Playback>,
     pub quit_on_end: bool,
     pub control: Option<PlaybackControl>,
-    pub request_id: Option<u64>,
     pub in_place: bool,
 }
 
@@ -122,7 +121,8 @@ impl Plugin for ReplayPlugin {
         app.init_resource::<ReplaySession>()
             .init_resource::<ReplayDiagnostics>()
             .init_resource::<PendingReplayArm>()
-            .scoped::<ClipRing>(frame::MatchScope::Live);
+            .scoped::<ClipRing>(frame::MatchScope::Live)
+            .add_systems(OnEnter(frame::MatchScope::Absent), cancel_pending_playback);
         let role = app.world().get_resource::<RuntimeRole>().copied();
         if role.is_some_and(|role| role.runs_authority() || role == RuntimeRole::Replay) {
             app.add_systems(
@@ -134,7 +134,7 @@ impl Plugin for ReplayPlugin {
             );
         }
         app.add_systems(
-            Update,
+            PreUpdate,
             (
                 record_received_ticks
                     .in_set(frame::InMatch)
@@ -155,17 +155,27 @@ impl Plugin for ReplayPlugin {
     }
 }
 
+fn cancel_pending_playback(
+    mut transitions: MessageReader<StateTransitionEvent<frame::MatchScope>>,
+    mut pending: ResMut<PendingReplayArm>,
+) {
+    for transition in transitions.read() {
+        if transition.exited.is_some() && transition.entered == Some(frame::MatchScope::Absent) {
+            *pending = Default::default();
+        }
+    }
+}
+
 fn sync_theater_occupancy(
     mut commands: Commands,
     mut pending: ResMut<PendingReplayArm>,
     role: Res<RuntimeRole>,
-    generation: Option<Res<frame::WorldGeneration>>,
-    timeline: Res<frame::ScopeEpoch<frame::Timeline>>,
-    mut restarting: Local<Option<u64>>,
+    transition: Option<Res<session::SessionSwapRequest>>,
 ) {
-    if pending
-        .request_id
-        .is_some_and(|id| generation.as_ref().is_none_or(|g| g.stamp().0 != Some(id)))
+    // Last still commits the old Live scope; a pending swap must not arm into it.
+    if transition
+        .as_ref()
+        .is_some_and(|transition| transition.is_pending())
     {
         return;
     }
@@ -173,29 +183,19 @@ fn sync_theater_occupancy(
         return;
     }
     if pending.playback.is_none() {
-        *restarting = None;
         return;
     }
     // The new playback is armed only after the timeline restart has retired
     // the old ticks; arming in the same frame would feed its first snapshot
     // into state that is about to be dropped.
     if pending.in_place {
-        match *restarting {
-            None => {
-                *restarting = Some(timeline.0);
-                commands.queue(|world: &mut World| {
-                    world
-                        .resource_mut::<NextState<frame::Timeline>>()
-                        .set(frame::Timeline::Running);
-                });
-                return;
-            }
-            Some(requested) if requested == timeline.0 => return,
-            Some(_) => {
-                *restarting = None;
-                commands.trigger(net::KillcamFxTransition { entering: false });
-            }
-        }
+        pending.in_place = false;
+        commands.queue(|world: &mut World| {
+            world
+                .resource_mut::<NextState<frame::Timeline>>()
+                .set(frame::Timeline::Live);
+        });
+        return;
     }
     let Some(playback) = pending.playback.take() else {
         return;
@@ -207,15 +207,19 @@ fn sync_theater_occupancy(
         .control
         .take()
         .unwrap_or_else(PlaybackControl::default);
-    pending.request_id = None;
     commands.queue(move |world: &mut World| {
         frame::scope::insert(world, playback, frame::MatchScope::Live);
     });
-    perf::theater(
-        1,
-        Some(i64::from(quit_on_end)),
-        Some(i64::from(role.runs_authority())),
-    );
+    perf::instant!("theater", "iw4l.sim", |ctx| {
+        let (present, quit_on_end, runs_authority): (i64, Option<i64>, Option<i64>) = (
+            1,
+            Some(i64::from(quit_on_end)),
+            Some(i64::from(role.runs_authority())),
+        );
+        ctx.arg("present", present);
+        ctx.arg("quit_on_end", quit_on_end);
+        ctx.arg("runs_authority", runs_authority);
+    });
 }
 
 fn record_received_ticks(
@@ -229,9 +233,11 @@ fn record_received_ticks(
         return;
     }
     for tick in &received.0 {
-        ring.push(tick.snapshot.clone());
+        if let Err(error) = ring.push_frame(&tick.snapshot, &tick.frame) {
+            diag::warn!(Net, "clip: failed to retain tick: {error}");
+        }
         if *role != RuntimeRole::Replay {
-            record_snapshot(&mut session, &tick.snapshot, &mut diag);
+            record_snapshot(&mut session, &tick.snapshot, Some(&tick.frame), &mut diag);
         }
     }
 }
@@ -249,19 +255,26 @@ fn record_server_tick(
     if *role != RuntimeRole::Dedicated {
         return;
     }
-    ring.push(tick.snapshot.clone());
-    record_snapshot(&mut session, &tick.snapshot, &mut diag);
+    if let Err(error) = ring.push(&tick.snapshot) {
+        diag::warn!(Net, "clip: failed to retain tick: {error}");
+    }
+    record_snapshot(&mut session, &tick.snapshot, None, &mut diag);
 }
 
 fn record_snapshot(
     session: &mut ReplaySession,
     snapshot: &sim::Snapshot,
+    frame: Option<&net::Frame>,
     diag: &mut ReplayDiagnostics,
 ) {
     let Some(recording) = session.0.as_mut() else {
         return;
     };
-    if let Err(error) = recording.record(snapshot) {
+    let result = match frame {
+        Some(frame) => recording.record_frame(snapshot, frame),
+        None => recording.record(snapshot),
+    };
+    if let Err(error) = result {
         let line = format!("record: write failed, recording stopped: {error}");
         diag::info!(Net, "{line}");
         diag.line = Some(line);

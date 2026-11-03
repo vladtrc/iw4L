@@ -1,4 +1,4 @@
-use asset_core::{AssetKey, AssetNamespace};
+use asset_core::{AssetKey, FamilyId};
 
 use crate::{CacWeaponPreview, CapturedStringTable};
 
@@ -54,10 +54,7 @@ impl CacItemPresentation {
     }
 }
 
-pub fn prepare_cac_preview(
-    namespace: AssetNamespace,
-    mut preview: CacWeaponPreview,
-) -> CacWeaponPreview {
+pub fn prepare_cac_preview(namespace: FamilyId, mut preview: CacWeaponPreview) -> CacWeaponPreview {
     preview.name_key = localized_key(namespace, &preview.name_key);
     preview.desc_key = localized_key(namespace, &preview.desc_key);
     if !preview.image.is_empty() && AssetKey::parse(&preview.image).is_err() {
@@ -66,12 +63,12 @@ pub fn prepare_cac_preview(
     preview
 }
 
-fn localized_key(namespace: AssetNamespace, reference: &str) -> String {
+fn localized_key(namespace: FamilyId, reference: &str) -> String {
     let reference = reference.trim_start_matches('@');
     if reference.is_empty() {
         return String::new();
     }
-    if namespace == AssetNamespace::Iw4 || AssetKey::parse(reference).is_ok() {
+    if namespace == FamilyId::IW4 || AssetKey::parse(reference).is_ok() {
         format!("@{reference}")
     } else {
         format!("@{}:localize/{reference}", namespace.as_str())
@@ -84,7 +81,7 @@ pub fn prepare_cac_equipment_preview(
     preview: &CacWeaponPreview,
 ) -> Option<CacWeaponPreview> {
     let key = AssetKey::parse(weapon).ok()?;
-    if key.namespace != AssetNamespace::Iw4 {
+    if key.namespace != FamilyId::IW4 {
         return None;
     }
     let leaf = weapon.rsplit('/').next().unwrap_or(weapon);

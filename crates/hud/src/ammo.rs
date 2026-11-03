@@ -66,7 +66,7 @@ pub(crate) fn weaponbar_ammo(
             if ammo_row_present(&ps.ammo, ammo_key) {
                 Some(get_ammo_not_in_clip(&ps.ammo, ammo_key))
             } else {
-                meta.map(|m| m.ammo_stock)
+                meta.map(|m| m.weapon_carry.ammo_stock)
             }
         }
     };
@@ -77,7 +77,7 @@ pub(crate) fn weaponbar_ammo(
             if clip_row_present(&ps.ammoclip, clip_key) {
                 Some(get_clip_for_hand(&ps.ammoclip, clip_key, 0))
             } else {
-                meta.map(|m| m.ammo_clip)
+                meta.map(|m| m.weapon_carry.ammo_clip)
             }
         }
     };

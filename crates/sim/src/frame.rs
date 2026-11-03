@@ -38,13 +38,13 @@ pub(crate) fn install_state_entity(world: &mut World, entity: Entity) {
     world.insert_resource(SimStateEntity(entity));
 }
 
-pub(crate) struct FrameWorld<'w> {
+pub struct FrameWorld<'w> {
     ecs: &'w mut World,
     state_entity: Entity,
 }
 
 impl<'w> FrameWorld<'w> {
-    pub(crate) fn from_world(ecs: &'w mut World) -> Self {
+    pub fn from_world(ecs: &'w mut World) -> Self {
         let state_entity = state_entity(ecs);
         Self { ecs, state_entity }
     }
@@ -78,7 +78,7 @@ impl FrameWorld<'_> {
         self.ecs
             .get_resource::<crate::script::RoundScript>()
             .map(|runtime| runtime.missile_collision_models(id))
-            .unwrap_or_default()
+            .unwrap_or(Vec::new())
     }
 
     pub(crate) fn emit_script_entity_trace(&self) {
@@ -89,11 +89,11 @@ impl FrameWorld<'_> {
         }
     }
 
-    pub(crate) fn ecs_ref(&self) -> &World {
+    pub fn ecs_ref(&self) -> &World {
         self.ecs
     }
 
-    pub(crate) fn ecs(&mut self) -> &mut World {
+    pub fn ecs(&mut self) -> &mut World {
         self.ecs
     }
 
@@ -362,6 +362,7 @@ impl FrameWorld<'_> {
             let _ = self.client_meta_mut(id);
         }
         if player_entity(self.ecs, id).is_none() {
+            self.entity_kernel_mut().occupy_reserved(id.0 as i32);
             let mut ps = blank_player_state();
 
             ps.corpse_index = -1;
@@ -526,29 +527,18 @@ impl FrameWorld<'_> {
         self.bullet_trace(query, moved.as_deref())
     }
 
-    pub(crate) fn record_collision_history(
-        &mut self,
-        tick: Tick,
-        msec: i32,
-        hitbox_cmds: Option<&[ClientId]>,
-    ) {
+    pub(crate) fn record_collision_history(&mut self, tick: Tick, msec: i32) {
         let ids = self.client_ids_sorted();
         let copies: Vec<(ClientId, PlayerState)> = ids
             .into_iter()
             .filter_map(|id| player_ref(self.ecs, id).copied().map(|ps| (id, ps)))
             .collect();
-        SimState::record_collision_history(
-            self,
-            tick,
-            msec,
-            |id| {
-                copies
-                    .iter()
-                    .find(|(client, _)| *client == id)
-                    .map(|(_, ps)| *ps)
-            },
-            hitbox_cmds,
-        );
+        SimState::record_collision_history(self, tick, msec, |id| {
+            copies
+                .iter()
+                .find(|(client, _)| *client == id)
+                .map(|(_, ps)| *ps)
+        });
     }
 
     pub fn lagcomp_query_for(
@@ -580,29 +570,6 @@ impl FrameWorld<'_> {
             collect_script_movers(self.ecs),
             collect_dropped_items(self.ecs),
         )
-    }
-
-    pub fn adopt_snapshot(&mut self, snapshot: &Snapshot) -> crate::AdoptReport {
-        let (report, projectiles, movers, items) = self.adopt_snapshot_state(snapshot);
-        adopt_payload_rows(self.ecs, &snapshot.players, projectiles, movers, items);
-        report
-    }
-
-    pub fn adopt_prediction_snapshot(
-        &mut self,
-        snapshot: &Snapshot,
-        local: ClientId,
-    ) -> crate::AdoptReport {
-        let (report, projectiles, movers, items) =
-            self.adopt_prediction_snapshot_state(snapshot, local);
-        let players = snapshot
-            .players
-            .iter()
-            .find(|(id, _)| *id == local)
-            .map(std::slice::from_ref)
-            .unwrap_or_default();
-        adopt_payload_rows(self.ecs, players, projectiles, movers, items);
-        report
     }
 
     pub fn shutdown_game(&mut self) {
@@ -709,27 +676,6 @@ pub(crate) fn script_mover_by_id(world: &World, id: ScriptModelId) -> Option<Scr
     None
 }
 
-pub(crate) fn spawn_payload_rows(
-    world: &mut World,
-    players: Vec<(ClientId, PlayerState)>,
-    projectiles: Vec<ProjectileState>,
-    movers: Vec<ScriptMoverGentity>,
-    items: Vec<DroppedItem>,
-) {
-    for (client, state) in players {
-        spawn_player_row(world, client, state);
-    }
-    for projectile in projectiles {
-        spawn_projectile(world, projectile);
-    }
-    for mover in movers {
-        spawn_script_mover_row(world, mover);
-    }
-    for item in items {
-        spawn_dropped_item(world, item);
-    }
-}
-
 pub(crate) fn clear_payload_rows(world: &mut World) {
     let entities: Vec<Entity> = {
         let index = payload_index(world);
@@ -748,129 +694,6 @@ pub(crate) fn clear_payload_rows(world: &mut World) {
         );
     }
     *payload_index_mut(world) = PayloadIndex::default();
-}
-
-fn adopt_payload_rows(
-    world: &mut World,
-    players: &[(ClientId, PlayerState)],
-    projectiles: Vec<ProjectileState>,
-    movers: Vec<ScriptMoverGentity>,
-    items: Vec<DroppedItem>,
-) {
-    adopt_player_rows(world, players);
-    let mut wanted_numbers = Vec::with_capacity(projectiles.len() + movers.len() + items.len());
-    wanted_numbers.extend(projectiles.iter().map(|projectile| projectile.entnum));
-    wanted_numbers.extend(movers.iter().map(|mover| mover.state.number));
-    wanted_numbers.extend(items.iter().map(|item| item.state.number));
-    despawn_unwanted_numbered(world, &wanted_numbers);
-    for projectile in projectiles {
-        upsert_projectile(world, projectile);
-    }
-    for mover in movers {
-        upsert_script_mover(world, mover);
-    }
-    for item in items {
-        upsert_dropped_item(world, item);
-    }
-}
-
-fn adopt_player_rows(world: &mut World, players: &[(ClientId, PlayerState)]) {
-    let stale: Vec<(ClientId, Entity)> = payload_index(world)
-        .by_client
-        .iter()
-        .copied()
-        .filter(|(id, _)| !players.iter().any(|(want, _)| want == id))
-        .collect();
-    for (id, entity) in stale {
-        unbind_client(world, id);
-        assert!(
-            world.despawn(entity),
-            "player payload vanished before adopt despawn"
-        );
-    }
-    for (id, ps) in players {
-        if let Some(entity) = player_entity(world, *id) {
-            if let Some(mut row) = world.get_mut::<PlayerRow>(entity) {
-                row.state = *ps;
-                continue;
-            }
-            unbind_client(world, *id);
-            assert!(
-                world.despawn(entity),
-                "player payload vanished before adopt respawn"
-            );
-        }
-        spawn_player_row(world, *id, *ps);
-    }
-}
-
-fn despawn_unwanted_numbered(world: &mut World, wanted: &[i32]) {
-    let stale: Vec<(i32, Entity)> = payload_index(world)
-        .by_number
-        .iter()
-        .enumerate()
-        .filter_map(|(n, slot)| {
-            let entity = (*slot)?;
-            let number = i32::try_from(n).ok()?;
-            if wanted.contains(&number) {
-                None
-            } else {
-                Some((number, entity))
-            }
-        })
-        .collect();
-    for (number, entity) in stale {
-        unbind_number(world, number);
-        assert!(
-            world.despawn(entity),
-            "numbered payload vanished before adopt despawn"
-        );
-    }
-}
-
-fn upsert_projectile(world: &mut World, projectile: ProjectileState) {
-    if let Some(entity) = entity_by_number(world, projectile.entnum) {
-        if let Some(mut row) = world.get_mut::<ProjectileRow>(entity) {
-            row.0 = projectile;
-            return;
-        }
-        unbind_number(world, projectile.entnum);
-        assert!(
-            world.despawn(entity),
-            "projectile payload vanished before adopt respawn"
-        );
-    }
-    spawn_projectile(world, projectile);
-}
-
-fn upsert_script_mover(world: &mut World, mover: ScriptMoverGentity) {
-    if let Some(entity) = entity_by_number(world, mover.state.number) {
-        if let Some(mut row) = world.get_mut::<ScriptMoverRow>(entity) {
-            row.0 = mover;
-            return;
-        }
-        unbind_number(world, mover.state.number);
-        assert!(
-            world.despawn(entity),
-            "script mover payload vanished before adopt respawn"
-        );
-    }
-    spawn_script_mover_row(world, mover);
-}
-
-fn upsert_dropped_item(world: &mut World, item: DroppedItem) {
-    if let Some(entity) = entity_by_number(world, item.state.number) {
-        if let Some(mut row) = world.get_mut::<DroppedItemRow>(entity) {
-            row.0 = item;
-            return;
-        }
-        unbind_number(world, item.state.number);
-        assert!(
-            world.despawn(entity),
-            "dropped item payload vanished before adopt respawn"
-        );
-    }
-    spawn_dropped_item(world, item);
 }
 
 fn occupancy(world: &World, number: i32) -> Option<EntityRunKind> {

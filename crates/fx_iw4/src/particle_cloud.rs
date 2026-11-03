@@ -331,13 +331,24 @@ pub const fn pack_gfx_color(rgba: [u8; 4]) -> u32 {
     u32::from_le_bytes([b, g, r, a])
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct FxCloudShape {
+    pub size0: f32,
+    pub size1: f32,
+    pub placement_scale: f32,
+}
+
+impl FxCloudShape {
+    pub fn cull_radius(&self, extra_reach: f32) -> f32 {
+        crate::cull_cloud_radius(self.size0, self.size1, self.placement_scale + extra_reach)
+    }
+}
+
 #[inline]
 pub fn build_cloud(
     world_origin: [f32; 3],
     elem_axis: [[f32; 3]; 3],
-    size0: f32,
-    size1: f32,
-    placement_scale: f32,
+    shape: FxCloudShape,
     color_rgba: [u8; 4],
     elem_flags: i32,
     velocity: [f32; 3],
@@ -348,15 +359,15 @@ pub fn build_cloud(
     GfxParticleCloud {
         quat,
         pos: world_origin,
-        placement_scale,
+        placement_scale: shape.placement_scale,
         axis_or_vel: [
             world_origin[0] - vel[0],
             world_origin[1] - vel[1],
             world_origin[2] - vel[2],
         ],
         color: pack_gfx_color(color_rgba),
-        size0,
-        size1,
+        size0: shape.size0,
+        size1: shape.size1,
         flags: ((elem_flags as u32) >> 29) & 3,
         scale: time_offset,
     }

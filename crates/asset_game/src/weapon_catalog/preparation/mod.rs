@@ -1,6 +1,6 @@
 use super::*;
 mod binding;
-use asset_core::{AssetKey, AssetKind, AssetNamespace};
+use asset_core::{AssetKey, AssetKind, FamilyId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(usize)]
@@ -21,14 +21,7 @@ pub enum WeaponComponent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComponentPreparationPolicy {
     Native,
-    Unsupported(ComponentPreparationRefusal),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ComponentPreparationRefusal {
-    UndeclaredReference,
-    CatalogMiss,
-    UnrequestedCapability,
+    Unsupported(&'static str),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,24 +36,16 @@ pub enum PreparedComponentTarget {
     Tracer(AssetEdge<TracerSpace>),
     SoundPublication,
     UiImages,
-    Unsupported(ComponentPreparationRefusal),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WeaponPreparationRefusal {
-    MissingNativeComponent {
-        weapon: String,
-        component: WeaponComponent,
-    },
+    Unsupported(&'static str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedComponentReference {
     component: WeaponComponent,
-    source_namespace: AssetNamespace,
+    source_namespace: FamilyId,
     source_name: String,
     name: String,
-    storage_namespace: AssetNamespace,
+    storage_namespace: FamilyId,
     policy: ComponentPreparationPolicy,
     target: PreparedComponentTarget,
 }
@@ -75,13 +60,13 @@ impl PreparedComponentReference {
     pub fn source_name(&self) -> &str {
         &self.source_name
     }
-    pub fn source_namespace(&self) -> AssetNamespace {
+    pub fn source_namespace(&self) -> FamilyId {
         self.source_namespace
     }
     pub fn name(&self) -> &str {
         &self.name
     }
-    pub fn storage_namespace(&self) -> AssetNamespace {
+    pub fn storage_namespace(&self) -> FamilyId {
         self.storage_namespace
     }
     pub fn policy(&self) -> &ComponentPreparationPolicy {
@@ -91,18 +76,19 @@ impl PreparedComponentReference {
 
 #[derive(Clone, Debug)]
 pub struct WeaponPreparationRecipe {
-    host_namespace: AssetNamespace,
+    host_namespace: FamilyId,
     attachment_mount_on_root: bool,
     hide_mode: crate::FpvHideMode,
+    ads_overlay: crate::AdsOverlayConvention,
     source: AssetKey,
-    routes: [Option<AssetNamespace>; 11],
+    routes: [Option<FamilyId>; 11],
     references: Vec<PreparedComponentReference>,
-    pub(in crate::weapon_catalog) refusal: Option<WeaponPreparationRefusal>,
+    pub(in crate::weapon_catalog) refusal: Option<String>,
     closed_references: bool,
 }
 
 impl WeaponPreparationRecipe {
-    pub fn host_namespace(&self) -> AssetNamespace {
+    pub fn host_namespace(&self) -> FamilyId {
         self.host_namespace
     }
     pub fn attachment_mount_on_root(&self) -> bool {
@@ -112,29 +98,30 @@ impl WeaponPreparationRecipe {
         self.hide_mode
     }
     pub fn ads_overlay_convention(&self) -> crate::AdsOverlayConvention {
-        crate::AdsOverlayConvention::from_namespace(self.host_namespace)
+        self.ads_overlay
     }
     pub fn source(&self) -> &AssetKey {
         &self.source
     }
-    pub(super) fn set_source(&mut self, namespace: AssetNamespace, name: &str) {
+    pub(super) fn set_source(&mut self, namespace: FamilyId, name: &str) {
         self.source.namespace = namespace;
         self.source.name = name.to_owned();
     }
     pub fn references(&self) -> &[PreparedComponentReference] {
         &self.references
     }
-    pub fn refusal(&self) -> Option<&WeaponPreparationRefusal> {
-        self.refusal.as_ref()
+    pub fn refusal(&self) -> Option<&str> {
+        self.refusal.as_deref()
     }
-    pub fn namespace(&self, component: WeaponComponent) -> Option<AssetNamespace> {
+    pub fn namespace(&self, component: WeaponComponent) -> Option<FamilyId> {
         self.routes[component as usize]
     }
-    pub(super) fn native(namespace: AssetNamespace) -> Self {
+    pub(super) fn native(namespace: FamilyId) -> Self {
         Self {
             host_namespace: namespace,
             attachment_mount_on_root: false,
             hide_mode: crate::FpvHideMode::Surfaces,
+            ads_overlay: crate::AdsOverlayConvention::WeightIsFrac,
             source: AssetKey {
                 namespace,
                 kind: AssetKind::Weapon,
@@ -146,13 +133,15 @@ impl WeaponPreparationRecipe {
             closed_references: false,
         }
     }
-    pub(super) fn for_capture(namespace: AssetNamespace, weapon: &str) -> Self {
+    pub(super) fn for_capture(namespace: FamilyId, weapon: &str) -> Self {
         let mut recipe = Self::native(namespace);
         recipe.set_source(namespace, weapon);
-        if namespace == AssetNamespace::T6 {
-            recipe.attachment_mount_on_root = true;
-            recipe.hide_mode = crate::FpvHideMode::Bones;
-        }
+        let runtime = &crate::weapon_policy(namespace)
+            .expect("weapon runtime policy required before capture")
+            .runtime;
+        recipe.attachment_mount_on_root = runtime.attachment_mount_on_root;
+        recipe.hide_mode = runtime.hide_mode;
+        recipe.ads_overlay = runtime.ads_overlay;
         recipe
     }
 }

@@ -1,4 +1,6 @@
 mod admission;
+mod atlas;
+pub use atlas::replace_clip as prepare_scene_collision;
 pub mod readiness;
 pub use net::LocalAccount;
 pub use readiness::SessionReadinessPolicy;
@@ -19,10 +21,8 @@ pub use content_manifest::{
     SessionManifestError, SessionWeaponId, SessionWeaponManifestRow,
 };
 
-pub use life_front::{LifeFrontCensus, LifeNotifyCensus};
 pub use lifecycle::{
-    LiveWorldIdentity, SessionSwapCompletion, SessionSwapRequest, SessionSwapResult,
-    SessionSwapTarget, TeardownRequest,
+    LiveWorldIdentity, SessionSwapRequest, SessionSwapResult, SessionSwapTarget, TeardownRequest,
 };
 pub use loadout::{
     AuthoritativeClassProjection, ClassRow, perk_catalog_id, project_class, resolve_class_weapon,
@@ -31,7 +31,7 @@ pub use loadout::{
 pub use local_arm::{
     arm_local_from_presented, join_local_on_class_select, sync_prediction_metrics_to_probe,
 };
-pub use match_apply::{apply_prepared_match, install_script_model_id};
+pub use match_apply::{apply_prepared_match, install_script_model_id, sim_clip_map};
 pub use plugin::SessionPlugin;
 pub use startup::{PendingConsoleLines, StartupCommands};
 

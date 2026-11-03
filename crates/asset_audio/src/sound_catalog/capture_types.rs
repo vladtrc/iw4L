@@ -6,28 +6,28 @@ pub const MSS_PCM: i32 = 1;
 pub struct LoadedSoundPcm {
     pub name: String,
 
-    pub(crate) game: ZoneGame,
-    pub(crate) format: i32,
+    pub game: FamilyId,
+    pub format: i32,
     pub rate: u32,
-    pub(crate) bits: i32,
-    pub(crate) channels: i32,
+    pub bits: i32,
+    pub channels: i32,
     pub samples: u32,
     pub block_size: u32,
-    pub(crate) pcm: crate::encoded_audio::EncodedAudio,
+    pub pcm: crate::encoded_audio::EncodedAudio,
 
     pub zone: ZoneOwner,
 
     pub seek_table: Vec<u32>,
 
-    pub sab_media: Option<crate::SabMediaSource>,
+    pub external_media: Option<crate::ExternalAudioSource>,
 }
 
 impl LoadedSoundPcm {
-    pub fn game(&self) -> ZoneGame {
+    pub fn game(&self) -> FamilyId {
         self.game
     }
     pub fn captured(
-        game: ZoneGame,
+        game: FamilyId,
         name: impl Into<String>,
         format: i32,
         rate: u32,
@@ -47,29 +47,8 @@ impl LoadedSoundPcm {
             pcm: pcm.into(),
             zone: ZoneOwner::default(),
             seek_table,
-            sab_media: None,
+            external_media: None,
         }
-    }
-
-    pub(crate) fn from_sab(source: crate::SabMediaSource, game: ZoneGame, zone: ZoneOwner) -> Self {
-        Self {
-            name: format!("t6/{:08x}", source.entry.id),
-            game,
-            format: i32::from(source.entry.format),
-            rate: source.entry.frame_rate().unwrap_or(0),
-            bits: 16,
-            channels: i32::from(source.entry.channels),
-            samples: source.entry.frame_count,
-            sab_media: Some(source),
-            zone,
-            block_size: 0,
-            pcm: Default::default(),
-            seek_table: Vec::new(),
-        }
-    }
-
-    pub fn t5_adpcm_bytes(&self) -> Option<&[u8]> {
-        (self.sab_media.is_none() && self.format == 6).then_some(self.pcm.bytes())
     }
 
     pub fn channels(&self) -> i32 {
@@ -95,10 +74,6 @@ impl LoadedSoundPcm {
     pub fn bits(&self) -> i32 {
         self.bits
     }
-
-    pub fn is_t5_xwma(&self) -> bool {
-        self.sab_media.is_none() && self.format == crate::sound_wma_t5::T5_WMA
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -121,7 +96,7 @@ pub struct CapturedAlias {
 
     pub loaded_name: Option<String>,
 
-    pub(crate) loaded: LoadedSoundEdge,
+    pub loaded: LoadedSoundEdge,
     pub loaded_binding_origin: crate::LoadedBindingOrigin,
 
     pub streamed: Option<(String, String)>,
@@ -152,6 +127,7 @@ pub struct CapturedAlias {
     pub velocity_min: f32,
 
     pub flags: Option<u32>,
+    pub channel_id: Option<u32>,
 
     pub looping: Option<bool>,
 
@@ -167,7 +143,7 @@ pub struct CapturedAlias {
 
     pub volume_falloff: Option<CapturedSndCurve>,
 
-    pub t5_distance_curves: Option<[u8; 2]>,
+    pub distance_curve_names: Option<[String; 2]>,
 
     pub near_falloff: Option<CapturedSndCurve>,
 
@@ -181,7 +157,7 @@ pub struct CapturedAlias {
 
     pub stereo_speaker_gains: Option<[[f32; 2]; 2]>,
 
-    pub t6_speaker_pan: Option<[f32; 6]>,
+    pub surround_pan: Option<[f32; 6]>,
 
     pub limit_count: Option<u8>,
 
@@ -217,13 +193,7 @@ impl CapturedAlias {
     }
 
     pub fn is_looping(&self) -> Option<bool> {
-        self.decoded_flags()
-            .map(SndAliasFlags::looping)
-            .or(self.looping)
-    }
-
-    pub fn decoded_flags(&self) -> Option<SndAliasFlags> {
-        self.flags.map(SndAliasFlags::from_word)
+        self.looping
     }
 }
 
@@ -312,28 +282,22 @@ pub struct CapturedSound {
     pub name: String,
     pub aliases: Vec<CapturedAlias>,
 
-    pub(crate) game: ZoneGame,
+    pub game: FamilyId,
 
     pub zone: ZoneOwner,
 }
 
 impl CapturedSound {
-    pub fn game(&self) -> ZoneGame {
+    pub fn game(&self) -> FamilyId {
         self.game
     }
     pub fn ent_channel(&self, variant: usize) -> Option<u32> {
-        match self.game {
-            ZoneGame::T5 | ZoneGame::T6 => None,
-            ZoneGame::Iw4 | ZoneGame::Iw5 => self
-                .aliases
-                .get(variant)
-                .and_then(|a| a.decoded_flags().map(|f| f.channel())),
-        }
+        self.aliases.get(variant)?.channel_id
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ChannelKey {
-    pub namespace: AssetNamespace,
+    pub namespace: FamilyId,
     pub id: u32,
 }

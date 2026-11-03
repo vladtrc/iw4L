@@ -1,11 +1,10 @@
-use bevy_ecs::entity::Entity;
 use bevy_ecs::prelude::World;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::script::host;
 use crate::script::{
-    Fault, LevelData, Location, NativeRegistry, Program, RoundScript, Thread, ThreadState, Value,
+    Fault, LevelData, Location, NativeRegistry, Program, RoundScript, ThreadState, Value,
 };
 
 use super::{INSTRUCTION_BUDGET, execute, new_thread};
@@ -13,26 +12,7 @@ use super::{INSTRUCTION_BUDGET, execute, new_thread};
 /// Runs during install, before the map's `script_struct` blocks are appended to `level.struct`.
 pub const STRUCT_INIT: &str = "codescripts/struct::initstructs";
 
-pub(crate) fn copy_state(source: &World, target: &mut World) {
-    target.insert_resource(source.resource::<RoundScript>().clone());
-    target.insert_resource(source.resource::<crate::script::MatchScript>().clone());
-    target.insert_resource(source.resource::<host::mechanics::Mechanics>().clone());
-    target.insert_resource(source.resource::<NativeRegistry>().clone());
-    for entity in source.iter_entities() {
-        if let Some(thread) = entity.get::<Thread>() {
-            target.spawn(thread.clone());
-        }
-    }
-}
-
 pub(crate) fn reset_round(world: &mut World) {
-    let ids: Vec<_> = world
-        .query_filtered::<Entity, bevy_ecs::query::With<Thread>>()
-        .iter(world)
-        .collect();
-    for id in ids {
-        world.despawn(id);
-    }
     let round = RoundScript::new(world.resource::<crate::script::MatchScript>());
     world.insert_resource(round);
     world.insert_resource(host::mechanics::Mechanics::default());
@@ -67,13 +47,16 @@ pub(crate) fn install_level(
     program: Arc<Program>,
     plan: host::restart::RestartPlan,
 ) -> Result<(), Fault> {
-    let natives = plan.natives.clone();
+    let mut natives = plan.natives.clone();
     let location = Location {
         module: "<runtime>".into(),
         function: "install".into(),
         line: 0,
         column: 0,
     };
+    let family = crate::script::families::script_family(program.rules())
+        .map_err(|message| Fault::at(&location, message))?;
+    (family.register_natives)(&mut natives);
     if world.resource::<RoundScript>().program.is_some() {
         return Err(Fault::at(
             &location,
@@ -106,6 +89,7 @@ pub(crate) fn install_level(
         .map(|b| natives.get(b.namespace, b.name).unwrap())
         .collect();
     let mut runtime = world.resource_mut::<RoundScript>();
+    (family.initialize_round)(&mut runtime.extensions);
     runtime.program = Some(program.clone());
     runtime.natives = bound;
     runtime.objects.insert(0, BTreeMap::new());

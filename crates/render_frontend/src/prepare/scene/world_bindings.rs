@@ -1,20 +1,51 @@
 use asset_material::MaterialWorldBindingInputs;
-use asset_model::LightGridColorEncoding;
+use asset_model::LightGridCodec;
 
 pub(super) fn prepare(
-    source_namespace: Option<asset_core::AssetNamespace>,
-    encoding: LightGridColorEncoding,
+    source_namespace: Option<asset_core::FamilyId>,
+    codec: &LightGridCodec,
     exposure_stops: Option<f32>,
     sky_intensity: Option<[f32; 4]>,
 ) -> MaterialWorldBindingInputs {
     MaterialWorldBindingInputs {
         source_namespace,
         exposure_stops,
-        model_lighting_decode_scale: asset_model::model_lighting_texel_decode_scale(encoding),
-        reflection_probe_alpha_weight: f32::from(
-            encoding == LightGridColorEncoding::T6Coefficients,
-        ),
+        model_lighting_decode_scale: asset_model::model_lighting_texel_decode_scale(codec),
+        reflection_probe_alpha_weight: codec.reflection_probe_alpha_weight,
         sky_intensity,
+    }
+}
+
+/// An atlas layer's inputs, made as its map's own would be were it the match's.
+pub(super) fn layer(
+    lighting: &asset_world::AtlasLayerLighting,
+) -> asset_material::MaterialLayerBindingInputs {
+    let sun = lighting
+        .t5_sun_light
+        .map(|sun| asset_material::MaterialSunInputs {
+            direction: sun.direction,
+            color: [sun.diffuse[0], sun.diffuse[1], sun.diffuse[2]],
+            diffuse_color: Some(sun.diffuse),
+            specular_color: Some(sun.specular),
+        })
+        .or_else(|| {
+            lighting
+                .sun_primary_light
+                .as_ref()
+                .map(|light| self::sun(&super::world::map_dir_primary_light(light)))
+        });
+    asset_material::MaterialLayerBindingInputs {
+        world: prepare(
+            lighting.source_namespace,
+            lighting
+                .light_grid_codec
+                .unwrap_or(&asset_model::RGB8_LIGHT_GRID_CODEC),
+            lighting.t6_exposure,
+            lighting.sky_dynamic_intensity,
+        ),
+        exposure: lighting.t5_sun_parse_exposure,
+        fog: lighting.exp_fog.as_ref().map(fog),
+        sun,
     }
 }
 

@@ -47,7 +47,7 @@ impl FxModelEntry {
     }
 }
 
-type FxModelKey = (crate::AssetNamespace, String);
+type FxModelKey = (crate::FamilyId, String);
 
 #[derive(Clone, Debug, Default)]
 pub struct FxModelCatalog {
@@ -55,7 +55,7 @@ pub struct FxModelCatalog {
     order: Vec<FxModelKey>,
     zones: Vec<ZoneOwner>,
     capture_zone: ZoneOwner,
-    capture_ns: Option<crate::AssetNamespace>,
+    capture_ns: Option<crate::FamilyId>,
     strings: ScriptStrings,
 }
 
@@ -64,7 +64,7 @@ impl FxModelCatalog {
         self.capture_zone = zone;
     }
 
-    pub fn set_capture_ns(&mut self, ns: crate::AssetNamespace) {
+    pub fn set_capture_ns(&mut self, ns: crate::FamilyId) {
         self.capture_ns = Some(ns);
     }
 
@@ -108,8 +108,13 @@ impl FxModelCatalog {
                 continue;
             }
             self.order.push(key.clone());
-            self.zones
-                .push(other.zones.get(index).copied().unwrap_or_default());
+            self.zones.push(
+                other
+                    .zones
+                    .get(index)
+                    .copied()
+                    .unwrap_or(asset_core::ZoneOwner::UNKNOWN),
+            );
             self.entries.insert(key, entry);
         }
         self.entries.len().saturating_sub(before)
@@ -121,8 +126,12 @@ impl FxModelCatalog {
         for (index, key) in old_order.into_iter().enumerate() {
             if hints.contains(&key) {
                 self.order.push(key);
-                self.zones
-                    .push(old_zones.get(index).copied().unwrap_or_default());
+                self.zones.push(
+                    old_zones
+                        .get(index)
+                        .copied()
+                        .unwrap_or(asset_core::ZoneOwner::UNKNOWN),
+                );
             }
         }
         self.entries.retain(|key, _| hints.contains(key));
@@ -139,7 +148,7 @@ impl FxModelCatalog {
         census
     }
 
-    pub fn index_in(&self, ns: crate::AssetNamespace, name: &str) -> Option<usize> {
+    pub fn index_in(&self, ns: crate::FamilyId, name: &str) -> Option<usize> {
         self.order
             .iter()
             .position(|(key_ns, key_name)| *key_ns == ns && key_name == name)
@@ -154,7 +163,10 @@ impl FxModelCatalog {
     }
 
     pub fn zone_of(&self, index: usize) -> ZoneOwner {
-        self.zones.get(index).copied().unwrap_or_default()
+        self.zones
+            .get(index)
+            .copied()
+            .unwrap_or(asset_core::ZoneOwner::UNKNOWN)
     }
 
     pub fn len(&self) -> usize {

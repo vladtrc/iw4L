@@ -99,9 +99,6 @@ pub(crate) fn steer(
     cmd: &playerstate_iw4::UserCmd,
     msec: i32,
 ) {
-    if !world.publishes_snapshot() {
-        return;
-    }
     let Some(mut link) = world
         .client_meta(id)
         .and_then(|m| m.remote_missile)
@@ -130,9 +127,6 @@ pub(crate) fn steer(
 }
 
 pub(crate) fn advance(world: &mut FrameWorld, tick: Tick) {
-    if !world.publishes_snapshot() {
-        return;
-    }
     forget_gone_missiles(world);
     let now = crate::level_time_ms(tick);
     for id in world.client_ids_sorted() {

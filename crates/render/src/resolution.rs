@@ -4,6 +4,7 @@
 
 use bevy::camera::{CameraOutputMode, ImageRenderTarget, RenderTarget};
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::ecs::system::SystemParam;
 use bevy::image::ImageSampler;
 use bevy::picking::Pickable;
 use bevy::prelude::*;
@@ -64,16 +65,89 @@ fn opaque_output() -> CameraOutputMode {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(SystemParam)]
+struct ScaledPresentation<'w, 's> {
+    commands: Commands<'w, 's>,
+    presents: Query<'w, 's, Entity, With<PresentCamera>>,
+    nodes: Query<'w, 's, Entity, With<PresentImage>>,
+    images: ResMut<'w, Assets<Image>>,
+    scaled: ResMut<'w, ScaledTarget>,
+}
+
+impl ScaledPresentation<'_, '_> {
+    fn clear(&mut self) {
+        let Self {
+            commands,
+            presents,
+            nodes,
+            scaled,
+            ..
+        } = self;
+        if scaled.0.take().is_some() {
+            for entity in presents.iter().chain(nodes.iter()) {
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+
+    fn ensure(&mut self, size: UVec2) -> Option<&Handle<Image>> {
+        let Self {
+            commands,
+            presents,
+            nodes,
+            images,
+            scaled,
+        } = self;
+        if scaled
+            .0
+            .as_ref()
+            .is_none_or(|(current, _)| *current != size)
+        {
+            let handle = images.add(target_image(size));
+            for entity in nodes.iter() {
+                commands.entity(entity).despawn();
+            }
+            let camera = presents.iter().next().unwrap_or_else(|| {
+                commands
+                    .spawn((
+                        PresentCamera,
+                        Camera2d,
+                        Camera {
+                            order: 1,
+                            clear_color: ClearColorConfig::Custom(Color::BLACK),
+                            ..default()
+                        },
+                        // Msaa stays at its default: 2D cameras on one window share a
+                        // depth texture keyed by target alone, so their sample counts
+                        // must agree with the overlay camera's.
+                        Tonemapping::None,
+                        DebandDither::Disabled,
+                    ))
+                    .id()
+            });
+            commands.spawn((
+                PresentImage,
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                ImageNode::new(handle.clone()).with_mode(NodeImageMode::Stretch),
+                UiTargetCamera(camera),
+                Pickable::IGNORE,
+            ));
+            scaled.0 = Some((size, handle));
+        }
+        scaled.0.as_ref().map(|(_, handle)| handle)
+    }
+}
+
 fn sync_render_resolution(
-    mut commands: Commands,
     settings: Option<Res<frame::GameSettings>>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut lenses: Query<(&mut Camera, &mut RenderTarget, &mut Projection), With<FpvLens>>,
-    presents: Query<Entity, With<PresentCamera>>,
-    nodes: Query<Entity, With<PresentImage>>,
-    mut images: ResMut<Assets<Image>>,
-    mut scaled: ResMut<ScaledTarget>,
+    mut presentation: ScaledPresentation,
 ) {
     let want = match (settings, windows.single()) {
         (Some(settings), Ok(window)) => scaled_size(
@@ -84,11 +158,7 @@ fn sync_render_resolution(
         _ => None,
     };
     let Some((size, logical_height)) = want.filter(|_| !lenses.is_empty()) else {
-        if scaled.0.take().is_some() {
-            for entity in presents.iter().chain(nodes.iter()) {
-                commands.entity(entity).despawn();
-            }
-        }
+        presentation.clear();
         for (mut camera, mut target, mut projection) in &mut lenses {
             if !matches!(*target, RenderTarget::Window(WindowRef::Primary)) {
                 *target = RenderTarget::Window(WindowRef::Primary);
@@ -100,48 +170,7 @@ fn sync_render_resolution(
         }
         return;
     };
-    if scaled
-        .0
-        .as_ref()
-        .is_none_or(|(current, _)| *current != size)
-    {
-        let handle = images.add(target_image(size));
-        for entity in &nodes {
-            commands.entity(entity).despawn();
-        }
-        let camera = presents.iter().next().unwrap_or_else(|| {
-            commands
-                .spawn((
-                    PresentCamera,
-                    Camera2d,
-                    Camera {
-                        order: 1,
-                        clear_color: ClearColorConfig::Custom(Color::BLACK),
-                        ..default()
-                    },
-                    // Msaa stays at its default: 2D cameras on one window share a
-                    // depth texture keyed by target alone, so their sample counts
-                    // must agree with the overlay camera's.
-                    Tonemapping::None,
-                    DebandDither::Disabled,
-                ))
-                .id()
-        });
-        commands.spawn((
-            PresentImage,
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                ..default()
-            },
-            ImageNode::new(handle.clone()).with_mode(NodeImageMode::Stretch),
-            UiTargetCamera(camera),
-            Pickable::IGNORE,
-        ));
-        scaled.0 = Some((size, handle));
-    }
-    let Some((_, handle)) = scaled.0.as_ref() else {
+    let Some(handle) = presentation.ensure(size) else {
         return;
     };
     // Logical size matches the window, so HUD projections of world points line up.

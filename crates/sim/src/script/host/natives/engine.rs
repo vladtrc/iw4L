@@ -48,7 +48,7 @@ fn describe(value: &Value) -> &'static str {
     }
 }
 
-pub(crate) fn entity_id(world: &World, value: &Value) -> Result<u64, String> {
+pub fn entity_id(world: &World, value: &Value) -> Result<u64, String> {
     match world.resource::<RoundScript>().entity(value) {
         Some((id, e)) if e.kind != EntityKind::HudElem => Ok(id),
         Some(_) => Err("hud element is not an entity".into()),
@@ -587,11 +587,7 @@ fn team_clients(world: &mut World, team: &str, except: Option<u32>) -> Vec<crate
         .collect()
 }
 
-pub(crate) fn play_sound_at(
-    world: &mut World,
-    origin: [f32; 3],
-    alias: &str,
-) -> Result<(), String> {
+pub fn play_sound_at(world: &mut World, origin: [f32; 3], alias: &str) -> Result<(), String> {
     if crate::frame::FrameWorld::from_world(world).script_sound_is_looping(alias)? {
         return Err("cannot play a looping alias as a one-shot sound".into());
     }
@@ -709,7 +705,9 @@ fn weapon_facts(
     let index = frame
         .weapon_index_by_script_name(&name)
         .ok_or_else(|| format!("unknown weapon '{name}'"))?;
-    Ok(frame.weapon_combat_row(index).unwrap_or_default())
+    Ok(frame
+        .weapon_combat_row(index)
+        .unwrap_or_else(weapon_iw4::WeaponCombatFacts::default))
 }
 
 const WEAPON_TYPES: &[&str] = &["bullet", "grenade", "projectile", "riotshield"];
@@ -834,7 +832,7 @@ fn register_entities(registry: &mut NativeRegistry) {
         Ok(Value::Int(i32::from(
             piece >= 0
                 && stage >= 0
-                && crate::t5_destructible::stage_matches(
+                && crate::model_behaviors::stage_matches(
                     &crate::frame::FrameWorld::from_world(world),
                     crate::AuthorityModelOwner::ScriptModel(target),
                     piece as usize,
@@ -967,7 +965,13 @@ fn register_placement(registry: &mut NativeRegistry) {
         let id = entity_id(world, receiver)?;
         let tag = string(args, 0)?;
         let origin = vector_field(world, id, "origin");
-        let offset = super::super::presence::tag_offset(world, id, &tag).unwrap_or(ZERO);
+        let offset = match super::super::presence::tag_lookup(world, id, &tag) {
+            Some(Some(offset)) => offset,
+            Some(None) if !tag.eq_ignore_ascii_case("tag_origin") => {
+                return Err(format!("tag '{tag}' does not exist on entity"));
+            }
+            _ => ZERO,
+        };
         let axis = math_iw4::angles_to_axis(vector_field(world, id, "angles"));
         Ok(Value::Vector(std::array::from_fn(|i| {
             origin[i] + axis[0][i] * offset[0] + axis[1][i] * offset[1] + axis[2][i] * offset[2]
@@ -1441,7 +1445,7 @@ fn register_attachments(registry: &mut NativeRegistry) {
 
     registry.register(Method, "attach", |world, receiver, args| {
         let model: Arc<str> = string(args, 0)?.into();
-        let tag: Arc<str> = optional(args, 1, string)?.unwrap_or_default().into();
+        let tag: Arc<str> = optional(args, 1, string)?.unwrap_or(String::new()).into();
         let id = entity_id(world, receiver)?;
         let mut runtime = runtime(world);
         let entity = runtime.entities.get_mut(&id).unwrap();

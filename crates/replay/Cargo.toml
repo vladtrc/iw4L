@@ -10,10 +10,12 @@ diag.workspace = true
 bevy.workspace = true
 frame.workspace = true
 net.workspace = true
+session.workspace = true
 sim.workspace = true
 playerstate_iw4.workspace = true
 perf.workspace = true
 getrandom = "0.3"
+zstd = "0.13.3"
 
 [lints]
 workspace = true

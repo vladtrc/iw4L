@@ -4,7 +4,7 @@ use sim::{ClientId, Snapshot};
 use crate::client::predict::CmdSeq;
 use crate::transport::delta::{SnapshotDecoder, SnapshotEncoder};
 use crate::transport::frame::{
-    Frame, LoopbackTransport, Transport, TransportError, frame_from_acked_tick,
+    Frame, FrameTail, LoopbackTransport, Transport, TransportError, frame_from_acked_tick,
 };
 
 #[derive(Resource, Debug, Default)]
@@ -31,19 +31,21 @@ impl ListenLoopback {
         self.transport.pending()
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn send_tick(
         &mut self,
         snapshot: &Snapshot,
         acks: Vec<(ClientId, CmdSeq)>,
-        svc_sounds: Vec<crate::SvcSound>,
-        svc_scores: Option<String>,
-        svc_card_slots: Vec<crate::SvcCardSlot>,
-        svc_open_menus: Vec<crate::SvcOpenMenu>,
-        svc_hud_splashes: Vec<crate::SvcHudSplash>,
-        svc_game_notifies: Vec<crate::SvcGameNotify>,
-        reliable: crate::ReliablePayload,
+        tail: FrameTail,
     ) -> Result<(), TransportError> {
+        let FrameTail {
+            svc_sounds,
+            svc_scores,
+            svc_card_slots,
+            svc_open_menus,
+            svc_hud_splashes,
+            svc_game_notifies,
+            reliable,
+        } = tail;
         let mut frame = frame_from_acked_tick(&mut self.encoder, snapshot, acks);
         frame.svc_sounds = svc_sounds;
         frame.svc_scores = svc_scores;

@@ -6,15 +6,13 @@ license.workspace = true
 description = "Authored sound aliases, curves, codecs, and map sound facts."
 
 [dependencies]
+movement_iw4.workspace = true
 asset_core.workspace = true
 asset_transport.workspace = true
 asset_iw4.workspace = true
 fastfile_iw4.workspace = true
-fastfile_iw5.workspace = true
-fastfile_t5.workspace = true
-fastfile_t6.workspace = true
 diag.workspace = true
-bevy.workspace = true
+bevy_ecs.workspace = true
 blake3 = "=1.8.5"
 
 [lints]

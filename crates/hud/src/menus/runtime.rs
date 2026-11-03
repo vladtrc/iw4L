@@ -144,7 +144,7 @@ impl Runner<'_, '_> {
             }
             Command::Exec(text) => self.exec(text),
             Command::CopyDvar(name, source) => {
-                let value = self.dvar(&source).unwrap_or_default().to_owned();
+                let value = self.dvar(&source).unwrap_or("").to_owned();
                 self.dvars.set(&name, value);
             }
             Command::SetDvar(name, value) => self.set_dvar(&name, &value),
@@ -571,7 +571,7 @@ impl Runner<'_, '_> {
             .iter()
             .find(|m| m.name.eq_ignore_ascii_case(menu))
             .map(|m| m.items.iter().map(|s| s.hidden).collect())
-            .unwrap_or_default();
+            .unwrap_or(Vec::new());
         let host = MenuHost {
             world: self.world,
             dvars: self.dvars,
@@ -610,7 +610,7 @@ impl Runner<'_, '_> {
         if item.dvar.is_empty() {
             return false;
         }
-        let current = self.dvar(&item.dvar).unwrap_or_default();
+        let current = self.dvar(&item.dvar).unwrap_or("");
         let choices = self.dvars.choices(&item.dvar).unwrap_or(&item.choices);
         let value = if let Some(slider) = &item.slider {
             let current = current.parse::<f32>().unwrap_or(slider.min);
@@ -688,7 +688,7 @@ impl Runner<'_, '_> {
             let buffer: Vec<char> = self
                 .dvars
                 .get(&item.dvar)
-                .unwrap_or_default()
+                .unwrap_or("")
                 .chars()
                 .take(max_chars)
                 .collect();

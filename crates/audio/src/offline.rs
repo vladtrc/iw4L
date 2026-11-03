@@ -23,6 +23,25 @@ pub enum OfflineError {
     VoiceBudget,
 }
 
+impl std::fmt::Display for OfflineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Media(error) => write!(f, "offline audio: {error}"),
+            Self::InvalidParameters => f.write_str("invalid offline audio parameters"),
+            Self::VoiceBudget => f.write_str("offline audio voice budget exceeded"),
+        }
+    }
+}
+
+impl std::error::Error for OfflineError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Media(error) => Some(error),
+            Self::InvalidParameters | Self::VoiceBudget => None,
+        }
+    }
+}
+
 pub struct OfflineVoice(Arc<InstanceState>);
 
 impl OfflineVoice {
@@ -85,7 +104,6 @@ impl OfflineRenderer {
         let instance = Arc::new(InstanceState {
             id: self.next_id,
             scope: AudioScope::Menu,
-            epoch: 0,
             stopped: AtomicBool::new(false),
             finish_attack: AtomicBool::new(false),
             paused: AtomicBool::new(false),

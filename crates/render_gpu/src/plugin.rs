@@ -24,6 +24,7 @@ impl Plugin for RenderGpuPlugin {
             Err(cause) => diag::warn!(World, "drawsurf sampler profile: cause={cause:?}"),
         }
         crate::drawsurf::register_drawsurf_render(app);
+        crate::drawsurf::scope::register(app);
         app.init_resource::<crate::GpuSubmitReady>()
             .init_resource::<crate::ColourWorkingSet>();
         let Some(render_app) = app.get_sub_app_mut(bevy::render::RenderApp) else {

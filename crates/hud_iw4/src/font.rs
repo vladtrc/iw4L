@@ -87,17 +87,28 @@ pub fn ui_text_height(text_scale: f32) -> f32 {
     text_scale * R_TEXT_EM
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextAlignment {
+    pub mode: i32,
+    pub offset: [f32; 2],
+}
+
 pub fn item_text_origin(
-    rect_x: f32,
-    rect_y: f32,
-    rect_w: f32,
-    rect_h: f32,
-    text_align_mode: i32,
-    text_align_x: f32,
-    text_align_y: f32,
-    measured_w: f32,
-    measured_h: f32,
+    rect: crate::AppliedRect,
+    alignment: TextAlignment,
+    measured_size: [f32; 2],
 ) -> (f32, f32) {
+    let crate::AppliedRect {
+        x: rect_x,
+        y: rect_y,
+        w: rect_w,
+        h: rect_h,
+    } = rect;
+    let TextAlignment {
+        mode: text_align_mode,
+        offset: [text_align_x, text_align_y],
+    } = alignment;
+    let [measured_w, measured_h] = measured_size;
     let mut x = text_align_x;
     let h_mode = text_align_mode & 3;
     if h_mode != 0 {

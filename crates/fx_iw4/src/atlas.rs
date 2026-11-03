@@ -13,6 +13,14 @@ const FX_ATLAS_LIFE_SCALE: u8 = 4;
 const FX_ATLAS_CLAMP_LAST: u8 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FxAtlasUvRect {
+    pub u0: f32,
+    pub u_span: f32,
+    pub v0: f32,
+    pub v_span: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FxSpriteAtlasUv {
     pub s0: f32,
     pub ds: f32,

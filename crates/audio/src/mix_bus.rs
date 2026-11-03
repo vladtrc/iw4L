@@ -1,50 +1,6 @@
-use asset_core::AssetNamespace;
+use asset_core::FamilyId;
 
 use crate::render_core::{QUANTUM, SAMPLE_RATE};
-
-const BUSES: usize = 4;
-
-#[derive(Clone, Copy)]
-struct Compressor {
-    threshold_db: f32,
-    ratio: f32,
-    makeup_db: f32,
-    attack_s: f32,
-    release_s: f32,
-}
-
-#[derive(Clone, Copy)]
-struct BusStage {
-    trim_db: f32,
-    compressor: Option<Compressor>,
-}
-
-fn stage(namespace: AssetNamespace) -> BusStage {
-    match namespace {
-        AssetNamespace::Iw4 => BusStage {
-            trim_db: 0.0,
-            compressor: None,
-        },
-        AssetNamespace::Iw5 => BusStage {
-            trim_db: -2.5,
-            compressor: None,
-        },
-        AssetNamespace::T5 => BusStage {
-            trim_db: 7.0,
-            compressor: None,
-        },
-        AssetNamespace::T6 => BusStage {
-            trim_db: 0.0,
-            compressor: Some(Compressor {
-                threshold_db: -40.0,
-                ratio: 4.0,
-                makeup_db: 29.5,
-                attack_s: 0.002,
-                release_s: 0.212,
-            }),
-        },
-    }
-}
 
 fn coefficient(seconds: f32) -> f32 {
     1.0 - (-1.0 / (seconds * SAMPLE_RATE as f32)).exp()
@@ -54,57 +10,74 @@ fn db_to_gain(db: f32) -> f32 {
     10f32.powf(db / 20.0)
 }
 
+struct Bus {
+    namespace: FamilyId,
+    stage: asset_audio::MixBusStage,
+    buffer: [[f32; 2]; QUANTUM],
+    used: bool,
+    envelope: f32,
+}
+
 pub(crate) struct MixBuses {
-    buffers: [[[f32; 2]; QUANTUM]; BUSES],
-    used: [bool; BUSES],
-    envelope: [f32; BUSES],
+    buses: Vec<Bus>,
 }
 
 impl Default for MixBuses {
     fn default() -> Self {
-        Self {
-            buffers: [[[0.0; 2]; QUANTUM]; BUSES],
-            used: [false; BUSES],
-            envelope: [0.0; BUSES],
-        }
+        let mut buses: Vec<_> = asset_audio::audio_families()
+            .iter()
+            .map(|(namespace, policy)| Bus {
+                namespace,
+                stage: policy.mix_bus,
+                buffer: [[0.0; 2]; QUANTUM],
+                used: false,
+                envelope: 0.0,
+            })
+            .collect();
+        buses.sort_by_key(|bus| (bus.stage.order, bus.namespace));
+        Self { buses }
     }
 }
 
 impl MixBuses {
-    pub(crate) fn bus(&mut self, namespace: AssetNamespace) -> &mut [[f32; 2]; QUANTUM] {
-        let index = namespace as usize;
-        if !self.used[index] {
-            self.used[index] = true;
-            self.buffers[index] = [[0.0; 2]; QUANTUM];
+    pub(crate) fn bus(&mut self, namespace: FamilyId) -> &mut [[f32; 2]; QUANTUM] {
+        let bus = self
+            .buses
+            .iter_mut()
+            .find(|bus| bus.namespace == namespace)
+            .expect("render media bus must belong to an installed audio family");
+        if !bus.used {
+            bus.used = true;
+            bus.buffer = [[0.0; 2]; QUANTUM];
         }
-        &mut self.buffers[index]
+        &mut bus.buffer
     }
 
     pub(crate) fn mix_into(&mut self, output: &mut [[f32; 2]; QUANTUM]) {
-        for namespace in AssetNamespace::ALL {
-            let index = namespace as usize;
-            let stage = stage(namespace);
+        for bus in &mut self.buses {
+            let stage = bus.stage;
             let Some(compressor) = stage.compressor else {
-                if self.used[index] {
+                if bus.used {
                     let trim = db_to_gain(stage.trim_db);
-                    for (target, frame) in output.iter_mut().zip(&self.buffers[index]) {
+                    for (target, frame) in output.iter_mut().zip(&bus.buffer) {
                         target[0] += frame[0] * trim;
                         target[1] += frame[1] * trim;
                     }
                 }
+                bus.used = false;
                 continue;
             };
-            if !self.used[index] {
-                if self.envelope[index] < 1e-12 {
+            if !bus.used {
+                if bus.envelope < 1e-12 {
                     continue;
                 }
-                self.buffers[index] = [[0.0; 2]; QUANTUM];
+                bus.buffer = [[0.0; 2]; QUANTUM];
             }
             let attack = coefficient(compressor.attack_s);
             let release = coefficient(compressor.release_s);
             let slope = 1.0 - 1.0 / compressor.ratio;
-            let mut envelope = self.envelope[index];
-            for (target, frame) in output.iter_mut().zip(&self.buffers[index]) {
+            let mut envelope = bus.envelope;
+            for (target, frame) in output.iter_mut().zip(&bus.buffer) {
                 let power = (frame[0] * frame[0] + frame[1] * frame[1]) * 0.5;
                 let power = if power.is_finite() { power } else { 0.0 };
                 envelope += (power - envelope) * if power > envelope { attack } else { release };
@@ -114,9 +87,9 @@ impl MixBuses {
                 target[0] += frame[0] * gain;
                 target[1] += frame[1] * gain;
             }
-            self.envelope[index] = envelope;
+            bus.envelope = envelope;
+            bus.used = false;
         }
-        self.used = [false; BUSES];
     }
 }
 

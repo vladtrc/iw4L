@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 
 use crate::overlay::{
     OverlayCodeNeed, apply_shadowable_light, overlay_code_mesh_tess_code_constants,
@@ -29,6 +29,11 @@ pub struct MaterialExecView<'a> {
     pub view_from_world: Option<Mat4>,
 
     pub code_sources: &'a RuntimeCodeSources,
+
+    pub view_origin: Vec3,
+    /// The atlas world whose camera this is (`MaterialExecFrame::world_cameras`);
+    /// `None` for the frame's own.
+    pub world: Option<u8>,
 }
 
 impl<'a> MaterialExecView<'a> {
@@ -44,6 +49,28 @@ impl<'a> MaterialExecView<'a> {
             clip_from_world: frame.clip_from_world,
             view_from_world: frame.view_from_world,
             code_sources: &frame.code_sources,
+            view_origin: frame.view_origin,
+            world: None,
+        }
+    }
+
+    /// The camera for a draw tagged `tag` (`PortalView::surface_tag`): the
+    /// tagged world's own when it has one, else this one.
+    pub fn in_world(self, tag: u8) -> Self {
+        let Some(camera) = tag
+            .checked_sub(1)
+            .and_then(|world| self.frame.world_cameras.get(usize::from(world)))
+            .and_then(Option::as_ref)
+        else {
+            return self;
+        };
+        Self {
+            clip_from_world: Some(camera.clip_from_world),
+            view_from_world: Some(camera.view_from_world),
+            code_sources: &camera.code_sources,
+            view_origin: camera.view_origin,
+            world: Some(tag - 1),
+            ..self
         }
     }
 
@@ -62,6 +89,8 @@ impl<'a> MaterialExecView<'a> {
             clip_from_world: Some(clip_from_world),
             view_from_world: Some(view_from_world),
             code_sources,
+            view_origin: frame.view_origin,
+            world: None,
         }
     }
 }
@@ -191,8 +220,10 @@ fn overlay_reflection_sh(
     scratch: &mut RuntimeCodeSources,
 ) {
     if let Some((_, sh)) = per_surface_reflection_sh(frame, draw) {
-        for (index, row) in render_material::CODE_T6_REFLECTION_SH.into_iter().zip(sh) {
-            scratch.set_constant_rows(index, &[row.map(f32::to_bits)]);
+        for bindings in render_material::material_lighting_bindings() {
+            for (index, row) in bindings.reflection_sh.iter().copied().zip(sh) {
+                scratch.set_constant_rows(index, &[row.map(f32::to_bits)]);
+            }
         }
     }
 }
@@ -202,17 +233,33 @@ fn overlay_smodel_lighting_sh(
     draw: &RetainedDrawItem,
     scratch: &mut RuntimeCodeSources,
 ) {
-    let RetainedDrawKind::Smodel { placement, .. } = draw.kind else {
-        return;
+    let sh = match draw.kind {
+        RetainedDrawKind::Smodel { placement, .. } => frame
+            .smodel_lighting_sh
+            .get(placement as usize)
+            .copied()
+            .flatten(),
+        RetainedDrawKind::XModel {
+            lighting_handle, ..
+        } => u16::try_from(lighting_handle)
+            .ok()
+            .and_then(|handle| {
+                lighting_iw4::model_lighting_cache_slot(frame.xmodel_lighting_base, handle)
+            })
+            .and_then(|slot| {
+                frame
+                    .xmodel_lighting_sh
+                    .get(slot as usize)
+                    .copied()
+                    .flatten()
+            }),
+        _ => return,
     };
-    let sh = frame
-        .smodel_lighting_sh
-        .get(placement as usize)
-        .copied()
-        .flatten()
-        .unwrap_or([[1.0, 1.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.0; 4]]);
-    for (index, row) in render_material::CODE_T6_GRID_SH.into_iter().zip(sh) {
-        scratch.set_constant_rows(index, &[row.map(f32::to_bits)]);
+    let sh = sh.unwrap_or([[1.0, 1.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.0; 4]]);
+    for bindings in render_material::material_lighting_bindings() {
+        for (index, row) in bindings.grid_sh.iter().copied().zip(sh) {
+            scratch.set_constant_rows(index, &[row.map(f32::to_bits)]);
+        }
     }
 }
 
@@ -354,12 +401,9 @@ fn overlay_draw_material(
     apply_shadowable_light(
         scratch,
         draw.key,
-        &runtime.frame.primary_lights,
-        &runtime.frame.attenuation,
-        &runtime.frame.local_light_bindings,
+        runtime.frame,
         runtime.catalog,
-        runtime.frame.view_origin,
-        &runtime.frame.spot_receivers,
+        runtime.view_origin,
     )?;
     match draw.kind {
         RetainedDrawKind::Smodel {
@@ -369,7 +413,7 @@ fn overlay_draw_material(
         } => {
             overlay_smodel_world_matrix(
                 scratch,
-                runtime.frame.view_origin,
+                runtime.view_origin,
                 smodel_code_world_from_local(&draw.kind),
                 runtime.clip_from_world,
                 runtime.view_from_world,
@@ -392,7 +436,7 @@ fn overlay_draw_material(
         } => {
             overlay_smodel_world_matrix(
                 scratch,
-                runtime.frame.view_origin,
+                runtime.view_origin,
                 world_from_local,
                 runtime.clip_from_world,
                 runtime.view_from_world,
@@ -410,18 +454,13 @@ fn overlay_draw_material(
             if host_viewmodel_render_fx_flags(object_id) != 0
                 && let Some(clip) = runtime.frame.viewmodel_clip_from_world
             {
-                overlay_viewmodel_depth_hack(
-                    scratch,
-                    clip,
-                    runtime.frame.view_origin,
-                    world_from_local,
-                );
+                overlay_viewmodel_depth_hack(scratch, clip, runtime.view_origin, world_from_local);
             }
         }
         RetainedDrawKind::ParticleCloud { clouds, .. } => {
             overlay_particle_cloud_tess_code_constants(
                 scratch,
-                runtime.frame.view_origin,
+                runtime.view_origin,
                 &clouds,
                 runtime.clip_from_world,
                 runtime.view_from_world,
@@ -439,12 +478,7 @@ fn overlay_draw_material(
                 overlay_code_mesh_tess_code_constants(scratch, &args[..usize::from(arg_count)]);
             }
             if viewmodel && let Some(clip) = runtime.frame.viewmodel_clip_from_world {
-                overlay_viewmodel_depth_hack(
-                    scratch,
-                    clip,
-                    runtime.frame.view_origin,
-                    Mat4::IDENTITY,
-                );
+                overlay_viewmodel_depth_hack(scratch, clip, runtime.view_origin, Mat4::IDENTITY);
             }
         }
         RetainedDrawKind::Glass {
@@ -496,7 +530,7 @@ fn overlay_draw_obj_only(
         } => {
             overlay_smodel_world_matrix(
                 scratch,
-                runtime.frame.view_origin,
+                runtime.view_origin,
                 smodel_code_world_from_local(&draw.kind),
                 runtime.clip_from_world,
                 runtime.view_from_world,
@@ -516,7 +550,7 @@ fn overlay_draw_obj_only(
                 overlay_viewmodel_depth_hack(
                     scratch,
                     clip,
-                    runtime.frame.view_origin,
+                    runtime.view_origin,
                     smodel_code_world_from_local(&draw.kind),
                 );
             }
@@ -524,7 +558,7 @@ fn overlay_draw_obj_only(
         RetainedDrawKind::ParticleCloud { clouds, .. } => {
             overlay_particle_cloud_tess_code_constants(
                 scratch,
-                runtime.frame.view_origin,
+                runtime.view_origin,
                 &clouds,
                 runtime.clip_from_world,
                 runtime.view_from_world,
@@ -542,12 +576,7 @@ fn overlay_draw_obj_only(
                 overlay_code_mesh_tess_code_constants(scratch, &args[..usize::from(arg_count)]);
             }
             if viewmodel && let Some(clip) = runtime.frame.viewmodel_clip_from_world {
-                overlay_viewmodel_depth_hack(
-                    scratch,
-                    clip,
-                    runtime.frame.view_origin,
-                    Mat4::IDENTITY,
-                );
+                overlay_viewmodel_depth_hack(scratch, clip, runtime.view_origin, Mat4::IDENTITY);
             }
         }
         RetainedDrawKind::Glass {
@@ -684,6 +713,8 @@ pub struct MaterialRunExecutor {
     census: MaterialRunCensus,
     shells: HashMap<ShellInternKey, ShellEntry>,
     shell_generation: Option<MaterialGenerationId>,
+    /// The camera of the open run and overlay (`MaterialExecView::world`).
+    world: Option<u8>,
 }
 
 /// A material shell kept across runs, and what it reads.
@@ -774,6 +805,11 @@ impl MaterialRunExecutor {
         }
         self.place_rows.clear();
         self.place_lanes.clear();
+        if self.world != view.world {
+            self.world = view.world;
+            self.run = None;
+            self.last_overlay = None;
+        }
         let share = execution_share_key(view.frame, draw, tech_type, vertex_type);
         let overlay_key = overlay_keep_key(view.frame, draw);
         if self.run.as_ref().is_some_and(|run| run.share == share) {

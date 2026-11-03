@@ -2,7 +2,7 @@ use super::AdmittedExactPort;
 use super::gpu_prepare::{ConstantPackRefusal, split_bind_layout};
 use super::postfx_dof::{
     self, DofFrame, DofPlanRefusal, GaussianPass, POSTFX_MATERIALS, POSTFX_VERTEX_TYPE,
-    PostFxSourceRefusal, film_sources,
+    film_sources,
 };
 use super::sm3_wgsl::{PASS_FRAGMENT_ENTRY, PASS_VERTEX_ENTRY};
 use crate::diag::render_frame_diag::GPU_SPAN_POSTFX;
@@ -493,7 +493,7 @@ fn queue_postfx_pipeline(
         return Err(PostFxGpuRefusal::EmptyConstantBlock);
     }
     let (constants_layout, textures_layout) = postfx_layouts(film);
-    let host_state = state.apply_change_state_0_host(AlphaMode::Opaque, false);
+    let host_state = state.apply_change_state_0_host(false);
     Ok(cache.queue_render_pipeline(RenderPipelineDescriptor {
         label: Some("iw4_postfx_film".into()),
         layout: vec![constants_layout, textures_layout],
@@ -586,14 +586,16 @@ fn create_postfx_gpu(
 
 fn packed_fullscreen_vertices(width: u32, height: u32) -> Vec<u8> {
     hud_iw4::draw_stretch_pic_pack(
-        0.0,
-        0.0,
-        width as f32,
-        height as f32,
-        0.0,
-        0.0,
-        1.0,
-        1.0,
+        hud_iw4::AppliedRect {
+            x: 0.0,
+            y: 0.0,
+            w: width as f32,
+            h: height as f32,
+        },
+        hud_iw4::TextureWindow {
+            min: [0.0, 0.0],
+            max: [1.0, 1.0],
+        },
         0xffff_ffff,
     )
     .into_iter()
@@ -611,7 +613,7 @@ enum PostFxSubmitRefusal {
     FloatZNotResolvedForFrame,
     PipelinePending,
     DofPlan(DofPlanRefusal),
-    FilmSource(PostFxSourceRefusal),
+    FilmSource(String),
     Execute {
         material: &'static str,
         cause: MaterialRefusal,
@@ -707,76 +709,279 @@ impl PostFxPipelineWait {
     }
 }
 
-fn draw_postfx(
-    view: ViewQuery<(&ViewTarget, &ExtractedView)>,
-    gpu: Res<ExactPostFxGpu>,
-    extracted: Res<ExtractedPostFx>,
-    floatz: Res<super::floatz::ExactFloatZResolve>,
-    colour_frame: Res<super::PublishedRenderFrame>,
-    cache: Res<PipelineCache>,
-    device: Res<RenderDevice>,
-    queue: Res<RenderQueue>,
-    mut context: RenderContext,
-    mut texture_table: ResMut<super::texture_table::ExactTextureTable>,
-    mut refusal: Local<Option<PostFxSubmitRefusal>>,
-    mut pipeline_wait: Local<Option<PostFxPipelineWait>>,
-    mut texture_cache: Local<PostFxTextureCache>,
-    mut submitted: Local<Option<(u64, bool, UVec2)>>,
-) {
-    let products = &colour_frame.frame_products;
-    let (target, view) = view.into_inner();
-    let Some(targets) = gpu.targets.as_ref() else {
-        *pipeline_wait = None;
-        return;
-    };
-    if gpu.prepared.is_empty() || gpu.prepared.len() != gpu.steps.len() {
-        *pipeline_wait = None;
-        return;
+#[derive(bevy::ecs::system::SystemParam)]
+struct PostFxFrame<'w> {
+    extracted: Res<'w, ExtractedPostFx>,
+    floatz: Res<'w, super::floatz::ExactFloatZResolve>,
+    colour_frame: Res<'w, super::PublishedRenderFrame>,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct PostFxPipelineLookup<'w> {
+    gpu: Res<'w, ExactPostFxGpu>,
+    cache: Res<'w, PipelineCache>,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct PostFxRecorder<'w, 's> {
+    texture_table: ResMut<'w, super::texture_table::ExactTextureTable>,
+    refusal: Local<'s, Option<PostFxSubmitRefusal>>,
+    pipeline_wait: Local<'s, Option<PostFxPipelineWait>>,
+    texture_cache: Local<'s, PostFxTextureCache>,
+    submitted: Local<'s, Option<(u64, bool, UVec2)>>,
+}
+
+impl PostFxFrame<'_> {
+    fn active(&self) -> bool {
+        self.extracted.frame.dof.active()
     }
-    let active = extracted.frame.dof.active();
-    let graded = extracted.frame.grading != [0.0, 1.0, 0.0, 1.0] || extracted.t6_vision.is_some();
-    let prepare = || -> Result<Vec<Vec<u8>>, PostFxSubmitRefusal> {
-        if target.main_texture_format() != TextureFormat::Rgba8Unorm {
-            return Err(PostFxSubmitRefusal::TargetFormat(
-                target.main_texture_format(),
-            ));
-        }
-        let size = UVec2::new(
-            target.main_texture().width(),
-            target.main_texture().height(),
-        );
-        if size != targets.size || view.viewport != UVec4::new(0, 0, size.x, size.y) {
-            return Err(PostFxSubmitRefusal::PartialViewport {
-                viewport: view.viewport,
-                target: size,
-            });
-        }
-        if active && (floatz.resolved_frame != Some(products.0.frame_id) || floatz.view().is_none())
+    fn graded(&self) -> bool {
+        self.extracted.frame.grading != [0.0, 1.0, 0.0, 1.0] || self.extracted.t6_vision.is_some()
+    }
+}
+
+impl PostFxPipelineLookup<'_> {
+    fn require(
+        &self,
+        pipeline: CachedRenderPipelineId,
+        material: &'static str,
+    ) -> Result<(), PostFxSubmitRefusal> {
+        require_postfx_pipeline(self.cache.get_render_pipeline_state(pipeline), material)
+    }
+}
+
+impl PostFxRecorder<'_, '_> {
+    fn record(
+        mut self,
+        view: ViewQuery<(&ViewTarget, &ExtractedView)>,
+        source: PostFxFrame,
+        pipelines: PostFxPipelineLookup,
+        device: Res<RenderDevice>,
+        queue: Res<RenderQueue>,
+        mut context: RenderContext,
+    ) {
+        let products = &source.colour_frame.frame_products;
+        let (target, view) = view.into_inner();
+        let Some(targets) = pipelines.gpu.targets.as_ref() else {
+            *self.pipeline_wait = None;
+            return;
+        };
+        if pipelines.gpu.prepared.is_empty()
+            || pipelines.gpu.prepared.len() != pipelines.gpu.steps.len()
         {
-            return Err(PostFxSubmitRefusal::FloatZNotResolvedForFrame);
+            *self.pipeline_wait = None;
+            return;
         }
-        if graded {
-            let grade = gpu
-                .grade
-                .as_ref()
-                .ok_or(PostFxSubmitRefusal::PipelinePending)?;
-            for pipeline in grade.required_pipelines(
-                extracted
-                    .t6_vision
-                    .is_some_and(|vision| vision.bloom.is_some()),
-            ) {
-                require_postfx_pipeline(
-                    cache.get_render_pipeline_state(pipeline),
-                    "vision grading",
-                )?;
+        let active = source.active();
+        let graded = source.graded();
+        let prepare = || -> Result<Vec<Vec<u8>>, PostFxSubmitRefusal> {
+            if target.main_texture_format() != TextureFormat::Rgba8Unorm {
+                return Err(PostFxSubmitRefusal::TargetFormat(
+                    target.main_texture_format(),
+                ));
             }
+            let size = UVec2::new(
+                target.main_texture().width(),
+                target.main_texture().height(),
+            );
+            if size != targets.size || view.viewport != UVec4::new(0, 0, size.x, size.y) {
+                return Err(PostFxSubmitRefusal::PartialViewport {
+                    viewport: view.viewport,
+                    target: size,
+                });
+            }
+            if active
+                && (source.floatz.resolved_frame != Some(products.0.frame_id)
+                    || source.floatz.view().is_none())
+            {
+                return Err(PostFxSubmitRefusal::FloatZNotResolvedForFrame);
+            }
+            if graded {
+                let grade = pipelines
+                    .gpu
+                    .grade
+                    .as_ref()
+                    .ok_or(PostFxSubmitRefusal::PipelinePending)?;
+                for pipeline in grade.required_pipelines(
+                    source
+                        .extracted
+                        .t6_vision
+                        .is_some_and(|vision| vision.bloom.is_some()),
+                ) {
+                    pipelines.require(pipeline, "vision grading")?;
+                }
+            }
+            let mut uploads = Vec::new();
+            for (ready, step) in pipelines.gpu.prepared.iter().zip(&pipelines.gpu.steps) {
+                pipelines.require(ready.pipeline, ready.film.name)?;
+                let size = if matches!(
+                    step.target,
+                    Image::Output | Image::Graded | Image::ScreenBlur | Image::ScreenPing
+                ) {
+                    targets.size
+                } else {
+                    targets.quarter
+                };
+                let mut sources: RuntimeCodeSources = if active {
+                    postfx_dof::sources(
+                        size.x,
+                        size.y,
+                        targets.size.y,
+                        source.extracted.vision,
+                        source.extracted.frame,
+                    )
+                    .map_err(PostFxSubmitRefusal::DofPlan)?
+                } else {
+                    film_sources(size.x, size.y, source.extracted.vision)
+                        .map_err(PostFxSubmitRefusal::FilmSource)?
+                };
+                for (index, _) in &step.images {
+                    sources
+                        .set_texture(*index, if *index == 15 { 0x61 } else { 0x62 })
+                        .map_err(|cause| {
+                            PostFxSubmitRefusal::FilmSource(format!(
+                                "postfx code source: {cause:?}"
+                            ))
+                        })?;
+                }
+                if let Some(gaussian) = &step.gaussian {
+                    for (i, row) in gaussian.taps.iter().enumerate() {
+                        sources.set_constant_rows(10 + i as u16, &[row.map(f32::to_bits)]);
+                    }
+                }
+                let execution =
+                    rebind_stable_material(&ready.film.shell, &ready.film.catalog, &sources)
+                        .map_err(|cause| PostFxSubmitRefusal::Execute {
+                            material: step.name,
+                            cause,
+                        })?;
+                let Some(pass) = execution.pass(0).filter(|_| execution.pass_count() == 1) else {
+                    return Err(PostFxSubmitRefusal::PassCount);
+                };
+                if pass.port != ready.film.port.id() {
+                    return Err(PostFxSubmitRefusal::PortMismatch);
+                }
+                let constants = ready.film.port.pack_hit(pass).map_err(|cause| {
+                    PostFxSubmitRefusal::Constants {
+                        material: step.name,
+                        cause,
+                    }
+                })?;
+                let mut bytes = Vec::new();
+                bytes.extend_from_slice(bytemuck::cast_slice(&constants.vertex));
+                bytes.extend_from_slice(bytemuck::cast_slice(&constants.pixel));
+                let mut slots =
+                    vec![
+                        0u32;
+                        d3d9_sm3::texture_slot_rows(ready.film.port.module().sampler_count) * 4
+                    ];
+                for lane in pass.code_samplers {
+                    let Some(index) = step.images.iter().position(|(code, _)| *code == lane.index)
+                    else {
+                        return Err(PostFxSubmitRefusal::MissingCodeImage(lane.index));
+                    };
+                    let expected = if lane.index == 15 { 0x61 } else { 0x62 };
+                    if lane.sampler_state != expected || lane.image.is_some() {
+                        return Err(PostFxSubmitRefusal::SamplerMismatch);
+                    }
+                    let ordinal = ready
+                        .film
+                        .port
+                        .abi()
+                        .samplers
+                        .iter()
+                        .position(|binding| binding.register == lane.register)
+                        .ok_or(PostFxSubmitRefusal::MissingSamplerRegister(lane.register))?;
+                    slots[ordinal] =
+                        d3d9_sm3::texture_slot_word(index as u16, u16::from(lane.index == 15));
+                }
+                bytes.extend_from_slice(bytemuck::cast_slice(&slots));
+                uploads.push(bytes);
+            }
+            Ok(uploads)
+        };
+        let planned = pipelines.gpu.steps.len();
+        perf::counter!("postfx_planned_steps", "iw4l.render", planned as f64);
+        let uploads = match prepare() {
+            Ok(uploads) => uploads,
+            Err(cause) => {
+                perf::counter!(
+                    "postfx_refusal",
+                    "iw4l.render",
+                    f64::from(refusal_discriminant(&cause))
+                );
+                if cause == PostFxSubmitRefusal::PipelinePending {
+                    if let Some(elapsed) = PostFxPipelineWait::update(
+                        &mut self.pipeline_wait,
+                        pipelines.gpu.prepared[0].film.generation,
+                        std::time::Instant::now(),
+                    ) {
+                        diag::warn!(
+                            World,
+                            "post-fx pipelines still pending after {:.0}s frame={} planned={planned}",
+                            elapsed.as_secs_f32(),
+                            products.0.frame_id
+                        );
+                    }
+                } else {
+                    *self.pipeline_wait = None;
+                }
+                if self.refusal.as_ref() != Some(&cause) {
+                    if cause == PostFxSubmitRefusal::PipelinePending {
+                        diag::info!(
+                            World,
+                            "post-fx submit: waiting for pipelines frame={} planned={planned}",
+                            products.0.frame_id
+                        );
+                    } else {
+                        diag::warn!(
+                            World,
+                            "post-fx submit: RED frame={} planned={planned} cause={cause:?}",
+                            products.0.frame_id,
+                        );
+                    }
+                    *self.refusal = Some(cause);
+                }
+                return;
+            }
+        };
+        *self.pipeline_wait = None;
+        perf::counter!("postfx_executed_steps", "iw4l.render", uploads.len() as f64);
+
+        let owner = (pipelines.gpu.prepared[0].film.generation, targets.size);
+        if self.texture_cache.owner != Some(owner) {
+            self.texture_cache.groups.clear();
+            self.texture_cache.owner = Some(owner);
         }
-        let mut uploads = Vec::new();
-        for (ready, step) in gpu.prepared.iter().zip(&gpu.steps) {
-            require_postfx_pipeline(
-                cache.get_render_pipeline_state(ready.pipeline),
-                ready.film.name,
-            )?;
+        let post = target.post_process_write();
+        let diagnostics = context.diagnostic_recorder();
+        let diagnostics = diagnostics.as_deref();
+        let encoder = context.command_encoder();
+        let span = diagnostics.time_span(encoder, GPU_SPAN_POSTFX);
+        if graded {
+            let grade = pipelines.gpu.grade.as_ref().expect("grade prepared");
+            let grade_target = targets.view(Image::Graded);
+            grade
+                .prepare(
+                    &queue,
+                    source.extracted.frame.grading,
+                    source.extracted.t6_vision,
+                )
+                .record(
+                    &device,
+                    &pipelines.cache,
+                    encoder,
+                    post.source,
+                    grade_target,
+                );
+        }
+        for ((ready, step), bytes) in pipelines
+            .gpu
+            .prepared
+            .iter()
+            .zip(&pipelines.gpu.steps)
+            .zip(&uploads)
+        {
             let size = if matches!(
                 step.target,
                 Image::Output | Image::Graded | Image::ScreenBlur | Image::ScreenPing
@@ -785,245 +990,113 @@ fn draw_postfx(
             } else {
                 targets.quarter
             };
-            let mut sources: RuntimeCodeSources = if active {
-                postfx_dof::sources(
-                    size.x,
-                    size.y,
-                    targets.size.y,
-                    extracted.vision,
-                    extracted.frame,
-                )
-                .map_err(PostFxSubmitRefusal::DofPlan)?
-            } else {
-                film_sources(size.x, size.y, extracted.vision)
-                    .map_err(PostFxSubmitRefusal::FilmSource)?
-            };
-            for (index, _) in &step.images {
-                sources
-                    .set_texture(*index, if *index == 15 { 0x61 } else { 0x62 })
-                    .map_err(|cause| {
-                        PostFxSubmitRefusal::FilmSource(PostFxSourceRefusal::CodeSource(cause))
-                    })?;
-            }
-            if let Some(gaussian) = &step.gaussian {
-                for (i, row) in gaussian.taps.iter().enumerate() {
-                    sources.set_constant_rows(10 + i as u16, &[row.map(f32::to_bits)]);
-                }
-            }
-            let execution =
-                rebind_stable_material(&ready.film.shell, &ready.film.catalog, &sources).map_err(
-                    |cause| PostFxSubmitRefusal::Execute {
-                        material: step.name,
-                        cause,
-                    },
-                )?;
-            let Some(pass) = execution.pass(0).filter(|_| execution.pass_count() == 1) else {
-                return Err(PostFxSubmitRefusal::PassCount);
-            };
-            if pass.port != ready.film.port.id() {
-                return Err(PostFxSubmitRefusal::PortMismatch);
-            }
-            let constants =
-                ready
-                    .film
-                    .port
-                    .pack_hit(pass)
-                    .map_err(|cause| PostFxSubmitRefusal::Constants {
-                        material: step.name,
-                        cause,
-                    })?;
-            let mut bytes = Vec::new();
-            bytes.extend_from_slice(bytemuck::cast_slice(&constants.vertex));
-            bytes.extend_from_slice(bytemuck::cast_slice(&constants.pixel));
-            let mut slots =
-                vec![0u32; d3d9_sm3::texture_slot_rows(ready.film.port.module().sampler_count) * 4];
-            for lane in pass.code_samplers {
-                let Some(index) = step.images.iter().position(|(code, _)| *code == lane.index)
-                else {
-                    return Err(PostFxSubmitRefusal::MissingCodeImage(lane.index));
-                };
-                let expected = if lane.index == 15 { 0x61 } else { 0x62 };
-                if lane.sampler_state != expected || lane.image.is_some() {
-                    return Err(PostFxSubmitRefusal::SamplerMismatch);
-                }
-                let ordinal = ready
-                    .film
-                    .port
-                    .abi()
-                    .samplers
-                    .iter()
-                    .position(|binding| binding.register == lane.register)
-                    .ok_or(PostFxSubmitRefusal::MissingSamplerRegister(lane.register))?;
-                slots[ordinal] =
-                    d3d9_sm3::texture_slot_word(index as u16, u16::from(lane.index == 15));
-            }
-            bytes.extend_from_slice(bytemuck::cast_slice(&slots));
-            uploads.push(bytes);
-        }
-        Ok(uploads)
-    };
-    let planned = gpu.steps.len();
-    perf::Counter::CounterPostFxPlannedSteps.emit(planned as f64);
-    let uploads = match prepare() {
-        Ok(uploads) => uploads,
-        Err(cause) => {
-            perf::Counter::CounterPostFxRefusal.emit(f64::from(refusal_discriminant(&cause)));
-            if cause == PostFxSubmitRefusal::PipelinePending {
-                if let Some(elapsed) = PostFxPipelineWait::update(
-                    &mut pipeline_wait,
-                    gpu.prepared[0].film.generation,
-                    std::time::Instant::now(),
-                ) {
-                    diag::warn!(
-                        World,
-                        "post-fx pipelines still pending after {:.0}s frame={} planned={planned}",
-                        elapsed.as_secs_f32(),
-                        products.0.frame_id
-                    );
-                }
-            } else {
-                *pipeline_wait = None;
-            }
-            if refusal.as_ref() != Some(&cause) {
-                if cause == PostFxSubmitRefusal::PipelinePending {
-                    diag::info!(
-                        World,
-                        "post-fx submit: waiting for pipelines frame={} planned={planned}",
-                        products.0.frame_id
-                    );
-                } else {
-                    diag::warn!(
-                        World,
-                        "post-fx submit: RED frame={} planned={planned} cause={cause:?}",
-                        products.0.frame_id,
-                    );
-                }
-                *refusal = Some(cause);
-            }
-            return;
-        }
-    };
-    *pipeline_wait = None;
-    perf::Counter::CounterPostFxExecutedSteps.emit(uploads.len() as f64);
-
-    let owner = (gpu.prepared[0].film.generation, targets.size);
-    if texture_cache.owner != Some(owner) {
-        texture_cache.groups.clear();
-        texture_cache.owner = Some(owner);
-    }
-    let post = target.post_process_write();
-    let diagnostics = context.diagnostic_recorder();
-    let diagnostics = diagnostics.as_deref();
-    let encoder = context.command_encoder();
-    let span = diagnostics.time_span(encoder, GPU_SPAN_POSTFX);
-    if graded {
-        gpu.grade.as_ref().expect("grade prepared").draw(
-            &device,
-            &queue,
-            &cache,
-            encoder,
-            post.source,
-            targets.view(Image::Graded),
-            extracted.frame.grading,
-            extracted.t6_vision,
-        );
-    }
-    for ((ready, step), bytes) in gpu.prepared.iter().zip(&gpu.steps).zip(&uploads) {
-        let size = if matches!(
-            step.target,
-            Image::Output | Image::Graded | Image::ScreenBlur | Image::ScreenPing
-        ) {
-            targets.size
-        } else {
-            targets.quarter
-        };
-        queue.write_buffer(&ready.constants_arena, 0, bytes);
-        queue.write_buffer(
-            &ready.vertex,
-            0,
-            &packed_fullscreen_vertices(size.x, size.y),
-        );
-        let views: Vec<_> = step
-            .images
-            .iter()
-            .map(|(_, image)| match image {
-                Image::Scene => {
-                    if graded {
-                        targets.view(Image::Graded)
-                    } else {
-                        post.source
+            queue.write_buffer(&ready.constants_arena, 0, bytes);
+            queue.write_buffer(
+                &ready.vertex,
+                0,
+                &packed_fullscreen_vertices(size.x, size.y),
+            );
+            let views: Vec<_> = step
+                .images
+                .iter()
+                .map(|(_, image)| match image {
+                    Image::Scene => {
+                        if graded {
+                            targets.view(Image::Graded)
+                        } else {
+                            post.source
+                        }
                     }
-                }
-                Image::Depth => floatz.view().expect("preflight checked depth"),
-                image => targets.view(*image),
-            })
-            .collect();
-        let key = (ready.film.port.id(), views.iter().map(|v| v.id()).collect());
-        let textures = texture_cache.groups.entry(key).or_insert_with(|| {
-            texture_table.views_bind_group(
-                &device,
-                &cache.get_bind_group_layout(&ready.textures_layout),
-                "iw4_postfx_images",
-                &views,
-                &[
-                    &ready.sampler,
-                    gpu.depth_sampler.as_ref().expect("prepared"),
-                ],
-            )
-        });
-        let destination = if step.target == Image::Output {
-            post.destination
-        } else {
-            let state =
-                super::state::GfxPassState::from_prepared(ready.film.shell.passes()[0].state());
-            targets.attachment(step.target, state.srgb_write_enable())
-        };
-        let attachments = [Some(RenderPassColorAttachment {
-            view: destination,
-            resolve_target: None,
-            ops: Operations {
-                load: if step.composite {
-                    LoadOp::Load
-                } else {
-                    LoadOp::Clear(LinearRgba::BLACK.into())
+                    Image::Depth => source.floatz.view().expect("preflight checked depth"),
+                    image => targets.view(*image),
+                })
+                .collect();
+            let key = (ready.film.port.id(), views.iter().map(|v| v.id()).collect());
+            let textures = self.texture_cache.groups.entry(key).or_insert_with(|| {
+                self.texture_table.views_bind_group(
+                    &device,
+                    &pipelines
+                        .cache
+                        .get_bind_group_layout(&ready.textures_layout),
+                    "iw4_postfx_images",
+                    &views,
+                    &[
+                        &ready.sampler,
+                        pipelines.gpu.depth_sampler.as_ref().expect("prepared"),
+                    ],
+                )
+            });
+            let destination = if step.target == Image::Output {
+                post.destination
+            } else {
+                let state =
+                    super::state::GfxPassState::from_prepared(ready.film.shell.passes()[0].state());
+                targets.attachment(step.target, state.srgb_write_enable())
+            };
+            let attachments = [Some(RenderPassColorAttachment {
+                view: destination,
+                resolve_target: None,
+                ops: Operations {
+                    load: if step.composite {
+                        LoadOp::Load
+                    } else {
+                        LoadOp::Clear(LinearRgba::BLACK.into())
+                    },
+                    store: StoreOp::Store,
                 },
-                store: StoreOp::Store,
-            },
-            depth_slice: None,
-        })];
-        let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
-            label: Some(step.name),
-            color_attachments: &attachments,
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(
-            cache
-                .get_render_pipeline(ready.pipeline)
-                .expect("preflight"),
-        );
-        pass.set_bind_group(0, &ready.constants, &[]);
-        pass.set_bind_group(1, &*textures, &[]);
-        pass.set_vertex_buffer(0, *ready.vertex.slice(..));
-        pass.set_index_buffer(*ready.index.slice(..), IndexFormat::Uint16);
-        pass.set_viewport(0.0, 0.0, size.x as f32, size.y as f32, 0.0, 1.0);
-        pass.draw_indexed(0..6, 0, 0..1);
-    }
-    span.end(encoder);
-    let state = (gpu.prepared[0].film.generation.get(), active, targets.size);
-    if submitted.as_ref() != Some(&state) || refusal.is_some() {
-        diag::info!(
-            World,
-            "post-fx submit: READY dof={active} passes={} size={:?} focus={:?}",
-            gpu.steps.len(),
+                depth_slice: None,
+            })];
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some(step.name),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(
+                pipelines
+                    .cache
+                    .get_render_pipeline(ready.pipeline)
+                    .expect("preflight"),
+            );
+            pass.set_bind_group(0, &ready.constants, &[]);
+            pass.set_bind_group(1, &*textures, &[]);
+            pass.set_vertex_buffer(0, *ready.vertex.slice(..));
+            pass.set_index_buffer(*ready.index.slice(..), IndexFormat::Uint16);
+            pass.set_viewport(0.0, 0.0, size.x as f32, size.y as f32, 0.0, 1.0);
+            pass.draw_indexed(0..6, 0, 0..1);
+        }
+        span.end(encoder);
+        let state = (
+            pipelines.gpu.prepared[0].film.generation.get(),
+            active,
             targets.size,
-            extracted.frame
         );
-        *submitted = Some(state);
+        if self.submitted.as_ref() != Some(&state) || self.refusal.is_some() {
+            diag::info!(
+                World,
+                "post-fx submit: READY dof={active} passes={} size={:?} focus={:?}",
+                pipelines.gpu.steps.len(),
+                targets.size,
+                source.extracted.frame
+            );
+            *self.submitted = Some(state);
+        }
+        *self.refusal = None;
     }
-    *refusal = None;
+}
+
+fn draw_postfx(
+    view: ViewQuery<(&ViewTarget, &ExtractedView)>,
+    source: PostFxFrame,
+    pipelines: PostFxPipelineLookup,
+    device: Res<RenderDevice>,
+    queue: Res<RenderQueue>,
+    context: RenderContext,
+    recorder: PostFxRecorder,
+) {
+    recorder.record(view, source, pipelines, device, queue, context);
 }
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]

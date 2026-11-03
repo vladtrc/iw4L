@@ -1,7 +1,6 @@
 use crate::assemble::drawsurf::tess::smodel::{SmodelGpuPlan, smodel_camera_lod};
-use crate::prepare::scene::cull::smodel_cull_dist_skips_slot;
+use crate::prepare::scene::cull::StaticModelCullView;
 use crate::prepare::scene::smodel_lighting::WorldSmodelLighting;
-use crate::prepare::scene::view_parms::PreparedSceneView;
 use crate::prepare::scene::world::WorldScene;
 use bevy::platform::collections::{HashMap, HashSet};
 use bevy::prelude::*;
@@ -32,20 +31,14 @@ impl Default for PretessDvar {
     }
 }
 
-#[derive(Resource, Clone, Copy, Debug)]
+#[derive(Resource, Clone, Debug)]
 pub struct LodRampDvar {
     pub scale_mid: Option<f32>,
     pub bias_mid: Option<f32>,
     pub scale_last: Option<f32>,
-
     pub world_unit: Option<f32>,
-    pub t5_scale: f32,
-    pub t5_bias: f32,
-    pub t5_fov_threshold: f32,
-
-    pub t5: asset_model::t5_lod::LodParmsAxis,
+    pub profiles: render_scene::LodViewProfiles,
 }
-
 impl Default for LodRampDvar {
     fn default() -> Self {
         Self {
@@ -53,24 +46,19 @@ impl Default for LodRampDvar {
             bias_mid: None,
             scale_last: None,
             world_unit: None,
-            t5_scale: asset_model::t5_lod::R_LOD_SCALE_RIGID_DEFAULT,
-            t5_bias: asset_model::t5_lod::R_LOD_BIAS_RIGID_DEFAULT,
-            t5_fov_threshold: asset_model::t5_lod::R_FOV_SCALE_THRESHOLD_DEFAULT,
-            t5: asset_model::t5_lod::LodParmsAxis::default(),
+            profiles: render_scene::LodViewProfiles::new(false),
         }
     }
 }
-
 impl LodRampDvar {
-    #[must_use]
-    pub fn args(self) -> crate::assemble::drawsurf::tess::smodel::LodRampArgs {
+    pub fn args(&self) -> crate::assemble::drawsurf::tess::smodel::LodRampArgs {
         crate::assemble::drawsurf::tess::smodel::LodRampArgs {
             scale_mid: self.scale_mid,
             bias_mid: self.bias_mid,
             scale_last: self.scale_last,
             world_unit: self.world_unit,
-            t5: self.t5,
-            t5_no_lod_cull_out: false,
+            profiles: self.profiles.snapshot(),
+            no_lod_cull_out: false,
         }
     }
 }
@@ -87,10 +75,8 @@ pub fn update_lod_parms(
     rigid: &mut LodRampDvar,
     skinned: &mut LodRampSkinnedDvar,
 ) {
-    let (scale, bias, threshold) = (rigid.t5_scale, rigid.t5_bias, rigid.t5_fov_threshold);
-    rigid.t5.update(tan_half_fov_y, scale, bias, threshold);
-    let (scale, bias, threshold) = (skinned.t5_scale, skinned.t5_bias, skinned.t5_fov_threshold);
-    skinned.t5.update(tan_half_fov_y, scale, bias, threshold);
+    rigid.profiles.update(tan_half_fov_y);
+    skinned.profiles.update(tan_half_fov_y);
 }
 
 #[derive(Resource)]
@@ -245,15 +231,13 @@ impl WorldStaticModelCache {
     fn cache_surface(
         &mut self,
         authored_slot: usize,
-        lod_slot: u8,
-        bank: u8,
-        size_class: u8,
+        spec: lighting_iw4::SmcLodCacheSpec,
         verts: u32,
     ) -> CacheStaticModelSurface {
         let existing = self
             .cache_index
             .get(authored_slot)
-            .and_then(|row| row.get(usize::from(lod_slot)))
+            .and_then(|row| row.get(usize::from(spec.lod_slot)))
             .copied()
             .unwrap_or(0);
         let Ok(smodel_index) = u16::try_from(authored_slot) else {
@@ -262,15 +246,7 @@ impl WorldStaticModelCache {
         let out = {
             let mut result = CacheStaticModelSurface::Refused;
             self.with_smc(|smc| {
-                result = smc.cache_surface(
-                    bank,
-                    size_class,
-                    smodel_index,
-                    lod_slot,
-                    existing,
-                    verts,
-                    true,
-                );
+                result = smc.cache_surface(spec, smodel_index, existing, verts, true);
             });
             result
         };
@@ -312,10 +288,8 @@ pub(crate) fn cache_visible_smodel_surfaces(
     plan: Option<Res<SmodelGpuPlan>>,
     lighting: Option<Res<WorldSmodelLighting>>,
     scene: Res<WorldScene>,
-    prepared: Res<PreparedSceneView>,
-    lock_pvs: Res<crate::prepare::scene::view_parms::RLockPvs>,
+    cull_view: StaticModelCullView,
     smc_enable: Res<SmcEnableDvar>,
-    lod_ramp: Res<LodRampDvar>,
     mut worker_cmds: ResMut<FrontendWorkerCmds>,
 ) {
     let Some(cache) = cache.as_mut() else {
@@ -360,7 +334,7 @@ pub(crate) fn cache_visible_smodel_surfaces(
     cache.pending_ib.clear();
     cache.pending_skin.clear();
     let _ = worker_cmds.queues.reset_type(WORKER_CMD_SMODELCACHE);
-    let eye = prepared.ready.then_some(lock_pvs.dpvs_eye(&prepared));
+    let eyes = cull_view.eyes(&scene);
     let cull = scene.cull.as_ref();
     let cull_dists = cull
         .map(|c| c.static_model_cull_dists.as_slice())
@@ -376,13 +350,7 @@ pub(crate) fn cache_visible_smodel_surfaces(
         if !vis {
             continue;
         }
-        if smodel_cull_dist_skips_slot(
-            cull_dists,
-            authored,
-            placement.origin,
-            eye,
-            lod_ramp.scale_last,
-        ) {
+        if cull_view.distance_skips(cull_dists, authored, placement.origin, &eyes) {
             continue;
         }
         let Some(lighting) = lighting.as_ref() else {
@@ -405,8 +373,8 @@ pub(crate) fn cache_visible_smodel_surfaces(
             mesh.lod,
             placement.origin,
             placement.scale,
-            eye,
-            lod_ramp.args(),
+            eyes.at(placement.origin),
+            &cull_view.lod_args(),
         ) else {
             continue;
         };
@@ -432,13 +400,7 @@ pub(crate) fn cache_visible_smodel_surfaces(
         let vert_count = mesh.vert_count_by_lod.get(lod_i).copied().unwrap_or(0);
 
         let first_patch_vert = cache.patch_verts;
-        let result = cache.cache_surface(
-            authored,
-            spec.lod_slot,
-            spec.bank,
-            spec.size_class,
-            vert_count,
-        );
+        let result = cache.cache_surface(authored, spec, vert_count);
         match result {
             CacheStaticModelSurface::Hit { .. } => {}
             CacheStaticModelSurface::Refused => {}

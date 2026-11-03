@@ -100,7 +100,7 @@ pub use flashbang::{
 };
 pub use font::{
     G_COLOR_TABLE, HUDELEM_FONT_DEFAULT_BASE_SCALE, HUDELEM_FONT_HALF_BASE_SCALE,
-    HUDELEM_FONT_THIRD_BASE_SCALE, R_TEXT_EM, color_from_caret_digit, hudelem_em_px,
+    HUDELEM_FONT_THIRD_BASE_SCALE, R_TEXT_EM, TextAlignment, color_from_caret_digit, hudelem_em_px,
     hudelem_font_base_scale, hudelem_font_ui_enum, hudelem_text_scale, item_get_text_placement_y,
     item_text_origin, next_letter, normalized_text_scale, seconds_to_countdown_display,
     ui_get_font_handle, ui_text_height,
@@ -180,7 +180,7 @@ pub use playercard::{
     PLAYERCARD_INFO_AGE, PLAYERCARD_INFO_CLAN, PLAYERCARD_INFO_ICON, PLAYERCARD_INFO_NAME,
     PLAYERCARD_INFO_NAMEPLATE, PLAYERCARD_INFO_PRESTIGE, PLAYERCARD_INFO_RANK, PLAYERCARD_INFO_STR,
     PLAYERCARD_INFO_TEAM, PLAYERCARD_INFO_TITLE, PLAYERCARD_INFO_VALID, PLAYERCARD_KILLED_BY_MENU,
-    PLAYERCARD_YOU_KILLED_MENU, PlayerCardData, SCRIPT_MENU_KILLEDBY_DISPLAY,
+    PLAYERCARD_YOU_KILLED_MENU, PlayerCardData, PlayerCardProfile, SCRIPT_MENU_KILLEDBY_DISPLAY,
     SCRIPT_MENU_KILLEDBY_DISPLAY_NAME, SCRIPT_MENU_KILLEDBY_HIDE, SCRIPT_MENU_KILLEDBY_HIDE_NAME,
     SCRIPT_MENU_YOUKILLED_DISPLAY, SCRIPT_MENU_YOUKILLED_DISPLAY_NAME,
     player_cards_set_script_slot, script_menu_cs_index, script_menu_name,
@@ -211,8 +211,8 @@ pub use scorebar::{
 pub use scrplace::{
     ALIGN_CENTER, ALIGN_CENTER_SAFE, ALIGN_FULLSCREEN, ALIGN_NOSCALE, ALIGN_SUB, ALIGN_TO_VIRTUAL,
     ALIGN_USER_CENTER, ALIGN_USER_MAX, ALIGN_USER_MIN, ALIGN_VIEWABLE, ALIGN_VIEWABLE_MAX,
-    AppliedRect, SAFE_AREA_ADJUSTED_DEFAULT, SAFE_AREA_DEFAULT, SCRPLACE_VIRTUAL_HEIGHT,
-    SCRPLACE_VIRTUAL_WIDTH, ScreenPlacement,
+    AppliedRect, DisplayGeometry, SAFE_AREA_ADJUSTED_DEFAULT, SAFE_AREA_DEFAULT,
+    SCRPLACE_VIRTUAL_HEIGHT, SCRPLACE_VIRTUAL_WIDTH, SafeArea, ScreenPlacement,
 };
 pub use set_2d::{
     FLOAT64_ONE, GFX_SCENE_DEF_DWORDS, GFX_VIEW_MODE_2D, GFX_VIEW_MODE_3D, GFX_VIEW_MODE_NONE,
@@ -238,9 +238,9 @@ pub use stretch_pic_cmd::{
     GFX_CMD_STRETCHPIC_Y, GFX_RENDER_CMD_BUF_SIZE, GFX_RENDER_CMD_TAIL_RESERVE,
     GFX_TESS_2D_PACKED_NORMAL, GFX_TESS_VERTEX_STRIDE, GfxCmdStretchPic, GfxCmdStretchPicArgs,
     GfxTessVertex2d, RB_DRAW_STRETCHPIC_INDICES, TESS_STRETCHPIC_FLUSH_INDEX_PLUS_SIX,
-    TESS_STRETCHPIC_FLUSH_VERT_PLUS_FOUR, add_cmd_draw_stretch_pic, convert_color_to_bytes,
-    draw_stretch_pic_corners, draw_stretch_pic_pack, parse_gfx_cmd_stretch_pic, set_vertex_2d,
-    tess_stretchpic_must_flush, unpack_color_bgra,
+    TESS_STRETCHPIC_FLUSH_VERT_PLUS_FOUR, TextureWindow, add_cmd_draw_stretch_pic,
+    convert_color_to_bytes, draw_stretch_pic_corners, draw_stretch_pic_pack,
+    parse_gfx_cmd_stretch_pic, set_vertex_2d, tess_stretchpic_must_flush, unpack_color_bgra,
 };
 pub use text_fx::{
     DECODE_CHARACTERS_GLOW_MATERIAL, DECODE_CHARACTERS_MATERIAL, DecayingLetter,

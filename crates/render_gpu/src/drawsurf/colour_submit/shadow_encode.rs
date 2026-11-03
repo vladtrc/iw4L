@@ -11,7 +11,6 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::RenderDevice;
 use render_frame::SunShadowViewport;
-use std::collections::BTreeMap;
 
 #[derive(Clone, Copy)]
 pub(super) struct ShadowGeometry<'a> {
@@ -56,56 +55,13 @@ pub(super) struct ShadowPassInputs<'a> {
     pub(super) scissor: D3dScissorRect,
     pub(super) viewport: SunShadowViewport,
     pub(super) cleared: bool,
-}
-
-#[derive(Clone, Copy)]
-enum ShadowRecordRefusal {
-    PipelineNotReady,
-    ConstantArenaMissing,
-    UnsupportedTessKind,
-    MissingTessBuffer,
-}
-
-impl ShadowRecordRefusal {
-    const ALL: [Self; 4] = [
-        Self::PipelineNotReady,
-        Self::ConstantArenaMissing,
-        Self::UnsupportedTessKind,
-        Self::MissingTessBuffer,
-    ];
-    fn name(self) -> &'static str {
-        match self {
-            Self::PipelineNotReady => "PipelineNotReady",
-            Self::ConstantArenaMissing => "ConstantArenaMissing",
-            Self::UnsupportedTessKind => "UnsupportedTessKind",
-            Self::MissingTessBuffer => "MissingTessBuffer",
-        }
-    }
+    pub(super) tile_clear: Option<&'a bevy::render::render_resource::RenderPipeline>,
 }
 
 #[derive(Default)]
 pub(super) struct ShadowRecordResult {
     pub(super) indexed: u32,
     pub(super) bindings: RecordCensus,
-    refusals: [u32; 4],
-}
-
-impl ShadowRecordResult {
-    fn refuse(&mut self, cause: ShadowRecordRefusal) {
-        let count = &mut self.refusals[cause as usize];
-        *count = count.saturating_add(1);
-    }
-
-    pub(super) fn append_refusals(&self, total: &mut u32, rows: &mut BTreeMap<String, u32>) {
-        for cause in ShadowRecordRefusal::ALL {
-            let count = self.refusals[cause as usize];
-            if count != 0 {
-                *total = total.saturating_add(count);
-                let row = rows.entry(cause.name().into()).or_insert(0);
-                *row = row.saturating_add(count);
-            }
-        }
-    }
 }
 
 pub(super) fn record_shadowmap_draws<'a>(
@@ -125,6 +81,7 @@ pub(super) fn record_shadowmap_draws<'a>(
         scissor,
         viewport,
         cleared,
+        tile_clear,
     } = inputs;
     let mut result = ShadowRecordResult::default();
     let (sx, sy, sw, sh) = scissor_xywh(scissor);
@@ -174,6 +131,19 @@ pub(super) fn record_shadowmap_draws<'a>(
     if sw > 0 && sh > 0 {
         pass.set_scissor_rect(sx, sy, sw, sh);
     }
+    if let Some(pipeline) = tile_clear {
+        pass.set_viewport(
+            vp.x as f32,
+            vp.y as f32,
+            vp.width as f32,
+            vp.height as f32,
+            0.,
+            1.,
+        );
+        pass.set_stencil_reference(0);
+        pass.set_render_pipeline(pipeline);
+        pass.draw(0..3, 0..1);
+    }
     let mut record_n = RecordCensus {
         state: u32::from(sw > 0 && sh > 0),
         ..RecordCensus::default()
@@ -183,24 +153,25 @@ pub(super) fn record_shadowmap_draws<'a>(
     let mut bound_epoch = None;
     let mut bound_depth = None;
     let mut constants_bound = false;
+    let mut bound_slice = None;
     let mut indexed = 0u32;
     for draw in draws {
         let Some(gpu_pipeline) = registry.ready(draw.pipeline) else {
-            result.refuse(ShadowRecordRefusal::PipelineNotReady);
+            diag::warn_once!(World, "shadow pipeline not ready");
             continue;
         };
         let (Some(constant_base), Some(constants_bind)) = (draw.constant_base, constants_bind)
         else {
-            result.refuse(ShadowRecordRefusal::ConstantArenaMissing);
+            diag::warn_once!(World, "shadow constant arena missing");
             continue;
         };
         let Some(mesh) = geometry.mesh(draw.tess, draw.ring_epoch) else {
-            result.refuse(ShadowRecordRefusal::UnsupportedTessKind);
+            diag::warn_once!(World, "shadow tess kind unsupported");
             continue;
         };
         let (vertex, index) = (mesh.vertex, mesh.index);
         let (Some(vertex), Some(index)) = (vertex, index) else {
-            result.refuse(ShadowRecordRefusal::MissingTessBuffer);
+            diag::warn_once!(World, "shadow tess buffer missing");
             continue;
         };
         if bound_pipeline != Some(draw.pipeline)
@@ -242,6 +213,13 @@ pub(super) fn record_shadowmap_draws<'a>(
             );
             bound_depth = Some((draw.depth_min, draw.depth_max));
             record_n.state = record_n.state.saturating_add(1);
+        }
+        let slice = draw.slice_clip.as_ref().map(|group| group.id());
+        if bound_slice != slice {
+            if let Some(group) = draw.slice_clip.as_deref() {
+                pass.set_bind_group(2, group, &[]);
+            }
+            bound_slice = slice;
         }
         if !constants_bound {
             pass.set_bind_group(0, constants_bind, &[]);

@@ -73,9 +73,7 @@ fn play_with_bolt(
         .unwrap_or(FX_SPAWN_BOLT_NONE);
     match host.spawn_effect(
         req.def_name,
-        req.pose.origin,
-        req.pose.axis,
-        req.pose.msec,
+        req.pose,
         bolt,
         req.wants_spotlight && host.spawn_products != crate::FxSpawnProducts::Marks,
         req.catalog_index,

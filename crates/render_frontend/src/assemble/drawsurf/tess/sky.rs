@@ -8,16 +8,10 @@ use render_frame::SourceRevisions;
 pub struct SkyModelDrawPlan {
     pub geometry: SmodelGpuPlan,
     pub draws: Vec<XModelSurfaceDraw>,
-    pub refusals: Vec<SkyModelRefusal>,
+    /// The atlas world of each draw.
+    pub worlds: Vec<usize>,
     pub generation: u64,
     pub revisions: SourceRevisions,
-}
-
-#[derive(Debug)]
-pub enum SkyModelRefusal {
-    SurfaceMaterialMissing { surface: u32 },
-    MaterialNotSorted { material: assets::MaterialIndex },
-    MaterialUnavailable { material: assets::MaterialIndex },
 }
 
 pub fn build_sky_model_draw_plan(
@@ -32,23 +26,29 @@ pub fn build_sky_model_draw_plan(
     let (Some(scene), Some(job)) = (scene, job) else {
         return;
     };
-    let Some(model) = &scene.sky_model else {
+    if scene.sky_models.is_empty() {
         return;
-    };
+    }
     let (exact, _, _) = job.tess_image_handles();
     if exact.is_empty() {
         return;
     }
-    let (mut geometry, _, _, _) = pack_smodel_meshes(std::slice::from_ref(model), &[]);
+    let (mut geometry, _, _, _) = pack_smodel_meshes(&scene.sky_models, &[]);
     let mut draws = Vec::new();
-    let mut refusals = Vec::new();
-    for &(surface, authored) in &geometry.meshes[0].surfaces_by_lod[0] {
+    let mut worlds = Vec::new();
+    let sky_surfaces: Vec<_> = geometry
+        .meshes
+        .iter()
+        .zip(&scene.sky_worlds)
+        .flat_map(|(mesh, &world)| mesh.surfaces_by_lod[0].iter().map(move |&s| (world, s)))
+        .collect();
+    for (world, (surface, authored)) in sky_surfaces {
         let Some(authored) = authored else {
-            refusals.push(SkyModelRefusal::SurfaceMaterialMissing { surface });
+            diag::warn_once!(World, "sky surface {surface}: material missing");
             continue;
         };
         let Some(derived) = scene.runtime_material_catalog.derived(authored) else {
-            refusals.push(SkyModelRefusal::MaterialUnavailable { material: authored });
+            diag::warn_once!(World, "sky material {authored:?}: unavailable");
             continue;
         };
         let Some(ordinal) = scene
@@ -57,7 +57,7 @@ pub fn build_sky_model_draw_plan(
             .sorted_materials
             .ordinal_for_asset_id(authored.order())
         else {
-            refusals.push(SkyModelRefusal::MaterialNotSorted { material: authored });
+            diag::warn_once!(World, "sky material {authored:?}: no sorted ordinal");
             continue;
         };
         let maps = runtime_maps(Some(authored), &scene.runtime_material_catalog, exact);
@@ -77,6 +77,7 @@ pub fn build_sky_model_draw_plan(
             sort_key: derived.sort_key,
             material_sorted_index: Some(ordinal.get()),
         });
+        worlds.push(world);
         draws.push(XModelSurfaceDraw {
             surface,
             material,
@@ -96,18 +97,15 @@ pub fn build_sky_model_draw_plan(
     }
     diag::info!(
         World,
-        "skybox tess: model={} surfaces={} skipped={}",
-        model.name,
+        "skybox tess: models={:?} surfaces={} skipped={}",
+        scene
+            .sky_models
+            .iter()
+            .map(|model| &model.name)
+            .collect::<Vec<_>>(),
         draws.len(),
         geometry.packed_skip_surfaces
     );
-    if !refusals.is_empty() {
-        diag::warn!(
-            World,
-            "skybox tess refusals: model={} {refusals:?}",
-            model.name
-        );
-    }
     let mut revisions = SourceRevisions::default();
     revisions.set_topology_from(
         &geometry.indices(),
@@ -122,11 +120,35 @@ pub fn build_sky_model_draw_plan(
             SkyModelDrawPlan {
                 geometry,
                 draws,
-                refusals,
+                worlds,
                 generation: 1,
                 revisions,
             },
             frame::MatchScope::Live,
         );
     });
+}
+
+impl SkyModelDrawPlan {
+    /// The draws, each sky around the eye as its own world sees it through
+    /// the doors; the sky of a world no door leads to is left out.
+    pub fn draws_at<'a>(
+        &'a self,
+        eye: Vec3,
+        view: Option<&'a render_frame::PortalView>,
+    ) -> impl Iterator<Item = XModelSurfaceDraw> + 'a {
+        self.draws
+            .iter()
+            .zip(&self.worlds)
+            .filter_map(move |(draw, &world)| {
+                let at = match &view {
+                    Some(view) => Vec3::from_array(view.eye_in(world, eye.to_array())?),
+                    None => eye,
+                };
+                Some(XModelSurfaceDraw {
+                    world_from_local: Mat4::from_translation(at),
+                    ..*draw
+                })
+            })
+    }
 }

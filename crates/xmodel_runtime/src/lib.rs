@@ -39,6 +39,6 @@ pub use xanim_tree::{
 pub use destructible::{T5DestructibleDef, T5DestructiblePiece, T5DestructibleStage};
 
 pub use player_body::{
-    ClientAnimSample, PlayerAnimProperties, PlayerBodyBranches, apply_player_anim_goals,
-    apply_player_anim_rates, overlay_legs_clip,
+    ClientAnimSample, PlayerAnimProperties, PlayerAnimTransition, PlayerBodyBranches,
+    apply_player_anim_goals, apply_player_anim_rates, overlay_legs_clip,
 };

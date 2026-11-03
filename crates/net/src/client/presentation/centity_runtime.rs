@@ -262,7 +262,9 @@ pub fn apply_existing(rt: &mut CEntityRuntime, next: EntityState, at_time_ms: i3
     let e_type_changed = rt.next_state.e_type != next.e_type;
     let teleport = (rt.next_state.e_flags ^ next.e_flags) & EFLAGS_TELEPORT != 0;
     let other_body = another_body(&rt.next_state, &next);
-    if !was_in || e_type_changed || teleport || other_body {
+    let changed_world = sim::world_graph::world_at(rt.next_state.tr_base)
+        != sim::world_graph::world_at(next.tr_base);
+    if !was_in || e_type_changed || teleport || other_body || changed_world {
         let new_entity = !was_in || e_type_changed || other_body;
         reset_entity(rt, next, at_time_ms, new_entity);
         return;

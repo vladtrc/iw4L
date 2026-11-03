@@ -17,6 +17,7 @@ pub struct AdmittedExactPort {
     pub abi: PassProgramAbi,
     pub module: Arc<PassWgsl>,
     pub layout: WgpuPassLayout,
+    pub lowering: render_material::ProgramLoweringRecipe,
 }
 
 impl AdmittedExactPort {

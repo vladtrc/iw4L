@@ -230,7 +230,7 @@ fn fire_weapon(world: &mut World, receiver: &Value, args: &[Value]) -> Result<Va
         (heli.weapon, heli.owner, heli.turret, heli.heading)
     };
     let weapon = weapon.ok_or("vehicle has no weapon")?;
-    let tag = optional(args, 0, string)?.unwrap_or_default();
+    let tag = optional(args, 0, string)?.unwrap_or(String::new());
     let from = super::presence::tag_world(world, id, &tag)
         .map(|(origin, _)| origin)
         .unwrap_or_else(|| super::turrets::muzzle(world, id));
@@ -856,7 +856,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let weapon = string(args, 5)?;
         let point = vector(args, 6)?;
         let dir = vector(args, 7)?;
-        let part = optional(args, 11, string)?.unwrap_or_default();
+        let part = optional(args, 11, string)?.unwrap_or(String::new());
         let mut runtime = world.resource_mut::<RoundScript>();
         let before = match runtime.object_field(object, "health") {
             Value::Int(health) => health,

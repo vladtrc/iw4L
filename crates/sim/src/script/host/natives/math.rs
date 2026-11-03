@@ -40,7 +40,7 @@ fn nearest_on_segment(a: [f32; 3], b: [f32; 3], point: [f32; 3]) -> [f32; 3] {
     add(a, scale(segment, t))
 }
 
-pub(crate) fn random(world: &mut World) -> u32 {
+pub fn random(world: &mut World) -> u32 {
     let mut runtime = world.resource_mut::<RoundScript>();
     let mut x = runtime.rng;
     x ^= x << 13;

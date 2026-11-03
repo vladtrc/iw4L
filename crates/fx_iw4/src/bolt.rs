@@ -43,13 +43,6 @@ pub enum FxGetBoneOrientationRoute {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BoneOrientationRefuse {
-    CentityInvalid,
-    DObjMissing,
-    BoneOutOfRange,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FxUpdateEffectBolt {
     Skip,
 
@@ -113,18 +106,18 @@ pub fn get_bone_orientation_route(
     current_valid: bool,
     bone: i32,
     dobj_bone_count: Option<u8>,
-) -> Result<FxGetBoneOrientationRoute, BoneOrientationRefuse> {
+) -> Result<FxGetBoneOrientationRoute, &'static str> {
     if dobj < FX_BOLT_CENTITY_LIMIT && !current_valid {
-        return Err(BoneOrientationRefuse::CentityInvalid);
+        return Err("invalid bolt entity");
     }
     if bone < 0 {
         return Ok(FxGetBoneOrientationRoute::EntityPose);
     }
     let Some(count) = dobj_bone_count else {
-        return Err(BoneOrientationRefuse::DObjMissing);
+        return Err("bolt DObj missing");
     };
     if bone >= i32::from(count) {
-        return Err(BoneOrientationRefuse::BoneOutOfRange);
+        return Err("bolt bone out of range");
     }
     Ok(FxGetBoneOrientationRoute::DObjBone(bone as u16))
 }

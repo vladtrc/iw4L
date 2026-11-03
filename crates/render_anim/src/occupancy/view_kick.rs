@@ -14,7 +14,8 @@ use playerstate_iw4::ENTITYNUM_NONE;
 use weapon_iw4::{
     VIEW_DAMAGE_UNDIRECTED, VIEW_ORG_BOB_Z_MIN_OFS, ViewAngleBobInputs, ViewOrgBobInputs,
     crash_land_fall_height, crash_land_view_dip, damage_feedback_kick, get_viewmodel_weapon_index,
-    land_origin_z, view_angle_bob, view_damage_angles, view_org_bob, viewweapon_land_origin_z,
+    land_origin_z, lerp_sway_params, view_angle_bob, view_damage_angles, view_org_bob,
+    viewweapon_land_origin_z,
 };
 
 use crate::anim::view_kick_state::{KickParams, ViewKickState, add_kick_to_viewangles};
@@ -37,7 +38,6 @@ pub struct PendingViewHurt(pub u32);
 
 #[derive(Resource, Default)]
 pub struct SessionViewKick {
-    context: Option<frame::PresentationContext>,
     pub state: ViewKickState,
     pub sway: ViewSwayState,
 
@@ -139,16 +139,7 @@ pub fn tick_session_view_kick(
     weapons: Option<Res<PreparedWeapons>>,
     walk: Option<Res<AppliedEntityEventWalk>>,
     mut kick: ResMut<SessionViewKick>,
-    context: (Res<frame::InstalledMatch>, Res<net::EntityEventCursor>),
 ) {
-    let context = Some(frame::PresentationContext::new(
-        context.0.load_key,
-        context.1.timeline(),
-    ));
-    if kick.context != context {
-        kick.clear_for_new_life();
-        kick.context = context;
-    }
     let Some(ps) = presented.player(local.0) else {
         return;
     };
@@ -171,7 +162,7 @@ pub fn tick_session_view_kick(
         return;
     };
     let Some(facts) = reg
-        .snapshot_weapon(presented.weapon_epoch(), viewmodel)
+        .snapshot_weapon(viewmodel)
         .ok()
         .and_then(|weapon| weapon.fpv_facts())
     else {
@@ -204,12 +195,19 @@ pub fn tick_session_view_kick(
     kick.state.advance(&params, ps.f_weapon_pos_frac, dt);
 
     let overlay_active = facts.overlay_reticle != 0;
+    let sway_params = if facts.aim_down_sight {
+        lerp_sway_params(
+            facts.sway.hip_params(),
+            facts.sway.ads_params(),
+            ps.f_weapon_pos_frac,
+        )
+    } else {
+        facts.sway.hip_params()
+    };
     kick.sway.advance(
-        facts.sway.hip_params(),
-        facts.sway.ads_params(),
+        sway_params,
         ps.viewangles,
         ps.f_weapon_pos_frac,
-        facts.aim_down_sight,
         overlay_active,
         1.0,
         dt,
@@ -217,10 +215,13 @@ pub fn tick_session_view_kick(
 }
 
 pub fn sync_camera_from_presented(
-    mut killcam: Local<super::killcam::KillcamCamera>,
+    camera_entities: (
+        ResMut<super::killcam::KillcamCamera>,
+        Res<net::CEntitySlots>,
+        Query<&net::CEntity>,
+    ),
     clock: Res<FrameClock>,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
+    presentation: net::LocalPresentation,
     sim_cam: Res<SimCamera>,
     settings: Res<frame::GameSettings>,
     mut kick: ResMut<SessionViewKick>,
@@ -237,27 +238,13 @@ pub fn sync_camera_from_presented(
     >,
     mut lenses: Query<&mut Projection, With<FpvLens>>,
     view: Res<ViewSubject>,
-    death_cam_clip: Res<crate::occupancy::dyn_ent::DynEntPhysClip>,
-    mut missile_view: Local<RemoteMissileView>,
-    context: (
-        Local<Option<frame::PresentationContext>>,
-        Res<frame::InstalledMatch>,
-        Res<net::EntityEventCursor>,
+    (death_cam_clip, atlas_clips): (
+        Res<crate::occupancy::dyn_ent::DynEntPhysClip>,
+        Option<Res<crate::occupancy::killcam::AtlasClips>>,
     ),
+    mut missile_view: ResMut<RemoteMissileView>,
 ) {
-    let (mut previous, installed, timeline) = context;
-    let current = Some(frame::PresentationContext::new(
-        installed.load_key,
-        timeline.timeline(),
-    ));
-    if *previous != current {
-        *killcam = super::killcam::KillcamCamera::default();
-        *missile_view = RemoteMissileView::default();
-        kick.clear_for_new_life();
-        kick.context = current;
-        hurt.0 = 0;
-        *previous = current;
-    }
+    let (mut killcam, entity_slots, identities) = camera_entities;
     kick.killcam_focus_distance = None;
     if let Some(view) = sim_cam.view_override {
         for mut transform in &mut q {
@@ -283,19 +270,23 @@ pub fn sync_camera_from_presented(
     if !sim_cam.enabled {
         return;
     }
-    let Some(ps) = presented.player(local.0) else {
+    let Some(ps) = presentation.presented.player(presentation.client_id()) else {
         return;
     };
     let viewmodel = get_viewmodel_weapon_index(ps);
     if let Some((pose, fov, focus_distance)) = killcam.update(
-        &presented,
-        local.0,
+        &presentation,
         clock.time(),
         view.in_killcam(),
         weapons.as_deref(),
-        death_cam_clip.0.as_deref(),
+        super::killcam::KillcamWorld::new(death_cam_clip.0.as_deref(), atlas_clips.as_deref()),
+        u16::try_from(ps.kill_cam_entity)
+            .ok()
+            .and_then(|number| entity_slots.entity_for_number(number))
+            .and_then(|entity| identities.get(entity).ok())
+            .map(|identity| identity.generation()),
     ) {
-        let pose = earthquake_pose(pose, &presented, clock.time());
+        let pose = earthquake_pose(pose, &presentation.presented, clock.time());
         let eye = transform_from_iw_view(pose);
         for mut transform in &mut q {
             transform.translation = eye.translation;
@@ -313,12 +304,12 @@ pub fn sync_camera_from_presented(
         return;
     }
     if let Some(pose) = missile_view.camera(
-        &presented,
-        local.0,
+        &presentation.presented,
+        presentation.client_id(),
         clock.time(),
         death_cam_clip.0.as_deref(),
     ) {
-        let pose = earthquake_pose(pose, &presented, clock.time());
+        let pose = earthquake_pose(pose, &presentation.presented, clock.time());
         let eye = transform_from_iw_view(pose);
         for mut transform in &mut q {
             transform.translation = eye.translation;
@@ -338,17 +329,23 @@ pub fn sync_camera_from_presented(
         return;
     }
     if presented_is_third_person(
-        &presented,
-        local.0,
+        &presentation.presented,
+        presentation.client_id(),
         view.in_killcam(),
         settings.third_person,
     ) {
-        let Some(pose) = linked_weapon_camera(&presented, local.0)
-            .or_else(|| third_person_camera(&presented, local.0, death_cam_clip.0.as_deref()))
+        let Some(pose) = linked_weapon_camera(&presentation.presented, presentation.client_id())
+            .or_else(|| {
+                third_person_camera(
+                    &presentation.presented,
+                    presentation.client_id(),
+                    death_cam_clip.0.as_deref(),
+                )
+            })
         else {
             return;
         };
-        let pose = earthquake_pose(pose, &presented, clock.time());
+        let pose = earthquake_pose(pose, &presentation.presented, clock.time());
         let eye = transform_from_iw_view(pose);
         for mut transform in &mut q {
             transform.translation = eye.translation;
@@ -356,27 +353,23 @@ pub fn sync_camera_from_presented(
         }
         kick.refdef_vieworg = pose.origin;
         kick.refdef_view_angles = pose.angles;
-        kick.horiz_fov_deg = apply_fpv_lens_fov(
-            &mut lenses,
+        let horiz = fpv_horizontal_fov(
             settings.fov,
-            ps.pm_type,
-            ps.link_flags,
-            ps.e_flags,
+            ps,
             0.0,
-            ps.scope_zoom_level,
+            false,
             viewmodel,
             weapons.as_ref().and_then(|w| {
-                w.snapshot_weapon(presented.weapon_epoch(), viewmodel)
+                w.snapshot_weapon(viewmodel)
                     .ok()
                     .and_then(|weapon| weapon.fpv_facts())
             }),
-            false,
-            actions.as_deref_mut(),
-        )
-        .unwrap_or(settings.fov);
+        );
+        apply_fpv_lens_fov(&mut lenses, horiz, actions.as_deref_mut());
+        kick.horiz_fov_deg = horiz;
         return;
     }
-    let offset = presented.view_offset();
+    let offset = presentation.presented.view_offset();
     let xyspeed = {
         let vx = ps.velocity[0];
         let vy = ps.velocity[1];
@@ -390,18 +383,9 @@ pub fn sync_camera_from_presented(
         weapon_pos_frac: ps.f_weapon_pos_frac,
         perks0: ps.perks[0],
     };
-    stamp_damage_feedback(
-        &mut kick,
-        &mut hurt,
-        ps.damage_event,
-        ps.damage_yaw,
-        ps.damage_pitch,
-        ps.damage_count,
-        ps.viewangles,
-        clock.time(),
-    );
+    kick.stamp_damage_feedback(&mut hurt, ps, clock.time());
     let bob_angles = match weapons.as_ref().and_then(|w| {
-        w.snapshot_weapon(presented.weapon_epoch(), viewmodel)
+        w.snapshot_weapon(viewmodel)
             .ok()
             .and_then(|weapon| weapon.fpv_facts())
     }) {
@@ -473,7 +457,11 @@ pub fn sync_camera_from_presented(
     if origin[2] < min_z {
         origin[2] = min_z;
     }
-    let pose = earthquake_pose(WorldCameraPose { origin, angles }, &presented, clock.time());
+    let pose = earthquake_pose(
+        WorldCameraPose { origin, angles },
+        &presentation.presented,
+        clock.time(),
+    );
     kick.refdef_vieworg = pose.origin;
     kick.refdef_view_angles = pose.angles;
     let eye = transform_from_iw_view(pose);
@@ -488,41 +476,33 @@ pub fn sync_camera_from_presented(
         kick.b_position_to_ads = false;
     }
     kick.last_weapon_pos_frac = ps.f_weapon_pos_frac;
-    if let Some(horiz) = apply_fpv_lens_fov(
-        &mut lenses,
+    let horiz = fpv_horizontal_fov(
         settings.fov,
-        ps.pm_type,
-        ps.link_flags,
-        ps.e_flags,
+        ps,
         ps.f_weapon_pos_frac,
-        ps.scope_zoom_level,
+        kick.b_position_to_ads,
         viewmodel,
         weapons.as_ref().and_then(|w| {
-            w.snapshot_weapon(presented.weapon_epoch(), viewmodel)
+            w.snapshot_weapon(viewmodel)
                 .ok()
                 .and_then(|weapon| weapon.fpv_facts())
         }),
-        kick.b_position_to_ads,
-        actions.as_deref_mut(),
-    ) {
-        kick.horiz_fov_deg = horiz;
-    }
+    );
+    apply_fpv_lens_fov(&mut lenses, horiz, actions.as_deref_mut());
+    kick.horiz_fov_deg = horiz;
 }
 
-fn apply_fpv_lens_fov(
-    lenses: &mut Query<&mut Projection, With<FpvLens>>,
+fn fpv_horizontal_fov(
     base_fov: f32,
-    pm_type: i32,
-    link_flags: u32,
-    e_flags: u32,
+    ps: &playerstate_iw4::PlayerState,
     f_weapon_pos_frac: f32,
-    scope_zoom_level: u32,
+    b_position_to_ads: bool,
     viewmodel: u32,
     facts: Option<WeaponFpvFacts>,
-    b_position_to_ads: bool,
-    actions: Option<&mut ClientActionInput>,
-) -> Option<f32> {
-    let facts = facts.filter(|f| f.body_resolved).unwrap_or_default();
+) -> f32 {
+    let facts = facts
+        .filter(|f| f.body_resolved)
+        .unwrap_or_else(WeaponFpvFacts::default);
     let overlay = WeaponAdsOverlayFacts {
         ads_zoom_in_frac: facts.ads_zoom_in_frac,
         ads_zoom_out_frac: facts.ads_zoom_out_frac,
@@ -531,7 +511,7 @@ fn apply_fpv_lens_fov(
     };
     let ads_target = facts
         .scope_zoom
-        .fov(scope_zoom_level)
+        .fov(ps.scope_zoom_level)
         .unwrap_or(facts.ads_zoom_fov);
     let ads_target = if ads_target.is_finite() && ads_target > 0.0 {
         ads_target
@@ -540,9 +520,9 @@ fn apply_fpv_lens_fov(
     };
     let inputs = FovInputs {
         cg_fov: base_fov,
-        pm_type,
-        link_flags,
-        e_flags,
+        pm_type: ps.pm_type,
+        link_flags: ps.link_flags,
+        e_flags: ps.e_flags,
         weapon_index_nonzero: viewmodel != 0,
         aim_down_sight: facts.aim_down_sight && facts.ads_zoom_fov > 0.0,
         ads_zoom_fov: ads_target,
@@ -551,6 +531,14 @@ fn apply_fpv_lens_fov(
         fov_min: CG_FOV_MIN_DEFAULT.min(ads_target),
     };
     let (horiz, _) = calc_fov_from_ads(&inputs, f_weapon_pos_frac, b_position_to_ads, &overlay);
+    horiz
+}
+
+fn apply_fpv_lens_fov(
+    lenses: &mut Query<&mut Projection, With<FpvLens>>,
+    horiz: f32,
+    actions: Option<&mut ClientActionInput>,
+) {
     let zoom_sensitivity = zoom_sensitivity(horiz);
     if let Some(actions) = actions {
         actions.fov_scale = zoom_sensitivity * actions.shellshock_look_scale;
@@ -561,7 +549,6 @@ fn apply_fpv_lens_fov(
             perspective.fov = vertical;
         }
     }
-    Some(horiz)
 }
 
 fn stamp_and_land_origin_z(
@@ -598,38 +585,44 @@ fn stamp_and_land_origin_z(
     land_origin_z(delta, kick.land_change)
 }
 
-fn stamp_damage_feedback(
-    kick: &mut SessionViewKick,
-    hurt: &mut PendingViewHurt,
-    damage_event: u32,
-    damage_yaw: u32,
-    damage_pitch: u32,
-    damage_count: i32,
-    viewangles: [f32; 3],
-    cg_time: i32,
-) {
-    let mut stamped = false;
-    if kick.have_damage_prev && damage_event != kick.last_damage_event && damage_count != 0 {
-        let punch = damage_feedback_kick(damage_yaw, damage_pitch, damage_count, viewangles);
-        kick.v_dmg_pitch = punch.v_dmg_pitch;
-        kick.v_dmg_roll = punch.v_dmg_roll;
-        kick.damage_time = cg_time.max(1);
-        stamped = true;
+impl SessionViewKick {
+    fn stamp_damage_feedback(
+        &mut self,
+        hurt: &mut PendingViewHurt,
+        ps: &playerstate_iw4::PlayerState,
+        cg_time: i32,
+    ) {
+        let mut stamped = false;
+        if self.have_damage_prev
+            && ps.damage_event != self.last_damage_event
+            && ps.damage_count != 0
+        {
+            let punch = damage_feedback_kick(
+                ps.damage_yaw,
+                ps.damage_pitch,
+                ps.damage_count,
+                ps.viewangles,
+            );
+            self.v_dmg_pitch = punch.v_dmg_pitch;
+            self.v_dmg_roll = punch.v_dmg_roll;
+            self.damage_time = cg_time.max(1);
+            stamped = true;
+        }
+        if !stamped && hurt.0 > 0 {
+            hurt.0 -= 1;
+            let punch = damage_feedback_kick(
+                VIEW_DAMAGE_UNDIRECTED,
+                VIEW_DAMAGE_UNDIRECTED,
+                1,
+                ps.viewangles,
+            );
+            self.v_dmg_pitch = punch.v_dmg_pitch;
+            self.v_dmg_roll = punch.v_dmg_roll;
+            self.damage_time = cg_time.max(1);
+        }
+        self.last_damage_event = ps.damage_event;
+        self.have_damage_prev = true;
     }
-    if !stamped && hurt.0 > 0 {
-        hurt.0 -= 1;
-        let punch = damage_feedback_kick(
-            VIEW_DAMAGE_UNDIRECTED,
-            VIEW_DAMAGE_UNDIRECTED,
-            1,
-            viewangles,
-        );
-        kick.v_dmg_pitch = punch.v_dmg_pitch;
-        kick.v_dmg_roll = punch.v_dmg_roll;
-        kick.damage_time = cg_time.max(1);
-    }
-    kick.last_damage_event = damage_event;
-    kick.have_damage_prev = true;
 }
 
 #[derive(Resource, Clone, Copy, Debug, Default)]

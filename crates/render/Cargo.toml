@@ -9,7 +9,7 @@ description = "Snapshot to pixels: scene, viewmodel, effects. No game logic."
 diag.workspace = true
 bevy.workspace = true
 fx.workspace = true
-hud = { path = "../hud" }
+hud = { workspace = true }
 frame.workspace = true
 render_frame.workspace = true
 render_anim.workspace = true
@@ -17,7 +17,7 @@ render_frontend.workspace = true
 render_fx.workspace = true
 render_gpu.workspace = true
 render_scene.workspace = true
-net = { path = "../net" }
+net = { workspace = true }
 assets.workspace = true
 serde.workspace = true
 serde_json.workspace = true

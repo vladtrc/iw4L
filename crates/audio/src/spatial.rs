@@ -4,10 +4,11 @@ use std::sync::Mutex;
 
 use crate::attenuation::distance_attenuation;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct ListenerSnapshot {
     pub origin_inches: [f32; 3],
     pub right: [f32; 3],
+    pub portals: Option<Arc<crate::portal_space::PortalSpace>>,
 }
 
 #[derive(Default)]
@@ -25,7 +26,10 @@ impl ListenerState {
     }
 
     pub(crate) fn get(&self) -> Option<ListenerSnapshot> {
-        *self.0.lock().unwrap_or_else(|poison| poison.into_inner())
+        self.0
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
     }
 }
 
@@ -46,9 +50,23 @@ pub(crate) struct SpatialParameters {
 }
 
 impl SpatialSource {
-    pub(crate) fn evaluate(&self, listener: ListenerSnapshot) -> SpatialParameters {
-        let offset =
-            std::array::from_fn::<_, 3, _>(|i| self.origin_inches[i] - listener.origin_inches[i]);
+    pub(crate) fn position(&self, listener: &ListenerSnapshot) -> Option<[f32; 3]> {
+        listener
+            .portals
+            .as_ref()
+            .map_or(Some(self.origin_inches), |space| {
+                space.position(listener.origin_inches, self.origin_inches)
+            })
+    }
+
+    pub(crate) fn evaluate(&self, listener: &ListenerSnapshot) -> SpatialParameters {
+        let Some(position) = self.position(listener) else {
+            return SpatialParameters {
+                gains: [0.0; 2],
+                priority: 0.0,
+            };
+        };
+        let offset = std::array::from_fn::<_, 3, _>(|i| position[i] - listener.origin_inches[i]);
         let distance = offset.iter().map(|value| value * value).sum::<f32>().sqrt();
         let attenuation = if self.knots.is_empty() {
             0.0
@@ -67,12 +85,7 @@ impl SpatialSource {
         } else {
             0.0
         };
-        let (left, right) = channel_gains(
-            listener.origin_inches,
-            listener.right,
-            self.origin_inches,
-            gain,
-        );
+        let (left, right) = channel_gains(listener.origin_inches, listener.right, position, gain);
         SpatialParameters {
             gains: [left, right],
             priority: if distance.is_finite() {

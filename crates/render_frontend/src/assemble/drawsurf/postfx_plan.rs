@@ -60,13 +60,7 @@ pub enum PostFxAdmissionRefusal {
     StateBitsMismatch { actual: [u32; 2] },
     AlphaTestEnabled,
     SamplerAbiMismatch,
-    CodeSource(PostFxSourceRefusal),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PostFxSourceRefusal {
-    InvalidDimensions { width: u32, height: u32 },
-    CodeSource(super::CodeSourceError),
+    CodeSource(String),
 }
 
 #[derive(Clone, Debug)]
@@ -150,13 +144,13 @@ pub fn film_sources(
     width: u32,
     height: u32,
     vision: Option<asset_world::FilmVision>,
-) -> Result<RuntimeCodeSources, PostFxSourceRefusal> {
-    let width_i32 = i32::try_from(width)
-        .map_err(|_| PostFxSourceRefusal::InvalidDimensions { width, height })?;
-    let height_i32 = i32::try_from(height)
-        .map_err(|_| PostFxSourceRefusal::InvalidDimensions { width, height })?;
+) -> Result<RuntimeCodeSources, String> {
+    let width_i32 =
+        i32::try_from(width).map_err(|_| format!("invalid postfx dimensions {width}x{height}"))?;
+    let height_i32 =
+        i32::try_from(height).map_err(|_| format!("invalid postfx dimensions {width}x{height}"))?;
     let projection = hud_iw4::cmd_buf_set_2d_projection(width_i32, height_i32)
-        .ok_or(PostFxSourceRefusal::InvalidDimensions { width, height })?;
+        .ok_or_else(|| format!("invalid postfx dimensions {width}x{height}"))?;
     let mut sources = RuntimeCodeSources::default();
     sources.set_constant(
         super::CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0,
@@ -171,7 +165,7 @@ pub fn film_sources(
             1.0 / height as f32,
         ])],
     );
-    let authored = vision.unwrap_or_default();
+    let authored = vision.unwrap_or_else(asset_world::FilmVision::default);
     let vision = if authored.enable {
         authored
     } else {
@@ -227,7 +221,7 @@ pub fn film_sources(
     apply_glow_consts(&mut sources, authored);
     sources
         .set_texture(CODE_TEXTURE_RESOLVED_SCENE, RESOLVED_SCENE_SAMPLER)
-        .map_err(PostFxSourceRefusal::CodeSource)?;
+        .map_err(|cause| format!("postfx code source: {cause:?}"))?;
     Ok(sources)
 }
 
@@ -406,7 +400,7 @@ fn admit_unlit_2d(
     })
 }
 
-fn admission_sources() -> Result<RuntimeCodeSources, PostFxSourceRefusal> {
+fn admission_sources() -> Result<RuntimeCodeSources, String> {
     let mut sources = film_sources(1, 1, None)?;
 
     for index in 22..=27 {
@@ -418,7 +412,7 @@ fn admission_sources() -> Result<RuntimeCodeSources, PostFxSourceRefusal> {
     for index in [8, 11, 12, 15] {
         sources
             .set_texture(index, if index == 15 { 0x61 } else { 0x62 })
-            .map_err(PostFxSourceRefusal::CodeSource)?;
+            .map_err(|cause| format!("postfx code source: {cause:?}"))?;
     }
     Ok(sources)
 }

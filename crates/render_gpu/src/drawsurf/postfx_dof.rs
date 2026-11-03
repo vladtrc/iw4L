@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use render_backend::overlay::CODE_TRANSPOSE_WORLD_VIEW_PROJECTION0;
-use render_material::{CodeSourceError, RuntimeCodeSources};
+use render_material::RuntimeCodeSources;
 
 const FILM_DESAT_MIN: f32 = 1.0 / 4096.0;
 pub const POSTFX_MATERIALS: &[&str] = &[
@@ -29,12 +29,6 @@ const CODE_COLOR_TINT_BASE: u16 = 47;
 const CODE_COLOR_TINT_DELTA: u16 = 48;
 const CODE_COLOR_TINT_QUADRATIC_DELTA: u16 = 49;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PostFxSourceRefusal {
-    InvalidDimensions { width: u32, height: u32 },
-    CodeSource(CodeSourceError),
-}
-
 fn float4_bits(row: [f32; 4]) -> [u32; 4] {
     row.map(f32::to_bits)
 }
@@ -60,13 +54,13 @@ pub fn film_sources(
     width: u32,
     height: u32,
     vision: Option<asset_world::FilmVision>,
-) -> Result<RuntimeCodeSources, PostFxSourceRefusal> {
-    let width_i32 = i32::try_from(width)
-        .map_err(|_| PostFxSourceRefusal::InvalidDimensions { width, height })?;
-    let height_i32 = i32::try_from(height)
-        .map_err(|_| PostFxSourceRefusal::InvalidDimensions { width, height })?;
+) -> Result<RuntimeCodeSources, String> {
+    let width_i32 =
+        i32::try_from(width).map_err(|_| format!("invalid postfx dimensions {width}x{height}"))?;
+    let height_i32 =
+        i32::try_from(height).map_err(|_| format!("invalid postfx dimensions {width}x{height}"))?;
     let mut projection = hud_iw4::cmd_buf_set_2d_projection(width_i32, height_i32)
-        .ok_or(PostFxSourceRefusal::InvalidDimensions { width, height })?;
+        .ok_or_else(|| format!("invalid postfx dimensions {width}x{height}"))?;
     // Fullscreen quads must cover wgpu's half-integer pixel centers. The D3D9
     // projection shifts the right/bottom edges onto the last pixel centers,
     // leaving clear texels that subsequent blur passes spread into the image.
@@ -86,7 +80,7 @@ pub fn film_sources(
             1.0 / height as f32,
         ])],
     );
-    let authored = vision.unwrap_or_default();
+    let authored = vision.unwrap_or_else(asset_world::FilmVision::default);
     let vision = if authored.enable {
         authored
     } else {
@@ -142,10 +136,10 @@ pub fn film_sources(
     apply_glow_consts(&mut sources, authored);
     sources
         .set_texture(CODE_TEXTURE_RESOLVED_SCENE, RESOLVED_SCENE_SAMPLER)
-        .map_err(PostFxSourceRefusal::CodeSource)?;
+        .map_err(|cause| format!("postfx code source: {cause:?}"))?;
     sources
         .set_texture(CODE_TEXTURE_FEEDBACK, RESOLVED_SCENE_SAMPLER)
-        .map_err(PostFxSourceRefusal::CodeSource)?;
+        .map_err(|cause| format!("postfx code source: {cause:?}"))?;
     Ok(sources)
 }
 
@@ -243,7 +237,7 @@ impl Default for GlowFrame {
 
 impl GlowFrame {
     pub fn from_vision(vision: Option<asset_world::FilmVision>) -> Self {
-        let vision = vision.unwrap_or_default();
+        let vision = vision.unwrap_or_else(asset_world::FilmVision::default);
         Self {
             enable: vision.glow_enable,
             radius: vision.glow_radius,
@@ -277,7 +271,7 @@ pub enum DofPlanRefusal {
     InvalidDimensions,
     InvalidFocus,
     BlurFractions { small: f32, medium: f32 },
-    CodeSource(PostFxSourceRefusal),
+    CodeSource(String),
 }
 
 pub fn sources(
@@ -356,7 +350,7 @@ pub fn sources(
     }
     for index in [8, 11, 12, 15] {
         s.set_texture(index, if index == 15 { 0x61 } else { 0x62 })
-            .map_err(|e| DofPlanRefusal::CodeSource(PostFxSourceRefusal::CodeSource(e)))?;
+            .map_err(|e| DofPlanRefusal::CodeSource(format!("postfx code source: {e:?}")))?;
     }
     Ok(s)
 }

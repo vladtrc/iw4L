@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use frame::configure_render_sets;
+use frame::{ScopeApp, configure_render_sets};
 use net::ClientSet;
 
 use crate::diag::capture::{CaptureQueue, capture_frame, report_unwritten_captures};
@@ -20,9 +20,14 @@ impl Plugin for RenderPlugin {
             render_frontend::RenderAssemblePlugin,
             render_gpu::RenderGpuPlugin,
         ))
+        .scoped::<render_gpu::InstalledRenderWorld>(frame::MatchScope::Live)
+        .scoped::<render_gpu::PublishedRenderFrame>(frame::MatchScope::Live)
         .add_systems(
             PostUpdate,
-            (stamp_gpu_submit_ready, crate::extract::seal_render_frame)
+            (
+                stamp_gpu_submit_ready,
+                crate::extract::seal_render_frame.in_set(frame::InMatch),
+            )
                 .chain()
                 .after(frame::RenderSet::FrontendAssemble),
         )
@@ -32,7 +37,7 @@ impl Plugin for RenderPlugin {
                 publish_overhead_posed_players.in_set(frame::InMatch),
                 publish_overhead_posed_models.in_set(frame::InMatch),
             )
-                .after(frame::WorkerCmdSet::SkinModel)
+                .after(frame::WorkerCmdSet::ModelPose)
                 .in_set(hud::OverheadPosedPlayerFramePublished)
                 .in_set(ClientSet::Present),
         );
@@ -57,7 +62,8 @@ impl Plugin for RenderPlugin {
                     crate::extract::extract_image_handles,
                     crate::extract::extract_postfx,
                     crate::extract::extract_model_lighting_tiles,
-                ),
+                )
+                    .after(frame::ScopeSet::Install),
             );
             if render_gpu::geometry_diagnostic_enabled() {
                 render_app.add_systems(
@@ -74,6 +80,8 @@ fn extract_gpu_load_progress(
     pipelines: Res<bevy::render::render_resource::PipelineCache>,
     working_set: Res<render_gpu::ColourWorkingSet>,
     warmup: Res<render_gpu::WorldPipelineWarmup>,
+    skin_failure: Res<render_scene::SkinFailure>,
+    present_ack: Res<render_scene::WorldPresentAck>,
 ) {
     use render_frontend::prepare::scene::world_gpu::{GpuLoadProgress, OverlayWarmup};
 
@@ -81,11 +89,11 @@ fn extract_gpu_load_progress(
     let Some(mut progress) = main_world.get_resource_mut::<GpuLoadProgress>() else {
         return;
     };
-    progress.generation = warmup.generation;
+    progress.skin_failure = skin_failure.reason;
+    progress.presented_at = present_ack.at;
     progress.waiting_n = pipelines.waiting_pipelines().count() as u32;
     progress.pipeline_n = pipelines.pipelines().count() as u32;
     progress.warmup = OverlayWarmup {
-        generation: warmup.generation,
         initialized: warmup.initialized,
         total: warmup.total,
         ready: warmup.ready,
@@ -128,7 +136,6 @@ fn stamp_gpu_submit_ready(
         return;
     };
     *ready = render_gpu::GpuSubmitReady {
-        world_generation: demand.world_generation,
         warm_pipelines: demand.warm_pipelines,
         overlay_gpu_wait: demand.overlay_gpu_wait,
         pipeline_world_materials: demand.pipeline_world_materials.clone(),
@@ -139,20 +146,26 @@ fn stamp_gpu_submit_ready(
 
 fn publish_overhead_posed_players(
     source: Res<render_anim::PosedPlayerFrame>,
-    mut destination: Option<ResMut<hud::OverheadPosedPlayerFrame>>,
+    slots: Res<net::CEntitySlots>,
+    mut destination: Query<&mut hud::OverheadNameState>,
 ) {
-    let Some(destination) = destination.as_mut() else {
-        return;
-    };
-    destination.replace(source.iter().map(|player| {
-        let head = match player.head {
+    for mut state in &mut destination {
+        state.head = None;
+    }
+    for player in source.iter() {
+        let Some(entity) = slots.entity_for_number(player.entnum) else {
+            continue;
+        };
+        let Ok(mut state) = destination.get_mut(entity) else {
+            continue;
+        };
+        state.head = Some(match player.head {
             render_anim::PosedPlayerHead::Exact(world) => {
                 hud::OverheadPosedHead::ExactWorld(world.to_array())
             }
             render_anim::PosedPlayerHead::NoDObjOrHead => hud::OverheadPosedHead::NoDObjOrHead,
-        };
-        (player.entnum, head)
-    }));
+        });
+    }
 }
 
 fn publish_overhead_posed_models(

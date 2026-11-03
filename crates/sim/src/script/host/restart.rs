@@ -146,7 +146,7 @@ pub(crate) fn restart_level(world: &mut World, tick: crate::Tick) {
         for number in frame.dropped_item_numbers_sorted() {
             frame.despawn_dropped_item(number);
         }
-        crate::t5_destructible::restart(&mut frame);
+        crate::model_behaviors::restart(&mut frame);
         frame.restart_level_phase();
         for id in frame.client_ids_sorted() {
             let (origin, angles) = frame

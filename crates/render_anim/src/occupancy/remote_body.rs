@@ -1,17 +1,15 @@
 use crate::anim::remote_body::{
-    AdvancedRemoteTree, CpuBodyGeom, CpuSurfMeta, PendingGunSkin, PreparedRemoteKits,
-    RemoteBodySkinnedItem, RemoteBodySkinnedQueue, RemoteBodyTrees, RemoteModelLods,
-    RemoteSkinModels, RemoteSkinPoseHashes, SkinAfterPose, WorldGunGap, advance_remote_tree,
-    bind_remote_skin_models, clone_corpse_tree_from_victim, commit_assembled_body,
-    corpse_occupation_key, ensure_remote_dobj, hash_skin_matrices, occupy_lod_byte,
-    occupy_remote_kit_dobj, packed_anim, pose_remote_dobj, push_cached_surfaces, radii,
+    AdvancedRemoteTree, AssembledRemoteBody, CpuBodyGeom, CpuSurfMeta, PendingGunSkin,
+    PreparedRemoteKits, RemoteAnimTracks, RemoteBodySkinnedItem, RemoteBodySkinnedQueue,
+    RemoteBodyState, RemoteGeometryRevision, SkinAfterPose, WorldGunGap, advance_remote_tree,
+    bind_remote_skin_models, ensure_remote_dobj, hash_skin_matrices, occupy_lod_byte,
+    occupy_remote_kit_dobj, pose_remote_dobj, push_cached_surfaces, radii,
     remote_player_controller, select_remote_lods, select_remote_models, skin_after_pose,
-    skin_slot_need, skip_frozen_corpse_dobj, take_unique_geom, validate_remote_tracks, zero_anim,
+    skin_slot_need, skip_frozen_corpse_dobj, take_unique_geom, validate_remote_tracks,
 };
 use crate::anim::scene_submission::{AnimDObjSceneSkels, AnimDObjSceneSubmission, AnimSceneSubmit};
 use crate::anim::world_weapon::PreparedItemCompositions;
 use crate::anim::xmodel_pose::{build_skin_layout, stream_lod_surface_rigid};
-use crate::gaps::{RenderGap, RenderGapCause, RenderPresentationGaps};
 use crate::lighting_box_half;
 use crate::{
     RemoteBodyDrawPlan, append_remote_body_cpu_blob, finish_remote_body_draw_plan,
@@ -21,14 +19,15 @@ use crate::{
 use anim_iw4::{PLAYER_ANIM_RAW_MASK, PlayerAnimValue};
 use asset_model::ModelSkel;
 use assets::{PreparedBodies, PreparedWeapons, PreparedWorldWeapons};
+use bevy::ecs::query::QueryData;
 use bevy::prelude::*;
 use bevy::tasks::ComputeTaskPool;
 use entity_iw4::{ET_PLAYER, ET_PLAYER_CORPSE};
 use frame::ScopeApp;
 use frame::{ModelLightingSeated, ViewSubject, WorkerCmdSet};
 use net::{
-    CEntity, CEntityRuntime, ClientSet, FrameClock, LocalPresentClient, PlayerDrawGate,
-    PresentedPublished, PresentedSnapshot, remote_body_submits, remote_pose_sample,
+    CEntity, CEntityRuntime, ClientSet, FrameClock, PlayerDrawGate, PresentedPublished,
+    remote_body_submits, remote_pose_sample,
 };
 use render_scene::HostGfxScene;
 use render_scene::WorldModelLightingAtlas;
@@ -39,12 +38,13 @@ use render_scene::{
     ModelLightingOwner, ModelLightingRequest, ModelLightingRequests, ResolvedModelLighting,
     ResolvedModelLightingTable,
 };
-use std::collections::{HashMap, HashSet};
+use std::borrow::Cow;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 #[derive(Component, Debug, Clone, Copy)]
-#[require(RemoteFxBolts)]
+#[require(RemoteFxBolts, RemoteBodyState)]
 pub struct RemotePlayer {
     pub ffa_team: Option<u8>,
 
@@ -92,7 +92,7 @@ struct RemoteBodyLightingBinds {
 struct BodySkinShapeKey {
     world_weapon: bool,
     product_revision: u64,
-    namespace: asset_core::AssetNamespace,
+    namespace: asset_core::FamilyId,
     name: String,
     lod: u8,
 }
@@ -130,7 +130,7 @@ impl BodySkinShapes {
     fn shape(
         &self,
         skel: &ModelSkel,
-        namespace: asset_core::AssetNamespace,
+        namespace: asset_core::FamilyId,
         world_weapon: bool,
         lod: u8,
         layout: &crate::anim::xmodel_pose::SkinLayout,
@@ -160,16 +160,15 @@ impl BodySkinShapes {
 }
 
 pub fn register_remote_body_systems(app: &mut App) {
-    app.init_app::<RenderPresentationGaps>()
-        .scoped::<RemoteBodyDrawPlan>(frame::MatchScope::Live)
-        .scoped::<RemoteBodyTrees>(frame::MatchScope::Live)
-        .scoped::<RemoteSkinPoseHashes>(frame::MatchScope::Live)
+    app.add_observer(retire_remote_body);
+    app.scoped::<RemoteBodyDrawPlan>(frame::MatchScope::Live)
+        .scoped::<RemoteGeometryRevision>(frame::MatchScope::Live)
         .scoped::<RemoteBodySkinnedQueue>(frame::MatchScope::Live)
         .scoped::<RemoteBodyLightingBinds>(frame::MatchScope::Live)
         .scoped::<BodySkinShapes>(frame::MatchScope::Live)
         .scoped::<PreparedRemoteKits>(frame::MatchScope::Live)
         .add_systems(
-            Update,
+            PreUpdate,
             (reset_remote_kits
                 .in_set(frame::InMatch)
                 .in_set(ClientSet::Load))
@@ -209,6 +208,9 @@ pub fn register_remote_body_systems(app: &mut App) {
         .add_systems(
             Update,
             ((
+                copy_corpse_animation
+                    .after(sync_remote_bodies)
+                    .before(pose_remote_bodies),
                 begin_remote_body_tess
                     .after(sync_remote_bodies)
                     .before(pose_remote_bodies),
@@ -217,12 +219,11 @@ pub fn register_remote_body_systems(app: &mut App) {
                     .after(sync_remote_bodies)
                     .after(begin_remote_body_tess)
                     .after(crate::anim::dobj_pose::begin_dobj_pose_frame)
-                    .after(WorkerCmdSet::CellStatic)
-                    .after(WorkerCmdSet::CellSceneEnt)
-                    .after(WorkerCmdSet::DpvsEnt),
+                    .after(WorkerCmdSet::WorldVisibility)
+                    .after(WorkerCmdSet::SceneVisibility),
             )
                 .after(PresentedPublished)
-                .in_set(WorkerCmdSet::SkinModel))
+                .in_set(WorkerCmdSet::ModelPose))
             .in_set(frame::InMatch),
         )
         .add_systems(
@@ -237,9 +238,9 @@ pub fn register_remote_body_systems(app: &mut App) {
             Update,
             (enqueue_remote_body_lighting
                 .in_set(frame::InMatch)
-                .after(WorkerCmdSet::SkinModel)
+                .after(WorkerCmdSet::ModelPose)
                 .after(crate::occupancy::script_model::ScriptModelSkinSet)
-                .before(WorkerCmdSet::CellDynModel)
+                .before(WorkerCmdSet::DynamicModels)
                 .after(PresentedPublished)
                 .in_set(ClientSet::Present))
             .in_set(frame::InMatch),
@@ -254,7 +255,7 @@ pub fn register_remote_body_systems(app: &mut App) {
                     .in_set(frame::InMatch)
                     .after(submit_remote_bodies),
             )
-                .in_set(WorkerCmdSet::AddSceneEnt))
+                .in_set(ClientSet::Present))
             .in_set(frame::InMatch),
         );
 }
@@ -277,7 +278,6 @@ fn prepare_remote_kits(
     soldiers: Option<Res<asset_game::SoldierPresentations>>,
     weapons: Option<Res<PreparedWeapons>>,
     world_weapons: Option<Res<PreparedWorldWeapons>>,
-    presented: Res<PresentedSnapshot>,
     mut compositions: ResMut<PreparedItemCompositions>,
     mut kits: ResMut<PreparedRemoteKits>,
     remotes: Query<(&CEntityRuntime, &RemotePlayer)>,
@@ -289,11 +289,9 @@ fn prepare_remote_kits(
         compositions.clear();
         return;
     };
-    kits.reset_for(&bodies, &weapons, &world);
+    let mut batch = kits.prepare_batch(&bodies, &weapons, &world);
     compositions.reset_for(&weapons, &world);
-    let Ok(owner) = weapons.for_snapshot(presented.weapon_epoch()) else {
-        return;
-    };
+    let owner = weapons.bound();
     for (runtime, remote) in &remotes {
         let axis = asset_model::kit_assignment_is_axis(remote.client_state_team, remote.ffa_team);
         let sample = remote_pose_sample(runtime);
@@ -301,33 +299,51 @@ fn prepare_remote_kits(
             continue;
         };
         for camo in [0, sample.weapon_model] {
-            kits.prepare(
-                &bodies,
-                &soldiers,
-                &weapons,
-                &world,
-                &mut compositions,
-                axis,
-                weapon.handle(),
-                camo,
-            );
+            batch.prepare(&soldiers, &mut compositions, axis, weapon.handle(), camo);
         }
     }
 }
 
-fn finish_body_draw_plan(mut plan: ResMut<RemoteBodyDrawPlan>) {
+pub fn finish_body_draw_plan(mut plan: ResMut<RemoteBodyDrawPlan>) {
     finish_remote_body_draw_plan(&mut plan);
 }
 
 fn begin_remote_body_tess() {}
+
+fn remote_body_draw_gate(
+    presentation: &net::LocalPresentation<'_>,
+    subject: Option<&ViewSubject>,
+    settings: &frame::GameSettings,
+) -> PlayerDrawGate {
+    let net::LocalPresentation { presented, local } = presentation;
+    let in_killcam = subject.is_some_and(|s| s.in_killcam());
+    let eyes = match subject {
+        Some(ViewSubject::Seat {
+            focus: Some(focus), ..
+        }) => i32::try_from(*focus).unwrap_or(0),
+        _ => i32::try_from(local.0.0).unwrap_or(0),
+    };
+    PlayerDrawGate {
+        eyes_entity_num: eyes,
+        other_flags: presented
+            .player(local.0)
+            .map(|ps| ps.other_flags)
+            .unwrap_or(0),
+        rendering_third_person: crate::occupancy::third_person::presented_is_third_person(
+            presented,
+            local.0,
+            in_killcam,
+            settings.third_person,
+        ),
+    }
+}
 
 fn occupy_remote_scene_ents(
     mut scene_skels: ResMut<AnimDObjSceneSkels>,
     mut scene_submissions: MessageWriter<AnimDObjSceneSubmission>,
     lod_skinned: Res<render_scene::LodRampSkinnedDvar>,
     cameras: Query<&GlobalTransform, With<Camera3d>>,
-    local: Res<LocalPresentClient>,
-    presented: Res<PresentedSnapshot>,
+    presentation: net::LocalPresentation,
     subject: Option<Res<ViewSubject>>,
     settings: Res<frame::GameSettings>,
     bodies: Option<Res<PreparedBodies>>,
@@ -361,26 +377,8 @@ fn occupy_remote_scene_ents(
         _ => None,
     };
     let eye = cameras.single().ok().map(|xf| xf.translation());
-    let in_killcam = subject.as_ref().is_some_and(|s| s.in_killcam());
-    let eyes = match subject.as_deref() {
-        Some(ViewSubject::Seat {
-            focus: Some(focus), ..
-        }) => i32::try_from(*focus).unwrap_or(0),
-        _ => i32::try_from(local.0.0).unwrap_or(0),
-    };
-    let gate = PlayerDrawGate {
-        eyes_entity_num: eyes,
-        other_flags: presented
-            .player(local.0)
-            .map(|ps| ps.other_flags)
-            .unwrap_or(0),
-        rendering_third_person: crate::occupancy::third_person::presented_is_third_person(
-            &presented,
-            local.0,
-            in_killcam,
-            settings.third_person,
-        ),
-    };
+    let gate = remote_body_draw_gate(&presentation, subject.as_deref(), &settings);
+    let presented = &presentation.presented;
     for (identity, runtime, transform) in &remotes {
         if !remote_body_submits(identity.number(), runtime, gate) {
             continue;
@@ -459,7 +457,7 @@ fn occupy_remote_scene_ents(
         let ramp = lod_skinned.args();
         let lod_bytes: Vec<i8> = kit_models
             .iter()
-            .map(|model| occupy_lod_byte(skel_camera_lod(model.skel, origin, eye, ramp)))
+            .map(|model| occupy_lod_byte(skel_camera_lod(model.skel, origin, eye, &ramp)))
             .collect();
         let models: Vec<_> = kit_models
             .iter()
@@ -490,8 +488,7 @@ fn occupy_remote_scene_ents(
 
 fn sync_remote_bodies(
     mut commands: Commands,
-    local: Res<LocalPresentClient>,
-    presented: Res<PresentedSnapshot>,
+    presentation: net::LocalPresentation,
     subject: Option<Res<ViewSubject>>,
     settings: Res<frame::GameSettings>,
     bodies: Option<Res<PreparedBodies>>,
@@ -506,33 +503,15 @@ fn sync_remote_bodies(
         return;
     };
 
-    let in_killcam = subject.as_ref().is_some_and(|s| s.in_killcam());
-    let eyes = match subject.as_deref() {
-        Some(ViewSubject::Seat {
-            focus: Some(focus), ..
-        }) => i32::try_from(*focus).unwrap_or(0),
-        _ => i32::try_from(local.0.0).unwrap_or(0),
-    };
-    let gate = PlayerDrawGate {
-        eyes_entity_num: eyes,
-        other_flags: presented
-            .player(local.0)
-            .map(|ps| ps.other_flags)
-            .unwrap_or(0),
-        rendering_third_person: crate::occupancy::third_person::presented_is_third_person(
-            &presented,
-            local.0,
-            in_killcam,
-            settings.third_person,
-        ),
-    };
+    let gate = remote_body_draw_gate(&presentation, subject.as_deref(), &settings);
+    let presented = &presentation.presented;
 
     for (entity, identity, runtime, remote) in &existing {
         let Some(client) = identity.client() else {
             if remote.is_some() {
                 commands
                     .entity(entity)
-                    .remove::<(RemotePlayer, RemoteFxBolts)>();
+                    .remove::<(RemotePlayer, RemoteFxBolts, RemoteBodyState)>();
             }
             continue;
         };
@@ -540,7 +519,7 @@ fn sync_remote_bodies(
             if remote.is_some() {
                 commands
                     .entity(entity)
-                    .remove::<(RemotePlayer, RemoteFxBolts)>();
+                    .remove::<(RemotePlayer, RemoteFxBolts, RemoteBodyState)>();
             }
             continue;
         }
@@ -570,7 +549,7 @@ fn sync_remote_bodies(
             if remote.is_some() {
                 commands
                     .entity(entity)
-                    .remove::<(RemotePlayer, RemoteFxBolts)>();
+                    .remove::<(RemotePlayer, RemoteFxBolts, RemoteBodyState)>();
             }
             continue;
         };
@@ -578,7 +557,7 @@ fn sync_remote_bodies(
             if remote.is_some() {
                 commands
                     .entity(entity)
-                    .remove::<(RemotePlayer, RemoteFxBolts)>();
+                    .remove::<(RemotePlayer, RemoteFxBolts, RemoteBodyState)>();
             }
             continue;
         };
@@ -587,7 +566,7 @@ fn sync_remote_bodies(
             if remote.is_some() {
                 commands
                     .entity(entity)
-                    .remove::<(RemotePlayer, RemoteFxBolts)>();
+                    .remove::<(RemotePlayer, RemoteFxBolts, RemoteBodyState)>();
             }
             continue;
         }
@@ -615,7 +594,8 @@ fn sync_remote_bodies(
 }
 
 struct PendingBodySkin<'a> {
-    persist_key: u32,
+    entity: Entity,
+    number: u32,
     transform: Transform,
     matrices: Vec<Mat4>,
     body: &'a asset_model::BodyMeshEntry,
@@ -634,10 +614,16 @@ struct PendingBodySkin<'a> {
     dest: CpuBodyGeom,
 }
 
-enum RemoteSkinAction<'a> {
-    Culled,
-    ReuseCache,
-    Blend(PendingBodySkin<'a>),
+#[derive(QueryData)]
+#[query_data(mutable)]
+struct RemoteBodyRoot {
+    entity: Entity,
+    identity: &'static CEntity,
+    runtime: &'static CEntityRuntime,
+    transform: &'static Transform,
+    bolts: &'static mut RemoteFxBolts,
+    remote: &'static RemotePlayer,
+    state: &'static mut RemoteBodyState,
 }
 
 struct RemotePoseFrame<'a> {
@@ -651,13 +637,11 @@ struct RemotePoseFrame<'a> {
     dt: f32,
     eye: Option<Vec3>,
     ramp: LodRampArgs,
-    trees: &'a mut RemoteBodyTrees,
-    pose_hashes: &'a mut RemoteSkinPoseHashes,
+    geometry_revision: &'a mut RemoteGeometryRevision,
     submit: &'a mut RemoteBodySkinnedQueue,
     dobj_poses: &'a mut crate::anim::dobj_pose::HostDObjPoseFrame,
     posed_players: &'a mut crate::anim::dobj_pose::PosedPlayerFrame,
     scene: &'a render_scene::GfxScene,
-    last_cache_hits: &'a HashSet<u32>,
     pending: Vec<PendingBodySkin<'a>>,
 
     world_gun_gap: Option<WorldGunGap>,
@@ -670,19 +654,16 @@ struct RemoteBodySceneSlot<'a> {
     skin_entries: &'a [dpvs_iw4::SceneEntSkinEntry],
 }
 
-fn remote_body_scene_slot(
-    scene: &render_scene::GfxScene,
-    persist_key: u32,
-) -> RemoteBodySceneSlot<'_> {
+fn remote_body_scene_slot(scene: &render_scene::GfxScene, number: u32) -> RemoteBodySceneSlot<'_> {
     RemoteBodySceneSlot {
-        hidden: scene.scene_ent_hidden(persist_key),
-        surface_count: scene.scene_ent_surface_count(persist_key),
+        hidden: scene.scene_ent_hidden(number),
+        surface_count: scene.scene_ent_surface_count(number),
         lods: scene
-            .scene_dobj(persist_key)
+            .scene_dobj(number)
             .map(|dobj| dobj.lods.as_slice())
             .unwrap_or(&[]),
         skin_entries: scene
-            .scene_ent_skinned_surfs(persist_key)
+            .scene_ent_skinned_surfs(number)
             .map(|surfs| surfs.entries.as_slice())
             .unwrap_or(&[]),
     }
@@ -690,7 +671,6 @@ fn remote_body_scene_slot(
 
 fn pose_remote_bodies(
     time: Res<Time>,
-    gaps: Res<RenderPresentationGaps>,
     sources: Option<Res<asset_anim::PlayerAnimSources>>,
     soldiers: Option<Res<asset_game::SoldierPresentations>>,
     bodies: Option<Res<PreparedBodies>>,
@@ -698,8 +678,7 @@ fn pose_remote_bodies(
     world_weapons: Option<Res<PreparedWorldWeapons>>,
     prepared_kits: Res<PreparedRemoteKits>,
     compositions: Res<PreparedItemCompositions>,
-    mut trees: ResMut<RemoteBodyTrees>,
-    mut pose_hashes: ResMut<RemoteSkinPoseHashes>,
+    mut geometry_revision: ResMut<RemoteGeometryRevision>,
     mut skin_shapes: ResMut<BodySkinShapes>,
     mut submit: ResMut<RemoteBodySkinnedQueue>,
     dpvs: (
@@ -711,13 +690,7 @@ fn pose_remote_bodies(
         Option<Res<FrameClock>>,
     ),
     mut roots: Query<
-        (
-            &CEntity,
-            &CEntityRuntime,
-            &Transform,
-            &mut RemoteFxBolts,
-            &RemotePlayer,
-        ),
+        RemoteBodyRoot,
         (
             With<RemotePlayer>,
             Without<WorldScriptModelInstance>,
@@ -728,79 +701,86 @@ fn pose_remote_bodies(
 ) {
     let (cameras, lod_skinned, mut dobj_poses, mut posed_players, gfx, cg_clock) = dpvs;
     submit.clear();
-    for (_, _, _, mut bolts, _) in &mut roots {
-        *bolts = RemoteFxBolts::default();
+    for mut root in &mut roots {
+        *root.bolts = RemoteFxBolts::default();
     }
-    let legs_written = remote_legs_written(roots.iter().map(|(_, runtime, _, _, _)| runtime));
+    let legs_written = remote_legs_written(roots.iter().map(|root| root.runtime));
     let leaves_bound = sources
         .as_deref()
-        .map(|sources| {
-            remote_written_leaves_bound(roots.iter().map(|(_, runtime, _, _, _)| runtime), sources)
-        })
+        .map(|sources| remote_written_leaves_bound(roots.iter().map(|root| root.runtime), sources))
         .unwrap_or(false);
 
     let source_cause = match sources.as_deref() {
-        None => Some(RenderGapCause::PlayerAnimSourcesNotPrepared),
+        None => Some(Cow::Borrowed("player animation sources not prepared")),
         Some(sources) if !sources.decode_errors().is_empty() => {
-            Some(RenderGapCause::PlayerAnimSourceDecodeFailed {
-                first: sources
+            Some(Cow::<'static, str>::Owned(format!(
+                "player animation source decode failed: {first}",
+                first = sources
                     .decode_errors()
                     .first()
                     .map(|error| format!("{error:?}"))
-                    .unwrap_or_default(),
-            })
+                    .unwrap_or(String::new())
+            )))
         }
         Some(sources) if sources.multiplayer_atr().is_none() => {
-            Some(RenderGapCause::MultiplayerAtrAbsent)
+            Some(Cow::Borrowed("animtrees/multiplayer.atr absent"))
         }
         Some(sources) if sources.playeranim_script().is_none() => {
-            Some(RenderGapCause::PlayeranimScriptAbsent)
+            Some(Cow::Borrowed("mp/playeranim.script absent"))
         }
         Some(sources) => match sources.compiled() {
-            None => Some(RenderGapCause::AnimtreeCompilerMissing),
-            Some(Err(error)) => Some(RenderGapCause::AnimtreeCompileFailed {
-                reason: error.to_string(),
-            }),
+            None => Some(Cow::Borrowed("ATR/script compiler missing")),
+            Some(Err(error)) => Some(Cow::<'static, str>::Owned(format!(
+                "ATR compile failed: {reason}",
+                reason = error.to_string()
+            ))),
             Some(Ok(_)) => match sources.parsed_script() {
-                Some(Err(error)) => Some(RenderGapCause::AnimScriptParseFailed {
-                    reason: error.to_string(),
-                }),
-                Some(Ok(_)) if !legs_written => Some(RenderGapCause::AnimScriptEvaluatorMissing),
-                Some(Ok(_)) if !leaves_bound => Some(RenderGapCause::XAnimLeafBindMissing),
+                Some(Err(error)) => Some(Cow::<'static, str>::Owned(format!(
+                    "playeranim.script parse failed: {reason}",
+                    reason = error.to_string()
+                ))),
+                Some(Ok(_)) if !legs_written => Some(Cow::Borrowed("playeranim evaluator missing")),
+                Some(Ok(_)) if !leaves_bound => Some(Cow::Borrowed("XAnim leaf bind missing")),
                 Some(Ok(_)) => None,
-                _ => Some(RenderGapCause::AnimScriptEvaluatorMissing),
+                _ => Some(Cow::Borrowed("playeranim evaluator missing")),
             },
         },
     };
     if let Some(cause) = source_cause {
-        gaps.raise(cause);
+        diag::warn_once!(World, "{}", cause);
         return;
     }
 
     let Some(sources) = sources.as_deref() else {
-        gaps.raise(RenderGapCause::PlayerAnimSourcesNotPrepared);
+        diag::warn_once!(World, "player animation sources not prepared");
         return;
     };
     let Some(Ok(tree)) = sources.compiled() else {
-        gaps.raise(RenderGapCause::AnimtreeCompilerMissing);
+        diag::warn_once!(World, "ATR/script compiler missing");
         return;
     };
     let Some(Ok(_script)) = sources.parsed_script() else {
-        gaps.raise(RenderGapCause::XAnimCalcFailed {
-            reason: "playeranim.script not parsed".into(),
-        });
+        diag::warn_once!(
+            World,
+            "XAnimCalc failed: {reason}",
+            reason = String::from("playeranim.script not parsed")
+        );
         return;
     };
     let Some(soldiers) = soldiers.as_deref() else {
-        gaps.raise(RenderGapCause::XAnimCalcFailed {
-            reason: "soldier presentations not installed".into(),
-        });
+        diag::warn_once!(
+            World,
+            "XAnimCalc failed: {reason}",
+            reason = String::from("soldier presentations not installed")
+        );
         return;
     };
     let Some(bodies) = bodies.as_deref() else {
-        gaps.raise(RenderGapCause::XAnimCalcFailed {
-            reason: "PreparedBodies not installed".into(),
-        });
+        diag::warn_once!(
+            World,
+            "XAnimCalc failed: {reason}",
+            reason = String::from("PreparedBodies not installed")
+        );
         return;
     };
 
@@ -809,8 +789,6 @@ fn pose_remote_bodies(
     let mut posed_bodies = 0usize;
     let mut scene_hidden_bodies = 0usize;
     let mut last_calc_error = None;
-    let mut live = HashSet::new();
-    let last_cache_hits = pose_hashes.take_last_cache_hits();
     let mut pose_frame = RemotePoseFrame {
         soldiers,
         tree,
@@ -830,21 +808,16 @@ fn pose_remote_bodies(
             .unwrap_or_else(|| time.delta_secs()),
         eye,
         ramp: skinned_ramp,
-        trees: &mut trees,
-        pose_hashes: &mut pose_hashes,
+        geometry_revision: &mut geometry_revision,
         submit: &mut submit,
         dobj_poses: &mut dobj_poses,
         posed_players: &mut posed_players,
         scene: &gfx.scene,
-        last_cache_hits: &last_cache_hits,
         pending: Vec::new(),
         world_gun_gap: None,
     };
-    for (identity, runtime, transform, mut bolts, remote) in &mut roots {
-        let persist_key = u32::from(identity.number());
-
-        live.insert(persist_key);
-        let posed = pose_frame.pose_one_remote(identity, runtime, transform, &mut bolts, remote);
+    for root in &mut roots {
+        let posed = pose_frame.pose_one_remote(root);
         match posed {
             Ok(PoseOneOutcome::Posed) => posed_bodies += 1,
             Ok(PoseOneOutcome::SceneHidden) => scene_hidden_bodies += 1,
@@ -852,44 +825,48 @@ fn pose_remote_bodies(
             Err(reason) => last_calc_error = Some(reason),
         }
     }
-    pose_frame.trees.retain_live(&live);
-    pose_frame.pose_hashes.retain_live(&live);
 
     match pose_frame.world_gun_gap.take() {
-        Some(gap) => gaps.raise(RenderGapCause::RemoteBodyWorldGunMissing {
-            weapon: gap.weapon,
-            world_model: gap.world_model,
-        }),
-        None => gaps.clear(RenderGap::RemoteBodyWorldGun),
+        Some(gap) => diag::warn_once!(
+            World,
+            "remote body world gun missing: weapon {weapon} `{world_model}`",
+            weapon = gap.weapon,
+            world_model = gap.world_model
+        ),
+        None => (),
     }
 
     if posed_bodies == 0 {
         if scene_hidden_bodies > 0 {
             return;
         }
-        gaps.raise(match last_calc_error {
-            Some(reason) => RenderGapCause::XAnimCalcFailed { reason },
-            None => RenderGapCause::XAnimCalcMissing,
-        });
+        diag::warn_once!(
+            World,
+            "{}",
+            match last_calc_error {
+                Some(reason) => Cow::<'static, str>::Owned(format!(
+                    "XAnimCalc failed: {reason}",
+                    reason = (reason)
+                )),
+                None => Cow::Borrowed("XAnimCalc missing"),
+            }
+        );
         return;
     }
 
     skin_shapes.prepare(bodies, world_weapons.as_deref());
-    let _skin_model = perf::Span::HostSkinModelMs.enter();
+    let _skin_model = perf::span!("skin_model", "iw4l.render");
     let workers = skin_blend_worker_count(pose_frame.pending.len());
     let pending = std::mem::take(&mut pose_frame.pending);
     let assembled = assemble_meshes_parallel(pending, workers, &skin_shapes);
     for assembled in assembled {
-        if let Ok(assembled) = assembled {
-            commit_assembled_body(
-                assembled.persist_key,
-                &assembled.transform,
-                assembled.geom,
-                assembled.radii,
-                assembled.radius_parents,
-                assembled.lods,
+        if let Ok(assembled) = assembled
+            && let Ok(mut root) = roots.get_mut(assembled.entity)
+        {
+            assembled.commit(
                 pose_frame.submit,
-                pose_frame.pose_hashes,
+                &mut root.state.skin,
+                pose_frame.geometry_revision,
             );
         }
     }
@@ -906,44 +883,47 @@ enum PoseOneOutcome {
 impl<'a> RemotePoseFrame<'a> {
     fn pose_one_remote(
         &mut self,
-        identity: &CEntity,
-        runtime: &CEntityRuntime,
-        transform: &Transform,
-        bolts: &mut RemoteFxBolts,
-        remote: &RemotePlayer,
+        mut root: RemoteBodyRootItem<'_, '_>,
     ) -> Result<PoseOneOutcome, String> {
+        let bolts = &mut *root.bolts;
+        let state = &mut *root.state;
         *bolts = RemoteFxBolts::default();
-        let persist_key = u32::from(identity.number());
-        let is_corpse = runtime.next_state.e_type == ET_PLAYER_CORPSE
-            || runtime.pose_e_type == ET_PLAYER_CORPSE as u8;
-        let occupation_key = is_corpse.then(|| corpse_occupation_key(identity)).flatten();
-        if let Some(key) = occupation_key {
-            let victim = u32::try_from(runtime.next_state.client_num).unwrap_or(0);
-            clone_corpse_tree_from_victim(self.trees, persist_key, victim, key);
-        }
-        let corpse_age_ms =
-            occupation_key.map(|_| runtime.pose_time_ms.wrapping_sub(runtime.next_state.time2));
+        let number = u32::from(root.identity.number());
+        let is_corpse = root.runtime.next_state.e_type == ET_PLAYER_CORPSE
+            || root.runtime.pose_e_type == ET_PLAYER_CORPSE as u8;
+        let corpse_age_ms = is_corpse.then_some(
+            root.runtime
+                .pose_time_ms
+                .wrapping_sub(root.runtime.next_state.time2),
+        );
+        let last_cache_hit = std::mem::take(&mut state.skin.last_cache_hit);
 
-        if runtime.previous_pose.is_none() {
-            if let Some(slot) = self.trees.get_mut(persist_key) {
+        if root.runtime.previous_pose.is_none() {
+            if let Some(slot) = state.tree.as_mut() {
                 slot.legs_rate_sample.time_ms = 0;
                 slot.torso_rate_sample.time_ms = 0;
             }
         }
-        let sample = remote_pose_sample(runtime);
+        let sample = remote_pose_sample(root.runtime);
         if is_corpse {
             let legs_leaf =
                 PlayerAnimValue::from_raw((sample.anim.legs_anim as u16) & PLAYER_ANIM_RAW_MASK)
                     .map(|v| v.effective_index())
                     .filter(|&index| index != 0)
                     .and_then(|index| self.tree.node(index).map(|n| n.name.as_str()));
-            perf::corpse(1, None, Some(i64::from(ET_PLAYER_CORPSE)), legs_leaf);
+            perf::instant!("corpse", "iw4l.sim", |ctx| {
+                let (occupied, pose_e_type, legs_leaf_name): (i64, Option<i64>, Option<&str>) =
+                    (1, Some(i64::from(ET_PLAYER_CORPSE)), legs_leaf);
+                ctx.arg("occupied", occupied);
+
+                ctx.arg("pose_e_type", pose_e_type);
+                ctx.arg("legs_leaf_name", legs_leaf_name);
+            });
         }
-        let Some(legs) = packed_anim(sample.anim.legs_anim) else {
-            self.trees.remove(persist_key);
+        let Some(tracks) = RemoteAnimTracks::from_pair(sample.anim) else {
+            state.tree = None;
             return Ok(PoseOneOutcome::NoAnim);
         };
-        let torso = packed_anim(sample.anim.torso_anim).unwrap_or_else(zero_anim);
         let e_type = if is_corpse {
             ET_PLAYER_CORPSE
         } else {
@@ -958,24 +938,26 @@ impl<'a> RemotePoseFrame<'a> {
         let prone = sample.prone;
         let crouch = sample.crouch;
         let dt = self.dt;
-        let trees = &mut *self.trees;
+        let trees = &mut state.tree;
         let pending = &mut self.pending;
-        let pose_hashes = &mut *self.pose_hashes;
+        let pose_hashes = &mut state.skin;
         let submit = &mut *self.submit;
-        let slot = remote_body_scene_slot(self.scene, persist_key);
+        let slot = remote_body_scene_slot(self.scene, number);
         let scene_ent_surface_count = slot.surface_count;
         let skin_entries = slot.skin_entries;
         let slot_lods = slot.lods;
         let scene_ent_hidden = slot.hidden;
-        let last_cache_hits = self.last_cache_hits;
-        let axis = asset_model::kit_assignment_is_axis(remote.client_state_team, remote.ffa_team);
+        let axis = asset_model::kit_assignment_is_axis(
+            root.remote.client_state_team,
+            root.remote.ffa_team,
+        );
         let eye = self.eye;
-        let ramp = self.ramp;
+        let ramp = self.ramp.clone();
         let dobj_poses = &mut *self.dobj_poses;
         let posed_players = &mut *self.posed_players;
         let world_gun_gap = &mut self.world_gun_gap;
         let result = (|| {
-            let origin = transform.translation.to_array();
+            let origin = root.transform.translation.to_array();
             let soldier = self.soldiers.side(axis).map_err(str::to_owned)?;
             if !soldier.owns_bodies(&bodies.0) {
                 return Err("soldier body owner differs from prepared bodies".into());
@@ -986,7 +968,7 @@ impl<'a> RemotePoseFrame<'a> {
                 world_weapons,
                 weapon,
                 sample.weapon_model,
-                remote.shield,
+                root.remote.shield,
                 weapons
                     .zip(world_weapons)
                     .and_then(|(w, c)| self.compositions.get(w, c, weapon, sample.weapon_model)),
@@ -994,9 +976,7 @@ impl<'a> RemotePoseFrame<'a> {
             let binding = soldier.animation().map_err(str::to_owned)?;
             let advanced = advance_remote_tree(
                 binding,
-                legs,
-                torso,
-                persist_key,
+                tracks,
                 dt,
                 sample.rate_origin,
                 sample.rate_time_ms,
@@ -1017,26 +997,26 @@ impl<'a> RemotePoseFrame<'a> {
             }
             let body = model_set.body;
             let Some(lods) = select_remote_lods(&model_set, slot_lods, |skel| {
-                skel_camera_lod(skel, origin, eye, ramp)
+                skel_camera_lod(skel, origin, eye, &ramp)
             }) else {
                 return Ok(PoseOneOutcome::NoBodyLod);
             };
             if skip_frozen_corpse_dobj(
                 e_type == ET_PLAYER_CORPSE,
                 reuse,
-                last_cache_hits.contains(&persist_key),
-                pose_hashes.has_lods(persist_key, lods.tuple()),
+                last_cache_hit,
+                pose_hashes.has_lods(lods.tuple()),
             ) {
-                push_cached_surfaces(persist_key, transform, pose_hashes, submit);
+                push_cached_surfaces(number, root.transform, pose_hashes, submit);
                 return Ok(PoseOneOutcome::Posed);
             }
             let kit = kits
                 .and_then(|kits| kits.get(axis, weapon, sample.weapon_model))
                 .ok_or_else(|| format!("remote kit not prepared: axis={axis} weapon={weapon}"))?;
             let prepared_dobj = kit.dobj.as_ref();
-            ensure_remote_dobj(&model_set, e_type, persist_key, trees, prepared_dobj)?;
+            ensure_remote_dobj(&model_set, e_type, trees, prepared_dobj)?;
             let dobj = trees
-                .get(persist_key)
+                .as_ref()
                 .and_then(|slot| slot.dobj.as_deref())
                 .expect("composed");
             validate_remote_tracks(dobj, clips.as_ref(), body, &model_set.body_name)?;
@@ -1046,117 +1026,90 @@ impl<'a> RemotePoseFrame<'a> {
                 anim_runtime,
                 remote_player_controller(is_corpse, view_pitch_deg, prone, crouch),
             )?;
-            let skin = publish_remote_dobj(
-                dobj,
+            publish_remote_bones(
                 kit.bolt_bones,
                 &world,
-                persist_key,
-                runtime,
-                transform,
+                number,
+                root.runtime,
+                root.transform,
                 bolts,
                 dobj_poses,
             )?;
+            let skin = dobj.skin_matrices(&world);
             if !is_corpse {
                 publish_posed_player_head(
                     kit.head_bone,
                     &world,
-                    identity,
-                    transform,
+                    root.identity,
+                    root.transform,
                     posed_players,
                 )?;
             }
             let hash = hash_skin_matrices(&skin) ^ u64::from(sample.weapon_model);
-            let pose_same = pose_hashes.remember_pose_hash(persist_key, hash);
+            let pose_same = pose_hashes.remember_pose_hash(hash);
 
             let skin_models = bind_remote_skin_models(dobj, &model_set)?;
-            let lods_reusable = pose_hashes.has_lods(persist_key, lods.tuple());
-            let action = remote_skin_action(
-                persist_key,
-                transform,
-                skin,
-                skin_entries,
-                lods,
-                skin_models,
-                skin_after_pose(scene_ent_surface_count == Some(0), pose_same, lods_reusable),
-            );
-            match action {
-                RemoteSkinAction::Culled => {}
-                RemoteSkinAction::ReuseCache => {
-                    push_cached_surfaces(persist_key, transform, pose_hashes, submit);
+            let lods_reusable = pose_hashes.has_lods(lods.tuple());
+            match skin_after_pose(scene_ent_surface_count == Some(0), pose_same, lods_reusable) {
+                SkinAfterPose::Culled => {
+                    drop((skin_models, lods, skin));
                 }
-                RemoteSkinAction::Blend(mut job) => {
+                SkinAfterPose::ReuseCache => {
+                    drop((skin_models, lods, skin));
+                    push_cached_surfaces(number, root.transform, pose_hashes, submit);
+                }
+                SkinAfterPose::Blend => {
+                    let mut job = PendingBodySkin {
+                        entity: root.entity,
+                        number,
+                        transform: *root.transform,
+                        matrices: skin,
+                        body: skin_models.body,
+                        head: skin_models.head,
+                        gun: skin_models.gun,
+                        body_lod: lods.body,
+                        head_lod: lods.head,
+                        gun_lod: lods.gun,
+                        skin_entries,
+                        head_model: skin_models.head_model,
+                        gun_model: skin_models.gun_model,
+                        attachments: skin_models
+                            .attachments
+                            .into_iter()
+                            .zip(lods.attachments)
+                            .map(|((skin, model), lod)| (skin, model, lod))
+                            .collect(),
+                        camouflage: None,
+                        dest: CpuBodyGeom::default(),
+                    };
                     job.camouflage = weapons.and_then(|registry| {
                         registry
                             .registry()
                             .select_appearance(weapon, sample.weapon_model)
                             .and_then(|appearance| appearance.material_camouflage())
                     });
-                    job.dest = take_unique_geom(pose_hashes, persist_key);
+                    job.dest = take_unique_geom(pose_hashes);
                     pending.push(job);
                 }
             }
             Ok(PoseOneOutcome::Posed)
         })();
-        if let Some(key) = occupation_key
-            && let Some(slot) = trees.get_mut(persist_key)
-            && slot.occupation_key.is_none()
-        {
-            slot.occupation_key = Some(key);
-        }
         result
     }
 }
 
-fn remote_skin_action<'a>(
-    persist_key: u32,
-    transform: &Transform,
-    matrices: Vec<Mat4>,
-    skin_entries: &'a [dpvs_iw4::SceneEntSkinEntry],
-    lods: RemoteModelLods,
-    models: RemoteSkinModels<'a>,
-    after_pose: SkinAfterPose,
-) -> RemoteSkinAction<'a> {
-    match after_pose {
-        SkinAfterPose::Culled => RemoteSkinAction::Culled,
-        SkinAfterPose::ReuseCache => RemoteSkinAction::ReuseCache,
-        SkinAfterPose::Blend => RemoteSkinAction::Blend(PendingBodySkin {
-            persist_key,
-            transform: *transform,
-            matrices,
-            body: models.body,
-            head: models.head,
-            gun: models.gun,
-            body_lod: lods.body,
-            head_lod: lods.head,
-            gun_lod: lods.gun,
-            skin_entries,
-            head_model: models.head_model,
-            gun_model: models.gun_model,
-            attachments: models
-                .attachments
-                .into_iter()
-                .zip(lods.attachments)
-                .map(|((skin, model), lod)| (skin, model, lod))
-                .collect(),
-            camouflage: None,
-            dest: CpuBodyGeom::default(),
-        }),
-    }
-}
-
-fn publish_remote_dobj(
-    dobj: &xmodel_runtime::DObj,
+fn publish_remote_bones(
     bolt_bones: [Option<u16>; 4],
     world: &[Mat4],
-    persist_key: u32,
+    number: u32,
     runtime: &CEntityRuntime,
     transform: &Transform,
     bolts: &mut RemoteFxBolts,
     dobj_poses: &mut crate::anim::dobj_pose::HostDObjPoseFrame,
-) -> Result<Vec<Mat4>, String> {
+) -> Result<(), String> {
     dobj_poses
         .publish(
-            persist_key,
+            number,
             runtime.in_next_snap(),
             runtime.next_state.e_flags,
             transform.to_matrix(),
@@ -1165,14 +1118,11 @@ fn publish_remote_dobj(
         .map_err(|error| format!("DObj bone publication failed: {error:?}"))?;
     let target = |bone: Option<u16>| -> Option<fx::FxBoltTarget> {
         let bone = bone?;
-        let orientation = dobj_poses.resolve(persist_key, i32::from(bone)).ok()?;
+        let orientation = dobj_poses.resolve(number, i32::from(bone)).ok()?;
         Some(fx::FxBoltTarget {
-            dobj: persist_key,
+            dobj: number,
             bone,
-            centity_teleport: fx_iw4::bolt_spawn_teleport_bit(
-                persist_key,
-                runtime.next_state.e_flags,
-            ),
+            centity_teleport: fx_iw4::bolt_spawn_teleport_bit(number, runtime.next_state.e_flags),
             orientation,
         })
     };
@@ -1180,7 +1130,7 @@ fn publish_remote_dobj(
     bolts.brass = target(bolt_bones[1]);
     bolts.knife = target(bolt_bones[2]);
     bolts.laser = target(bolt_bones[3]);
-    Ok(dobj.skin_matrices(world))
+    Ok(())
 }
 
 fn publish_posed_player_head(
@@ -1215,7 +1165,7 @@ fn skel_camera_lod(
     skel: &ModelSkel,
     origin: [f32; 3],
     eye: Option<Vec3>,
-    ramp: LodRampArgs,
+    ramp: &LodRampArgs,
 ) -> Option<u8> {
     smodel_camera_lod(skel.lod, origin, 1.0, eye, ramp)
 }
@@ -1231,35 +1181,86 @@ fn surface_material_key(
     }
 }
 
+enum SkinSlotModel<'a> {
+    Body(&'a asset_model::BodyMeshEntry),
+    WorldWeapon(&'a asset_model::WorldWeaponEntry),
+}
+
+impl SkinSlotModel<'_> {
+    fn skel(&self) -> &ModelSkel {
+        match self {
+            Self::Body(entry) => &entry.skel,
+            Self::WorldWeapon(entry) => &entry.skel,
+        }
+    }
+
+    fn namespace(&self) -> asset_core::FamilyId {
+        match self {
+            Self::Body(entry) => entry.namespace,
+            Self::WorldWeapon(entry) => entry.namespace,
+        }
+    }
+
+    fn world_weapon(&self) -> bool {
+        matches!(self, Self::WorldWeapon(_))
+    }
+
+    fn material(&self, surface: usize) -> Option<asset_core::MaterialKey> {
+        match self {
+            Self::Body(entry) => {
+                surface_material_key(surface, &entry.material_keys, &entry.material_edges)
+            }
+            Self::WorldWeapon(entry) => {
+                surface_material_key(surface, &entry.material_keys, &entry.material_edges)
+            }
+        }
+    }
+}
+
+struct SkinSlotStream<'a> {
+    lod: u8,
+    model: u16,
+    entries: &'a [dpvs_iw4::SceneEntSkinEntry],
+}
+
+impl SkinSlotStream<'_> {
+    fn draws(&self, surface: usize) -> bool {
+        dpvs_iw4::SceneEntSkinEntry::stream_draws(self.entries, self.model, surface as u16)
+    }
+
+    fn rigid(&self, skel: &ModelSkel, surface: usize) -> bool {
+        stream_lod_surface_rigid(skel, self.lod, self.entries, self.model, surface)
+    }
+}
+
 fn skin_slot_into(
-    skel: &ModelSkel,
-    namespace: asset_core::AssetNamespace,
-    world_weapon: bool,
+    source: SkinSlotModel,
     skin_shapes: &BodySkinShapes,
     skin: &[Mat4],
     base: usize,
-    lod: u8,
-    model: u16,
-    entries: &[dpvs_iw4::SceneEntSkinEntry],
-    keys: &[Option<asset_core::MaterialKey>],
-    edges: &[assets::AssetEdge<assets::MaterialSpace>],
+    stream: SkinSlotStream,
     geom: &mut CpuBodyGeom,
     skip_empty: bool,
 ) -> Result<(), String> {
+    let skel = source.skel();
     skin_slot_need(skel, skin, base)?;
 
-    let layout = build_skin_layout(skel, lod, |lod_local| {
-        dpvs_iw4::SceneEntSkinEntry::stream_draws(entries, model, lod_local as u16)
-    })
-    .ok_or_else(|| "skin_model refused the posed skeleton".to_string())?;
+    let layout = build_skin_layout(skel, stream.lod, |lod_local| stream.draws(lod_local))
+        .ok_or_else(|| "skin_model refused the posed skeleton".to_string())?;
     let dest_first = geom.packed.len();
     geom.packed.resize(
         dest_first.saturating_add(layout.dest_vertex_n),
         [0u8; asset_iw4::size::GFX_PACKED_VERTEX],
     );
-    let rigid = |surface| stream_lod_surface_rigid(skel, lod, entries, model, surface);
+    let rigid = |surface| stream.rigid(skel, surface);
     if layout.dest_vertex_n != 0 {
-        let shape = skin_shapes.shape(skel, namespace, world_weapon, lod, &layout);
+        let shape = skin_shapes.shape(
+            skel,
+            source.namespace(),
+            source.world_weapon(),
+            stream.lod,
+            &layout,
+        );
         let bone_end = base
             .checked_add(shape.required_bones())
             .ok_or("body bone range overflow")?;
@@ -1306,7 +1307,7 @@ fn skin_slot_into(
             geom.surfaces.push(CpuSurfMeta {
                 index_start: 0,
                 index_count: 0,
-                material: surface_material_key(surf.surface_index, keys, edges),
+                material: source.material(surf.surface_index),
             });
             continue;
         }
@@ -1321,7 +1322,7 @@ fn skin_slot_into(
         geom.surfaces.push(CpuSurfMeta {
             index_start,
             index_count: surf.index_count,
-            material: surface_material_key(surf.surface_index, keys, edges),
+            material: source.material(surf.surface_index),
         });
     }
     geom.decoded_n = geom.packed.len();
@@ -1342,7 +1343,7 @@ fn assemble_meshes_parallel(
     jobs: Vec<PendingBodySkin<'_>>,
     workers: usize,
     skin_shapes: &BodySkinShapes,
-) -> Vec<Result<AssembledMeshes, String>> {
+) -> Vec<Result<AssembledRemoteBody, String>> {
     if jobs.is_empty() {
         return Vec::new();
     }
@@ -1381,36 +1382,26 @@ fn assemble_meshes_parallel(
         .collect()
 }
 
-struct AssembledMeshes {
-    persist_key: u32,
-    transform: Transform,
-    geom: CpuBodyGeom,
-    radii: Vec<f32>,
-    radius_parents: Vec<u8>,
-    lods: (Option<u8>, Option<u8>, Option<u8>),
-}
-
 fn assemble_meshes(
     job: PendingBodySkin<'_>,
     skin_shapes: &BodySkinShapes,
-) -> Result<AssembledMeshes, String> {
-    let persist_key = job.persist_key;
+) -> Result<AssembledRemoteBody, String> {
+    let entity = job.entity;
+    let number = job.number;
     let transform = job.transform;
     let lods = (Some(job.body_lod), job.head_lod, job.gun_lod);
     let mut geom = job.dest;
     geom.skin_jobs.clear();
     skin_slot_into(
-        &job.body.skel,
-        job.body.namespace,
-        false,
+        SkinSlotModel::Body(job.body),
         skin_shapes,
         &job.matrices,
         0,
-        job.body_lod,
-        0,
-        job.skin_entries,
-        &job.body.material_keys,
-        &job.body.material_edges,
+        SkinSlotStream {
+            lod: job.body_lod,
+            model: 0,
+            entries: job.skin_entries,
+        },
         &mut geom,
         false,
     )?;
@@ -1418,17 +1409,15 @@ fn assemble_meshes(
         (None, _) | (Some(_), None) => {}
         (Some((head, base)), Some(lod)) => {
             skin_slot_into(
-                &head.skel,
-                head.namespace,
-                false,
+                SkinSlotModel::Body(head),
                 skin_shapes,
                 &job.matrices,
                 base,
-                lod,
-                job.head_model.unwrap_or(1),
-                job.skin_entries,
-                &head.material_keys,
-                &head.material_edges,
+                SkinSlotStream {
+                    lod,
+                    model: job.head_model.unwrap_or(1),
+                    entries: job.skin_entries,
+                },
                 &mut geom,
                 false,
             )?;
@@ -1439,17 +1428,15 @@ fn assemble_meshes(
         (None, _) | (Some(_), None) => {}
         (Some(gun), Some(lod)) => {
             skin_slot_into(
-                &gun.entry.skel,
-                gun.entry.namespace,
-                true,
+                SkinSlotModel::WorldWeapon(gun.entry),
                 skin_shapes,
                 &job.matrices,
                 gun.base,
-                lod,
-                job.gun_model.unwrap_or(0),
-                job.skin_entries,
-                &gun.entry.material_keys,
-                &gun.entry.material_edges,
+                SkinSlotStream {
+                    lod,
+                    model: job.gun_model.unwrap_or(0),
+                    entries: job.skin_entries,
+                },
                 &mut geom,
                 true,
             )?;
@@ -1460,17 +1447,15 @@ fn assemble_meshes(
             continue;
         };
         skin_slot_into(
-            &attachment.entry.skel,
-            attachment.entry.namespace,
-            true,
+            SkinSlotModel::WorldWeapon(attachment.entry),
             skin_shapes,
             &job.matrices,
             attachment.base,
-            lod,
-            *model,
-            job.skin_entries,
-            &attachment.entry.material_keys,
-            &attachment.entry.material_edges,
+            SkinSlotStream {
+                lod,
+                model: *model,
+                entries: job.skin_entries,
+            },
             &mut geom,
             true,
         )?;
@@ -1491,8 +1476,9 @@ fn assemble_meshes(
         job.head.map(|(head, _)| head),
         job.gun.as_ref().map(|gun| gun.entry),
     );
-    Ok(AssembledMeshes {
-        persist_key,
+    Ok(AssembledRemoteBody {
+        entity,
+        number,
         transform,
         geom,
         radii,
@@ -1526,183 +1512,236 @@ fn enqueue_remote_body_lighting(
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct RemoteBodyPublisher<'w, 's> {
+    plan: ResMut<'w, RemoteBodyDrawPlan>,
+    last_catalog: Local<'s, Option<Arc<render_material::RuntimeMaterialCatalog>>>,
+}
+
+impl RemoteBodyPublisher<'_, '_> {
+    fn publish(
+        mut self,
+        mut submit: ResMut<RemoteBodySkinnedQueue>,
+        mut binds: ResMut<RemoteBodyLightingBinds>,
+        resolved: Res<ResolvedModelLightingTable>,
+        atlas: Option<Res<WorldModelLightingAtlas>>,
+        tess: Option<Res<render_scene::TessMaterials>>,
+        model_materials: Res<crate::anim::model_materials::PreparedModelMaterials>,
+    ) {
+        let items = submit.take();
+        let binds = std::mem::take(&mut binds.by_client);
+        if items.is_empty() {
+            if self.plan.decoded_n != 0 || self.plan.last_packed_id.is_some() {
+                self.plan.clear_geometry();
+            }
+            *self.last_catalog = None;
+            return;
+        }
+        if atlas.is_none() {
+            self.plan.clear_geometry();
+            *self.last_catalog = None;
+            {
+                perf::instant!("lighting_fail", "iw4l.render");
+                diag::warn_once!(World, "remote body lighting alloc failed");
+            };
+            return;
+        }
+        let Some(tess) = tess else {
+            self.plan.clear_geometry();
+            *self.last_catalog = None;
+            {
+                perf::instant!("lighting_fail", "iw4l.render");
+                diag::warn_once!(World, "remote body lighting alloc failed");
+            };
+            return;
+        };
+        if !self
+            .last_catalog
+            .as_ref()
+            .is_some_and(|old| Arc::ptr_eq(old, &tess.catalog()))
+        {
+            self.plan.clear_geometry();
+            *self.last_catalog = Some(Arc::clone(&tess.catalog()));
+        }
+
+        let mut last_cause = None;
+        let mut seated = Vec::with_capacity(items.len());
+        for item in items {
+            let seated_light = binds
+                .get(&item.client)
+                .and_then(|request| resolved.get(request.owner));
+            let Some((handle, scene_light, probe)) = (match seated_light {
+                Some(ResolvedModelLighting::Seated {
+                    handle,
+                    scene_light_index,
+                    reflection_probe_index,
+                    ..
+                }) => Some((handle, scene_light_index, reflection_probe_index)),
+                Some(ResolvedModelLighting::Failed) | None => {
+                    last_cause = Some(Cow::Borrowed("remote body lighting alloc failed"));
+                    None
+                }
+            }) else {
+                continue;
+            };
+            seated.push((item, handle, scene_light, probe));
+        }
+        if seated.is_empty() {
+            if self.plan.decoded_n != 0 || self.plan.last_packed_id.is_some() {
+                self.plan.clear_geometry();
+            }
+            *self.last_catalog = None;
+            diag::warn_once!(
+                World,
+                "{}",
+                last_cause.unwrap_or(Cow::Borrowed("remote body submit missing"))
+            );
+            return;
+        }
+
+        let packed_id = seated_packed_id(&seated);
+        let draw_id = seated_draw_id(&seated);
+        if self.plan.last_packed_id == Some(packed_id)
+            && seated_clients_match(&self.plan, &seated)
+            && refresh_remote_body_bones(&mut self.plan, &seated)
+        {
+            if self.plan.last_draw_id != Some(draw_id) {
+                refresh_remote_body_draws(&mut self.plan, &seated);
+                self.plan.revisions.bump_draws();
+                self.plan.revision = self.plan.revision.wrapping_add(1);
+                self.plan.last_draw_id = Some(draw_id);
+            }
+
+            return;
+        }
+
+        self.plan.clear_geometry();
+        let vert_n: usize = seated
+            .iter()
+            .map(|(item, _, _, _)| item.geom.decoded_n)
+            .sum();
+        let idx_n: usize = seated
+            .iter()
+            .map(|(item, _, _, _)| item.geom.indices.len())
+            .sum();
+        self.plan.indices.reserve(idx_n);
+        let mut session = take_body_packed_session(&mut self.plan);
+        session.reserve_packed(vert_n);
+        let mut mat_by_key: HashMap<asset_core::MaterialKey, u32> = HashMap::new();
+        let mut submitted_verts = 0usize;
+        let mut any_missing_material = false;
+        for (item, handle, scene_light, probe) in seated {
+            let before = self.plan.decoded_n;
+            let appended = append_remote_body_cpu_blob(
+                &mut self.plan,
+                &mut session,
+                &item.geom.packed,
+                &item.geom.indices,
+                item.geom.decoded_n,
+            );
+            if let Some((vertex_base, _)) = appended {
+                for job in &item.geom.skin_jobs {
+                    let mut job = job.clone();
+                    job.destination = vertex_base
+                        .checked_add(job.destination)
+                        .expect("body skin destination fits u32");
+                    self.plan.skin_jobs.push(job);
+                }
+            }
+            let index_base = appended.map(|(_, index_base)| index_base);
+            for surface in item.geom.surfaces.iter() {
+                let Some(key) = surface.material.as_ref() else {
+                    any_missing_material = true;
+                    last_cause = Some({
+                        let name: String = String::new();
+                        Cow::<'static, str>::Owned(if name.is_empty() {
+                            "remote body material missing: authored name not retained at capture"
+                                .to_owned()
+                        } else {
+                            format!("remote body material missing: `{name}` not in global catalog")
+                        })
+                    });
+                    continue;
+                };
+                let mat_idx = if let Some(&idx) = mat_by_key.get(key) {
+                    idx
+                } else {
+                    let Some(material) = model_materials.material(&tess.catalog(), key).cloned()
+                    else {
+                        any_missing_material = true;
+                        last_cause = Some({
+                            let name: String = format!("{}:{}", key.namespace.as_str(), key.name);
+                            Cow::<'static, str>::Owned(if name.is_empty() {
+                                "remote body material missing: authored name not retained at capture"
+                                    .to_owned()
+                            } else {
+                                format!(
+                                    "remote body material missing: `{name}` not in global catalog"
+                                )
+                            })
+                        });
+                        continue;
+                    };
+                    let idx = self.plan.materials.len() as u32;
+                    self.plan.materials.push(material);
+                    mat_by_key.insert(key.clone(), idx);
+                    idx
+                };
+                if let Some(index_base) = index_base {
+                    push_remote_body_cpu_draw(
+                        &mut self.plan,
+                        (
+                            index_base.saturating_add(surface.index_start),
+                            surface.index_count,
+                        ),
+                        &item,
+                        handle,
+                        scene_light,
+                        probe,
+                        mat_idx,
+                    );
+                }
+            }
+            if self.plan.decoded_n > before {
+                submitted_verts += self.plan.decoded_n - before;
+            }
+        }
+        install_body_packed_session(&mut self.plan, session);
+        if submitted_verts > 0 && !any_missing_material {
+            self.plan.revisions.bump_surfaces();
+            self.plan.revisions.bump_draws();
+            let topology = topology_fingerprint(
+                &self.plan.indices,
+                &self.plan.surface_ranges,
+                self.plan.decoded_n,
+            );
+            if self.plan.revisions.topology != topology {
+                self.plan.revisions.topology = topology;
+            }
+            self.plan.revision = self.plan.revision.wrapping_add(1);
+            self.plan.last_packed_id = Some(packed_id);
+            self.plan.last_draw_id = Some(draw_id);
+
+            return;
+        }
+        diag::warn_once!(
+            World,
+            "{}",
+            last_cause.unwrap_or(Cow::Borrowed("remote body submit missing"))
+        );
+    }
+}
+
 fn submit_remote_bodies(
-    mut plan: ResMut<RemoteBodyDrawPlan>,
-    gaps: Res<RenderPresentationGaps>,
-    mut submit: ResMut<RemoteBodySkinnedQueue>,
-    mut binds: ResMut<RemoteBodyLightingBinds>,
+    publisher: RemoteBodyPublisher,
+    submit: ResMut<RemoteBodySkinnedQueue>,
+    binds: ResMut<RemoteBodyLightingBinds>,
     resolved: Res<ResolvedModelLightingTable>,
     atlas: Option<Res<WorldModelLightingAtlas>>,
     tess: Option<Res<render_scene::TessMaterials>>,
     model_materials: Res<crate::anim::model_materials::PreparedModelMaterials>,
-    mut last_catalog: Local<Option<Arc<render_material::RuntimeMaterialCatalog>>>,
 ) {
-    let items = submit.take();
-    let binds = std::mem::take(&mut binds.by_client);
-    if items.is_empty() {
-        if plan.decoded_n != 0 || plan.last_packed_id.is_some() {
-            plan.clear_geometry();
-        }
-        *last_catalog = None;
-        return;
-    }
-    if atlas.is_none() {
-        plan.clear_geometry();
-        *last_catalog = None;
-        gaps.raise(RenderGapCause::RemoteBodyLightingAllocFailed);
-        return;
-    }
-    let Some(tess) = tess else {
-        plan.clear_geometry();
-        *last_catalog = None;
-        gaps.raise(RenderGapCause::RemoteBodyLightingAllocFailed);
-        return;
-    };
-    if !last_catalog
-        .as_ref()
-        .is_some_and(|old| Arc::ptr_eq(old, &tess.catalog()))
-    {
-        plan.clear_geometry();
-        *last_catalog = Some(Arc::clone(&tess.catalog()));
-    }
-
-    let mut last_cause = None;
-    let mut seated = Vec::with_capacity(items.len());
-    for item in items {
-        let seated_light = binds
-            .get(&item.client)
-            .and_then(|request| resolved.get(request.owner));
-        let Some((handle, scene_light, probe)) = (match seated_light {
-            Some(ResolvedModelLighting::Seated {
-                handle,
-                scene_light_index,
-                reflection_probe_index,
-                ..
-            }) => Some((handle, scene_light_index, reflection_probe_index)),
-            Some(ResolvedModelLighting::Failed) | None => {
-                last_cause = Some(RenderGapCause::RemoteBodyLightingAllocFailed);
-                None
-            }
-        }) else {
-            continue;
-        };
-        seated.push((item, handle, scene_light, probe));
-    }
-    if seated.is_empty() {
-        if plan.decoded_n != 0 || plan.last_packed_id.is_some() {
-            plan.clear_geometry();
-        }
-        *last_catalog = None;
-        gaps.raise(last_cause.unwrap_or(RenderGapCause::RemoteBodySubmitMissing));
-        return;
-    }
-
-    let packed_id = seated_packed_id(&seated);
-    let draw_id = seated_draw_id(&seated);
-    if plan.last_packed_id == Some(packed_id)
-        && seated_clients_match(&plan, &seated)
-        && refresh_remote_body_bones(&mut plan, &seated)
-    {
-        if plan.last_draw_id != Some(draw_id) {
-            refresh_remote_body_draws(&mut plan, &seated);
-            plan.revisions.bump_draws();
-            plan.revision = plan.revision.wrapping_add(1);
-            plan.last_draw_id = Some(draw_id);
-        }
-        gaps.clear(RenderGap::RemoteBodyAnimation);
-        return;
-    }
-
-    plan.clear_geometry();
-    let vert_n: usize = seated
-        .iter()
-        .map(|(item, _, _, _)| item.geom.decoded_n)
-        .sum();
-    let idx_n: usize = seated
-        .iter()
-        .map(|(item, _, _, _)| item.geom.indices.len())
-        .sum();
-    plan.indices.reserve(idx_n);
-    let mut session = take_body_packed_session(&mut plan);
-    session.reserve_packed(vert_n);
-    let mut mat_by_key: HashMap<asset_core::MaterialKey, u32> = HashMap::new();
-    let mut submitted_verts = 0usize;
-    let mut any_missing_material = false;
-    for (item, handle, scene_light, probe) in seated {
-        let before = plan.decoded_n;
-        let appended = append_remote_body_cpu_blob(
-            &mut plan,
-            &mut session,
-            &item.geom.packed,
-            &item.geom.indices,
-            item.geom.decoded_n,
-        );
-        if let Some((vertex_base, _)) = appended {
-            for job in &item.geom.skin_jobs {
-                let mut job = job.clone();
-                job.destination = vertex_base
-                    .checked_add(job.destination)
-                    .expect("body skin destination fits u32");
-                plan.skin_jobs.push(job);
-            }
-        }
-        let index_base = appended.map(|(_, index_base)| index_base);
-        for surface in item.geom.surfaces.iter() {
-            let Some(key) = surface.material.as_ref() else {
-                any_missing_material = true;
-                last_cause = Some(RenderGapCause::RemoteBodyMaterialMissing {
-                    name: String::new(),
-                });
-                continue;
-            };
-            let mat_idx = if let Some(&idx) = mat_by_key.get(key) {
-                idx
-            } else {
-                let Some(material) = model_materials.material(&tess.catalog(), key).cloned() else {
-                    any_missing_material = true;
-                    last_cause = Some(RenderGapCause::RemoteBodyMaterialMissing {
-                        name: format!("{}:{}", key.namespace.as_str(), key.name),
-                    });
-                    continue;
-                };
-                let idx = plan.materials.len() as u32;
-                plan.materials.push(material);
-                mat_by_key.insert(key.clone(), idx);
-                idx
-            };
-            if let Some(index_base) = index_base {
-                push_remote_body_cpu_draw(
-                    &mut plan,
-                    index_base.saturating_add(surface.index_start),
-                    surface.index_count,
-                    item.world_from_local,
-                    handle,
-                    scene_light,
-                    probe,
-                    mat_idx,
-                    Some(item.client),
-                );
-            }
-        }
-        if plan.decoded_n > before {
-            submitted_verts += plan.decoded_n - before;
-        }
-    }
-    install_body_packed_session(&mut plan, session);
-    if submitted_verts > 0 && !any_missing_material {
-        plan.revisions.bump_surfaces();
-        plan.revisions.bump_draws();
-        let topology = topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.decoded_n);
-        if plan.revisions.topology != topology {
-            plan.revisions.topology = topology;
-        }
-        plan.revision = plan.revision.wrapping_add(1);
-        plan.last_packed_id = Some(packed_id);
-        plan.last_draw_id = Some(draw_id);
-        gaps.clear(RenderGap::RemoteBodyAnimation);
-        return;
-    }
-    gaps.raise(last_cause.unwrap_or(RenderGapCause::RemoteBodySubmitMissing));
+    publisher.publish(submit, binds, resolved, atlas, tess, model_materials);
 }
 
 fn refresh_remote_body_bones(
@@ -1841,4 +1880,47 @@ fn attach_remote_root(
     commands
         .entity(entity)
         .insert((remote, transform, Visibility::default()));
+}
+
+fn retire_remote_body(
+    event: On<Remove<CEntity>>,
+    identities: Query<&CEntity>,
+    lighting: Option<ResMut<RemoteBodyLightingBinds>>,
+) {
+    let Ok(identity) = identities.get(event.entity) else {
+        return;
+    };
+    let number = u32::from(identity.number());
+    if let Some(mut lighting) = lighting {
+        lighting.by_client.remove(&number);
+    }
+}
+
+fn copy_corpse_animation(
+    mut commands: Commands,
+    added: Query<(Entity, &CEntityRuntime), Added<RemotePlayer>>,
+    states: Query<&RemoteBodyState>,
+    slots: Res<net::CEntitySlots>,
+) {
+    for (entity, runtime) in &added {
+        if runtime.next_state.e_type != ET_PLAYER_CORPSE {
+            continue;
+        }
+        let Some(victim) = u16::try_from(runtime.next_state.client_num)
+            .ok()
+            .and_then(|number| slots.entity_for_number(number))
+        else {
+            continue;
+        };
+        let Some(mut tree) = states.get(victim).ok().and_then(|state| state.tree.clone()) else {
+            continue;
+        };
+        tree.dobj = None;
+        tree.reuse_key = None;
+        commands.queue(move |world: &mut World| {
+            if let Some(mut state) = world.get_mut::<RemoteBodyState>(entity) {
+                state.tree = Some(tree);
+            }
+        });
+    }
 }

@@ -46,16 +46,6 @@ impl FxPointGroup {
     };
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct FxMarkCopyCensus {
-    pub copied_tri: u32,
-    pub copied_point: u32,
-    pub tri_groups: u32,
-    pub point_groups: u32,
-
-    pub first_xyz: [f32; 3],
-}
-
 #[inline]
 pub fn mark_contexts_equal(a: &[u8; 7], b: &[u8; 7]) -> bool {
     a == b
@@ -174,36 +164,4 @@ pub fn copy_mark_points(
         handle = groups[idx].next;
     }
     copied
-}
-
-pub fn copy_staging_into_scratch(
-    tris: &[FxMarkStagingTri],
-    points: &[FxMarkStagingPoint],
-    tri_groups: &mut [FxTriGroup],
-    point_groups: &mut [FxPointGroup],
-) -> Option<FxMarkCopyCensus> {
-    if tris.is_empty() {
-        return None;
-    }
-    let need_t = mark_tri_groups_for_staging(tris) as usize;
-    let need_p = crate::mark_point_groups_for_count(points.len() as u32) as usize;
-    if tri_groups.len() < need_t || point_groups.len() < need_p {
-        return None;
-    }
-    let tri_head = link_scratch_tri_groups(&mut tri_groups[..need_t]);
-    let point_head = link_scratch_point_groups(&mut point_groups[..need_p]);
-    let copied_tri = copy_mark_tris(&mut tri_groups[..need_t], tri_head, tris);
-    let copied_point = copy_mark_points(&mut point_groups[..need_p], point_head, points);
-    let first_xyz = if (tri_head as usize) < need_t && (point_head as usize) < need_p {
-        point_groups[point_head as usize].points[0].xyz
-    } else {
-        [0.0; 3]
-    };
-    Some(FxMarkCopyCensus {
-        copied_tri,
-        copied_point,
-        tri_groups: need_t as u32,
-        point_groups: need_p as u32,
-        first_xyz,
-    })
 }

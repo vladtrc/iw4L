@@ -13,7 +13,7 @@ use weapon_iw4::{WEAPTYPE_GRENADE, WeaponState};
 
 const GRENADE_LINGER_MS: i64 = 30_000; // threads on the grenade keep running after it explodes
 
-pub(crate) fn is_changing_weapon(state: i32) -> bool {
+pub fn is_changing_weapon(state: i32) -> bool {
     matches!(
         WeaponState::from_i32(state),
         Ok(WeaponState::Raising
@@ -228,10 +228,6 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
 }
 
 pub(crate) fn sync_engine_events(world: &mut World) {
-    let request = world.resource::<crate::step::StepRequest>();
-    if !request.reason.advances_authority_world() {
-        return;
-    }
     let notes = std::mem::take(&mut FrameWorld::from_world(world).weapon_notes);
     let runtime = world.resource::<RoundScript>();
     if runtime.program.is_none() || runtime.fault.is_some() || !runtime.started {
@@ -306,12 +302,7 @@ fn notify_weapon_changes(world: &mut World) {
 }
 
 pub(crate) fn publish_projectile_launches(world: &mut World) {
-    if world
-        .resource::<crate::step::StepRequest>()
-        .reason
-        .advances_authority_world()
-        && world.resource::<RoundScript>().started
-    {
+    if world.resource::<RoundScript>().started {
         adopt_fired(world);
     }
 }

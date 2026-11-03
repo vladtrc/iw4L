@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use master_protocol::ContentFlags;
+use master_protocol::ContentFamilies;
 
 #[derive(Resource, Default, Debug)]
 pub struct UiPartyState {
@@ -78,84 +78,80 @@ pub enum UiMenuKey {
     Delete,
 }
 
-#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AssetFamilies(pub u8);
+#[derive(Resource, Clone, Debug, PartialEq, Eq)]
+pub struct AssetFamilies(pub ContentFamilies);
 
 impl AssetFamilies {
-    pub const ALL: Self = Self(ContentFlags::KNOWN.0);
-    pub const SETTINGS: [(&'static str, &'static str, u8); 3] = [
-        ("iw5", "sv_assets_iw5", ContentFlags::IW5.0),
-        ("t5", "sv_assets_t5", ContentFlags::T5.0),
-        ("t6", "sv_assets_t6", ContentFlags::T6.0),
-    ];
-
-    pub fn from_families<'a>(families: impl IntoIterator<Item = &'a str>) -> Self {
-        Self(
-            families
-                .into_iter()
-                .filter_map(ContentFlags::family)
-                .fold(0, |mask, flag| mask | flag.0),
+    pub fn all_installed() -> Self {
+        Self::from_families(
+            asset_core::families()
+                .iter()
+                .map(|family| family.id().as_str()),
         )
     }
-
-    pub fn enabled(self, family: &str) -> bool {
-        ContentFlags::family(family).is_some_and(|flag| ContentFlags(self.0).contains(flag))
+    pub fn settings() -> Vec<(asset_core::FamilyId, String)> {
+        asset_core::families()
+            .iter()
+            .map(|family| family.id())
+            .filter(|id| *id != asset_core::FamilyId::IW4)
+            .map(|id| (id, format!("sv_assets_{}", id.as_str())))
+            .collect()
     }
-
-    pub fn missing_notice(self, have: u8) -> Option<String> {
-        let missing = self.0 & !have;
-        if missing == 0 {
+    pub fn from_families<'a>(families: impl IntoIterator<Item = &'a str>) -> Self {
+        Self(ContentFamilies::from_families(families).expect("valid bounded family selection"))
+    }
+    pub fn enabled(&self, family: &str) -> bool {
+        self.0.contains_family(family)
+    }
+    pub fn missing_notice(&self, have: &ContentFamilies) -> Option<String> {
+        let missing = self.0.missing_from(have);
+        if missing.is_empty() {
             return None;
         }
-        let names = [
-            (ContentFlags::IW4, "Modern Warfare 2 (IW4)"),
-            (ContentFlags::IW5, "Modern Warfare 3 (IW5)"),
-            (ContentFlags::T5, "Black Ops (T5)"),
-            (ContentFlags::T6, "Black Ops II (T6)"),
-        ]
-        .into_iter()
-        .filter_map(|(flag, name)| ContentFlags(missing).contains(flag).then_some(name))
-        .collect::<Vec<_>>()
-        .join(", ");
-        let names = if missing & !ContentFlags::KNOWN.0 != 0 {
-            if names.is_empty() {
-                "unknown game content (update IW4L)".to_owned()
-            } else {
-                format!("{names}, unknown game content (update IW4L)")
-            }
-        } else {
-            names
-        };
+        let names = missing
+            .iter()
+            .map(|token| {
+                asset_core::FamilyId::parse(token)
+                    .and_then(asset_core::game_folder_family)
+                    .map(|policy| format!("{} ({token})", policy.title))
+                    .unwrap_or_else(|| token.to_owned())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
         Some(format!(
             "Missing game files:\n{names}.\n\nInstall these games and select their game folders,\nor ask the host to disable their optional asset families."
         ))
     }
-
-    pub fn from_inventory(have: u8, dvars: &UiMenuDvars) -> Result<Self, String> {
-        let mut enabled = have & ContentFlags::IW4.0;
-        for (family, setting, bit) in Self::SETTINGS {
+    pub fn from_inventory(have: &ContentFamilies, dvars: &UiMenuDvars) -> Result<Self, String> {
+        let mut enabled = Vec::new();
+        if have.contains_family("iw4") {
+            enabled.push("iw4".to_owned());
+        }
+        for (id, setting) in Self::settings() {
+            let family = id.as_str();
             let env = std::env::var(format!("IW4L_ASSETS_{}", family.to_ascii_uppercase())).ok();
-            let value = dvars.get(setting).or(env.as_deref());
+            let value = dvars.get(&setting).or(env.as_deref());
             let allow = match value {
-                None => have & bit != 0,
+                None => have.contains_family(family),
                 Some("0") => false,
                 Some("1") => true,
                 Some(_) => return Err(format!("{setting} must be 0 or 1")),
             };
             if allow {
-                if have & bit == 0 {
+                if !have.contains_family(family) {
                     return Err(format!(
                         "Cannot enable {family}: game content is not installed"
                     ));
                 }
-                enabled |= bit;
+                enabled.push(family.to_owned());
             }
         }
-        Ok(Self(enabled))
+        Ok(Self(
+            ContentFamilies::from_families(enabled).map_err(|error| error.to_string())?,
+        ))
     }
-
-    pub fn require_map(self, map: &str) -> Result<(), String> {
-        let family = ContentFlags::map_family(map);
+    pub fn require_map(&self, map: &str) -> Result<(), String> {
+        let family = ContentFamilies::map_family(map);
         if self.enabled(family) {
             Ok(())
         } else {

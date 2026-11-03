@@ -10,7 +10,7 @@ use render_frontend::assemble::drawsurf::tess::particle_cloud::FxParticleCloudPl
 use render_frontend::assemble::drawsurf::tess::smodel::SmodelGpuPlan;
 use render_frontend::assemble::drawsurf::tess::world::WorldDrawGpuPlan;
 use render_frontend::assemble::drawsurf::tess::xmodel::XModelDrawPlan;
-use render_gpu::diag::render_frame_diag::SharedRenderStagesSlot;
+use render_gpu::diag::render_frame_diag::{ExtractColourStats, SharedRenderStagesSlot};
 use render_gpu::{
     ExtractedRenderFrameProducts, ExtractedRuntimeImageHandles, InstalledRenderWorld,
     PublishedRenderFrame, SamplerTable,
@@ -86,9 +86,9 @@ fn overlay_xmodel_shares(
     }
 }
 
-fn insert_empty_colour(commands: &mut Commands) {
-    commands.insert_resource(InstalledRenderWorld::default());
-    commands.insert_resource(PublishedRenderFrame::default());
+fn clear_colour(world: &mut InstalledRenderWorld, frame: &mut PublishedRenderFrame) {
+    *world = InstalledRenderWorld::default();
+    *frame = PublishedRenderFrame::default();
 }
 
 fn world_colour_extract_counts(plan: Option<&WorldDrawGpuPlan>) -> (usize, usize, usize) {
@@ -116,51 +116,58 @@ fn smodel_colour_extract_counts(plan: Option<&SmodelGpuPlan>) -> (usize, usize) 
 }
 
 pub fn extract_exact_colour(
-    mut commands: Commands,
+    mut world: ResMut<InstalledRenderWorld>,
     sealed: Extract<Option<Res<PublishedRenderFrame>>>,
-    existing: Option<Res<PublishedRenderFrame>>,
+    mut existing: ResMut<PublishedRenderFrame>,
     mut focus_submit: ResMut<render_gpu::FocusedOwnerSubmitState>,
     slot: Option<Res<SharedRenderStagesSlot>>,
 ) {
     let started = Instant::now();
-    if let Some(existing) = existing.as_ref() {
-        render_gpu::emit_focused_owner_submit(
-            &existing.frame_products,
-            &mut focus_submit,
-            None,
-            None,
-            "render_not_scheduled",
-            0,
-            0,
-            0,
-        );
-    }
+    focus_submit.emit(
+        &existing.frame_products,
+        None,
+        None,
+        render_gpu::FocusedOwnerSubmitReport {
+            terminal: "render_not_scheduled",
+            prepared_surfaces: 0,
+            prepared_passes: 0,
+            drawn_passes: 0,
+        },
+    );
     if let Some(sealed) = sealed.as_ref() {
-        commands.insert_resource(sealed.world().clone());
-        commands.insert_resource((**sealed).clone());
+        *world = sealed.world().clone();
+        *existing = (**sealed).clone();
     } else {
-        insert_empty_colour(&mut commands);
+        clear_colour(&mut world, &mut existing);
     }
     if let Some(slot) = slot {
         slot.stamp_extract_products(started.elapsed().as_secs_f32() * 1000.0, 1, 0);
-        slot.stamp_extract_colour(0.0, 0.0, 1, 0, 0, 1, 1, 0);
+        slot.stamp_extract_colour(ExtractColourStats {
+            ports_ms: 0.0,
+            tess_ms: 0.0,
+            world_skip: 1,
+            world_clone_bytes: 0,
+            xmodel_clone_bytes: 0,
+            xmodel_arc: 1,
+            fx_arc: 1,
+            fx_clone_bytes: 0,
+        });
     }
 }
 
 pub fn seal_render_frame(
-    mut commands: Commands,
     material: (
         Option<Res<render_frontend::assemble::drawsurf::MaterialGeneration>>,
         Option<Res<render_frontend::assemble::drawsurf::MaterialFrameInputs>>,
         Option<Res<render_frontend::assemble::drawsurf::FrameAssemblyInputs>>,
         Option<Res<render_frontend::assemble::drawsurf::RenderFrameProducts>>,
+        Res<render_scene::SkinFailure>,
     ),
     world: Option<Res<WorldDrawGpuPlan>>,
     smodel: Option<Res<SmodelGpuPlan>>,
     smc: Option<Res<render_frontend::prepare::scene::smodel_geom_cache::WorldStaticModelCache>>,
     static_identity: (
         Option<Res<render_frontend::assemble::drawsurf::StaticDrawLane>>,
-        Option<Res<frame::WorldGeneration>>,
         Option<Res<frame::WorldProducts>>,
     ),
     xmodel: Option<Res<XModelDrawPlan>>,
@@ -175,48 +182,46 @@ pub fn seal_render_frame(
         Option<Res<render_frontend::assemble::drawsurf::MapSunEffects>>,
         Option<Res<render_frontend::assemble::drawsurf::SunEffectsFrameInput>>,
     ),
-    (existing_world, existing_frame): (
-        Option<Res<InstalledRenderWorld>>,
-        Option<Res<PublishedRenderFrame>>,
+    (mut existing_world, mut existing_frame): (
+        ResMut<InstalledRenderWorld>,
+        ResMut<PublishedRenderFrame>,
     ),
 ) {
-    let (retained, world_generation, world_products) = static_identity;
-    let world_products = world_products.map(|products| *products).unwrap_or_default();
-    let (runtime, mat_frame, assembly, products) = material;
+    let (retained, world_products) = static_identity;
+    let world_products = world_products
+        .map(|products| *products)
+        .unwrap_or(frame::WorldProducts(None));
+    let (runtime, mat_frame, assembly, products, skin_failure) = material;
     let Some(runtime) = runtime.as_ref() else {
-        insert_empty_colour(&mut commands);
+        clear_colour(&mut existing_world, &mut existing_frame);
         return;
     };
     let Some(mat_frame) = mat_frame.as_ref() else {
-        insert_empty_colour(&mut commands);
+        clear_colour(&mut existing_world, &mut existing_frame);
         return;
     };
     let generation = runtime.catalog.generation_id();
-    let world_generation = world_generation
-        .as_ref()
-        .map(|generation| generation.stamp())
-        .unwrap_or(frame::WorldStamp(None));
     let Some(products) = products.as_ref() else {
-        insert_empty_colour(&mut commands);
+        clear_colour(&mut existing_world, &mut existing_frame);
         return;
     };
     let snapshot = products.published();
-    let coherent =
-        frame_submission_matches(assembly.as_deref(), &snapshot, generation, world_generation);
+    let coherent = frame_submission_matches(assembly.as_deref(), &snapshot, generation);
     if !coherent {
-        insert_empty_colour(&mut commands);
+        clear_colour(&mut existing_world, &mut existing_frame);
         return;
     }
     let frame_products = ExtractedRenderFrameProducts(snapshot);
     let cpu_port_len = runtime.programs.ports().len();
-    let skip_ports = existing_world.as_ref().is_some_and(|world| {
+    let skip_ports = {
+        let world = &*existing_world;
         render_gpu::colour_ports_static(
             world.generation,
             world.ports.len(),
             generation,
             cpu_port_len,
         )
-    });
+    };
     let (ports, _ports_ms) = if skip_ports {
         (Vec::new(), 0.0_f32)
     } else {
@@ -231,6 +236,7 @@ pub fn seal_render_frame(
                 abi: port.abi().clone(),
                 module: port.shared_module(),
                 layout: port.wgpu_layout().clone(),
+                lowering: port.lowering_recipe(),
             })
             .collect();
         (ports, ports_started.elapsed().as_secs_f32() * 1000.0)
@@ -240,27 +246,21 @@ pub fn seal_render_frame(
         world_colour_extract_counts(world.as_ref().map(|plan| &**plan));
     let (smodel_v, smodel_i) = smodel_colour_extract_counts(smodel.as_ref().map(|plan| &**plan));
 
-    let skip_world_smodel = existing_world.as_ref().is_some_and(|world| {
-        render_gpu::colour_world_smodel_static(
-            (world.world_generation, world.world_products),
-            world.static_geometry.world_vertices.len(),
-            world.static_geometry.world_indices.len(),
-            world.static_geometry.world_layer.len(),
-            world.static_geometry.smodel_vertices.len(),
-            world.static_geometry.smodel_indices.len(),
-            (world_generation, world_products),
-            world_v,
-            world_i,
-            world_layer_n,
-            smodel_v,
-            smodel_i,
-        )
-    });
+    let skip_world_smodel = {
+        let world = &*existing_world;
+        world
+            .static_geometry_identity()
+            .matches(render_gpu::StaticGeometryIdentity {
+                world_products,
+                world_vertex_count: world_v,
+                world_index_count: world_i,
+                world_layer_count: world_layer_n,
+                smodel_vertex_count: smodel_v,
+                smodel_index_count: smodel_i,
+            })
+    };
     let smc_revision = smc.as_ref().map(|cache| cache.content_revision());
-    let skip_smc_maps = skip_world_smodel
-        && existing_world
-            .as_ref()
-            .is_some_and(|world| world.smc_revision == smc_revision);
+    let skip_smc_maps = skip_world_smodel && existing_world.smc_revision == smc_revision;
     let empty_static = || {
         (
             Arc::new(Vec::new()),
@@ -528,12 +528,9 @@ pub fn seal_render_frame(
     let image_handles = images
         .as_ref()
         .map(|handles| (**handles).clone())
-        .unwrap_or_default();
+        .unwrap_or_else(render_frontend::assemble::drawsurf::RuntimeImageHandles::default);
 
-    let mut exec_frame = existing_frame
-        .as_ref()
-        .map(|frame| frame.exec_frame.clone())
-        .unwrap_or_default();
+    let mut exec_frame = existing_frame.exec_frame.clone();
     render_frontend::assemble::drawsurf::material_exec::refresh(
         &mut exec_frame,
         mat_frame,
@@ -543,11 +540,20 @@ pub fn seal_render_frame(
         generation,
         catalog: Some(Arc::clone(&runtime.catalog)),
         prepared: Some(Arc::clone(&runtime.prepared)),
-        world_generation,
         world_products,
         smc_revision,
         ports: Arc::new(ports),
         static_geometry: Arc::new(render_gpu::ExtractedStaticGeometry {
+            world_bounds: render_gpu::surface_bounds(
+                &world_vertices,
+                &world_indices,
+                &world_surface_ranges,
+            ),
+            smodel_bounds: render_gpu::surface_bounds(
+                &smodel_vertices,
+                &smodel_indices,
+                &smodel_surface_ranges,
+            ),
             world_vertices,
             world_layer,
             world_indices,
@@ -579,13 +585,13 @@ pub fn seal_render_frame(
         sun_effects: sun.0.and_then(|sun| sun.def),
     };
     let next_frame = render_gpu::RenderFrameData {
+        skin_refused: skin_failure.reason.is_some(),
         skin_jobs: xmodel
             .as_ref()
             .map(|plan| plan.skin_jobs.clone())
-            .unwrap_or_default(),
+            .unwrap_or(Vec::new()),
         frame_products,
         generation,
-        world_generation,
         exec_frame,
         sun_shadow: mat_frame.sun_shadow,
         sun_effects: sun.1.and_then(|input| input.frame),
@@ -593,11 +599,11 @@ pub fn seal_render_frame(
         pipeline_world_materials: spawn_job
             .as_ref()
             .map(|job| job.pipeline_world_materials.clone())
-            .unwrap_or_default(),
+            .unwrap_or_else(|| Arc::new(std::collections::HashSet::new())),
         pipeline_smodel_materials: spawn_job
             .as_ref()
             .map(|job| job.pipeline_smodel_materials.clone())
-            .unwrap_or_default(),
+            .unwrap_or_else(|| Arc::new(std::collections::HashSet::new())),
         pipeline_demand_revision: spawn_job
             .as_ref()
             .map(|job| job.pipeline_demand_revision)
@@ -632,22 +638,20 @@ pub fn seal_render_frame(
         glass_mesh_bounds: glass_mesh
             .as_ref()
             .and_then(|plan| plan.bounds_share.clone())
-            .unwrap_or_default(),
+            .unwrap_or_else(|| Arc::new(Vec::new())),
     };
-    if let Some(existing) = existing_world.as_ref() {
-        reuse_installed_rows(
-            &mut next_world,
-            existing,
-            WorldRowReuse {
-                static_geometry: skip_world_smodel,
-                smc_index_baked: skip_smc_maps,
-                ports: skip_ports,
-            },
-        );
-    }
+    reuse_installed_rows(
+        &mut next_world,
+        &existing_world,
+        WorldRowReuse {
+            static_geometry: skip_world_smodel,
+            smc_index_baked: skip_smc_maps,
+            ports: skip_ports,
+        },
+    );
     let world = InstalledRenderWorld::new(next_world);
-    commands.insert_resource(world.clone());
-    commands.insert_resource(PublishedRenderFrame::seal(world, next_frame));
+    *existing_world = world.clone();
+    *existing_frame = PublishedRenderFrame::seal(world, next_frame);
 }
 
 /// Which rows of the installed world the seal decided are still the ones the
@@ -683,12 +687,9 @@ fn frame_submission_matches(
     inputs: Option<&render_frontend::assemble::drawsurf::FrameAssemblyInputs>,
     snapshot: &render_frame::FrameProductsSnapshot,
     generation: render_frontend::assemble::drawsurf::MaterialGenerationId,
-    world_generation: frame::WorldStamp,
 ) -> bool {
     inputs.is_some_and(|inputs| {
-        inputs.frame_id == snapshot.frame_id
-            && inputs.catalog_generation == generation
-            && inputs.world_generation == world_generation
+        inputs.frame_id == snapshot.frame_id && inputs.catalog_generation == generation
     }) && snapshot.products.iter().all(|product| {
         matches!(product.status, render_frame::FrameProductStatus::Missing(_))
             || product.generation_id == generation
@@ -748,6 +749,7 @@ pub fn extract_postfx(
                         abi: film.port.abi().clone(),
                         module: film.port.shared_module(),
                         layout: film.port.wgpu_layout().clone(),
+                        lowering: film.port.lowering_recipe(),
                     },
                     shader: film.shader.clone(),
                     shell: film.shell.clone(),
@@ -769,6 +771,7 @@ pub fn extract_postfx(
                     abi: blood.film.port.abi().clone(),
                     module: blood.film.port.shared_module(),
                     layout: blood.film.port.wgpu_layout().clone(),
+                    lowering: blood.film.port.lowering_recipe(),
                 },
                 shader: blood.film.shader.clone(),
                 shell: blood.film.shell.clone(),
@@ -829,7 +832,7 @@ pub fn extract_geometry(
     let g0_world_surfs = dpvs
         .as_ref()
         .map(|stats| stats.g0_world_surfs.clone())
-        .unwrap_or_default();
+        .unwrap_or(Vec::new());
     let generation = runtime.catalog.generation_id();
     let world_v = world
         .as_ref()

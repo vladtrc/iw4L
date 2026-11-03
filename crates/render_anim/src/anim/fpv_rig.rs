@@ -68,12 +68,6 @@ impl FpvMaterialAdmission {
             .find(|(index, _)| *index == surface)
             .map(|(_, verdict)| verdict)
     }
-
-    pub fn verdicts_of(&self, catalog_entry: usize) -> &[(usize, FpvSurfaceVerdict)] {
-        self.verdicts
-            .get(&catalog_entry)
-            .map_or(&[], |verdicts| verdicts.as_slice())
-    }
 }
 
 #[derive(Clone, Copy, Debug)]

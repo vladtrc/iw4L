@@ -33,6 +33,11 @@ fn normalize(name: &str) -> String {
 }
 
 impl ScriptSources {
+    pub fn text(&self, module: &str) -> Option<&str> {
+        let bytes = self.sources.get(module)?.bytes.as_ref().ok()?;
+        std::str::from_utf8(bytes).ok()
+    }
+
     pub fn read(&self, module: &str) -> Result<Vec<u8>, String> {
         self.sources
             .get(module)
@@ -133,11 +138,7 @@ impl ScriptSources {
         &self.schemas
     }
 
-    pub(crate) fn capture_schema(
-        &mut self,
-        name: String,
-        schema: structured_data_iw4::DefinitionSet,
-    ) {
+    pub fn capture_schema(&mut self, name: String, schema: structured_data_iw4::DefinitionSet) {
         self.schemas
             .insert(normalize(&name), std::sync::Arc::new(schema));
     }
@@ -161,7 +162,7 @@ impl ScriptSources {
         })
     }
 
-    pub(crate) fn capture(&mut self, name: &str, data: &[u8], compressed: bool) {
+    pub fn capture(&mut self, name: &str, data: &[u8], compressed: bool) {
         let name = normalize(name);
         if name.ends_with(".cfg") || name.ends_with(".shock") || name == "radiant/keys.txt" {
             if let Some(text) = asset_world::decode_rawfile_text(data, compressed) {
@@ -192,7 +193,7 @@ impl ScriptSources {
         );
     }
 
-    pub(crate) fn capture_table(&mut self, table: &asset_game::CapturedStringTable) {
+    pub fn capture_table(&mut self, table: &asset_game::CapturedStringTable) {
         self.tables.insert(
             normalize(&table.name),
             ScriptTable {
@@ -228,7 +229,7 @@ impl ScriptSources {
         true
     }
 
-    pub(crate) fn insert_source(&mut self, module: &str, source: String) {
+    pub fn insert_source(&mut self, module: &str, source: String) {
         self.sources.insert(
             normalize(module),
             ScriptSource {
@@ -238,7 +239,7 @@ impl ScriptSources {
         );
     }
 
-    pub(crate) fn set_entities(&mut self, entities: String) {
+    pub fn set_entities(&mut self, entities: String) {
         self.entities = Some(entities);
     }
 

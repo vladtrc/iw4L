@@ -185,26 +185,35 @@ pub(super) fn copy_submit_prepare_ms(
 
     for (counter, value) in [
         (
-            perf::Counter::CounterDipsColour,
+            perf::counter!("dip_colour", "iw4l.render", handle),
             census.preparation.gpu_ready,
         ),
-        (perf::Counter::CounterDipsSun, census.frame.sun_shadow_gpu),
         (
-            perf::Counter::CounterBindGroup0,
+            perf::counter!("dip_sun", "iw4l.render", handle),
+            census.frame.sun_shadow_gpu,
+        ),
+        (
+            perf::counter!("bind0", "iw4l.render", handle),
             census.preparation.set_bind_group0_n,
         ),
         (
-            perf::Counter::CounterBindGroup1,
+            perf::counter!("bind1", "iw4l.render", handle),
             census.preparation.set_bind_group1_n,
         ),
-        (perf::Counter::CounterCmdState, census.frame.set_state_n),
         (
-            perf::Counter::CounterOverlayConstWrites,
+            perf::counter!("cmd_state", "iw4l.render", handle),
+            census.frame.set_state_n,
+        ),
+        (
+            perf::counter!("overlay_const_writes", "iw4l.render", handle),
             census.preparation.overlay_const_writes_n,
         ),
-        (perf::Counter::CounterMultiDraws, census.frame.multi_draw_n),
         (
-            perf::Counter::CounterMultiDrawCommands,
+            perf::counter!("multi_draw", "iw4l.render", handle),
+            census.frame.multi_draw_n,
+        ),
+        (
+            perf::counter!("multi_draw_cmds", "iw4l.render", handle),
             census.frame.multi_draw_commands_n,
         ),
     ] {
@@ -214,23 +223,23 @@ pub(super) fn copy_submit_prepare_ms(
     }
     for (counter, value) in [
         (
-            perf::Counter::RenderSubmitSunMs,
+            perf::counter!("submit_sun", "iw4l.render", handle),
             census.frame.sun_shadow_submit_ms,
         ),
         (
-            perf::Counter::RenderSubmitGatherMs,
+            perf::counter!("submit_gather", "iw4l.render", handle),
             census.frame.submit_gather_ms,
         ),
         (
-            perf::Counter::RenderSubmitPrepareMs,
+            perf::counter!("submit_prepare", "iw4l.render", handle),
             census.frame.submit_prepare_ms,
         ),
         (
-            perf::Counter::RenderSubmitArenaMs,
+            perf::counter!("submit_arena", "iw4l.render", handle),
             census.frame.submit_arena_ms,
         ),
         (
-            perf::Counter::RenderSubmitRecordMs,
+            perf::counter!("submit_record", "iw4l.render", handle),
             census.frame.submit_record_ms,
         ),
     ] {

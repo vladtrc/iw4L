@@ -48,7 +48,7 @@ fn encode_zone_field(zone: &str) -> [u8; ZONE_FIELD_LEN] {
     let mut out = [0u8; ZONE_FIELD_LEN];
     let cleaned: String = zone
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
         .take(ZONE_FIELD_LEN - 1)
         .collect();
     let bytes = cleaned.as_bytes();
@@ -67,14 +67,16 @@ fn looks_like_zone_field(zone: &[u8; ZONE_FIELD_LEN]) -> bool {
         return true;
     }
     let Some(end) = zone.iter().position(|&b| b == 0) else {
-        return zone.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'_');
+        return zone
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
     };
     if end == 0 {
         return false;
     }
     zone[..end]
         .iter()
-        .all(|&b| b.is_ascii_alphanumeric() || b == b'_')
+        .all(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         && zone[end..].iter().all(|&b| b == 0)
 }
 
@@ -143,7 +145,7 @@ pub fn demo_path(artifacts_root: &Path, name: &str) -> PathBuf {
 pub fn sanitize_demo_name(name: &str) -> Option<String> {
     let cleaned: String = name
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == '-')
         .take(64)
         .collect();
     if cleaned.is_empty() {

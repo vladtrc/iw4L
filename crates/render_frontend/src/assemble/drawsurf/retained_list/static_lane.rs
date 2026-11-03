@@ -1,18 +1,17 @@
-use super::bmodel_world_from_local_for_surf;
+use super::bmodel_owner_for_surf;
 use super::common::{
     push_direct_lane_item, retained_draw_order_tie, with_catalog, world_surface_rank,
 };
 use super::smodel::{
-    SmodelBucketEmitQueues, SmodelBucketEmitSource, SmodelDestinationPass, SmodelPretessBuilder,
-    consume_smodel_bucket_tail, consume_smodel_buckets, expand_smodel_destination,
-    packed_lighting_dword_nonzero, push_smodel_surf_bucket, smodel_cache_index_u16,
-    smodel_lod_is_rigid, smodel_lod_smc_flag, smodel_vis_skips_slot,
+    SmodelBucketEmitQueues, SmodelBucketEmitSource, SmodelDestinationPass, SmodelDestinationWriter,
+    SmodelPretessBuilder, packed_lighting_dword_nonzero, push_smodel_surf_bucket,
+    smodel_cache_index_u16, smodel_lod_is_rigid, smodel_lod_smc_flag, smodel_vis_skips_slot,
 };
 use crate::assemble::drawsurf::list::DrawSurfList;
 use crate::assemble::drawsurf::tess::smodel::{
     LodRampArgs, SmodelGpuPlan, SmodelPlacement, smodel_camera_lod,
 };
-use crate::prepare::scene::cull::{DpvsFrameStats, smodel_cull_dist_skips_slot};
+use crate::prepare::scene::cull::{DpvsFrameStats, WorldEyes, smodel_cull_dist_skips_slot};
 use crate::prepare::scene::smodel_geom_cache::{
     LodRampDvar, PretessDvar, SmcEnableDvar, WorldStaticModelCache,
 };
@@ -20,7 +19,6 @@ use crate::prepare::scene::smodel_lighting::WorldSmodelLighting;
 use crate::prepare::scene::view_parms::PreparedSceneView;
 use crate::prepare::scene::world::WorldScene;
 use bevy::prelude::*;
-use frame::{WorldGeneration, WorldStamp};
 use render_frame::{BspCameraLane, RetainedDrawItem, RetainedDrawKind};
 use std::sync::Arc;
 use std::time::Instant;
@@ -98,13 +96,12 @@ pub struct StaticDrawLane {
 
     logged_buckets: Option<[u32; 5]>,
 
-    pub(crate) world_generation: WorldStamp,
     pub(crate) colour: Vec<RetainedDrawItem>,
     pub(crate) emissive: Vec<RetainedDrawItem>,
     pub(crate) distortion: Vec<RetainedDrawItem>,
     pub(crate) census: RetainedRebuildCensus,
 
-    last_static: Option<(u64, u64, EyeLodReuseKey)>,
+    last_static: Option<(u64, u64, render_scene::LodViewKey)>,
 
     static_items: Vec<RetainedDrawItem>,
 
@@ -126,9 +123,8 @@ pub struct StaticDrawLane {
 }
 
 impl StaticDrawLane {
-    pub(crate) fn live_for(
+    pub(crate) fn draws(
         &self,
-        current: WorldStamp,
     ) -> (
         &[RetainedDrawItem],
         &[RetainedDrawItem],
@@ -136,32 +132,28 @@ impl StaticDrawLane {
         &[RetainedDrawItem],
         &[u16],
     ) {
-        if self.world_generation == current {
-            (
-                &self.static_items,
-                &self.colour,
-                &self.emissive,
-                &self.distortion,
-                self.world_run_surfs.as_slice(),
-            )
-        } else {
-            (&[], &[], &[], &[], &[])
-        }
+        (
+            &self.static_items,
+            &self.colour,
+            &self.emissive,
+            &self.distortion,
+            &self.world_run_surfs,
+        )
     }
 }
 
 fn static_list_reusable(
-    last: Option<(u64, u64, EyeLodReuseKey)>,
+    last: Option<&(u64, u64, render_scene::LodViewKey)>,
     world_id: u64,
     vis_id: u64,
-    eye_key: EyeLodReuseKey,
+    eye_key: &render_scene::LodViewKey,
     generation_hold: bool,
     has_static: bool,
 ) -> bool {
     generation_hold
         && has_static
         && last
-            .is_some_and(|(world, vis, eye)| world == world_id && vis == vis_id && eye == eye_key)
+            .is_some_and(|(world, vis, eye)| *world == world_id && *vis == vis_id && eye == eye_key)
 }
 
 fn world_static_reusable(last_world_id: Option<u64>, world_id: u64, generation_hold: bool) -> bool {
@@ -170,12 +162,6 @@ fn world_static_reusable(last_world_id: Option<u64>, world_id: u64, generation_h
 
 fn smodel_descriptors_reusable(last: Option<&[SmodelLodPick]>, next: &[SmodelLodPick]) -> bool {
     last.is_some_and(|last| last == next)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct EyeLodReuseKey {
-    eye_bits: Option<[u32; 3]>,
-    ramp_bits: [Option<u32>; 3],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,17 +181,6 @@ struct SmodelLodWalk {
     query_n: u32,
 }
 
-fn eye_lod_reuse_key(eye: Option<Vec3>, ramp: LodRampArgs) -> EyeLodReuseKey {
-    EyeLodReuseKey {
-        eye_bits: eye.map(|eye| [eye.x.to_bits(), eye.y.to_bits(), eye.z.to_bits()]),
-        ramp_bits: [
-            ramp.scale_mid.map(f32::to_bits),
-            ramp.bias_mid.map(f32::to_bits),
-            ramp.scale_last.map(f32::to_bits),
-        ],
-    }
-}
-
 fn note_smodel_vis(census: &mut RetainedRebuildCensus, smodel_vis: &[u8]) {
     if !smodel_vis.is_empty() {
         census.smodel_vis_ready = 1;
@@ -217,8 +192,8 @@ fn collect_smodel_lod_picks(
     plan: Option<&SmodelGpuPlan>,
     smodel_vis: &[u8],
     cull_dists: &[u16],
-    eye: Option<Vec3>,
-    lod_args: LodRampArgs,
+    eyes: &WorldEyes,
+    lod_args: &LodRampArgs,
     lighting: Option<&WorldSmodelLighting>,
     smc_cache: Option<&WorldStaticModelCache>,
 ) -> SmodelLodWalk {
@@ -236,7 +211,7 @@ fn collect_smodel_lod_picks(
             cull_dists,
             vis_slot,
             placement.origin,
-            eye,
+            eyes.at(placement.origin),
             lod_args.scale_last,
         ) {
             walk.hidden_n = walk.hidden_n.saturating_add(1);
@@ -249,8 +224,8 @@ fn collect_smodel_lod_picks(
             plan,
             lighting,
             smc_cache,
-            eye,
-            lod_args,
+            eyes.at(placement.origin),
+            &lod_args,
         ) {
             walk.picks.push(pick);
         }
@@ -265,7 +240,7 @@ fn smodel_descriptor_pick(
     lighting: Option<&WorldSmodelLighting>,
     smc_cache: Option<&WorldStaticModelCache>,
     eye: Option<Vec3>,
-    lod_args: LodRampArgs,
+    lod_args: &LodRampArgs,
 ) -> Option<SmodelLodPick> {
     let handle = if placement.lit {
         let slot = placement.lighting_slot?;
@@ -285,7 +260,7 @@ fn smodel_descriptor_pick(
             .and_then(|slot| lighting.and_then(|l| l.packed_lighting_for_slot(slot)))
     });
     let mesh = plan.meshes.get(placement.mesh)?;
-    let lod = smodel_camera_lod(mesh.lod, placement.origin, placement.scale, eye, lod_args)?;
+    let lod = smodel_camera_lod(mesh.lod, placement.origin, placement.scale, eye, &lod_args)?;
     let lod_surfs = mesh
         .surfaces_by_lod
         .get(usize::from(lod))
@@ -318,6 +293,7 @@ fn materialize_world_runs(items: &mut Vec<RetainedDrawItem>, table: &mut Vec<u16
             bsp_kind,
             bsp_run_first,
             setup_key_changed,
+            brush_model,
             ..
         } = item.kind
         else {
@@ -339,6 +315,7 @@ fn materialize_world_runs(items: &mut Vec<RetainedDrawItem>, table: &mut Vec<u16
             bsp_run_first,
             setup_key_changed,
             world_from_local,
+            brush_model,
         };
         run_n = run_n.saturating_add(1);
     }
@@ -356,17 +333,12 @@ fn emit_world_static_lane(
         let surface_samplers = world_plan
             .and_then(|plan| plan.surface_sampler_inputs.get(usize::from(item.surf)))
             .copied()
-            .unwrap_or_default();
-        let world_from_local =
-            scene
-                .and_then(|scene| scene.cull.as_ref())
-                .map_or(Mat4::IDENTITY, |cull| {
-                    bmodel_world_from_local_for_surf(
-                        item.surf,
-                        &cull.brush_models,
-                        &cull.bmodel_world_from_local,
-                    )
-                });
+            .unwrap_or_else(render_frame::SurfaceSamplerInputs::default);
+        let brush_owner = scene
+            .and_then(|scene| scene.cull.as_ref())
+            .and_then(|cull| {
+                bmodel_owner_for_surf(item.surf, &cull.brush_models, &cull.bmodel_world_from_local)
+            });
         let kind = match item.kind {
             crate::prepare::scene::world::WorldDrawItemKind::Bsp(kind) => {
                 RetainedDrawKind::bsp_world(
@@ -378,7 +350,10 @@ fn emit_world_static_lane(
                 )
             }
             crate::prepare::scene::world::WorldDrawItemKind::BModel => {
-                RetainedDrawKind::world_with_pose(item.surf, world_from_local)
+                let Some((model, pose)) = brush_owner else {
+                    continue;
+                };
+                RetainedDrawKind::brush_world(item.surf, model, pose)
             }
         };
 
@@ -445,44 +420,50 @@ fn emit_smodel_static_lane(
             packed_lighting,
             pass: SmodelDestinationPass::Colour,
         };
+        let lighting_nonzero = packed_lighting_dword_nonzero(packed_lighting);
+        let lod_smc_flag = smodel_lod_smc_flag(mesh, lod_i);
+        let selected_bucket = smodel_lod_is_rigid(mesh, lod_i).map(|lod_is_rigid| {
+            lighting_iw4::add_static_model_surf_to_bucket(
+                i32::from(lod),
+                smc_on,
+                lighting_nonzero,
+                lod_smc_flag,
+                cache_index,
+                lod_is_rigid,
+            )
+        });
         let (bucket, full) = push_smodel_surf_bucket(
             &mut list.smodel_surf_lists,
             &mut queues,
-            i32::from(lod),
-            smc_on,
-            packed_lighting_dword_nonzero(packed_lighting),
-            smodel_lod_smc_flag(mesh, lod_i),
+            selected_bucket,
             cache_index,
             smodel_index,
-            smodel_lod_is_rigid(mesh, lod_i),
             source,
         );
         list.census.note_smodel_bucket(bucket, full);
         if bucket.is_none() {
-            expand_smodel_destination(
-                source,
-                None,
-                plan,
+            SmodelDestinationWriter {
+                smodel_plan: plan,
                 catalog,
-                smc_cache,
-                &mut pretess,
-                &mut destinations,
-                None,
-            );
+                out: &mut destinations,
+            }
+            .expand(source, None, None);
         } else if full
             && let Some(mask) = bucket
                 .and_then(|bucket| u8::try_from(bucket).ok())
                 .and_then(lighting_iw4::smodel_bucket_mask)
         {
-            let consumed = consume_smodel_buckets(
+            let consumed = SmodelDestinationWriter {
+                smodel_plan: plan,
+                catalog,
+                out: &mut destinations,
+            }
+            .consume_buckets(
                 &mut list.smodel_surf_lists,
                 &mut queues,
                 mask,
-                plan,
-                catalog,
                 smc_cache,
                 &mut pretess,
-                &mut destinations,
                 None,
             );
             list.census.smodel_bucket_consume_n = list
@@ -503,14 +484,16 @@ fn emit_smodel_static_lane(
             list.census.smodel_query_n
         );
     }
-    let consumed = consume_smodel_bucket_tail(
+    let consumed = SmodelDestinationWriter {
+        smodel_plan: plan,
+        catalog,
+        out: &mut destinations,
+    }
+    .consume_tail(
         &mut list.smodel_surf_lists,
         &mut queues,
-        plan,
-        catalog,
         smc_cache,
         &mut pretess,
-        &mut destinations,
         None,
     );
     list.census.smodel_bucket_consume_n = list
@@ -619,9 +602,8 @@ pub(crate) fn rebuild_static_draw_lane(
     prepared: Option<Res<PreparedSceneView>>,
     lod_ramp: Res<LodRampDvar>,
     runtime: Res<crate::assemble::drawsurf::MaterialGeneration>,
-    world_generation: Option<Res<WorldGeneration>>,
 ) {
-    let _post_rebuild = perf::Span::HostPostRebuildMs.enter();
+    let _post_rebuild = perf::span!("post_rebuild", "iw4l.render");
     let (world_plan, scene) = world_geom;
     let (smodel_plan, lighting, dpvs, smc_cache, smc_enable, pretess_dvar) = smodel;
     let smc_on = smc_enable.enabled != Some(false);
@@ -631,22 +613,19 @@ pub(crate) fn rebuild_static_draw_lane(
         .unwrap_or(&[]);
     let world_id = world_list.draw_items_id;
     let vis_id = dpvs.as_ref().map(|stats| stats.smodel_vis_id).unwrap_or(0);
-    let world_generation = world_generation.map(|g| g.stamp()).unwrap_or_default();
     let eye = prepared.as_ref().filter(|v| v.ready).map(|v| v.eye);
     let lod_args = lod_ramp.args();
-    let eye_key = eye_lod_reuse_key(eye, lod_args);
-    let generation_hold = list.generation_id == runtime.catalog.generation_id()
-        && list.world_generation == world_generation;
+    let eye_key = lod_args.view_key(eye.map(|eye| eye.to_array()));
+    let generation_hold = list.generation_id == runtime.catalog.generation_id();
     let reuse = static_list_reusable(
-        list.last_static,
+        list.last_static.as_ref(),
         world_id,
         vis_id,
-        eye_key,
+        &eye_key,
         generation_hold,
         !list.static_items.is_empty(),
     );
     list.generation_id = runtime.catalog.generation_id();
-    list.world_generation = world_generation;
     if reuse {
         list.census.rebuild_skip = 1;
         list.census.lod_hold = 0;
@@ -655,7 +634,7 @@ pub(crate) fn rebuild_static_draw_lane(
         note_smodel_vis(&mut list.census, smodel_vis);
     } else {
         let world_hold = world_static_reusable(
-            list.last_static.map(|(world, _, _)| world),
+            list.last_static.as_ref().map(|(world, _, _)| *world),
             world_id,
             generation_hold,
         );
@@ -668,8 +647,8 @@ pub(crate) fn rebuild_static_draw_lane(
             smodel_plan.as_deref(),
             smodel_vis,
             cull_dists,
-            eye,
-            lod_args,
+            &WorldEyes::new(scene.as_deref(), eye),
+            &lod_args,
             lighting.as_deref(),
             smc_cache.as_deref(),
         );

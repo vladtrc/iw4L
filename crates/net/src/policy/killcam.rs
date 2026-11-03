@@ -36,12 +36,14 @@ pub(crate) fn play_script_seats(
         if started_at_ms == now_ms {
             diag::info!(
                 Net,
-                "killcam: script seat viewer={} spectating={} entity={} archive_ms={} length_ms={}",
+                "killcam: script seat viewer={} spectating={} entity={} archive_ms={} length_ms={} (archive holds {}ms, {}B)",
                 viewer.0,
                 seat.spectator_client,
                 seat.kill_cam_entity,
                 seat.archive_ms,
-                seat.length_ms
+                seat.length_ms,
+                archive.duration_ms(),
+                archive.bytes()
             );
         }
         let focus_life = seats

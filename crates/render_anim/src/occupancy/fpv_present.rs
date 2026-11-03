@@ -1,4 +1,5 @@
 use frame::ScopeApp;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use anim_iw4::{DOBJ_RADIUS_PARENT_ROOT, compute_bounds_radius};
@@ -13,14 +14,13 @@ use crate::anim::fpv::{
     AuthorityFpvCues, EquippedFpv, FpvAuthoritySample, is_predicted_fire_weap_anim,
     local_shot_identity,
 };
-use crate::anim::fpv_host::{FpvGenerateArgs, FpvPoseKind, FpvPoseRefuse, generate_fpv_pose};
+use crate::anim::fpv_host::{FpvPoseGenerator, FpvPoseKind};
 use crate::anim::fpv_prepared::{
     FpvOwnerInputs, FpvWeaponSlot, FpvWeaponTable, FpvWeaponView, PreparedFpv,
 };
 use crate::anim::fpv_rig::PreparedFpvRig;
 use crate::anim::scene_submission::{AnimDObjSceneSubmission, AnimSceneSubmit};
 use crate::anim::viewmodel_controller::ViewmodelController;
-use crate::gaps::{RenderGap, RenderGapCause, RenderPresentationGaps};
 use crate::occupancy::remote_body::RemotePlayer;
 use crate::occupancy::third_person::presented_is_third_person;
 use crate::occupancy::view_kick::{
@@ -130,11 +130,11 @@ pub enum FpvState {
 
     Drawn { idle_sampled: bool },
 
-    Blocked(RenderGapCause),
+    Blocked(Cow<'static, str>),
 }
 
 impl FpvState {
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self) -> &str {
         match self {
             FpvState::ClearedNotAlive => "not Alive — FPV cleared",
             FpvState::ClearedNoWeapon => "held weapon 0 — FPV cleared",
@@ -147,11 +147,11 @@ impl FpvState {
             } => {
                 "spawned after Equip; bind-pose eye-posed hands+gun; idle sample gap; retained FPV"
             }
-            FpvState::Blocked(cause) => cause.label(),
+            FpvState::Blocked(cause) => cause.as_ref(),
         }
     }
 
-    pub fn cause(&self) -> Option<&RenderGapCause> {
+    pub fn cause(&self) -> Option<&Cow<'static, str>> {
         match self {
             FpvState::Blocked(cause) => Some(cause),
             _ => None,
@@ -223,7 +223,6 @@ pub fn spawn_pending_fpv(
     cameras: Query<Entity, With<FlyCamera>>,
     existing_fpv: Query<Entity, With<FpvPlacementRoot>>,
     mut status: ResMut<FpvStatusGap>,
-    gaps: Res<RenderPresentationGaps>,
 ) {
     let SpawnPendingFpvInputs {
         prepared,
@@ -245,11 +244,8 @@ pub fn spawn_pending_fpv(
     let Some(bound_table) = owners.bind(table) else {
         return;
     };
-    if owners.handles(
-        presented.weapon_epoch(),
-        request.weapon_id,
-        request.parent_weapon,
-    ) != Some((request.weapon_handle, request.parent_handle))
+    if owners.handles(request.weapon_id, request.parent_weapon)
+        != Some((request.weapon_handle, request.parent_handle))
     {
         return;
     }
@@ -263,10 +259,11 @@ pub fn spawn_pending_fpv(
     if table.catalog_id() != request.catalog_id
         || table.gun_index(request.weapon_id) != Some(request.gun_index)
     {
-        let cause = RenderGapCause::FpvGunXModelUnresolved {
-            weapon_id: request.weapon_id,
-        };
-        gaps.raise(cause.clone());
+        let cause = Cow::<'static, str>::Owned(format!(
+            "gunXModel[0] unresolved for weapon {weapon_id}",
+            weapon_id = request.weapon_id
+        ));
+        diag::warn_once!(World, "{}", cause.clone());
         status.0 = Some(FpvState::Blocked(cause));
         return;
     }
@@ -279,15 +276,16 @@ pub fn spawn_pending_fpv(
     let view = match bound_table.slot(request.weapon_handle, request.parent_handle, axis) {
         Ok(FpvWeaponSlot::Ready(view)) => Arc::clone(view),
         Ok(FpvWeaponSlot::Refused(cause)) => {
-            gaps.raise(cause.clone());
+            diag::warn_once!(World, "{}", cause.clone());
             status.0 = Some(FpvState::Blocked(cause.clone()));
             return;
         }
         Ok(FpvWeaponSlot::Absent) | Err(_) => {
-            let cause = RenderGapCause::FpvGunXModelUnresolved {
-                weapon_id: request.weapon_id,
-            };
-            gaps.raise(cause.clone());
+            let cause = Cow::<'static, str>::Owned(format!(
+                "gunXModel[0] unresolved for weapon {weapon_id}",
+                weapon_id = request.weapon_id
+            ));
+            diag::warn_once!(World, "{}", cause.clone());
             status.0 = Some(FpvState::Blocked(cause));
             return;
         }
@@ -298,8 +296,8 @@ pub fn spawn_pending_fpv(
             "fpv: no FlyCamera to parent viewmodel under — re-queue"
         );
         pending.0 = Some(request);
-        gaps.raise(RenderGapCause::FpvNoCamera);
-        status.0 = Some(FpvState::Blocked(RenderGapCause::FpvNoCamera));
+        diag::warn_once!(World, "FPV waiting for camera");
+        status.0 = Some(FpvState::Blocked(Cow::Borrowed("FPV waiting for camera")));
         return;
     };
 
@@ -314,13 +312,6 @@ pub fn spawn_pending_fpv(
     });
 
     crate::clear_fpv_draw_plan(&mut fpv_plan, 0);
-    let census = &view.census;
-    fpv_plan.gun_colormap_skip_n = Some(census.gun_colormap_skip_n);
-    fpv_plan.gun_ordinal_skip_n = Some(0);
-    fpv_plan.gun_colormap_skip_names = (!census.gun_colormap_skip_names.is_empty())
-        .then(|| census.gun_colormap_skip_names.join(","));
-    fpv_plan.plan_mat_hints = (!census.mat_hints.is_empty()).then(|| census.mat_hints.join(","));
-
     let controller = ViewmodelController::new(view.right.clone());
     let left = view.left.clone().map(ViewmodelController::new);
     diag::info!(
@@ -369,7 +360,6 @@ pub fn spawn_pending_fpv(
         material_catalog: Arc::clone(table.material_catalog()),
     });
 
-    gaps.clear(RenderGap::FpvViewmodel);
     status.0 = Some(FpvState::Drawn { idle_sampled });
 }
 
@@ -510,33 +500,9 @@ pub fn occupy_fpv_scene(
     }
 }
 
-fn refuse_gap_cause(refuse: FpvPoseRefuse) -> RenderGapCause {
-    match refuse {
-        FpvPoseRefuse::CatalogMissing => RenderGapCause::FpvCatalogMissing,
-        FpvPoseRefuse::NoActiveClips => RenderGapCause::FpvNoActiveClips,
-        FpvPoseRefuse::EyePoseFailed { gun_xmodel } => {
-            RenderGapCause::FpvEyePoseFailed { gun_xmodel }
-        }
-        FpvPoseRefuse::DependencyUnresolved {
-            weapon_id,
-            role,
-            name,
-        } => RenderGapCause::FpvDependencyUnresolved {
-            weapon_id,
-            role,
-            name,
-        },
-    }
-}
-
 pub fn tick_fpv_viewmodel(
     time: Res<Time>,
-    (presented, local, generation, events): (
-        Res<PresentedSnapshot>,
-        Res<LocalPresentClient>,
-        Res<frame::WorldGeneration>,
-        Res<net::EntityEventCursor>,
-    ),
+    (presented, local): (Res<PresentedSnapshot>, Res<LocalPresentClient>),
     mut cursor: ResMut<FpvPresentCursor>,
     prepared: Res<PreparedFpv>,
     owners: FpvOwnerInputs,
@@ -610,7 +576,7 @@ pub fn tick_fpv_viewmodel(
         return;
     }
     let Some(fpv) = fpv_meshes.as_ref() else {
-        product.kind = FpvPoseKind::Refuse(FpvPoseRefuse::CatalogMissing);
+        product.kind = FpvPoseKind::Refuse(std::borrow::Cow::Borrowed("FPV catalog missing"));
         return;
     };
 
@@ -624,8 +590,7 @@ pub fn tick_fpv_viewmodel(
             if let Some(table) = table {
                 match table.gun_index(weapon) {
                     Some(gun_index) if gun_index == session.fpv.gun_index => {
-                        let handles =
-                            owners.handles(presented.weapon_epoch(), weapon, ps.weapon_primary);
+                        let handles = owners.handles(weapon, ps.weapon_primary);
                         let next = owners.bind(table).and_then(|bound| {
                             handles.and_then(|(weapon, parent)| {
                                 bound.slot(weapon, parent, session.axis).ok()
@@ -668,7 +633,7 @@ pub fn tick_fpv_viewmodel(
                     }
                     Some(gun_index) => {
                         let Some((weapon_handle, parent_handle)) =
-                            owners.handles(presented.weapon_epoch(), weapon, ps.weapon_primary)
+                            owners.handles(weapon, ps.weapon_primary)
                         else {
                             product.kind = FpvPoseKind::Hide;
                             return;
@@ -694,7 +659,8 @@ pub fn tick_fpv_viewmodel(
                     }
                 }
             } else {
-                product.kind = FpvPoseKind::Refuse(FpvPoseRefuse::CatalogMissing);
+                product.kind =
+                    FpvPoseKind::Refuse(std::borrow::Cow::Borrowed("FPV catalog missing"));
                 return;
             }
         }
@@ -806,7 +772,7 @@ pub fn tick_fpv_viewmodel(
         view: equipped_view,
         ..
     } = session;
-    let (mut kind, notetracks) = generate_fpv_pose(FpvGenerateArgs {
+    let (mut kind, notetracks) = FpvPoseGenerator {
         dt,
         equipped,
         rigs: &equipped_view.rigs,
@@ -829,15 +795,14 @@ pub fn tick_fpv_viewmodel(
         predicted_fire,
         dual,
         dual_offset,
-    });
+    }
+    .generate();
     if weapon_id != 0
         && (!notetracks.records.is_empty() || notetracks.discarded != 0)
         && let Some(snapshot) = presented.snapshot()
         && let Some(meta) = snapshot.meta.for_client(local.0)
     {
         pending_notes.batch = Some(notetracks.into_audio_batch(
-            generation.stamp(),
-            events.timeline(),
             local.0,
             meta.life_sequence,
             weapon_id,
@@ -871,7 +836,6 @@ fn skin_fpv_geometry(
     owners: FpvOwnerInputs,
     mut fpv_plan: ResMut<crate::FpvDrawPlan>,
     mut status: ResMut<FpvStatusGap>,
-    gaps: Res<RenderPresentationGaps>,
     mut lenses: Query<
         &mut Transform,
         (
@@ -887,9 +851,9 @@ fn skin_fpv_geometry(
     match &product.kind {
         FpvPoseKind::Hide => crate::clear_fpv_draw_plan(&mut fpv_plan, handle),
         FpvPoseKind::Refuse(refuse) => {
-            let cause = refuse_gap_cause(refuse.clone());
+            let cause = refuse.clone();
             crate::clear_fpv_draw_plan(&mut fpv_plan, handle);
-            gaps.raise(cause.clone());
+            diag::warn_once!(World, "{}", cause.clone());
             status.0 = Some(FpvState::Blocked(cause));
         }
         FpvPoseKind::Posed(frame) => {
@@ -914,13 +878,14 @@ fn skin_fpv_geometry(
                 let camo = match session.map(|session| session.view.camo(product.camo)) {
                     Some(Ok(camo)) => camo,
                     Some(Err(reason)) => {
-                        let cause = RenderGapCause::FpvDependencyUnresolved {
-                            weapon_id: session.map_or(0, |session| session.weapon_id),
-                            role: "camouflage",
-                            name: reason.to_owned(),
-                        };
+                        let cause = Cow::<'static, str>::Owned(format!(
+                            "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
+                            weapon_id = session.map_or(0, |session| session.weapon_id),
+                            role = "camouflage",
+                            name = reason.to_owned()
+                        ));
                         crate::clear_fpv_draw_plan(&mut fpv_plan, handle);
-                        gaps.raise(cause.clone());
+                        diag::warn_once!(World, "{}", cause.clone());
                         status.0 = Some(FpvState::Blocked(cause));
                         return;
                     }
@@ -939,20 +904,21 @@ fn skin_fpv_geometry(
                 fpv_plan.camo = product.camo;
             }
             let Some(jobs) = rig.gpu_skin_jobs(&frame.poses) else {
-                let cause = RenderGapCause::FpvDependencyUnresolved {
-                    weapon_id: session.map_or(0, |session| session.weapon_id),
-                    role: "skinning",
-                    name: "packed geometry or bone range unavailable".into(),
-                };
+                let cause = Cow::<'static, str>::Owned(format!(
+                    "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
+                    weapon_id = session.map_or(0, |session| session.weapon_id),
+                    role = "skinning",
+                    name = String::from("packed geometry or bone range unavailable")
+                ));
                 crate::clear_fpv_draw_plan(&mut fpv_plan, handle);
-                gaps.raise(cause.clone());
+                diag::warn_once!(World, "{}", cause.clone());
                 status.0 = Some(FpvState::Blocked(cause));
                 return;
             };
             fpv_plan.skin_jobs = jobs;
             fpv_plan.geometry_ok = !fpv_plan.draws().is_empty();
             fpv_plan.settle_visible();
-            gaps.clear(RenderGap::FpvViewmodel);
+
             status.0 = Some(FpvState::Drawn {
                 idle_sampled: frame.idle_sampled,
             });
@@ -1035,222 +1001,236 @@ pub fn publish_fpv_dobj_pose(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn apply_fpv_placement(
-    clock: Res<FrameClock>,
-    presented: Res<PresentedSnapshot>,
-    local: Res<LocalPresentClient>,
-    prepared: Res<PreparedFpv>,
-    mut kick: ResMut<SessionViewKick>,
-    cg_gun: Res<GunOffset>,
-    mut aim: ResMut<ViewweaponAim>,
-    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
-    mut roots: Query<
-        &mut Transform,
+#[derive(SystemParam)]
+pub struct FpvPlacement<'w, 's> {
+    clock: Res<'w, FrameClock>,
+    prepared: Res<'w, PreparedFpv>,
+    kick: ResMut<'w, SessionViewKick>,
+    cg_gun: Res<'w, GunOffset>,
+    aim: ResMut<'w, ViewweaponAim>,
+    roots: Query<
+        'w,
+        's,
+        &'static mut Transform,
         (
             With<FpvPlacementRoot>,
             Without<RemotePlayer>,
             Without<WorldScriptModelInstance>,
         ),
     >,
-    view_settings: (Res<ViewSubject>, Res<frame::GameSettings>),
-    mut gfx_scene: ResMut<HostGfxScene>,
-) {
-    let (view, settings) = view_settings;
-    *aim = ViewweaponAim::default();
-    let Ok(mut transform) = roots.single_mut() else {
-        return;
-    };
-    let Some(ps) = presented.player(local.0) else {
-        return;
-    };
-    if presented_is_third_person(
-        &presented,
-        local.0,
-        view.in_killcam(),
-        settings.third_person,
+    gfx_scene: ResMut<'w, HostGfxScene>,
+}
+
+impl FpvPlacement<'_, '_> {
+    fn apply(
+        &mut self,
+        presentation: net::LocalPresentation,
+        windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+        view_settings: (Res<ViewSubject>, Res<frame::GameSettings>),
     ) {
-        return;
-    }
-    let Some(table) = prepared.table() else {
-        return;
-    };
-    let viewmodel = fpv_viewmodel_weapon(ps, table);
-    let Some(facts) = table.facts_of(viewmodel) else {
-        return;
-    };
+        let (view, settings) = view_settings;
+        *self.aim = ViewweaponAim::default();
+        let Ok(mut transform) = self.roots.single_mut() else {
+            return;
+        };
+        let Some(ps) = presentation.player() else {
+            return;
+        };
+        if presented_is_third_person(
+            &presentation.presented,
+            presentation.client_id(),
+            view.in_killcam(),
+            settings.third_person,
+        ) {
+            return;
+        }
+        let Some(table) = self.prepared.table() else {
+            return;
+        };
+        let viewmodel = fpv_viewmodel_weapon(ps, table);
+        let Some(facts) = table.facts_of(viewmodel) else {
+            return;
+        };
 
-    let mut state = WeaponPlacementState {
-        sway_springs: kick.sway.springs(),
-        gun_recoil: kick.state.gun,
-        movement_origin: kick.placement_move_origin,
-        movement_angles: kick.placement_move_angles,
-        weap_idle_time: kick.weap_idle_time,
-        last_idle_factor: kick.last_idle_factor,
-        damage_kick_time: clock.time(),
-        damage_time: kick.damage_time,
-        v_dmg_pitch: kick.v_dmg_pitch,
-        v_dmg_roll: kick.v_dmg_roll,
-        ..Default::default()
-    };
+        let mut state = WeaponPlacementState {
+            sway_springs: self.kick.sway.springs(),
+            gun_recoil: self.kick.state.gun,
+            movement_origin: self.kick.placement_move_origin,
+            movement_angles: self.kick.placement_move_angles,
+            weap_idle_time: self.kick.weap_idle_time,
+            last_idle_factor: self.kick.last_idle_factor,
+            damage_kick_time: self.clock.time(),
+            damage_time: self.kick.damage_time,
+            v_dmg_pitch: self.kick.v_dmg_pitch,
+            v_dmg_roll: self.kick.v_dmg_roll,
+            ..Default::default()
+        };
 
-    let overlay_reticle = if facts.overlay_reticle != 0 {
-        facts.overlay_reticle
-    } else if table.overlay_is_hud_iris(viewmodel) {
-        1
-    } else {
-        0
-    };
-    let ps_in = WeaponPlacementPsInputs {
-        e_flags: ps.e_flags,
-        weapon_pos_frac: ps.f_weapon_pos_frac,
-        weapon_time: ps.weapon_time,
-        aim_down_sight: facts.aim_down_sight,
-        overlay_reticle,
-        weapon_transition_active: false,
+        let overlay_reticle = if facts.overlay_reticle != 0 {
+            facts.overlay_reticle
+        } else if table.overlay_is_hud_iris(viewmodel) {
+            1
+        } else {
+            0
+        };
+        let ps_in = WeaponPlacementPsInputs {
+            e_flags: ps.e_flags,
+            weapon_pos_frac: ps.f_weapon_pos_frac,
+            weapon_time: ps.weapon_time,
+            aim_down_sight: facts.aim_down_sight,
+            overlay_reticle,
+            weapon_transition_active: false,
 
-        lean_fraction: 0.0,
-    };
-    let stance = WeaponStanceStaticOfsInputs {
-        ducked_ofs: facts.ducked_ofs,
-        prone_ofs: facts.prone_ofs,
-        ads_aim_pitch: facts.ads_aim_pitch,
-        night_vision_wear_time: facts.night_vision_wear_time,
-    };
-    let bob_inputs = WeaponBobInputs {
-        ads_bob_factor: facts.ads_bob_factor,
-    };
-    let xyspeed = {
-        let vx = ps.velocity[0];
-        let vy = ps.velocity[1];
-        vec3_length([vx, vy, 0.0])
-    };
-    let kinematics = WeaponMovementKinematics {
-        xyspeed,
-        speed: ps.speed as f32,
-        velocity: ps.velocity,
-        viewangles: ps.viewangles,
-        weaponstate: ps.weaponstate_primary,
-        weaponstate_secondary: ps.weaponstate_secondary,
-        pm_flags: ps.pm_flags,
-        frametime: clock.frametime_secs(),
-    };
-    let waveform = calculate_weapon_movement_bob_waveform(WeaponBobWaveformInputs {
-        bob_cycle: (ps.bob_cycle as u32 & 0xff) as u8,
-        xyspeed,
-        view_height_target: ps.view_height_target,
-        pm_flags: ps.pm_flags,
-        weapon_pos_frac: ps.f_weapon_pos_frac,
-    });
-    let hip = GunRecoilResponse::default();
-    let ads = GunRecoilResponse::default();
-    let mut steps = [WeaponPlacementAssembleStep::Sway; PLACEMENT_ASSEMBLE_STEP_COUNT];
+            lean_fraction: 0.0,
+        };
+        let stance = WeaponStanceStaticOfsInputs {
+            ducked_ofs: facts.ducked_ofs,
+            prone_ofs: facts.prone_ofs,
+            ads_aim_pitch: facts.ads_aim_pitch,
+            night_vision_wear_time: facts.night_vision_wear_time,
+        };
+        let bob_inputs = WeaponBobInputs {
+            ads_bob_factor: facts.ads_bob_factor,
+        };
+        let xyspeed = {
+            let vx = ps.velocity[0];
+            let vy = ps.velocity[1];
+            vec3_length([vx, vy, 0.0])
+        };
+        let kinematics = WeaponMovementKinematics {
+            xyspeed,
+            speed: ps.speed as f32,
+            velocity: ps.velocity,
+            viewangles: ps.viewangles,
+            weaponstate: ps.weaponstate_primary,
+            weaponstate_secondary: ps.weaponstate_secondary,
+            pm_flags: ps.pm_flags,
+            frametime: self.clock.frametime_secs(),
+        };
+        let waveform = calculate_weapon_movement_bob_waveform(WeaponBobWaveformInputs {
+            bob_cycle: (ps.bob_cycle as u32 & 0xff) as u8,
+            xyspeed,
+            view_height_target: ps.view_height_target,
+            pm_flags: ps.pm_flags,
+            weapon_pos_frac: ps.f_weapon_pos_frac,
+        });
+        let hip = GunRecoilResponse::default();
+        let ads = GunRecoilResponse::default();
+        let mut steps = [WeaponPlacementAssembleStep::Sway; PLACEMENT_ASSEMBLE_STEP_COUNT];
 
-    let mut idle = facts.idle;
-    if facts.can_hold_breath {
-        idle.ads_idle_amount *= ps.hold_breath_scale;
-    }
-    let contrib = weapon_placement_assemble(
-        &mut state,
-        ps_in,
-        stance,
-        StanceTransitionFadeGlobals::default(),
-        facts.movement,
-        kinematics,
-        bob_inputs,
-        idle,
-        Some(waveform),
-        hip,
-        ads,
-        facts.kick.gun_max_pitch,
-        facts.kick.gun_max_yaw,
-        0.0,
-        &mut steps,
-    );
-    kick.placement_move_origin = state.movement_origin;
-    kick.placement_move_angles = state.movement_angles;
-    kick.weap_idle_time = state.weap_idle_time;
-    kick.last_idle_factor = state.last_idle_factor;
-    let mut origin = apply_viewweapon_land_view(
-        apply_cg_gun_offset_view(contrib.origin, cg_gun.xyz()),
-        kick.viewweapon_land_view,
-    );
-    if ps.last_weapon_hand == 1 {
-        let add = dual_wield_view_model_origin_add(
-            0,
-            [0.0, 1.0, 0.0],
-            facts.dual_wield_view_model_offset,
+        let mut idle = facts.idle;
+        if facts.can_hold_breath {
+            idle.ads_idle_amount *= ps.hold_breath_scale;
+        }
+        let contrib = weapon_placement_assemble(
+            &mut state,
+            &weapon_iw4::WeaponPlacementFrame {
+                ps: ps_in,
+                kinematics,
+                bob_waveform: Some(waveform),
+                dt_secs: 0.0,
+            },
+            &weapon_iw4::WeaponPlacementSettings {
+                stance,
+                fade_globals: StanceTransitionFadeGlobals::default(),
+                movement: facts.movement,
+                bob: bob_inputs,
+                idle,
+                gun_spring_hip: hip,
+                gun_spring_ads: ads,
+                gun_max_pitch: facts.kick.gun_max_pitch,
+                gun_max_yaw: facts.kick.gun_max_yaw,
+            },
+            &mut steps,
         );
-        origin[0] += add[0];
-        origin[1] += add[1];
-        origin[2] += add[2];
-    }
-    let from_axis = viewweapon_iron_ads_saves_composed_axis(
-        facts.aim_down_sight,
-        ps.f_weapon_pos_frac,
-        overlay_reticle,
-    );
-    let [gun_pitch, gun_yaw] = viewweapon_save_gun_pitch_yaw(
-        contrib.angles,
-        kick.refdef_view_angles,
-        facts.aim_down_sight,
-        ps.f_weapon_pos_frac,
-        overlay_reticle,
-    );
-    let xhair = if kick.horiz_fov_deg > 0.0 {
-        if let Ok(window) = windows.single() {
-            let height = window.height().max(1.0);
-            let aspect = window.width() / height;
-            let (tan_x, tan_y) = tan_half_fov(kick.horiz_fov_deg, aspect);
-            let (vf, vr, vu) = angle_vectors(kick.refdef_view_angles);
-            calc_crosshair_position(
-                gun_pitch,
-                gun_yaw,
-                kick.refdef_view_angles[2],
-                vf,
-                vr,
-                vu,
-                tan_x,
-                tan_y,
-            )
+        self.kick.placement_move_origin = state.movement_origin;
+        self.kick.placement_move_angles = state.movement_angles;
+        self.kick.weap_idle_time = state.weap_idle_time;
+        self.kick.last_idle_factor = state.last_idle_factor;
+        let mut origin = apply_viewweapon_land_view(
+            apply_cg_gun_offset_view(contrib.origin, self.cg_gun.xyz()),
+            self.kick.viewweapon_land_view,
+        );
+        if ps.last_weapon_hand == 1 {
+            let add = dual_wield_view_model_origin_add(
+                0,
+                [0.0, 1.0, 0.0],
+                facts.dual_wield_view_model_offset,
+            );
+            origin[0] += add[0];
+            origin[1] += add[1];
+            origin[2] += add[2];
+        }
+        let from_axis = viewweapon_iron_ads_saves_composed_axis(
+            facts.aim_down_sight,
+            ps.f_weapon_pos_frac,
+            overlay_reticle,
+        );
+        let [gun_pitch, gun_yaw] = viewweapon_save_gun_pitch_yaw(
+            contrib.angles,
+            self.kick.refdef_view_angles,
+            facts.aim_down_sight,
+            ps.f_weapon_pos_frac,
+            overlay_reticle,
+        );
+        let xhair = if self.kick.horiz_fov_deg > 0.0 {
+            if let Ok(window) = windows.single() {
+                let height = window.height().max(1.0);
+                let aspect = window.width() / height;
+                let (tan_x, tan_y) = tan_half_fov(self.kick.horiz_fov_deg, aspect);
+                let (vf, vr, vu) = angle_vectors(self.kick.refdef_view_angles);
+                calc_crosshair_position(gun_pitch, gun_yaw, vf, vr, vu, tan_x, tan_y)
+            } else {
+                [0.0, 0.0]
+            }
         } else {
             [0.0, 0.0]
-        }
-    } else {
-        [0.0, 0.0]
-    };
-    *aim = ViewweaponAim {
-        live: true,
-        weapon: viewmodel,
-        angle_offset: [
-            math_iw4::angle_subtract(gun_pitch, ps.viewangles[0]),
-            math_iw4::angle_subtract(gun_yaw, ps.viewangles[1]),
-        ],
-        gun_pitch,
-        gun_yaw,
-        xhair_x: xhair[0],
-        xhair_y: xhair[1],
-        from_composed_axis: from_axis,
-    };
-    let placed = iw_view_placement_to_bevy_camera_local(origin, contrib.angles);
-    let world_delta = viewweapon_view_to_world_delta(origin, kick.refdef_view_angles);
-    let pose_origin = [
-        kick.refdef_vieworg[0] + world_delta[0],
-        kick.refdef_vieworg[1] + world_delta[1],
-        kick.refdef_vieworg[2] + world_delta[2],
-    ];
-    let pose_quat = scene_quat_from_viewmodel_axes(contrib.angles, kick.refdef_view_angles);
-    gfx_scene
-        .scene
-        .store_pose_origin_quat(SCENE_VIEWMODEL_ENTNUM, pose_origin, Some(pose_quat));
-    if ps.last_weapon_hand == 1 {
-        gfx_scene.scene.store_pose_origin_quat(
-            SCENE_VIEWMODEL_LEFT_ENTNUM,
+        };
+        *self.aim = ViewweaponAim {
+            live: true,
+            weapon: viewmodel,
+            angle_offset: [
+                math_iw4::angle_subtract(gun_pitch, ps.viewangles[0]),
+                math_iw4::angle_subtract(gun_yaw, ps.viewangles[1]),
+            ],
+            gun_pitch,
+            gun_yaw,
+            xhair_x: xhair[0],
+            xhair_y: xhair[1],
+            from_composed_axis: from_axis,
+        };
+        let placed = iw_view_placement_to_bevy_camera_local(origin, contrib.angles);
+        let world_delta = viewweapon_view_to_world_delta(origin, self.kick.refdef_view_angles);
+        let pose_origin = [
+            self.kick.refdef_vieworg[0] + world_delta[0],
+            self.kick.refdef_vieworg[1] + world_delta[1],
+            self.kick.refdef_vieworg[2] + world_delta[2],
+        ];
+        let pose_quat =
+            scene_quat_from_viewmodel_axes(contrib.angles, self.kick.refdef_view_angles);
+        self.gfx_scene.scene.store_pose_origin_quat(
+            SCENE_VIEWMODEL_ENTNUM,
             pose_origin,
             Some(pose_quat),
         );
+        if ps.last_weapon_hand == 1 {
+            self.gfx_scene.scene.store_pose_origin_quat(
+                SCENE_VIEWMODEL_LEFT_ENTNUM,
+                pose_origin,
+                Some(pose_quat),
+            );
+        }
+        *transform = placed;
     }
-    *transform = placed;
+}
+
+pub fn apply_fpv_placement(
+    presentation: net::LocalPresentation,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    view_settings: (Res<ViewSubject>, Res<frame::GameSettings>),
+    mut placement: FpvPlacement,
+) {
+    placement.apply(presentation, windows, view_settings);
 }
 
 fn fpv_spawn_queued(pending: Option<Res<PendingFpvSpawn>>) -> bool {
@@ -1282,15 +1262,16 @@ pub fn register_fpv_present_systems(app: &mut App) {
                 .after(reset_view_kick_on_life_started))
             .in_set(frame::InMatch),
         )
-        .scoped::<SessionViewmodel>(frame::MatchScope::Live)
+        .scoped::<SessionViewmodel>(frame::Timeline::Live)
         .scoped::<PreparedFpv>(frame::MatchScope::Live)
         .scoped::<crate::anim::model_materials::PreparedModelMaterials>(frame::MatchScope::Live)
-        .scoped::<SessionViewKick>(frame::Timeline::Running)
+        .scoped::<SessionViewKick>(frame::Timeline::Live)
+        .scoped::<super::killcam::KillcamCamera>(frame::Timeline::Live)
+        .scoped::<super::third_person::RemoteMissileView>(frame::Timeline::Live)
         .scoped::<GunOffset>(frame::MatchScope::Live)
         .scoped::<ViewweaponAim>(frame::MatchScope::Live)
-        .scoped::<PendingViewHurt>(frame::Timeline::Running)
+        .scoped::<PendingViewHurt>(frame::Timeline::Live)
         .scoped::<FpvStatusGap>(frame::MatchScope::Live)
-        .init_app::<RenderPresentationGaps>()
         .add_systems(
             Update,
             (reset_view_kick_on_life_started
@@ -1334,7 +1315,7 @@ pub fn register_fpv_present_systems(app: &mut App) {
                 apply_fpv_placement
                     .in_set(frame::InMatch)
                     .after(tick_fpv_viewmodel)
-                    .before(WorkerCmdSet::CellSceneEnt),
+                    .before(WorkerCmdSet::SceneVisibility),
                 // Neither placement nor bone publication reads a vertex.
                 stamp_fpv_placement_matrix
                     .in_set(frame::InMatch)

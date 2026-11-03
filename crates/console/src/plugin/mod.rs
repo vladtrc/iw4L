@@ -17,6 +17,7 @@ use bevy::{
     window::{CursorEntered, CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused},
 };
 use frame::AppScreen;
+use frame::ScopeApp;
 use input_iw4::{SCRIPT_KEYNUM, command_names, input_cmd, key_event, key_up_command_id};
 use net::{ClientActionInput, ClientSet, PresentedSnapshot, frame_time_msec, key_frame_msec};
 use render_frontend::prepare::scene::world::WorldScene;
@@ -33,8 +34,8 @@ use crate::{
 mod dispatch_state;
 mod state;
 
-pub use dispatch_state::{ConsoleCommandQueue, ConsoleDispatch, WaitMovePose};
-use dispatch_state::{WAIT_WORLD_TIMEOUT_SECS, WaitKind, parse_wait_args};
+pub use dispatch_state::{ConsoleCommandQueue, ConsoleDispatch, Hold, WaitKind, WaitMovePose};
+use dispatch_state::{WAIT_TIMEOUT_SECS, parse_wait_args};
 pub use state::{ConsoleFont, ConsoleSettings, ConsoleState};
 
 const EMBEDDED_FONT: &[u8] = include_bytes!("../../assets/FiraMono-Regular.ttf");
@@ -82,6 +83,10 @@ pub struct ConsolePlugin;
 
 impl Plugin for ConsolePlugin {
     fn build(&self, app: &mut App) {
+        app.scoped::<crate::weapon_dispatch::WeaponCompletionState>(frame::MatchScope::Live)
+            .scoped::<crate::user_settings::SentPlayerName>(frame::MatchScope::Live)
+            .scoped::<crate::barracks_menu::SentPlayerProfile>(frame::MatchScope::Live);
+
         crate::startup::install_stdin(app);
         crate::chat::install(app);
         app.init_resource::<ConsoleSettings>()
@@ -182,6 +187,7 @@ impl Plugin for ConsolePlugin {
                         crate::feature_dispatch::route_capture_commands,
                         crate::feature_dispatch::route_state_dump_commands,
                         crate::feature_dispatch::route_hitvol_commands,
+                        crate::feature_dispatch::route_input_program.in_set(frame::InMatch),
                         crate::feature_dispatch::route_debug_feature_commands
                             .in_set(frame::InMatch),
                         crate::feature_dispatch::route_session_commands,
@@ -198,11 +204,6 @@ impl Plugin for ConsolePlugin {
                     )
                         .chain(),
                     (
-                        (
-                            crate::weapon_dispatch::echo_give_results,
-                            crate::weapon_dispatch::echo_configuration_change_results,
-                        )
-                            .chain(),
                         (
                             crate::debug_move::route_debug_move_commands,
                             crate::saved_position::route_saved_position_commands,
@@ -337,27 +338,36 @@ fn publish_ui_input_capture(
         console.open || chat.as_ref().is_some_and(|chat| chat.captures_input());
 }
 
-fn publish_client_action_input(
+#[derive(bevy::ecs::system::SystemParam)]
+struct KeyboardMouseInput<'w, 's> {
     // The clock `sample_client_input` reads: a press and the samples that
     // time its hold must agree.
-    time: Res<Time<Real>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse_buttons: Res<ButtonInput<MouseButton>>,
-    mut motion: MessageReader<MouseMotion>,
-    mut wheel: MessageReader<MouseWheel>,
-    mut wheel_carry: Local<f32>,
+    time: Res<'w, Time<Real>>,
+    keys: Res<'w, ButtonInput<KeyCode>>,
+    mouse_buttons: Res<'w, ButtonInput<MouseButton>>,
+    motion: MessageReader<'w, 's, MouseMotion>,
+    wheel: MessageReader<'w, 's, MouseWheel>,
+    wheel_carry: Local<'s, f32>,
+    scripted: ResMut<'w, ConsoleInputState>,
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+struct UiControlCapture<'w> {
+    console: Res<'w, ConsoleState>,
+    chat: Option<Res<'w, crate::chat::ChatState>>,
+    script_menus: hud::MenuState<'w>,
+    overlay: Res<'w, frame::UiOverlayInput>,
+}
+
+fn publish_client_action_input(
+    mut input: KeyboardMouseInput,
     binds: Res<KeyBinds>,
-    mut scripted: ResMut<ConsoleInputState>,
-    console: Res<ConsoleState>,
-    chat: Option<Res<crate::chat::ChatState>>,
-    script_menus: hud::MenuState<'_>,
-    overlay: Res<frame::UiOverlayInput>,
+    capture: UiControlCapture,
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
     mut out: ResMut<ClientActionInput>,
-    (gamepads, active, mut devices, mut physical, prediction, presented, local): (
-        Query<&bevy::input::gamepad::Gamepad>,
-        Res<frame::ActivePad>,
+    (gamepad, mut devices, mut physical, prediction, presented, local): (
+        crate::gamepad::ActiveGamepad,
         ResMut<frame::InputDevices>,
         Local<PhysicalInputState>,
         Res<net::ClientPredictionState>,
@@ -365,14 +375,14 @@ fn publish_client_action_input(
         Res<net::LocalPresentClient>,
     ),
 ) {
-    if time.elapsed_secs() - physical.mouse_activity_start > 0.3 {
+    if input.time.elapsed_secs() - physical.mouse_activity_start > 0.3 {
         physical.mouse_activity = 0.0;
-        physical.mouse_activity_start = time.elapsed_secs();
+        physical.mouse_activity_start = input.time.elapsed_secs();
     }
-    let pad = active.0.and_then(|entity| gamepads.get(entity).ok());
-    let inputs = BindInputs::new(&keys, &mouse_buttons).with_pad(pad);
-    let owner_changed = physical.active_pad != active.0;
-    physical.active_pad = active.0;
+    let pad = gamepad.get();
+    let inputs = BindInputs::new(&input.keys, &input.mouse_buttons).with_pad(pad);
+    let owner_changed = physical.active_pad != gamepad.entity();
+    physical.active_pad = gamepad.entity();
     if owner_changed {
         physical.blocked.retain(|button| !button.is_pad());
         physical.movement_ready = true;
@@ -389,8 +399,8 @@ fn publish_client_action_input(
     out.pad_deflection = 0.0;
     out.mouse_x = 0.0;
     out.mouse_y = 0.0;
-    out.frame_msec = key_frame_msec(time.delta_secs());
-    out.now_msec = frame_time_msec(time.elapsed_secs());
+    out.frame_msec = key_frame_msec(input.time.delta_secs());
+    out.now_msec = frame_time_msec(input.time.elapsed_secs());
     out.sensitivity = settings.sensitivity;
     if out.m_yaw == 0.0 {
         out.m_yaw = 0.022;
@@ -402,14 +412,19 @@ fn publish_client_action_input(
     let now = out.now_msec;
     let frame = out.frame_msec;
     if binds.is_changed() {
-        *wheel_carry = 0.0;
+        *input.wheel_carry = 0.0;
     }
-    let modal_captured = chat.as_ref().is_some_and(|chat| chat.captures_input())
-        || console.open
-        || script_menus.is_some_and(|menus| menus.captures_input())
-        || keys.just_pressed(KeyCode::Escape)
+    let modal_captured = capture
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.captures_input())
+        || capture.console.open
+        || capture
+            .script_menus
+            .is_some_and(|menus| menus.captures_input())
+        || input.keys.just_pressed(KeyCode::Escape)
         || pad.is_some_and(|pad| pad.just_pressed(bevy::input::gamepad::GamepadButton::Start));
-    let captured = !devices.focused || modal_captured || overlay.0;
+    let captured = !devices.focused || modal_captured || capture.overlay.0;
     physical.blocked.retain(|button| inputs.pressed(*button));
 
     let akimbo = prediction
@@ -445,7 +460,7 @@ fn publish_client_action_input(
     }
     if captured {
         let mut mouse_activity = 0.0;
-        for event in motion.read() {
+        for event in input.motion.read() {
             mouse_activity += event.delta.x.abs() + event.delta.y.abs();
         }
         if devices.focused {
@@ -455,9 +470,9 @@ fn publish_client_action_input(
                 physical.mouse_activity = 0.0;
             }
         }
-        wheel.clear();
-        scripted.take_mouse();
-        *wheel_carry = 0.0;
+        input.wheel.clear();
+        input.scripted.take_mouse();
+        *input.wheel_carry = 0.0;
         for key_num in 0..input_iw4::KEY_COUNT {
             if out.client.keys[key_num].down != 0 {
                 key_event(&mut out.client, key_num, false, now, frame);
@@ -506,8 +521,8 @@ fn publish_client_action_input(
                 key_event(&mut out.client, key_num, false, now, frame);
             }
         }
-        for event in wheel.read() {
-            let steps = wheel_detents(event.unit, event.y, &mut wheel_carry);
+        for event in input.wheel.read() {
+            let steps = wheel_detents(event.unit, event.y, &mut input.wheel_carry);
             let button = if steps > 0 {
                 BindButton::WheelUp
             } else {
@@ -521,12 +536,12 @@ fn publish_client_action_input(
             }
         }
 
-        let (sx, sy) = scripted.take_mouse();
-        let (rx, ry) = scripted.mouse_rate().unwrap_or((0.0, 0.0));
+        let (sx, sy) = input.scripted.take_mouse();
+        let (rx, ry) = input.scripted.mouse_rate().unwrap_or((0.0, 0.0));
         out.mouse_x += sx + rx;
         out.mouse_y += sy + ry;
 
-        for event in motion.read() {
+        for event in input.motion.read() {
             out.mouse_x += event.delta.x;
             out.mouse_y += event.delta.y;
         }
@@ -546,7 +561,7 @@ fn publish_client_action_input(
         }
     }
     if !modal_captured {
-        let scripted_now: std::collections::BTreeSet<u32> = scripted.ids().collect();
+        let scripted_now: std::collections::BTreeSet<u32> = input.scripted.ids().collect();
         let down: Vec<u32> = scripted_now
             .difference(&out.scripted_ids)
             .copied()
@@ -569,8 +584,8 @@ fn publish_client_action_input(
         out.scripted_ids = scripted_now;
     }
     if devices.focused
-        && (keys.get_just_pressed().next().is_some()
-            || mouse_buttons.get_just_pressed().next().is_some())
+        && (input.keys.get_just_pressed().next().is_some()
+            || input.mouse_buttons.get_just_pressed().next().is_some())
     {
         devices.pad_prompts = false;
         physical.mouse_activity = 0.0;
@@ -610,35 +625,65 @@ fn publish_client_action_input(
     }
 }
 
-/// Hold the pointer for as long as gameplay owns it, and take it back whenever
-/// the window does.
-///
-/// The grab is not ours alone to keep: a compositor drops the constraint when
-/// the window loses focus or the pointer leaves the surface, and `bevy_winit`
-/// says as much — it re-requests the grab on every change to `CursorOptions`
-/// precisely because its cache "can change through external means". Asking for
-/// the mode we already hold is a no-op inside winit, so regaining focus first
-/// releases the grab and lets the next frame take it again. Without that bounce
-/// a window that came back from an alt-tab, an overview or a notification keeps
-/// a `Locked` label over a pointer nothing is holding, and on a compositor that
-/// only reports relative motion to a held pointer the view stops turning while
-/// every key, and the console, still work.
+#[derive(bevy::ecs::system::SystemParam)]
+struct WindowCursorGrab<'w, 's> {
+    focused: MessageReader<'w, 's, WindowFocused>,
+    entered: MessageReader<'w, 's, CursorEntered>,
+    windows: Query<'w, 's, &'static mut CursorOptions, With<PrimaryWindow>>,
+}
+
+impl WindowCursorGrab<'_, '_> {
+    /// Hold the pointer for as long as gameplay owns it, and take it back whenever
+    /// the window does.
+    ///
+    /// The grab is not ours alone to keep: a compositor drops the constraint when
+    /// the window loses focus or the pointer leaves the surface, and `bevy_winit`
+    /// says as much — it re-requests the grab on every change to `CursorOptions`
+    /// precisely because its cache "can change through external means". Asking for
+    /// the mode we already hold is a no-op inside winit, so regaining focus first
+    /// releases the grab and lets the next frame take it again. Without that bounce
+    /// a window that came back from an alt-tab, an overview or a notification keeps
+    /// a `Locked` label over a pointer nothing is holding, and on a compositor that
+    /// only reports relative motion to a held pointer the view stops turning while
+    /// every key, and the console, still work.
+    fn sync(&mut self, grab: bool) {
+        let mut returned = false;
+        for ev in self.focused.read() {
+            returned |= ev.focused;
+        }
+        returned |= self.entered.read().count() > 0;
+
+        let Ok(mut cursor) = self.windows.single_mut() else {
+            return;
+        };
+        let want = if grab {
+            CursorGrabMode::Locked
+        } else {
+            CursorGrabMode::None
+        };
+        if returned && want != CursorGrabMode::None && cursor.grab_mode == want {
+            // Drop it visibly held but actually loose, and re-take it next frame.
+            // The cursor stays hidden across the gap, so the player sees nothing.
+            cursor.grab_mode = CursorGrabMode::None;
+            return;
+        }
+        if cursor.grab_mode != want {
+            cursor.grab_mode = want;
+            cursor.visible = want == CursorGrabMode::None;
+            let grab_label = if grab { "locked" } else { "none" };
+            diag::event!(Input, Debug, "cursor", "cursor grab={grab_label}");
+        }
+    }
+}
+
 fn sync_cursor_grab(
     free_pointer: Res<frame::UiPointerFree>,
     console: Res<ConsoleState>,
     chat: Option<Res<crate::chat::ChatState>>,
     script_menus: hud::MenuState<'_>,
     screen: Option<Res<AppScreen>>,
-    mut focused: MessageReader<WindowFocused>,
-    mut entered: MessageReader<CursorEntered>,
-    mut windows: Query<&mut CursorOptions, With<PrimaryWindow>>,
+    mut cursor: WindowCursorGrab,
 ) {
-    let mut returned = false;
-    for ev in focused.read() {
-        returned |= ev.focused;
-    }
-    returned |= entered.read().count() > 0;
-
     let menu_open = script_menus.is_some_and(|m| m.captures_input());
     let in_game = screen
         .as_ref()
@@ -648,26 +693,7 @@ fn sync_cursor_grab(
         && !chat.as_ref().is_some_and(|chat| chat.open)
         && !menu_open
         && !free_pointer.0;
-    let Ok(mut cursor) = windows.single_mut() else {
-        return;
-    };
-    let want = if grab {
-        CursorGrabMode::Locked
-    } else {
-        CursorGrabMode::None
-    };
-    if returned && want != CursorGrabMode::None && cursor.grab_mode == want {
-        // Drop it visibly held but actually loose, and re-take it next frame.
-        // The cursor stays hidden across the gap, so the player sees nothing.
-        cursor.grab_mode = CursorGrabMode::None;
-        return;
-    }
-    if cursor.grab_mode != want {
-        cursor.grab_mode = want;
-        cursor.visible = want == CursorGrabMode::None;
-        let grab_label = if grab { "locked" } else { "none" };
-        diag::event!(Input, Debug, "cursor", "cursor grab={grab_label}");
-    }
+    cursor.sync(grab);
 }
 
 fn setup_console(
@@ -806,9 +832,9 @@ fn setup_console(
     crate::debug_fx_marks::register_fx_mark_commands(&mut registry);
     binds.apply_defaults();
 
-    let maps = asset_transport::games_root_from_env()
+    let maps = asset_transport::games_root()
         .map(|root| asset_transport::list_mp_maps(&root))
-        .unwrap_or_default();
+        .unwrap_or(Vec::new());
     crate::feature_dispatch::register_feature_commands(&mut registry, &maps);
     crate::frontend::register(&mut registry);
     crate::class_menu::register(&mut registry);
@@ -1222,53 +1248,58 @@ fn apply_console_os_paste(
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct ConsolePromptEdit<'w, 's> {
+    state: ResMut<'w, ConsoleState>,
+    clipboard: ResMut<'w, Clipboard>,
+    font_cx: ResMut<'w, FontCx>,
+    layout_cx: ResMut<'w, LayoutCx>,
+    focus: ResMut<'w, InputFocus>,
+    prompt: Option<Res<'w, ConsolePrompt>>,
+    editables: Query<'w, 's, &'static mut EditableText, With<ConsoleInputText>>,
+}
+
 fn handle_console_input(
     keys: Res<ButtonInput<KeyCode>>,
     logical_keys: Res<ButtonInput<Key>>,
     mut events: MessageReader<KeyboardInput>,
-    mut state: ResMut<ConsoleState>,
+    mut ui: ConsolePromptEdit,
     registry: Res<ConsoleRegistry>,
     settings: Res<ConsoleSettings>,
     mut queue: ResMut<ConsoleCommandQueue>,
-    mut clipboard: ResMut<Clipboard>,
-    mut font_cx: ResMut<FontCx>,
-    mut layout_cx: ResMut<LayoutCx>,
-    mut focus: ResMut<InputFocus>,
-    prompt: Option<Res<ConsolePrompt>>,
-    mut editables: Query<&mut EditableText, With<ConsoleInputText>>,
 ) {
-    let prompt_entity = prompt.map(|p| p.0);
+    let prompt_entity = ui.prompt.map(|p| p.0);
     if keys.just_pressed(KeyCode::Backquote) {
-        state.open = !state.open;
+        ui.state.open = !ui.state.open;
         if let Some(entity) = prompt_entity
-            && let Ok(mut editable) = editables.get_mut(entity)
+            && let Ok(mut editable) = ui.editables.get_mut(entity)
         {
             editable.pending_edits.clear();
         }
         sync_prompt_focus(
-            state.open,
+            ui.state.open,
             prompt_entity,
-            &mut focus,
-            &mut editables,
-            &mut state.editor,
+            &mut ui.focus,
+            &mut ui.editables,
+            &mut ui.state.editor,
         );
-        if !state.open {
-            clear_scrollback_selection(&mut state);
+        if !ui.state.open {
+            clear_scrollback_selection(&mut ui.state);
         }
         return;
     }
-    if !state.open {
-        clear_scrollback_selection(&mut state);
+    if !ui.state.open {
+        clear_scrollback_selection(&mut ui.state);
         return;
     }
 
     let Some(prompt_entity) = prompt_entity else {
         return;
     };
-    if focus.get() != Some(prompt_entity) {
-        focus.set(prompt_entity, FocusCause::Navigated);
+    if ui.focus.get() != Some(prompt_entity) {
+        ui.focus.set(prompt_entity, FocusCause::Navigated);
     }
-    let Ok(mut editable) = editables.get_mut(prompt_entity) else {
+    let Ok(mut editable) = ui.editables.get_mut(prompt_entity) else {
         return;
     };
 
@@ -1321,9 +1352,9 @@ fn handle_console_input(
     }
 
     if want_close {
-        state.open = false;
+        ui.state.open = false;
         editable.pending_edits.clear();
-        focus.clear();
+        ui.focus.clear();
         return;
     }
 
@@ -1333,10 +1364,10 @@ fn handle_console_input(
 
     if want_clear {
         editable.clear();
-        state.editor.line.clear();
-        state.editor.caret = 0;
-        state.editor.selected = 0;
-        state.leave_history_browse();
+        ui.state.editor.line.clear();
+        ui.state.editor.caret = 0;
+        ui.state.editor.selected = 0;
+        ui.state.leave_history_browse();
         return;
     }
     if want_home {
@@ -1346,83 +1377,113 @@ fn handle_console_input(
         editable.queue_edit(TextEdit::LineEnd(false));
     }
 
-    apply_prompt_edits(&mut editable, &mut font_cx, &mut layout_cx, &mut clipboard);
+    apply_prompt_edits(
+        &mut editable,
+        &mut ui.font_cx,
+        &mut ui.layout_cx,
+        &mut ui.clipboard,
+    );
     sanitize_prompt_newlines(&mut editable);
-    apply_prompt_edits(&mut editable, &mut font_cx, &mut layout_cx, &mut clipboard);
-    sync_editor_from_widget(&mut state.editor, &editable);
+    apply_prompt_edits(
+        &mut editable,
+        &mut ui.font_cx,
+        &mut ui.layout_cx,
+        &mut ui.clipboard,
+    );
+    sync_editor_from_widget(&mut ui.state.editor, &editable);
 
     if want_kill_word {
-        state.editor.kill_word();
-        state.leave_history_browse();
-        write_widget_from_editor(&mut editable, &state.editor);
-        apply_prompt_edits(&mut editable, &mut font_cx, &mut layout_cx, &mut clipboard);
-        sync_editor_from_widget(&mut state.editor, &editable);
+        ui.state.editor.kill_word();
+        ui.state.leave_history_browse();
+        write_widget_from_editor(&mut editable, &ui.state.editor);
+        apply_prompt_edits(
+            &mut editable,
+            &mut ui.font_cx,
+            &mut ui.layout_cx,
+            &mut ui.clipboard,
+        );
+        sync_editor_from_widget(&mut ui.state.editor, &editable);
     }
 
     if arrow_up {
-        if (state.history_cursor.is_some() || state.editor.line.is_empty())
-            && state.history_recall(true)
+        if (ui.state.history_cursor.is_some() || ui.state.editor.line.is_empty())
+            && ui.state.history_recall(true)
         {
-            write_widget_from_editor(&mut editable, &state.editor);
-            apply_prompt_edits(&mut editable, &mut font_cx, &mut layout_cx, &mut clipboard);
+            write_widget_from_editor(&mut editable, &ui.state.editor);
+            apply_prompt_edits(
+                &mut editable,
+                &mut ui.font_cx,
+                &mut ui.layout_cx,
+                &mut ui.clipboard,
+            );
         } else {
-            let len = console_suggestions(&state, &registry).len();
+            let len = console_suggestions(&ui.state, &registry).len();
             if len > 0 {
-                state.editor.selected = (state.editor.selected + 1) % len;
+                ui.state.editor.selected = (ui.state.editor.selected + 1) % len;
             }
         }
     } else if arrow_down {
-        if state.history_cursor.is_some() {
-            state.history_recall(false);
-            write_widget_from_editor(&mut editable, &state.editor);
-            apply_prompt_edits(&mut editable, &mut font_cx, &mut layout_cx, &mut clipboard);
+        if ui.state.history_cursor.is_some() {
+            ui.state.history_recall(false);
+            write_widget_from_editor(&mut editable, &ui.state.editor);
+            apply_prompt_edits(
+                &mut editable,
+                &mut ui.font_cx,
+                &mut ui.layout_cx,
+                &mut ui.clipboard,
+            );
         } else {
-            let len = console_suggestions(&state, &registry).len();
+            let len = console_suggestions(&ui.state, &registry).len();
             if len > 0 {
-                state.editor.selected = (state.editor.selected + len - 1) % len;
+                ui.state.editor.selected = (ui.state.editor.selected + len - 1) % len;
             }
         }
     }
 
     if want_tab {
-        let suggestions = console_suggestions(&state, &registry);
-        if state.editor.accept(&suggestions) {
-            state.leave_history_browse();
-            write_widget_from_editor(&mut editable, &state.editor);
-            apply_prompt_edits(&mut editable, &mut font_cx, &mut layout_cx, &mut clipboard);
-            sync_editor_from_widget(&mut state.editor, &editable);
+        let suggestions = console_suggestions(&ui.state, &registry);
+        if ui.state.editor.accept(&suggestions) {
+            ui.state.leave_history_browse();
+            write_widget_from_editor(&mut editable, &ui.state.editor);
+            apply_prompt_edits(
+                &mut editable,
+                &mut ui.font_cx,
+                &mut ui.layout_cx,
+                &mut ui.clipboard,
+            );
+            sync_editor_from_widget(&mut ui.state.editor, &editable);
         }
     }
 
     if want_submit {
-        if state.history_cursor.is_none() {
-            let suggestions = console_suggestions(&state, &registry);
+        if ui.state.history_cursor.is_none() {
+            let suggestions = console_suggestions(&ui.state, &registry);
             if !suggestions.is_empty() {
-                state.editor.accept(&suggestions);
+                ui.state.editor.accept(&suggestions);
             }
         }
-        let line = state.editor.take();
-        state.leave_history_browse();
+        let line = ui.state.editor.take();
+        ui.state.leave_history_browse();
         editable.clear();
         if line.trim().is_empty() {
             return;
         }
-        state.echo(format!("> {line}"), settings.log_capacity);
-        if state.history.last() != Some(&line) {
-            state.history.push(line.clone());
-            if state.history.len() > 100 {
-                state.history.remove(0);
+        ui.state.echo(format!("> {line}"), settings.log_capacity);
+        if ui.state.history.last() != Some(&line) {
+            ui.state.history.push(line.clone());
+            if ui.state.history.len() > 100 {
+                ui.state.history.remove(0);
             }
         }
         for command in ConsoleCommand::parse_script(&line) {
             if command.name == "help" {
                 for line in registry.help_lines() {
-                    state.echo(line, settings.log_capacity);
+                    ui.state.echo(line, settings.log_capacity);
                 }
             } else if command.name == "clear" {
-                state.log.clear();
+                ui.state.log.clear();
             } else if registry.resolve(&command.name).is_none() {
-                state.echo(
+                ui.state.echo(
                     format!("unknown command `{}`", command.name),
                     settings.log_capacity,
                 );
@@ -1836,7 +1897,7 @@ fn abort_script_on_wait_timeout(
     let kept = queue.0.len();
     let dropped = before - kept;
     let msg = format!(
-        "{kind}: timed out after {WAIT_WORLD_TIMEOUT_SECS:.0}s ({detail}) — \
+        "{kind}: timed out after {WAIT_TIMEOUT_SECS:.0}s ({detail}) — \
          script aborted, {dropped} queued commands dropped, kept exit={kept}"
     );
     diag::warn!(Console, "{msg}");
@@ -1879,18 +1940,7 @@ fn dispatch_console_command(
         scene.as_ref().is_some_and(|s| s.spawned)
     };
 
-    let waiting = dispatch.paused
-        || dispatch.wait_world
-        || dispatch.wait_progression
-        || dispatch.wait_spawn
-        || dispatch.wait_spawn_admit
-        || dispatch.wait_torn
-        || dispatch.wait_ambient
-        || dispatch.wait_move.is_some()
-        || dispatch.wait_playing
-        || dispatch.wait_tick.is_some()
-        || dispatch.wait_alive.is_some()
-        || dispatch.wait_remaining > 0.0;
+    let waiting = dispatch.hold.is_some();
     if waiting
         && let Some(index) = queue.0.iter().position(|cmd| {
             cmd.interactive && matches!(cmd.name.as_str(), "dump" | "clip" | "screenshot")
@@ -1906,268 +1956,113 @@ fn dispatch_console_command(
         return;
     }
     promote_interactive_interrupt(waiting, &mut queue, &mut dispatch);
-    if dispatch.paused {
-        return;
-    }
-    if dispatch.wait_world {
-        if world_up {
-            dispatch.wait_world = false;
-            diag::info!(
-                Console,
-                "wait world: spawned after {:.1}s",
-                dispatch.wait_world_elapsed
-            );
-        } else {
-            dispatch.wait_world_elapsed += time.delta_secs();
-            if dispatch.wait_world_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
-                dispatch.wait_world = false;
-                abort_script_on_wait_timeout(
-                    "wait world",
-                    "spawned=false",
-                    &mut queue,
-                    &mut console,
-                    capacity,
-                );
-            } else {
-                return;
-            }
-        }
-    }
-    if dispatch.wait_progression {
-        if player_data
-            .as_ref()
-            .is_some_and(|data| data.unlock_data_ready())
-        {
-            dispatch.wait_progression = false;
-            diag::info!(Console, "wait progression: native account content ready");
-        } else {
-            dispatch.wait_progression_elapsed += time.delta_secs();
-            if dispatch.wait_progression_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
-                dispatch.wait_progression = false;
-                abort_script_on_wait_timeout(
-                    "wait progression",
-                    "native account content unavailable",
-                    &mut queue,
-                    &mut console,
-                    capacity,
-                );
-            } else {
-                return;
-            }
-        }
-    }
-    if dispatch.wait_spawn_admit {
-        dispatch.wait_spawn_elapsed += time.delta_secs();
-        if dispatch.wait_spawn_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
-            dispatch.wait_spawn_admit = false;
-            dispatch.pending_spawn_class = None;
-            abort_script_on_wait_timeout(
-                "spawn",
-                "class select never allowed",
-                &mut queue,
-                &mut console,
-                capacity,
-            );
-        } else {
-            return;
-        }
-    }
-    if dispatch.wait_spawn
+    let spawn_refusal = dispatch
+        .hold
+        .as_ref()
+        .is_some_and(|hold| matches!(hold.until, WaitKind::Spawn))
         && class_phase
             .as_ref()
-            .is_some_and(|phase| !phase.is_pending())
+            .is_some_and(|phase| !phase.is_pending());
+    if spawn_refusal
         && let Some(reason) = class_status.as_ref().and_then(|status| status.0.as_ref())
     {
-        dispatch.wait_spawn = false;
+        dispatch.release();
         let message = format!("spawn: refused — {reason}");
         diag::warn!(Console, "{message}");
         console.echo(message, capacity);
     }
-    if dispatch.wait_spawn {
-        if screen
-            .as_ref()
-            .is_some_and(|s| matches!(**s, AppScreen::InGame))
-        {
-            dispatch.wait_spawn = false;
+    if let Some(hold) = dispatch.hold.as_mut() {
+        let (ready, detail) = match &hold.until {
+            WaitKind::Seconds(secs) => (hold.elapsed >= *secs, "delay elapsed"),
+            WaitKind::World => (world_up, "scene spawned"),
+            WaitKind::Progression => (
+                player_data
+                    .as_ref()
+                    .is_some_and(|data| data.unlock_data_ready()),
+                "native account content ready",
+            ),
+            WaitKind::Spawn => (
+                screen
+                    .as_ref()
+                    .is_some_and(|screen| matches!(**screen, AppScreen::InGame))
+                    && class_phase.as_ref().is_none_or(|phase| !phase.is_pending()),
+                "class equipped and screen InGame",
+            ),
+            WaitKind::SpawnAdmission(_) => (false, "class selection allowed"),
+            WaitKind::Torn => (
+                world_is_torn(has_world.as_deref(), scene.as_deref()),
+                "match torn down",
+            ),
+            WaitKind::Ambient => (
+                ambient_booted.as_ref().is_some_and(|booted| booted.0),
+                "MapAmbientBooted",
+            ),
+            WaitKind::Weapon(weapon) => (
+                presented
+                    .as_ref()
+                    .zip(local.as_ref())
+                    .is_some_and(|(presented, local)| {
+                        presented
+                            .player(local.0)
+                            .is_some_and(|player| player.weapon == *weapon)
+                    }),
+                "held weapon",
+            ),
+            WaitKind::Move(pose) => (
+                presented.as_ref().is_some_and(|presented| {
+                    crate::debug_move::presented_matches_move(presented, *pose)
+                }),
+                "presented move target",
+            ),
+            WaitKind::Playing => (
+                authority
+                    .as_ref()
+                    .is_some_and(|world| world.0.phase() == sim::MatchPhase::Playing),
+                "match Playing",
+            ),
+            WaitKind::Alive(client, life) => (
+                authority
+                    .as_ref()
+                    .and_then(|world| world.0.client_meta(*client))
+                    .is_some_and(|meta| {
+                        meta.lifecycle == sim::ClientLifecycle::Alive && meta.life_sequence != *life
+                    }),
+                "newer life Alive",
+            ),
+            WaitKind::Ticks(until) => (
+                clock
+                    .as_ref()
+                    .is_some_and(|clock| clock.tick.wrapping_sub(*until) < u32::MAX / 2),
+                "authority tick reached",
+            ),
+            WaitKind::SessionWorld | WaitKind::SessionTorn => {
+                (false, "session transaction completed")
+            }
+        };
+        if ready {
             diag::info!(
                 Console,
-                "wait spawn: InGame after {:.1}s",
-                dispatch.wait_spawn_elapsed
+                "{}: {detail} after {:.1}s",
+                hold.until.label(),
+                hold.elapsed
             );
+            dispatch.release();
         } else {
-            dispatch.wait_spawn_elapsed += time.delta_secs();
-            if dispatch.wait_spawn_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
-                dispatch.wait_spawn = false;
+            hold.elapsed += time.delta_secs();
+            if !matches!(hold.until, WaitKind::Seconds(_)) && hold.elapsed >= WAIT_TIMEOUT_SECS {
+                let kind = hold.until.label();
                 abort_script_on_wait_timeout(
-                    "wait spawn",
-                    "screen not InGame",
+                    kind,
+                    &format!("waiting for {detail}"),
                     &mut queue,
                     &mut console,
                     capacity,
                 );
+                dispatch.release();
             } else {
                 return;
             }
         }
-    }
-    if dispatch.wait_ambient {
-        if ambient_booted.as_ref().is_some_and(|b| b.0) {
-            dispatch.wait_ambient = false;
-            diag::info!(
-                Console,
-                "wait ambient: MapAmbientBooted after {:.1}s",
-                dispatch.wait_ambient_elapsed
-            );
-        } else {
-            dispatch.wait_ambient_elapsed += time.delta_secs();
-            if dispatch.wait_ambient_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
-                dispatch.wait_ambient = false;
-                abort_script_on_wait_timeout(
-                    "wait ambient",
-                    "MapAmbientBooted=0",
-                    &mut queue,
-                    &mut console,
-                    capacity,
-                );
-            } else {
-                return;
-            }
-        }
-    }
-    if dispatch.wait_torn {
-        if world_is_torn(has_world.as_deref(), scene.as_deref()) {
-            dispatch.wait_torn = false;
-            diag::info!(
-                Console,
-                "wait torn: hold after {:.1}s",
-                dispatch.wait_torn_elapsed
-            );
-        } else {
-            dispatch.wait_torn_elapsed += time.delta_secs();
-            if dispatch.wait_torn_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
-                dispatch.wait_torn = false;
-                abort_script_on_wait_timeout(
-                    "wait torn",
-                    "match scope or scene.spawned still set",
-                    &mut queue,
-                    &mut console,
-                    capacity,
-                );
-            } else {
-                return;
-            }
-        }
-    }
-    if let Some(pose) = dispatch.wait_move {
-        let matched = presented
-            .as_ref()
-            .is_some_and(|p| crate::debug_move::presented_matches_move(p, pose));
-        if matched {
-            dispatch.wait_move = None;
-            diag::info!(
-                Console,
-                "wait move: presented pose after {:.1}s",
-                dispatch.wait_move_elapsed
-            );
-        } else {
-            dispatch.wait_move_elapsed += time.delta_secs();
-            if dispatch.wait_move_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
-                dispatch.wait_move = None;
-                abort_script_on_wait_timeout(
-                    "wait move",
-                    "presented pose still not the move target",
-                    &mut queue,
-                    &mut console,
-                    capacity,
-                );
-            } else {
-                return;
-            }
-        }
-    }
-    if dispatch.wait_playing {
-        if authority
-            .as_ref()
-            .is_some_and(|w| w.0.phase() == sim::MatchPhase::Playing)
-        {
-            dispatch.wait_playing = false;
-            diag::info!(
-                Console,
-                "wait playing: Playing after {:.1}s",
-                dispatch.wait_playing_elapsed
-            );
-        } else {
-            dispatch.wait_playing_elapsed += time.delta_secs();
-            if dispatch.wait_playing_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
-                dispatch.wait_playing = false;
-                abort_script_on_wait_timeout(
-                    "wait playing",
-                    "match phase still not Playing",
-                    &mut queue,
-                    &mut console,
-                    capacity,
-                );
-            } else {
-                return;
-            }
-        }
-    }
-    if let Some((client, life)) = dispatch.wait_alive {
-        let alive = authority
-            .as_ref()
-            .and_then(|w| w.0.client_meta(client))
-            .is_some_and(|m| m.lifecycle == sim::ClientLifecycle::Alive && m.life_sequence != life);
-        if alive {
-            dispatch.wait_alive = None;
-            diag::info!(
-                Console,
-                "force_spawn: Alive after {:.1}s",
-                dispatch.wait_alive_elapsed
-            );
-        } else {
-            dispatch.wait_alive_elapsed += time.delta_secs();
-            if dispatch.wait_alive_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
-                dispatch.wait_alive = None;
-                abort_script_on_wait_timeout(
-                    "force_spawn",
-                    "no newer life became Alive",
-                    &mut queue,
-                    &mut console,
-                    capacity,
-                );
-            } else {
-                return;
-            }
-        }
-    }
-    if let Some(until) = dispatch.wait_tick {
-        let now = clock.as_ref().map(|c| c.tick);
-        if now.is_some_and(|now| now.wrapping_sub(until) < u32::MAX / 2) {
-            dispatch.wait_tick = None;
-            diag::info!(
-                Console,
-                "wait ticks: tick {until} after {:.1}s",
-                dispatch.wait_tick_elapsed
-            );
-        } else {
-            dispatch.wait_tick_elapsed += time.delta_secs();
-            if dispatch.wait_tick_elapsed >= WAIT_WORLD_TIMEOUT_SECS {
-                dispatch.wait_tick = None;
-                abort_script_on_wait_timeout(
-                    "wait ticks",
-                    "authority clock did not reach the tick",
-                    &mut queue,
-                    &mut console,
-                    capacity,
-                );
-            } else {
-                return;
-            }
-        }
-    }
-    if dispatch.wait_remaining > 0.0 {
-        dispatch.wait_remaining = (dispatch.wait_remaining - time.delta_secs()).max(0.0);
-        return;
     }
     if let Some(command) = queue.0.pop_front() {
         if registry.resolve(&command.name).is_none() {
@@ -2193,16 +2088,12 @@ fn dispatch_console_command(
         if sync {
             match command.name.as_str() {
                 "disconnect" => {
-                    dispatch.paused = true;
-                    dispatch.wait_torn = true;
-                    dispatch.wait_torn_elapsed = 0.0;
+                    dispatch.wait(WaitKind::SessionTorn);
                     diag::info!(Console, "disconnect: sync until torn hold");
                 }
                 "spawn" => {}
                 _ => {
-                    dispatch.paused = true;
-                    dispatch.wait_world = true;
-                    dispatch.wait_world_elapsed = 0.0;
+                    dispatch.wait(WaitKind::SessionWorld);
                     diag::info!(Console, "{}: sync until scene.spawned", command.name);
                 }
             }
@@ -2223,10 +2114,10 @@ fn dispatch_console_command(
 
             let rss = asset_transport::process_resident_bytes()
                 .map(|bytes| format!(" rss_mib={}", bytes >> 20))
-                .unwrap_or_default();
+                .unwrap_or(String::new());
             let heap = diag::process_live_heap_bytes()
                 .map(|bytes| format!(" heap_mib={}", bytes >> 20))
-                .unwrap_or_default();
+                .unwrap_or(String::new());
             let facts = mark_match_facts(
                 authority.as_deref(),
                 clock.as_deref(),
@@ -2240,7 +2131,12 @@ fn dispatch_console_command(
                 std::process::id(),
                 *mark_sequence
             );
-            perf::benchmark_mark(label, *mark_sequence, ns as u64);
+            perf::instant!("benchmark_mark", "iw4l.frame", |ctx| {
+                let (sequence, elapsed_ns): (u64, u64) = (*mark_sequence, ns as u64);
+                ctx.arg("label", label);
+                ctx.arg("sequence", sequence as i64);
+                ctx.arg("elapsed_ns", elapsed_ns as i64);
+            });
             diag::info!(Console, "{line}");
             println!("{line}");
             console.echo(line, capacity);
@@ -2248,70 +2144,16 @@ fn dispatch_console_command(
         }
         if command.name == "wait" {
             match parse_wait_args(&command.args) {
-                WaitKind::Progression => {
-                    dispatch.wait_progression = !player_data
-                        .as_ref()
-                        .is_some_and(|data| data.unlock_data_ready());
-                    dispatch.wait_progression_elapsed = 0.0;
-                }
-                WaitKind::World => {
-                    if world_up {
-                        diag::info!(Console, "wait world: already spawned");
-                    } else {
-                        dispatch.wait_world = true;
-                        dispatch.wait_world_elapsed = 0.0;
-                        diag::info!(Console, "wait world: until scene.spawned");
-                    }
-                }
-                WaitKind::Spawn => {
-                    if screen
-                        .as_ref()
-                        .is_some_and(|s| matches!(**s, AppScreen::InGame))
-                    {
-                        diag::info!(Console, "wait spawn: already InGame");
-                    } else {
-                        dispatch.wait_spawn = true;
-                        dispatch.wait_spawn_elapsed = 0.0;
-                        diag::info!(Console, "wait spawn: until AppScreen::InGame");
-                    }
-                }
-                WaitKind::Torn => {
-                    if world_is_torn(has_world.as_deref(), scene.as_deref()) {
-                        diag::info!(Console, "wait torn: already hold");
-                    } else {
-                        dispatch.wait_torn = true;
-                        dispatch.wait_torn_elapsed = 0.0;
-                        diag::info!(
-                            Console,
-                            "wait torn: until match scope absent and scene.spawned=0"
-                        );
-                    }
-                }
-                WaitKind::Ambient => {
-                    if ambient_booted.as_ref().is_some_and(|b| b.0) {
-                        diag::info!(Console, "wait ambient: already MapAmbientBooted");
-                    } else {
-                        dispatch.wait_ambient = true;
-                        dispatch.wait_ambient_elapsed = 0.0;
-                        diag::info!(Console, "wait ambient: until MapAmbientBooted");
-                    }
-                }
                 WaitKind::Ticks(n) => match clock.as_ref() {
-                    Some(clock) => {
-                        dispatch.wait_tick = Some(clock.tick.wrapping_add(n));
-                        dispatch.wait_tick_elapsed = 0.0;
-                        diag::info!(Console, "wait: {n} ticks from tick {}", clock.tick);
-                    }
+                    Some(clock) => dispatch.wait(WaitKind::Ticks(clock.tick.wrapping_add(n))),
                     None => {
-                        let msg = format!("wait: {n}t needs an authority clock; not holding");
-                        diag::warn!(Console, "{msg}");
-                        console.echo(msg, capacity);
+                        let message = format!("wait: {n}t needs an authority clock; not holding");
+                        diag::warn!(Console, "{message}");
+                        console.echo(message, capacity);
                     }
                 },
-                WaitKind::Seconds(secs) => {
-                    dispatch.wait_remaining = secs;
-                    diag::info!(Console, "wait: {secs:.1}s");
-                }
+                WaitKind::Seconds(secs) if secs <= 0.0 || !secs.is_finite() => {}
+                until => dispatch.wait(until),
             }
             return;
         }

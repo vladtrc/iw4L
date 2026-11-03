@@ -12,27 +12,27 @@ use super::{
     ExactColourPipeline, ExactColourSubmitCensus, ExactConstantArena, ExactFloatZResolve,
     ExactPipelineRegistry, ExactPrepare, ExactPrepareTarget, ExactShadowBindingCache,
     ExactTessBind, ExtractedColourRefs, ExtractedRenderFrameProducts, ExtractedView, FrameProduct,
-    FrameProductKind, FrameProductStatus, GpuConstantArena, GpuSubmitRefusal, HashSet, Mat4,
-    MaterialExecView, MaterialRefusal, MaterialRunExecutor, Msaa, PipelineCache, PortId,
-    PrepareCost, PrepareTextureTables, PreparedColourRow, PublishedRenderFrame, Query,
-    RenderDevice, RenderQueue, Res, ResMut, ResidentShadowStaticDraws, Resource, RetainedDrawKind,
-    RuntimeShaderStage, RuntimeUploadedImageRegistry, SCENE_DEPTH_FORMAT, SamplerTable,
-    SceneDepthTexture, SceneTextureState, SceneTextureTables, ShadowSubmitScratch,
+    FrameProductKind, FrameProductStatus, GpuConstantArena, GpuSubmitRefusal, Mat4,
+    MaterialExecView, MaterialRefusal, MaterialRunExecutor, Msaa, PipelineCache,
+    PipelineWaitCensus, PrepareCost, PrepareTextureTables, PreparedColourRow, PublishedRenderFrame,
+    Query, RenderDevice, RenderQueue, Res, ResMut, ResidentShadowStaticDraws, Resource,
+    RetainedDrawKind, RuntimeShaderStage, RuntimeUploadedImageRegistry, SCENE_DEPTH_FORMAT,
+    SamplerTable, SceneDepthTexture, SceneTextureState, SceneTextureTables, ShadowSubmitScratch,
     ShadowTextureTable, ShadowmapSpotArena, ShadowmapSpotGpu, ShadowmapSunArena, ShadowmapSunGpu,
     SmodelCacheGpu, SpecializedRenderPipelines, UnsupportedStateCensus, Vec3, Vec4, ViewTarget,
     With, WorldPretessLayout, as_u32, bind_world_packed_rows, bsp_draw_source, bsp_kind_index,
     build_colour_row_plan, colour_census_clock, colour_census_ms, colour_draw_at, colour_pack_key,
-    colour_tech_at, draw_surf_list_work_colour, empty_world_run_gather, exec_tables,
-    execution_binds_code_texture, floatz, gather_world_run_indices, is_viewmodel_colour_draw,
-    material_refusal_class, pack_sun_shadow_frontend, publish_this_frame_spot_shadow_views,
-    publish_this_frame_sun_shadow_view, record_pipeline_not_ready, smodel_skinned,
-    spot_rt_for_light, spot_shadow_view_missing, submit_refusal_class, submit_refusal_family,
-    sun_shadow_view_missing, upload_constant_arena, viewmodel_colour_submits_when_pipelines_ready,
-    world_packed_row_meta, world_pretess_dest_ib, world_pretess_key,
+    colour_tech_at, draw_surf_list_work_colour, empty_world_run_gather, exec_tables, floatz,
+    gather_world_run_indices, is_viewmodel_colour_draw, material_refusal_class,
+    pack_sun_shadow_frontend, prepare_constant_bases, publish_this_frame_spot_shadow_views,
+    publish_this_frame_sun_shadow_view, smodel_skinned, spot_rt_for_light,
+    spot_shadow_view_missing, submit_refusal_class, submit_refusal_family, sun_shadow_view_missing,
+    viewmodel_colour_submits_when_pipelines_ready, world_packed_row_meta, world_pretess_dest_ib,
+    world_pretess_key,
 };
 
 fn run_colour_lanes(camera: CameraLane<'_>, shadow: ShadowLane<'_>) {
-    let _prepare = perf::Span::RenderColourPrepareMs.enter();
+    let _prepare = perf::span!("colour_prepare", "iw4l.render");
     ComputeTaskPool::get_or_init(TaskPool::default).scope(|scope| {
         scope.spawn(async move { prepare_shadow_passes(shadow) });
         prepare_camera_colour(camera);
@@ -185,13 +185,12 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
         cam,
         pretess,
     } = lane;
-    let _span = perf::Span::RenderPrepareCameraMs.enter();
+    let _span = perf::span!("prepare_camera", "iw4l.render");
     let extracted = ExtractedColourRefs::new(frame);
     let products = &extracted.frame.frame_products;
     *cam = CameraPrepareState::default();
     let census_on = perf::recording();
     census.begin_prepare(census_on);
-    scratch.skinned_tess.begin_frame();
     if !installed.ready {
         return;
     }
@@ -231,7 +230,7 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
         light,
         emissive,
         world_run_surfs,
-        geometry.world_generation,
+        geometry.static_identity.world_products,
         geometry.generation,
         products.0.world_run_revision,
     );
@@ -240,7 +239,7 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
         light,
         emissive,
         pretess_key,
-        geometry.smodel_index_count,
+        geometry.static_identity.smodel_index_count,
         geometry.xmodel.uploaded_topology,
         geometry.xmodel.index.len(),
     );
@@ -257,7 +256,7 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
                 .chain(emissive.ordered_draws.iter()),
             world_run_surfs,
             &geometry.world_surface_ranges,
-            geometry.world_vertex_count as u32,
+            geometry.static_identity.world_vertex_count as u32,
             &geometry.smodel_surface_ranges,
             &geometry.xmodel_surface_ranges,
             &mut scratch.pack_draws,
@@ -465,13 +464,7 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
         exec_refused,
         unsupported_state,
         bsp_submit_refused_surfaces,
-        pnr_smodel_mats,
-        pnr_world_mats,
-        pnr_smodel_ps,
-        pnr_world_ps,
-        pnr_smodel_keys,
-        pnr_world_keys,
-        pnr_ports,
+        pipeline_wait,
         bind_smodel_mats,
         last_markmesh_refusal,
         last_markmesh_exec_skip,
@@ -530,9 +523,17 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
             extracted.world.smodel_pretess_indices.as_slice(),
             extracted.world.smodel_index_layout_revision,
         );
-        perf::Counter::SmodelIbSkip.emit(f64::from(u8::from(smodel_ib_skip)));
+        perf::counter!(
+            "smodel_ib_skip",
+            "iw4l.render",
+            f64::from(u8::from(smodel_ib_skip))
+        );
     }
-    perf::Counter::WorldPretessSkip.emit(f64::from(u8::from(world_ib_skip)));
+    perf::counter!(
+        "world_pretess_skip",
+        "iw4l.render",
+        f64::from(u8::from(world_ib_skip))
+    );
 
     cam.active = true;
     cam.samples = samples;
@@ -548,13 +549,7 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
     cam.exec_refusals = submit_refusals.exec;
     cam.unsupported_state = unsupported_state;
     cam.bsp_submit_refused_surfaces = bsp_submit_refused_surfaces;
-    cam.pnr_smodel_mats = pnr_smodel_mats;
-    cam.pnr_world_mats = pnr_world_mats;
-    cam.pnr_smodel_ps = pnr_smodel_ps;
-    cam.pnr_world_ps = pnr_world_ps;
-    cam.pnr_smodel_keys = pnr_smodel_keys;
-    cam.pnr_world_keys = pnr_world_keys;
-    cam.pnr_ports = pnr_ports;
+    cam.pipeline_wait = pipeline_wait;
     cam.bind_smodel_mats = bind_smodel_mats;
     cam.last_markmesh_refusal = last_markmesh_refusal;
     cam.last_markmesh_exec_skip = last_markmesh_exec_skip;
@@ -569,6 +564,16 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
     cam.markmesh_hits = markmesh_hits;
     cam.glassmesh_hits = glassmesh_hits;
     cam.prepared_hits = prepared_hits;
+    perf::counter!(
+        "draw_source_prepared",
+        "iw4l.render",
+        f64::from(prepare_cost.source_build_n)
+    );
+    perf::counter!(
+        "draw_source_reused",
+        "iw4l.render",
+        f64::from(prepare_cost.source_reuse_n)
+    );
     cam.prepare_cost = prepare_cost;
     cam.colour_run_census = colour_run_census;
     cam.focused_object_id = focused_object_id;
@@ -594,108 +599,131 @@ struct CameraFrameTargets {
     needs_resolved_scene: bool,
 }
 
-pub(super) fn install_shared_colour_pass(
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct SharedColourSetup<'w> {
+    pipeline: Res<'w, ExactColourPipeline>,
+    constant_arena: ResMut<'w, ExactConstantArena>,
+    shadow_arena: ResMut<'w, ShadowmapSunArena>,
+    spot_arena: ResMut<'w, ShadowmapSpotArena>,
+    shadowmap: ResMut<'w, ShadowmapSunGpu>,
+    spotmap: ResMut<'w, ShadowmapSpotGpu>,
+}
+
+impl SharedColourSetup<'_> {
+    fn install(
+        &mut self,
+        extracted: ExtractedColourRefs<'_>,
+        device: &RenderDevice,
+        uploaded: &mut ResMut<RuntimeUploadedImageRegistry>,
+    ) -> Option<SharedColourResources> {
+        let products = &extracted.frame.frame_products;
+        install_shared_colour_resources(SharedColourInstall {
+            products,
+            extracted,
+            pipeline: &self.pipeline,
+            device,
+            uploaded,
+            constant_arena: &mut self.constant_arena,
+            shadow_arena: &mut self.shadow_arena,
+            spot_arena: &mut self.spot_arena,
+            shadowmap: &mut self.shadowmap,
+            spotmap: &mut self.spotmap,
+        })
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct CameraTargetSetup<'w, 's> {
     views: Query<
+        'w,
+        's,
         (
-            &ViewTarget,
-            &SceneDepthTexture,
-            &ExtractedView,
-            Option<&Msaa>,
+            &'static ViewTarget,
+            &'static SceneDepthTexture,
+            &'static ExtractedView,
+            Option<&'static Msaa>,
         ),
         With<Camera3d>,
     >,
+    pipeline_cache: Res<'w, PipelineCache>,
+    dof: Res<'w, super::super::postfx::ExtractedPostFx>,
+    floatz: ResMut<'w, ExactFloatZResolve>,
+    floatz_pipelines: ResMut<'w, SpecializedRenderPipelines<ExactFloatZResolve>>,
+    resolved_scene: ResMut<'w, super::super::resolved_scene::ResolvedScene>,
+}
+
+impl CameraTargetSetup<'_, '_> {
+    fn install(
+        &mut self,
+        extracted: ExtractedColourRefs<'_>,
+        device: &RenderDevice,
+        uploaded: &mut ResMut<RuntimeUploadedImageRegistry>,
+    ) -> CameraFrameTargets {
+        let mut cameras = self.views.iter();
+        let camera_view = match (cameras.next(), cameras.count()) {
+            (view, 0) => view,
+            _ => None,
+        };
+        install_camera_frame_targets(CameraTargetInstall {
+            view: camera_view,
+            extracted,
+            dof: &self.dof,
+            pipeline_cache: &self.pipeline_cache,
+            device,
+            uploaded,
+            floatz: &mut self.floatz,
+            floatz_pipelines: &mut self.floatz_pipelines,
+            resolved_scene: &mut self.resolved_scene,
+        })
+    }
+}
+
+#[derive(bevy::ecs::system::SystemParam)]
+pub(super) struct ColourBindingEpochs<'w> {
+    binding_cache: ResMut<'w, ExactColourBindingCache>,
+    texture_table: ResMut<'w, SceneTextureTables>,
+    scratch: ResMut<'w, ColourSubmitScratch>,
+    shadow_binding: ResMut<'w, ExactShadowBindingCache>,
+    shadow_table: ResMut<'w, ShadowTextureTable>,
+    shadow_scratch: ResMut<'w, ShadowSubmitScratch>,
+}
+
+impl ColourBindingEpochs<'_> {
+    fn open(&mut self, uploaded: &RuntimeUploadedImageRegistry, generation: MaterialGenerationId) {
+        open_scene_table_epoch(
+            &mut self.binding_cache,
+            &mut self.texture_table,
+            &mut self.scratch,
+            uploaded,
+            generation,
+        );
+        open_shadow_table_epoch(
+            &mut self.shadow_binding,
+            &mut self.shadow_table,
+            &mut self.shadow_scratch,
+            uploaded,
+            generation,
+        );
+    }
+}
+
+pub(super) fn install_shared_colour_pass(
     frame: Res<PublishedRenderFrame>,
-    pipeline: Res<ExactColourPipeline>,
-    pipeline_cache: Res<PipelineCache>,
     device: Res<RenderDevice>,
-    queue: Res<RenderQueue>,
-    dof: Res<super::super::postfx::ExtractedPostFx>,
-    (
-        mut uploaded,
-        mut binding_cache,
-        mut shadow_binding,
-        mut constant_arena,
-        mut texture_table,
-        mut shadow_table,
-        (mut scratch, mut shadow_scratch),
-    ): (
-        ResMut<RuntimeUploadedImageRegistry>,
-        ResMut<ExactColourBindingCache>,
-        ResMut<ExactShadowBindingCache>,
-        ResMut<ExactConstantArena>,
-        ResMut<SceneTextureTables>,
-        ResMut<ShadowTextureTable>,
-        (ResMut<ColourSubmitScratch>, ResMut<ShadowSubmitScratch>),
-    ),
-    (
-        mut shadow_arena,
-        mut spot_arena,
-        mut shadowmap,
-        mut spotmap,
-        mut floatz,
-        mut floatz_pipelines,
-        mut resolved_scene,
-        mut installed,
-    ): (
-        ResMut<ShadowmapSunArena>,
-        ResMut<ShadowmapSpotArena>,
-        ResMut<ShadowmapSunGpu>,
-        ResMut<ShadowmapSpotGpu>,
-        ResMut<ExactFloatZResolve>,
-        ResMut<SpecializedRenderPipelines<ExactFloatZResolve>>,
-        ResMut<super::super::resolved_scene::ResolvedScene>,
-        ResMut<InstalledColourPass>,
-    ),
+    mut uploaded: ResMut<RuntimeUploadedImageRegistry>,
+    mut installed: ResMut<InstalledColourPass>,
+    mut shared_setup: SharedColourSetup,
+    mut camera_setup: CameraTargetSetup,
+    mut epochs: ColourBindingEpochs,
 ) {
     *installed = InstalledColourPass::default();
     let extracted = ExtractedColourRefs::new(&frame);
-    let products = &extracted.frame.frame_products;
-    let Some(shared) = install_shared_colour_resources(SharedColourInstall {
-        products,
-        extracted,
-        pipeline: &pipeline,
-        device: &device,
-        uploaded: &mut uploaded,
-        constant_arena: &mut constant_arena,
-        shadow_arena: &mut shadow_arena,
-        spot_arena: &mut spot_arena,
-        shadowmap: &mut shadowmap,
-        spotmap: &mut spotmap,
-    }) else {
+    let Some(shared) = shared_setup.install(extracted, &device, &mut uploaded) else {
         return;
     };
-    let mut cameras = views.iter();
-    let camera_view = match (cameras.next(), cameras.count()) {
-        (view, 0) => view,
-        _ => None,
-    };
-    let camera = install_camera_frame_targets(CameraTargetInstall {
-        view: camera_view,
-        extracted,
-        dof: &dof,
-        pipeline_cache: &pipeline_cache,
-        device: &device,
-        queue: &queue,
-        uploaded: &mut uploaded,
-        floatz: &mut floatz,
-        floatz_pipelines: &mut floatz_pipelines,
-        resolved_scene: &mut resolved_scene,
-    });
+    let camera = camera_setup.install(extracted, &device, &mut uploaded);
     let generation = extracted.world.generation;
-    open_scene_table_epoch(
-        &mut binding_cache,
-        &mut texture_table,
-        &mut scratch,
-        &uploaded,
-        generation,
-    );
-    open_shadow_table_epoch(
-        &mut shadow_binding,
-        &mut shadow_table,
-        &mut shadow_scratch,
-        &uploaded,
-        generation,
-    );
+    epochs.open(&uploaded, generation);
     *installed = InstalledColourPass {
         ready: true,
         sun_shadow_view_ready: shared.sun_shadow_view_ready,
@@ -716,7 +744,6 @@ struct CameraTargetInstall<'a, 'r> {
     dof: &'a super::super::postfx::ExtractedPostFx,
     pipeline_cache: &'a PipelineCache,
     device: &'a RenderDevice,
-    queue: &'a RenderQueue,
     uploaded: &'a mut RuntimeUploadedImageRegistry,
     floatz: &'a mut ExactFloatZResolve,
     floatz_pipelines: &'a mut SpecializedRenderPipelines<ExactFloatZResolve>,
@@ -735,7 +762,7 @@ fn install_camera_frame_targets(install: CameraTargetInstall<'_, '_>) -> CameraF
     {
         return CameraFrameTargets::default();
     }
-    let Some((target, depth, extracted_view, msaa)) = install.view else {
+    let Some((target, depth, _extracted_view, msaa)) = install.view else {
         return CameraFrameTargets::default();
     };
     let samples = msaa.map_or(1, Msaa::samples);
@@ -763,30 +790,28 @@ fn install_camera_frame_targets(install: CameraTargetInstall<'_, '_>) -> CameraF
             .uploaded
             .publish_frame_target(|registry| &mut registry.resolved_post_sun, Some(view));
     }
+    let size = depth.texture.size();
+    let view = floatz::ensure_target(
+        install.floatz,
+        install.device,
+        size.width,
+        size.height,
+        samples,
+    );
     if needs_floatz {
-        let size = depth.texture.size();
-        let (view, _resized) =
-            floatz::ensure_target(install.floatz, install.device, size.width, size.height);
-        if view.is_some() {
-            install
-                .uploaded
-                .publish_frame_target(|registry| &mut registry.float_z, view);
-        }
-
+        install
+            .uploaded
+            .publish_frame_target(|registry| &mut registry.float_z, view);
         floatz::prepare_blit(
             install.floatz,
             install.pipeline_cache,
             install.device,
-            install.queue,
             install.floatz_pipelines,
-            depth.view(),
-            samples,
-            floatz::znear_from_clip_from_view(extracted_view.clip_from_view).unwrap_or(0.0),
-            extracted.frame.exec_frame.viewmodel_near,
         );
     } else {
         floatz::forget_blit(install.floatz);
     }
+
     CameraFrameTargets {
         needs_floatz,
         needs_resolved_scene,
@@ -902,13 +927,7 @@ struct CameraRowTally {
     exec_refused: u32,
     unsupported_state: UnsupportedStateCensus,
     bsp_submit_refused_surfaces: [u32; 4],
-    pnr_smodel_mats: BTreeMap<String, u32>,
-    pnr_world_mats: BTreeMap<String, u32>,
-    pnr_smodel_ps: BTreeMap<String, u32>,
-    pnr_world_ps: BTreeMap<String, u32>,
-    pnr_smodel_keys: HashSet<u64>,
-    pnr_world_keys: HashSet<u64>,
-    pnr_ports: HashSet<PortId>,
+    pipeline_wait: PipelineWaitCensus,
     bind_smodel_mats: BTreeMap<String, u32>,
     last_markmesh_refusal: Option<GpuSubmitRefusal>,
     last_markmesh_exec_skip: Option<&'static str>,
@@ -943,13 +962,7 @@ impl CameraRowTally {
             exec_refused: 0,
             unsupported_state: UnsupportedStateCensus::default(),
             bsp_submit_refused_surfaces: [0; 4],
-            pnr_smodel_mats: BTreeMap::new(),
-            pnr_world_mats: BTreeMap::new(),
-            pnr_smodel_ps: BTreeMap::new(),
-            pnr_world_ps: BTreeMap::new(),
-            pnr_smodel_keys: HashSet::new(),
-            pnr_world_keys: HashSet::new(),
-            pnr_ports: HashSet::new(),
+            pipeline_wait: PipelineWaitCensus::default(),
             bind_smodel_mats: BTreeMap::new(),
             last_markmesh_refusal: None,
             last_markmesh_exec_skip: None,
@@ -1000,13 +1013,7 @@ impl CameraRowTally {
         {
             *into = into.saturating_add(from);
         }
-        add_counts(&mut self.pnr_smodel_mats, next.pnr_smodel_mats);
-        add_counts(&mut self.pnr_world_mats, next.pnr_world_mats);
-        add_counts(&mut self.pnr_smodel_ps, next.pnr_smodel_ps);
-        add_counts(&mut self.pnr_world_ps, next.pnr_world_ps);
-        self.pnr_smodel_keys.extend(next.pnr_smodel_keys);
-        self.pnr_world_keys.extend(next.pnr_world_keys);
-        self.pnr_ports.extend(next.pnr_ports);
+        self.pipeline_wait.absorb(next.pipeline_wait);
         add_counts(&mut self.bind_smodel_mats, next.bind_smodel_mats);
         self.last_markmesh_refusal = next
             .last_markmesh_refusal
@@ -1102,13 +1109,7 @@ fn prepare_camera_rows(
     let mut exec_refused = 0u32;
     let mut unsupported_state = UnsupportedStateCensus::default();
     let mut bsp_submit_refused_surfaces = [0u32; 4];
-    let mut pnr_smodel_mats = BTreeMap::<String, u32>::new();
-    let mut pnr_world_mats = BTreeMap::<String, u32>::new();
-    let mut pnr_smodel_ps = BTreeMap::<String, u32>::new();
-    let mut pnr_world_ps = BTreeMap::<String, u32>::new();
-    let mut pnr_smodel_keys = HashSet::<u64>::new();
-    let mut pnr_world_keys = HashSet::<u64>::new();
-    let mut pnr_ports = HashSet::<PortId>::new();
+    let mut pipeline_wait = PipelineWaitCensus::default();
     let mut bind_smodel_mats = BTreeMap::<String, u32>::new();
     let mut last_markmesh_refusal: Option<GpuSubmitRefusal> = None;
     let mut last_markmesh_exec_skip: Option<&'static str> = None;
@@ -1139,6 +1140,10 @@ fn prepare_camera_rows(
     executor.begin_list();
     let run_pack = std::mem::take(&mut lane.run_pack);
     let mut exact_prepare = ExactPrepare {
+        portal_view: None,
+        slice_plane: None,
+        instance: 0,
+        slice_groups: Default::default(),
         extracted,
         geometry,
         pretess: Some(pretess),
@@ -1208,231 +1213,317 @@ fn prepare_camera_rows(
             last_glass_probe_sampler =
                 Some(u32::from(item.surface_samplers.reflection_probe.is_some()));
         }
-        let executed = exec_view.map_or(
-            Err(MaterialRefusal::StaleMaterialGeneration {
-                retained: colour.generation_id,
-                current: extracted.world.generation,
-            }),
-            |view| {
-                let vertex_type = MaterialRunExecutor::vertex_type(view, item, tech);
-                executor.execute(view, item, tech, vertex_type, true)
-            },
-        );
-        let execution = match executed {
-            Ok(()) => executor.execution(),
-            Err(ref cause) => {
-                exec_refused = exec_refused.saturating_add(1);
-                if census_on && let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
-                    let lane = bsp_kind_index(kind);
-                    bsp_submit_refused_surfaces[lane] =
-                        bsp_submit_refused_surfaces[lane].saturating_add(1);
-                }
-                submit_refusals.note_exec(&item.kind, item.key, cause);
-                if census_on && let MaterialRefusal::UnsupportedState { fields, .. } = cause {
-                    unsupported_state.note(super::super::state::UnsupportedStateFields {
-                        unknown_blend_factor: fields.unknown_blend_factor,
-                        unknown_blend_operation: fields.unknown_blend_operation,
-                        stencil: fields.stencil,
-                    });
-                }
-                if matches!(item.kind, RetainedDrawKind::MarkMesh { .. }) {
-                    last_markmesh_exec_skip = Some(material_refusal_class(cause));
-                    if matches!(
-                        cause,
-                        MaterialRefusal::MissingCodeConstant {
-                            stage: RuntimeShaderStage::Vertex,
-                            index: super::super::CODE_BASE_LIGHTING_COORDS,
-                            ..
-                        }
-                    ) {
-                        markmesh_missing_58 = markmesh_missing_58.saturating_add(1);
-                    }
-                }
-                if matches!(item.kind, RetainedDrawKind::Glass { .. }) {
-                    last_glassmesh_exec_skip = Some(material_refusal_class(cause));
-                }
-                continue;
+        let mut instances = [Some((*item, None)), None];
+        if !is_viewmodel_colour_draw(&item.kind, item.key)
+            && let Some(portal) = extracted.frame.exec_frame.portal.as_ref()
+            && matches!(item.kind, RetainedDrawKind::XModel { .. })
+        {
+            for (instance, placement) in portal.entity_instances(&item.kind).into_iter().enumerate()
+            {
+                let mut copy = *item;
+                placement.apply_to(&mut copy.kind);
+                instances[instance] = Some((copy, placement.slice_plane));
             }
-        };
-        let place = executor.place();
-        let run_serial = executor.run_serial();
-        if matches!(item.kind, RetainedDrawKind::World { .. }) {
-            world_exec_ready_keys.push(item.key);
         }
-        let viewmodel = is_viewmodel_colour_draw(&item.kind, item.key);
-        let binds_sun_shadow =
-            execution_binds_code_texture(execution, super::CODE_TEXTURE_SHADOWMAP_SUN);
-        let binds_spot_shadow =
-            execution_binds_code_texture(execution, super::CODE_TEXTURE_SHADOWMAP_SPOT);
-        let spot_select = if binds_spot_shadow {
-            let light = GfxDrawSurf { packed: item.key }.scene_light_index();
-            spot_rt_for_light(products, light)
-        } else {
-            None
-        };
-        exact_prepare.spot_shadow_select = spot_select;
-        if sun_shadow_view_missing(sun_shadow_view_ready, binds_sun_shadow) {
-            let cause = GpuSubmitRefusal::ProductDependencyNotReady {
-                product: FrameProductKind::SunShadow,
-            };
-            refused_draws = refused_draws.saturating_add(1);
-            if census_on && let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
-                let lane = bsp_kind_index(kind);
-                bsp_submit_refused_surfaces[lane] =
-                    bsp_submit_refused_surfaces[lane].saturating_add(1);
-            }
-            submit_refusals.note_submit(&item.kind, viewmodel, &cause);
-            last_refusal = Some(cause);
-            continue;
-        }
-        if spot_shadow_view_missing(uploaded, binds_spot_shadow, spot_select) {
-            let cause = GpuSubmitRefusal::ProductDependencyNotReady {
-                product: FrameProductKind::SpotShadow,
-            };
-            refused_draws = refused_draws.saturating_add(1);
-            if census_on && let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
-                let lane = bsp_kind_index(kind);
-                bsp_submit_refused_surfaces[lane] =
-                    bsp_submit_refused_surfaces[lane].saturating_add(1);
-            }
-            submit_refusals.note_submit(&item.kind, viewmodel, &cause);
-            last_refusal = Some(cause);
-            continue;
-        }
-        let dest = if viewmodel {
-            &mut pending_viewmodel_prepared
-        } else {
-            &mut prepared
-        };
-        let dest_start = dest.len();
-        match exact_prepare.prepare_ready_hit(
-            item,
-            execution,
-            run_serial,
-            place,
-            item.surface_samplers,
-            prepare_target,
-            binds_sun_shadow,
-            binds_spot_shadow,
-            dest,
-        ) {
-            Ok(_) => {
-                prepared_hits = prepared_hits.saturating_add(1);
-                if let Some((start, count)) = index_span {
-                    let mut span_ok = true;
-                    for draw in &mut dest[dest_start..] {
-                        if matches!(draw.tess, ExactTessBind::World) {
-                            let Some(layout) = pretess.layout.as_ref() else {
-                                span_ok = false;
-                                last_refusal = Some(GpuSubmitRefusal::WorldPretessEpochMismatch {
-                                    span_epoch: planned.layout_epoch,
-                                    layout_epoch: 0,
-                                });
-                                break;
-                            };
-                            if planned.layout_epoch != layout.epoch {
-                                last_refusal = Some(GpuSubmitRefusal::WorldPretessEpochMismatch {
-                                    span_epoch: planned.layout_epoch,
-                                    layout_epoch: layout.epoch,
-                                });
-                                span_ok = false;
-                                break;
+        for (instance, (instance_item, slice_plane)) in instances.into_iter().flatten().enumerate()
+        {
+            let item = &instance_item;
+            exact_prepare.instance = instance as u16;
+            exact_prepare.slice_plane = slice_plane;
+            let mut source_cache = None;
+            for portal_tag in super::portal_draw_tags(
+                &extracted.frame.exec_frame,
+                &item.kind,
+                &products.0.world_run_surfs,
+                item.key,
+            ) {
+                let foreign_world =
+                    extracted
+                        .frame
+                        .exec_frame
+                        .portal
+                        .as_ref()
+                        .is_some_and(|portal| {
+                            portal_tag
+                                .checked_sub(1)
+                                .and_then(|view| portal.worlds.get(view as usize))
+                                .copied()
+                                .is_some_and(|world| world != portal.camera_world)
+                        });
+                let tech = if foreign_world {
+                    render_material::TechType(lighting_iw4::without_sun_shadow(tech.0))
+                } else {
+                    tech
+                };
+                exact_prepare.portal_view = Some(portal_tag);
+                if super::portal_scene::exit_clip_mode(device)
+                    == d3d9_sm3::ExitClipMode::FragmentDiscard
+                    && super::portal_scene::exit_class(extracted, portal_tag, &item.kind)
+                        == super::portal_scene::ExitClass::Outside
+                {
+                    continue;
+                }
+                let mut view_item = *item;
+                if let RetainedDrawKind::XModel {
+                    object_id: u16::MAX,
+                    ref mut world_from_local,
+                    ..
+                } = view_item.kind
+                    && let Some(view) = exec_view
+                {
+                    // Sky geometry is shared, but its centre belongs to this
+                    // unfolded camera, including multiple routes into one world.
+                    world_from_local.w_axis = view.in_world(portal_tag).view_origin.extend(1.0);
+                }
+                let item = &view_item;
+                let executed = exec_view.map_or(
+                    Err(MaterialRefusal::StaleMaterialGeneration {
+                        retained: colour.generation_id,
+                        current: extracted.world.generation,
+                    }),
+                    |view| {
+                        let view = view.in_world(portal_tag);
+                        let vertex_type = MaterialRunExecutor::vertex_type(view, item, tech);
+                        executor.execute(view, item, tech, vertex_type, true)
+                    },
+                );
+                let execution = match executed {
+                    Ok(()) => executor.execution(),
+                    Err(ref cause) => {
+                        if matches!(
+                            item.kind,
+                            RetainedDrawKind::XModel {
+                                object_id: u16::MAX,
+                                ..
                             }
-                            if start.saturating_add(count) > layout.logical_index_count {
-                                last_refusal =
-                                    Some(GpuSubmitRefusal::WorldPretessSpanBeyondLimit {
-                                        start,
-                                        count,
-                                        logical_len: layout.logical_index_count,
-                                        epoch: layout.epoch,
-                                    });
-                                span_ok = false;
-                                break;
-                            }
-                            draw.start = start;
-                            draw.count = count;
-                        } else if matches!(
-                            draw.tess,
-                            ExactTessBind::Smodel
-                                | ExactTessBind::SmodelCached
-                                | ExactTessBind::XModel
                         ) {
-                            draw.start = start;
-                            draw.count = count;
+                            diag::warn_once!(
+                                World,
+                                "sky draw execution refused: tag={portal_tag} key={} cause={cause:?}",
+                                item.key
+                            );
                         }
-                    }
-                    if !span_ok {
-                        dest.truncate(dest_start);
-                        prepared_hits = prepared_hits.saturating_sub(1);
-                        refused_draws = refused_draws.saturating_add(1);
-                        submit_refusals.note_submit_class(
-                            submit_refusal_family(&item.kind, viewmodel),
-                            last_refusal
-                                .as_ref()
-                                .map(submit_refusal_class)
-                                .unwrap_or("WorldPretessSpanBeyondLimit"),
-                            1,
-                        );
+                        exec_refused = exec_refused.saturating_add(1);
+                        if census_on && let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
+                            let lane = bsp_kind_index(kind);
+                            bsp_submit_refused_surfaces[lane] =
+                                bsp_submit_refused_surfaces[lane].saturating_add(1);
+                        }
+                        submit_refusals.note_exec(&item.kind, item.key, cause);
+                        if census_on && let MaterialRefusal::UnsupportedState { fields, .. } = cause
+                        {
+                            unsupported_state.note(super::super::state::UnsupportedStateFields {
+                                unknown_blend_factor: fields.unknown_blend_factor,
+                                unknown_blend_operation: fields.unknown_blend_operation,
+                                stencil: fields.stencil,
+                            });
+                        }
+                        if matches!(item.kind, RetainedDrawKind::MarkMesh { .. }) {
+                            last_markmesh_exec_skip = Some(material_refusal_class(cause));
+                            if matches!(
+                                cause,
+                                MaterialRefusal::MissingCodeConstant {
+                                    stage: RuntimeShaderStage::Vertex,
+                                    index: super::super::CODE_BASE_LIGHTING_COORDS,
+                                    ..
+                                }
+                            ) {
+                                markmesh_missing_58 = markmesh_missing_58.saturating_add(1);
+                            }
+                        }
+                        if matches!(item.kind, RetainedDrawKind::Glass { .. }) {
+                            last_glassmesh_exec_skip = Some(material_refusal_class(cause));
+                        }
                         continue;
                     }
+                };
+                if matches!(item.kind, RetainedDrawKind::World { .. }) {
+                    world_exec_ready_keys.push(item.key);
                 }
-                if viewmodel {
-                    pending_viewmodel_keys.push(item.key);
+                let viewmodel = is_viewmodel_colour_draw(&item.kind, item.key);
+                let dependencies = super::ShadowProductDependencies::from_execution(execution);
+                let spot_select = if dependencies.spot {
+                    let light = GfxDrawSurf { packed: item.key }.scene_light_index();
+                    spot_rt_for_light(products, light)
                 } else {
-                    ready_draws = ready_draws.saturating_add(1);
-                    submitted_keys.push(item.key);
+                    None
+                };
+                exact_prepare.spot_shadow_select = spot_select;
+                if sun_shadow_view_missing(sun_shadow_view_ready, dependencies.sun) {
+                    let cause = GpuSubmitRefusal::ProductDependencyNotReady {
+                        product: FrameProductKind::SunShadow,
+                    };
+                    refused_draws = refused_draws.saturating_add(1);
+                    if census_on && let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
+                        let lane = bsp_kind_index(kind);
+                        bsp_submit_refused_surfaces[lane] =
+                            bsp_submit_refused_surfaces[lane].saturating_add(1);
+                    }
+                    submit_refusals.note_submit(&item.kind, viewmodel, &cause);
+                    last_refusal = Some(cause);
+                    continue;
                 }
-            }
-            Err(cause) => {
-                refused_draws = refused_draws.saturating_add(1);
-                if census_on && let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
-                    let lane = bsp_kind_index(kind);
-                    bsp_submit_refused_surfaces[lane] =
-                        bsp_submit_refused_surfaces[lane].saturating_add(1);
+                if spot_shadow_view_missing(uploaded, dependencies.spot, spot_select) {
+                    let cause = GpuSubmitRefusal::ProductDependencyNotReady {
+                        product: FrameProductKind::SpotShadow,
+                    };
+                    refused_draws = refused_draws.saturating_add(1);
+                    if census_on && let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
+                        let lane = bsp_kind_index(kind);
+                        bsp_submit_refused_surfaces[lane] =
+                            bsp_submit_refused_surfaces[lane].saturating_add(1);
+                    }
+                    submit_refusals.note_submit(&item.kind, viewmodel, &cause);
+                    last_refusal = Some(cause);
+                    continue;
                 }
-                submit_refusals.note_submit(&item.kind, viewmodel, &cause);
-                if matches!(cause, GpuSubmitRefusal::PipelineNotReady) {
-                    pipeline_not_ready = pipeline_not_ready.saturating_add(1);
+                let dest = if viewmodel {
+                    &mut pending_viewmodel_prepared
+                } else {
+                    &mut prepared
+                };
+                let dest_start = dest.len();
+                // Sky follows the unfolded camera; other instances keep one
+                // physical source for every view that draws them this frame.
+                if matches!(
+                    item.kind,
+                    RetainedDrawKind::XModel {
+                        object_id: u16::MAX,
+                        ..
+                    }
+                ) {
+                    source_cache = None;
                 }
-                if census_on && matches!(cause, GpuSubmitRefusal::PipelineNotReady) {
-                    record_pipeline_not_ready(
-                        &item.kind,
-                        viewmodel,
-                        item.key,
-                        execution,
-                        extracted,
-                        &mut pnr_smodel_mats,
-                        &mut pnr_world_mats,
-                        &mut pnr_smodel_ps,
-                        &mut pnr_world_ps,
-                        &mut pnr_smodel_keys,
-                        &mut pnr_world_keys,
-                        &mut pnr_ports,
-                    );
+                match exact_prepare.prepare_ready_hit(
+                    item,
+                    &executor,
+                    prepare_target,
+                    &mut source_cache,
+                    dependencies,
+                    dest,
+                ) {
+                    Ok(_) => {
+                        prepared_hits = prepared_hits.saturating_add(1);
+                        if let Some((start, count)) = index_span {
+                            let mut span_ok = true;
+                            for draw in &mut dest[dest_start..] {
+                                if matches!(draw.tess, ExactTessBind::World) {
+                                    let Some(layout) = pretess.layout.as_ref() else {
+                                        span_ok = false;
+                                        last_refusal =
+                                            Some(GpuSubmitRefusal::WorldPretessEpochMismatch {
+                                                span_epoch: planned.layout_epoch,
+                                                layout_epoch: 0,
+                                            });
+                                        break;
+                                    };
+                                    if planned.layout_epoch != layout.epoch {
+                                        last_refusal =
+                                            Some(GpuSubmitRefusal::WorldPretessEpochMismatch {
+                                                span_epoch: planned.layout_epoch,
+                                                layout_epoch: layout.epoch,
+                                            });
+                                        span_ok = false;
+                                        break;
+                                    }
+                                    if start.saturating_add(count) > layout.logical_index_count {
+                                        last_refusal =
+                                            Some(GpuSubmitRefusal::WorldPretessSpanBeyondLimit {
+                                                start,
+                                                count,
+                                                logical_len: layout.logical_index_count,
+                                                epoch: layout.epoch,
+                                            });
+                                        span_ok = false;
+                                        break;
+                                    }
+                                    draw.start = start;
+                                    draw.count = count;
+                                } else if matches!(
+                                    draw.tess,
+                                    ExactTessBind::Smodel
+                                        | ExactTessBind::SmodelCached
+                                        | ExactTessBind::XModel
+                                ) {
+                                    draw.start = start;
+                                    draw.count = count;
+                                }
+                            }
+                            if !span_ok {
+                                dest.truncate(dest_start);
+                                prepared_hits = prepared_hits.saturating_sub(1);
+                                refused_draws = refused_draws.saturating_add(1);
+                                submit_refusals.note_submit_class(
+                                    submit_refusal_family(&item.kind, viewmodel),
+                                    last_refusal
+                                        .as_ref()
+                                        .map(submit_refusal_class)
+                                        .unwrap_or("WorldPretessSpanBeyondLimit"),
+                                    1,
+                                );
+                                continue;
+                            }
+                        }
+                        if viewmodel {
+                            pending_viewmodel_keys.push(item.key);
+                        } else {
+                            ready_draws = ready_draws.saturating_add(1);
+                            submitted_keys.push(item.key);
+                        }
+                    }
+                    Err(cause) => {
+                        if matches!(
+                            item.kind,
+                            RetainedDrawKind::XModel {
+                                object_id: u16::MAX,
+                                ..
+                            }
+                        ) {
+                            diag::warn_once!(
+                                World,
+                                "sky draw submit refused: tag={portal_tag} key={} cause={cause:?}",
+                                item.key
+                            );
+                        }
+                        refused_draws = refused_draws.saturating_add(1);
+                        if census_on && let (Some(kind), _, _, _) = bsp_draw_source(&item.kind) {
+                            let lane = bsp_kind_index(kind);
+                            bsp_submit_refused_surfaces[lane] =
+                                bsp_submit_refused_surfaces[lane].saturating_add(1);
+                        }
+                        submit_refusals.note_submit(&item.kind, viewmodel, &cause);
+                        if matches!(cause, GpuSubmitRefusal::PipelineNotReady) {
+                            pipeline_not_ready = pipeline_not_ready.saturating_add(1);
+                        }
+                        if census_on && matches!(cause, GpuSubmitRefusal::PipelineNotReady) {
+                            pipeline_wait
+                                .record(&item.kind, viewmodel, item.key, execution, extracted);
+                        }
+                        if census_on
+                            && matches!(item.kind, RetainedDrawKind::Smodel { .. })
+                            && matches!(cause, GpuSubmitRefusal::TextureBind(_))
+                        {
+                            let ordinal = item.material_rank;
+                            let name = extracted
+                                .world
+                                .sorted_material_names
+                                .get(ordinal as usize)
+                                .cloned()
+                                .unwrap_or_else(|| format!("ord{ordinal}"));
+                            *bind_smodel_mats.entry(name).or_default() += 1;
+                        }
+                        if viewmodel && matches!(cause, GpuSubmitRefusal::PipelineNotReady) {
+                            viewmodel_pipeline_gap = true;
+                        }
+                        if matches!(item.kind, RetainedDrawKind::MarkMesh { .. }) {
+                            last_markmesh_refusal = Some(cause.clone());
+                        }
+                        if matches!(item.kind, RetainedDrawKind::Glass { .. }) {
+                            last_glassmesh_refusal = Some(cause.clone());
+                        }
+                        last_refusal = Some(cause);
+                    }
                 }
-                if census_on
-                    && matches!(item.kind, RetainedDrawKind::Smodel { .. })
-                    && matches!(cause, GpuSubmitRefusal::TextureBind(_))
-                {
-                    let ordinal = item.material_rank;
-                    let name = extracted
-                        .world
-                        .sorted_material_names
-                        .get(ordinal as usize)
-                        .cloned()
-                        .unwrap_or_else(|| format!("ord{ordinal}"));
-                    *bind_smodel_mats.entry(name).or_default() += 1;
-                }
-                if viewmodel && matches!(cause, GpuSubmitRefusal::PipelineNotReady) {
-                    viewmodel_pipeline_gap = true;
-                }
-                if matches!(item.kind, RetainedDrawKind::MarkMesh { .. }) {
-                    last_markmesh_refusal = Some(cause.clone());
-                }
-                if matches!(item.kind, RetainedDrawKind::Glass { .. }) {
-                    last_glassmesh_refusal = Some(cause.clone());
-                }
-                last_refusal = Some(cause);
             }
         }
     }
@@ -1449,11 +1540,10 @@ fn prepare_camera_rows(
         let arena_started = std::time::Instant::now();
         let split = prepared.len();
         prepared.append(&mut pending_viewmodel_prepared);
-        (arena_share, arena_vertex_n, arena_pixel_n) = upload_constant_arena(
-            &mut prepared,
-            &mut lane.arena_pack,
+        let layout = prepare_constant_bases(&mut prepared, &mut lane.arena_pack, pipeline);
+        (arena_share, arena_vertex_n, arena_pixel_n) = lane.arena_pack.upload(
             gpu_arena,
-            pipeline,
+            layout,
             registry,
             device,
             queue,
@@ -1482,13 +1572,7 @@ fn prepare_camera_rows(
         exec_refused,
         unsupported_state,
         bsp_submit_refused_surfaces,
-        pnr_smodel_mats,
-        pnr_world_mats,
-        pnr_smodel_ps,
-        pnr_world_ps,
-        pnr_smodel_keys,
-        pnr_world_keys,
-        pnr_ports,
+        pipeline_wait,
         bind_smodel_mats,
         last_markmesh_refusal,
         last_markmesh_exec_skip,
@@ -1544,7 +1628,7 @@ struct ColourPrepareLane {
 }
 
 #[derive(Resource, Default)]
-pub(super) struct ColourSubmitScratch {
+pub(crate) struct ColourSubmitScratch {
     lanes: [ColourPrepareLane; COLOUR_PREPARE_LANES],
 
     pub(super) world_exec_ready_keys: Vec<u64>,

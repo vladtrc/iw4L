@@ -6,127 +6,96 @@ use crate::world::ClientId;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ClassId(pub u32);
 
-pub type ActionRequestId = u32;
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ClientAction {
-    JoinMatch {
-        request_id: ActionRequestId,
-    },
+    JoinMatch,
 
-    LeaveMatch {
-        request_id: ActionRequestId,
-    },
+    LeaveMatch,
 
     SelectClass {
-        request_id: ActionRequestId,
         class_id: ClassId,
-        revision: u32,
         loadout: crate::PersonalClass,
     },
 
     GiveWeapon {
-        request_id: ActionRequestId,
         weapon: u32,
         model: u8,
     },
 
     ChangeWeaponCamo {
-        request_id: ActionRequestId,
         weapon: u32,
         model: u8,
     },
 
     ChangeWeaponConfiguration {
-        request_id: ActionRequestId,
         from: u32,
         to: u32,
     },
 
-    ForceDeath {
-        request_id: ActionRequestId,
-    },
+    ForceDeath,
 
-    SpawnClient {
-        request_id: ActionRequestId,
-    },
+    SpawnClient,
 
     ForceSpawn {
-        request_id: ActionRequestId,
         pick: SpawnPick,
     },
 
-    SpawnIntermission {
-        request_id: ActionRequestId,
-    },
+    SpawnIntermission,
 
     SetMatchPhase {
-        request_id: ActionRequestId,
         phase: MatchPhase,
     },
 
     Move {
-        request_id: ActionRequestId,
         origin: [f32; 3],
         angles: [f32; 3],
     },
 
     BeginScriptMoverRotateVelocity {
-        request_id: ActionRequestId,
         speed: f32,
     },
 
-    ToggleGod {
-        request_id: ActionRequestId,
-    },
+    ToggleGod,
+
+    ToggleProjectileFlight,
+
+    EndGracePeriod,
 
     DebugDamage {
-        request_id: ActionRequestId,
         amount: i32,
     },
 
     SetProfile {
-        request_id: ActionRequestId,
         profile: PlayerProfile,
     },
 
     SetName {
-        request_id: ActionRequestId,
         name: [u8; 16],
     },
 
     Chat {
-        request_id: ActionRequestId,
         team_only: bool,
         text: [u8; crate::chat::CHAT_BYTES],
     },
 
-    UseCopycat {
-        request_id: ActionRequestId,
-    },
+    UseCopycat,
 
     ActionSlot {
-        request_id: ActionRequestId,
         slot: u8,
     },
 
     ChooseDefaultClass {
-        request_id: ActionRequestId,
         index: u8,
     },
 
     MenuResponse {
-        request_id: ActionRequestId,
         menu: [u8; MENU_RESPONSE_BYTES],
         response: [u8; MENU_RESPONSE_BYTES],
     },
 
-    ResupplyAmmo {
-        request_id: ActionRequestId,
-    },
+    ResupplyAmmo,
 
     GiveKillstreak {
-        request_id: ActionRequestId,
         name: [u8; MENU_RESPONSE_BYTES],
     },
 }
@@ -161,8 +130,7 @@ pub enum SpawnPick {
     At { origin: [f32; 3], yaw: f32 },
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CommandSequence(pub u32);
+pub use playerstate_iw4::CommandSequence;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlayerCommand {
@@ -213,36 +181,6 @@ impl TickInput {
         self.shot_samples
             .sort_by_key(|((id, time), _)| (id.0, *time));
 
-        self.actions
-            .sort_by_key(|(id, action)| (id.0, action_request_id(action)));
-    }
-}
-
-pub fn action_request_id(action: &ClientAction) -> ActionRequestId {
-    match *action {
-        ClientAction::JoinMatch { request_id }
-        | ClientAction::LeaveMatch { request_id }
-        | ClientAction::SelectClass { request_id, .. }
-        | ClientAction::GiveWeapon { request_id, .. }
-        | ClientAction::ChangeWeaponCamo { request_id, .. }
-        | ClientAction::ChangeWeaponConfiguration { request_id, .. }
-        | ClientAction::ForceDeath { request_id }
-        | ClientAction::SpawnClient { request_id }
-        | ClientAction::ForceSpawn { request_id, .. }
-        | ClientAction::SpawnIntermission { request_id }
-        | ClientAction::SetMatchPhase { request_id, .. }
-        | ClientAction::Move { request_id, .. }
-        | ClientAction::BeginScriptMoverRotateVelocity { request_id, .. }
-        | ClientAction::ToggleGod { request_id }
-        | ClientAction::DebugDamage { request_id, .. }
-        | ClientAction::SetName { request_id, .. }
-        | ClientAction::SetProfile { request_id, .. }
-        | ClientAction::Chat { request_id, .. }
-        | ClientAction::UseCopycat { request_id }
-        | ClientAction::ActionSlot { request_id, .. }
-        | ClientAction::ChooseDefaultClass { request_id, .. }
-        | ClientAction::MenuResponse { request_id, .. }
-        | ClientAction::GiveKillstreak { request_id, .. }
-        | ClientAction::ResupplyAmmo { request_id } => request_id,
+        self.actions.sort_by_key(|(id, _)| id.0);
     }
 }

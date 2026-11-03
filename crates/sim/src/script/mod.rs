@@ -1,5 +1,7 @@
 mod compiler;
 mod error;
+pub mod extensions;
+pub mod families;
 pub mod host;
 mod ir;
 pub mod profile;
@@ -13,7 +15,8 @@ pub(crate) use bevy_ecs::prelude::Resource;
 pub(crate) use std::collections::{BTreeMap, VecDeque};
 pub(crate) use std::sync::Arc;
 
-pub(crate) use runtime::{MatchScript, RoundScript};
+pub(crate) use runtime::MatchScript;
+pub use runtime::RoundScript;
 
 pub use error::{Fault, Location};
 pub(crate) use host::controls::{
@@ -22,16 +25,15 @@ pub(crate) use host::controls::{
 pub use host::entities::{
     KeyType, LevelData, StringTable, parse_entity_string, parse_radiant_keys,
 };
-pub(crate) use host::entity_damage::{
-    EntityHit, HitTarget, ScriptBlast, ScriptHit, damage_entity, radius_targets,
-};
+pub use host::entity_damage::{EntityHit, HitTarget, ScriptBlast, ScriptHit};
+pub(crate) use host::entity_damage::{damage_entity, radius_targets};
 pub(crate) use host::mechanics::Mechanics;
 pub(crate) use host::mechanics::advance_mechanics;
 pub use host::natives::engine::{EXIT_LEVEL, MAP_RESTART};
 pub(crate) use host::natives::iw4::set_dvar;
 pub(crate) use host::players::{
-    answer_join, answer_menu, apply_disconnects, apply_player_links, choose_class,
-    choose_default_class, disconnect_player, flashbang, force_death, give_killstreak, is_t5,
+    answer_join, answer_menu, apply_disconnects, apply_player_links, bot_custom_classes_allowed,
+    choose_class, choose_default_class, disconnect_player, flashbang, force_death, give_killstreak,
     note_team_answer, personal_class, player_damage, script_seats, set_profile, sync_players,
 };
 pub(crate) use host::presence::sync_presence;
@@ -43,16 +45,14 @@ pub use ir::IR_VERSION;
 pub(crate) use ir::{Binary, Callee, Function, Global, Op, Unary};
 pub use profile::catalog::{Builtin, Catalog, Namespace, Owner};
 pub use profile::iw4_startup::Iw4Startup;
-pub use program::{ModuleIdentity, Program, Realm, Site};
-pub(crate) use runtime::{
-    advance_scheduler, copy_state, healthy, install, preflight, reset, start, take_signals,
-};
+pub use program::{FamilyId, ModuleIdentity, Program, Site};
+pub(crate) use runtime::{advance_scheduler, install, preflight, reset, start, take_signals};
 pub use source::{FileSources, SourceOrigin, SourceResolver, decode_source, normalize_module};
 pub(crate) use value::ArrayKey;
 pub use value::{ScriptString, Value};
 pub(crate) use vm::state::{Frame, Thread, ThreadState, Waiter, WaiterKind};
 
-pub(crate) use host::entity_damage::{
+pub use host::entity_damage::{
     destructible_attacker, destructible_callback, destructible_debris, destructible_effect,
     set_destructible_model, stop_destructible_effect,
 };

@@ -1,11 +1,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use d3d9_sm3::{PassLoweringAbi, PassWgsl};
+use d3d9_sm3::PassWgsl;
 
 use super::material_runtime::RuntimeShaderPair;
 
 // Bump when emitted WGSL changes as well as when the binary format changes.
-pub const WGSL_CACHE_FORMAT: u32 = 7;
+pub const WGSL_CACHE_FORMAT: u32 = 9;
 
 const MAGIC: &[u8; 8] = b"IWLWGSL\n";
 
@@ -21,8 +21,8 @@ pub fn stats() -> (u64, u64, f64) {
     )
 }
 
-pub fn load(pair: RuntimeShaderPair, abi: &PassLoweringAbi) -> Option<PassWgsl> {
-    let key = cache_key(pair, abi);
+pub fn load(pair: RuntimeShaderPair, owner: &str, backend_key: &[u8]) -> Option<PassWgsl> {
+    let key = cache_key(pair, owner, backend_key);
     let started = std::time::Instant::now();
     let bytes = assets::cache_get("wgsl", &key)?;
     IO_NS.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -31,9 +31,9 @@ pub fn load(pair: RuntimeShaderPair, abi: &PassLoweringAbi) -> Option<PassWgsl> 
     Some(module)
 }
 
-pub fn store(pair: RuntimeShaderPair, abi: &PassLoweringAbi, module: &PassWgsl) {
+pub fn store(pair: RuntimeShaderPair, owner: &str, backend_key: &[u8], module: &PassWgsl) {
     MISS.fetch_add(1, Ordering::Relaxed);
-    let key = cache_key(pair, abi);
+    let key = cache_key(pair, owner, backend_key);
     let bytes = encode(module);
     let started = std::time::Instant::now();
     if let Err(error) = assets::cache_put("wgsl", &key, &bytes) {
@@ -42,11 +42,13 @@ pub fn store(pair: RuntimeShaderPair, abi: &PassLoweringAbi, module: &PassWgsl) 
     IO_NS.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
 
-fn cache_key(pair: RuntimeShaderPair, abi: &PassLoweringAbi) -> String {
+fn cache_key(pair: RuntimeShaderPair, owner: &str, backend_key: &[u8]) -> String {
     let mut hash = assets::fnv1a64(&WGSL_CACHE_FORMAT.to_le_bytes());
     hash = assets::fnv1a64_more(hash, &pair.vertex.program_hash.to_le_bytes());
     hash = assets::fnv1a64_more(hash, &pair.pixel.program_hash.to_le_bytes());
-    hash = assets::fnv1a64_more(hash, format!("{abi:?}").as_bytes());
+    hash = assets::fnv1a64_more(hash, &(owner.len() as u64).to_le_bytes());
+    hash = assets::fnv1a64_more(hash, owner.as_bytes());
+    hash = assets::fnv1a64_more(hash, backend_key);
     format!("{hash:016x}")
 }
 

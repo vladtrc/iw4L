@@ -263,16 +263,19 @@ pub fn drive_client_admission_facts(
     link: Option<bevy::prelude::Res<UdpClientLink>>,
     bridge: Option<bevy::prelude::Res<MasterBridge>>,
 ) {
+    let previous_install = admission.core.installed();
     if let Some(fact) = installed.filter(|fact| fact.is_added()) {
-        admission.core.apply_start(fact.load_key.match_key);
-        admission.core.apply_install(fact.load_key);
+        admission.core.apply_start(fact.match_key);
+        admission.core.apply_install(fact.match_key);
     }
     let key = live_match_key(bridge.as_deref());
     if !key.is_none() {
         admission.core.apply_start(key);
     }
-    if let Some(bridge) = bridge.as_ref() {
-        bridge.set_installed_load(admission.core.installed());
+    if let Some(bridge) = bridge.as_ref()
+        && admission.core.installed() != previous_install
+    {
+        bridge.set_installed_match(admission.core.installed());
     }
     if let (Some(link), Some(bootstrap_id)) = (
         link.as_deref(),
@@ -299,6 +302,27 @@ pub fn drive_client_admission_facts(
     }
 }
 
+#[derive(Default)]
+pub struct SignonBridgeObservation {
+    incarnation: Option<u64>,
+    terminal_reported: bool,
+}
+
+impl SignonBridgeObservation {
+    fn observe(&mut self, current: Option<u64>) -> bool {
+        if self.incarnation == current {
+            return false;
+        }
+        self.incarnation = current;
+        self.terminal_reported = false;
+        true
+    }
+
+    fn report_terminal(&mut self) {
+        self.terminal_reported = self.incarnation.is_some();
+    }
+}
+
 pub fn drive_signon(
     dvars: bevy::prelude::Res<frame::UiMenuDvars>,
     mut signon: bevy::prelude::ResMut<SignonState>,
@@ -306,17 +330,13 @@ pub fn drive_signon(
     role: bevy::prelude::Res<RuntimeRole>,
     link: Option<bevy::prelude::Res<UdpClientLink>>,
     bridge: Option<bevy::prelude::Res<MasterBridge>>,
-    mut incarnation: bevy::prelude::Local<Option<u64>>,
-    mut reported_terminal: bevy::prelude::Local<Option<u64>>,
+    mut observation: bevy::prelude::Local<SignonBridgeObservation>,
 ) {
     if dvars.get("ui_password_pending") == Some("1") {
         return;
     }
     let current = bridge.as_ref().map(|bridge| bridge.incarnation());
-    if *incarnation != current {
-        *incarnation = current;
-        *reported_terminal = None;
-
+    if observation.observe(current) {
         *signon = SignonState::default();
     }
     if signon.phase.is_failed() {
@@ -326,7 +346,7 @@ pub fn drive_signon(
     // worker but leaves the terminal state on the resource, which outlives the
     // teardown that resets `SignonState` — reading it again would fail the next
     // session's fresh signon with the previous one's message.
-    let already_reported = *reported_terminal == current && current.is_some();
+    let already_reported = observation.terminal_reported;
     if let Some(bridge) = bridge.as_ref() {
         match bridge.state() {
             MasterBridgeState::Failed { .. } | MasterBridgeState::Closed { .. }
@@ -335,7 +355,7 @@ pub fn drive_signon(
                 return;
             }
             MasterBridgeState::Failed { error, identity } => {
-                *reported_terminal = current;
+                observation.report_terminal();
                 let match_key = identity.match_key();
                 admission.core.apply_fail(SessionFail {
                     stage: if error.operation == "admission" {
@@ -355,7 +375,7 @@ pub fn drive_signon(
                 return;
             }
             MasterBridgeState::Closed { reason, .. } => {
-                *reported_terminal = current;
+                observation.report_terminal();
                 admission.core.apply_close();
                 signon.set_phase(SignonPhase::Failed(SignonFailReason::SessionClosed(reason)));
                 signon.admitted = admission.core.class_select_allowed();
@@ -380,133 +400,151 @@ pub fn drive_signon(
     signon.set_phase(next);
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct MapLoadReporter<'w, 's> {
+    hold: Option<bevy::prelude::Res<'w, crate::AuthorityLoadHold>>,
+    defer: Option<bevy::prelude::Res<'w, DeferHostWorldReady>>,
+    sent: bevy::prelude::Local<'s, Option<(u64, u32)>>,
+    deferred: bevy::prelude::Local<'s, bool>,
+    withheld: bevy::prelude::Local<'s, bool>,
+}
+
+impl MapLoadReporter<'_, '_> {
+    fn drive(
+        mut self,
+        bridge: Option<bevy::prelude::Res<MasterBridge>>,
+        descriptor: Option<bevy::prelude::Res<crate::MatchDescriptor>>,
+        has_world: Option<bevy::prelude::Res<bevy::prelude::State<frame::MatchScope>>>,
+        admission: Option<bevy::prelude::Res<ClientAdmission>>,
+        signon: bevy::prelude::Res<SignonState>,
+    ) {
+        let Some(bridge) = bridge else {
+            return;
+        };
+        let installed = has_world.is_some_and(|world| *world.get() == frame::MatchScope::Live);
+        let hold = self.hold.is_some_and(|hold| hold.0);
+        let live = live_match_key(Some(&bridge));
+        let belongs = admission.as_ref().is_some_and(|admission| {
+            admission
+                .core
+                .installed()
+                .is_some_and(|key| key == live || (live.is_none() && key.is_none()))
+        });
+        let Some(descriptor) = descriptor.as_deref() else {
+            return;
+        };
+        match bridge.state() {
+            MasterBridgeState::Hosting {
+                identity,
+                in_match: true,
+                ..
+            } if identity.epoch != 0 => {
+                let Some(ready) = confirm_keyed_world_ready(
+                    installed,
+                    hold,
+                    belongs,
+                    HostWorldReady {
+                        epoch: identity.epoch,
+                        map: descriptor.map,
+                        weapons: descriptor.weapons,
+                        classes: descriptor.classes,
+                    },
+                ) else {
+                    return;
+                };
+                if self.defer.is_some_and(|defer| defer.blocking(now_ms())) {
+                    if !*self.deferred {
+                        diag::info!(
+                            Net,
+                            "host world ready held; network and control loop still running"
+                        );
+                        *self.deferred = true;
+                    }
+                    return;
+                }
+                let key = (bridge.incarnation(), identity.epoch);
+                if *self.sent == Some(key) {
+                    return;
+                }
+                bridge.report_host_world_ready(
+                    ready.epoch,
+                    crate::MatchDescriptor {
+                        map: ready.map,
+                        weapons: ready.weapons,
+                        classes: ready.classes,
+                    },
+                    admission
+                        .as_ref()
+                        .and_then(|admission| admission.core.installed())
+                        .expect("confirmed installed host world"),
+                );
+                *self.sent = Some(key);
+            }
+            _ => {
+                let epoch = signon.epoch.0;
+                let Some(ready) = confirm_keyed_world_ready(
+                    installed,
+                    false,
+                    belongs,
+                    HostWorldReady {
+                        epoch,
+                        map: descriptor.map,
+                        weapons: descriptor.weapons,
+                        classes: descriptor.classes,
+                    },
+                ) else {
+                    // The world is on screen but the report is still held back:
+                    // say which gate holds it, or the client sits in LoadingMap
+                    // with nothing in the log to read.
+                    if installed && !*self.withheld {
+                        *self.withheld = true;
+                        diag::info!(
+                            Net,
+                            "map loaded withheld: epoch={epoch} belongs={belongs} installed_key={:?} live={:?}",
+                            admission
+                                .as_ref()
+                                .and_then(|admission| admission.core.installed()),
+                            live,
+                        );
+                    }
+                    return;
+                };
+                *self.withheld = false;
+                let key = (bridge.incarnation(), epoch);
+                if *self.sent == Some(key) {
+                    return;
+                }
+                bridge.report_map_loaded(
+                    ready.epoch,
+                    crate::MatchDescriptor {
+                        map: ready.map,
+                        weapons: ready.weapons,
+                        classes: ready.classes,
+                    },
+                );
+                diag::info!(
+                    Net,
+                    "map loaded reported epoch={} map={:016x} weapons={:016x} classes={:016x} — the host owes a bootstrap offer",
+                    ready.epoch,
+                    ready.map,
+                    ready.weapons,
+                    ready.classes
+                );
+                *self.sent = Some(key);
+            }
+        }
+    }
+}
+
 pub fn drive_map_loaded(
+    reporter: MapLoadReporter,
     bridge: Option<bevy::prelude::Res<MasterBridge>>,
     descriptor: Option<bevy::prelude::Res<crate::MatchDescriptor>>,
     has_world: Option<bevy::prelude::Res<bevy::prelude::State<frame::MatchScope>>>,
     admission: Option<bevy::prelude::Res<ClientAdmission>>,
     signon: bevy::prelude::Res<SignonState>,
-    hold: Option<bevy::prelude::Res<crate::AuthorityLoadHold>>,
-    defer: Option<bevy::prelude::Res<DeferHostWorldReady>>,
-    mut sent: bevy::prelude::Local<Option<(u64, u32)>>,
-    mut deferred: bevy::prelude::Local<bool>,
-    mut withheld: bevy::prelude::Local<bool>,
 ) {
-    let Some(bridge) = bridge else {
-        return;
-    };
-    let installed = has_world.is_some_and(|world| *world.get() == frame::MatchScope::Live);
-    let hold = hold.is_some_and(|hold| hold.0);
-    let live = live_match_key(Some(&bridge));
-    let belongs = admission.as_ref().is_some_and(|admission| {
-        admission
-            .core
-            .installed()
-            .is_some_and(|key| key.belongs_to(live) || (live.is_none() && key.match_key.is_none()))
-    });
-    let Some(descriptor) = descriptor.as_deref() else {
-        return;
-    };
-    match bridge.state() {
-        MasterBridgeState::Hosting {
-            identity,
-            in_match: true,
-            ..
-        } if identity.epoch != 0 => {
-            let Some(ready) = confirm_keyed_world_ready(
-                installed,
-                hold,
-                belongs,
-                HostWorldReady {
-                    epoch: identity.epoch,
-                    map: descriptor.map,
-                    weapons: descriptor.weapons,
-                    classes: descriptor.classes,
-                },
-            ) else {
-                return;
-            };
-            if defer.is_some_and(|defer| defer.blocking(now_ms())) {
-                if !*deferred {
-                    diag::info!(
-                        Net,
-                        "host world ready held; network and control loop still running"
-                    );
-                    *deferred = true;
-                }
-                return;
-            }
-            let key = (bridge.incarnation(), identity.epoch);
-            if *sent == Some(key) {
-                return;
-            }
-            bridge.report_host_world_ready(
-                ready.epoch,
-                crate::MatchDescriptor {
-                    map: ready.map,
-                    weapons: ready.weapons,
-                    classes: ready.classes,
-                },
-                admission
-                    .as_ref()
-                    .and_then(|admission| admission.core.installed())
-                    .expect("confirmed installed host world"),
-            );
-            *sent = Some(key);
-        }
-        _ => {
-            let epoch = signon.epoch.0;
-            let Some(ready) = confirm_keyed_world_ready(
-                installed,
-                false,
-                belongs,
-                HostWorldReady {
-                    epoch,
-                    map: descriptor.map,
-                    weapons: descriptor.weapons,
-                    classes: descriptor.classes,
-                },
-            ) else {
-                // The world is on screen but the report is still held back:
-                // say which gate holds it, or the client sits in LoadingMap
-                // with nothing in the log to read.
-                if installed && !*withheld {
-                    *withheld = true;
-                    diag::info!(
-                        Net,
-                        "map loaded withheld: epoch={epoch} belongs={belongs} installed_key={:?} live={:?}",
-                        admission
-                            .as_ref()
-                            .and_then(|admission| admission.core.installed()),
-                        live,
-                    );
-                }
-                return;
-            };
-            *withheld = false;
-            let key = (bridge.incarnation(), epoch);
-            if *sent == Some(key) {
-                return;
-            }
-            bridge.report_map_loaded(
-                ready.epoch,
-                crate::MatchDescriptor {
-                    map: ready.map,
-                    weapons: ready.weapons,
-                    classes: ready.classes,
-                },
-            );
-            diag::info!(
-                Net,
-                "map loaded reported epoch={} map={:016x} weapons={:016x} classes={:016x} — the host owes a bootstrap offer",
-                ready.epoch,
-                ready.map,
-                ready.weapons,
-                ready.classes
-            );
-            *sent = Some(key);
-        }
-    }
+    reporter.drive(bridge, descriptor, has_world, admission, signon);
 }
 
 pub fn drive_match_boundary(

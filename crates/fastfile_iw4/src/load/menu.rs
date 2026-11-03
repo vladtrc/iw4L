@@ -265,9 +265,11 @@ pub(super) fn load_menu(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink) -
             links,
             p,
             s.layout(field, 224 + (field - 204) * 2),
-            menu_name,
-            "",
-            kind,
+            MenuScriptTarget {
+                menu: menu_name,
+                item: "",
+                kind,
+            },
             &mut cache,
         )?;
     }
@@ -835,19 +837,25 @@ fn stmt_support(s: &ZoneStream<'_>, stmt: Ptr) -> Option<Ptr> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct MenuScriptTarget<'a> {
+    menu: &'a str,
+    item: &'a str,
+    kind: MenuScriptKind,
+}
+
 fn follow_handler_set(
     s: &mut ZoneStream<'_>,
     links: &mut dyn AssetLinkSink,
     parent: Ptr,
     field: usize,
-    menu: &str,
-    item: &str,
-    kind: MenuScriptKind,
+    target: MenuScriptTarget<'_>,
     cache: &mut StatementCache,
 ) -> Result<()> {
+    let MenuScriptTarget { menu, item, kind } = target;
     let (load, insert_slot) = s.begin_body_with_insert(parent.at(field))?;
     if load {
-        load_event_handler_set(s, links, menu, item, kind, insert_slot, cache)?;
+        load_event_handler_set(s, links, target, insert_slot, cache)?;
     } else if let Ok(ZonePtr::Offset(q)) = s.ptr_at(parent, field) {
         links.reuse_menu_script_set(s.resolve_alias(q), menu, item, kind)?;
     }
@@ -857,9 +865,7 @@ fn follow_handler_set(
 fn load_event_handler_set(
     s: &mut ZoneStream<'_>,
     links: &mut dyn AssetLinkSink,
-    menu: &str,
-    item: &str,
-    kind: MenuScriptKind,
+    target: MenuScriptTarget<'_>,
     insert_slot: Option<Ptr>,
     cache: &mut StatementCache,
 ) -> Result<()> {
@@ -871,7 +877,7 @@ fn load_event_handler_set(
         let arr = s.alloc_load(4, s.pointer_bytes() * count)?;
         for i in 0..count {
             if s.begin_body(arr.at(i * s.pointer_bytes()))? {
-                load_event_handler(s, links, menu, item, kind, cache)?;
+                load_event_handler(s, links, target, cache)?;
             }
         }
     }
@@ -883,11 +889,10 @@ fn load_event_handler_set(
 fn load_event_handler(
     s: &mut ZoneStream<'_>,
     links: &mut dyn AssetLinkSink,
-    menu: &str,
-    item: &str,
-    kind: MenuScriptKind,
+    target: MenuScriptTarget<'_>,
     cache: &mut StatementCache,
 ) -> Result<()> {
+    let MenuScriptTarget { menu, item, kind } = target;
     const EVENT_UNCONDITIONAL: i32 = 0;
     const EVENT_IF: i32 = 1;
     const EVENT_ELSE: i32 = 2;
@@ -916,13 +921,13 @@ fn load_event_handler(
                 })?;
                 let condition = core::str::from_utf8(&condition_buf[..condition_len]).unwrap_or("");
                 links.begin_menu_event_branch(menu, item, kind, Some(condition))?;
-                follow_handler_set(s, links, c, 0, menu, item, kind, cache)?;
+                follow_handler_set(s, links, c, 0, target, cache)?;
                 links.end_menu_event_branch(menu, item, kind)?;
             }
         }
         EVENT_ELSE => {
             links.begin_menu_event_branch(menu, item, kind, None)?;
-            follow_handler_set(s, links, data, 0, menu, item, kind, cache)?;
+            follow_handler_set(s, links, data, 0, target, cache)?;
             links.end_menu_event_branch(menu, item, kind)?;
         }
         t if (EVENT_SET_LOCAL_VAR_FIRST..=EVENT_SET_LOCAL_VAR_LAST).contains(&t) => {
@@ -958,9 +963,11 @@ fn load_item_key_handler(
             links,
             p,
             s.layout(4, 8),
-            menu,
-            "",
-            MenuScriptKind::ExecKey,
+            MenuScriptTarget {
+                menu,
+                item: "",
+                kind: MenuScriptKind::ExecKey,
+            },
             cache,
         )?;
         more = s.begin_body(p.at(s.layout(8, 16)))?;
@@ -1029,9 +1036,11 @@ fn load_item_def(
             links,
             p,
             s.layout(field, 264 + (field - 240) * 2),
-            menu_name,
-            item_name,
-            kind,
+            MenuScriptTarget {
+                menu: menu_name,
+                item: item_name,
+                kind,
+            },
             cache,
         )?;
     }
@@ -1222,7 +1231,18 @@ fn load_item_type_data(
     if item_type == ITEM_TYPE_LISTBOX {
         if s.begin_body(p.at(0))? {
             let b = s.alloc_load(4, s.layout(sz::LIST_BOX_DEF, 336))?;
-            follow_handler_set(s, links, b, 288, menu, item, MenuScriptKind::Action, cache)?;
+            follow_handler_set(
+                s,
+                links,
+                b,
+                288,
+                MenuScriptTarget {
+                    menu,
+                    item,
+                    kind: MenuScriptKind::Action,
+                },
+                cache,
+            )?;
             asset_ptr_at(s, links, AssetType::Material, b.at(s.layout(320, 328)))?;
         }
     } else if EDIT_FIELD_TYPES.contains(&item_type) {

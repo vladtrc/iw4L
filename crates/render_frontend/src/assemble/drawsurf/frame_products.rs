@@ -1,3 +1,4 @@
+use bevy::ecs::system::SystemParam;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::tasks::ComputeTaskPool;
@@ -138,6 +139,8 @@ const PRODUCT_BANKS: usize = 3;
 #[derive(Resource, Debug)]
 pub struct RenderFrameProducts {
     pub frame_id: u64,
+    pub camera_world: usize,
+    pub view_origin: Vec3,
     banks: [Arc<FrameProductsSnapshot>; PRODUCT_BANKS],
     write: usize,
     published: usize,
@@ -151,6 +154,8 @@ impl Default for RenderFrameProducts {
     fn default() -> Self {
         Self {
             frame_id: 0,
+            camera_world: 0,
+            view_origin: Vec3::ZERO,
             banks: [
                 Arc::new(FrameProductsSnapshot::empty()),
                 Arc::new(FrameProductsSnapshot::empty()),
@@ -281,6 +286,10 @@ pub struct MaterialFrameInputs {
     pub sun_shadow: Option<super::SunShadowForcedFrame>,
 
     pub spot_receivers: Vec<Option<render_frame::SpotShadowReceiver>>,
+
+    pub portal: Option<render_frame::PortalView>,
+    pub world_cameras: Vec<Option<render_frame::WorldCamera>>,
+    pub world_fog_colors: Vec<[f32; 4]>,
 }
 
 pub(crate) fn admit_material_generation(
@@ -359,7 +368,6 @@ struct CameraFillStamp {
     xmodel_payload: u64,
     fx_payload: u64,
     catalog: u64,
-    world_generation: Option<u64>,
     colour_tech: u8,
     emissive_tech: u8,
     dfog: bool,
@@ -376,7 +384,6 @@ impl CameraFillStamp {
             && self.xmodel_membership == other.xmodel_membership
             && self.fx_membership == other.fx_membership
             && self.catalog == other.catalog
-            && self.world_generation == other.world_generation
             && self.colour_tech == other.colour_tech
             && self.emissive_tech == other.emissive_tech
             && self.dfog == other.dfog
@@ -397,10 +404,6 @@ impl CameraFillStamp {
         super::list::mix_content_id(&mut id, self.xmodel_membership);
         super::list::mix_content_id(&mut id, self.fx_membership);
         super::list::mix_content_id(&mut id, self.catalog);
-        super::list::mix_content_id(
-            &mut id,
-            self.world_generation.map_or(0, |g| g.wrapping_add(1)),
-        );
         super::list::mix_content_id(&mut id, u64::from(self.colour_tech));
         super::list::mix_content_id(&mut id, u64::from(self.emissive_tech));
         super::list::mix_content_id(&mut id, u64::from(self.dfog));
@@ -558,98 +561,29 @@ fn apply_payload_update(product: &mut FrameProduct, persist: &mut ProductBindPer
     false
 }
 
-fn apply_camera_list(
-    product: &mut FrameProduct,
-    persist: &mut ProductBindPersist,
-    generation_id: MaterialGenerationId,
-    tech_type: TechType,
-    light_types: &[u8],
+#[derive(Clone, Copy)]
+struct ProductTechniquePolicy<'a> {
+    base: TechType,
+    light_types: &'a [u8],
     dfog: bool,
     remap_lit: bool,
     sun_shadow_map: super::SunShadowReceivers,
-    spot_shadowed: &[u8],
-    target: ProductTarget,
-    catalog: &RuntimeMaterialCatalog,
-    prepared: &PreparedMaterialTable,
-    composition_digest: u64,
-    reuse_compact: bool,
-) {
-    if reuse_compact && apply_payload_update(product, persist) {
-        product.generation_id = generation_id;
-        product.list_digest = composition_digest;
-        product.status = FrameProductStatus::Ready { tech_type, target };
-        return;
-    }
-    fill_product_list(
-        product,
-        generation_id,
-        tech_type,
-        light_types,
-        dfog,
-        remap_lit,
-        sun_shadow_map,
-        spot_shadowed,
-        target,
-        persist,
-        catalog,
-        prepared,
-        composition_digest,
-    );
+    spot_shadowed: &'a [u8],
 }
 
-fn compact_product_draws(
-    product: &mut FrameProduct,
-    tech_type: TechType,
-    remap_lit: bool,
-    light_types: &[u8],
-    dfog: bool,
-    sun_shadow_map: super::SunShadowReceivers,
-    spot_shadowed: &[u8],
-    persist: &mut ProductBindPersist,
-    catalog: &RuntimeMaterialCatalog,
-    prepared: &PreparedMaterialTable,
-) {
-    persist.compact_seen.clear();
-    persist.compact_seen.reserve(product.ordered_draws.len());
-    persist.compact_remap.clear();
-    persist.compact_remap.reserve(product.ordered_draws.len());
-    product.draw_tech.clear();
-    product.draw_tech.reserve(product.ordered_draws.len());
-    product.code_sampler_mask = 0;
-    product.material_refusals.clear();
-    product.has_codemesh = false;
-
-    let input_len = product.ordered_draws.len();
-    let input_near_n = product.sun_near_n.min(input_len);
-    let split_sun = input_near_n > 0 && input_near_n < input_len;
-    let mut output_near_n = input_near_n;
-    let mut output = 0;
-    for input in 0..input_len {
-        if split_sun && input == input_near_n {
-            output_near_n = output;
-            persist.compact_seen.clear();
-        }
-        let draw = product.ordered_draws[input];
-        let draw_tech = if product.kind == FrameProductKind::Light {
-            let index = dpvs_iw4::GfxDrawSurf { packed: draw.key }.scene_light_index();
-            let light_type = light_types.get(usize::from(index)).copied().unwrap_or(0);
-            TechType(lighting_iw4::additional_light_tech_type(
-                light_type,
-                spot_shadowed.contains(&index),
-            ))
-        } else if remap_lit
-            && tech_type.0 == lighting_iw4::GFX_DRAW_METHOD_LIT_BEGIN
-            && render_material::resolve_sorted_material(
-                catalog,
-                render_material::MaterialDrawKey::new(draw.key, draw.material_rank)
-                    .with_material_id(draw.material_id),
-            )
-            .is_ok_and(|material| material.draw_rules.unlit_sky)
-        {
-            TechType(asset_iw4::TECHNIQUE_UNLIT as u8 + u8::from(dfog))
-        } else if remap_lit {
+impl ProductTechniquePolicy<'_> {
+    fn keep_colour(self, draw: &RetainedDrawItem, catalog: &RuntimeMaterialCatalog) -> bool {
+        let Self {
+            base,
+            remap_lit,
+            light_types,
+            dfog,
+            sun_shadow_map,
+            spot_shadowed,
+        } = self;
+        let tech = if remap_lit {
             super::colour_lit_technique(
-                tech_type,
+                base,
                 draw.key,
                 light_types,
                 dfog,
@@ -657,42 +591,210 @@ fn compact_product_draws(
                 spot_shadowed,
             )
         } else {
-            tech_type
+            base
         };
-        let key = logical_input_key(&draw, draw_tech);
-        if let Some(&compact) = persist.compact_seen.get(&key) {
-            persist.compact_remap.push(compact);
-            continue;
+        !super::material_runtime::resolve_material_technique(
+            catalog,
+            render_material::MaterialDrawKey::new(draw.key, draw.material_rank)
+                .with_material_id(draw.material_id),
+            tech,
+        )
+        .is_ok_and(|(_, technique)| technique.flags & 1 != 0)
+    }
+}
+
+struct ProductListWriter<'a> {
+    product: &'a mut FrameProduct,
+    persist: &'a mut ProductBindPersist,
+    catalog: &'a RuntimeMaterialCatalog,
+    prepared: &'a PreparedMaterialTable,
+}
+
+impl ProductListWriter<'_> {
+    fn apply_camera(
+        &mut self,
+        generation_id: MaterialGenerationId,
+        policy: ProductTechniquePolicy<'_>,
+        target: ProductTarget,
+        composition_digest: u64,
+        reuse_compact: bool,
+    ) {
+        let tech_type = policy.base;
+        let product = &mut *self.product;
+        let persist = &mut *self.persist;
+        if reuse_compact && apply_payload_update(product, persist) {
+            product.generation_id = generation_id;
+            product.list_digest = composition_digest;
+            product.status = FrameProductStatus::Ready { tech_type, target };
+            return;
         }
-        let material_key = render_material::MaterialDrawKey::new(draw.key, draw.material_rank)
-            .with_material_id(draw.material_id);
-        let mask = match super::draw_code_sampler_mask(catalog, prepared, material_key, draw_tech) {
-            Ok(mask) => mask,
-            Err(cause) => {
-                product
-                    .material_refusals
-                    .push(render_frame::FrameMaterialRefusal {
-                        key: material_key,
-                        tech_type: draw_tech,
-                        cause,
-                    });
-                persist.compact_seen.insert(key, u32::MAX);
-                persist.compact_remap.push(u32::MAX);
+        self.fill(generation_id, policy, target, composition_digest);
+    }
+
+    fn compact(&mut self, policy: ProductTechniquePolicy<'_>) {
+        let product = &mut *self.product;
+        let persist = &mut *self.persist;
+        let catalog = self.catalog;
+        let prepared = self.prepared;
+        let ProductTechniquePolicy {
+            base: tech_type,
+            light_types,
+            dfog,
+            remap_lit,
+            sun_shadow_map,
+            spot_shadowed,
+        } = policy;
+        persist.compact_seen.clear();
+        persist.compact_seen.reserve(product.ordered_draws.len());
+        persist.compact_remap.clear();
+        persist.compact_remap.reserve(product.ordered_draws.len());
+        product.draw_tech.clear();
+        product.draw_tech.reserve(product.ordered_draws.len());
+        product.code_sampler_mask = 0;
+        product.material_refusals.clear();
+        product.has_codemesh = false;
+
+        let input_len = product.ordered_draws.len();
+        let input_near_n = product.sun_near_n.min(input_len);
+        let split_sun = input_near_n > 0 && input_near_n < input_len;
+        let mut output_near_n = input_near_n;
+        let mut output = 0;
+        for input in 0..input_len {
+            if split_sun && input == input_near_n {
+                output_near_n = output;
+                persist.compact_seen.clear();
+            }
+            let draw = product.ordered_draws[input];
+            let draw_tech = if product.kind == FrameProductKind::Light {
+                let index = dpvs_iw4::GfxDrawSurf { packed: draw.key }.scene_light_index();
+                let light_type = light_types.get(usize::from(index)).copied().unwrap_or(0);
+                TechType(lighting_iw4::additional_light_tech_type(
+                    light_type,
+                    spot_shadowed.contains(&index),
+                ))
+            } else if remap_lit
+                && tech_type.0 == lighting_iw4::GFX_DRAW_METHOD_LIT_BEGIN
+                && render_material::resolve_sorted_material(
+                    catalog,
+                    render_material::MaterialDrawKey::new(draw.key, draw.material_rank)
+                        .with_material_id(draw.material_id),
+                )
+                .is_ok_and(|material| material.draw_rules.unlit_sky)
+            {
+                TechType(asset_iw4::TECHNIQUE_UNLIT as u8 + u8::from(dfog))
+            } else if remap_lit {
+                super::colour_lit_technique(
+                    tech_type,
+                    draw.key,
+                    light_types,
+                    dfog,
+                    sun_shadow_map,
+                    spot_shadowed,
+                )
+            } else {
+                tech_type
+            };
+            let key = logical_input_key(&draw, draw_tech);
+            if let Some(&compact) = persist.compact_seen.get(&key) {
+                persist.compact_remap.push(compact);
                 continue;
             }
-        };
-        let compact = u32::try_from(output).unwrap_or(u32::MAX);
-        persist.compact_seen.insert(key, compact);
-        persist.compact_remap.push(compact);
-        product.ordered_draws[output] = draw;
-        product.draw_tech.push(draw_tech);
-        product.code_sampler_mask |= mask;
-        product.has_codemesh |= matches!(draw.kind, RetainedDrawKind::CodeMesh { .. });
-        output += 1;
+            let material_key = render_material::MaterialDrawKey::new(draw.key, draw.material_rank)
+                .with_material_id(draw.material_id);
+            let mask =
+                match super::draw_code_sampler_mask(catalog, prepared, material_key, draw_tech) {
+                    Ok(mask) => mask,
+                    Err(cause) => {
+                        product
+                            .material_refusals
+                            .push(render_frame::FrameMaterialRefusal {
+                                key: material_key,
+                                tech_type: draw_tech,
+                                cause,
+                            });
+                        persist.compact_seen.insert(key, u32::MAX);
+                        persist.compact_remap.push(u32::MAX);
+                        continue;
+                    }
+                };
+            let compact = u32::try_from(output).unwrap_or(u32::MAX);
+            persist.compact_seen.insert(key, compact);
+            persist.compact_remap.push(compact);
+            product.ordered_draws[output] = draw;
+            product.draw_tech.push(draw_tech);
+            product.code_sampler_mask |= mask;
+            product.has_codemesh |= matches!(draw.kind, RetainedDrawKind::CodeMesh { .. });
+            output += 1;
+        }
+        product.ordered_draws.truncate(output);
+        if input_near_n > 0 {
+            product.sun_near_n = if split_sun { output_near_n } else { output };
+        }
     }
-    product.ordered_draws.truncate(output);
-    if input_near_n > 0 {
-        product.sun_near_n = if split_sun { output_near_n } else { output };
+
+    fn fill(
+        &mut self,
+        generation_id: MaterialGenerationId,
+        policy: ProductTechniquePolicy<'_>,
+        target: ProductTarget,
+        composition_digest: u64,
+    ) {
+        let tech_type = policy.base;
+        self.product.generation_id = generation_id;
+        self.product.list_digest = composition_digest;
+        self.compact(policy);
+        self.product.world_pretess_id = world_pretess_id(self.product);
+        self.persist.remember_compacted(self.product);
+        self.product.status = FrameProductStatus::Ready { tech_type, target };
+    }
+    fn fill_dlight(
+        &mut self,
+        colour: &FrameProduct,
+        inputs: &FrameAssemblyInputs,
+        scene: Option<&crate::prepare::scene::world::WorldScene>,
+        gfx: Option<&render_scene::GfxScene>,
+        world_run_surfs: &[u16],
+        policy: ProductTechniquePolicy<'_>,
+    ) {
+        let light = &mut *self.product;
+        let persist = &mut *self.persist;
+
+        light.begin_fill(COLOUR_MISSING);
+        persist.prepare(inputs.catalog_generation);
+        if inputs.primary_lights.len() <= inputs.map_light_n {
+            return;
+        }
+        for (i, dlight) in inputs
+            .primary_lights
+            .iter()
+            .enumerate()
+            .skip(inputs.map_light_n)
+        {
+            let Ok(index) = u8::try_from(i) else {
+                continue;
+            };
+            for draw in &colour.ordered_draws {
+                if super::dlight_receivers::dlight_receiver_keep(
+                    draw,
+                    dlight.origin,
+                    dlight.radius,
+                    scene,
+                    gfx,
+                    world_run_surfs,
+                ) {
+                    let mut row = *draw;
+                    row.key = super::with_scene_light_index(draw.key, index);
+                    light.ordered_draws.push(row);
+                }
+            }
+        }
+        self.apply_camera(
+            colour.generation_id,
+            policy,
+            ProductTarget::Core3dViewColour,
+            dlight_list_digest(colour.list_digest, inputs),
+            false,
+        );
     }
 }
 
@@ -769,37 +871,6 @@ fn overlay_compact_from_lanes(
     remap.next().is_none() && filled == expect
 }
 
-fn colour_list_keep(
-    draw: &RetainedDrawItem,
-    base: TechType,
-    remap_lit: bool,
-    light_types: &[u8],
-    dfog: bool,
-    sun_shadow_map: super::SunShadowReceivers,
-    spot_shadowed: &[u8],
-    catalog: &RuntimeMaterialCatalog,
-) -> bool {
-    let tech = if remap_lit {
-        super::colour_lit_technique(
-            base,
-            draw.key,
-            light_types,
-            dfog,
-            sun_shadow_map,
-            spot_shadowed,
-        )
-    } else {
-        base
-    };
-    !super::material_runtime::resolve_material_technique(
-        catalog,
-        render_material::MaterialDrawKey::new(draw.key, draw.material_rank)
-            .with_material_id(draw.material_id),
-        tech,
-    )
-    .is_ok_and(|(_, technique)| technique.flags & 1 != 0)
-}
-
 fn overlay_filter_from_lanes(
     dest: &mut [RetainedDrawItem],
     lanes: [&[RetainedDrawItem]; 3],
@@ -847,45 +918,9 @@ fn commit_compacted_payload(
     product.status = FrameProductStatus::Ready { tech_type, target };
 }
 
-fn fill_product_list(
-    product: &mut FrameProduct,
-    generation_id: MaterialGenerationId,
-    tech_type: TechType,
-    light_types: &[u8],
-    dfog: bool,
-    remap_lit: bool,
-    sun_shadow_map: super::SunShadowReceivers,
-    spot_shadowed: &[u8],
-    target: ProductTarget,
-    persist: &mut ProductBindPersist,
-    catalog: &RuntimeMaterialCatalog,
-    prepared: &PreparedMaterialTable,
-    composition_digest: u64,
-) {
-    product.generation_id = generation_id;
-    product.list_digest = composition_digest;
-    compact_product_draws(
-        product,
-        tech_type,
-        remap_lit,
-        light_types,
-        dfog,
-        sun_shadow_map,
-        spot_shadowed,
-        persist,
-        catalog,
-        prepared,
-    );
-    product.world_pretess_id = world_pretess_id(product);
-    persist.remember_compacted(product);
-    product.status = FrameProductStatus::Ready { tech_type, target };
-}
-
 #[derive(Resource, Debug, Default)]
 pub struct FrameAssemblyInputs {
     pub frame_id: u64,
-
-    pub world_generation: frame::WorldStamp,
 
     pub catalog_generation: MaterialGenerationId,
     pub inv_image_height: Option<f32>,
@@ -898,15 +933,19 @@ pub struct FrameAssemblyInputs {
     pub local_light_bindings: Vec<render_material::CompiledConstantOverlay>,
     pub reflection_probe_sh: Vec<Option<[[f32; 4]; 3]>>,
     pub smodel_lighting_sh: std::sync::Arc<Vec<Option<[[f32; 4]; 3]>>>,
+    pub xmodel_lighting_base: u32,
+    pub xmodel_lighting_sh: std::sync::Arc<Vec<Option<[[f32; 4]; 3]>>>,
 }
 
 pub(crate) fn open_frame_products(
     generation: Res<MaterialGeneration>,
-    world_generation: Option<Res<frame::WorldGeneration>>,
     lighting: Option<Res<WorldModelLightingAtlas>>,
     dfog: Option<Res<super::DrawMethodDfog>>,
     primary_lights: Option<Res<super::MapPrimaryLights>>,
     smodel_plan: Option<Res<super::tess::smodel::SmodelGpuPlan>>,
+    model_lighting: Option<
+        Res<crate::prepare::scene::model_lighting_cache::WorldModelLightingCache>,
+    >,
     fx_dlights: Option<Res<render_fx::HostFxDlights>>,
     prepared: Option<Res<crate::prepare::scene::view_parms::PreparedSceneView>>,
     mut inputs: ResMut<FrameAssemblyInputs>,
@@ -918,10 +957,7 @@ pub(crate) fn open_frame_products(
     spot_lights.0.clear();
     mat_frame.spot_receivers.clear();
     let inputs = inputs.as_mut();
-    inputs.frame_id = inputs.frame_id.wrapping_add(1);
-    inputs.world_generation = world_generation
-        .map(|generation| generation.stamp())
-        .unwrap_or_default();
+    inputs.frame_id = perf::frames::open_index();
     inputs.catalog_generation = generation.catalog.generation_id();
     inputs.inv_image_height = lighting.as_ref().and_then(|lighting| {
         lighting_iw4::model_lighting_inv_image_height(lighting.dims.image_height)
@@ -933,7 +969,10 @@ pub(crate) fn open_frame_products(
     inputs.reflection_probe_sh.clear();
     inputs.smodel_lighting_sh = smodel_plan
         .map(|plan| plan.lighting_sh.clone())
-        .unwrap_or_default();
+        .unwrap_or_else(|| Arc::new(Vec::new()));
+    (inputs.xmodel_lighting_base, inputs.xmodel_lighting_sh) = model_lighting
+        .map(|cache| cache.lighting_sh())
+        .unwrap_or_else(|| (0, Arc::new(Vec::new())));
     if let Some(map) = primary_lights.as_ref() {
         inputs
             .reflection_probe_sh
@@ -999,7 +1038,7 @@ pub(crate) fn open_frame_products(
             .as_ref()
             .and_then(|map| map.overrides.get(index))
             .copied()
-            .unwrap_or_default();
+            .unwrap_or_else(super::command_context::MaterialLightOverrides::default);
         let light_inputs = asset_material::MaterialLocalLightInputs {
             light_type: light.light_type,
             direction: light.direction,
@@ -1083,7 +1122,6 @@ impl Default for SunProduct {
 struct SunPackStamp {
     membership: u64,
     catalog: u64,
-    world_generation: Option<u64>,
     world_verts: u32,
     world_range_n: usize,
     smodel_range_n: usize,
@@ -1096,10 +1134,6 @@ impl SunPackStamp {
         let mut id = super::list::CONTENT_ID_SEED;
         super::list::mix_content_id(&mut id, self.membership);
         super::list::mix_content_id(&mut id, self.catalog);
-        super::list::mix_content_id(
-            &mut id,
-            self.world_generation.map_or(0, |g| g.wrapping_add(1)),
-        );
         super::list::mix_content_id(&mut id, u64::from(self.world_verts));
         super::list::mix_content_id(&mut id, self.world_range_n as u64);
         super::list::mix_content_id(&mut id, self.smodel_range_n as u64);
@@ -1228,7 +1262,7 @@ pub(crate) fn bake_static_sun_shadow_casters(
     mut staged: ResMut<StaticSunCasters>,
     mut sun_staging: Local<super::SunShadowStaging>,
 ) {
-    let _static = perf::Span::HostStaticSunMs.enter();
+    let _static = perf::span!("static_sun", "iw4l.render");
     let (smodel_plan, lod_ramp, smc_cache, pretess, smodel_lighting) = smodel_plan;
     let camera_view = frame.view_from_world;
     staged.partitions = None;
@@ -1256,7 +1290,23 @@ pub(crate) fn bake_static_sun_shadow_casters(
         *sun_draw_cell_n = 0;
         let planes0 = sun_frame.partitions[0].clip_planes;
         let planes1 = sun_frame.partitions[1].clip_planes;
-        let dpvs = &cull.dpvs;
+        let (dpvs, surface_base, surface_count, smodel_base) = if cull.cell_vis_world == 0 {
+            (&cull.dpvs, 0, surf_n, 0)
+        } else {
+            let Some(layer) = cull
+                .atlas_layers
+                .iter()
+                .find(|layer| layer.world == cull.cell_vis_world)
+            else {
+                return;
+            };
+            (
+                &layer.dpvs,
+                layer.surface_base,
+                layer.surface_count,
+                layer.smodel_base,
+            )
+        };
         let cell_vis = cull.cell_vis.as_slice();
         let cell_vis_all = cull.cell_vis_all;
         let (surf_near, surf_far) = sun_surface_vis.split_at_mut(1);
@@ -1298,6 +1348,7 @@ pub(crate) fn bake_static_sun_shadow_casters(
                         &mut smodel_ids_far,
                     ),
                 ] {
+                    let ramp = ramp.clone();
                     scope.spawn(async move {
                         let (_, draw_cells) =
                             crate::prepare::scene::cull::add_world_surfaces_frustum_only(
@@ -1305,8 +1356,8 @@ pub(crate) fn bake_static_sun_shadow_casters(
                                 planes,
                                 cell_vis,
                                 cell_vis_all,
-                                surface_vis,
-                                smodel_vis,
+                                &mut surface_vis[surface_base..surface_base + surface_count],
+                                &mut smodel_vis[smodel_base..],
                                 frustum_msb,
                             );
                         if let Some(eye) = lod_origin_eye {
@@ -1317,17 +1368,19 @@ pub(crate) fn bake_static_sun_shadow_casters(
                                 ramp.scale_last,
                             );
                         }
-                        let plan = super::retained_list::bake_sun_shadow_caster_plan(
+                        let plan = super::retained_list::SunShadowBake::new(
                             cull,
                             &smodel_plan.shadow_draw_insts,
                             world_plan,
                             smodel_plan,
                             catalog,
+                            buckets,
+                        )
+                        .bake(
                             Some(surface_vis),
                             Some(smodel_vis),
                             lod_origin_eye,
                             ramp,
-                            buckets,
                             bsp_ids,
                             smodel_ids,
                         );
@@ -1377,13 +1430,18 @@ pub(crate) fn bake_sun_shadow_casters(
     near.smodel_ids = std::mem::take(&mut casters.smodel_ids);
     near.bsp_ids_far = std::mem::take(&mut casters.bsp_ids_far);
     near.smodel_ids_far = std::mem::take(&mut casters.smodel_ids_far);
-    let (mut ordered0, ordered1) = super::retained_list::merge_sun_shadow_caster_partitions(
+    let (mut ordered0, mut ordered1) = super::retained_list::merge_sun_shadow_caster_partitions(
         &mut near,
         &mut far,
         xmodel_plan.as_deref(),
         &generation.catalog,
         [planes0.as_slice(), planes1.as_slice()],
+        frame.portal.as_ref(),
     );
+    if let Some(portal) = frame.portal.as_ref() {
+        ordered0.retain(|item| portal.camera_sun_caster(&item.kind));
+        ordered1.retain(|item| portal.camera_sun_caster(&item.kind));
+    }
     let sun_near_n = ordered0.len();
     ordered0.extend(ordered1);
     *casters = near;
@@ -1485,7 +1543,7 @@ pub(crate) fn execute_sun_product(
         .as_ref()
         .map(|lights| lights.types.as_slice())
         .unwrap_or(&[]);
-    let (_, _, _, _, world_run_surfs) = retained.live_for(inputs.world_generation);
+    let (_, _, _, _, world_run_surfs) = retained.draws();
 
     let (Some(_), Some(world_plan), Some(smodel_plan)) = (
         frame.sun_shadow,
@@ -1514,7 +1572,6 @@ pub(crate) fn execute_sun_product(
     let stamp = SunPackStamp {
         membership: caster_membership(&product.ordered_draws, product.sun_near_n),
         catalog: inputs.catalog_generation.get(),
-        world_generation: inputs.world_generation.0,
         world_verts,
         world_range_n: world_ranges.len(),
         smodel_range_n: smodel_ranges.len(),
@@ -1531,19 +1588,23 @@ pub(crate) fn execute_sun_product(
     ) {
         return;
     }
-    fill_product_list(
+    ProductListWriter {
         product,
-        retained.generation_id,
-        TechType(super::SUN_SHADOW_CASTER_TECH),
-        light_types,
-        inputs.dfog,
-        false,
-        super::SunShadowReceivers::NONE,
-        &[],
-        ProductTarget::SunShadowFallbackAtlas,
         persist,
-        &generation.catalog,
-        &generation.prepared,
+        catalog: &generation.catalog,
+        prepared: &generation.prepared,
+    }
+    .fill(
+        retained.generation_id,
+        ProductTechniquePolicy {
+            base: TechType(super::SUN_SHADOW_CASTER_TECH),
+            light_types,
+            dfog: inputs.dfog,
+            remap_lit: false,
+            sun_shadow_map: super::SunShadowReceivers::NONE,
+            spot_shadowed: &[],
+        },
+        ProductTarget::SunShadowFallbackAtlas,
         stamp.digest(),
     );
     {
@@ -1620,7 +1681,7 @@ pub(crate) fn bake_spot_shadow_casters(
         mat_frame.spot_receivers.clear();
         return;
     };
-    let (retained_items, _, _, _, world_run_surfs) = retained.live_for(inputs.world_generation);
+    let (retained_items, _, _, _, world_run_surfs) = retained.draws();
     super::spot_shadow_casters::fill_spot_shadow_caster_plan(
         &mut spot_casters,
         &spot_occ,
@@ -1648,6 +1709,7 @@ pub(crate) fn bake_spot_shadow_casters(
         inputs.frame_id as u32,
         sm_enable.enabled,
         sm_sun_enable.enabled,
+        mat_frame.portal.as_ref(),
     );
     spot_lights.0 = spot_casters.shadowed_light_indices();
     mat_frame.spot_receivers = spot_casters.receivers_by_light_index();
@@ -1693,19 +1755,23 @@ pub(crate) fn execute_spot_product(
             spot_casters.adopt_frame_slots(&persist.compact_remap, last_pack_id, last_packed);
         return;
     }
-    fill_product_list(
+    ProductListWriter {
         product,
-        retained.generation_id,
-        TechType(super::SUN_SHADOW_CASTER_TECH),
-        light_types,
-        inputs.dfog,
-        false,
-        super::SunShadowReceivers::NONE,
-        &[],
-        ProductTarget::SpotShadowMaps,
         persist,
-        &generation.catalog,
-        &generation.prepared,
+        catalog: &generation.catalog,
+        prepared: &generation.prepared,
+    }
+    .fill(
+        retained.generation_id,
+        ProductTechniquePolicy {
+            base: TechType(super::SUN_SHADOW_CASTER_TECH),
+            light_types,
+            dfog: inputs.dfog,
+            remap_lit: false,
+            sun_shadow_map: super::SunShadowReceivers::NONE,
+            spot_shadowed: &[],
+        },
+        ProductTarget::SpotShadowMaps,
         stamp.digest(),
     );
     product.spot_slots =
@@ -1732,10 +1798,9 @@ pub(crate) fn execute_camera_products(
     published: Res<RenderFrameProducts>,
     mut owner: ResMut<CameraProducts>,
 ) {
-    let _post_execute = perf::Span::HostPostExecuteMs.enter();
+    let _post_execute = perf::span!("post_execute", "iw4l.render");
     let (retained, xmodel_lane, fx_lane) = lanes;
-    let (_, static_colour, static_emissive, static_distortion, world_run_surfs) =
-        retained.live_for(inputs.world_generation);
+    let (_, static_colour, static_emissive, static_distortion, world_run_surfs) = retained.draws();
     let sort_key_distortion = scene
         .as_deref()
         .and_then(|scene| scene.cull.as_ref())
@@ -1751,17 +1816,12 @@ pub(crate) fn execute_camera_products(
     };
     let light_types = map_types;
     let stamp = CameraFillStamp {
-        static_membership: if retained.world_generation == inputs.world_generation {
-            retained.membership_revision
-        } else {
-            0
-        },
+        static_membership: retained.membership_revision,
         xmodel_membership: xmodel_lane.membership_revision,
         fx_membership: fx_lane.membership_revision,
         xmodel_payload: xmodel_lane.payload_revision,
         fx_payload: fx_lane.payload_revision,
         catalog: inputs.catalog_generation.get(),
-        world_generation: inputs.world_generation.0,
         colour_tech: draw_method.tech_type().0,
         emissive_tech: draw_method.emissive_tech_type().0,
         dfog: inputs.dfog,
@@ -1808,22 +1868,26 @@ pub(crate) fn execute_camera_products(
                 .ordered_draws,
         );
         distortion.status = published.product(FrameProductKind::Distortion).status;
-        fill_dlight_light(
-            light,
-            light_persist,
+        ProductListWriter {
+            product: light,
+            persist: light_persist,
+            catalog: &generation.catalog,
+            prepared: &generation.prepared,
+        }
+        .fill_dlight(
             colour,
             &inputs,
             scene.as_deref(),
             gfx.as_deref().map(|g| &g.scene),
             world_run_surfs,
-            &spot_lights.0,
-            retained.generation_id,
-            draw_method.tech_type(),
-            light_types_owned.as_slice(),
-            inputs.dfog,
-            &generation.catalog,
-            &generation.prepared,
-            composition_digest,
+            ProductTechniquePolicy {
+                base: draw_method.tech_type(),
+                light_types: light_types_owned.as_slice(),
+                dfog: inputs.dfog,
+                remap_lit: true,
+                sun_shadow_map: super::SunShadowReceivers::NONE,
+                spot_shadowed: &spot_lights.0,
+            },
         );
         *last_fill = Some(stamp);
         return;
@@ -1839,29 +1903,27 @@ pub(crate) fn execute_camera_products(
     let overlay_pair = {
         let colour_keep = |draw: &RetainedDrawItem| {
             distortion_settings.enabled
-                || colour_list_keep(
-                    draw,
-                    draw_method.tech_type(),
-                    true,
+                || ProductTechniquePolicy {
+                    base: draw_method.tech_type(),
+                    remap_lit: true,
                     light_types,
-                    inputs.dfog,
-                    sun_receivers,
-                    &spot_lights.0,
-                    &generation.catalog,
-                )
+                    dfog: inputs.dfog,
+                    sun_shadow_map: sun_receivers,
+                    spot_shadowed: &spot_lights.0,
+                }
+                .keep_colour(draw, &generation.catalog)
         };
         let emissive_keep = |draw: &RetainedDrawItem| {
             distortion_settings.enabled
-                || colour_list_keep(
-                    draw,
-                    draw_method.emissive_tech_type(),
-                    false,
+                || ProductTechniquePolicy {
+                    base: draw_method.emissive_tech_type(),
+                    remap_lit: false,
                     light_types,
-                    inputs.dfog,
-                    super::SunShadowReceivers::NONE,
-                    &[],
-                    &generation.catalog,
-                )
+                    dfog: inputs.dfog,
+                    sun_shadow_map: super::SunShadowReceivers::NONE,
+                    spot_shadowed: &[],
+                }
+                .keep_colour(draw, &generation.catalog)
         };
         let overlay_colour = reuse_compact
             && colour_persist.compacted
@@ -1918,52 +1980,59 @@ pub(crate) fn execute_camera_products(
                 (&mut *emissive, draw_method.emissive_tech_type(), false),
             ] {
                 product.ordered_draws.retain(|draw| {
-                    colour_list_keep(
-                        draw,
+                    ProductTechniquePolicy {
                         base,
-                        remap,
+                        remap_lit: remap,
                         light_types,
-                        inputs.dfog,
-                        if remap {
+                        dfog: inputs.dfog,
+                        sun_shadow_map: if remap {
                             sun_receivers
                         } else {
                             super::SunShadowReceivers::NONE
                         },
-                        if remap { spot_lights.0.as_slice() } else { &[] },
-                        &generation.catalog,
-                    )
+                        spot_shadowed: if remap { spot_lights.0.as_slice() } else { &[] },
+                    }
+                    .keep_colour(draw, &generation.catalog)
                 });
             }
         }
-        apply_camera_list(
-            colour,
-            colour_persist,
+        ProductListWriter {
+            product: colour,
+            persist: colour_persist,
+            catalog: &generation.catalog,
+            prepared: &generation.prepared,
+        }
+        .apply_camera(
             retained.generation_id,
-            draw_method.tech_type(),
-            light_types,
-            inputs.dfog,
-            true,
-            sun_receivers,
-            &spot_lights.0,
+            ProductTechniquePolicy {
+                base: draw_method.tech_type(),
+                light_types,
+                dfog: inputs.dfog,
+                remap_lit: true,
+                sun_shadow_map: sun_receivers,
+                spot_shadowed: &spot_lights.0,
+            },
             ProductTarget::Core3dViewColour,
-            &generation.catalog,
-            &generation.prepared,
             composition_digest,
             reuse_compact,
         );
-        apply_camera_list(
-            emissive,
-            emissive_persist,
+        ProductListWriter {
+            product: emissive,
+            persist: emissive_persist,
+            catalog: &generation.catalog,
+            prepared: &generation.prepared,
+        }
+        .apply_camera(
             retained.generation_id,
-            draw_method.emissive_tech_type(),
-            light_types,
-            inputs.dfog,
-            false,
-            super::SunShadowReceivers::NONE,
-            &[],
+            ProductTechniquePolicy {
+                base: draw_method.emissive_tech_type(),
+                light_types,
+                dfog: inputs.dfog,
+                remap_lit: false,
+                sun_shadow_map: super::SunShadowReceivers::NONE,
+                spot_shadowed: &[],
+            },
             ProductTarget::Core3dViewColour,
-            &generation.catalog,
-            &generation.prepared,
             composition_digest,
             reuse_compact,
         );
@@ -2006,22 +2075,26 @@ pub(crate) fn execute_camera_products(
                 FrameProductStatus::Missing(MissingProductCause::MissingDistortionSortKey);
         }
     }
-    fill_dlight_light(
-        light,
-        light_persist,
+    ProductListWriter {
+        product: light,
+        persist: light_persist,
+        catalog: &generation.catalog,
+        prepared: &generation.prepared,
+    }
+    .fill_dlight(
         colour,
         &inputs,
         scene.as_deref(),
         gfx.as_deref().map(|g| &g.scene),
         world_run_surfs,
-        &spot_lights.0,
-        retained.generation_id,
-        draw_method.tech_type(),
-        light_types_owned.as_slice(),
-        inputs.dfog,
-        &generation.catalog,
-        &generation.prepared,
-        composition_digest,
+        ProductTechniquePolicy {
+            base: draw_method.tech_type(),
+            light_types: light_types_owned.as_slice(),
+            dfog: inputs.dfog,
+            remap_lit: true,
+            sun_shadow_map: super::SunShadowReceivers::NONE,
+            spot_shadowed: &spot_lights.0,
+        },
     );
     *last_fill = Some(stamp);
 }
@@ -2044,109 +2117,95 @@ fn dlight_list_digest(composition_digest: u64, inputs: &FrameAssemblyInputs) -> 
     digest
 }
 
-fn fill_dlight_light(
-    light: &mut FrameProduct,
-    persist: &mut ProductBindPersist,
-    colour: &FrameProduct,
-    inputs: &FrameAssemblyInputs,
-    scene: Option<&crate::prepare::scene::world::WorldScene>,
-    gfx: Option<&render_scene::GfxScene>,
-    world_run_surfs: &[u16],
-    spot_shadowed: &[u8],
-    generation_id: MaterialGenerationId,
-    tech_type: TechType,
-    light_types: &[u8],
-    dfog: bool,
-    catalog: &RuntimeMaterialCatalog,
-    prepared: &PreparedMaterialTable,
-    composition_digest: u64,
-) {
-    light.begin_fill(COLOUR_MISSING);
-    persist.prepare(inputs.catalog_generation);
-    if inputs.primary_lights.len() <= inputs.map_light_n {
-        return;
+#[derive(SystemParam)]
+pub(crate) struct ProductPublishSources<'w> {
+    camera: ResMut<'w, CameraProducts>,
+    sun: ResMut<'w, SunProduct>,
+    spot: ResMut<'w, SpotProduct>,
+}
+
+impl ProductPublishSources<'_> {
+    fn adopt_into(&mut self, frame: &mut RenderFrameProducts) {
+        let camera = self.camera.as_mut();
+        frame.adopt(&mut camera.colour);
+        frame.adopt(&mut camera.light);
+        frame.adopt(&mut camera.emissive);
+        frame.adopt(&mut camera.distortion);
+        frame.adopt(&mut self.sun.product);
+        frame.adopt(&mut self.spot.product);
     }
-    for (i, dlight) in inputs
-        .primary_lights
-        .iter()
-        .enumerate()
-        .skip(inputs.map_light_n)
-    {
-        let Ok(index) = u8::try_from(i) else {
-            continue;
-        };
-        for draw in &colour.ordered_draws {
-            if super::dlight_receivers::dlight_receiver_keep(
-                draw,
-                dlight.origin,
-                dlight.radius,
-                scene,
-                gfx,
-                world_run_surfs,
-            ) {
-                let mut row = *draw;
-                row.key = super::with_scene_light_index(draw.key, index);
-                light.ordered_draws.push(row);
-            }
-        }
-    }
-    apply_camera_list(
-        light,
-        persist,
-        generation_id,
-        tech_type,
-        light_types,
-        dfog,
-        true,
-        super::SunShadowReceivers::NONE,
-        spot_shadowed,
-        ProductTarget::Core3dViewColour,
-        catalog,
-        prepared,
-        dlight_list_digest(composition_digest, inputs),
-        false,
-    );
 }
 
 pub(crate) fn publish_frame_products(
     inputs: Res<FrameAssemblyInputs>,
+    material_frame: Res<MaterialFrameInputs>,
     retained: Res<StaticDrawLane>,
     focus: Option<Res<RenderFocus>>,
     prepared: Option<Res<crate::prepare::scene::view_parms::PreparedSceneView>>,
     mut frame: ResMut<RenderFrameProducts>,
-    mut camera: ResMut<CameraProducts>,
-    mut sun: ResMut<SunProduct>,
-    mut spot: ResMut<SpotProduct>,
+    mut sources: ProductPublishSources,
 ) {
-    let (_, _, _, _, world_run_surfs) = retained.live_for(inputs.world_generation);
+    let (_, _, _, _, world_run_surfs) = retained.draws();
     frame.frame_id = inputs.frame_id;
+    frame.camera_world = material_frame.portal.as_ref().map_or(0, |p| p.camera_world);
+    frame.view_origin = material_frame.view_origin;
     frame.begin_fill();
     frame.set_world_run_surfs(world_run_surfs);
-    let camera = camera.as_mut();
-    frame.adopt(&mut camera.colour);
-    frame.adopt(&mut camera.light);
-    frame.adopt(&mut camera.emissive);
-    frame.adopt(&mut camera.distortion);
-    frame.adopt(&mut sun.product);
-    frame.adopt(&mut spot.product);
+    sources.adopt_into(&mut frame);
     let focused = focus.as_ref().and_then(|focus| focus.frame.clone());
     frame.set_focus(focused.clone());
     frame.finish_fill();
     if let Some(focused) = focused.as_ref() {
         let camera_origin = prepared.as_ref().map(|view| view.eye.to_array());
-        perf::render_owner_plan(
-            frame.frame_id,
-            inputs.world_generation.0,
-            "script_model",
-            focused.owner_id,
-            focused.model.as_deref(),
-            focused.outcome,
-            focused.object_id,
-            camera_origin,
-            focused.camera_hidden,
-            focused.lighting_handle,
-            focused.planned_surfaces,
-        );
+        perf::instant!("render_owner_plan", "iw4l.render", |ctx| {
+            let (
+                frame_id,
+                owner_kind,
+                owner_id,
+                model,
+                outcome,
+                object_id,
+                camera_hidden,
+                lighting_handle,
+                planned_surfaces,
+            ): (
+                u64,
+                &str,
+                u32,
+                Option<&str>,
+                &str,
+                Option<u16>,
+                Option<bool>,
+                Option<u32>,
+                u32,
+            ) = (
+                frame.frame_id,
+                "script_model",
+                focused.owner_id,
+                focused.model.as_deref(),
+                focused.outcome,
+                focused.object_id,
+                focused.camera_hidden,
+                focused.lighting_handle,
+                focused.planned_surfaces,
+            );
+            ctx.arg("frame_id", frame_id as i64);
+            ctx.arg("owner_kind", owner_kind);
+            ctx.arg("owner_id", i64::from(owner_id));
+            ctx.arg("model", model);
+            ctx.arg("outcome", outcome);
+            ctx.arg("object_id", object_id.map(i64::from));
+            if let Some(origin) = camera_origin {
+                ctx.arg("camera_x", f64::from(origin[0]));
+                ctx.arg("camera_y", f64::from(origin[1]));
+                ctx.arg("camera_z", f64::from(origin[2]));
+            }
+            if let Some(hidden) = camera_hidden {
+                ctx.arg("camera_hidden", i64::from(u8::from(hidden)));
+            }
+            ctx.arg("lighting_handle", lighting_handle.map(i64::from));
+            ctx.arg("planned_surfaces", i64::from(planned_surfaces));
+        });
     }
 
     let draws = frame
@@ -2172,5 +2231,5 @@ pub(crate) fn publish_frame_products(
                 .ordered_draws
                 .len(),
         );
-    perf::Counter::CounterDraws.emit(draws as f64);
+    perf::counter!("draws", "iw4l.render", draws as f64);
 }

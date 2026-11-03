@@ -2,7 +2,7 @@ use super::*;
 
 impl WeaponCatalog {
     pub fn into_build(self) -> WeaponBuild {
-        let mut build = WeaponBuild::from_catalog(self.entries, self.iw5_attachments);
+        let mut build = WeaponBuild::from_catalog(self.entries, self.attachments);
         build.registry.vehicle_turrets = self.vehicle_turrets;
         build.registry.vehicle_compass = self.vehicle_compass;
         build.registry.vehicle_accel = self.vehicle_accel;
@@ -20,19 +20,18 @@ impl WeaponBuild {
         registry.revision = mint_weapon_revision();
         registry.family_tables = self.family_tables.clone().into();
         registry.families = crate::WeaponFamilies::build(&self.family_tables, &registry);
-        let t5_knife = registry
-            .rows
-            .iter()
-            .position(|row| {
-                row.namespace == crate::AssetNamespace::T5
-                    && row.name.strip_suffix("_mp").unwrap_or(&row.name) == "knife"
-            })
-            .map(|index| index as u32);
+        let mut named_weapons = HashMap::new();
+        for (index, row) in registry.rows.iter().enumerate() {
+            let bare = row.name.strip_suffix("_mp").unwrap_or(&row.name).to_owned();
+            named_weapons
+                .entry((row.namespace, bare))
+                .or_insert(index as u32);
+        }
         for row in &mut registry.rows {
             row.preparation.set_source(row.namespace, &row.name);
             row.preparation.declare_sound_hints(&row.sounds);
             row.preparation.finish();
-            if row.namespace == crate::AssetNamespace::Iw4 && row.camo_models.choices.is_empty() {
+            if row.namespace == crate::FamilyId::IW4 && row.camo_models.choices.is_empty() {
                 row.camo_models.choices = row
                     .camo_models
                     .view
@@ -57,21 +56,19 @@ impl WeaponBuild {
                     .collect();
             }
             row.appearances = appearance::PreparedWeaponAppearance::prepare(row);
-            let melee_weapon =
-                if row.namespace == crate::AssetNamespace::T5 && !row.facts.use_as_melee {
-                    t5_knife.map_or(crate::MeleeWeaponPolicy::Own, |weapon| {
-                        crate::MeleeWeaponPolicy::T5KnifeCompatibility { weapon }
-                    })
-                } else {
-                    crate::MeleeWeaponPolicy::Own
-                };
-            let policy = crate::WeaponSemanticPolicy::compile(
-                row.namespace,
-                row.facts.thermal_scope,
-                row.overlay_material.as_deref(),
-                melee_weapon,
-            );
-            row.facts.thermal_scope = policy.thermal_scope.enabled();
+            let namespace = row.namespace;
+            let family = crate::weapon_policy(namespace)
+                .expect("weapon publication requires a registered family policy");
+            let find_weapon =
+                |name: &str| named_weapons.get(&(namespace, name.to_owned())).copied();
+            let policy = (family.semantics)(crate::WeaponSemanticInputs {
+                namespace,
+                native_thermal: row.facts.thermal_scope,
+                overlay: row.overlay_material.as_deref(),
+                use_as_melee: row.facts.use_as_melee,
+                find_weapon: &find_weapon,
+            });
+            row.facts.thermal_scope = policy.thermal_scope;
             row.semantics = Some(policy);
         }
         for id in 0..registry.rows.len() as u32 {
@@ -97,7 +94,7 @@ impl WeaponBuild {
 
     pub(super) fn from_catalog(
         mut entries: Vec<CatalogWeapon>,
-        iw5_attachments: HashMap<String, Iw5ScopeRow>,
+        attachments: WeaponAttachments,
     ) -> Self {
         let mut gun_by_def: HashMap<(u8, u32), String> = HashMap::new();
         let mut hand_by_def: HashMap<(u8, u32), String> = HashMap::new();
@@ -301,32 +298,29 @@ impl WeaponBuild {
                     if existing.hide_tags.is_empty() && !entry.hide_tags.is_empty() {
                         existing.hide_tags = entry.hide_tags;
                     }
+                    existing.attachment_assets.resize(
+                        existing
+                            .attachment_assets
+                            .len()
+                            .max(entry.attachment_assets.len()),
+                        None,
+                    );
                     for (existing_slot, new_slot) in existing
-                        .iw5_attachment_slots
+                        .attachment_assets
                         .iter_mut()
-                        .zip(entry.iw5_attachment_slots)
+                        .zip(entry.attachment_assets)
                     {
                         if existing_slot.is_none() {
                             *existing_slot = new_slot;
                         }
                     }
-                    if existing.iw5_reload_overrides.is_empty() {
-                        existing.iw5_reload_overrides = entry.iw5_reload_overrides;
-                    }
-                    if existing.iw5_anim_overrides.is_empty() {
-                        existing.iw5_anim_overrides = entry.iw5_anim_overrides;
-                    }
-                    if existing.iw5_fx_overrides.is_empty() {
-                        existing.iw5_fx_overrides = entry.iw5_fx_overrides;
-                    }
-                    if existing.iw5_notetrack_overrides.is_empty() {
-                        existing.iw5_notetrack_overrides = entry.iw5_notetrack_overrides;
-                    }
+                    existing.native_capture.fill_missing(entry.native_capture);
                     merge_sound_aliases(&mut existing.sounds, &entry.sounds);
-                    if existing.sounds.leftover_sound_overrides.is_empty() {
-                        existing.sounds.leftover_sound_overrides =
-                            entry.sounds.leftover_sound_overrides.clone();
+                    if existing.sounds.dependency_aliases.is_none() {
+                        existing.sounds.dependency_aliases =
+                            entry.sounds.dependency_aliases.clone();
                     }
+
                     merge_combat_fx(&mut existing.combat_fx, &entry.combat_fx);
                     if existing.flame.is_none() {
                         existing.flame = entry.flame;
@@ -401,9 +395,8 @@ impl WeaponBuild {
                 hide_tags: entry.hide_tags,
                 attachment_view_models: {
                     let mut models = entry.attached_models[0].clone();
-                    if entry.namespace == crate::AssetNamespace::Iw5
-                        && let Some((view, _)) =
-                            iw5_default_scope_models(&entry.iw5_attachment_slots, &iw5_attachments)
+                    if let Some((view, _)) =
+                        attachments.default_models(entry.namespace, &entry.attachment_assets)
                     {
                         models.extend(view);
                     }
@@ -411,26 +404,19 @@ impl WeaponBuild {
                 },
                 attachment_world_models: {
                     let mut models = entry.attached_models[1].clone();
-                    if entry.namespace == crate::AssetNamespace::Iw5
-                        && let Some((_, world)) =
-                            iw5_default_scope_models(&entry.iw5_attachment_slots, &iw5_attachments)
+                    if let Some((_, world)) =
+                        attachments.default_models(entry.namespace, &entry.attachment_assets)
                     {
                         models.extend(world);
                     }
                     models
                 },
                 attachment_view_ads_models: Vec::new(),
-                t6_clip_models: entry.t6_clip_models,
-                t6_attachments: entry.t6_attachments,
-                t6_attachment_stats: entry.t6_attachment_stats,
-                iw5_configuration: None,
+                indexed_name: true,
                 prepared_attachments: Vec::new(),
                 attachment_caption_keys: Vec::new(),
-                iw5_attachment_slots: entry.iw5_attachment_slots,
-                iw5_reload_overrides: entry.iw5_reload_overrides,
-                iw5_anim_overrides: entry.iw5_anim_overrides,
-                iw5_fx_overrides: entry.iw5_fx_overrides,
-                iw5_notetrack_overrides: entry.iw5_notetrack_overrides,
+                attachment_assets: entry.attachment_assets,
+                native_capture: entry.native_capture,
                 sounds: entry.sounds,
                 combat_fx: entry.combat_fx,
                 flame: entry.flame,
@@ -470,7 +456,7 @@ impl WeaponBuild {
             family_tables: Arc::default(),
             shared_ranks: Default::default(),
             shared_icons: Default::default(),
-            iw5_attachments,
+            attachments,
             configurations: HashMap::new(),
             by_name: index_of,
             by_namespaced: HashMap::new(),

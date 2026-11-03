@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
@@ -42,14 +43,6 @@ struct HostDObjPose {
     bones: Vec<xmodel_runtime::DObjBoneOrientation>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HostDObjPoseRefuse {
-    MissingDObj,
-    BoneCountOverflow,
-    Bone(fx_iw4::BoneOrientationRefuse),
-    Frame(xmodel_runtime::DObjBoneOrientationError),
-}
-
 #[derive(Resource, Default)]
 pub struct HostDObjPoseFrame {
     by_dobj: HashMap<u32, HostDObjPose>,
@@ -67,14 +60,15 @@ impl HostDObjPoseFrame {
         next_state_eflags: u32,
         entity_world: Mat4,
         bone_world: &[Mat4],
-    ) -> Result<(), HostDObjPoseRefuse> {
+    ) -> Result<(), Cow<'static, str>> {
         let entity = xmodel_runtime::bone_orientation(&[entity_world], 0)
-            .map_err(HostDObjPoseRefuse::Frame)?;
+            .map_err(|cause| Cow::Owned(format!("invalid DObj frame: {cause:?}")))?;
         let mut bones = Vec::with_capacity(bone_world.len());
         for matrix in bone_world {
             let world = entity_world * *matrix;
             bones.push(
-                xmodel_runtime::bone_orientation(&[world], 0).map_err(HostDObjPoseRefuse::Frame)?,
+                xmodel_runtime::bone_orientation(&[world], 0)
+                    .map_err(|cause| Cow::Owned(format!("invalid DObj frame: {cause:?}")))?,
             );
         }
         self.by_dobj.insert(
@@ -93,15 +87,15 @@ impl HostDObjPoseFrame {
         &self,
         dobj: u32,
         bone: i32,
-    ) -> Result<fx::FxBoltOrientation, HostDObjPoseRefuse> {
+    ) -> Result<fx::FxBoltOrientation, Cow<'static, str>> {
         let pose = self
             .by_dobj
             .get(&dobj)
-            .ok_or(HostDObjPoseRefuse::MissingDObj)?;
-        let count =
-            u8::try_from(pose.bones.len()).map_err(|_| HostDObjPoseRefuse::BoneCountOverflow)?;
+            .ok_or_else(|| Cow::Borrowed("DObj missing"))?;
+        let count = u8::try_from(pose.bones.len())
+            .map_err(|_| Cow::Borrowed("DObj bone count overflow"))?;
         let route = fx_iw4::get_bone_orientation_route(dobj, pose.current_valid, bone, Some(count))
-            .map_err(HostDObjPoseRefuse::Bone)?;
+            .map_err(|cause| Cow::Owned(format!("invalid DObj bone: {cause:?}")))?;
         let orientation = match route {
             fx_iw4::FxGetBoneOrientationRoute::EntityPose => pose.entity,
             fx_iw4::FxGetBoneOrientationRoute::DObjBone(index) => pose.bones[index as usize],

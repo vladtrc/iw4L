@@ -272,6 +272,76 @@ fn mix_fx_payload_revision(
     id
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct MarkLightingSource<'w, 's> {
+    mark_owners: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static crate::prepare::scene::world::WorldScriptModelInstance,
+        ),
+    >,
+    lighting: Res<'w, crate::prepare::scene::model_lighting_cache::ResolvedModelLightingTable>,
+    smodel_lighting: Option<Res<'w, crate::prepare::scene::smodel_lighting::WorldSmodelLighting>>,
+}
+
+impl MarkLightingSource<'_, '_> {
+    fn resolve(
+        &self,
+        sub_key: &mut crate::assemble::drawsurf::tess::mark::GfxMarkSubKey,
+    ) -> Option<u32> {
+        let handle = if let Some(number) = sub_key.entity {
+            use crate::prepare::scene::model_lighting_cache::{
+                ModelLightingOwner, ResolvedModelLighting,
+            };
+            let result = self
+                .mark_owners
+                .iter()
+                .find(|(_, owner)| owner.gentity_number == Some(number))
+                .and_then(|(entity, _)| self.lighting.get(ModelLightingOwner::ScriptModel(entity)));
+            let Some(ResolvedModelLighting::Seated {
+                handle,
+                scene_light_index,
+                reflection_probe_index,
+                ..
+            }) = result
+            else {
+                return None;
+            };
+            sub_key.primary_light = scene_light_index;
+            sub_key.probe = reflection_probe_index;
+            handle
+        } else if let Some(piece) = sub_key.glass {
+            use crate::prepare::scene::model_lighting_cache::{
+                ModelLightingOwner, ResolvedModelLighting,
+            };
+            let Some(ResolvedModelLighting::Seated {
+                handle,
+                scene_light_index,
+                reflection_probe_index,
+                ..
+            }) = self.lighting.get(ModelLightingOwner::Glass(piece))
+            else {
+                return None;
+            };
+            sub_key.primary_light = scene_light_index;
+            sub_key.probe = reflection_probe_index;
+            handle
+        } else if let Some(index) = sub_key.smodel {
+            let handle = self
+                .smodel_lighting
+                .as_ref()
+                .and_then(|l| l.handles.get(index as usize))
+                .copied()?;
+            u32::from(handle)
+        } else {
+            0
+        };
+        Some(handle)
+    }
+}
+
 pub(crate) fn rebuild_fx_draw_lane(
     plans: (
         Option<Res<FxCodeMeshPlan>>,
@@ -281,12 +351,7 @@ pub(crate) fn rebuild_fx_draw_lane(
     ),
     runtime: Res<crate::assemble::drawsurf::MaterialGeneration>,
     mut lane: ResMut<FxDrawLane>,
-    mark_owners: Query<(
-        Entity,
-        &crate::prepare::scene::world::WorldScriptModelInstance,
-    )>,
-    lighting: Res<crate::prepare::scene::model_lighting_cache::ResolvedModelLightingTable>,
-    smodel_lighting: Option<Res<crate::prepare::scene::smodel_lighting::WorldSmodelLighting>>,
+    mark_lighting: MarkLightingSource,
     camera_origin: Option<Res<render_fx::FxCameraOrigin>>,
     scene: Option<Res<WorldScene>>,
 ) {
@@ -325,10 +390,10 @@ pub(crate) fn rebuild_fx_draw_lane(
     {
         sort_fx_draw_lane(lane, eye, glass_plan);
         lane.payload_revision = payload;
-        perf::Counter::FxLayoutOverlay.emit(1.0);
+        perf::counter!("fx_layout_overlay", "iw4l.render", 1.0);
         return;
     }
-    perf::Counter::FxLayoutOverlay.emit(0.0);
+    perf::counter!("fx_layout_overlay", "iw4l.render", 0.0);
     lane.colour.clear();
     lane.emissive.clear();
     lane.distortion.clear();
@@ -440,56 +505,9 @@ pub(crate) fn rebuild_fx_draw_lane(
                 continue;
             };
             let mut sub_key = draw.sub_key;
-            let lighting_handle = if let Some(number) = sub_key.entity {
-                use crate::prepare::scene::model_lighting_cache::{
-                    ModelLightingOwner, ResolvedModelLighting,
-                };
-                let result = mark_owners
-                    .iter()
-                    .find(|(_, owner)| owner.gentity_number == Some(number))
-                    .and_then(|(entity, _)| lighting.get(ModelLightingOwner::ScriptModel(entity)));
-                let Some(ResolvedModelLighting::Seated {
-                    handle,
-                    scene_light_index,
-                    reflection_probe_index,
-                    ..
-                }) = result
-                else {
-                    lane.mark_mesh_skipped_no_lighting += 1;
-                    continue;
-                };
-                sub_key.primary_light = scene_light_index;
-                sub_key.probe = reflection_probe_index;
-                handle
-            } else if let Some(piece) = sub_key.glass {
-                use crate::prepare::scene::model_lighting_cache::{
-                    ModelLightingOwner, ResolvedModelLighting,
-                };
-                let Some(ResolvedModelLighting::Seated {
-                    handle,
-                    scene_light_index,
-                    reflection_probe_index,
-                    ..
-                }) = lighting.get(ModelLightingOwner::Glass(piece))
-                else {
-                    lane.mark_mesh_skipped_no_lighting += 1;
-                    continue;
-                };
-                sub_key.primary_light = scene_light_index;
-                sub_key.probe = reflection_probe_index;
-                handle
-            } else if let Some(index) = sub_key.smodel {
-                let Some(handle) = smodel_lighting
-                    .as_ref()
-                    .and_then(|l| l.handles.get(index as usize))
-                    .copied()
-                else {
-                    lane.mark_mesh_skipped_no_lighting += 1;
-                    continue;
-                };
-                u32::from(handle)
-            } else {
-                0
+            let Some(lighting_handle) = mark_lighting.resolve(&mut sub_key) else {
+                lane.mark_mesh_skipped_no_lighting += 1;
+                continue;
             };
             let key = pack_mark_mesh_draw_surf(
                 mat.sort_key,

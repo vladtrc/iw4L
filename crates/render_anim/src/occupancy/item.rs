@@ -84,7 +84,7 @@ pub fn register_item_systems(app: &mut App) {
             (occupy_item_scene_ents
                 .in_set(frame::InMatch)
                 .in_set(frame::RenderSet::Anim)
-                .before(frame::WorkerCmdSet::CellDynModel)
+                .before(frame::WorkerCmdSet::DynamicModels)
                 .in_set(render_scene::GfxSceneAdd)
                 .in_set(AnimSceneSubmit))
             .in_set(frame::InMatch),
@@ -96,10 +96,9 @@ pub fn register_item_systems(app: &mut App) {
                 append_item_draws.in_set(frame::InMatch),
             )
                 .chain()
-                .after(frame::WorkerCmdSet::CellSceneEnt)
-                .after(frame::WorkerCmdSet::DpvsEnt)
-                .before(frame::WorkerCmdSet::CellDynModel)
-                .in_set(frame::WorkerCmdSet::SkinModel))
+                .after(frame::WorkerCmdSet::SceneVisibility)
+                .before(frame::WorkerCmdSet::DynamicModels)
+                .in_set(frame::WorkerCmdSet::ModelPose))
             .in_set(frame::InMatch),
         );
 }
@@ -147,109 +146,126 @@ fn local_has_scavenger_perk(
         .is_some_and(|ps| (ps.perks[0] & PERK_SCAVENGER) != 0)
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct ItemSceneProducer<'w> {
+    compositions: ResMut<'w, PreparedItemCompositions>,
+    occupancy: ResMut<'w, ItemOccupancy>,
+    scene_skels: ResMut<'w, AnimDObjSceneSkels>,
+    scene_submissions: MessageWriter<'w, AnimDObjSceneSubmission>,
+}
+
+impl ItemSceneProducer<'_> {
+    fn produce(
+        &mut self,
+        presented: Option<Res<net::PresentedSnapshot>>,
+        local_client: Option<Res<net::LocalPresentClient>>,
+        weapons: Option<Res<assets::PreparedWeapons>>,
+        world_weapons: Option<Res<assets::PreparedWorldWeapons>>,
+        cg_clock: Option<Res<net::FrameClock>>,
+    ) {
+        self.occupancy.rows.clear();
+        let (Some(weapons), Some(world)) = (weapons.as_deref(), world_weapons.as_deref()) else {
+            self.compositions.clear();
+            return;
+        };
+        self.compositions.reset_for(weapons, world);
+        let catalog = &world.0;
+
+        let Some(presented_inner) = presented.as_deref() else {
+            return;
+        };
+        let Some(snapshot) = presented_inner.snapshot() else {
+            return;
+        };
+        let hide_scavenger =
+            !local_has_scavenger_perk(Some(presented_inner), local_client.as_deref());
+        let at_time = cg_clock
+            .as_ref()
+            .filter(|clock| clock.started())
+            .map(|clock| clock.time())
+            .unwrap_or_else(|| sim::level_time_ms(snapshot.tick));
+        let items: Vec<_> = snapshot
+            .meta
+            .entities
+            .iter()
+            .filter(|es| es.e_type == ET_ITEM)
+            .collect();
+        if catalog.is_empty() {
+            return;
+        }
+
+        for (index, es) in items.iter().enumerate() {
+            let Some(weapon) = item_weapon_index(es.index) else {
+                continue;
+            };
+            if es.e_flags & 0x20 != 0 {
+                continue;
+            }
+            if hide_scavenger && item_is_scavenger(snapshot, es.number) {
+                continue;
+            }
+            let Some(handle) = weapons.bound().row(weapon).map(|weapon| weapon.handle()) else {
+                continue;
+            };
+            let Ok(composition) = self.compositions.prepare(weapons, world, handle, 0) else {
+                continue;
+            };
+            let Some(entry) = catalog.get_at(composition.model.order()) else {
+                continue;
+            };
+            let mut models = vec![self.scene_skels.shared(&composition.name, &entry.skel, 0)];
+            models.extend(composition.attachments.iter().filter_map(|index| {
+                let attachment = catalog.get_at(index.order())?;
+                Some(
+                    self.scene_skels
+                        .shared(attachment.skel.name.as_str(), &attachment.skel, 0),
+                )
+            }));
+            let origin = evaluate_origin(es, at_time);
+            let lighting_origin = item_lighting_origin(origin);
+            let apos = Trajectory {
+                tr_time: es.apos_tr_time,
+                tr_type: es.apos_tr_type,
+                tr_duration: es.apos_tr_duration,
+                tr_delta: es.apos_tr_delta,
+                tr_base: es.apos_tr_base,
+            };
+            let angles = evaluate_trajectory(&apos, at_time);
+            let entnum = u32::try_from(es.number).unwrap_or(0);
+            self.scene_submissions.write(AnimDObjSceneSubmission {
+                render_fx_flags: 0,
+                has_tree: false,
+                origin,
+                lighting_origin,
+                radius: entry.skel.radius,
+                entnum,
+                quat: Some(scene_quat_from_angles(angles)),
+                occupy_model_n: u8::try_from(models.len()).unwrap_or(u8::MAX),
+                models,
+                hide_part_bits: [0; 6],
+                store_skin: true,
+            });
+            self.occupancy.rows.push(OccupiedItem {
+                index,
+                entnum: es.number,
+                origin,
+                angles,
+                composition,
+                lighting_origin,
+            });
+        }
+    }
+}
+
 fn occupy_item_scene_ents(
+    mut producer: ItemSceneProducer,
     presented: Option<Res<net::PresentedSnapshot>>,
     local_client: Option<Res<net::LocalPresentClient>>,
     weapons: Option<Res<assets::PreparedWeapons>>,
     world_weapons: Option<Res<assets::PreparedWorldWeapons>>,
-    mut compositions: ResMut<PreparedItemCompositions>,
-    mut occupancy: ResMut<ItemOccupancy>,
-    mut scene_skels: ResMut<AnimDObjSceneSkels>,
-    mut scene_submissions: MessageWriter<AnimDObjSceneSubmission>,
     cg_clock: Option<Res<net::FrameClock>>,
 ) {
-    occupancy.rows.clear();
-    let (Some(weapons), Some(world)) = (weapons.as_deref(), world_weapons.as_deref()) else {
-        compositions.clear();
-        return;
-    };
-    compositions.reset_for(weapons, world);
-    let catalog = &world.0;
-
-    let Some(presented_inner) = presented.as_deref() else {
-        return;
-    };
-    let Some(snapshot) = presented_inner.snapshot() else {
-        return;
-    };
-    let hide_scavenger = !local_has_scavenger_perk(Some(presented_inner), local_client.as_deref());
-    let at_time = cg_clock
-        .as_ref()
-        .filter(|clock| clock.started())
-        .map(|clock| clock.time())
-        .unwrap_or_else(|| sim::level_time_ms(snapshot.tick));
-    let items: Vec<_> = snapshot
-        .meta
-        .entities
-        .iter()
-        .filter(|es| es.e_type == ET_ITEM)
-        .collect();
-    if catalog.is_empty() {
-        return;
-    }
-
-    for (index, es) in items.iter().enumerate() {
-        let Some(weapon) = item_weapon_index(es.index) else {
-            continue;
-        };
-        if es.e_flags & 0x20 != 0 {
-            continue;
-        }
-        if hide_scavenger && item_is_scavenger(snapshot, es.number) {
-            continue;
-        }
-        let Some(handle) = weapons
-            .for_snapshot(presented_inner.weapon_epoch())
-            .ok()
-            .and_then(|owner| owner.row(weapon))
-            .map(|weapon| weapon.handle())
-        else {
-            continue;
-        };
-        let Ok(composition) = compositions.prepare(weapons, world, handle, 0) else {
-            continue;
-        };
-        let Some(entry) = catalog.get_at(composition.model.order()) else {
-            continue;
-        };
-        let mut models = vec![scene_skels.shared(&composition.name, &entry.skel, 0)];
-        models.extend(composition.attachments.iter().filter_map(|index| {
-            let attachment = catalog.get_at(index.order())?;
-            Some(scene_skels.shared(attachment.skel.name.as_str(), &attachment.skel, 0))
-        }));
-        let origin = evaluate_origin(es, at_time);
-        let lighting_origin = item_lighting_origin(origin);
-        let apos = Trajectory {
-            tr_time: es.apos_tr_time,
-            tr_type: es.apos_tr_type,
-            tr_duration: es.apos_tr_duration,
-            tr_delta: es.apos_tr_delta,
-            tr_base: es.apos_tr_base,
-        };
-        let angles = evaluate_trajectory(&apos, at_time);
-        let entnum = u32::try_from(es.number).unwrap_or(0);
-        scene_submissions.write(AnimDObjSceneSubmission {
-            render_fx_flags: 0,
-            has_tree: false,
-            origin,
-            lighting_origin,
-            radius: entry.skel.radius,
-            entnum,
-            quat: Some(scene_quat_from_angles(angles)),
-            occupy_model_n: u8::try_from(models.len()).unwrap_or(u8::MAX),
-            models,
-            hide_part_bits: [0; 6],
-            store_skin: true,
-        });
-        occupancy.rows.push(OccupiedItem {
-            index,
-            entnum: es.number,
-            origin,
-            angles,
-            composition,
-            lighting_origin,
-        });
-    }
+    producer.produce(presented, local_client, weapons, world_weapons, cg_clock);
 }
 
 fn pose_items(
@@ -317,6 +333,7 @@ fn pose_items(
             let Some((surfaces, _)) = pose_script_dobj_with_materials(
                 None,
                 &skels,
+                &[],
                 dobj,
                 &request,
                 None,
@@ -345,147 +362,177 @@ fn pose_items(
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct ItemDrawPublisher<'w, 's> {
+    plan: ResMut<'w, ItemDrawPlan>,
+    lighting_requests: ResMut<'w, ModelLightingRequests>,
+    atpoint: Res<'w, render_scene::DynAtPointLookup>,
+    last_material_generation: Local<'s, Option<render_material::MaterialGenerationId>>,
+    draws: Local<'s, Vec<XModelSurfaceDraw>>,
+    owners: Local<'s, Vec<ItemOwnerDraw>>,
+}
+
+impl ItemDrawPublisher<'_, '_> {
+    fn publish(
+        mut self,
+        product: Res<ItemPoseProduct>,
+        world_weapons: Option<Res<assets::PreparedWorldWeapons>>,
+        atlas: Option<Res<WorldModelLightingAtlas>>,
+        tess: Option<Res<TessMaterials>>,
+        facts: Res<WorldPresentFacts>,
+        model_materials: Res<crate::anim::model_materials::PreparedModelMaterials>,
+    ) {
+        self.draws.clear();
+        self.owners.clear();
+        let catalog = world_weapons
+            .as_ref()
+            .map(|prepared| &prepared.0)
+            .filter(|c| !c.is_empty());
+        let atlas_ref = atlas.as_deref();
+        if catalog.is_none() || atlas_ref.is_none() || !facts.spawned || tess.is_none() {
+            let (revision, generation) = (self.plan.revision, self.plan.generation);
+            *self.plan = ItemDrawPlan::default();
+            self.plan.revision = revision;
+            self.plan.generation = generation;
+            self.plan.publish_no_rows();
+            *self.last_material_generation = None;
+            return;
+        }
+        let world_weapons_changed = world_weapons
+            .as_ref()
+            .is_some_and(|value| value.is_changed());
+        let atlas_changed = atlas.as_ref().is_some_and(|value| value.is_changed());
+        let tess_changed = tess.as_ref().is_some_and(|value| value.is_changed());
+        let (Some(catalog), Some(_), Some(tess)) = (catalog, atlas_ref, tess.as_deref()) else {
+            unreachable!("required item draw resources checked above");
+        };
+        let material_generation = tess.catalog().generation_id();
+        let generation_changed = world_weapons_changed
+            || atlas_changed
+            || tess_changed
+            || *self.last_material_generation != Some(material_generation);
+        if generation_changed {
+            let revision = self.plan.revision.wrapping_add(1);
+            let generation = self.plan.generation.wrapping_add(1);
+            *self.plan = ItemDrawPlan::default();
+            self.plan.revision = revision;
+            self.plan.generation = generation;
+            self.plan.revisions.bump_admission();
+            *self.last_material_generation = Some(material_generation);
+        }
+        for row in &product.owners {
+            let posed = &product.assets[row.asset_index];
+            let asset_index = if let Some(index) = self
+                .plan
+                .assets
+                .iter()
+                .position(|asset| asset.model == posed.key)
+            {
+                index
+            } else {
+                let materials: Vec<Option<SmodelPassMaterial>> = posed
+                    .surfaces
+                    .iter()
+                    .map(|surface| {
+                        let entry = catalog
+                            .get_at(posed.models.get(usize::from(surface.model))?.order())?;
+                        if !entry.material_edges.get(surface.surface_index)?.is_bound() {
+                            return None;
+                        }
+                        let key = entry.material_keys.get(surface.surface_index)?.as_ref()?;
+                        model_materials.material(&tess.catalog(), key).cloned()
+                    })
+                    .collect();
+                if materials.iter().all(Option::is_none) {
+                    continue;
+                }
+                let surfaces = append_item_surfaces(&mut self.plan, &posed.surfaces, &materials);
+                if surfaces.is_empty() {
+                    continue;
+                }
+                let index = self.plan.assets.len();
+                self.plan.assets.push(ItemAssetDraw {
+                    model: posed.key.clone(),
+                    surfaces,
+                });
+                index
+            };
+            let Some(entry) = catalog.get_at(row.model.order()) else {
+                continue;
+            };
+            let box_half = entry
+                .skel
+                .radius
+                .and_then(|radius| lighting_box_half(&[radius], &[DOBJ_RADIUS_PARENT_ROOT]));
+            let lookup_fallback = self.atpoint.fallback(row.lighting_origin, box_half);
+            let pending_lighting = Some(self.lighting_requests.request(ModelLightingRequest {
+                owner: ModelLightingOwner::Item(row.entnum),
+                origin: row.lighting_origin,
+                lookup_fallback,
+            }));
+            let object_id = XMODEL_OBJECT_ID_ITEM_BASE.saturating_add(row.index as u16);
+            self.owners.push(ItemOwnerDraw {
+                object_id,
+                model: row.name.clone(),
+            });
+            let world_from_local = item_world_from_local(row.origin, row.angles);
+            let caster_bound = entry
+                .skel
+                .radius
+                .map(|radius| render_scene::XModelCasterBound {
+                    origin: row.origin,
+                    radius: radius.max(1.0),
+                });
+            for &(surface, material) in &self.plan.assets[asset_index].surfaces {
+                self.draws.push(XModelSurfaceDraw {
+                    surface,
+                    material,
+                    world_from_local,
+                    lighting_handle: 0,
+                    pending_lighting,
+                    colour_refusal: None,
+                    object_id,
+                    scene_light_index: 0,
+                    reflection_probe_index: 0,
+                    packed_lighting: None,
+                    is_scope: false,
+                    scene_entnum: Some(row.entnum),
+                    body_client: None,
+                    caster_bound,
+                });
+            }
+            perf::instant!("item", "iw4l.sim", |ctx| {
+                let (e_type, present_gap): (i32, Option<&str>) =
+                    (entity_iw4::ET_ITEM, Some("posed"));
+                ctx.arg("e_type", i64::from(e_type));
+
+                ctx.arg("present_gap", present_gap);
+            });
+        }
+        if !self.draws.is_empty() {
+            let topology = topology_fingerprint(
+                &self.plan.indices,
+                &self.plan.surface_ranges,
+                self.plan.vertices.len(),
+            );
+            let rev = self.plan.revision;
+            self.plan.revision = stamp_plan_geometry(&mut self.plan.revisions, rev, topology);
+        }
+        self.plan
+            .publish_frame_rows(&mut self.draws, &mut self.owners);
+    }
+}
+
 fn append_item_draws(
+    publisher: ItemDrawPublisher,
     product: Res<ItemPoseProduct>,
     world_weapons: Option<Res<assets::PreparedWorldWeapons>>,
     atlas: Option<Res<WorldModelLightingAtlas>>,
-    atpoint: Res<render_scene::DynAtPointLookup>,
     tess: Option<Res<TessMaterials>>,
     facts: Res<WorldPresentFacts>,
-    mut plan: ResMut<ItemDrawPlan>,
-    mut lighting_requests: ResMut<ModelLightingRequests>,
     model_materials: Res<crate::anim::model_materials::PreparedModelMaterials>,
-    mut last_material_generation: Local<Option<render_material::MaterialGenerationId>>,
-    mut draws: Local<Vec<XModelSurfaceDraw>>,
-    mut owners: Local<Vec<ItemOwnerDraw>>,
 ) {
-    draws.clear();
-    owners.clear();
-    let catalog = world_weapons
-        .as_ref()
-        .map(|prepared| &prepared.0)
-        .filter(|c| !c.is_empty());
-    let atlas_ref = atlas.as_deref();
-    if catalog.is_none() || atlas_ref.is_none() || !facts.spawned || tess.is_none() {
-        let (revision, generation) = (plan.revision, plan.generation);
-        *plan = ItemDrawPlan::default();
-        plan.revision = revision;
-        plan.generation = generation;
-        plan.publish_no_rows();
-        *last_material_generation = None;
-        return;
-    }
-    let world_weapons_changed = world_weapons
-        .as_ref()
-        .is_some_and(|value| value.is_changed());
-    let atlas_changed = atlas.as_ref().is_some_and(|value| value.is_changed());
-    let tess_changed = tess.as_ref().is_some_and(|value| value.is_changed());
-    let (Some(catalog), Some(_), Some(tess)) = (catalog, atlas_ref, tess.as_deref()) else {
-        unreachable!("required item draw resources checked above");
-    };
-    let material_generation = tess.catalog().generation_id();
-    let generation_changed = world_weapons_changed
-        || atlas_changed
-        || tess_changed
-        || *last_material_generation != Some(material_generation);
-    if generation_changed {
-        let revision = plan.revision.wrapping_add(1);
-        let generation = plan.generation.wrapping_add(1);
-        *plan = ItemDrawPlan::default();
-        plan.revision = revision;
-        plan.generation = generation;
-        plan.revisions.bump_admission();
-        *last_material_generation = Some(material_generation);
-    }
-    for row in &product.owners {
-        let posed = &product.assets[row.asset_index];
-        let asset_index = if let Some(index) = plan
-            .assets
-            .iter()
-            .position(|asset| asset.model == posed.key)
-        {
-            index
-        } else {
-            let materials: Vec<Option<SmodelPassMaterial>> = posed
-                .surfaces
-                .iter()
-                .map(|surface| {
-                    let entry =
-                        catalog.get_at(posed.models.get(usize::from(surface.model))?.order())?;
-                    if !entry.material_edges.get(surface.surface_index)?.is_bound() {
-                        return None;
-                    }
-                    let key = entry.material_keys.get(surface.surface_index)?.as_ref()?;
-                    model_materials.material(&tess.catalog(), key).cloned()
-                })
-                .collect();
-            if materials.iter().all(Option::is_none) {
-                continue;
-            }
-            let surfaces = append_item_surfaces(&mut plan, &posed.surfaces, &materials);
-            if surfaces.is_empty() {
-                continue;
-            }
-            let index = plan.assets.len();
-            plan.assets.push(ItemAssetDraw {
-                model: posed.key.clone(),
-                surfaces,
-            });
-            index
-        };
-        let Some(entry) = catalog.get_at(row.model.order()) else {
-            continue;
-        };
-        let box_half = entry
-            .skel
-            .radius
-            .and_then(|radius| lighting_box_half(&[radius], &[DOBJ_RADIUS_PARENT_ROOT]));
-        let lookup_fallback = atpoint.fallback(row.lighting_origin, box_half);
-        let pending_lighting = Some(lighting_requests.request(ModelLightingRequest {
-            owner: ModelLightingOwner::Item(row.entnum),
-            origin: row.lighting_origin,
-            lookup_fallback,
-        }));
-        let object_id = XMODEL_OBJECT_ID_ITEM_BASE.saturating_add(row.index as u16);
-        owners.push(ItemOwnerDraw {
-            object_id,
-            model: row.name.clone(),
-        });
-        let world_from_local = item_world_from_local(row.origin, row.angles);
-        let caster_bound = entry
-            .skel
-            .radius
-            .map(|radius| render_scene::XModelCasterBound {
-                origin: row.origin,
-                radius: radius.max(1.0),
-            });
-        for &(surface, material) in &plan.assets[asset_index].surfaces {
-            draws.push(XModelSurfaceDraw {
-                surface,
-                material,
-                world_from_local,
-                lighting_handle: 0,
-                pending_lighting,
-                colour_refusal: None,
-                object_id,
-                scene_light_index: 0,
-                reflection_probe_index: 0,
-                packed_lighting: None,
-                is_scope: false,
-                scene_entnum: Some(row.entnum),
-                body_client: None,
-                caster_bound,
-            });
-        }
-        perf::item(entity_iw4::ET_ITEM, None, None, Some("posed"));
-    }
-    if !draws.is_empty() {
-        let topology =
-            topology_fingerprint(&plan.indices, &plan.surface_ranges, plan.vertices.len());
-        let rev = plan.revision;
-        plan.revision = stamp_plan_geometry(&mut plan.revisions, rev, topology);
-    }
-    plan.publish_frame_rows(&mut draws, &mut owners);
+    publisher.publish(product, world_weapons, atlas, tess, facts, model_materials);
 }
 
 fn evaluate_origin(es: &entity_iw4::EntityState, at_time: i32) -> [f32; 3] {

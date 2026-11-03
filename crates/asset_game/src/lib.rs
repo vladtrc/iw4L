@@ -1,16 +1,18 @@
+mod weapon_model_preparation;
+pub use weapon_model_preparation::*;
+mod weapon_capture_input;
+pub use weapon_capture_input::*;
+mod map_presentation;
 use asset_anim::{ClipScheduler, ClipSchedulerError, XAnimCatalog};
-use asset_audio::{SoundCatalog, game_nested_string_assignment};
+use asset_audio::SoundCatalog;
 use asset_core::*;
 use asset_material::{MaterialCatalog, MaterialDefinitions};
 use asset_model::{
     FpvMeshCatalog, ModelSkel, ProjectileMeshCatalog, WorldWeaponCatalog, WorldWeaponEntry,
     capture_xmodel_skel,
 };
-use asset_transport::{
-    GamesRoot, Iw5ZoneMemory, T5ZoneMemory, ZoneMemory, find_zone_file, find_zone_for_tree,
-    open_zone,
-};
-use asset_world::decode_rawfile_text;
+use asset_transport::{ZoneMemory, open_zone};
+pub use map_presentation::*;
 pub mod arena;
 mod attachment_hide;
 mod cac_host;
@@ -23,6 +25,8 @@ mod graph_support;
 mod impact_fx_catalog;
 mod localize;
 mod lochit;
+mod string_table;
+pub use string_table::*;
 mod menu_catalog;
 mod menu_source;
 mod penetration;
@@ -32,15 +36,18 @@ mod tracer_catalog;
 mod weapon_anim_dispatch;
 mod weapon_animations;
 mod weapon_camo;
+mod weapon_facts;
+pub use weapon_facts::*;
+mod weapon_visuals;
+pub use weapon_visuals::*;
+mod weapon_attachments;
+pub use weapon_attachments::*;
 mod weapon_catalog;
-pub use weapon_camo::WeaponCamouflage;
+pub use weapon_camo::*;
 mod weapon_families;
+mod weapon_policy;
 mod weapon_semantics;
-mod weapon_t6;
-pub use weapon_t6::{
-    MELEE_WEAPON as T6_MELEE_WEAPON, T6_EFFECTS, T6_EQUIPMENT_SOUNDS, capture_t6_string_table,
-    planted_model as t6_planted_model,
-};
+pub use weapon_policy::*;
 
 pub use arena::*;
 pub use attachment_hide::*;
@@ -68,10 +75,33 @@ pub mod asset_graph {
     pub(crate) use crate::graph_support::*;
 }
 
-mod team_t6;
-pub use team_t6::t6_team_properties;
-
 mod fpv_family;
-pub use fpv_family::{
-    FpvFamilyConnection, NativeFpvConnection, SoldierFpvConnection, SoldierHandsConnection,
-};
+pub use fpv_family::FpvFamilyConnection;
+
+mod weapon_configuration;
+pub use weapon_configuration::*;
+
+mod weapon_selection;
+pub use weapon_selection::*;
+
+mod weapon_capture;
+pub use weapon_capture::*;
+mod weapon_sounds;
+pub use weapon_sounds::*;
+
+mod weapon_draft;
+pub use weapon_draft::*;
+mod weapon_effects;
+pub use weapon_effects::*;
+
+mod weapon_configuration_preparation;
+pub use weapon_configuration_preparation::*;
+
+mod weapon_tables;
+pub use weapon_tables::*;
+
+mod weapon_runtime_policy;
+pub use weapon_runtime_policy::*;
+
+mod weapon_unlock;
+pub use weapon_unlock::*;

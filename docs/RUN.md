@@ -14,7 +14,7 @@ cargo run --profile play -p launcher -- map iw5:mp_overwatch --cmds '…'
 binary `--cmds`. The colon is a GNU make pattern, so `make map iw5:…` fails —
 write `make map ZONE=iw5:mp_overwatch` or use `cargo run`. Recipes: `make
 scenario`, `chaos`, `bench` ([`BENCH.md`](BENCH.md)), `bench-live`, `lifecycle-*`
-(`*_CMDS` in the `Makefile`). Live recipes use `[profile.play]`; LTO is `PROFILE=release`.
+(`*_CMDS` in the `Makefile`). Live recipes use `[profile.play]`.
 
 Linux startup creates `iw4`, `iw5`, `t5` and `t6` symlinks in `IW4L_GAMES` for missing games with exactly one valid Steam installation. Existing entries are preserved.
 

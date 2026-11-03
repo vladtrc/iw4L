@@ -35,6 +35,8 @@ pub struct WorldModelLightingCache {
 
     packed_lighting: Vec<Option<[u8; 4]>>,
 
+    lighting_sh: std::sync::Arc<Vec<Option<[[f32; 4]; 3]>>>,
+
     pixel_free_bits: [Vec<u32>; MODEL_LIGHTING_PIXEL_FREE_BITS_BUFFERS],
     warned_fail: bool,
 
@@ -68,6 +70,7 @@ impl WorldModelLightingCache {
             origins: vec![[0.0; 3]; limit],
             lighting_info: vec![0; limit],
             packed_lighting: vec![None; limit],
+            lighting_sh: std::sync::Arc::new(vec![None; limit]),
             pixel_free_bits: [ones.clone(), ones.clone(), ones.clone(), ones],
             warned_fail: false,
             frame_assigned: 0,
@@ -120,14 +123,17 @@ impl WorldModelLightingCache {
 
     pub fn alloc_sample_at(
         &mut self,
-        key: ModelLightingOwner,
-        origin: [f32; 3],
+        request: ModelLightingRequest,
         atlas: &WorldModelLightingAtlas,
         scene: Option<&WorldScene>,
         (images, tile_writes): (&mut Assets<Image>, &mut ModelLightingAtlasTileWrites),
-        lookup_fallback: u8,
         allow_moved_reuse: bool,
     ) -> u32 {
+        let ModelLightingRequest {
+            owner: key,
+            origin,
+            lookup_fallback,
+        } = request;
         let dims = atlas.dims;
         let base = dims.smodel_entry_limit;
         let current = self.body_handles.get(&key).copied().unwrap_or(0);
@@ -156,9 +162,11 @@ impl WorldModelLightingCache {
                 alloc_fail,
                 origins,
                 lighting_info,
-                &pixel_free_bits[pp],
-                &pixel_free_bits[p],
-                &mut curr,
+                lighting_iw4::ModelLightingFreeFrames {
+                    prev_prev: &pixel_free_bits[pp],
+                    prev: &pixel_free_bits[p],
+                    curr: &mut curr,
+                },
             ) {
                 Ok(mut glob) => Some(glob.alloc(current, origin, allow_moved_reuse || owned)),
                 Err(_) => None,
@@ -210,7 +218,26 @@ impl WorldModelLightingCache {
                 self.body_handles.remove(&key);
                 return 0;
             };
-            let Some(grid) = scene.light_grid.as_ref() else {
+            let world = asset_core::atlas::WorldLayout.world_at(origin).0;
+            let (grid, origin) = if world == 0 {
+                (scene.light_grid.as_ref(), origin)
+            } else {
+                let layer = scene
+                    .cull
+                    .as_ref()
+                    .and_then(|cull| cull.atlas_layers.iter().find(|layer| layer.world == world));
+                (
+                    layer.and_then(|layer| layer.light_grid.as_ref()),
+                    [
+                        origin[0]
+                            - asset_core::atlas::WorldLayout
+                                .origin(asset_core::atlas::WorldId(world))[0],
+                        origin[1],
+                        origin[2],
+                    ],
+                )
+            };
+            let Some(grid) = grid else {
                 self.body_handles.remove(&key);
                 return 0;
             };
@@ -260,10 +287,17 @@ impl WorldModelLightingCache {
                         sampled.compressed[2],
                         0xff,
                     ]);
+                    std::sync::Arc::make_mut(&mut self.lighting_sh)[slot as usize] =
+                        sampled.lighting_sh;
                 }
                 Err(_) => {
                     if let Some(packed) = self.packed_lighting.get_mut(slot as usize) {
                         *packed = None;
+                    }
+                    if let Some(sh) =
+                        std::sync::Arc::make_mut(&mut self.lighting_sh).get_mut(slot as usize)
+                    {
+                        *sh = None;
                     }
                     if let Some(owner) = self.slot_owner.get_mut(slot as usize) {
                         *owner = None;
@@ -295,6 +329,11 @@ impl WorldModelLightingCache {
             .and_then(|slot| self.lighting_info.get(slot as usize).copied())
             .map(lighting_iw4::lighting_info_scene_light_index)
             .unwrap_or(0)
+    }
+
+    /// Light-grid SH per cache slot, with the handle base that maps a handle to its slot.
+    pub fn lighting_sh(&self) -> (u32, std::sync::Arc<Vec<Option<[[f32; 4]; 3]>>>) {
+        (self.base_index, std::sync::Arc::clone(&self.lighting_sh))
     }
 
     pub fn packed_lighting_for_handle(&self, handle: u32) -> Option<[u8; 4]> {
@@ -499,12 +538,10 @@ fn drain_model_lighting_requests(
         }
         resolved.get_or_insert_with(request.owner, || {
             let handle = cache.alloc_sample_at(
-                request.owner,
-                request.origin,
+                request,
                 atlas,
                 scene,
                 (&mut images, &mut tile_writes),
-                request.lookup_fallback,
                 moving_glass,
             );
             if handle == 0 {

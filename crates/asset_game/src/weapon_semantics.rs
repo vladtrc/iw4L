@@ -1,18 +1,4 @@
-use asset_core::AssetNamespace;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThermalScopePolicy {
-    Native { enabled: bool },
-    T5OverlayNameCompatibility { enabled: bool },
-}
-
-impl ThermalScopePolicy {
-    pub fn enabled(self) -> bool {
-        match self {
-            Self::Native { enabled } | Self::T5OverlayNameCompatibility { enabled } => enabled,
-        }
-    }
-}
+use asset_core::FamilyId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MeleeImpact {
@@ -22,8 +8,8 @@ pub enum MeleeImpact {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MeleeCuePrecedence {
-    T5AuthoredFirstCompatibility,
-    KnifeFirstCompatibility,
+    AuthoredFirst,
+    KnifeFirst,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,7 +20,6 @@ pub struct MeleeCuePolicy {
     pub generic_hit: &'static str,
     pub generic_miss: &'static str,
 }
-
 impl MeleeCuePolicy {
     pub fn generic(self, knife: bool, impact: MeleeImpact) -> &'static str {
         match (knife, impact) {
@@ -46,51 +31,13 @@ impl MeleeCuePolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WeaponCueNamespacePolicy {
-    SourceNamespace(AssetNamespace),
-    T6HostNamespaceCompatibility,
-}
-
-impl WeaponCueNamespacePolicy {
-    pub fn namespace(self) -> AssetNamespace {
-        match self {
-            Self::SourceNamespace(namespace) => namespace,
-            Self::T6HostNamespaceCompatibility => AssetNamespace::Iw4,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MeleeWeaponPolicy {
-    Own,
-    T5KnifeCompatibility { weapon: u32 },
-}
-
-impl MeleeWeaponPolicy {
-    pub fn weapon(self, current: u32) -> u32 {
-        match self {
-            Self::Own => current,
-            Self::T5KnifeCompatibility { weapon } => weapon,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum BreathCueSource {
-    T5ConventionCompatibility,
-    IwConventionCompatibility,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BreathCuePolicy {
-    pub source: BreathCueSource,
     pub inhale: &'static str,
     pub exhale: &'static str,
     pub gasp: &'static str,
     pub heartbeat: &'static str,
 }
-
 impl BreathCuePolicy {
     pub fn aliases(self) -> [&'static str; 4] {
         [self.inhale, self.exhale, self.gasp, self.heartbeat]
@@ -99,68 +46,41 @@ impl BreathCuePolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WeaponSemanticPolicy {
-    pub thermal_scope: ThermalScopePolicy,
-    pub cue_namespace: WeaponCueNamespacePolicy,
+    pub thermal_scope: bool,
+    pub cue_namespace: FamilyId,
     pub melee_cues: MeleeCuePolicy,
-    pub melee_weapon: MeleeWeaponPolicy,
+    /// None means the current weapon; Some selects another published row.
+    pub melee_weapon: Option<u32>,
     pub breath_cues: BreathCuePolicy,
 }
 
-impl WeaponSemanticPolicy {
-    pub(crate) fn compile(
-        namespace: AssetNamespace,
-        native_thermal: bool,
-        overlay: Option<&str>,
-        melee_weapon: MeleeWeaponPolicy,
-    ) -> Self {
-        let cue_namespace = match namespace {
-            AssetNamespace::T6 => WeaponCueNamespacePolicy::T6HostNamespaceCompatibility,
-            namespace => WeaponCueNamespacePolicy::SourceNamespace(namespace),
-        };
-        if namespace == AssetNamespace::T5 {
-            Self {
-                cue_namespace,
-                melee_weapon,
-                breath_cues: BreathCuePolicy {
-                    source: BreathCueSource::T5ConventionCompatibility,
-                    inhale: "wpn_sniper_breathin",
-                    exhale: "wpn_sniper_breathout",
-                    gasp: "wpn_sniper_breathgasp",
-                    heartbeat: "wpn_sniper_heartbeat",
-                },
-                thermal_scope: ThermalScopePolicy::T5OverlayNameCompatibility {
-                    enabled: overlay.is_some_and(|name| name.contains("_ir")),
-                },
-                melee_cues: MeleeCuePolicy {
-                    precedence: MeleeCuePrecedence::T5AuthoredFirstCompatibility,
-                    knife_hit: "wpn_melee_knife_hit_body",
-                    knife_miss: "wpn_melee_knife_hit_other",
-                    generic_hit: "wpn_melee_hit",
-                    generic_miss: "wpn_melee_hit_other",
-                },
-            }
-        } else {
-            Self {
-                cue_namespace,
-                melee_weapon,
-                breath_cues: BreathCuePolicy {
-                    source: BreathCueSource::IwConventionCompatibility,
-                    inhale: "weap_sniper_breathin",
-                    exhale: "weap_sniper_breathout",
-                    gasp: "weap_sniper_breathgasp",
-                    heartbeat: "weap_sniper_heartbeat",
-                },
-                thermal_scope: ThermalScopePolicy::Native {
-                    enabled: native_thermal,
-                },
-                melee_cues: MeleeCuePolicy {
-                    precedence: MeleeCuePrecedence::KnifeFirstCompatibility,
-                    knife_hit: "melee_knife_hit_body",
-                    knife_miss: "melee_knife_hit_other",
-                    generic_hit: "melee_hit",
-                    generic_miss: "melee_hit_other",
-                },
-            }
-        }
+pub struct WeaponSemanticInputs<'a> {
+    pub namespace: FamilyId,
+    pub native_thermal: bool,
+    pub overlay: Option<&'a str>,
+    pub use_as_melee: bool,
+    /// Resolves an authored bare name in this source family, preserving first-row precedence.
+    pub find_weapon: &'a dyn Fn(&str) -> Option<u32>,
+}
+pub type WeaponSemanticCompiler = for<'a> fn(WeaponSemanticInputs<'a>) -> WeaponSemanticPolicy;
+
+pub fn reference_weapon_semantics(input: WeaponSemanticInputs<'_>) -> WeaponSemanticPolicy {
+    WeaponSemanticPolicy {
+        thermal_scope: input.native_thermal,
+        cue_namespace: input.namespace,
+        melee_weapon: None,
+        breath_cues: BreathCuePolicy {
+            inhale: "weap_sniper_breathin",
+            exhale: "weap_sniper_breathout",
+            gasp: "weap_sniper_breathgasp",
+            heartbeat: "weap_sniper_heartbeat",
+        },
+        melee_cues: MeleeCuePolicy {
+            precedence: MeleeCuePrecedence::KnifeFirst,
+            knife_hit: "melee_knife_hit_body",
+            knife_miss: "melee_knife_hit_other",
+            generic_hit: "melee_hit",
+            generic_miss: "melee_hit_other",
+        },
     }
 }

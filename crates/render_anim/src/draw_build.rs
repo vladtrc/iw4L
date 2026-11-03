@@ -6,6 +6,7 @@ use render_material::{RuntimeMaterialCatalog, SortedMaterialOrdinal};
 use render_scene::{SmodelPassMaterial, WorldModelLightingAtlas};
 
 use crate::anim::fpv_pose::PosedModelSurface;
+use crate::anim::remote_body::RemoteBodySkinnedItem;
 use crate::draw::{
     BODY_PACKED_UNAVAILABLE, DynEntAssetDraw, DynEntDrawPlan, FPV_PACKED_EMPTY_PLAN,
     FPV_PACKED_UNAVAILABLE, FpvDrawPlan, ItemDrawPlan, MissileDrawPlan, RemoteBodyDrawPlan,
@@ -179,14 +180,12 @@ pub fn append_remote_body_cpu_blob(
 
 pub fn push_remote_body_cpu_draw(
     plan: &mut RemoteBodyDrawPlan,
-    index_start: u32,
-    index_count: u32,
-    world_from_local: Mat4,
+    (index_start, index_count): (u32, u32),
+    item: &RemoteBodySkinnedItem,
     lighting_handle: u32,
     scene_light_index: u8,
     reflection_probe_index: u8,
     material: u32,
-    scene_entnum: Option<u32>,
 ) {
     if lighting_handle == 0 || index_count == 0 {
         return;
@@ -196,11 +195,11 @@ pub fn push_remote_body_cpu_draw(
     plan.draws.push(RemoteBodySurfaceDraw {
         surface: range_idx,
         material,
-        world_from_local,
+        world_from_local: item.world_from_local,
         lighting_handle,
         scene_light_index,
         reflection_probe_index,
-        scene_entnum,
+        scene_entnum: Some(item.client),
     });
 }
 

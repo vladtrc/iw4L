@@ -65,23 +65,9 @@ impl FpvBoltTargets {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum FpvPoseRefuse {
-    CatalogMissing,
-    NoActiveClips,
-    EyePoseFailed {
-        gun_xmodel: String,
-    },
-    DependencyUnresolved {
-        weapon_id: u32,
-        role: &'static str,
-        name: String,
-    },
-}
-
 pub enum FpvPoseKind {
     Hide,
-    Refuse(FpvPoseRefuse),
+    Refuse(std::borrow::Cow<'static, str>),
     Posed(FpvPosedFrame),
 }
 
@@ -108,7 +94,7 @@ pub struct FpvPoseProduct {
     pub camo: u8,
 }
 
-pub struct FpvGenerateArgs<'a> {
+pub struct FpvPoseGenerator<'a> {
     pub dt: f32,
     pub equipped: &'a mut EquippedFpv,
     pub rigs: &'a FpvRigSet,
@@ -124,67 +110,23 @@ pub struct FpvGenerateArgs<'a> {
     pub dual_offset: Option<f32>,
 }
 
-pub fn generate_fpv_pose(
-    args: FpvGenerateArgs<'_>,
-) -> (FpvPoseKind, crate::anim::fpv::FpvNotetracks) {
-    let FpvGenerateArgs {
-        dt,
-        equipped,
-        rigs,
-        active,
-        cursor,
-        rocket,
-        melee,
-        ads,
-        jammed,
-        sample,
-        predicted_fire,
-        dual,
-        dual_offset,
-    } = args;
-    let (_pose, notifies) =
-        tick_equipped_fpv_with_predicted_fire(equipped, cursor, sample, predicted_fire, dt);
-
-    let kind = pose_equipped_fpv(
-        equipped,
-        rigs,
-        active,
-        rocket,
-        melee,
-        ads,
-        jammed,
-        dual,
-        dual_offset,
-    );
-    (kind, notifies)
-}
-
-fn pose_equipped_fpv(
-    equipped: &EquippedFpv,
-    rigs: &FpvRigSet,
-    active: &mut Option<Arc<PreparedFpvRig>>,
-    rocket: bool,
-    melee: bool,
-    ads: bool,
-    jammed: bool,
-    dual: bool,
-    dual_offset: Option<f32>,
-) -> FpvPoseKind {
-    let right: Vec<PosedClip<'_>> = equipped
-        .controller
-        .active_anims()
-        .map(|a| PosedClip {
-            node: a.node,
-            clip: a.clip,
-            time: a.time,
-            weight: a.weight,
-        })
-        .collect();
-    if right.is_empty() {
-        return FpvPoseKind::Refuse(FpvPoseRefuse::NoActiveClips);
+impl FpvPoseGenerator<'_> {
+    pub fn generate(mut self) -> (FpvPoseKind, crate::anim::fpv::FpvNotetracks) {
+        let (_pose, notifies) = tick_equipped_fpv_with_predicted_fire(
+            self.equipped,
+            self.cursor,
+            self.sample,
+            self.predicted_fire,
+            self.dt,
+        );
+        let kind = self.pose_equipped();
+        (kind, notifies)
     }
-    let left: Vec<PosedClip<'_>> = match (dual, equipped.left.as_ref()) {
-        (true, Some(left)) => left
+
+    fn pose_equipped(&mut self) -> FpvPoseKind {
+        let right: Vec<PosedClip<'_>> = self
+            .equipped
+            .controller
             .active_anims()
             .map(|a| PosedClip {
                 node: a.node,
@@ -192,63 +134,87 @@ fn pose_equipped_fpv(
                 time: a.time,
                 weight: a.weight,
             })
-            .collect(),
-        _ => Vec::new(),
-    };
-    let dual_drawn = !left.is_empty();
-
-    let Some(prepared) = rigs.pick(rocket, dual_drawn, melee, ads, jammed) else {
-        *active = None;
-        return FpvPoseKind::Refuse(FpvPoseRefuse::EyePoseFailed {
-            gun_xmodel: equipped.gun_xmodel.clone(),
-        });
-    };
-    if active
-        .as_ref()
-        .is_none_or(|current| current.generation() != prepared.generation())
-    {
-        *active = Some(Arc::clone(prepared));
-    }
-
-    let combined = prepared.combines_hands();
-    let pose = if combined {
-        prepared.pose_combined(&right, &left)
-    } else {
-        prepared.pose_hand(0, &right, Vec3::ZERO)
-    };
-    let Some(right_pose) = pose else {
-        return FpvPoseKind::Refuse(FpvPoseRefuse::EyePoseFailed {
-            gun_xmodel: equipped.gun_xmodel.clone(),
-        });
-    };
-    let lens = right_pose.lens;
-    let left_pose = if dual_drawn && !combined {
-        let offset = dual_offset
-            .filter(|offset| *offset != 0.0)
-            .map(|offset| {
-                Vec3::from_array(weapon_iw4::dual_wield_view_model_origin_add(
-                    1,
-                    [-1.0, 0.0, 0.0],
-                    offset,
-                ))
-            })
-            .unwrap_or(Vec3::ZERO);
-        let Some(pose) = prepared.pose_hand(1, &left, offset) else {
-            return FpvPoseKind::Refuse(FpvPoseRefuse::EyePoseFailed {
-                gun_xmodel: equipped.gun_xmodel.clone(),
-            });
+            .collect();
+        if right.is_empty() {
+            return FpvPoseKind::Refuse(std::borrow::Cow::Borrowed(
+                "FPV no active clips this frame",
+            ));
+        }
+        let left: Vec<PosedClip<'_>> = match (self.dual, self.equipped.left.as_ref()) {
+            (true, Some(left)) => left
+                .active_anims()
+                .map(|a| PosedClip {
+                    node: a.node,
+                    clip: a.clip,
+                    time: a.time,
+                    weight: a.weight,
+                })
+                .collect(),
+            _ => Vec::new(),
         };
-        Some(pose)
-    } else {
-        None
-    };
+        let dual_drawn = !left.is_empty();
 
-    let secondary_bolt = prepared.secondary_bolt(&right_pose);
-    let poses = [Some(right_pose), left_pose];
-    FpvPoseKind::Posed(FpvPosedFrame {
-        poses,
-        secondary_bolt,
-        lens,
-        idle_sampled: true,
-    })
+        let Some(prepared) =
+            self.rigs
+                .pick(self.rocket, dual_drawn, self.melee, self.ads, self.jammed)
+        else {
+            *self.active = None;
+            return FpvPoseKind::Refuse(std::borrow::Cow::<'static, str>::Owned(format!(
+                "FPV eye-pose failed for `{gun_xmodel}` (need viewhands+gun skels with tag_view)",
+                gun_xmodel = (self.equipped.gun_xmodel.clone())
+            )));
+        };
+        if self
+            .active
+            .as_ref()
+            .is_none_or(|current| current.generation() != prepared.generation())
+        {
+            *self.active = Some(Arc::clone(prepared));
+        }
+
+        let combined = prepared.combines_hands();
+        let pose = if combined {
+            prepared.pose_combined(&right, &left)
+        } else {
+            prepared.pose_hand(0, &right, Vec3::ZERO)
+        };
+        let Some(right_pose) = pose else {
+            return FpvPoseKind::Refuse(std::borrow::Cow::<'static, str>::Owned(format!(
+                "FPV eye-pose failed for `{gun_xmodel}` (need viewhands+gun skels with tag_view)",
+                gun_xmodel = (self.equipped.gun_xmodel.clone())
+            )));
+        };
+        let lens = right_pose.lens;
+        let left_pose = if dual_drawn && !combined {
+            let offset = self
+                .dual_offset
+                .filter(|offset| *offset != 0.0)
+                .map(|offset| {
+                    Vec3::from_array(weapon_iw4::dual_wield_view_model_origin_add(
+                        1,
+                        [-1.0, 0.0, 0.0],
+                        offset,
+                    ))
+                })
+                .unwrap_or(Vec3::ZERO);
+            let Some(pose) = prepared.pose_hand(1, &left, offset) else {
+                return FpvPoseKind::Refuse(std::borrow::Cow::<'static, str>::Owned(format!(
+                    "FPV eye-pose failed for `{gun_xmodel}` (need viewhands+gun skels with tag_view)",
+                    gun_xmodel = (self.equipped.gun_xmodel.clone())
+                )));
+            };
+            Some(pose)
+        } else {
+            None
+        };
+
+        let secondary_bolt = prepared.secondary_bolt(&right_pose);
+        let poses = [Some(right_pose), left_pose];
+        FpvPoseKind::Posed(FpvPosedFrame {
+            poses,
+            secondary_bolt,
+            lens,
+            idle_sampled: true,
+        })
+    }
 }

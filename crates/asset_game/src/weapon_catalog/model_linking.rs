@@ -251,14 +251,16 @@ impl WeaponBuild {
                         census.built += 1;
                         crate::FpvAssembly::build(
                             fpv,
-                            hands,
-                            mounts,
-                            rocket,
-                            knife,
-                            ads,
-                            &assembly_hide_tags,
-                            hide_mode,
-                            jammed,
+                            crate::FpvAssemblyInput {
+                                hands,
+                                mounts,
+                                rocket,
+                                knife,
+                                ads,
+                                hide_tags: &assembly_hide_tags,
+                                hide_mode,
+                                jammed,
+                            },
                             &mut skeletons,
                         )
                         .map(Arc::new)

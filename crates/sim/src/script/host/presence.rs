@@ -103,7 +103,7 @@ pub(crate) fn spawn_presence(world: &mut World, origin: [f32; 3]) -> Result<Scri
 /// The observability boundary for script writes: native collision reads go
 /// through here, so a query sees every pose, solidity and visibility change a
 /// native or field store made earlier in the same tick.
-pub(crate) fn settled(world: &mut World) -> FrameWorld<'_> {
+pub fn settled(world: &mut World) -> FrameWorld<'_> {
     settle_collision(world);
     FrameWorld::from_world(world)
 }
@@ -177,9 +177,6 @@ pub(crate) fn settle_collision(world: &mut World) {
 
 pub(crate) fn sync_presence(world: &mut World) {
     let request = world.resource::<crate::step::StepRequest>();
-    if !request.reason.advances_authority_world() {
-        return;
-    }
     let tick = request.tick;
     let now = crate::level_time_ms(tick);
     settle_collision(world);
@@ -352,7 +349,9 @@ fn with_tag_dobj<T>(
     ))
 }
 
-fn tag_lookup(world: &mut World, object: u64, tag: &str) -> Option<Option<[f32; 3]>> {
+/// Model-space offset of `tag`: `None` when the entity has no model to ask,
+/// `Some(None)` when its model lacks the tag.
+pub(crate) fn tag_lookup(world: &mut World, object: u64, tag: &str) -> Option<Option<[f32; 3]>> {
     with_tag_dobj(world, object, |dobj| {
         Some(dobj.tag_world_pose(tag).map(|(at, _)| {
             dobj.world_from_model
@@ -378,10 +377,6 @@ pub(crate) fn tag_world(
             axis(matrix.z_axis),
         ],
     ))
-}
-
-pub(crate) fn tag_offset(world: &mut World, object: u64, tag: &str) -> Option<[f32; 3]> {
-    tag_lookup(world, object, tag).flatten()
 }
 
 fn resolve_link_tags(world: &mut World) {
@@ -575,7 +570,7 @@ impl RoundScript {
             .collect()
     }
 
-    pub(crate) fn presence_of(&self, value: &Value) -> Option<ScriptModelId> {
+    pub fn presence_of(&self, value: &Value) -> Option<ScriptModelId> {
         self.entity(value).and_then(|(_, e)| e.presence)
     }
 

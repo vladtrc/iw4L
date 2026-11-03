@@ -8,8 +8,8 @@ use net::{
 };
 use sim::{ClientAction, ClientLifecycle, SimWorld, Tick};
 
-use crate::nav::{self, NAV_HULL, NAV_SCHEMA, NavGraph, RouteStats};
-use crate::query::{Budgeted, QueryCounters, QuerySubsystem, TraceBudget};
+use crate::nav::{self, NAV_HULL, NAV_SCHEMA, NavGraph};
+use crate::query::{Budgeted, TraceBudget};
 use crate::roster::{
     BotAddQueue, BotFireQueue, BotHold, BotRoster, BotTpQueue, BotTpTarget, BotTpWhere,
     default_class_index,
@@ -20,80 +20,10 @@ use frame::{AuthoritySet, BotNavigationReady, ClientSet, RuntimeRole};
 const VIEW_PITCH_DOWN: f32 = 85.0;
 const TRACE_QUOTA: u32 = 96;
 const ASTAR_QUOTA: u32 = 2048;
-/// Ten seconds of authority ticks between aggregates. Compact enough to leave
-/// in a match, coarse enough not to be a per-query log in the hot path.
-const METER_PERIOD_TICKS: u32 = 200;
-
 #[derive(Resource, Default)]
 struct BotNav {
     graph: NavGraph,
     pending: Option<(u64, Task<NavGraph>, Option<asset_transport::StageHandle>)>,
-}
-
-/// Where the shared quota went and whether pending work actually advanced.
-/// Reported per window; not a per-query trace.
-#[derive(Resource, Default)]
-struct BotMeter {
-    queries: QueryCounters,
-    controller_us: u64,
-    ticks: u32,
-    stuck_peak: usize,
-    live_peak: usize,
-    max_age: u32,
-    max_starved: u32,
-    /// Route totals at the last report, so the line carries this window's work.
-    routes_at_report: RouteStats,
-}
-
-impl BotMeter {
-    fn report(&mut self, totals: RouteStats, bots: usize) {
-        let was = self.routes_at_report;
-        let routes = RouteStats {
-            completed: totals.completed.saturating_sub(was.completed),
-            terminal: totals.terminal.saturating_sub(was.terminal),
-            cancelled: totals.cancelled.saturating_sub(was.cancelled),
-            discarded_attachments: totals
-                .discarded_attachments
-                .saturating_sub(was.discarded_attachments),
-            denied_slices: totals.denied_slices.saturating_sub(was.denied_slices),
-            ..RouteStats::default()
-        };
-        self.routes_at_report = totals;
-        let per = |row: &[u32; QuerySubsystem::COUNT]| {
-            QuerySubsystem::ALL
-                .iter()
-                .map(|s| format!("{}={}", s.label(), row[s.index()]))
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        diag::info!(
-            Sim,
-            "bots: window={} bots={bots} attempted[{}] denied[{}] primitives={} \
-             routes done={} terminal={} cancelled={} discarded={} denied_slices={} \
-             age={} starve={} live_peak={} stuck_peak={} controller_us={}",
-            self.ticks,
-            per(&self.queries.attempted),
-            per(&self.queries.denied),
-            self.queries.primitives,
-            routes.completed,
-            routes.terminal,
-            routes.cancelled,
-            routes.discarded_attachments,
-            routes.denied_slices,
-            self.max_age,
-            self.max_starved,
-            self.live_peak,
-            self.stuck_peak,
-            self.controller_us,
-        );
-        self.queries = QueryCounters::ZERO;
-        self.controller_us = 0;
-        self.ticks = 0;
-        self.stuck_peak = 0;
-        self.live_peak = 0;
-        self.max_age = 0;
-        self.max_starved = 0;
-    }
 }
 
 pub struct BotsPlugin;
@@ -107,9 +37,8 @@ impl Plugin for BotsPlugin {
             .init_resource::<BotFireQueue>()
             .scoped::<BotNav>(frame::MatchScope::Live)
             .scoped::<BotNavigationReady>(frame::MatchScope::Live)
-            .scoped::<BotMeter>(frame::MatchScope::Live)
             .add_systems(
-                Update,
+                PreUpdate,
                 (
                     fill_bots_from_rules.in_set(frame::InMatch),
                     drain_bot_add_queue.in_set(frame::InMatch),
@@ -122,7 +51,7 @@ impl Plugin for BotsPlugin {
                     .before(ClientSet::Receive),
             )
             .add_systems(
-                Update,
+                PreUpdate,
                 (prepare_navigation.in_set(frame::InMatch))
                     .chain()
                     .in_set(ClientSet::Load),
@@ -238,7 +167,6 @@ fn evict_bots_claiming_local_client(mut roster: ResMut<BotRoster>, local: Res<Lo
 fn boot_bots(
     mut roster: ResMut<BotRoster>,
     mut actions: ResMut<ClientActionInbox>,
-    mut request_ids: ResMut<net::ActionRequestIds>,
     installed: Option<Res<State<frame::MatchScope>>>,
     world: Option<ResMut<AuthorityWorld>>,
     local: Res<LocalPresentClient>,
@@ -272,7 +200,7 @@ fn boot_bots(
                 })
             }
         };
-        if world.0.gsc_realm() == Some(sim::script::Realm::Iw4)
+        if world.0.gsc_realm() == Some(sim::script::FamilyId::IW4)
             && let Err(error) = world
                 .0
                 .persistent_data_mut()
@@ -286,44 +214,23 @@ fn boot_bots(
             continue;
         }
         let index = default_class_index(seed, bot.id, bot.class_picks);
-        let join_id = request_ids.allocate();
-        let class_request = request_ids.allocate();
-        let name_request = request_ids.allocate();
         let queued = [
-            actions.push(
-                bot.id,
-                ClientAction::JoinMatch {
-                    request_id: join_id,
-                },
-            ),
+            actions.push(bot.id, ClientAction::JoinMatch),
             team.map_or(Ok(()), |team| {
-                let request_id = request_ids.allocate();
                 match (
                     sim::menu_response_field(sim::TEAM_MENU),
                     sim::menu_response_field(team),
                 ) {
-                    (Some(menu), Some(response)) => actions.push(
-                        bot.id,
-                        ClientAction::MenuResponse {
-                            request_id,
-                            menu,
-                            response,
-                        },
-                    ),
+                    (Some(menu), Some(response)) => {
+                        actions.push(bot.id, ClientAction::MenuResponse { menu, response })
+                    }
                     _ => Ok(()),
                 }
             }),
-            actions.push(
-                bot.id,
-                ClientAction::ChooseDefaultClass {
-                    request_id: class_request,
-                    index,
-                },
-            ),
+            actions.push(bot.id, ClientAction::ChooseDefaultClass { index }),
             actions.push(
                 bot.id,
                 ClientAction::SetName {
-                    request_id: name_request,
                     name: entity_iw4::pack_client_state_name(bot.name),
                 },
             ),
@@ -336,8 +243,10 @@ fn boot_bots(
         bot.class_picks += 1;
         diag::info!(
             Sim,
-            "bots: JoinMatch+changeclass client={} pick={index} request_id={class_request}",
+            "bots: JoinMatch+changeclass client={} pick={index} requested_side={:?} requested_team={team:?} mode={:?}",
             bot.id.0,
+            bot.side,
+            world.0.game_mode_kind(),
         );
     }
 }
@@ -346,7 +255,6 @@ fn apply_bot_tp(
     mut queue: ResMut<BotTpQueue>,
     roster: Res<BotRoster>,
     mut actions: ResMut<ClientActionInbox>,
-    mut request_ids: ResMut<net::ActionRequestIds>,
     world: Option<Res<AuthorityWorld>>,
     local: Res<LocalPresentClient>,
 ) {
@@ -409,21 +317,13 @@ fn apply_bot_tp(
                     (origin, aim_viewangles(origin, ps.origin))
                 }
             };
-            let request_id = request_ids.allocate();
-            if let Err(error) = actions.push(
-                id,
-                ClientAction::Move {
-                    request_id,
-                    origin,
-                    angles,
-                },
-            ) {
+            if let Err(error) = actions.push(id, ClientAction::Move { origin, angles }) {
                 diag::warn!(Sim, "bots: tp client={} not queued — {error}", id.0);
                 continue;
             }
             diag::info!(
                 Sim,
-                "bots: tp client={} ({:.1} {:.1} {:.1}) request_id={request_id}",
+                "bots: tp client={} ({:.1} {:.1} {:.1})",
                 id.0,
                 origin[0],
                 origin[1],
@@ -441,11 +341,9 @@ struct ThinkBots<'w> {
     roster: ResMut<'w, BotRoster>,
     cmds: ResMut<'w, ClientCommandInbox>,
     actions: ResMut<'w, ClientActionInbox>,
-    request_ids: ResMut<'w, net::ActionRequestIds>,
     hold: Res<'w, BotHold>,
     fire: ResMut<'w, BotFireQueue>,
     reliable: ResMut<'w, ReliableEventHub>,
-    meter: ResMut<'w, BotMeter>,
 }
 
 fn think_bots(mut p: ThinkBots) {
@@ -467,10 +365,12 @@ fn think_bots(mut p: ThinkBots) {
     let mut astar = ASTAR_QUOTA;
     let count = p.roster.bots.len();
     let start = (p.clock.tick as usize / 2) % count.max(1);
-    let mut controller_us = 0u64;
     let seed = p.roster.seed;
     for offset in 0..count {
         let bot = &mut p.roster.bots[(start + offset) % count];
+        if p.world.0.input_program_owns(bot.id) {
+            continue;
+        }
         let Some(meta) = snapshot.meta.for_client(bot.id) else {
             continue;
         };
@@ -483,11 +383,10 @@ fn think_bots(mut p: ThinkBots) {
         if bot.class_picked_in != Some(meta.life_sequence) {
             bot.class_picked_in = Some(meta.life_sequence);
             let index = default_class_index(seed, bot.id, bot.class_picks);
-            let request_id = p.request_ids.allocate();
-            match p.actions.push(
-                bot.id,
-                ClientAction::ChooseDefaultClass { request_id, index },
-            ) {
+            match p
+                .actions
+                .push(bot.id, ClientAction::ChooseDefaultClass { index })
+            {
                 Ok(()) => bot.class_picks += 1,
                 Err(error) => diag::warn!(
                     Sim,
@@ -516,7 +415,6 @@ fn think_bots(mut p: ThinkBots) {
             else {
                 continue;
             };
-            let started = std::time::Instant::now();
             let mut cmd = brain.drive_nav(
                 &obs,
                 &mut queried,
@@ -524,7 +422,6 @@ fn think_bots(mut p: ThinkBots) {
                 &mut astar,
                 AUTHORITY_MS,
             );
-            controller_us += started.elapsed().as_micros() as u64;
             cmd.server_time = p.clock.time_ms;
             cmd
         } else {
@@ -538,57 +435,17 @@ fn think_bots(mut p: ThinkBots) {
         }
         p.cmds.push(bot.id, None, cmd, None);
     }
-    if count == 0 {
-        return;
-    }
-    // Only a bot with a movement task that did not move counts as stuck; a
-    // hold, an interaction or waiting to respawn is not a navigation failure.
-    let tick = p.clock.tick;
-    let mut routes = RouteStats::default();
-    let mut stuck = 0;
-    let mut live = 0;
-    let (mut age, mut starved) = (0, 0);
-    for bot in &p.roster.bots {
-        let Some(brain) = bot.brain.as_ref() else {
-            continue;
-        };
-        let stats = brain.route_stats();
-        routes.completed += stats.completed;
-        routes.terminal += stats.terminal;
-        routes.cancelled += stats.cancelled;
-        routes.discarded_attachments += stats.discarded_attachments;
-        routes.denied_slices += stats.denied_slices;
-        let (bot_age, bot_starved) = brain.route_age();
-        if bot_age != 0 {
-            live += 1;
-        }
-        age = age.max(bot_age);
-        starved = starved.max(bot_starved);
-        stuck += usize::from(brain.stuck(tick));
-    }
-    let meter = &mut p.meter;
-    meter.queries.merge(&budget.counters);
-    meter.controller_us += controller_us;
-    meter.ticks += 1;
-    meter.stuck_peak = meter.stuck_peak.max(stuck);
-    meter.live_peak = meter.live_peak.max(live);
-    meter.max_age = meter.max_age.max(age);
-    meter.max_starved = meter.max_starved.max(starved);
-    if meter.ticks >= METER_PERIOD_TICKS {
-        meter.report(routes, count);
-    }
 }
 
 fn prepare_navigation(
     world: Option<Res<AuthorityWorld>>,
     installed: Option<Res<State<frame::MatchScope>>>,
     role: Res<RuntimeRole>,
-    generation: Res<frame::WorldGeneration>,
     mut nav: ResMut<BotNav>,
     mut ready: ResMut<BotNavigationReady>,
     load: Option<Res<assets::MapLoadProcess>>,
 ) {
-    ready.0 = frame::WorldReadiness::new(generation.stamp(), frame::ReadinessState::Pending);
+    ready.0 = frame::WorldReadiness::new(frame::ReadinessState::Pending);
     if !matches!(*role, RuntimeRole::Listen | RuntimeRole::Dedicated) {
         ready.0.state = frame::ReadinessState::Ready;
         return;
@@ -636,12 +493,74 @@ fn refresh_nav(world: &SimWorld, nav: &mut BotNav, load: Option<&assets::MapLoad
         load.progress
             .begin(asset_transport::StageId::Navigation, None)
     });
-    let mut snapshot = world.clone();
+    let mut seeds = world.authored_spawn_origins();
+    seeds.extend(
+        world
+            .objectives
+            .compass
+            .iter()
+            .map(|objective| objective.origin),
+    );
+    let content = world.content();
+    let atlas = content.atlas().cloned();
+    if let Some(atlas) = &atlas {
+        seeds.extend(
+            atlas
+                .portals
+                .iter()
+                .flat_map(|pair| [pair.a, pair.b])
+                .filter(|door| door.world == sim::world_graph::WorldId::ROOT)
+                .map(nav::portal_entrance),
+        );
+    }
+    let bounds = nav::playable_bounds(world.clip_brushes(), &seeds);
+    let collision = world.collision_scene();
     let generation = nav.graph.generation.wrapping_add(1);
     nav.pending = Some((
         digest,
         assets::load_pool().spawn(async move {
-            let mut graph = navigation_for(&mut snapshot, digest);
+            let mut graph = navigation_for(&collision, bounds, &seeds, digest);
+            if let Some(atlas) = &atlas {
+                for (index, world) in atlas.worlds.iter().enumerate() {
+                    let world_id = index + 1;
+                    let offset = sim::world_graph::world_offset(world_id);
+                    let door_seeds: Vec<_> = atlas
+                        .portals
+                        .iter()
+                        .flat_map(|pair| [pair.a, pair.b])
+                        .filter(|door| door.world.index() == world_id)
+                        .map(nav::portal_entrance)
+                        .collect();
+                    let native: Vec<_> = door_seeds
+                        .iter()
+                        .map(|p| std::array::from_fn(|i| p[i] - offset[i]))
+                        .collect();
+                    let bounds = nav::playable_bounds(&world.brushes, &native).map(|(lo, hi)| {
+                        (
+                            std::array::from_fn(|i| lo[i] + offset[i]),
+                            std::array::from_fn(|i| hi[i] + offset[i]),
+                        )
+                    });
+                    let world_digest =
+                        assets::fnv1a64_more(digest, &(world_id as u64).to_le_bytes());
+                    let extra = navigation_for(&collision, bounds, &door_seeds, world_digest);
+                    if !nav::append_world(&mut graph, extra) {
+                        break;
+                    }
+                }
+                nav::link_portals(&collision, &mut graph, atlas);
+                diag::info!(
+                    Sim,
+                    "bots: atlas navigation: {} nodes, {} portal edges",
+                    graph.nodes.len(),
+                    graph
+                        .adj
+                        .iter()
+                        .flatten()
+                        .filter(|edge| edge.kind == nav::TraversalKind::Portal)
+                        .count()
+                );
+            }
             graph.generation = generation;
             graph
         }),
@@ -654,10 +573,30 @@ const NAV_CACHE_KIND: &str = "nav";
 
 fn nav_digest(world: &SimWorld) -> u64 {
     let parts = world.content_components();
-    assets::fnv1a64_more(
+    let mut digest = assets::fnv1a64_more(
         assets::fnv1a64(&parts.map.to_le_bytes()),
         &parts.models.to_le_bytes(),
-    )
+    );
+    if let Some(atlas) = world.content().atlas() {
+        for world in &atlas.worlds {
+            digest = assets::fnv1a64_more(digest, world.zone.as_bytes());
+        }
+        for pair in &atlas.portals {
+            for door in [pair.a, pair.b] {
+                digest = assets::fnv1a64_more(digest, &(door.world.index() as u64).to_le_bytes());
+                for value in door
+                    .base
+                    .into_iter()
+                    .chain(door.normal)
+                    .chain([door.width, door.height])
+                {
+                    digest = assets::fnv1a64_more(digest, &value.to_le_bytes());
+                }
+            }
+            digest = assets::fnv1a64_more(digest, &[u8::from(pair.flip)]);
+        }
+    }
+    digest
 }
 
 /// The digest, schema and hull that decide in-memory reuse are the whole key,
@@ -669,7 +608,12 @@ fn nav_cache_key(digest: u64) -> String {
 /// Walking the grid costs seconds of load, and a match teardown drops the graph
 /// with the roster, so the second start of a map would pay it again. Keep the
 /// bake in the artifact cache under its own key and only walk on a miss.
-fn navigation_for(world: &mut SimWorld, digest: u64) -> NavGraph {
+fn navigation_for(
+    collision: &sim::CollisionScene,
+    bounds: Option<([f32; 3], [f32; 3])>,
+    seeds: &[[f32; 3]],
+    digest: u64,
+) -> NavGraph {
     let key = nav_cache_key(digest);
     if let Some(graph) = assets::cache_get(NAV_CACHE_KIND, &key)
         .as_deref()
@@ -689,7 +633,7 @@ fn navigation_for(world: &mut SimWorld, digest: u64) -> NavGraph {
     }
     let started = std::time::Instant::now();
     let mut graph = NavGraph::default();
-    bake_navigation(world, &mut graph);
+    bake_navigation(collision, bounds, seeds, digest, &mut graph);
     diag::info!(
         Sim,
         "bots: navigation prepared in {:.1}ms on worker",
@@ -701,21 +645,18 @@ fn navigation_for(world: &mut SimWorld, digest: u64) -> NavGraph {
     graph
 }
 
-fn bake_navigation(world: &mut SimWorld, graph: &mut NavGraph) {
-    let digest = nav_digest(world);
+fn bake_navigation(
+    collision: &sim::CollisionScene,
+    bounds: Option<([f32; 3], [f32; 3])>,
+    seeds: &[[f32; 3]],
+    digest: u64,
+    graph: &mut NavGraph,
+) {
     if graph.digest == digest && graph.schema == NAV_SCHEMA && graph.hull == NAV_HULL {
         return;
     }
     let generation = graph.generation.wrapping_add(1);
-    let mut seeds = world.authored_spawn_origins();
-    seeds.extend(
-        world
-            .objectives
-            .compass
-            .iter()
-            .map(|objective| objective.origin),
-    );
-    let Some(bounds) = nav::playable_bounds(world.clip_brushes(), &seeds) else {
+    let Some(bounds) = bounds else {
         *graph = NavGraph {
             generation,
             digest,
@@ -725,7 +666,7 @@ fn bake_navigation(world: &mut SimWorld, graph: &mut NavGraph) {
         };
         return;
     };
-    *graph = nav::bake_seeded(world, bounds, digest, &seeds);
+    *graph = nav::bake_seeded(collision, bounds, digest, seeds);
     graph.generation = generation;
 }
 

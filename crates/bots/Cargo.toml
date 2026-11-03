@@ -6,19 +6,20 @@ license.workspace = true
 description = "Host-only bot controllers: sensor observations into UserCmd."
 
 [dependencies]
+asset_core.workspace = true
 getrandom = "0.3"
 asset_transport.workspace = true
 assets.workspace = true
 diag.workspace = true
 bevy.workspace = true
 frame.workspace = true
-sim = { path = "../sim" }
-net = { path = "../net" }
-playerstate_iw4 = { path = "../playerstate_iw4" }
+sim = { workspace = true }
+net = { workspace = true }
+playerstate_iw4 = { workspace = true }
 entity_iw4.workspace = true
-movement_iw4 = { path = "../movement_iw4" }
-weapon_iw4 = { path = "../weapon_iw4" }
-math_iw4 = { path = "../math_iw4" }
+movement_iw4 = { workspace = true }
+weapon_iw4 = { workspace = true }
+math_iw4 = { workspace = true }
 trace_iw4.workspace = true
 gamemode_iw4.workspace = true
 
