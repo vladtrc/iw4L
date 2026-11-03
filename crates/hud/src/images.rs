@@ -446,10 +446,10 @@ impl HudImages {
         if let Some(cached) = self.by_name.get(&key) {
             return cached.clone();
         }
-        if ns == HUD_CHROME_NAMESPACE {
-            if let Some(handle) = self.upload_zone(name, sampling, sampler, images) {
-                return Some(handle);
-            }
+        if ns == HUD_CHROME_NAMESPACE
+            && let Some(handle) = self.upload_zone(name, sampling, sampler, images)
+        {
+            return Some(handle);
         }
         let decoded = self.decode_iwd(ns, name, sampling, sampler, images);
         self.by_name.insert(key, decoded.clone());
@@ -465,12 +465,12 @@ impl HudImages {
         if self.rgba_by_name.contains_key(&key) {
             return;
         }
-        if ns == HUD_CHROME_NAMESPACE {
-            if let Some((width, height, rgba)) = self.zone_lookup(name) {
-                self.rgba_by_name
-                    .insert(key, Some((width, height, rgba.to_vec())));
-                return;
-            }
+        if ns == HUD_CHROME_NAMESPACE
+            && let Some((width, height, rgba)) = self.zone_lookup(name)
+        {
+            self.rgba_by_name
+                .insert(key, Some((width, height, rgba.to_vec())));
+            return;
         }
         let decoded = self.decode_iwd_rgba(ns, name);
         self.rgba_by_name.insert(key, decoded);
@@ -520,13 +520,12 @@ impl HudImages {
                 images,
             );
         }
-        if let Some(compass) = compass {
-            if let Some(name) = compass.declaration.image.as_deref()
-                && let Some(ns) = self.map_namespace
-            {
-                let _ = self.get(ns, name, images);
-                self.ensure_rgba(ns, name);
-            }
+        if let Some(compass) = compass
+            && let Some(name) = compass.declaration.image.as_deref()
+            && let Some(ns) = self.map_namespace
+        {
+            let _ = self.get(ns, name, images);
+            self.ensure_rgba(ns, name);
         }
         if let Some(catalog) = catalog {
             for font in catalog.fonts.values() {
@@ -577,12 +576,9 @@ impl HudImages {
         sampler: Option<u8>,
         images: &mut Assets<Image>,
     ) -> Option<Handle<Image>> {
-        match self.decode_iwd_rgba(ns, name) {
-            Some((width, height, rgba)) => {
-                Some(images.add(make_image(width, height, rgba, sampling, sampler)))
-            }
-            None => None,
-        }
+        self.decode_iwd_rgba(ns, name).map(|(width, height, rgba)| {
+            images.add(make_image(width, height, rgba, sampling, sampler))
+        })
     }
 
     fn decode_iwd_rgba(&self, ns: FamilyId, name: &str) -> CachedRgba {

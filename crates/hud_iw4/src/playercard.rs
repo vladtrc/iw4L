@@ -31,7 +31,7 @@ pub const PLAYERCARD_INFO_NAME: i32 = 8;
 pub const PLAYERCARD_INFO_CLAN: i32 = 9;
 pub const PLAYERCARD_INFO_STR: i32 = 10;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PlayerCardData {
     pub last_update_time: i32,
 
@@ -48,21 +48,6 @@ pub struct PlayerCardData {
     pub team: i32,
 
     pub name: [u8; 32],
-}
-
-impl Default for PlayerCardData {
-    fn default() -> Self {
-        Self {
-            last_update_time: 0,
-            title: 0,
-            icon: 0,
-            nameplate: 0,
-            rank: 0,
-            prestige: 0,
-            team: 0,
-            name: [0; 32],
-        }
-    }
 }
 
 impl PlayerCardData {

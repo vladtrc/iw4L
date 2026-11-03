@@ -26,6 +26,19 @@ pub use render_material::{
 
 pub use render_scene::runtime_cull_face;
 
+type MaterialPassIdentityMap = HashMap<
+    (
+        RuntimeShaderPair,
+        u8,
+        u8,
+        render_material::PassColorSpace,
+        bool,
+        bool,
+        Vec<RuntimeArgumentBinding>,
+    ),
+    usize,
+>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeProgramPort {
     id: PortId,
@@ -245,18 +258,7 @@ impl RuntimeProgramRegistry {
         only_sets: Option<&std::collections::HashSet<usize>>,
     ) -> Vec<(usize, usize)> {
         let mut indices = Vec::<(usize, usize)>::new();
-        let mut seen: HashMap<
-            (
-                RuntimeShaderPair,
-                u8,
-                u8,
-                render_material::PassColorSpace,
-                bool,
-                bool,
-                Vec<RuntimeArgumentBinding>,
-            ),
-            usize,
-        > = HashMap::new();
+        let mut seen: MaterialPassIdentityMap = HashMap::new();
         for (set_i, set) in catalog.parts().technique_sets.iter().enumerate() {
             if only_sets.is_some_and(|sets| !sets.contains(&set_i)) {
                 continue;
@@ -287,12 +289,12 @@ impl RuntimeProgramRegistry {
         indices
     }
 
-    pub fn catalog_pass<'a>(
-        catalog: &'a RuntimeMaterialCatalog,
+    pub fn catalog_pass(
+        catalog: &RuntimeMaterialCatalog,
         tech_type: TechType,
         set_i: usize,
         pass_i: usize,
-    ) -> Option<&'a RuntimePass> {
+    ) -> Option<&RuntimePass> {
         catalog
             .parts()
             .technique_sets

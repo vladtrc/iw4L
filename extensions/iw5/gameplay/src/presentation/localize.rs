@@ -41,12 +41,11 @@ impl ext_iw5_fastfile::AssetLinkSink for Iw5LocalizeSink {
         slot: ext_iw5_fastfile::Ptr,
         insert_slot: Option<ext_iw5_fastfile::Ptr>,
     ) -> ext_iw5_fastfile::Result<()> {
-        if let Some(sound) = self.sound.as_mut() {
-            if let Some(capture) = sound.native_mut::<crate::sound::Iw5SoundCapture>() {
-                let result =
-                    ext_iw5_fastfile::AssetLinkSink::loaded(capture, s, ty, slot, insert_slot);
-                sound.guard(result);
-            }
+        if let Some(sound) = self.sound.as_mut()
+            && let Some(capture) = sound.native_mut::<crate::sound::Iw5SoundCapture>()
+        {
+            let result = ext_iw5_fastfile::AssetLinkSink::loaded(capture, s, ty, slot, insert_slot);
+            sound.guard(result);
         }
         Ok(())
     }
@@ -57,11 +56,11 @@ impl ext_iw5_fastfile::AssetLinkSink for Iw5LocalizeSink {
         slot: ext_iw5_fastfile::Ptr,
         target: ext_iw5_fastfile::Ptr,
     ) -> ext_iw5_fastfile::Result<()> {
-        if let Some(sound) = self.sound.as_mut() {
-            if let Some(capture) = sound.native_mut::<crate::sound::Iw5SoundCapture>() {
-                let result = ext_iw5_fastfile::AssetLinkSink::alias(capture, ty, slot, target);
-                sound.guard(result);
-            }
+        if let Some(sound) = self.sound.as_mut()
+            && let Some(capture) = sound.native_mut::<crate::sound::Iw5SoundCapture>()
+        {
+            let result = ext_iw5_fastfile::AssetLinkSink::alias(capture, ty, slot, target);
+            sound.guard(result);
         }
         Ok(())
     }

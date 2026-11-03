@@ -405,5 +405,5 @@ pub(crate) fn stamp_match_destructible_death(
     xanims: &XAnimCatalog,
     models: &MapXModelSceneCatalog,
 ) -> Vec<DestructibleDeathRow> {
-    stamp_destructible_death_edges(xanims, models, &DESTRUCTIBLE_DEATH_HINTS)
+    stamp_destructible_death_edges(xanims, models, DESTRUCTIBLE_DEATH_HINTS)
 }

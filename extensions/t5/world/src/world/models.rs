@@ -101,7 +101,7 @@ pub fn build_t5_xmodel_mesh(
     let mut lod_surfaces: [Vec<ModelSurfaceDraw>; 4] = Default::default();
     let mut total_vertices = 0usize;
     let mut total_triangles = 0usize;
-    for lod in 0..4 {
+    for (lod, lod_surfaces_entry) in lod_surfaces[..4].iter_mut().enumerate() {
         let (first_surface, surface_count) = geometry.lod_surf_span[lod];
         let first_surface = usize::from(first_surface);
         if surface_count == 0 || first_surface + usize::from(surface_count) > geometry.surface_count
@@ -118,7 +118,7 @@ pub fn build_t5_xmodel_mesh(
         )?;
         total_vertices += verts;
         total_triangles += tris;
-        lod_surfaces[lod] = draws;
+        (*lod_surfaces_entry) = draws;
     }
     if lod_surfaces.iter().all(|lod| lod.is_empty()) {
         return Err(ModelMeshError::MissingSurfaces);

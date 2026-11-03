@@ -46,28 +46,12 @@ pub fn validate(games: &asset_transport::GamesRoot, path: &Path) -> Result<(), S
     if recipe["template"].as_str() == Some("random-door") {
         assets::shuffle_random_doors(&mut recipe, 1)?;
     }
-    let worlds = recipe["worlds"]
-        .as_array()
-        .ok_or("scene worlds must be an array")?
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .map(str::to_owned)
-                .ok_or("invalid world name".to_owned())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if worlds.is_empty() {
-        return Err("scene has no worlds".into());
-    }
-    let map = assets::MergedMap {
-        name: "validation".into(),
-        path: path.into(),
-        worlds,
-        recipe,
-    };
-    map.door_trims()?;
-    map.door_replacements()?;
-    for (index, world) in map.worlds.iter().enumerate() {
+    recipe
+        .as_object_mut()
+        .ok_or("scene must be an object")?
+        .remove("template");
+    let map = assets::MergedMap::from_recipe("validation".into(), path.into(), recipe)?;
+    for (index, world) in map.scene.worlds.iter().enumerate() {
         let (prepared, _) = doors::load_map(games, world)?;
         let clip = prepared
             .clip
@@ -78,7 +62,7 @@ pub fn validate(games: &asset_transport::GamesRoot, path: &Path) -> Result<(), S
     diag::announce_stdout(&format!(
         "{}: validated {} native maps",
         path.display(),
-        map.worlds.len()
+        map.scene.worlds.len()
     ));
     Ok(())
 }

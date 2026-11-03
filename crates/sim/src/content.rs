@@ -2,7 +2,10 @@ use crate::spawn::{AuthoredSpawnPoint, MatchBootstrap};
 use crate::world::SimBrush;
 use weapon_iw4::WeaponCombatFacts;
 
-pub const CONTENT_DIGEST_SCHEME: u64 = 21;
+mod scene;
+pub(crate) use scene::digest as scene_geometry_digest;
+
+pub const CONTENT_DIGEST_SCHEME: u64 = 22;
 
 #[derive(Clone, Copy)]
 struct Digest(u64);
@@ -358,12 +361,11 @@ fn hash_camouflage_slots(h: &mut Digest, slots: &[Vec<u8>]) {
 }
 
 pub fn content_digest(
-    weapon_content: &crate::SimWeaponContent,
+    content: &crate::SimContent,
     bootstrap: &MatchBootstrap,
-    clip_brushes: &[SimBrush],
     script_models: &[crate::EntityCollisionCapabilities],
-    map_content: &asset_core::MapContentDefinition,
 ) -> u64 {
+    let weapon_content = content.weapons();
     let mut h = Digest::new();
     h.u64(CONTENT_DIGEST_SCHEME);
     hash_combat(&mut h, &weapon_content.weapon_combat);
@@ -379,8 +381,8 @@ pub fn content_digest(
     hash_ranks(&mut h, &weapon_content.rank_progression);
     hash_class_catalog(&mut h);
     hash_spawns(&mut h, &bootstrap.spawns);
-    hash_collision(&mut h, clip_brushes);
-    hash_map_content(&mut h, map_content);
+    h.u64(content.geometry_digest());
+    hash_map_content(&mut h, content.map());
     hash_script_models(&mut h, script_models);
     h.finish()
 }
@@ -397,12 +399,11 @@ pub struct ContentComponents {
 }
 
 pub fn content_components(
-    weapon_content: &crate::SimWeaponContent,
+    content: &crate::SimContent,
     bootstrap: &MatchBootstrap,
-    clip_brushes: &[SimBrush],
     script_models: &[crate::EntityCollisionCapabilities],
-    map_content: &asset_core::MapContentDefinition,
 ) -> ContentComponents {
+    let weapon_content = content.weapons();
     let component = |tag: u8| {
         let mut h = Digest::new();
         h.u64(CONTENT_DIGEST_SCHEME);
@@ -412,8 +413,8 @@ pub fn content_components(
 
     let mut map = component(b'M');
     hash_spawns(&mut map, &bootstrap.spawns);
-    hash_collision(&mut map, clip_brushes);
-    hash_map_content(&mut map, map_content);
+    map.u64(content.geometry_digest());
+    hash_map_content(&mut map, content.map());
 
     let mut models = component(b'D');
     hash_script_models(&mut models, script_models);

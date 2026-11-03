@@ -207,7 +207,12 @@ impl FxGlassSystemHost {
         let src: Vec<u8> = init.init_geo.iter().flatten().copied().collect();
         let mut dst = vec![0u8; src.len()];
         glass_reset_copy_geo(&mut dst, &src);
-        for (i, chunk) in dst.chunks_exact(FX_GLASS_GEOMETRY_DATA).enumerate() {
+        for (i, chunk) in dst
+            .as_chunks::<FX_GLASS_GEOMETRY_DATA>()
+            .0
+            .iter()
+            .enumerate()
+        {
             if let Some(word) = self.geo_data.get_mut(i) {
                 word.copy_from_slice(chunk);
             }
@@ -676,7 +681,7 @@ impl FxGlassSystemHost {
         while let Some(cur) = work.pop() {
             if ops >= FX_GLASS_SPLIT_OP_CAP {
                 finals.push(cur);
-                finals.extend(work.drain(..));
+                finals.append(&mut work);
                 break;
             }
             let Some((cur_state, cur_geo)) = self.piece_geo(cur) else {
@@ -823,10 +828,10 @@ impl FxGlassSystemHost {
         {
             return;
         }
-        if revision != 0 {
-            if let Some(slot) = self.last_event_revision.get_mut(pane as usize) {
-                *slot = revision;
-            }
+        if revision != 0
+            && let Some(slot) = self.last_event_revision.get_mut(pane as usize)
+        {
+            *slot = revision;
         }
         self.pending_events.push(GlassPresentationEvent {
             pane,
@@ -981,10 +986,10 @@ impl FxGlassSystemHost {
         if let Some(birth) = self.birth_at.get_mut(piece as usize) {
             *birth = self.time;
         }
-        if let Some(mode) = self.contact_mode.get_mut(piece as usize) {
-            if *mode == CONTACT_NONE {
-                *mode = CONTACT_DISAPPEAR;
-            }
+        if let Some(mode) = self.contact_mode.get_mut(piece as usize)
+            && *mode == CONTACT_NONE
+        {
+            *mode = CONTACT_DISAPPEAR;
         }
     }
 

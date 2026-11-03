@@ -182,7 +182,7 @@ impl SimState {
             .zip(&atlas.portal_thickness)
             .enumerate()
         {
-            for side in 0..2 {
+            for (side, thickness_entry) in thickness[..2].iter().enumerate() {
                 let signature = self.portal_clearance_rows[index][side];
                 if signature == self.portal_clearance_validated[index][side] {
                     continue;
@@ -192,7 +192,7 @@ impl SimState {
                     side,
                     signature: signature.expect("desired clearance signature"),
                     door: if side == 0 { pair.a } else { pair.b },
-                    thickness: thickness[side],
+                    thickness: (*thickness_entry),
                     clearance: atlas
                         .portal_clearance
                         .get(index)
@@ -245,8 +245,8 @@ impl ClearanceJob {
                     }
                     let mut door = entry.door;
                     let offset = crate::world_graph::world_offset(door.world.index());
-                    for i in 0..3 {
-                        door.base[i] += offset[i];
+                    for (i, offset_entry) in offset[..3].iter().enumerate() {
+                        door.base[i] += *offset_entry;
                     }
                     let backend = player_scene.backend(&[], u16::MAX, door.base);
                     let flight = entry.clearance == crate::world_graph::PortalClearance::Flight;

@@ -197,7 +197,7 @@ fn load_xsurface(s: &mut ZoneStream<'_>, p: Ptr) -> Result<()> {
     s.with_align_site(AlignWasteSite::Verts0, |s| {
         match s.ptr_at(p, 32)? {
             ZonePtr::Following | ZonePtr::Insert => {
-                let phase = (s.watermark(XFILE_BLOCK_VIRTUAL as u8) & 15) as usize;
+                let phase = s.watermark(XFILE_BLOCK_VIRTUAL as u8) & 15;
                 s.align_waste_verts0_phase(phase);
             }
             _ => {}

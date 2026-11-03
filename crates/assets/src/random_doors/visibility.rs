@@ -51,7 +51,7 @@ pub(super) fn exit_links(door: &Value, other: &Value) -> [[f64; 2]; 2] {
     let tangent = [-normal[1], normal[0], 0.0];
     let width = super::size(door, "width");
     let height = super::size(door, "height");
-    for side in 0..2 {
+    for (side, out_entry) in out[..2].iter_mut().enumerate() {
         if side == 1 && door["two_sided"] == false {
             continue;
         }
@@ -66,7 +66,7 @@ pub(super) fn exit_links(door: &Value, other: &Value) -> [[f64; 2]; 2] {
             let eye = aperture.eye_at(distance);
             if aperture.sees(other, eye, distance) {
                 let entered_side = usize::from(dot(sub(eye, other_base), other_normal) <= 0.0);
-                out[side][entered_side] += 1.0 / 3.0;
+                (*out_entry)[entered_side] += 1.0 / 3.0;
             }
         }
     }

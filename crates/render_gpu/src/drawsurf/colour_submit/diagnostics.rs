@@ -145,6 +145,9 @@ pub(super) struct ExactColourFrameCensus {
     pub(super) xmodel_reuse_n: Option<u32>,
     pub(super) xmodel_material_runs: Option<u32>,
     pub(super) smodel_index_gaps: Option<u32>,
+    pub(super) smodel_index_owner: Option<u64>,
+    pub(super) smodel_index_revision: Option<u64>,
+    pub(super) smodel_index_words: Option<usize>,
     pub(super) smodel_material_runs: Option<u32>,
     pub(super) smodel_material_runs_seq: Option<u32>,
     pub(super) smodel_material_run_max: Option<u32>,
@@ -351,6 +354,9 @@ pub(super) fn copy_submit_prepare_ms(
         guard.xmodel_reuse_n = census.frame.xmodel_reuse_n;
         guard.xmodel_material_runs = census.frame.xmodel_material_runs;
         guard.smodel_index_gaps = census.frame.smodel_index_gaps;
+        guard.smodel_index_owner = census.frame.smodel_index_owner;
+        guard.smodel_index_revision = census.frame.smodel_index_revision;
+        guard.smodel_index_words = census.frame.smodel_index_words;
         guard.smodel_material_runs = census.frame.smodel_material_runs;
         guard.smodel_material_runs_seq = census.frame.smodel_material_runs_seq;
         guard.smodel_material_run_max = census.frame.smodel_material_run_max;

@@ -282,39 +282,38 @@ pub(crate) fn install_sound_bank(
         );
     }
 
-    if let IwdOpen::Opening(task) = &mut compose.iwd {
-        if let Some((indices, lines)) = future::block_on(future::poll_once(task)) {
-            for line in lines {
-                diag::info!(Audio, "{line}");
-            }
-            compose.iwd = IwdOpen::Open(Arc::new(indices));
+    if let IwdOpen::Opening(task) = &mut compose.iwd
+        && let Some((indices, lines)) = future::block_on(future::poll_once(task))
+    {
+        for line in lines {
+            diag::info!(Audio, "{line}");
         }
+        compose.iwd = IwdOpen::Open(Arc::new(indices));
     }
-    if compose.bank.is_none() {
-        if let Some(arrived) = map_sound.as_deref_mut() {
-            if arrived.match_key == compose.match_key {
-                compose.common_profile_id = arrived.common_profile_id;
-                let map = std::mem::replace(&mut arrived.sound, Err(String::new()));
-                let match_key = compose.match_key;
-                commands.queue(move |world: &mut World| {
-                    if world
-                        .get_resource::<assets::PreparedMatchSound>()
-                        .is_some_and(|sound| sound.match_key == match_key)
-                    {
-                        world.remove_resource::<assets::PreparedMatchSound>();
-                    }
-                });
-                let namespace = arrived.namespace;
-                let gaps = arrived.gaps;
-                let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
-                compose.bank = Some(pool.spawn(async move {
-                    ComposedBank {
-                        loaded: map.map(|catalog| (Arc::new(catalog), gaps)),
-                        namespace,
-                    }
-                }));
+    if compose.bank.is_none()
+        && let Some(arrived) = map_sound.as_deref_mut()
+        && arrived.match_key == compose.match_key
+    {
+        compose.common_profile_id = arrived.common_profile_id;
+        let map = std::mem::replace(&mut arrived.sound, Err(String::new()));
+        let match_key = compose.match_key;
+        commands.queue(move |world: &mut World| {
+            if world
+                .get_resource::<assets::PreparedMatchSound>()
+                .is_some_and(|sound| sound.match_key == match_key)
+            {
+                world.remove_resource::<assets::PreparedMatchSound>();
             }
-        }
+        });
+        let namespace = arrived.namespace;
+        let gaps = arrived.gaps;
+        let pool = AsyncComputeTaskPool::get_or_init(TaskPool::default);
+        compose.bank = Some(pool.spawn(async move {
+            ComposedBank {
+                loaded: map.map(|catalog| (Arc::new(catalog), gaps)),
+                namespace,
+            }
+        }));
     }
 
     let composed = match (&compose.iwd, compose.bank.as_mut()) {

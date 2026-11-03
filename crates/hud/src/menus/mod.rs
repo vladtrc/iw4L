@@ -270,8 +270,8 @@ impl ScriptMenuRuntime<'_, '_> {
                 _ => {}
             }
         }
-        let mut menus = self.menu_states.0.as_deref_mut().unwrap_or(frontend_menus);
-        let mut locals = self
+        let menus = self.menu_states.0.as_deref_mut().unwrap_or(frontend_menus);
+        let locals = self
             .local_states
             .0
             .as_deref_mut()
@@ -361,8 +361,8 @@ impl ScriptMenuRuntime<'_, '_> {
         let mut runner = Runner {
             catalog,
             world: &world,
-            menus: &mut menus,
-            locals: &mut locals,
+            menus,
+            locals,
             exprs: &mut self.exprs,
             dvars: &mut self.dvars,
             depth: 0,
@@ -688,20 +688,19 @@ impl ScriptMenuCanvas<'_> {
                 focus_rect: *focus_rect,
             };
             let mut owner_draw = |args: OwnerDrawArgs<'_>, frame: &mut ChromeFrame| {
-                if args.item.owner_draw == 181 {
-                    if let Some(map_namespace) = self.hud_images.map_namespace()
-                        && let Some(image) = compass.and_then(|c| c.declaration.image.as_ref())
-                    {
-                        push_owner_pic(
-                            &args,
-                            image.clone(),
-                            map_namespace,
-                            args.color,
-                            Draw2dOp::StretchPic,
-                            frame,
-                        );
-                        return OwnerDrawPaint::Painted;
-                    }
+                if args.item.owner_draw == 181
+                    && let Some(map_namespace) = self.hud_images.map_namespace()
+                    && let Some(image) = compass.and_then(|c| c.declaration.image.as_ref())
+                {
+                    push_owner_pic(
+                        &args,
+                        image.clone(),
+                        map_namespace,
+                        args.color,
+                        Draw2dOp::StretchPic,
+                        frame,
+                    );
+                    return OwnerDrawPaint::Painted;
                 }
                 OwnerDrawPaint::Gap(ChromeGapKind::OwnerDraw)
             };

@@ -3,12 +3,14 @@ use asset_core::FamilyId;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+type AnimationSourceDecoder = fn(&str, &[u8], bool) -> Result<Vec<u8>, String>;
+
 #[derive(Clone, Copy, Debug)]
 pub struct AnimationFamily {
     pub grammar: &'static PlayerAnimGrammar,
     pub select_referenced_leaves: bool,
     pub use_type_aliases: bool,
-    pub decode_source: fn(&str, &[u8], bool) -> Result<Vec<u8>, String>,
+    pub decode_source: AnimationSourceDecoder,
 }
 pub fn decode_standard_source(
     _: &str,

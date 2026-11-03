@@ -56,6 +56,10 @@ pub(crate) fn spawn_iris(root: &mut ChildSpawnerCommands) {
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn hide_overlay(
     overlay: &mut Query<
         (&mut Node, &mut ImageNode, &AdsIrisOverlay),
@@ -130,6 +134,10 @@ pub(crate) struct IrisOverlay<'w, 's> {
     hud_images: ResMut<'w, HudImages>,
     images: ResMut<'w, Assets<Image>>,
     fill: ResMut<'w, IrisLetterboxFill>,
+    #[expect(
+        clippy::type_complexity,
+        reason = "Bevy system parameters keep scheduler resource access explicit."
+    )]
     overlay: Query<
         'w,
         's,

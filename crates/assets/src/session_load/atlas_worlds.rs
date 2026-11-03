@@ -12,7 +12,7 @@ use crate::merged_map::MergedMap;
 /// and the doors between the worlds.
 #[derive(Default)]
 pub struct AtlasLoad {
-    pub(crate) zones: Vec<(usize, PathBuf)>,
+    pub(crate) zones: Vec<(asset_core::atlas::WorldId, String, PathBuf)>,
     pub(crate) doors: Vec<asset_world::AtlasDoorPair>,
     pub(crate) replacements: Vec<asset_world::PortalDoorReplacement>,
     pub(crate) trims: Vec<asset_world::PortalDoorTrim>,
@@ -21,7 +21,7 @@ pub struct AtlasLoad {
 
 /// The zone files and doors of `merged`; empty for a plain map. A world that
 /// cannot be found refuses the entire merged match.
-pub(crate) fn atlas_load(
+pub fn atlas_load(
     games: Option<&asset_transport::GamesRoot>,
     merged: Option<&MergedMap>,
 ) -> AtlasLoad {
@@ -38,9 +38,9 @@ pub(crate) fn atlas_load(
         };
     };
     let mut zones = Vec::new();
-    for (index, zone) in merged.worlds.iter().enumerate().skip(1) {
+    for (index, zone) in merged.scene.worlds.iter().enumerate().skip(1) {
         match asset_transport::find_zone_file(games, zone) {
-            Ok(found) => zones.push((index, found.path)),
+            Ok(found) => zones.push((asset_core::atlas::WorldId(index), zone.clone(), found.path)),
             Err(error) => {
                 return AtlasLoad {
                     refusal: Some(format!("atlas render: {zone}: {error}")),
@@ -55,99 +55,47 @@ pub(crate) fn atlas_load(
         zones.len(),
         merged.path.display()
     );
-    let (trims, refusal) = match merged.door_trims() {
-        Ok(trims) => (trims, None),
-        Err(error) => (Vec::new(), Some(error)),
-    };
-    let replacements = match merged.door_replacements() {
-        Ok(replacements) => replacements,
-        Err(error) => {
-            return AtlasLoad {
-                refusal: Some(format!("portal replacement refused: {error}")),
-                ..Default::default()
-            };
-        }
-    };
-    let doors = match atlas_render_doors(merged) {
-        Ok(doors) => doors,
-        Err(error) => {
-            return AtlasLoad {
-                refusal: Some(error),
-                ..Default::default()
-            };
-        }
-    };
     AtlasLoad {
-        trims,
-        refusal,
+        trims: merged.scene.trims().cloned().collect(),
+        replacements: merged.scene.replacements().cloned().collect(),
+        refusal: None,
         zones,
-        doors,
-        replacements,
+        doors: merged
+            .scene
+            .portals
+            .iter()
+            .map(|portal| {
+                let [a, b] = &portal.ends;
+                asset_world::AtlasDoorPair {
+                    two_sided: [a.trim.two_sided, b.trim.two_sided],
+                    a: a.trim.aperture,
+                    b: b.trim.aperture,
+                    flip: portal.flip,
+                }
+            })
+            .collect(),
     }
-}
-
-/// The doors of `merged`, as `session::atlas` reads them for the sim; a door
-/// that does not parse refuses the match rather than diverging from the sim.
-fn atlas_render_doors(merged: &MergedMap) -> Result<Vec<asset_world::AtlasDoorPair>, String> {
-    let door = |value: &serde_json::Value| -> Option<asset_world::AtlasDoorway> {
-        let vec3 = |key: &str| -> Option<[f32; 3]> {
-            let v = value[key].as_array()?;
-            Some([
-                v.first()?.as_f64()? as f32,
-                v.get(1)?.as_f64()? as f32,
-                v.get(2)?.as_f64()? as f32,
-            ])
-        };
-        Some(asset_world::AtlasDoorway {
-            world: usize::try_from(value["world"].as_u64()?).ok()?,
-            base: vec3("base")?,
-            normal: vec3("normal")?,
-            width: value["width"].as_f64()? as f32,
-            height: value["height"].as_f64()? as f32,
-        })
-    };
-    let mut pairs = Vec::new();
-    for portal in merged.recipe["portals"].as_array().into_iter().flatten() {
-        match (door(&portal["a"]), door(&portal["b"])) {
-            (Some(a), Some(b)) => pairs.push(asset_world::AtlasDoorPair {
-                two_sided: [
-                    portal["a"]["two_sided"]
-                        .as_bool()
-                        .ok_or("missing native a sidedness")?,
-                    portal["b"]["two_sided"]
-                        .as_bool()
-                        .ok_or("missing native b sidedness")?,
-                ],
-                a,
-                b,
-                flip: portal["flip"].as_bool().unwrap_or(false),
-            }),
-            _ => {
-                return Err(format!(
-                    "atlas render: {}: a portal does not parse",
-                    merged.path.display()
-                ));
-            }
-        }
-    }
-    Ok(pairs)
 }
 
 /// One atlas world walked by its lane, materials still its own.
 pub(super) struct AtlasWorldWalk {
-    pub world: usize,
+    pub world: asset_core::atlas::WorldId,
+    pub zone: String,
     pub path: PathBuf,
     pub loaded: LoadedWorld,
 }
 
 pub(super) fn walk_atlas_worlds(
-    zones: Vec<(usize, PathBuf)>,
+    zones: Vec<(asset_core::atlas::WorldId, String, PathBuf)>,
     material_seed: &MaterialCatalog,
     film_visions: &crate::FilmVisionCatalog,
     progress: &LoadProgress,
 ) -> Result<Vec<AtlasWorldWalk>, String> {
     let mut walks = Vec::new();
-    for (world, path) in zones {
+    for (world, zone, path) in zones {
+        if progress.is_canceled() {
+            return Err("atlas load canceled".into());
+        }
         let image = open_zone_shared(&path)
             .map_err(|error| format!("atlas world {world}: {}: {error}", path.display()))?;
         let selected = lane(image.game).ok_or_else(|| {
@@ -166,6 +114,7 @@ pub(super) fn walk_atlas_worlds(
         );
         walks.push(AtlasWorldWalk {
             world,
+            zone,
             path,
             loaded,
         });
@@ -183,11 +132,13 @@ pub(super) fn absorb_atlas_worlds(
     replacements: Vec<asset_world::PortalDoorReplacement>,
     trims: Vec<asset_world::PortalDoorTrim>,
     report: &mut Vec<String>,
-) -> Result<(), String> {
+) -> Result<Vec<PreparedAtlasWorld>, String> {
+    let mut prepared = Vec::with_capacity(walks.len());
     hide_door_leaves(host, 0, &replacements, report);
     apply_door_trims(host, 0, &trims, report)?;
     for AtlasWorldWalk {
         world,
+        zone,
         path,
         loaded,
     } in walks
@@ -195,10 +146,15 @@ pub(super) fn absorb_atlas_worlds(
         let LoadedWorld {
             world: mut extra,
             mut materials,
+            collision,
+            report: world_report,
             ..
         } = loaded;
-        hide_door_leaves(&mut extra, world, &replacements, report);
-        apply_door_trims(&mut extra, world, &trims, report)?;
+        let collision =
+            collision.ok_or_else(|| format!("atlas world {world}: {zone}: missing collision"))?;
+        report.extend(world_report);
+        hide_door_leaves(&mut extra, world.index(), &replacements, report);
+        apply_door_trims(&mut extra, world.index(), &trims, report)?;
         materials.promote_fallback_tables();
         materials.absorb_feature_variant_donors();
         materials.reroute_stub_materials();
@@ -208,8 +164,8 @@ pub(super) fn absorb_atlas_worlds(
                 .insert(zone.to_string_lossy().into_owned());
         }
         let linked = global.absorb_asset_population_host_materials_win(materials);
-        let shift = asset_core::atlas::WorldLayout.origin(asset_core::atlas::WorldId(world));
-        append_atlas_world(host, world, extra, shift, &linked)
+        let shift = asset_core::atlas::WorldLayout.origin(world);
+        append_atlas_world(host, world.index(), extra, shift, &linked)
             .map_err(|error| format!("atlas world {world}: {}: {error}", path.display()))?;
         let line = format!(
             "atlas world {world}: {} drawn at x+{} (materials linked={})",
@@ -219,11 +175,16 @@ pub(super) fn absorb_atlas_worlds(
         );
         diag::info!(World, "{line}");
         report.push(line);
+        prepared.push(PreparedAtlasWorld {
+            id: world,
+            zone,
+            collision: Arc::new(collision),
+        });
     }
     if let Some(draw) = host.draw.as_mut() {
         draw.atlas_doors = doors;
     }
-    Ok(())
+    Ok(prepared)
 }
 
 fn apply_door_trims(

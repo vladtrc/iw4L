@@ -97,6 +97,10 @@ fn change_page(page: &mut usize, command: &ConsoleCommand, len: usize) {
         .min(len.saturating_sub(1) / PAGE_SIZE);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn route(
     mut events: MessageReader<ConsoleCommand>,
     (mut returned, scope, match_scope): (
@@ -372,6 +376,7 @@ pub(crate) fn route(
                         return Err("Only the lobby host can start a match".into());
                     }
                     let (map, mode) = selected_game(&dvars, &maps)?;
+                    let map = assets::MergedMap::select_name(&identity.artifacts, &map)?;
                     let families = services
                         .bridge
                         .as_ref()
@@ -1001,9 +1006,9 @@ pub(crate) fn route(
                     if assets.is_empty() {
                         "—".into()
                     } else {
-                        assets
+                        browser_cell(&assets, 10)
                     },
-                    status,
+                    browser_cell(&status, 16),
                 ]
             })
             .unwrap_or_else(|| std::array::from_fn(|_| String::new()));

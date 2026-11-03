@@ -183,7 +183,6 @@ pub fn capture(
                 view_kick: facts.view_kick,
                 scales: facts.scales,
                 share_ammo_with_alt: facts.share_ammo_with_alt,
-                ..Default::default()
             },
         );
 }

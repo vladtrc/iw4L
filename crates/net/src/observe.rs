@@ -12,6 +12,20 @@ use crate::client::presentation::presented::{
 use crate::client::runtime::{ClientClock, ClientPredictionState, LastAdoptedSnapshot};
 use sim::ClientLifecycle;
 
+type FeelFields<'a> = (
+    i32,
+    Option<i32>,
+    Option<i32>,
+    Option<&'a str>,
+    Option<i32>,
+    Option<[f32; 3]>,
+    Option<[f32; 3]>,
+    Option<f32>,
+    Option<i64>,
+    Option<i32>,
+    Option<i32>,
+);
+
 #[derive(Resource, Default)]
 struct IngressQueueCensus(Option<i64>);
 
@@ -104,19 +118,7 @@ fn emit_feel(
             ingress_queue_depth,
             authority_command_time,
             predicted_command_time,
-        ): (
-            i32,
-            Option<i32>,
-            Option<i32>,
-            Option<&str>,
-            Option<i32>,
-            Option<[f32; 3]>,
-            Option<[f32; 3]>,
-            Option<f32>,
-            Option<i64>,
-            Option<i32>,
-            Option<i32>,
-        ) = (
+        ): FeelFields<'_> = (
             clock.time(),
             fanout.as_ref().and_then(|f| f.seat_applied),
             fanout.as_ref().and_then(|f| f.seat_lookup_tick),

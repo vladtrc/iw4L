@@ -127,6 +127,10 @@ impl MoveHistory {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Acknowledgement transfers one existing move record without a per-command allocation."
+)]
 pub enum AckMatch {
     Matched(MoveRecord),
 
@@ -347,10 +351,8 @@ impl ClientPrediction {
         self.next_tick = self.next_tick.wrapping_add(1);
 
         let output = if msec > 0 {
-            let output = self
-                .step_predicted(tick, seq, cmd, msec, true, scene)
-                .unwrap_or(input);
-            output
+            self.step_predicted(tick, seq, cmd, msec, true, scene)
+                .unwrap_or(input)
         } else {
             input
         };
@@ -467,13 +469,12 @@ impl ClientPrediction {
         } else {
             let source = self.apply_ack(ack);
 
-            if let (Some(source), Some(authoritative)) = (source.as_ref(), authoritative.as_ref()) {
-                if let Some(deviation) =
+            if let (Some(source), Some(authoritative)) = (source.as_ref(), authoritative.as_ref())
+                && let Some(deviation) =
                     record_prediction_errors(source, authoritative, snapshot.tick, "current")
-                {
-                    self.metrics.deviations += 1;
-                    self.metrics.last_deviation = Some((deviation.field, deviation.distance));
-                }
+            {
+                self.metrics.deviations += 1;
+                self.metrics.last_deviation = Some((deviation.field, deviation.distance));
             }
 
             self.seed_old_cmd(source.as_ref());

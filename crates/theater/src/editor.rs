@@ -398,6 +398,10 @@ fn seek(state: &mut TheaterState, frame: u64, control: PlaybackControl) -> Resul
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn apply_actions(
     mut state: ResMut<TheaterState>,
     mut playback: Option<ResMut<ReplayPlayback>>,

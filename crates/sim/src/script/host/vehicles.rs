@@ -866,7 +866,7 @@ pub(crate) fn register(registry: &mut NativeRegistry) {
         let after = before.saturating_sub(amount);
         runtime.set_object_field(object, "health", Value::Int(after));
         let model = runtime.object_field(object, "model");
-        drop(runtime);
+
         raise(
             world,
             receiver.clone(),
@@ -1198,7 +1198,7 @@ pub(crate) fn advance(world: &mut World) {
         runtime.set_object_field(id, "origin", Value::Vector(next));
         runtime.set_object_field(id, "angles", Value::Vector([pitch, yaw, roll]));
         runtime.set_object_field(id, "veh_speed", Value::Float(speed / MPH));
-        drop(runtime);
+
         for note in notes {
             raise(world, Value::Object(id), note, Vec::new());
         }

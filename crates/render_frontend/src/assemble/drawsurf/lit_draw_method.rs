@@ -76,9 +76,7 @@ pub fn colour_lit_technique(
     };
     let has_shadow_map = match gfx_light_type {
         lighting_iw4::GFX_LIGHT_TYPE_DIR => sun_shadow_map.shadows(fields.scene_light_index),
-        lighting_iw4::GFX_LIGHT_TYPE_SPOT => spot_shadowed
-            .iter()
-            .any(|&light| light == fields.scene_light_index),
+        lighting_iw4::GFX_LIGHT_TYPE_SPOT => spot_shadowed.contains(&fields.scene_light_index),
         _ => false,
     };
     TechType(lighting_iw4::lit_tech_type(

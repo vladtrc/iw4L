@@ -67,7 +67,7 @@ pub fn spark_slot_for_handle(handle: u16) -> Option<usize> {
         return None;
     }
     let byte = (handle as u32) << 4;
-    if byte % FX_SPARK_CLOUD_HISTORY_STRIDE as u32 != 0 {
+    if !byte.is_multiple_of(FX_SPARK_CLOUD_HISTORY_STRIDE as u32) {
         return None;
     }
     let slot = (byte / FX_SPARK_CLOUD_HISTORY_STRIDE as u32) as usize;

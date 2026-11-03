@@ -554,7 +554,9 @@ fn read_seek_table(s: &ZoneStream<'_>, asset: Ptr) -> Vec<u32> {
         return Vec::new();
     };
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
@@ -606,14 +608,14 @@ pub fn load_sound_catalog_t5(path: &Path) -> Result<SoundCatalog, String> {
         walked: 0,
         stopped_at: None,
     };
-    if let Err(e) = load_zone(&mut stream, &mut sink) {
-        if let Some((idx, name)) = sink.stopped_at {
-            diag::info!(
-                Zone,
-                "t5 sound catalog: stopped at asset {idx} ({name}) after {} walked: {e}",
-                sink.walked
-            );
-        }
+    if let Err(e) = load_zone(&mut stream, &mut sink)
+        && let Some((idx, name)) = sink.stopped_at
+    {
+        diag::info!(
+            Zone,
+            "t5 sound catalog: stopped at asset {idx} ({name}) after {} walked: {e}",
+            sink.walked
+        );
     }
     Ok(sink.capture.finish())
 }

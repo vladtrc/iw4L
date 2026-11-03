@@ -23,13 +23,7 @@ pub fn elem_norm_time(age_msec: i32, life_msec: i32) -> f32 {
         return 1.0;
     }
     let t = age_msec as f32 / life_msec as f32;
-    if t <= 0.0 {
-        0.0
-    } else if t >= 1.0 {
-        1.0
-    } else {
-        t
-    }
+    if t == 0.0 { 0.0 } else { t.clamp(0.0, 1.0) }
 }
 
 #[inline]
@@ -158,7 +152,7 @@ pub fn evaluate_color_bgra(
     let (floor, frac) = setup_visual_sample_point(interval_count, norm_time);
     let (s0, s1) = sample_pair(samples, floor)?;
     let mut out = [0u8; 4];
-    for c in 0..4 {
+    for (c, out_entry) in out[..4].iter_mut().enumerate() {
         let base0 = *s0.get(FX_VIS_COLOR_OFF + c)? as f32;
         let amp0 = *s0
             .get(FX_ELEM_VISUAL_STATE_SIZE + FX_VIS_COLOR_OFF + c)
@@ -170,7 +164,7 @@ pub fn evaluate_color_bgra(
         let v0 = base0 * (1.0 - rand01) + amp0 * rand01;
         let v1 = base1 * (1.0 - rand01) + amp1 * rand01;
         let v = v0 * (1.0 - frac) + v1 * frac;
-        out[c] = libm::roundf(v).clamp(0.0, 255.0) as u8;
+        (*out_entry) = libm::roundf(v).clamp(0.0, 255.0) as u8;
     }
     Some(out)
 }

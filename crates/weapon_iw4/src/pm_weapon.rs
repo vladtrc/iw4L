@@ -132,24 +132,23 @@ pub fn pm_weapon(
             && content
                 .weapon_combat_facts(parent)
                 .is_some_and(|f| f.alternate_weapon == target)
+            && let Some(facts) = content.weapon_combat_facts(target)
         {
-            if let Some(facts) = content.weapon_combat_facts(target) {
-                let ammo = crate::ammo_table_key(facts.ammo_index, target);
-                let clip = crate::clip_table_key(facts.clip_index, target);
-                let (initial_clip, _, initial_stock) = crate::spawn_clip_stock(&facts, 0);
-                if !ammo_row_present(&ps.ammo, ammo) {
-                    set_ammo_not_in_clip(&mut ps.ammo, ammo, initial_stock);
-                }
-                if !clip_row_present(&ps.ammoclip, clip) {
-                    set_clip_for_hand(&mut ps.ammoclip, clip, 0, initial_clip);
-                }
-                carry.set_ammo(
-                    target,
-                    get_clip_for_hand(&ps.ammoclip, clip, 0),
-                    get_ammo_not_in_clip(&ps.ammo, ammo),
-                );
-                *state = ps;
+            let ammo = crate::ammo_table_key(facts.ammo_index, target);
+            let clip = crate::clip_table_key(facts.clip_index, target);
+            let (initial_clip, _, initial_stock) = crate::spawn_clip_stock(&facts, 0);
+            if !ammo_row_present(&ps.ammo, ammo) {
+                set_ammo_not_in_clip(&mut ps.ammo, ammo, initial_stock);
             }
+            if !clip_row_present(&ps.ammoclip, clip) {
+                set_clip_for_hand(&mut ps.ammoclip, clip, 0, initial_clip);
+            }
+            carry.set_ammo(
+                target,
+                get_clip_for_hand(&ps.ammoclip, clip, 0),
+                get_ammo_not_in_clip(&ps.ammo, ammo),
+            );
+            *state = ps;
         }
     }
     let old_buttons = inputs.old_buttons;
@@ -163,9 +162,7 @@ pub fn pm_weapon(
     } else {
         return None;
     };
-    let Some(facts) = content.weapon_combat_facts(facts_weapon) else {
-        return None;
-    };
+    let facts = content.weapon_combat_facts(facts_weapon)?;
 
     {
         let mut spread_state = AimSpreadState {

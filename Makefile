@@ -289,6 +289,7 @@ SCENARIO ?= heavy_gameplay_lifecycle
 # Cold cache by default; ARGS='--seed N' | '--replay <run.json>' | '--cache shared'.
 approved: require-games
 	cd $(ROOT) && $(CARGO) build --profile play -p launcher
+	$(if $(filter master_duo_chaos,$(SCENARIO)),cd $(ROOT) && $(CARGO) build --profile play -p iw4l-master,)
 	cd $(ROOT) && $(CARGO) run --quiet -p approved_tests -- $(SCENARIO) $(ARGS)
 
 # Build each commit once (play profile, one fixed worktree), then run the heavy

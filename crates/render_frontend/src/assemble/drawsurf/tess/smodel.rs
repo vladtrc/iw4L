@@ -10,6 +10,13 @@ pub use render_scene::{
     AuthoredMaps, LodRampArgs, SmodelPassMaterial, runtime_maps, smodel_camera_lod,
 };
 
+type PackSmodelMeshesOutput = (
+    SmodelGpuPlan,
+    Vec<Vec<Option<assets::MaterialIndex>>>,
+    Vec<Vec<asset_world::XSurfaceCollisionPayload>>,
+    Vec<Option<usize>>,
+);
+
 #[derive(Clone, Debug, Default)]
 pub struct SmodelMeshSurfaces {
     pub surfaces: Vec<(u32, Option<assets::MaterialIndex>)>,
@@ -255,9 +262,9 @@ fn append_mesh_surface(
     }
     let base = vertices.len() as u32;
     vertices.reserve(n);
-    for i in 0..n {
+    for (i, positions_entry) in positions[..n].iter().enumerate() {
         vertices.push(SmodelVertex {
-            position: positions[i],
+            position: (*positions_entry),
             normal: normals
                 .and_then(|a| a.get(i).copied())
                 .unwrap_or([0.0, 0.0, 1.0]),
@@ -285,12 +292,7 @@ pub struct SmodelVertexLitCopy<'a> {
 pub fn pack_smodel_meshes(
     meshes: &[WorldStaticModelMesh],
     copies: &[SmodelVertexLitCopy<'_>],
-) -> (
-    SmodelGpuPlan,
-    Vec<Vec<Option<assets::MaterialIndex>>>,
-    Vec<Vec<asset_world::XSurfaceCollisionPayload>>,
-    Vec<Option<usize>>,
-) {
+) -> PackSmodelMeshesOutput {
     let mut plan = SmodelGpuPlan::default();
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
@@ -324,11 +326,13 @@ pub fn pack_smodel_meshes(
             match_surfaces,
             skip_surfaces,
         );
-        let mut packed_row = SmodelMeshSurfaces::default();
-        packed_row.vert_start = packed.len() as u32;
-        packed_row.lod_smc = model.lod_smc.map(|rows| rows[0]);
-        packed_row.lod_smc_rows = model.lod_smc;
-        packed_row.lod = model.lod;
+        let mut packed_row = SmodelMeshSurfaces {
+            vert_start: packed.len() as u32,
+            lod_smc: model.lod_smc.map(|rows| rows[0]),
+            lod_smc_rows: model.lod_smc,
+            lod: model.lod,
+            ..SmodelMeshSurfaces::default()
+        };
         let mut authored_row = Vec::new();
         let mut collision_row = Vec::new();
         for lod in 0..4 {

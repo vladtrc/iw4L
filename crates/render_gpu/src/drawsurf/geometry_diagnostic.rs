@@ -552,21 +552,14 @@ fn draw_geometry_diagnostic(
         colour
             .ordered_draws
             .iter()
-            .enumerate()
-            .filter_map(|(_, item)| {
+            .filter_map(|item| {
                 let ready = exec_ready.contains(&item.key);
                 diagnostic_would_draw(item, ready, submitted).then_some((*item, ready))
             })
-            .chain(
-                emissive
-                    .ordered_draws
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(_, item)| {
-                        let ready = exec_ready.contains(&item.key);
-                        diagnostic_would_draw(item, ready, submitted).then_some((*item, ready))
-                    }),
-            ),
+            .chain(emissive.ordered_draws.iter().filter_map(|item| {
+                let ready = exec_ready.contains(&item.key);
+                diagnostic_would_draw(item, ready, submitted).then_some((*item, ready))
+            })),
     );
     for &surf in &geometry.g0_world_surfs {
         let item = RetainedDrawItem {

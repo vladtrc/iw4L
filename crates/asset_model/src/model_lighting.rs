@@ -21,6 +21,8 @@ use lighting_iw4::{
     lit_albedo, lit_fragment_color, lit_sun_lighting, model_lighting_local_tile_nearest_index,
 };
 
+type ShPacker = Option<fn(&[[f32; 3]; 9]) -> [[f32; 4]; 3]>;
+
 #[derive(Clone, Copy, Debug)]
 pub struct DecodedGridColors {
     pub directional: [[f32; 3]; 56],
@@ -38,7 +40,7 @@ pub struct LightGridCodec {
     pub reflection_probe_alpha_weight: f32,
     pub decode: fn(&[u8]) -> Option<DecodedGridColors>,
     pub quantize: fn(f32) -> u8,
-    pub pack_sh: Option<fn(&[[f32; 3]; 9]) -> [[f32; 4]; 3]>,
+    pub pack_sh: ShPacker,
 }
 pub const RGB8_LIGHT_GRID_CODEC: LightGridCodec = LightGridCodec {
     id: "rgb8-reference",
@@ -555,7 +557,7 @@ fn sample_light_grid_at(
         let tile = linear_light_grid_tile(&linear, 0xff, grid.codec);
 
         let mut colors = [0u8; LIGHT_GRID_COLORS_BYTE_COUNT];
-        for (out, value) in colors.chunks_exact_mut(3).zip(linear) {
+        for (out, value) in colors.as_chunks_mut::<3>().0.iter_mut().zip(linear) {
             out.copy_from_slice(&value.map(|value| (grid.codec.quantize)(value)));
         }
         let compressed =
@@ -730,7 +732,7 @@ pub fn grid_palette_lighting(
     let coefficients = decoded.coefficients?;
     let linear = decoded.directional;
     let mut colors = [0u8; LIGHT_GRID_COLORS_BYTE_COUNT];
-    for (out, value) in colors.chunks_exact_mut(3).zip(linear) {
+    for (out, value) in colors.as_chunks_mut::<3>().0.iter_mut().zip(linear) {
         out.copy_from_slice(&value.map(|value| (grid.codec.quantize)(value)));
     }
     let compressed = light_grid_compress_colors(&colors, 0xff)?;

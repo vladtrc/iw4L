@@ -2,6 +2,8 @@ use crate::playback_policy::compiler::{CueCompiler, iw4::Iw4CueCompiler};
 use crate::{FamilyId, SoundCatalog};
 use std::{any::Any, collections::BTreeMap, path::Path, sync::OnceLock};
 
+type ExplosionSurfaceLookup = Option<fn(i32, u8) -> Option<(String, String)>>;
+
 pub trait NativeSoundCapture: Any + Send {
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn catalog_mut(&mut self) -> Option<&mut SoundCatalog>;
@@ -51,7 +53,7 @@ pub struct DecoderTelemetry {
 #[derive(Clone, Copy)]
 pub struct AudioFamily {
     pub decoder_telemetry: Option<fn() -> DecoderTelemetry>,
-    pub explosion_surfaces: Option<fn(i32, u8) -> Option<(String, String)>>,
+    pub explosion_surfaces: ExplosionSurfaceLookup,
     pub ui_aliases: &'static [(&'static str, &'static str)],
     pub mix_bus: MixBusStage,
     pub cue: &'static dyn CueCompiler,

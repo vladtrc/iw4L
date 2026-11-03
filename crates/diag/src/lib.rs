@@ -317,7 +317,7 @@ fn emit_raw(state: &mut DiagState, event: RawEvent<'_>) {
             "t": t,
             "ch": ch.as_str(),
             "lvl": lvl.as_str(),
-            "msg": if collapsed_banner { msg } else { msg },
+            "msg": msg,
         });
         if let Some(ev) = ev {
             obj["ev"] = serde_json::Value::String(ev.to_owned());
@@ -450,9 +450,7 @@ pub fn write_line(category: &str, message: &str) {
         "console" => Channel::Console,
         _ => Channel::Launch,
     };
-    let msg = if category.is_empty() {
-        message.to_owned()
-    } else if message.starts_with(category) {
+    let msg = if category.is_empty() || message.starts_with(category) {
         message.to_owned()
     } else {
         format!("{category}: {message}")

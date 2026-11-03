@@ -122,6 +122,10 @@ fn submit(state: &mut ChatState, outbox: &mut ChatOutbox) {
     state.caret = 0;
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn keyboard(
     mut events: MessageReader<KeyboardInput>,
     state: Option<ResMut<ChatState>>,

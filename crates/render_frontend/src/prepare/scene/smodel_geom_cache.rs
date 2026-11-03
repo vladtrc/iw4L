@@ -243,14 +243,14 @@ impl WorldStaticModelCache {
         let Ok(smodel_index) = u16::try_from(authored_slot) else {
             return CacheStaticModelSurface::Refused;
         };
-        let out = {
+
+        {
             let mut result = CacheStaticModelSurface::Refused;
             self.with_smc(|smc| {
                 result = smc.cache_surface(spec, smodel_index, existing, verts, true);
             });
             result
-        };
-        out
+        }
     }
 
     fn with_smc(&mut self, f: impl FnOnce(&mut StaticModelCache<'_>)) {
@@ -339,7 +339,7 @@ pub(crate) fn cache_visible_smodel_surfaces(
     let cull_dists = cull
         .map(|c| c.static_model_cull_dists.as_slice())
         .unwrap_or(&[]);
-    for (_placement_i, placement) in plan.placements.iter().enumerate() {
+    for placement in plan.placements.iter() {
         let Some(authored) = placement.lighting_slot else {
             continue;
         };

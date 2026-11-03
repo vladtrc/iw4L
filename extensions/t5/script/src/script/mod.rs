@@ -1,6 +1,6 @@
 pub mod destructible;
-mod script;
+mod runtime;
 
 pub fn script_registration() -> sim::script::families::ScriptFamily {
-    script::registration()
+    runtime::registration()
 }

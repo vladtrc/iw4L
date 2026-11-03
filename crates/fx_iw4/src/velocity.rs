@@ -46,13 +46,7 @@ impl FxVelocityField<'_> {
         let mut out = base_vel;
         let age01 = if life_ms > 0.0 {
             let t = age_msec / life_ms;
-            if t < 0.0 {
-                0.0
-            } else if t > 1.0 {
-                1.0
-            } else {
-                t
-            }
+            t.clamp(0.0, 1.0)
         } else {
             0.0
         };

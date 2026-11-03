@@ -11,6 +11,21 @@ and 64 pending steps per pass, virtualizes saturated loops and rejects excess
 one-shots. Cancellation and epoch invalidation bypass queues. Weapon attacks
 preserve their first 20 ms during replacement; explicit Stop cancels them.
 
+Source scenes replace one pending snapshot. The command inbox admits at most
+2048 starts and reserves one coalesced reset per scope. A full start queue
+refuses new starts; scope resets cancel queued starts in that scope and precede
+fresh starts. Publication takes short locks over bounded state; the consumer
+releases them before resolution, media preparation and device synchronization.
+It delivers the latest scene after any preceding scope resets.
+
+Each source publication has a generation and shared validity. Removal, a newer
+version or explicit Stop invalidates pending layers and active playback even
+when control has already taken an older scene. Reusing a stopped key with the
+same caller version creates a fresh generation. Other keys sharing its alias
+keep their own validity. History retains at most 4096 keys; ordinary omission
+requires a newer caller version to reactivate, while explicit Stop removes
+that key's history.
+
 Family compilers publish per-variant looping, spatial, voice, gain, pitch, layer
 and media policies in their catalog context. Bound sound handles and clip keys
 retain its revision; foreign owners and media/source mismatches refuse before playback.
@@ -48,3 +63,9 @@ slow control stages, affinity and device/null frame counts. Set
 `IW4L_AUDIO_DIAG_PATH` for a buffered file; the bounded queue counts dropped
 records. `dump` and `clip` include readiness and recent decisions. Device frames
 measure mixing into callbacks, before device latency or hardware playback.
+
+In a match, `sound [family:]alias [count]` submits one-shot aliases through the
+normal audio command path. Count defaults to 1 and is bounded at 8192. An
+unqualified alias must be unique across the loaded families. `dump` includes
+`pressure_refusals`, a cumulative count of starts refused by the bounded inbox
+or pending-work budget, so an overload can be distinguished from silent playback.

@@ -148,10 +148,10 @@ pub fn apply_default_sounds(sounds: &mut WeaponSoundAliases, overrides: &[SoundO
                     sounds.fire_player = ov.override_sound.clone();
                 }
             }
-            x if x == sz::SND_OVERRIDE_TYPE_PLAYER_LASTSHOT => {
-                if sounds.fire_last_player.is_none() {
-                    sounds.fire_last_player = ov.override_sound.clone();
-                }
+            x if x == sz::SND_OVERRIDE_TYPE_PLAYER_LASTSHOT
+                && sounds.fire_last_player.is_none() =>
+            {
+                sounds.fire_last_player = ov.override_sound.clone();
             }
             _ => {}
         }
@@ -275,12 +275,12 @@ fn iw5_script_string_pairs(
         })
         .collect()
 }
-pub(super) fn iw5_best_pair_override<'a, T>(
-    rows: &'a [T],
+pub(super) fn iw5_best_pair_override<T>(
+    rows: &[T],
     selection: AttachmentSelection,
     override_type: u32,
     fields: impl Fn(&T) -> (u16, u16, u32),
-) -> Option<&'a T> {
+) -> Option<&T> {
     let candidates = selection.override_candidates();
     let mut best = None;
     let mut best_score = 0;

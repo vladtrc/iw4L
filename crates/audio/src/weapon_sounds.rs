@@ -63,7 +63,7 @@ impl WeaponSoundOutput<'_> {
             .ok_or_else(|| "sound bank is unavailable".to_owned())
             .and_then(|bank| {
                 selected_alias(
-                    &weapons.registry(),
+                    weapons.registry(),
                     &bank.0,
                     weapon,
                     event,

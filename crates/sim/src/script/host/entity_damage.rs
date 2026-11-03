@@ -117,7 +117,7 @@ pub(crate) fn apply_script_blasts(world: &mut World, tick: crate::Tick) {
                     Some(Value::Vector(at)) => at,
                     _ => hit.origin,
                 };
-                drop(runtime);
+
                 damage_entity(
                     world,
                     &EntityHit {
@@ -263,7 +263,7 @@ pub(crate) fn damage_entity(world: &mut World, hit: &EntityHit) -> bool {
     };
     let after = before.saturating_sub(hit.amount);
     runtime.set_object_field(object, "health", Value::Int(after));
-    drop(runtime);
+
     let receiver = Value::Object(object);
     raise(
         world,
@@ -322,9 +322,7 @@ pub fn destructible_effect(
     up: [f32; 3],
 ) -> Option<u64> {
     let now = super::players::now_ms(world);
-    let Some(mut runtime) = world.get_resource_mut::<RoundScript>() else {
-        return None;
-    };
+    let mut runtime = world.get_resource_mut::<RoundScript>()?;
     let Ok(id) = runtime.create_entity(super::entities::EntityKind::Spawned, "script_model") else {
         return None;
     };
@@ -419,7 +417,7 @@ pub fn destructible_debris(
     let entity = runtime.entities.get_mut(&object).unwrap();
     entity.presence = Some(presence);
     entity.solid = false;
-    drop(runtime);
+
     let now = super::players::now_ms(world);
     world
         .resource_mut::<RoundScript>()

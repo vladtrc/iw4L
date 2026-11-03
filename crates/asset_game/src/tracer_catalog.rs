@@ -40,7 +40,7 @@ impl OwnedTracerDef {
     pub fn present_name(&self) -> Option<&str> {
         self.material
             .is_bound()
-            .then(|| self.material_hint.as_deref())
+            .then_some(self.material_hint.as_deref())
             .flatten()
     }
 

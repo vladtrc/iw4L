@@ -128,7 +128,7 @@ impl ColourPassRecorder<'_> {
         accounting.begin();
         if !bindings.has_ports() {
             accounting.focus_submit.emit(
-                &products,
+                products,
                 Some((
                     &extracted.world.sorted_material_names,
                     &extracted.world.image_handles,
@@ -145,7 +145,7 @@ impl ColourPassRecorder<'_> {
         }
         if extracted.world.sampler_table.is_none() {
             accounting.focus_submit.emit(
-                &products,
+                products,
                 Some((
                     &extracted.world.sorted_material_names,
                     &extracted.world.image_handles,
@@ -188,7 +188,7 @@ impl ColourPassRecorder<'_> {
                 shadow.shadow_table.epoch(),
             );
             accounting.focus_submit.emit(
-                &products,
+                products,
                 Some((
                     &extracted.world.sorted_material_names,
                     &extracted.world.image_handles,
@@ -277,7 +277,7 @@ impl ColourPassRecorder<'_> {
             && emissive.ordered_draws.is_empty()
         {
             accounting.focus_submit.emit(
-                &products,
+                products,
                 Some((
                     &extracted.world.sorted_material_names,
                     &extracted.world.image_handles,
@@ -295,7 +295,7 @@ impl ColourPassRecorder<'_> {
         let (target, depth, extracted_view, _msaa) = view.into_inner();
         if !self.cam.active {
             accounting.focus_submit.emit(
-                &products,
+                products,
                 Some((
                     &extracted.world.sorted_material_names,
                     &extracted.world.image_handles,
@@ -666,7 +666,7 @@ impl ColourPassRecorder<'_> {
                 .count() as u32
         });
         accounting.focus_submit.emit(
-            &products,
+            products,
             Some((
                 &extracted.world.sorted_material_names,
                 &extracted.world.image_handles,

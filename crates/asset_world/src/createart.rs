@@ -419,9 +419,7 @@ fn field_f32(source: &str, field: &str) -> Option<f32> {
     let after = &source[at + needle.len()..];
     let eq = after.find('=')?;
     let rest = after[eq + 1..].trim_start();
-    let end = rest
-        .find(|c: char| c == ';' || c == '\n' || c == '\r')
-        .unwrap_or(rest.len());
+    let end = rest.find([';', '\n', '\r']).unwrap_or(rest.len());
     rest[..end].trim().parse().ok()
 }
 

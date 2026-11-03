@@ -715,7 +715,7 @@ fn generate_trail_verts(
     if trail_def.repeat_dist == 0
         || trail_def.verts.is_empty()
         || trail_def.inds.len() < 2
-        || trail_def.inds.len() % 2 != 0
+        || !trail_def.inds.len().is_multiple_of(2)
     {
         out.skipped_no_trail_def = out.skipped_no_trail_def.saturating_add(1);
         return;
@@ -809,25 +809,26 @@ fn generate_trail_verts(
 
         let mut basis = trail_uncompress_basis(&elem.basis);
 
-        if (trail_def.flags & FX_ELEM_FLAG_TRAIL_DIR_BASIS) != 0 && sample_handle != first_elem {
-            if let Some(prev) = last_state {
-                let delta = [
-                    elem.origin[0] - prev.pos_world[0],
-                    elem.origin[1] - prev.pos_world[1],
-                    elem.origin[2] - prev.pos_world[2],
+        if (trail_def.flags & FX_ELEM_FLAG_TRAIL_DIR_BASIS) != 0
+            && sample_handle != first_elem
+            && let Some(prev) = last_state
+        {
+            let delta = [
+                elem.origin[0] - prev.pos_world[0],
+                elem.origin[1] - prev.pos_world[1],
+                elem.origin[2] - prev.pos_world[2],
+            ];
+            let delta = vec3_normalize(delta);
+            let mut side = [delta[1], -delta[0], 0.0];
+            if vec3_length_sq(side) > 0.0 {
+                side = vec3_normalize(side);
+                let up = [
+                    delta[1] * side[2] - delta[2] * side[1],
+                    delta[2] * side[0] - delta[0] * side[2],
+                    delta[0] * side[1] - delta[1] * side[0],
                 ];
-                let delta = vec3_normalize(delta);
-                let mut side = [delta[1], -delta[0], 0.0];
-                if vec3_length_sq(side) > 0.0 {
-                    side = vec3_normalize(side);
-                    let up = [
-                        delta[1] * side[2] - delta[2] * side[1],
-                        delta[2] * side[0] - delta[0] * side[2],
-                        delta[0] * side[1] - delta[1] * side[0],
-                    ];
-                    let up = vec3_normalize(up);
-                    basis = [side, up];
-                }
+                let up = vec3_normalize(up);
+                basis = [side, up];
             }
         }
 
@@ -873,7 +874,7 @@ fn generate_trail_verts(
     if segment_count > 1 {
         let mut base: u16 = 0;
         for _ in 0..(segment_count - 1) {
-            for pair in trail_def.inds.chunks_exact(2) {
+            for pair in trail_def.inds.as_chunks::<2>().0 {
                 let quads = trail_emit_index_quad(pair[0], pair[1], base, vert_count);
                 mesh.index_pairs.extend_from_slice(&quads);
             }

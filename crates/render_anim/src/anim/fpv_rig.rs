@@ -177,7 +177,7 @@ impl PreparedFpvModel {
                     model: skel.name.clone(),
                     surface,
                     material: material.clone(),
-                    cause: *cause,
+                    cause,
                 });
                 break;
             }

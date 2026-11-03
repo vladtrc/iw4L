@@ -338,6 +338,11 @@ fn remote_body_draw_gate(
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn occupy_remote_scene_ents(
     mut scene_skels: ResMut<AnimDObjSceneSkels>,
     mut scene_submissions: MessageWriter<AnimDObjSceneSubmission>,
@@ -669,6 +674,11 @@ fn remote_body_scene_slot(scene: &render_scene::GfxScene, number: u32) -> Remote
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn pose_remote_bodies(
     time: Res<Time>,
     sources: Option<Res<asset_anim::PlayerAnimSources>>,
@@ -732,12 +742,12 @@ fn pose_remote_bodies(
             None => Some(Cow::Borrowed("ATR/script compiler missing")),
             Some(Err(error)) => Some(Cow::<'static, str>::Owned(format!(
                 "ATR compile failed: {reason}",
-                reason = error.to_string()
+                reason = error
             ))),
             Some(Ok(_)) => match sources.parsed_script() {
                 Some(Err(error)) => Some(Cow::<'static, str>::Owned(format!(
                     "playeranim.script parse failed: {reason}",
-                    reason = error.to_string()
+                    reason = error
                 ))),
                 Some(Ok(_)) if !legs_written => Some(Cow::Borrowed("playeranim evaluator missing")),
                 Some(Ok(_)) if !leaves_bound => Some(Cow::Borrowed("XAnim leaf bind missing")),
@@ -826,14 +836,13 @@ fn pose_remote_bodies(
         }
     }
 
-    match pose_frame.world_gun_gap.take() {
-        Some(gap) => diag::warn_once!(
+    if let Some(gap) = pose_frame.world_gun_gap.take() {
+        diag::warn_once!(
             World,
             "remote body world gun missing: weapon {weapon} `{world_model}`",
             weapon = gap.weapon,
             world_model = gap.world_model
-        ),
-        None => (),
+        )
     }
 
     if posed_bodies == 0 {
@@ -898,11 +907,11 @@ impl<'a> RemotePoseFrame<'a> {
         );
         let last_cache_hit = std::mem::take(&mut state.skin.last_cache_hit);
 
-        if root.runtime.previous_pose.is_none() {
-            if let Some(slot) = state.tree.as_mut() {
-                slot.legs_rate_sample.time_ms = 0;
-                slot.torso_rate_sample.time_ms = 0;
-            }
+        if root.runtime.previous_pose.is_none()
+            && let Some(slot) = state.tree.as_mut()
+        {
+            slot.legs_rate_sample.time_ms = 0;
+            slot.torso_rate_sample.time_ms = 0;
         }
         let sample = remote_pose_sample(root.runtime);
         if is_corpse {
@@ -956,7 +965,8 @@ impl<'a> RemotePoseFrame<'a> {
         let dobj_poses = &mut *self.dobj_poses;
         let posed_players = &mut *self.posed_players;
         let world_gun_gap = &mut self.world_gun_gap;
-        let result = (|| {
+
+        (|| {
             let origin = root.transform.translation.to_array();
             let soldier = self.soldiers.side(axis).map_err(str::to_owned)?;
             if !soldier.owns_bodies(&bodies.0) {
@@ -1093,8 +1103,7 @@ impl<'a> RemotePoseFrame<'a> {
                 }
             }
             Ok(PoseOneOutcome::Posed)
-        })();
-        result
+        })()
     }
 }
 
@@ -1558,10 +1567,10 @@ impl RemoteBodyPublisher<'_, '_> {
         if !self
             .last_catalog
             .as_ref()
-            .is_some_and(|old| Arc::ptr_eq(old, &tess.catalog()))
+            .is_some_and(|old| Arc::ptr_eq(old, tess.catalog()))
         {
             self.plan.clear_geometry();
-            *self.last_catalog = Some(Arc::clone(&tess.catalog()));
+            *self.last_catalog = Some(Arc::clone(tess.catalog()));
         }
 
         let mut last_cause = None;
@@ -1666,7 +1675,7 @@ impl RemoteBodyPublisher<'_, '_> {
                 let mat_idx = if let Some(&idx) = mat_by_key.get(key) {
                     idx
                 } else {
-                    let Some(material) = model_materials.material(&tess.catalog(), key).cloned()
+                    let Some(material) = model_materials.material(tess.catalog(), key).cloned()
                     else {
                         any_missing_material = true;
                         last_cause = Some({

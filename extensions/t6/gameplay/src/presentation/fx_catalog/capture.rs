@@ -106,7 +106,9 @@ fn capture_elem_t6(
                 .collect()
         } else if t == elem_type::DECAL {
             elem.visuals
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     let material = |name: &String| OwnedFxVisual::Material {
                         material: authored.unresolved(),
@@ -187,16 +189,16 @@ fn decode_elem_view(bytes: &[u8]) -> Option<(FxElemDefView, [u8; 8])> {
     };
     let range2 = |off: usize| -> Option<[f32; 2]> { Some([f32_at(off)?, f32_at(off + 4)?]) };
     let mut spawn_origin = [[0.0f32; 2]; 3];
-    for i in 0..3 {
-        spawn_origin[i] = range2(0x38 + i * 8)?;
+    for (i, spawn_origin_entry) in spawn_origin[..3].iter_mut().enumerate() {
+        (*spawn_origin_entry) = range2(0x38 + i * 8)?;
     }
     let mut spawn_angles = [[0.0f32; 2]; 3];
-    for i in 0..3 {
-        spawn_angles[i] = range2(0x60 + i * 8)?;
+    for (i, spawn_angles_entry) in spawn_angles[..3].iter_mut().enumerate() {
+        (*spawn_angles_entry) = range2(0x60 + i * 8)?;
     }
     let mut angular_velocity = [[0.0f32; 2]; 3];
-    for i in 0..3 {
-        angular_velocity[i] = range2(0x78 + i * 8)?;
+    for (i, angular_velocity_entry) in angular_velocity[..3].iter_mut().enumerate() {
+        (*angular_velocity_entry) = range2(0x78 + i * 8)?;
     }
     let atlas: [u8; 8] = bytes[FX_ELEM_ATLAS_OFF..FX_ELEM_ATLAS_OFF + 8]
         .try_into()

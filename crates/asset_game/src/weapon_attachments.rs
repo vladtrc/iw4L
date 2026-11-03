@@ -1,6 +1,9 @@
 use asset_core::FamilyId;
 use std::any::Any;
 
+type AttachmentModelSelector =
+    fn(&WeaponAttachments, &[Option<String>]) -> Option<(Option<String>, Option<String>)>;
+
 /// Owned native attachment data. The format owner defines how donor data merges.
 pub trait WeaponAttachmentData: Any + std::fmt::Debug + Send + Sync {
     fn clone_box(&self) -> Box<dyn WeaponAttachmentData>;
@@ -58,7 +61,6 @@ impl WeaponAttachments {
 
 #[derive(Clone, Copy)]
 pub struct WeaponAttachmentPolicy {
-    pub default_models:
-        fn(&WeaponAttachments, &[Option<String>]) -> Option<(Option<String>, Option<String>)>,
+    pub default_models: AttachmentModelSelector,
     pub shared_ammo: fn(&WeaponAttachments, &str) -> bool,
 }

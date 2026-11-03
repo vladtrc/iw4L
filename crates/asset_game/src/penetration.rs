@@ -16,10 +16,7 @@ pub fn parse_pen_table_info_string(text: &str) -> Result<PenetrationDepthTable, 
         .ok_or(PenTableError::MissingMagic)?;
     let mut table = PenetrationDepthTable::empty();
     let mut parts = rest.split('\\').filter(|p| !p.is_empty());
-    loop {
-        let Some(key) = parts.next() else {
-            break;
-        };
+    while let Some(key) = parts.next() {
         let Some(value) = parts.next() else {
             return Err(PenTableError::OddPair);
         };

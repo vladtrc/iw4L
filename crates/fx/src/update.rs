@@ -208,13 +208,12 @@ pub fn update(
         let mut cursor = start;
         while cursor != end {
             let handle = host.handle_at_ring(cursor);
-            if let Some(slot) = host.slot_index_for_handle(handle) {
-                if let Some((prev_msec, msec_now)) =
+            if let Some(slot) = host.slot_index_for_handle(handle)
+                && let Some((prev_msec, msec_now)) =
                     stamp_and_pending_loop(host, slot, want_bolted, hooks)
-                {
-                    collect_collide_jobs(host, slot, prev_msec, msec_now, &mut collide_jobs);
-                    pending_apply.push((slot, prev_msec, msec_now));
-                }
+            {
+                collect_collide_jobs(host, slot, prev_msec, msec_now, &mut collide_jobs);
+                pending_apply.push((slot, prev_msec, msec_now));
             }
             cursor = cursor.wrapping_add(1);
         }
@@ -312,27 +311,25 @@ fn stamp_and_pending_loop(
         return None;
     }
     apply_fx_update_effect_bolt_to_slot(host, slot);
-    let prev_msec = match host.effect_at(slot) {
-        Some(e) => e.msec_last_update,
-        None => return None,
+    let prev_msec = {
+        let e = host.effect_at(slot)?;
+        e.msec_last_update
     };
 
-    let (pending, def_name, msec_begin) = match host.effect_at(slot) {
-        Some(e) => (
+    let (pending, def_name, msec_begin) = {
+        let e = host.effect_at(slot)?;
+        (
             (e.status & FX_STATUS_HAS_PENDING_LOOP_ELEMS) != 0,
             slot_def_name(e),
             e.msec_begin,
-        ),
-        None => return None,
+        )
     };
-    if pending {
-        if let Some(msec_looping_life) =
+    if pending
+        && let Some(msec_looping_life) =
             hooks.pending_loop(host, slot, prev_msec, msec_now, def_name.as_str())
-        {
-            if msec_looping_life < msec_now.wrapping_sub(msec_begin) {
-                stop_pending_loop(host, slot);
-            }
-        }
+        && msec_looping_life < msec_now.wrapping_sub(msec_begin)
+    {
+        stop_pending_loop(host, slot);
     }
     Some((prev_msec, msec_now))
 }
@@ -389,14 +386,14 @@ fn pending_collide_for_elem(
     let origin = elem.origin;
     let msec_begin = elem.msec_begin;
     let life_msec = elem.life_span_msec.max(1);
-    let (def_name, catalog_index, now, alt) = match host.effect_at(effect_slot) {
-        Some(e) => (
+    let (def_name, catalog_index, now, alt) = {
+        let e = host.effect_at(effect_slot)?;
+        (
             slot_def_name(e),
             e.catalog_index,
             e.frame_now(),
             e.frame_when_played(),
-        ),
-        None => return None,
+        )
     };
     let orient = elem.orientation(&now, &alt);
     let life_ms = life_msec as f32;
@@ -721,8 +718,8 @@ fn update_element(
         }
     }
 
-    if elem_type == FX_ELEM_TYPE_SPARK_CLOUD {
-        if let Some(visual) = hooks.spark_fill(FxSparkFillQuery {
+    if elem_type == FX_ELEM_TYPE_SPARK_CLOUD
+        && let Some(visual) = hooks.spark_fill(FxSparkFillQuery {
             def_name: def_name.as_str(),
             catalog_index,
             def_index,
@@ -730,25 +727,25 @@ fn update_element(
             life_msec,
             elem_random_seed: elem_seed,
             norm_time: elem_norm_time(msec_now.saturating_sub(msec_begin).max(0), life_msec),
-        }) {
-            let (world, at_rest_now) = match host.elems.get(slot) {
-                Some(e) => (e.world_origin(&now, &alt), e.at_rest_fraction),
-                None => (
-                    spark_elem_world_origin(origin, flags, &now, &alt, None),
-                    at_rest_fraction,
-                ),
-            };
-            let axis = spark_elem_axis(
-                visual.spawn_angles,
-                visual.angular_velocity,
-                elem_seed,
-                msec_now.saturating_sub(msec_begin).max(0),
-                life_msec,
-                at_rest_now,
-                orient.axis,
-            );
-            update_spark_history(host, spark_handle, world, axis, &visual, flags, msec_now);
-        }
+        })
+    {
+        let (world, at_rest_now) = match host.elems.get(slot) {
+            Some(e) => (e.world_origin(&now, &alt), e.at_rest_fraction),
+            None => (
+                spark_elem_world_origin(origin, flags, &now, &alt, None),
+                at_rest_fraction,
+            ),
+        };
+        let axis = spark_elem_axis(
+            visual.spawn_angles,
+            visual.angular_velocity,
+            elem_seed,
+            msec_now.saturating_sub(msec_begin).max(0),
+            life_msec,
+            at_rest_now,
+            orient.axis,
+        );
+        update_spark_history(host, spark_handle, world, axis, &visual, flags, msec_now);
     }
     if elem_type == FX_ELEM_TYPE_SPARK_FOUNTAIN {
         crate::spark_fountain::update_spark_fountain(host, spark_handle, |start, end| {

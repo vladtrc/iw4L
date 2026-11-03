@@ -16,6 +16,18 @@ use render_gpu::{
     PublishedRenderFrame, SamplerTable,
 };
 
+type OverlayWorldSharesOutput = (
+    Arc<Vec<render_frame::WorldVertex>>,
+    Arc<Vec<u32>>,
+    Arc<Vec<(u32, u32)>>,
+);
+
+type OverlaySmodelSharesOutput = (
+    Arc<Vec<render_frame::SmodelVertex>>,
+    Arc<Vec<u32>>,
+    Arc<Vec<(u32, u32)>>,
+);
+
 fn take_published<T>(share: Option<&Arc<Vec<T>>>) -> (Arc<Vec<T>>, u32) {
     match share {
         Some(rows) => (Arc::clone(rows), 1),
@@ -23,13 +35,7 @@ fn take_published<T>(share: Option<&Arc<Vec<T>>>) -> (Arc<Vec<T>>, u32) {
     }
 }
 
-fn overlay_world_shares(
-    plan: Option<&WorldDrawGpuPlan>,
-) -> (
-    Arc<Vec<render_frame::WorldVertex>>,
-    Arc<Vec<u32>>,
-    Arc<Vec<(u32, u32)>>,
-) {
+fn overlay_world_shares(plan: Option<&WorldDrawGpuPlan>) -> OverlayWorldSharesOutput {
     match plan {
         Some(plan) => (
             take_published(plan.decoded_share.as_ref()).0,
@@ -44,13 +50,7 @@ fn overlay_world_shares(
     }
 }
 
-fn overlay_smodel_shares(
-    plan: Option<&SmodelGpuPlan>,
-) -> (
-    Arc<Vec<render_frame::SmodelVertex>>,
-    Arc<Vec<u32>>,
-    Arc<Vec<(u32, u32)>>,
-) {
+fn overlay_smodel_shares(plan: Option<&SmodelGpuPlan>) -> OverlaySmodelSharesOutput {
     match plan {
         Some(plan) => (
             take_published(plan.decoded_share.as_ref()).0,
@@ -65,13 +65,7 @@ fn overlay_smodel_shares(
     }
 }
 
-fn overlay_xmodel_shares(
-    plan: Option<&XModelDrawPlan>,
-) -> (
-    Arc<Vec<render_frame::SmodelVertex>>,
-    Arc<Vec<u32>>,
-    Arc<Vec<(u32, u32)>>,
-) {
+fn overlay_xmodel_shares(plan: Option<&XModelDrawPlan>) -> OverlaySmodelSharesOutput {
     match plan {
         Some(plan) => (
             take_published(plan.decoded_share.as_ref()).0,
@@ -155,6 +149,11 @@ pub fn extract_exact_colour(
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub fn seal_render_frame(
     material: (
         Option<Res<render_frontend::assemble::drawsurf::MaterialGeneration>>,
@@ -242,9 +241,8 @@ pub fn seal_render_frame(
         (ports, ports_started.elapsed().as_secs_f32() * 1000.0)
     };
     let warm_pipelines = spawn_job.as_ref().is_some_and(|job| job.warm_pipelines);
-    let (world_v, world_i, world_layer_n) =
-        world_colour_extract_counts(world.as_ref().map(|plan| &**plan));
-    let (smodel_v, smodel_i) = smodel_colour_extract_counts(smodel.as_ref().map(|plan| &**plan));
+    let (world_v, world_i, world_layer_n) = world_colour_extract_counts(world.as_deref());
+    let (smodel_v, smodel_i) = smodel_colour_extract_counts(smodel.as_deref());
 
     let skip_world_smodel = {
         let world = &*existing_world;
@@ -811,6 +809,10 @@ pub fn extract_postfx(
     extracted.depth_sampler = samplers.as_ref().and_then(|s| s.decode(0x61).ok());
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub fn extract_geometry(
     mut commands: Commands,
     world: Extract<Option<Res<WorldDrawGpuPlan>>>,

@@ -25,6 +25,8 @@ use fx_iw4::{
 use math_iw4::angle_vectors;
 use sim::CollisionScene;
 
+type VisibilityBlockerAdds = RefCell<Vec<(i32, [f32; 3], f32, u8, fx_iw4::FxDistanceFade)>>;
+
 pub trait FxScene {
     fn sample_atpoint_rgb(&self, origin: [f32; 3]) -> Option<[u8; 3]>;
     fn finish_impact_marks(
@@ -592,13 +594,13 @@ fn record_spawn_decal(
                 host.note_models_go_skip(req.def_index);
             }
         }
-    } else if result.entered {
-        if let Some(scene) = world {
-            if scene.box_surfaces_prelude_ran(host) {
-                host.note_box_surfaces_run();
-            } else {
-                host.note_box_surfaces_skip();
-            }
+    } else if result.entered
+        && let Some(scene) = world
+    {
+        if scene.box_surfaces_prelude_ran(host) {
+            host.note_box_surfaces_run();
+        } else {
+            host.note_box_surfaces_skip();
         }
     }
     if !result.entered {
@@ -855,7 +857,7 @@ impl fx::FxUpdateHooks for CatalogUpdateHooks<'_> {
         let clip_world = self.clip_world;
         let collide_gap_indices = self.collide_gap_indices;
 
-        let out = (|| {
+        (|| {
             let effect = catalog_lookup(catalog, q.catalog_index)?;
             let elem = effect.elems.get(q.def_index as usize)?;
             if fx_iw4::elem_skips_position_update(elem.view.elem_type, elem.view.flags) {
@@ -894,8 +896,7 @@ impl fx::FxUpdateHooks for CatalogUpdateHooks<'_> {
                 );
             }
             elem_motion(elem).evaluate(q)
-        })();
-        out
+        })()
     }
     fn emit(&mut self, q: fx::FxEmitQuery<'_>) -> Option<fx_iw4::FxEmitSchedule> {
         let catalog = self.catalog;
@@ -1054,9 +1055,7 @@ impl fx::FxTrailUpdateHooks for CatalogUpdateHooks<'_> {
     ) -> Option<FxTrailCollideHit> {
         let clip_world = self.clip_world;
 
-        let Some(world) = clip_world else {
-            return None;
-        };
+        let world = clip_world?;
 
         let t = world.trace_world(start, end, mins, maxs, mask);
         Some(FxTrailCollideHit {
@@ -1130,7 +1129,7 @@ struct CatalogDrawResolver<'a> {
     gaps: FxVertsGaps,
     catalog_index_n: Cell<u32>,
     catalog_name_n: Cell<u32>,
-    vis_blocker_adds: RefCell<Vec<(i32, [f32; 3], f32, u8, fx_iw4::FxDistanceFade)>>,
+    vis_blocker_adds: VisibilityBlockerAdds,
     sprite_names: Option<(Arc<str>, Arc<str>)>,
 }
 

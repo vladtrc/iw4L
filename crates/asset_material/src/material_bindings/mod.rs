@@ -15,7 +15,7 @@ pub use local_light::{LocalLightWriter, MaterialLightOverrides, MaterialLocalLig
 pub struct PreparedMaterialBindings {
     generation: MaterialGenerationId,
     requested: Vec<u16>,
-    frame_steps: Vec<(asset_core::FamilyId, Vec<FrameStep>)>,
+    frame_steps: Vec<FrameStep>,
     local_light_ops: Vec<std::sync::Arc<dyn LocalLightProducer>>,
 }
 
@@ -34,13 +34,11 @@ pub struct MaterialFrameBindingInputs {
     pub sun: Option<MaterialSunInputs>,
 }
 
-/// The world inputs of one more map drawn in the frame, an atlas layer: its
-/// family's code constants are bound from these, not the camera map's.
 #[derive(Clone, Copy, Debug)]
 pub struct MaterialLayerBindingInputs {
+    pub id: asset_core::atlas::WorldId,
     pub world: MaterialWorldBindingInputs,
     pub exposure: Option<f32>,
-    pub fog: Option<MaterialFogInputs>,
     pub sun: Option<MaterialSunInputs>,
 }
 
@@ -137,7 +135,6 @@ impl PreparedMaterialBindings {
         catalog: &RuntimeMaterialCatalog,
         sources: &mut RuntimeCodeSources,
         inputs: &MaterialFrameBindingInputs,
-        layers: &[MaterialLayerBindingInputs],
     ) -> Result<(), StaleMaterialBindings> {
         let generation = catalog.generation_id();
         if generation != self.generation {
@@ -151,33 +148,8 @@ impl PreparedMaterialBindings {
             sources,
         };
         let sources = &mut writer;
-        for (family, steps) in &self.frame_steps {
-            // A family that only a layer's map is in reads that map's inputs.
-            let layer = (inputs.world.source_namespace != Some(*family))
-                .then(|| {
-                    layers
-                        .iter()
-                        .find(|layer| layer.world.source_namespace == Some(*family))
-                })
-                .flatten();
-            let layered;
-            let inputs = match layer {
-                Some(layer) => {
-                    layered = MaterialFrameBindingInputs {
-                        world: layer.world,
-                        exposure: layer.exposure,
-                        fog: layer.fog.unwrap_or(inputs.fog),
-                        fog_enabled: inputs.fog_enabled && layer.fog.is_some(),
-                        sun: layer.sun.or(inputs.sun),
-                        ..*inputs
-                    };
-                    &layered
-                }
-                None => inputs,
-            };
-            for step in steps {
-                step.execute(sources, inputs);
-            }
+        for step in &self.frame_steps {
+            step.execute(sources, inputs);
         }
 
         Ok(())

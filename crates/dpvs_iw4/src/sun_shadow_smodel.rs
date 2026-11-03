@@ -56,14 +56,14 @@ pub fn add_smodel_range_sun_shadow(
 ) -> usize {
     let mut n = 0usize;
     let last = vis.len().min(insts.len());
-    for i in 0..last {
+    for (i, insts_entry) in insts[..last].iter().enumerate() {
         if n >= out.len() {
             break;
         }
         if vis.get(i).copied().unwrap_or(0) == 0 {
             continue;
         }
-        if insts[i].flags & STATIC_MODEL_FLAG_NO_CAST_SHADOW != 0 {
+        if insts_entry.flags & STATIC_MODEL_FLAG_NO_CAST_SHADOW != 0 {
             continue;
         }
         let Ok(id) = u16::try_from(i) else {

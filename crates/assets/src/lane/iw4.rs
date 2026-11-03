@@ -402,7 +402,7 @@ impl ZoneLane for Iw4Lane {
             report.push("no GfxWorld reached — nothing to draw".into());
             push_mapents_key_census(&mut report, &stream);
             let dm_spawns = dm_spawn_points(&stream);
-            drop(stream);
+
             let arena_bytes = memory.total_bytes();
             drop(memory);
             report.push(format!(
@@ -531,7 +531,7 @@ impl ZoneLane for Iw4Lane {
                 let airstrike_height = asset_world::airstrike_height(&stream);
                 let dm_spawns = dm_spawn_points(&stream);
                 push_mapents_key_census(&mut report, &stream);
-                drop(stream);
+
                 let arena_bytes = memory.total_bytes();
                 drop(memory);
                 report.push(format!(
@@ -694,7 +694,7 @@ impl ZoneLane for Iw4Lane {
                 report.push(format!("world mesh: {e}"));
                 let dm_spawns = dm_spawn_points(&stream);
                 push_mapents_key_census(&mut report, &stream);
-                drop(stream);
+
                 let arena_bytes = memory.total_bytes();
                 drop(memory);
                 LoadedWorld {
@@ -970,7 +970,7 @@ impl ZoneLane for Iw4Lane {
             sink.light_def_bodies,
             light_defs.len()
         ));
-        drop(stream);
+
         let s1_common_bytes = memory.total_bytes();
         drop(memory);
         report.push(format!(

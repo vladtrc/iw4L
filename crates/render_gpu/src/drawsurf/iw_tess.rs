@@ -390,7 +390,7 @@ fn prepare_iw_tess(
             meta.cpu_ib_indices.fill(0);
         }
         let index_append = meta.cpu_ib.set_index_data(tri_count);
-        if index_append.lock_byte_offset % 4 != 0 {
+        if !index_append.lock_byte_offset.is_multiple_of(4) {
             continue;
         }
         copy_u16_indices_into_ring(&mut meta.cpu_ib_indices, index_append.base_index, indices);

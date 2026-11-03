@@ -308,10 +308,8 @@ pub fn select_fire_alias<'a>(
     fire: Option<&'a str>,
     fire_player: Option<&'a str>,
 ) -> Option<&'a str> {
-    if player_view {
-        if let Some(p) = fire_player.filter(|s| !s.is_empty()) {
-            return Some(p);
-        }
+    if player_view && let Some(p) = fire_player.filter(|s| !s.is_empty()) {
+        return Some(p);
     }
     fire.filter(|s| !s.is_empty())
 }
@@ -328,10 +326,8 @@ pub fn select_cg_fire_alias<'a>(
     if !last_shot {
         return current;
     }
-    if player_view {
-        if let Some(p) = fire_last_player.filter(|s| !s.is_empty()) {
-            return Some(p);
-        }
+    if player_view && let Some(p) = fire_last_player.filter(|s| !s.is_empty()) {
+        return Some(p);
     }
     if let Some(w) = fire_last.filter(|s| !s.is_empty()) {
         return Some(w);

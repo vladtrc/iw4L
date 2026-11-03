@@ -198,38 +198,38 @@ pub(super) fn load_clipmap(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink
 
     let mut dyn_ent_count = [0usize; 2];
     let mut dyn_ent_defs = [None; 2];
-    for ty in 0..2 {
-        dyn_ent_count[ty] = s.u16_at(p, s.layout(168, 328) + ty * 2)? as usize;
+    for (ty, dyn_ent_count_entry) in dyn_ent_count[..2].iter_mut().enumerate() {
+        (*dyn_ent_count_entry) = s.u16_at(p, s.layout(168, 328) + ty * 2)? as usize;
         dyn_ent_defs[ty] = load_dyn_entity_defs(s, links, p, ty)?;
     }
-    for ty in 0..2 {
+    for (ty, dyn_ent_count_entry) in dyn_ent_count[..2].iter().enumerate() {
         runtime_array(
             s,
             p,
             s.layout(180, 352) + ty * s.pointer_bytes(),
             4,
             sz::DYN_ENTITY_POSE,
-            dyn_ent_count[ty],
+            *dyn_ent_count_entry,
         )?;
     }
-    for ty in 0..2 {
+    for (ty, dyn_ent_count_entry) in dyn_ent_count[..2].iter().enumerate() {
         runtime_array(
             s,
             p,
             s.layout(188, 368) + ty * s.pointer_bytes(),
             4,
             s.layout(sz::DYN_ENTITY_CLIENT, 16),
-            dyn_ent_count[ty],
+            *dyn_ent_count_entry,
         )?;
     }
-    for ty in 0..2 {
+    for (ty, &count) in dyn_ent_count.iter().enumerate() {
         runtime_array(
             s,
             p,
             s.layout(196, 384) + ty * s.pointer_bytes(),
             4,
             sz::DYN_ENTITY_COLL,
-            dyn_ent_count[ty],
+            count,
         )?;
     }
 

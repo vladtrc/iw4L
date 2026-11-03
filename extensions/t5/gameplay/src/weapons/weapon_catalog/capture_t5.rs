@@ -1037,10 +1037,10 @@ pub(super) fn read_hide_tags_t5(
         if id == 0 {
             continue;
         }
-        if let Some(name) = strings.get(stream, id) {
-            if !name.is_empty() {
-                out.push(name.to_owned());
-            }
+        if let Some(name) = strings.get(stream, id)
+            && !name.is_empty()
+        {
+            out.push(name.to_owned());
         }
     }
     out

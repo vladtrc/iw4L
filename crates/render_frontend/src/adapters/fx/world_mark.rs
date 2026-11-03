@@ -107,7 +107,7 @@ thread_local! {
     };
 }
 
-fn pose_material<'a>(host: &'a FxSystemHost, against: MarkFragmentsAgainst) -> Option<&'a str> {
+fn pose_material(host: &FxSystemHost, against: MarkFragmentsAgainst) -> Option<&str> {
     impact_mark_material(
         [
             host.last_decal_mat0.as_deref(),
@@ -675,8 +675,8 @@ fn complete_glass_marks(host: &mut FxSystemHost, scene: &WorldScene) {
         };
         let normal = pane_axis[2].map(|v| if side < 0.0 { -v } else { v });
         for vertex in &mut vertices[..n] {
-            for k in 0..3 {
-                vertex.xyz[k] += normal[k] * thickness;
+            for (k, normal_entry) in normal[..3].iter().enumerate() {
+                vertex.xyz[k] += (*normal_entry) * thickness;
             }
         }
         let mut used_tri = 0;
@@ -1123,7 +1123,7 @@ fn stage_one_smodel(
                 }
             }
         }
-        drop(visit_triangle);
+
         if !walk_ok {
             return None;
         }

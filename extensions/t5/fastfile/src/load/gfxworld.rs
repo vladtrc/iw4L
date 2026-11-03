@@ -5,6 +5,34 @@ use crate::zone::{
     GfxLightGridGeometry, GfxWorldGeometry, Ptr, Result, XFILE_BLOCK_VIRTUAL, ZoneStream,
 };
 
+type LoadDrawOutput = Result<(
+    Option<Ptr>,
+    Option<Ptr>,
+    usize,
+    usize,
+    usize,
+    [crate::GfxLightmapImages; crate::MAX_LIGHTMAP_PAGES],
+    Option<Ptr>,
+    usize,
+    Option<Ptr>,
+    usize,
+)>;
+
+type LoadDpvsStaticOutput = Result<(
+    Option<Ptr>,
+    Option<Ptr>,
+    Option<Ptr>,
+    Option<Ptr>,
+    usize,
+    usize,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+    u32,
+)>;
+
 pub(super) fn load_gfxworld(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink) -> Result<()> {
     let p = s.alloc_load(4, sz::GFX_WORLD)?;
 
@@ -508,22 +536,7 @@ fn load_portal(s: &mut ZoneStream<'_>, portal: Ptr) -> Result<()> {
     Ok(())
 }
 
-fn load_draw(
-    s: &mut ZoneStream<'_>,
-    links: &mut dyn AssetLinkSink,
-    p: Ptr,
-) -> Result<(
-    Option<Ptr>,
-    Option<Ptr>,
-    usize,
-    usize,
-    usize,
-    [crate::GfxLightmapImages; crate::MAX_LIGHTMAP_PAGES],
-    Option<Ptr>,
-    usize,
-    Option<Ptr>,
-    usize,
-)> {
+fn load_draw(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink, p: Ptr) -> LoadDrawOutput {
     let probe_count = s.u32_at(p, 0)? as usize;
     let lightmap_count = s.i32_at(p, 0x0c)?.max(0) as usize;
     let vertex_count = s.u32_at(p, 0x9c)? as usize;
@@ -675,20 +688,7 @@ fn load_dpvs_static(
     p: Ptr,
     surface_count: usize,
     cull_group_count: usize,
-) -> Result<(
-    Option<Ptr>,
-    Option<Ptr>,
-    Option<Ptr>,
-    Option<Ptr>,
-    usize,
-    usize,
-    u32,
-    u32,
-    u32,
-    u32,
-    u32,
-    u32,
-)> {
+) -> LoadDpvsStaticOutput {
     let smodel_count = s.u32_at(p, 0)? as usize;
     let static_surface_count = s.u32_at(p, 8)? as usize;
     let lit_surfs_begin = s.u32_at(p, 0x0c)?;

@@ -665,21 +665,17 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
     .collect();
     let mut camouflage_images = Vec::new();
     for (namespace, policy) in asset_game::weapon_policies() {
-        if let Some(model) = policy.camouflage.model {
-            if let Some((_, table)) = cac_tables.iter().find(|(ns, table)| {
+        if let Some(model) = policy.camouflage.model
+            && let Some((_, table)) = cac_tables.iter().find(|(ns, table)| {
                 *ns == namespace && table.name.eq_ignore_ascii_case(model.table)
-            }) {
-                let dressed = weapons.prepare_model_camouflages(
-                    namespace,
-                    table,
-                    &material_seed,
-                    &fpv_meshes,
-                );
-                common_report.push(format!(
-                    "{}: {dressed} weapon configurations prepared",
-                    model.label
-                ));
-            }
+            })
+        {
+            let dressed =
+                weapons.prepare_model_camouflages(namespace, table, &material_seed, &fpv_meshes);
+            common_report.push(format!(
+                "{}: {dressed} weapon configurations prepared",
+                model.label
+            ));
         }
         if let Some(material) = policy.camouflage.materials {
             let options = cac_tables
@@ -753,10 +749,10 @@ async fn prepare_common(key: CommonKey) -> Arc<CommonSet> {
 
     material_seed.mark_images_common_owned();
     let mut ui_images = asset_material::UiImageBuild::default();
-    if let Ok(games) = games_root() {
-        if let Err(error) = ui_images.retain_archives(&games) {
-            common_report.push(format!("UI archives: {error}"));
-        }
+    if let Ok(games) = games_root()
+        && let Err(error) = ui_images.retain_archives(&games)
+    {
+        common_report.push(format!("UI archives: {error}"));
     }
     ui_images.retain_materials(&material_seed);
     for donor in &material_donors {

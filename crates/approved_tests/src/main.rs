@@ -6,6 +6,7 @@ mod scenario;
 mod scenarios {
     pub mod heavy_gameplay_lifecycle;
     pub mod master_duo_chaos;
+    mod master_fixture;
 }
 
 use std::path::{Path, PathBuf};
@@ -28,6 +29,8 @@ struct Args {
     replay: Option<PathBuf>,
     cache: CacheMode,
     bin: PathBuf,
+    master_bin: PathBuf,
+    scene: Option<PathBuf>,
 }
 
 fn main() {
@@ -39,7 +42,7 @@ fn main() {
             eprintln!("{message}");
             eprintln!(
                 "usage: approved_tests <heavy_gameplay_lifecycle|master_duo_chaos> [--seed N | --replay run.json] \
-                 [--cache cold|shared] [--bin path]"
+                 [--cache cold|shared] [--bin path] [--master-bin path] [--scene path]"
             );
             std::process::exit(2);
         }
@@ -52,20 +55,31 @@ fn main() {
             std::process::exit(2);
         }
 
-        std::process::exit(match scenarios::master_duo_chaos::run(&root, &args.bin) {
-            Ok(true) => 0,
-            Ok(false) => 1,
-            Err(error) => {
-                eprintln!("approved_tests: {error}");
-                1
-            }
-        });
+        std::process::exit(
+            match scenarios::master_duo_chaos::run(
+                &root,
+                &args.bin,
+                &args.master_bin,
+                args.scene.as_deref(),
+            ) {
+                Ok(true) => 0,
+                Ok(false) => 1,
+                Err(error) => {
+                    eprintln!("approved_tests: {error}");
+                    1
+                }
+            },
+        );
     }
     if args.scenario != SCENARIO.name {
         eprintln!(
             "approved scenarios: {}, master_duo_chaos (asked for {:?})",
             SCENARIO.name, args.scenario
         );
+        std::process::exit(2);
+    }
+    if args.scene.is_some() {
+        eprintln!("--scene belongs to master_duo_chaos");
         std::process::exit(2);
     }
     std::process::exit(match run(&root, &args) {
@@ -96,6 +110,11 @@ fn parse_args(root: &Path) -> Result<Args, String> {
         replay: None,
         cache: CacheMode::Cold,
         bin: root.join(format!("target/play/iw4l{}", std::env::consts::EXE_SUFFIX)),
+        master_bin: root.join(format!(
+            "target/play/iw4l-master{}",
+            std::env::consts::EXE_SUFFIX
+        )),
+        scene: None,
     };
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("{flag} needs a value"));
@@ -116,6 +135,8 @@ fn parse_args(root: &Path) -> Result<Args, String> {
                 }
             }
             "--bin" => args.bin = PathBuf::from(value()?),
+            "--master-bin" => args.master_bin = PathBuf::from(value()?),
+            "--scene" => args.scene = Some(PathBuf::from(value()?)),
             other => return Err(format!("unknown flag {other}")),
         }
     }

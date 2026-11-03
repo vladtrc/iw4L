@@ -23,6 +23,14 @@ use render_scene::{
 use render_scene::{ModelLightingOwner, ModelLightingRequest, ModelLightingRequests};
 use render_scene::{TessMaterials, WorldPresentFacts, WorldScriptModelInstance};
 
+type CollectPresentedModelsOutput<'a> = Option<(
+    Vec<(
+        &'a xmodel_runtime::ModelPoseSrc,
+        Option<xmodel_runtime::Attach>,
+    )>,
+    Vec<&'a asset_model::ModelSkel>,
+)>;
+
 #[derive(Resource, Default)]
 struct ScriptModelDobjs {
     by_id: HashMap<u32, PersistentScriptDobj>,
@@ -249,10 +257,7 @@ impl RenderFocusSelect {
     }
 
     fn script_model_id(&self) -> Option<u32> {
-        match self.selector {
-            Some(RenderFocusSelector::ScriptModel(id)) => Some(id),
-            None => None,
-        }
+        self.selector.map(|RenderFocusSelector::ScriptModel(id)| id)
     }
 }
 
@@ -560,6 +565,10 @@ fn occupy_script_model_scene_ents(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn pose_script_models(
     assets: Option<Res<asset_world::MapXModelSceneCatalog>>,
     atlas: Option<Res<WorldModelLightingAtlas>>,
@@ -837,6 +846,10 @@ fn pose_script_models(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn commit_script_model_draw_plan(
     assets: Option<Res<asset_world::MapXModelSceneCatalog>>,
     atlas: Option<Res<WorldModelLightingAtlas>>,
@@ -902,9 +915,7 @@ fn commit_script_model_draw_plan(
                 .iter()
                 .zip(posed.authored.iter().copied())
                 .map(|(_surface, authored)| {
-                    model_materials
-                        .authored(&tess.catalog(), authored?)
-                        .cloned()
+                    model_materials.authored(tess.catalog(), authored?).cloned()
                 })
                 .collect::<Vec<_>>();
             append_or_overwrite_script_model(
@@ -1128,9 +1139,7 @@ pub(crate) fn presented_skel_arcs(
             asset_world::MapXModelSceneAsset::Captured { skel, .. } => std::sync::Arc::clone(skel),
             asset_world::MapXModelSceneAsset::Unavailable { .. } => return None,
         };
-        if skel.pose.is_none() {
-            return None;
-        }
+        skel.pose.as_ref()?;
         skels.push(skel);
     }
     Some(skels)
@@ -1146,9 +1155,7 @@ pub(crate) fn presented_skels<'a>(
             asset_world::MapXModelSceneAsset::Captured { skel, .. } => skel.as_ref(),
             asset_world::MapXModelSceneAsset::Unavailable { .. } => return None,
         };
-        if skel.pose.is_none() {
-            return None;
-        }
+        skel.pose.as_ref()?;
         skels.push(skel);
     }
     Some(skels)
@@ -1157,13 +1164,7 @@ pub(crate) fn presented_skels<'a>(
 pub fn collect_presented_models<'a>(
     catalog: &'a asset_world::MapXModelSceneCatalog,
     state: &xmodel_runtime::DObjSemanticState,
-) -> Option<(
-    Vec<(
-        &'a xmodel_runtime::ModelPoseSrc,
-        Option<xmodel_runtime::Attach>,
-    )>,
-    Vec<&'a asset_model::ModelSkel>,
-)> {
+) -> CollectPresentedModelsOutput<'a> {
     let mut skels = Vec::with_capacity(state.composition.models.len());
     let mut attaches = Vec::with_capacity(state.composition.models.len());
     for (index, descriptor) in state.composition.models.iter().enumerate() {

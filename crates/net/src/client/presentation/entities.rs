@@ -289,7 +289,7 @@ impl CEntityOccupancy<'_, '_> {
                 diag::warn_once!(
                     Net,
                     "client {client} is outside the {slots}-slot entity-number space",
-                    client = (*client).0,
+                    client = client.0,
                     slots = crate::CLIENT_ENTITY_SLOT_COUNT
                 );
                 continue;
@@ -451,14 +451,13 @@ fn register_entity_ownership(app: &mut App) {
          identities: Query<(Entity, &CEntity)>,
          mut commands: Commands| {
             commands.entity(event.entity).insert(DespawnOnExit(*timeline.get()));
-            if perf::recording() {
-                if let Ok((_, identity)) = identities.get(event.entity) {
+            if perf::recording()
+                && let Ok((_, identity)) = identities.get(event.entity) {
                     let survivors = identities.iter().filter(|(entity, old)| {
                         *entity != event.entity && old.number() == identity.number()
                     }).count();
                     perf::instant!("centity_birth", "iw4l.sim", "number" => identity.number() as u64, "generation" => identity.generation() as u64, "survivors" => survivors as u64);
                 }
-            }
         },
     );
 }

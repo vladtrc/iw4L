@@ -11,6 +11,8 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+type CamoMaterialSwaps = Vec<(u8, Result<Arc<HashMap<usize, SmodelPassMaterial>>, String>)>;
+
 #[derive(Default)]
 pub struct FpvRigSet {
     pub(super) bare: [Option<Arc<PreparedFpvRig>>; 2],
@@ -55,7 +57,7 @@ pub struct FpvWeaponView {
     pub left: Option<WeaponAnimations>,
     pub idle_name: Option<String>,
     pub rigs: FpvRigSet,
-    pub camos: Vec<(u8, Result<Arc<HashMap<usize, SmodelPassMaterial>>, String>)>,
+    pub camos: CamoMaterialSwaps,
 }
 
 impl FpvWeaponView {

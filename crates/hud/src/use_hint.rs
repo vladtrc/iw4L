@@ -6,16 +6,18 @@ use assets::PreparedWeapons;
 use bevy::prelude::*;
 use std::collections::HashMap;
 
+type UseHintCaption = Option<(
+    String,
+    String,
+    Option<(asset_core::FamilyId, String, i32, bool)>,
+)>;
+
 #[derive(Component)]
 pub(crate) struct UseHintRaster;
 
 #[derive(Default)]
 pub(crate) struct HintMemory {
-    caption: Option<(
-        String,
-        String,
-        Option<(asset_core::FamilyId, String, i32, bool)>,
-    )>,
+    caption: UseHintCaption,
     last_seen: f64,
 }
 

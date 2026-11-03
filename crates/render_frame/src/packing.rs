@@ -63,21 +63,21 @@ pub fn pack_sun_shadow_frontend(
                 if run > 1 {
                     let start = run_off as usize;
                     let end = start.saturating_add(usize::from(run));
-                    if let Some(surfs) = world_run_surfs.get(start..end) {
-                        if surfs.len() == usize::from(run) {
-                            for &s in surfs {
-                                push_world(
-                                    &mut packed,
-                                    draw_index as u32,
-                                    draw.key,
-                                    draw.material_rank,
-                                    s,
-                                    world_ranges,
-                                    world_vertex_count,
-                                );
-                            }
-                            continue;
+                    if let Some(surfs) = world_run_surfs.get(start..end)
+                        && surfs.len() == usize::from(run)
+                    {
+                        for &s in surfs {
+                            push_world(
+                                &mut packed,
+                                draw_index as u32,
+                                draw.key,
+                                draw.material_rank,
+                                s,
+                                world_ranges,
+                                world_vertex_count,
+                            );
                         }
+                        continue;
                     }
                 }
                 push_world(

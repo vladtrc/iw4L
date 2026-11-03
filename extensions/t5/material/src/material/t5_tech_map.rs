@@ -391,7 +391,7 @@ pub fn iw4_slot_to_t5(iw4_slot: usize) -> Option<usize> {
     let iw4_slot = match iw4_slot {
         3 => 2,
         6 | 8 => iw4_slot - 1,
-        10..=36 if iw4_slot % 2 == 0 => iw4_slot - 1,
+        10..=36 if iw4_slot.is_multiple_of(2) => iw4_slot - 1,
         _ => iw4_slot,
     };
     T5_NAME_MATCH_IW4_SLOT

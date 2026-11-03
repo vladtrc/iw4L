@@ -20,6 +20,18 @@ pub use render_frame::{
     ProductTarget, RenderFocusFrame, SpotShadowFrameSlot,
 };
 
+type FrameProductFields<'a> = (
+    u64,
+    &'a str,
+    u32,
+    Option<&'a str>,
+    &'a str,
+    Option<u16>,
+    Option<bool>,
+    Option<u32>,
+    u32,
+);
+
 #[derive(Resource)]
 pub struct DistortionSettings {
     pub enabled: bool,
@@ -937,6 +949,10 @@ pub struct FrameAssemblyInputs {
     pub xmodel_lighting_sh: std::sync::Arc<Vec<Option<[[f32; 4]; 3]>>>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn open_frame_products(
     generation: Res<MaterialGeneration>,
     lighting: Option<Res<WorldModelLightingAtlas>>,
@@ -1246,6 +1262,11 @@ pub(crate) struct StaticSunCasters {
     visibility_counts: [usize; 4],
 }
 
+#[expect(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn bake_static_sun_shadow_casters(
     generation: Res<MaterialGeneration>,
     frame: Res<MaterialFrameInputs>,
@@ -1515,6 +1536,10 @@ pub(crate) fn bake_sun_shadow_casters(
     present.0 = !casters.items.is_empty();
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn execute_sun_product(
     inputs: Res<FrameAssemblyInputs>,
     generation: Res<MaterialGeneration>,
@@ -1651,6 +1676,10 @@ pub(crate) fn execute_sun_product(
     *last_stamp = Some(stamp);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn bake_spot_shadow_casters(
     inputs: (Res<FrameAssemblyInputs>, Res<MaterialGeneration>),
     retained: Res<StaticDrawLane>,
@@ -1779,6 +1808,10 @@ pub(crate) fn execute_spot_product(
     *last_stamp = Some(stamp);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn execute_camera_products(
     inputs: Res<FrameAssemblyInputs>,
     lanes: (
@@ -2168,17 +2201,7 @@ pub(crate) fn publish_frame_products(
                 camera_hidden,
                 lighting_handle,
                 planned_surfaces,
-            ): (
-                u64,
-                &str,
-                u32,
-                Option<&str>,
-                &str,
-                Option<u16>,
-                Option<bool>,
-                Option<u32>,
-                u32,
-            ) = (
+            ): FrameProductFields<'_> = (
                 frame.frame_id,
                 "script_model",
                 focused.owner_id,

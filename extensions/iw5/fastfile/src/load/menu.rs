@@ -243,11 +243,9 @@ fn load_item_def_data(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink, p: 
                 s.fixup_slot(type_data, body)?;
             }
         }
-        ITEM_TYPE_TEXT_SCROLL => {
-            if always_alloc(s, type_data)? {
-                let body = s.alloc_load(4, sz::TEXT_SCROLL_DEF)?;
-                s.fixup_slot(type_data, body)?;
-            }
+        ITEM_TYPE_TEXT_SCROLL if always_alloc(s, type_data)? => {
+            let body = s.alloc_load(4, sz::TEXT_SCROLL_DEF)?;
+            s.fixup_slot(type_data, body)?;
         }
         _ => {}
     }
@@ -375,13 +373,13 @@ fn load_menu_event_handler(
         EVENT_SET_LOCAL_VAR_BOOL
         | EVENT_SET_LOCAL_VAR_INT
         | EVENT_SET_LOCAL_VAR_FLOAT
-        | EVENT_SET_LOCAL_VAR_STRING => {
-            if always_alloc(s, p.at(0))? {
-                let data = s.alloc_load(4, s.layout(sz::SET_LOCAL_VAR_DATA, 16))?;
-                s.fixup_slot(p.at(0), data)?;
-                follow_name(s, data, 0)?;
-                load_statement_ptr(s, links, data.at(s.layout(4, 8)))?;
-            }
+        | EVENT_SET_LOCAL_VAR_STRING
+            if always_alloc(s, p.at(0))? =>
+        {
+            let data = s.alloc_load(4, s.layout(sz::SET_LOCAL_VAR_DATA, 16))?;
+            s.fixup_slot(p.at(0), data)?;
+            follow_name(s, data, 0)?;
+            load_statement_ptr(s, links, data.at(s.layout(4, 8)))?;
         }
         _ => {}
     }

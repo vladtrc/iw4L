@@ -662,11 +662,11 @@ impl ClientLinkIdentity<'_, '_> {
             );
         }
 
-        if let Some(id) = link.assigned_client {
-            if self.local.0 != id {
-                self.local.0 = id;
-                self.prediction.0.set_local(id);
-            }
+        if let Some(id) = link.assigned_client
+            && self.local.0 != id
+        {
+            self.local.0 = id;
+            self.prediction.0.set_local(id);
         }
     }
 }
@@ -1300,10 +1300,10 @@ impl ClientCommandSampler<'_> {
                 frozen,
             },
         );
-        if std::mem::take(&mut self.actions.client.center_view) {
-            if let Some(ps) = ps {
-                self.look.angles[0] = (-ps.delta_angles[0] * input_iw4::ANGLE2SHORT) as i32;
-            }
+        if std::mem::take(&mut self.actions.client.center_view)
+            && let Some(ps) = ps
+        {
+            self.look.angles[0] = (-ps.delta_angles[0] * input_iw4::ANGLE2SHORT) as i32;
         }
         let ps_weapon = ps.map(|ps| ps.weapon).unwrap_or(0);
         let life_sequence = source
@@ -1340,18 +1340,18 @@ impl ClientCommandSampler<'_> {
             }
         }
         follow_held_weapon_select(&mut self.select, ps_weapon, life_sequence, times.game_msec);
-        if let Some(ps) = ps {
-            if self.select.index == ps.weapon {
-                self.select.mapped_index = if level
-                    .content
-                    .weapon_combat_row(ps.weapon)
-                    .is_some_and(|facts| facts.inventory_type == 3)
-                {
-                    ps.weapon_primary
-                } else {
-                    ps.weapon
-                };
-            }
+        if let Some(ps) = ps
+            && self.select.index == ps.weapon
+        {
+            self.select.mapped_index = if level
+                .content
+                .weapon_combat_row(ps.weapon)
+                .is_some_and(|facts| facts.inventory_type == 3)
+            {
+                ps.weapon_primary
+            } else {
+                ps.weapon
+            };
         }
         let slots = std::mem::take(&mut self.actions.client.action_slots);
         if let Some(inbox) = self.action_inbox.as_mut() {
@@ -1409,14 +1409,13 @@ impl ClientCommandSampler<'_> {
         let in_killcam = view.is_some_and(|v| v.in_killcam());
         if let Some(ps) = ps {
             for next in cycles {
-                if next && gamemode_iw4::copycat_weapnext_bind_active(ps.pm_type, in_killcam) {
-                    if let Some(inbox) = self.action_inbox.as_mut() {
-                        if let Err(error) =
-                            inbox.push(source.client_id(), sim::ClientAction::UseCopycat)
-                        {
-                            diag::warn!(Net, "use_copycat: not queued — {error}");
-                        }
-                    }
+                if next
+                    && gamemode_iw4::copycat_weapnext_bind_active(ps.pm_type, in_killcam)
+                    && let Some(inbox) = self.action_inbox.as_mut()
+                    && let Err(error) =
+                        inbox.push(source.client_id(), sim::ClientAction::UseCopycat)
+                {
+                    diag::warn!(Net, "use_copycat: not queued — {error}");
                 }
                 cycle_weapon_select(
                     &mut self.select,
@@ -1960,7 +1959,7 @@ impl ClientCommandSender<'_> {
                 (Vec::new(), None)
             };
             let window = &cmds;
-            if let Err(e) = link.send_commands(window, &actions, reliable_ack.0) {
+            if let Err(e) = link.send_commands(window, actions, reliable_ack.0) {
                 diag::warn!(Net, "udp send cmds: {e}");
                 return;
             }
@@ -2256,10 +2255,8 @@ impl PresentationPublisher<'_, '_> {
             }
         }
 
-        if archived {
-            if let Some(seat) = remote_poses.remove(&local.0) {
-                predicted = seat;
-            }
+        if archived && let Some(seat) = remote_poses.remove(&local.0) {
+            predicted = seat;
         }
         for mut runtime in &mut self.entities {
             runtime.presented_player = None;

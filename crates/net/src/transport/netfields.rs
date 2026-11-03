@@ -444,7 +444,10 @@ pub fn ps_deviations<'a>(
                 }
                 Validation::Tolerance { epsilon, .. } => {
                     let distance = field_distance(predicted, authoritative, index);
-                    if !(distance > epsilon) {
+                    if !matches!(
+                        distance.partial_cmp(&epsilon),
+                        Some(core::cmp::Ordering::Greater)
+                    ) {
                         return None;
                     }
                     distance

@@ -607,23 +607,22 @@ impl MaterialDefinitions {
                 return TechsetResolve::Hit { index, facts };
             }
             let stripped = alternate_techset_name(key.namespace, want);
-            if stripped != want {
-                if let Some((index, facts)) = find_named(&stripped) {
-                    if facts.table.is_some() {
-                        return TechsetResolve::Hit { index, facts };
-                    }
-                }
+            if stripped != want
+                && let Some((index, facts)) = find_named(&stripped)
+                && facts.table.is_some()
+            {
+                return TechsetResolve::Hit { index, facts };
             }
             return TechsetResolve::GraphMissing { index };
         }
         let stripped = alternate_techset_name(key.namespace, want);
-        if stripped != want {
-            if let Some((index, facts)) = find_named(&stripped) {
-                if facts.table.is_some() {
-                    return TechsetResolve::Hit { index, facts };
-                }
-                return TechsetResolve::GraphMissing { index };
+        if stripped != want
+            && let Some((index, facts)) = find_named(&stripped)
+        {
+            if facts.table.is_some() {
+                return TechsetResolve::Hit { index, facts };
             }
+            return TechsetResolve::GraphMissing { index };
         }
         if let Some((index, facts)) = techsets.iter().enumerate().find(|(_, facts)| {
             facts.namespace != key.namespace

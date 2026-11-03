@@ -140,6 +140,7 @@ pub trait CommonFamilyCompiler: Send {
     fn compile(self: Box<Self>, products: CommonPreparationProducts) -> CommonPreparationResult;
 }
 
+#[derive(Default)]
 pub struct MaterialPopulation {
     pub materials: asset_material::MaterialCatalog,
     pub light_defs: Vec<asset_world::CapturedLightDef>,
@@ -147,19 +148,6 @@ pub struct MaterialPopulation {
     pub report: Vec<String>,
     pub cac_tables: Vec<asset_game::CapturedStringTable>,
     pub scripts: crate::ScriptSources,
-}
-
-impl Default for MaterialPopulation {
-    fn default() -> Self {
-        Self {
-            materials: asset_material::MaterialCatalog::default(),
-            light_defs: Vec::new(),
-            walked: 0,
-            report: Vec::new(),
-            cac_tables: Vec::new(),
-            scripts: crate::ScriptSources::default(),
-        }
-    }
 }
 
 pub trait ZoneLane: Send + Sync {

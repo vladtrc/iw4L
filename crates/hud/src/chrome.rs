@@ -189,6 +189,10 @@ impl<'a, H: ExprHost> ChromeMenuPainter<'a, H> {
         }
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "The borrowed callback retains its call-site lifetime and in-place output contract."
+    )]
     pub(crate) fn paint(
         mut self,
         vis_on_error: MenuVisOnError,
@@ -269,6 +273,10 @@ impl<'a, H: ExprHost> ChromeMenuPainter<'a, H> {
         frame
     }
 
+    #[expect(
+        clippy::type_complexity,
+        reason = "The borrowed callback retains its call-site lifetime and in-place output contract."
+    )]
     fn paint_item(
         &mut self,
         index: usize,

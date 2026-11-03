@@ -61,6 +61,10 @@ pub(crate) fn register_frontend_audio(app: &mut App) {
         );
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn start_frontend_audio_prepare(
     frontend: Option<Res<FrontendAudio>>,
     running: Option<Res<FrontendAudioPrepare>>,
@@ -70,19 +74,19 @@ fn start_frontend_audio_prepare(
         Option<Res<assets::MatchLoadBusy>>,
         Option<Res<assets::MatchLoadRequest>>,
         Option<Res<assets::MatchLoadAccepted>>,
-        Option<Res<assets::PreparedMatchReady>>,
         Option<Res<crate::ambient::SoundBankCompose>>,
     ),
+    scope: Res<State<frame::MatchScope>>,
     mut commands: Commands,
 ) {
     if frontend.is_some() || running.is_some() || silent.is_some() {
         return;
     }
-    let (busy, request, accepted, ready, walk) = loading;
+    let (busy, request, accepted, walk) = loading;
     if busy.is_some_and(|busy| busy.0)
         || request.is_some()
         || accepted.is_some()
-        || ready.is_some()
+        || *scope.get() == frame::MatchScope::Loading
         || walk.is_some()
     {
         return;

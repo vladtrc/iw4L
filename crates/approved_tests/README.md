@@ -16,18 +16,15 @@ directories everywhere in the workspace, this crate included.
 
 | name | what it does |
 | --- | --- |
-| `master_duo_chaos` | two real clients join one dev master lobby, load `mp_boneyard` once, move for 4 seconds and run 16 seconds of RPG chaos with seven bots |
+| `master_duo_chaos` | local master, maximal room adverts through QUIC and GUI, two clients moving and fighting on `mp_boneyard`; optional composed-scene admission and environment boundaries |
 | `heavy_gameplay_lifecycle` | cold load `mp_overgrown` with 16 players, three input scenes, production disconnect, a watched menu, a second map with three scenes, production quit |
 
-The scenario's steps are in `src/scenarios/heavy_gameplay_lifecycle.rs` and
-nowhere else: maps, seed rule, scenes, positions, angles, weapons, durations
-and input. To pin a scene to an owner-chosen position, replace its `Place`
-there; the runner does not change.
+Heavy gameplay steps live in `src/scenarios/heavy_gameplay_lifecycle.rs`: maps, seed rule, scenes, positions, angles, weapons, durations and input. Master steps live in `src/scenarios/master_duo_chaos.rs` and its boundary module.
 
 The heavy scenario uses a 2560×1440 window with vsync off, recorded alongside the observed render target in `run.json`.
 
 The heavy scenario also plants a claymore, drops a weapon through player death,
-restarts the script round in place, and captures entity and resource ownership at gameplay and teardown boundaries.
+restarts the script round in place, submits 8192 sound aliases to exercise explicit pressure refusal, and captures entity and resource ownership at gameplay and teardown boundaries. The runner checks simulation advancement under audio pressure and the actual uploaded static-model index owner on both maps, including replacement across the menu boundary.
 Both scenarios use isolated accounts and wait for native progression content and run `unlock all` from the menu before
 loading their map, so random showcase classes are admitted without altering a
 user account. Dumps record slot, payload, script-object and remote-animation counts; the runner
@@ -79,7 +76,7 @@ vary between runs.
 - `child_stdout.txt`, `child_stderr.txt`, and the game's own
   `iw4l-artifacts/logs/latest.log` and `iw4l-artifacts/runs/<id>/` perf run.
 
-Assertions are liveness only: the map loaded, its GSC program installed, the
+Gameplay assertions check that the map loaded, its GSC program installed, the
 players exist, simulation advanced, the authority applied the scene's movement
 commands to the local player, the player covered a path of at least 32 units or
 died, the lifecycle boundaries happened in order, no script fault ended the
@@ -105,47 +102,53 @@ applied, alive, no path: collision or a frozen player) or `input_not_applied`
 is no frame-time assertion. A run the controller had to kill is a failure,
 never a quit.
 
-## Two clients through the dev master
+## Two clients and master boundaries
 
 ```sh
-cargo xtask master install root@vps --name dev --port 4434 --ca ~/.iw4l/dev-vpn-ca
-cp "$IW4L_GAMES/dev.iw4l-server" "$IW4L_GAMES/community-dev.iw4l-server"
 make approved SCENARIO=master_duo_chaos
+make approved SCENARIO=master_duo_chaos ARGS='--scene /path/to/realized-scene.json'
+# Already built binaries:
+target/play/approved_tests master_duo_chaos --bin target/play/iw4l --master-bin target/play/iw4l-master
 ```
 
-`master_duo_chaos` stages a private hard link or copy of the Linux game binary
-in its run's `install/` directory. Both processes run there with isolated
-accounts, settings and artifacts. The descriptor is `community-dev.iw4l-server` under the resolved games root
-(`IW4L_GAMES`); each process gets it as the saved choice in its own `iw4l-artifacts/community.json`.
-The runner refuses descriptors outside
-the dev channel (port 4434 and a TLS name matching the descriptor host or `iw4l-dev`). Networking uses the descriptor's address,
-TLS name and embedded CA. Linux development binaries select the descriptor without fetching
-Windows updates.
+This Linux scenario requires OpenSSL. It starts its own master on a temporary
+localhost UDP port with a fresh CA and server certificate. `make approved`
+builds both binaries. Games, accounts, settings, certificates, descriptors and
+artifacts belong to the run directory. The runner stages a private game binary
+and selects its local descriptor for each process. It starts at most two game
+processes at once.
 
-The host creates a lobby, the second client joins its ID, and the host waits
-for exactly two members before starting. There is one map installation per
-process. The host simulates seven bots in addition to the two human seats.
-Four seconds of movement exercise the remote command path before the truck
-and RPG scene. Eight samples cover another sixteen seconds, then both games
-exit through `finish_run`.
+Two protocol hosts publish legal maximal inventories: 64 families, including
+63 tokens of 64 bytes, in both `requires` and `available`. A protocol reader
+checks two bounded pages, complete inventories and a following Status RPC on
+the same connection. A real GUI browser refreshes twice; its dumps must contain
+both exact inventories and both native row IDs. Display cells stay bounded.
+Those rooms are closed before gameplay begins.
 
-Each run keeps separate host/client logs, account and settings files, dumps,
-screenshots and native Perfetto traces under its approved-tests directory.
-`IW4L_ARTIFACTS_DIR` redirects output without changing the game working directory.
-`run.json` stores the descriptor, room, build, sample ticks and tick gaps,
-assertions and failures; `commands.txt` stores every console script sent to each
-process. Assertions check distinct human seats, replicated player count,
-advancing simulation, remote movement applied by the authority, exactly one
-map installation, script health and successful process exit. Client marks record both the latest adopted snapshot tick and the presented
-tick, plus clock debt. Timing samples
-and Perfetto `feel`/`remote` events expose stalls and presentation lag without
-applying localhost latency thresholds to a VPS connection.
+The host then creates a lobby on `mp_boneyard`, a second client joins, and both
+load it once. Native Intervention classes avoid dependence on random showcase
+class slots and enabled foreign families. Four seconds of movement exercise
+the remote command path, followed by sixteen seconds of RPG chaos with seven
+bots. Assertions check distinct seats, replicated player count, simulation and
+remote movement, one map installation, script health and process exit.
 
-Dev master installs use `/usr/local/lib/iw4l-dev` and `/etc/iw4l-dev`, with the
-`iw4l-master-dev.service` unit. Installing or updating dev does not overwrite
-the prod executable or certificates.
+`--scene` extends that same run with a realized scene recipe. Generate it with
+the content tooling for the installed maps; the runner uses the runtime's typed
+SceneRecipe parser. Environment coverage needs an IW4 root connected directly
+to two T5 maps with different sun, fog and exposure, plus a two-sided portal
+whose flip can be toggled while retaining a valid scene.
 
-Dev descriptors use the VPS host as the TLS identity. For an IP address,
-the independently issued dev certificate includes that IP in its SAN. This
-allows IP verification without sending a synthetic DNS label as SNI, preserving
-the intended destination through proxies that inspect QUIC server names.
+The host visits each T5 map directly and through its root portal. Dumps retain
+physical WorldId, authored environments and actual shader constant rows;
+assertions compare sun/exposure to the physical world, fog/sun/exposure between
+direct and portal views, and distinct same-family banks. Two independent
+clients then join the running host sequentially, with equal map fingerprints
+and live seats. A third client receives the same recipe with only one portal
+flip changed and must be rejected for map-content mismatch. One held bot keeps
+the host match running between clients. The host must survive the rejection.
+Without `--scene`, the report contains only the browser and native-map cases.
+
+Each role keeps commands, stdout/stderr, game logs, dumps, screenshots and
+native Perfetto traces. `run.json` records binary facts, exact scene input,
+pages, inventories, UI dvars, shader banks and boundary assertions. Every game
+exits through `finish_run`; a timeout or forced termination fails the run.

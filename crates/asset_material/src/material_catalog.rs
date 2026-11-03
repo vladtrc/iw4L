@@ -1204,15 +1204,15 @@ impl MaterialCatalog {
             graph,
         });
 
-        if let Some(graph) = s.latest_technique_graph() {
-            if graph.rows_truncated != 0 || graph.arguments_truncated != 0 {
-                diag::warn!(
-                    Zone,
-                    "technique graph truncated for {name}: rows_truncated={} arguments_truncated={} (fixed capture cap)",
-                    graph.rows_truncated,
-                    graph.arguments_truncated
-                );
-            }
+        if let Some(graph) = s.latest_technique_graph()
+            && (graph.rows_truncated != 0 || graph.arguments_truncated != 0)
+        {
+            diag::warn!(
+                Zone,
+                "technique graph truncated for {name}: rows_truncated={} arguments_truncated={} (fixed capture cap)",
+                graph.rows_truncated,
+                graph.arguments_truncated
+            );
         }
         Some(
             self.take_techset_slot(TechniqueSetFacts {
@@ -1341,10 +1341,10 @@ impl AssetLinkSink for MaterialCatalog {
             self.link.bind_direct(map, insert_slot, index);
         }
 
-        if ty == AssetType::Material {
-            if let Some(header) = s.latest_material().and_then(|g| g.header) {
-                self.link.bind_direct(map, header, index);
-            }
+        if ty == AssetType::Material
+            && let Some(header) = s.latest_material().and_then(|g| g.header)
+        {
+            self.link.bind_direct(map, header, index);
         }
         Ok(())
     }

@@ -25,7 +25,7 @@ pub const fn mark_mesh_index_reserve(old_index_n: u32, tri_count: u8) -> u32 {
 
 #[inline]
 pub const fn mark_context_is_world_list(context0: u8) -> bool {
-    !matches!(context0, 1 | 2 | 3 | 4)
+    !matches!(context0, 1..=4)
 }
 
 pub fn reserve_mark_mesh_verts(

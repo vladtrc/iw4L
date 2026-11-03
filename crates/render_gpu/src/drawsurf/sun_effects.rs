@@ -306,10 +306,10 @@ fn prepare_sun_effects(
     gpu.pipelines = ids;
 }
 
-fn uploaded_view<'a>(
-    uploaded: &'a RuntimeUploadedImageRegistry,
+fn uploaded_view(
+    uploaded: &RuntimeUploadedImageRegistry,
     image: Option<u32>,
-) -> Option<&'a TextureView> {
+) -> Option<&TextureView> {
     let slot = image? as usize;
     uploaded
         .material_images
@@ -350,8 +350,8 @@ fn pack_params(frame: &SunEffectsFrame) -> SunParamsGpu {
     }
 }
 
-fn bind_sun<'a>(
-    gpu: &'a SunEffectsGpu,
+fn bind_sun(
+    gpu: &SunEffectsGpu,
     cache: &PipelineCache,
     device: &RenderDevice,
     depth: &TextureView,

@@ -2,7 +2,7 @@ use asset_game::WeaponRegistry;
 use asset_world::{ClipCollision, SpawnPoint};
 use assets::{
     LoadingScreen, MatchType10SoundHints, PreparedDestructibleDeath, PreparedFpvMeshes,
-    PreparedMatchReady, PreparedWeapons, PreparedXAnims,
+    PreparedWeapons, PreparedXAnims,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -13,6 +13,7 @@ use frame::{
 use net::{AuthorityInputGate, AuthorityLoadHold, AuthorityWorld, ClientSet};
 
 use crate::SessionContentManifest;
+use crate::match_load::PreparedMatchReady;
 use crate::weapon_content;
 use render_frontend::adapters::anim::dyn_ent::{DynEntPhysClip, DynEntPhysWorld};
 use render_frontend::prepare::scene::camera::SimCamera;
@@ -218,6 +219,7 @@ impl PreparedMatchSource<'_, '_> {
             return;
         };
         commands.remove_resource::<PreparedMatchReady>();
+        let prepared_atlas = self.ready.atlas.take();
 
         let world_report = std::mem::take(&mut prepared.report);
         log_world_report(&world_report);
@@ -496,19 +498,9 @@ impl PreparedMatchSource<'_, '_> {
                 self.identity.as_deref(),
                 &zone,
             );
-            let clip = match (clip, self.merged.as_deref()) {
-                (Some(clip), Some(merged)) => {
-                    Some(crate::atlas::replace_clip(clip, merged, 0).map_err(InstallRefusal::new)?)
-                }
-                (clip, _) => clip,
-            };
-            let (atlas, atlas_clips) = crate::atlas::load_atlas(
-                self.merged.as_deref(),
-                self.identity.as_deref(),
-                clip.as_deref(),
-            )
-            .map_err(InstallRefusal::new)?
-            .unzip();
+            let (atlas, atlas_clips) = prepared_atlas
+                .map(|prepared| (prepared.atlas, prepared.clips))
+                .unzip();
             content.set_atlas(atlas);
             stage_resource(
                 &mut install,
@@ -928,13 +920,9 @@ fn merged_rules(
     merged: &assets::MergedMap,
 ) -> frame::HostMatchRules {
     let mut rules = host.cloned().unwrap_or_else(frame::HostMatchRules::default);
-    for (name, value) in merged.recipe["dvars"].as_object().into_iter().flatten() {
-        let value = match value {
-            serde_json::Value::String(text) => text.clone(),
-            other => other.to_string(),
-        };
+    for (name, value) in &merged.scene.dvars {
         rules.0.retain(|(set, _)| !set.eq_ignore_ascii_case(name));
-        rules.0.push((name.clone(), value));
+        rules.0.push((name.clone(), value.clone()));
     }
     rules
 }
@@ -1966,7 +1954,6 @@ impl MatchPlayerBootstrap<'_> {
             allow_debug_actions,
             intermission_view: map.intermission_view,
             airstrike_height: map.airstrike_height,
-            ..Default::default()
         }) {
             diag::info!(Sim, "bootstrap: {err}");
             return Err(InstallRefusal::new(format!(

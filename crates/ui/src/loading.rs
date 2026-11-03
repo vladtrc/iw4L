@@ -119,7 +119,6 @@ fn loading_text_shadow() -> TextShadow {
     TextShadow {
         offset: Vec2::splat(1.5),
         color: Color::linear_rgba(0., 0., 0., 0.75),
-        ..default()
     }
 }
 
@@ -597,6 +596,10 @@ impl LoadingScreenView<'_, '_> {
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn update_loading_screen(
     mut commands: Commands,
     font: Option<Res<GameUiFont>>,

@@ -225,9 +225,9 @@ fn parse_program(
 }
 
 fn parse_actor(value: &Value, client: sim::ClientId) -> Result<InputProgram, String> {
-    let quantum_ms = i32::try_from(integer(&value, "quantum_ms")?).map_err(|e| e.to_string())?;
+    let quantum_ms = i32::try_from(integer(value, "quantum_ms")?).map_err(|e| e.to_string())?;
     let first_sequence =
-        u32::try_from(integer(&value, "first_sequence")?).map_err(|e| e.to_string())?;
+        u32::try_from(integer(value, "first_sequence")?).map_err(|e| e.to_string())?;
     let rows = value
         .get("samples")
         .and_then(Value::as_array)

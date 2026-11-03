@@ -87,13 +87,12 @@ fn fill_fx(out: &mut GlassZoneCensus, s: &ZoneStream<'_>) {
         out.fx_origins.reserve(g.init_piece_count);
         for i in 0..g.init_piece_count {
             let p = states.at(i * sz::FX_GLASS_INIT_PIECE_STATE);
-            match (
+            if let (Ok(x), Ok(y), Ok(z)) = (
                 s.f32_at(p, INIT_PIECE_ORIGIN),
                 s.f32_at(p, INIT_PIECE_ORIGIN + 4),
                 s.f32_at(p, INIT_PIECE_ORIGIN + 8),
             ) {
-                (Ok(x), Ok(y), Ok(z)) => out.fx_origins.push([x, y, z]),
-                _ => {}
+                out.fx_origins.push([x, y, z])
             }
         }
     }
@@ -243,7 +242,7 @@ pub fn build_fx_glass_reset(stream: &ZoneStream<'_>) -> Option<FxGlassReset> {
     let src: Vec<u8> = init_geo_data.iter().flatten().copied().collect();
     glass_reset_copy_geo(&mut geo_flat, &src);
     let mut geo_data = Vec::with_capacity(init_geo_data.len());
-    for chunk in geo_flat.chunks_exact(FX_GLASS_GEOMETRY_DATA) {
+    for chunk in geo_flat.as_chunks::<FX_GLASS_GEOMETRY_DATA>().0.iter() {
         let mut word = [0u8; FX_GLASS_GEOMETRY_DATA];
         word.copy_from_slice(chunk);
         geo_data.push(word);

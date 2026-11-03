@@ -387,7 +387,11 @@ pub struct WorldScene {
     pub asset_ref: asset_material::AssetRefDumpCensus,
 }
 
-impl WorldScene {}
+impl WorldScene {
+    pub fn material_environments(&self) -> &[asset_material::MaterialLayerBindingInputs] {
+        &self.material_layers
+    }
+}
 
 #[derive(Debug)]
 pub struct WorldLightmap {
@@ -1261,18 +1265,20 @@ pub fn world_scene_from_draw(
         products_id,
     } = materials;
     let Some(mut draw) = world.draw else {
-        let mut empty = WorldScene::default();
-        empty.sun_sample_size_near = world.policy.sun_sample_size_near;
-        empty.common_profile_id = common_profile_id;
-        empty.products_id = products_id;
-        empty.fx_glass = fx_glass;
-        empty.script_brush_gameobjects = script_brush_gameobjects;
-        empty.script_brush_exploders = script_brush_exploders;
-        empty.script_brush_targetnames = script_brush_targetnames;
-        empty.script_brush_models = script_brush_models;
-        empty.dyn_ent_instances = dyn_ent_instances;
-        empty.dyn_ent_brush_n = dyn_ent_brush_n;
-        empty.dyn_ent_brushes = world_dyn_ent_brushes(&world.dyn_ents.brushes, &[], &[]);
+        let empty = WorldScene {
+            sun_sample_size_near: world.policy.sun_sample_size_near,
+            common_profile_id,
+            products_id,
+            fx_glass,
+            script_brush_gameobjects,
+            script_brush_exploders,
+            script_brush_targetnames,
+            script_brush_models,
+            dyn_ent_instances,
+            dyn_ent_brush_n,
+            dyn_ent_brushes: world_dyn_ent_brushes(&world.dyn_ents.brushes, &[], &[]),
+            ..WorldScene::default()
+        };
         return Ok(empty);
     };
     let dyn_ent_brushes = world_dyn_ent_brushes(
@@ -1473,7 +1479,9 @@ pub fn world_scene_from_draw(
     let material_layers: Vec<_> = draw
         .atlas_layers
         .iter()
-        .map(|layer| super::world_bindings::layer(&layer.lighting))
+        .map(|layer| {
+            super::world_bindings::layer(asset_core::atlas::WorldId(layer.world), &layer.lighting)
+        })
         .collect();
     let portal_worlds = 1 + draw
         .atlas_layers
@@ -1511,8 +1519,8 @@ pub fn world_scene_from_draw(
         .iter()
         .map(|layer| render_frame::PortalSurfaces {
             world: layer.world,
-            first: layer.surface_base as u32,
-            end: (layer.surface_base + layer.surface_count) as u32,
+            first: layer.surface_base,
+            end: (layer.surface_base + layer.surface_count),
         })
         .collect();
     let atlas_skies: Vec<(usize, asset_world::ModelMesh)> = draw

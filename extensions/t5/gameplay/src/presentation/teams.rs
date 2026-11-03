@@ -69,9 +69,7 @@ pub fn t5_teamset_from_map_gsc(script: &str) -> Option<&str> {
     let mut from = 0;
     while let Some(rel) = lower[from..].find("_teamset_") {
         let start = from + rel + "_teamset_".len();
-        let Some(rest) = script.get(start..) else {
-            return None;
-        };
+        let rest = script.get(start..)?;
         let Some(end) = rest.find("::") else {
             from = start;
             continue;

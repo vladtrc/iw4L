@@ -101,8 +101,8 @@ pub(crate) fn update(
             }
             continue;
         }
-        if stream.source.is_none() {
-            if let Some(cue) = weapon_audio.source_cue(
+        if stream.source.is_none()
+            && let Some(cue) = weapon_audio.source_cue(
                 &runtime,
                 stream.weapon,
                 slot_pair(
@@ -111,22 +111,22 @@ pub(crate) fn update(
                     WeaponSoundSlot::FireLoopPlayer,
                 ),
                 number,
-            ) {
-                stream.source = Some(DesiredSource {
-                    key: SourceKey {
-                        scope: AudioScope::Match,
-                        object: entity.to_bits(),
-                        slot: 8,
-                    },
-                    version: 1,
-                    cue,
-                    origin_inches: None,
-                    start_frame: runtime.audio_frame(),
-                    gain: 1.0,
-                    rate: 1.0,
-                    audible: true,
-                });
-            }
+            )
+        {
+            stream.source = Some(DesiredSource {
+                key: SourceKey {
+                    scope: AudioScope::Match,
+                    object: entity.to_bits(),
+                    slot: 8,
+                },
+                version: 1,
+                cue,
+                origin_inches: None,
+                start_frame: runtime.audio_frame(),
+                gain: 1.0,
+                rate: 1.0,
+                audible: true,
+            });
         }
         if let Some(source) = stream.source.as_mut() {
             source.origin_inches = (!stream.player_view).then_some(stream.origin_inches);
@@ -142,9 +142,9 @@ pub(crate) fn stop(
     streams: Query<&FlameStream>,
     runtime: Res<AudioRuntime>,
 ) {
-    if let Ok(stream) = streams.get(event.entity) {
-        if let Some(source) = &stream.source {
-            runtime.stop_source(source.key);
-        }
+    if let Ok(stream) = streams.get(event.entity)
+        && let Some(source) = &stream.source
+    {
+        runtime.stop_source(source.key);
     }
 }

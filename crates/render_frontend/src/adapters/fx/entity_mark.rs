@@ -245,7 +245,7 @@ fn stage(
         let Some(indices) = skel.indices.get(start..start + count) else {
             continue;
         };
-        for triangle in indices.chunks_exact(3) {
+        for triangle in indices.as_chunks::<3>().0 {
             let ids = [
                 triangle[0] as usize,
                 triangle[1] as usize,

@@ -630,7 +630,7 @@ pub fn decode_reflection_probe_cubemap(source: &AuthoredImage) -> Result<Image, 
             let encoded = &source.payload[start..start + level_bytes];
             match pixel_format {
                 PixelFormat::Bgra8 => {
-                    for pixel in encoded.chunks_exact(4) {
+                    for pixel in encoded.as_chunks::<4>().0 {
                         data.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
                     }
                 }
@@ -805,9 +805,8 @@ pub fn decode_ui_archive_image(
 ) -> Result<Option<(u32, u32, Vec<u8>)>, String> {
     let name = crate::AssetRef::bare_name(image_name);
     for main in ui_decode_mains(games_root) {
-        match decode_ui_image_from_main(&main, name)? {
-            Some(image) => return Ok(Some(image)),
-            None => {}
+        if let Some(image) = decode_ui_image_from_main(&main, name)? {
+            return Ok(Some(image));
         }
     }
     Ok(None)

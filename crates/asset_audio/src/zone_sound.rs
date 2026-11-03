@@ -88,17 +88,17 @@ impl ZoneSoundCapture {
         self.native_mut()
     }
     pub fn guard<E: std::fmt::Display>(&mut self, result: Result<(), E>) {
-        if let Err(error) = result {
-            if self.stopped.is_none() {
-                self.stopped = Some(error.to_string());
-            }
+        if let Err(error) = result
+            && self.stopped.is_none()
+        {
+            self.stopped = Some(error.to_string());
         }
     }
     pub fn raw_file(&mut self, name: &str, data: &[u8], zlib_compressed: bool) {
-        if self.stopped.is_none() {
-            if let Some(catalog) = self.capture.catalog_mut() {
-                catalog.ingest_rawfile(name, data, zlib_compressed);
-            }
+        if self.stopped.is_none()
+            && let Some(catalog) = self.capture.catalog_mut()
+        {
+            catalog.ingest_rawfile(name, data, zlib_compressed);
         }
     }
     pub fn iw4_loaded(

@@ -38,8 +38,16 @@ struct TheaterNavigationInput<'w, 's> {
 #[derive(bevy::ecs::system::SystemParam)]
 struct TheaterFocusNavigation<'w, 's> {
     commands: Commands<'w, 's>,
+    #[expect(
+        clippy::type_complexity,
+        reason = "Bevy system parameters keep scheduler resource access explicit."
+    )]
     roots: Query<'w, 's, Entity, Or<(With<BrowserRoot>, With<EditorRoot>)>>,
     children: Query<'w, 's, &'static Children>,
+    #[expect(
+        clippy::type_complexity,
+        reason = "Bevy system parameters keep scheduler resource access explicit."
+    )]
     buttons: Query<
         'w,
         's,

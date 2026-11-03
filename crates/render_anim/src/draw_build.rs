@@ -422,14 +422,12 @@ pub fn retain_script_model_assets(plan: &mut ScriptModelDrawPlan, keep: &[bool])
                     break;
                 };
                 next.vertices.push(*vertex);
-                if packed_ok {
-                    if let Some(src) = packed_src {
-                        if let Some(row) = src.get(vi as usize) {
-                            packed_dst.push(*row);
-                        } else {
-                            packed_ok = false;
-                            packed_dst.clear();
-                        }
+                if packed_ok && let Some(src) = packed_src {
+                    if let Some(row) = src.get(vi as usize) {
+                        packed_dst.push(*row);
+                    } else {
+                        packed_ok = false;
+                        packed_dst.clear();
                     }
                 }
             }

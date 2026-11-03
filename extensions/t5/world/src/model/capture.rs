@@ -142,8 +142,11 @@ fn capture_model_skel_t5(
             _ => return None,
         };
         let mut part_bits = [0u32; 6];
-        for i in 0..ext_t5_fastfile::size::XSURFACE_PART_BITS_WORDS {
-            part_bits[i] = stream
+        for (i, part_bits_entry) in part_bits[..ext_t5_fastfile::size::XSURFACE_PART_BITS_WORDS]
+            .iter_mut()
+            .enumerate()
+        {
+            (*part_bits_entry) = stream
                 .u32_at(
                     surface,
                     ext_t5_fastfile::size::XSURFACE_PART_BITS_OFF + i * 4,
@@ -162,7 +165,8 @@ fn capture_model_skel_t5(
             XRIGID_VERT_LIST,
         )?;
 
-        for vertex_index in 0..vertex_count {
+        for (vertex_index, surface_skins_entry) in surface_skins[..vertex_count].iter().enumerate()
+        {
             let vertex = vertices.at(vertex_index * GFX_PACKED_VERTEX);
             packed_vertices.push(copy_packed_vertex_t5(stream, vertex)?);
             positions.push([
@@ -171,7 +175,7 @@ fn capture_model_skel_t5(
                 stream.f32_at(vertex, 8).ok()?,
             ]);
 
-            let skin = surface_skins[vertex_index];
+            let skin = *surface_skins_entry;
             if skin.is_rigid() {
                 rigid_verts += 1;
             } else {
@@ -496,7 +500,7 @@ fn decode_surface_skin_t5(
 ) -> Option<Vec<VertSkin>> {
     let mut skins = vec![VertSkin::default(); vertex_count];
     let bone_at = |raw: u16| -> Option<u8> {
-        if raw % BONE_STRIDE != 0 {
+        if !raw.is_multiple_of(BONE_STRIDE) {
             return None;
         }
         let bone = raw / BONE_STRIDE;
@@ -505,26 +509,26 @@ fn decode_surface_skin_t5(
             .flatten()
     };
 
-    if vert_list_count > 0 {
-        if let Ok(ext_t5_fastfile::ZonePtr::Offset(list_ptr)) = stream.ptr_at(surface, 40) {
-            let list = stream.resolve_alias(list_ptr);
-            let mut vertex = 0usize;
-            for i in 0..vert_list_count {
-                let entry = list.at(i * rigid_stride);
-                let bone_offset = stream.u16_at(entry, 0).ok()?;
-                let run = stream.u16_at(entry, 2).ok()? as usize;
-                let bone = bone_at(bone_offset)?;
-                for _ in 0..run {
-                    if vertex >= vertex_count {
-                        break;
-                    }
-                    skins[vertex] = VertSkin::rigid(bone);
-                    vertex += 1;
+    if vert_list_count > 0
+        && let Ok(ext_t5_fastfile::ZonePtr::Offset(list_ptr)) = stream.ptr_at(surface, 40)
+    {
+        let list = stream.resolve_alias(list_ptr);
+        let mut vertex = 0usize;
+        for i in 0..vert_list_count {
+            let entry = list.at(i * rigid_stride);
+            let bone_offset = stream.u16_at(entry, 0).ok()?;
+            let run = stream.u16_at(entry, 2).ok()? as usize;
+            let bone = bone_at(bone_offset)?;
+            for _ in 0..run {
+                if vertex >= vertex_count {
+                    break;
                 }
+                skins[vertex] = VertSkin::rigid(bone);
+                vertex += 1;
             }
-            if vertex == vertex_count {
-                return Some(skins);
-            }
+        }
+        if vertex == vertex_count {
+            return Some(skins);
         }
     }
 

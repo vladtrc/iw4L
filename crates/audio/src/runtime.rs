@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -9,6 +8,7 @@ use bevy::prelude::Resource;
 
 use crate::admission::{AdmissionFailure, AdmissionPolicy, Occupant};
 use crate::clip_store::MediaService;
+use crate::control::{AudioInbox, CueCommand};
 use crate::cue::{CueFailure, CueHandle, CueResolver, CueSubmission};
 use crate::cue_execution::{
     CancelKind, CueCancellation, CueIntent, CueLease, CueMix, CueStep, CueTrigger, CueWork,
@@ -18,21 +18,12 @@ use crate::render_core::{
     Assignment, AudioScope, InstanceState, InstanceStatus, PHYSICAL_VOICES, QUANTUM, RenderShared,
     RenderVoiceId, SAMPLE_RATE,
 };
-use crate::sources::{
-    DesiredSource, SourceActivity, SourceCue, SourceKey, SourcePublisher, SourceScene,
-};
+use crate::sources::{DesiredSource, SourceActivity, SourceCue, SourceId, SourceKey, SourceScene};
 use crate::spatial::{ListenerSnapshot, ListenerState, SpatialSource};
 use std::collections::VecDeque;
 
 pub const LOGICAL_INSTANCES: usize = 2048;
 const CONTROL_BATCH: usize = 64;
-
-enum CueRequest {
-    Start(CueSubmission),
-    StopScope(AudioScope),
-    StopSource(SourceKey),
-    Sources(SourceScene),
-}
 
 #[derive(Clone, Copy, Debug)]
 pub struct AudioDiagnostics {
@@ -65,8 +56,7 @@ struct StartRequest {
 
 #[derive(Clone, Copy)]
 struct SourceBinding {
-    key: SourceKey,
-    version: u64,
+    id: SourceId,
     gain: f32,
     rate: f32,
     group: Option<crate::sources::SourceRenderGroup>,
@@ -85,7 +75,7 @@ struct LogicalInstance {
 #[derive(Resource)]
 pub struct AudioRuntime {
     shared: Arc<RenderShared>,
-    cue_tx: SyncSender<CueRequest>,
+    inbox: Arc<AudioInbox>,
     media: Mutex<Option<MediaService>>,
     cue_mix: Mutex<Option<CueMix>>,
     cue_cancellation: CueCancellation,
@@ -94,7 +84,6 @@ pub struct AudioRuntime {
     listener: Arc<ListenerState>,
     event_context: Arc<crate::event::EventContextState>,
 
-    source_publisher: Mutex<SourcePublisher>,
     rejections: Arc<[AtomicU64; 7]>,
     shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
@@ -113,7 +102,7 @@ impl AudioRuntime {
             .device_required
             .store(device_enabled, Ordering::Relaxed);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let (cue_tx, cue_rx) = sync_channel(LOGICAL_INSTANCES);
+        let inbox = Arc::new(AudioInbox::new());
         let thread_shared = shared.clone();
         let thread_shutdown = shutdown.clone();
         let sources = Arc::new(SourceActivity::new());
@@ -131,7 +120,7 @@ impl AudioRuntime {
         let worker = AudioControl {
             shared: thread_shared,
             shutdown: thread_shutdown,
-            cue_rx,
+            inbox: inbox.clone(),
             device_enabled,
             sources: control_sources,
             listener: control_listener,
@@ -143,7 +132,7 @@ impl AudioRuntime {
         .spawn();
         Self {
             shared,
-            cue_tx,
+            inbox,
             media: Mutex::new(None),
             cue_mix: Mutex::new(None),
             cue_cancellation: CueCancellation::default(),
@@ -152,7 +141,6 @@ impl AudioRuntime {
             listener,
             event_context,
 
-            source_publisher: Mutex::new(SourcePublisher::new()),
             rejections,
             shutdown,
             worker: Some(worker),
@@ -239,23 +227,14 @@ impl AudioRuntime {
     }
 
     pub(crate) fn stop_source(&self, key: SourceKey) {
-        self.source_publisher
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .stop_source(key);
-        let _ = self.cue_tx.send(CueRequest::StopSource(key));
+        self.inbox.stop_source(key);
         if let Some(worker) = &self.worker {
             worker.thread().unpark();
         }
     }
 
     pub(crate) fn stop_scope(&self, scope: AudioScope) {
-        self.cue_cancellation.cancel_scope(scope);
-        self.source_publisher
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .stop_scope(scope);
-        let _ = self.cue_tx.send(CueRequest::StopScope(scope));
+        self.inbox.stop_scope(scope, &self.cue_cancellation);
         if let Some(worker) = &self.worker {
             worker.thread().unpark();
         }
@@ -266,20 +245,14 @@ impl AudioRuntime {
         if let Some(worker) = &self.worker {
             worker.thread().unpark();
         }
-        self.source_publisher
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .cancel();
+        self.inbox.cancel_sources();
     }
 
     pub(crate) fn set_sources(&mut self, sources: Vec<DesiredSource>) {
-        let (scene, rejected) = self
-            .source_publisher
-            .get_mut()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .reconcile(sources, self.shared.cancelled.load(Ordering::Acquire));
+        let rejected = self
+            .inbox
+            .set_sources(sources, self.shared.cancelled.load(Ordering::Acquire));
         self.sources.dropped.fetch_add(rejected, Ordering::Relaxed);
-        let _ = self.cue_tx.send(CueRequest::Sources(scene));
         if let Some(worker) = &self.worker {
             worker.thread().unpark();
         }
@@ -454,14 +427,11 @@ impl AudioRuntime {
         let handle = CueHandle(request.state.clone());
         if self.shared.cancelled.load(Ordering::Acquire) {
             request.reject(CueFailure::Cancelled);
-        } else if let Err(error) = self.cue_tx.try_send(CueRequest::Start(request)) {
-            let (std::sync::mpsc::TrySendError::Full(request)
-            | std::sync::mpsc::TrySendError::Disconnected(request)) = error;
-            if let CueRequest::Start(request) = request {
-                request.reject(CueFailure::QueueFull);
+        } else {
+            self.inbox.start(request);
+            if let Some(worker) = &self.worker {
+                worker.thread().unpark();
             }
-        } else if let Some(worker) = &self.worker {
-            worker.thread().unpark();
         }
         handle
     }
@@ -480,7 +450,7 @@ impl Drop for AudioRuntime {
 struct AudioControl {
     shared: Arc<RenderShared>,
     shutdown: Arc<AtomicBool>,
-    cue_rx: Receiver<CueRequest>,
+    inbox: Arc<AudioInbox>,
     device_enabled: bool,
     sources: Arc<SourceActivity>,
     listener: Arc<ListenerState>,
@@ -502,7 +472,7 @@ impl AudioControl {
         let Self {
             shared,
             shutdown,
-            cue_rx,
+            inbox,
             device_enabled,
             sources,
             listener,
@@ -541,7 +511,7 @@ impl AudioControl {
             asserted: Vec::new(),
         };
         let mut present_sources = HashSet::with_capacity(LOGICAL_INSTANCES);
-        let mut source_cues = HashMap::<(SourceKey, u64), Arc<crate::cue::CueState>>::with_capacity(
+        let mut source_cues = HashMap::<SourceId, Arc<crate::cue::CueState>>::with_capacity(
             crate::sources::SOURCE_HISTORY,
         );
         let mut silence = [[0.0; 2]; QUANTUM];
@@ -554,72 +524,11 @@ impl AudioControl {
             let listener = listener_snapshot.as_ref();
             events.advance(event_context.get());
             let diag_stage = crate::diagnostics::slow_stage("context", diag_pass);
-            for _ in 0..CONTROL_BATCH {
-                let Ok(command) = cue_rx.try_recv() else {
-                    break;
-                };
+            let (commands, scene) = inbox.take(CONTROL_BATCH);
+            for command in commands {
                 let request = match command {
-                    CueRequest::Start(request) => request,
-                    CueRequest::Sources(scene) => {
-                        desired = scene;
-                        continue;
-                    }
-                    CueRequest::StopSource(key) => {
-                        for logical in &instances {
-                            if logical.source.is_some_and(|source| source.key == key) {
-                                logical
-                                    .request
-                                    .instance
-                                    .stopped
-                                    .store(true, Ordering::Release);
-                            }
-                        }
-                        shared.synchronize();
-                        for logical in &mut instances {
-                            if !logical.source.is_some_and(|source| source.key == key) {
-                                continue;
-                            }
-                            let first = logical
-                                .request
-                                .instance
-                                .first_device_us
-                                .load(Ordering::Acquire);
-                            if !logical.first_device_reported && first != u64::MAX {
-                                perf::instant!("audio_instance_started", "iw4l.sim", |ctx| {
-                                    ctx.arg("instance", logical.request.instance.id as i64);
-                                    ctx.arg("scope", logical.request.instance.scope as i64);
-                                });
-                                logical.first_device_reported = true;
-                            }
-                        }
-                        let queued = std::mem::take(&mut pending_cues);
-                        let mut cancelled = 0u64;
-                        for work in queued {
-                            if work.source.is_some_and(|(source, _)| source == key) {
-                                cancelled += 1;
-                                work.complete(crate::StartOutcome::Failed(
-                                    crate::StartFailure::CueRefused(CueFailure::Cancelled),
-                                ));
-                            } else {
-                                pending_cues.push_back(work);
-                            }
-                        }
-                        desired.sources.retain(|source| source.key != key);
-                        desired.asserted.retain(|source| source.key != key);
-                        source_cues.retain(|(source, _), state| {
-                            if *source != key {
-                                return true;
-                            }
-                            state
-                                .release
-                                .release(shared.frame.load(Ordering::Acquire), 0);
-                            false
-                        });
-                        perf::instant!("audio_source_stop", "iw4l.sim", "object" => key.object,
-                            "slot" => key.slot as u64, "scope" => key.scope as u64, "pending_cancelled" => cancelled);
-                        continue;
-                    }
-                    CueRequest::StopScope(scope) => {
+                    CueCommand::Start(request) => *request,
+                    CueCommand::StopScope(scope) => {
                         for logical in &instances {
                             if logical.request.instance.scope == scope {
                                 logical
@@ -663,10 +572,8 @@ impl AudioControl {
                                 pending_cues.push_back(work);
                             }
                         }
-                        desired.sources.retain(|source| source.key.scope != scope);
-                        desired.asserted.retain(|source| source.key.scope != scope);
-                        source_cues.retain(|(key, _), state| {
-                            if key.scope != scope {
+                        source_cues.retain(|id, state| {
+                            if id.key.scope != scope {
                                 return true;
                             }
                             state
@@ -700,6 +607,9 @@ impl AudioControl {
                 } else {
                     pending_cues.push_back(CueWork::new(request));
                 }
+            }
+            if let Some(scene) = scene {
+                desired = scene;
             }
             for logical in &mut instances {
                 let first_us = logical
@@ -760,18 +670,9 @@ impl AudioControl {
                     update_spatial(&logical.request, listener);
                 }
             }
-            desired
-                .sources
-                .retain(|_| !shared.cancelled.load(Ordering::Acquire));
-            desired
-                .asserted
-                .retain(|_| !shared.cancelled.load(Ordering::Acquire));
-            source_cues.retain(|(key, version), state| {
-                let current = desired
-                    .asserted
-                    .binary_search_by_key(key, |source| source.key)
-                    .ok()
-                    .is_some_and(|index| desired.asserted[index].version == *version);
+            desired.retain_current(shared.cancelled.load(Ordering::Acquire));
+            source_cues.retain(|id, state| {
+                let current = desired.current(*id).is_some();
                 if !current {
                     state
                         .release
@@ -783,13 +684,8 @@ impl AudioControl {
                 let Some(binding) = logical.source else {
                     continue;
                 };
-                let source = desired
-                    .asserted
-                    .binary_search_by_key(&binding.key, |source| source.key)
-                    .ok()
-                    .map(|index| &desired.asserted[index]);
-                if let Some(source) = source.filter(|source| source.version == binding.version) {
-                    let executable = executable_source(&desired, binding.key, binding.version);
+                if let Some(source) = desired.current(binding.id) {
+                    let executable = desired.executable(binding.id).is_some();
                     set_parameters(
                         &logical.request.instance,
                         source.gain * binding.gain,
@@ -921,21 +817,15 @@ impl AudioControl {
                     continue;
                 }
 
-                if let Some((key, version)) = work.source {
-                    let current = desired
-                        .asserted
-                        .binary_search_by_key(&key, |source| source.key)
-                        .ok()
-                        .map(|index| &desired.asserted[index])
-                        .filter(|source| source.version == version);
+                if let Some(id) = work.source {
+                    let current = desired.current(id);
                     let Some(source) = current else {
                         work.complete(crate::StartOutcome::Failed(
                             crate::StartFailure::CueRefused(CueFailure::Cancelled),
                         ));
                         continue;
                     };
-                    if (!executable_source(&desired, key, version)
-                        || instances.len() == LOGICAL_INSTANCES)
+                    if (desired.executable(id).is_none() || instances.len() == LOGICAL_INSTANCES)
                         && !work.request.execution.lease.cancelled()
                         && !work.request.state.release.requested()
                     {
@@ -971,14 +861,7 @@ impl AudioControl {
                                 .filter(|_| work.source.is_none())
                                 .unwrap_or_else(Instant::now),
                         );
-                        let source = work.source.and_then(|(key, version)| {
-                            desired
-                                .sources
-                                .binary_search_by_key(&key, |source| source.key)
-                                .ok()
-                                .map(|index| &desired.sources[index])
-                                .filter(|source| source.version == version)
-                        });
+                        let source = work.source.and_then(|id| desired.executable(id));
                         set_parameters(
                             &instance,
                             start.gain * source.map_or(1.0, |source| source.gain),
@@ -1013,9 +896,8 @@ impl AudioControl {
                             &mut instances,
                             listener,
                             &rejections,
-                            work.source.map(|(key, version)| SourceBinding {
-                                key,
-                                version,
+                            work.source.map(|id| SourceBinding {
+                                id,
                                 gain: start.gain,
                                 rate: start.rate,
                                 group: source.and_then(|source| source.cue.group),
@@ -1050,16 +932,17 @@ impl AudioControl {
 
             let mut channel_voices = HashMap::new();
             for logical in &instances {
-                if logical.slot.is_some() && live(&logical.request.instance) {
-                    if let Some(channel) = logical.request.admission.channel {
-                        *channel_voices
-                            .entry((
-                                logical.request.instance.scope,
-                                logical.request.admission.bank_revision,
-                                channel.key,
-                            ))
-                            .or_insert(0usize) += 1;
-                    }
+                if logical.slot.is_some()
+                    && live(&logical.request.instance)
+                    && let Some(channel) = logical.request.admission.channel
+                {
+                    *channel_voices
+                        .entry((
+                            logical.request.instance.scope,
+                            logical.request.admission.bank_revision,
+                            channel.key,
+                        ))
+                        .or_insert(0usize) += 1;
                 }
             }
             instances.retain_mut(|logical| {
@@ -1162,19 +1045,24 @@ impl AudioControl {
             let diag_stage = crate::diagnostics::slow_stage("voice_scheduling", diag_stage);
             if !shared.cancelled.load(Ordering::Acquire) {
                 present_sources.clear();
-                present_sources.extend(instances.iter().filter_map(|logical| {
-                    logical.source.map(|binding| (binding.key, binding.version))
-                }));
+                present_sources.extend(
+                    instances
+                        .iter()
+                        .filter_map(|logical| logical.source.map(|binding| binding.id)),
+                );
                 let mut source_intakes = 0;
-                for source in &desired.sources {
-                    if present_sources.contains(&(source.key, source.version))
+                for publication in &desired.sources {
+                    let source = &publication.desired;
+                    let id = publication.id;
+                    if publication.validity.cancelled()
+                        || present_sources.contains(&id)
                         || instances.len() == LOGICAL_INSTANCES
                     {
                         continue;
                     }
                     let cue = &source.cue;
                     if source_intakes == CONTROL_BATCH
-                        || source_cues.contains_key(&(source.key, source.version))
+                        || source_cues.contains_key(&id)
                         || pending_cues.len() == LOGICAL_INSTANCES
                     {
                         continue;
@@ -1202,13 +1090,13 @@ impl AudioControl {
                             depth: 0,
                             fallbacks: Vec::new(),
                             mix: cue.mix.clone(),
-                            lease: cue.lease.clone(),
+                            lease: cue.lease.with_source(publication.validity.clone()),
                             ticket,
                         },
                     });
-                    work.source = Some((source.key, source.version));
+                    work.source = Some(id);
                     source_intakes += 1;
-                    source_cues.insert((source.key, source.version), state);
+                    source_cues.insert(id, state);
                     perf::instant!("audio_source_intake", "iw4l.sim", "object" => source.key.object,
                         "slot" => source.key.slot as u64, "scope" => source.key.scope as u64,
                         "version" => source.version, "alias" => cue.alias.as_str());
@@ -1241,7 +1129,7 @@ impl AudioControl {
                     .iter()
                     .filter(|logical| logical
                         .source
-                        .is_some_and(|source| source.key.scope == AudioScope::Match))
+                        .is_some_and(|source| source.id.key.scope == AudioScope::Match))
                     .count() as f64
             );
             sources.rendered.store(rendered, Ordering::Relaxed);
@@ -1276,8 +1164,8 @@ impl AudioControl {
                 crate::StartFailure::CueRefused(CueFailure::Cancelled),
             ));
         }
-        while let Ok(command) = cue_rx.try_recv() {
-            if let CueRequest::Start(request) = command {
+        for command in inbox.take(usize::MAX).0 {
+            if let CueCommand::Start(request) = command {
                 request.reject(CueFailure::Cancelled);
             }
         }
@@ -1344,14 +1232,6 @@ fn apply_source_render_budget(instances: &[LogicalInstance]) {
                 .store(true, Ordering::Release);
         }
     }
-}
-
-fn executable_source(scene: &SourceScene, key: SourceKey, version: u64) -> bool {
-    scene
-        .sources
-        .binary_search_by_key(&key, |source| source.key)
-        .ok()
-        .is_some_and(|index| scene.sources[index].version == version)
 }
 
 fn update_spatial(request: &StartRequest, listener: Option<&ListenerSnapshot>) {
@@ -1570,8 +1450,11 @@ fn admit(
     perf::instant!("audio_instance_created", "iw4l.sim", |ctx| {
         ctx.arg("instance", request.instance.id as i64);
         ctx.arg("scope", request.instance.scope as i64);
-        ctx.arg("source_object", source.map(|source| source.key.object));
-        ctx.arg("source_slot", source.map(|source| source.key.slot as u64));
+        ctx.arg("source_object", source.map(|source| source.id.key.object));
+        ctx.arg(
+            "source_slot",
+            source.map(|source| source.id.key.slot as u64),
+        );
     });
     let frame = request.frame;
     instances.push(LogicalInstance {

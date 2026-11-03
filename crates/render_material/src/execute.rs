@@ -414,7 +414,7 @@ pub fn resolve_material_technique(
         .parts()
         .technique_sets
         .get(set_id.0 as usize)
-        .ok_or_else(|| {
+        .ok_or({
             if matches!(material.remap, RemapResolution::SelfSet) {
                 MaterialRefusal::LocalTechniqueSetOutOfRange { set: set_id }
             } else {

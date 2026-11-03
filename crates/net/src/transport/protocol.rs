@@ -148,7 +148,7 @@ impl core::fmt::Display for HandshakeReject {
             }
             Self::MapContent { ours, theirs } => write!(
                 f,
-                "map content mismatch (spawns/clip) ours={ours:016x} theirs={theirs:016x}"
+                "map content mismatch (scene/spawns/collision) ours={ours:016x} theirs={theirs:016x}"
             ),
             Self::WeaponRegistry { ours, theirs } => write!(
                 f,

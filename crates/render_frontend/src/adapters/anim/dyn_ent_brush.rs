@@ -503,46 +503,42 @@ fn skin_scene_ent_and_mark(
     entnum: u32,
 ) {
     let gate = scene.scene_dobj(entnum).map(|dobj| dobj.cull_gate);
-    if let Some(mut gate) = gate {
-        if dpvs_iw4::scene_dobj_gate_skin_begin(&mut gate) {
-            let ready = skin_inputs.by_ent.get(&entnum).cloned();
-            let expanded = ready.or_else(|| {
-                skin_inputs.pending.get(&entnum).map(|pending| {
-                    crate::prepare::scene::gfx_scene::expand_scene_ent_pending(
-                        pending,
-                        surface_cache,
-                    )
-                })
-            });
-            let mut entries = Vec::new();
-            let summary = match expanded.as_ref() {
-                Some(input) => {
-                    let models: Vec<dpvs_iw4::PreSkinModel<'_>> = input
-                        .models
-                        .iter()
-                        .map(|model| dpvs_iw4::PreSkinModel {
-                            lod: model.lod,
-                            bone_count: model.bone_count,
-                            surfaces: &model.surfaces,
-                        })
-                        .collect();
-                    dpvs_iw4::pre_skin_scene_ent(
-                        &models,
-                        &input.hide_part_bits,
-                        skin_inputs.frame_bytes_used,
-                        |entry| entries.push(entry),
-                    )
-                }
+    if let Some(mut gate) = gate
+        && dpvs_iw4::scene_dobj_gate_skin_begin(&mut gate)
+    {
+        let ready = skin_inputs.by_ent.get(&entnum).cloned();
+        let expanded = ready.or_else(|| {
+            skin_inputs.pending.get(&entnum).map(|pending| {
+                crate::prepare::scene::gfx_scene::expand_scene_ent_pending(pending, surface_cache)
+            })
+        });
+        let mut entries = Vec::new();
+        let summary = match expanded.as_ref() {
+            Some(input) => {
+                let models: Vec<dpvs_iw4::PreSkinModel<'_>> = input
+                    .models
+                    .iter()
+                    .map(|model| dpvs_iw4::PreSkinModel {
+                        lod: model.lod,
+                        bone_count: model.bone_count,
+                        surfaces: &model.surfaces,
+                    })
+                    .collect();
+                dpvs_iw4::pre_skin_scene_ent(
+                    &models,
+                    &input.hide_part_bits,
+                    skin_inputs.frame_bytes_used,
+                    |entry| entries.push(entry),
+                )
+            }
 
-                None => dpvs_iw4::PreSkinSummary::default(),
-            };
-            skin_inputs.frame_bytes_used =
-                skin_inputs.frame_bytes_used.saturating_add(summary.bytes);
-            scene.store_scene_ent_skin(
-                entnum,
-                render_frontend::SceneEntSkinnedSurfs { entries, summary },
-            );
-        }
+            None => dpvs_iw4::PreSkinSummary::default(),
+        };
+        skin_inputs.frame_bytes_used = skin_inputs.frame_bytes_used.saturating_add(summary.bytes);
+        scene.store_scene_ent_skin(
+            entnum,
+            render_frontend::SceneEntSkinnedSurfs { entries, summary },
+        );
     }
     scene.mark_scene_ent_visible(entnum);
 }

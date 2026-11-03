@@ -55,7 +55,7 @@ impl WeaponCombatFx {
         hint: &'a Option<String>,
     ) -> Option<crate::FxName<'a>> {
         edge.is_bound()
-            .then(|| hint.as_deref())
+            .then_some(hint.as_deref())
             .flatten()
             .filter(|name| !name.is_empty())
             .map(|name| crate::FxName::new(self.namespace, name))

@@ -371,13 +371,9 @@ fn retained_smodel_for_lod_in(
         let Some(mesh) = plan.meshes.get(placement.mesh) else {
             continue;
         };
-        let Some(lod) = smodel_camera_lod(
-            mesh.lod,
-            placement.origin,
-            placement.scale,
-            Some(eye),
-            &ramp,
-        ) else {
+        let Some(lod) =
+            smodel_camera_lod(mesh.lod, placement.origin, placement.scale, Some(eye), ramp)
+        else {
             continue;
         };
         let lod_surfs = mesh
@@ -451,6 +447,10 @@ fn used_from_shadow_geom_and_xmodel(world: &WorldScene, draws: &[XModelSurfaceDr
     used
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The shadow planner takes distinct immutable render owners at its assembly boundary."
+)]
 pub fn fill_spot_shadow_caster_plan(
     plan: &mut SpotShadowCasterPlan,
     occ: &SpotShadowSceneOccupancy,
@@ -678,17 +678,13 @@ pub fn fill_spot_shadow_caster_plan(
                     return None;
                 }
                 let mesh = world.static_model_meshes.get(inst.mesh);
-                if smodel_camera_lod(
+                smodel_camera_lod(
                     mesh.and_then(|m| m.lod),
                     inst.origin,
                     inst.scale,
                     Some(view.eye),
                     &lod_ramp,
-                )
-                .is_none()
-                {
-                    return None;
-                }
+                )?;
                 Some(inst.flags)
             },
             &mut smodel_ids,

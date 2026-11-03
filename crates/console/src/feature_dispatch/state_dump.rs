@@ -175,11 +175,50 @@ impl SceneLifetimeDump<'_, '_> {
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct BrowserDump<'w> {
+    browser: Option<Res<'w, net::MasterBrowser>>,
+    dvars: Res<'w, frame::UiMenuDvars>,
+}
+
+impl BrowserDump<'_> {
+    fn append_to(&self, out: &mut String) {
+        let Some(browser) = &self.browser else {
+            return;
+        };
+        let snapshot = browser.snapshot();
+        let adverts: Vec<_> = snapshot
+            .adverts
+            .iter()
+            .map(|advert| {
+                serde_json::json!({
+                    "id": advert.id.to_string(), "name": advert.name,
+                    "requires": advert.requires.iter().collect::<Vec<_>>(),
+                    "available": advert.available.iter().collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        out.push_str(&format!(
+            "browser_snapshot {}\n",
+            serde_json::json!({
+                "loading": snapshot.loading, "error": snapshot.error,
+                "generation": snapshot.generation, "adverts": adverts,
+                "ui": self.dvars.iter().filter(|(name, _)| name.starts_with("ui_browser_"))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            })
+        ));
+    }
+}
+
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn route_state_dump_commands(
     mut events: MessageReader<ConsoleCommand>,
     mut echo: ConsoleEcho,
     dump: StateDumpWriter,
-    lifetimes: SceneLifetimeDump,
+    observations: (SceneLifetimeDump, BrowserDump),
     portal: (
         Option<Res<assets::MergedMap>>,
         Option<Res<render_frontend::assemble::drawsurf::frame_products::MaterialFrameInputs>>,
@@ -196,6 +235,7 @@ pub(crate) fn route_state_dump_commands(
         Option<Res<audio::AudioRuntime>>,
     ),
 ) {
+    let (lifetimes, browser) = observations;
     for cmd in events.read() {
         if cmd.name != "dump" {
             continue;
@@ -223,6 +263,7 @@ pub(crate) fn route_state_dump_commands(
             portal.5.as_deref(),
         ));
         lifetimes.append_to(&mut audio, &portal.2, &portal.5);
+        browser.append_to(&mut audio);
         match dump.write(&name, Some(&audio)) {
             Ok(path) => echo.write(format!("dump: wrote {}", path.display())),
             Err(error) => echo.write(format!("dump: {error}")),
@@ -310,6 +351,10 @@ pub(super) fn audio_dump_section(
         }
         _ => out.push_str("missing_aliases = []\n"),
     }
+    out.push_str(&format!(
+        "pressure_refusals = {}\n",
+        decisions.map_or(0, |decisions| decisions.pressure_refusals())
+    ));
     out.push_str("starts =\n");
     match decisions {
         Some(decisions) => {
@@ -454,13 +499,60 @@ pub(super) fn portal_dump_section(
         merged.name,
         merged.recording_name(),
         merged.path,
-        merged.recipe
+        merged.recording_recipe()
     )).unwrap_or(String::new());
+    if let Some(scene) = scene {
+        for layer in scene.material_environments() {
+            let sun = layer.sun.map(|sun| {
+                serde_json::json!({
+                    "direction": sun.direction, "color": sun.color,
+                    "diffuse": sun.diffuse_color, "specular": sun.specular_color,
+                })
+            });
+            let fog = scene
+                .world_fogs
+                .get(layer.id.index())
+                .copied()
+                .flatten()
+                .map(|fog| {
+                    serde_json::json!({"color": fog.color_rgb,
+                    "start": fog.start_dist, "halfway": fog.halfway_dist,
+                    "max_opacity": fog.max_opacity})
+                });
+            out.push_str(&format!(
+                "world_environment {}\n",
+                serde_json::json!({
+                    "world": layer.id.index(),
+                    "family": layer.world.source_namespace.map(|id| id.as_str()),
+                    "exposure": layer.exposure, "sun": sun, "fog": fog,
+                })
+            ));
+        }
+    }
     if let Some(frame) = frame {
         out.push_str(&format!(
             "\n[portal_render]\neye={:?}\nmask=stencil\nview={:#?}\nworld_fog_colors={:?}\n",
             frame.view_origin, frame.portal, frame.world_fog_colors
         ));
+        let camera_world = frame
+            .portal
+            .as_ref()
+            .map_or(0, |portal| portal.camera_world);
+        let mut write_view = |view: usize, world: usize, root: bool,
+            sources: &render_frontend::assemble::drawsurf::material_runtime::RuntimeCodeSources| {
+            let constants: std::collections::BTreeMap<_, _> = sources.live_constants().collect();
+            out.push_str(&format!("view_material {}\n", serde_json::json!({
+                "view": view, "world": world, "root": root, "constants": constants,
+            })));
+        };
+        write_view(camera_world, camera_world, true, &frame.code_sources);
+        if let Some(portal) = frame.portal.as_ref() {
+            for (view, camera) in frame.world_cameras.iter().enumerate() {
+                if let Some(camera) = camera {
+                    write_view(view, portal.worlds[view], false, &camera.code_sources);
+                }
+            }
+        }
         if let Some(portal) = frame.portal.as_ref()
             && let Some(products) = products
         {
@@ -604,7 +696,7 @@ pub(super) fn portal_dump_section(
                 ..
             } = item.kind
             {
-                out.push_str(&format!("sun_entity_slice row={row} near={} entity={scene_entnum:?} origin={:?} plane={plane:?}\n", row < sun.sun_near_n as usize, world_from_local.w_axis.truncate().to_array()));
+                out.push_str(&format!("sun_entity_slice row={row} near={} entity={scene_entnum:?} origin={:?} plane={plane:?}\n", row < sun.sun_near_n, world_from_local.w_axis.truncate().to_array()));
             }
         }
         if let Some(cull) = scene.and_then(|s| s.cull.as_ref()) {
@@ -644,6 +736,17 @@ pub(super) fn portal_dump_section(
             }
         }
     }
+    if let (Some(scene), Some(timings)) = (scene, timings) {
+        out.push_str(&format!(
+            "smodel_index_upload {}\n",
+            serde_json::json!({
+                "scene_owner": scene.products_id,
+                "uploaded_owner": timings.smodel_index_owner,
+                "revision": timings.smodel_index_revision,
+                "words": timings.smodel_index_words,
+            })
+        ));
+    }
     if let Some(timings) = timings {
         out.push_str(&format!(
             "\n[portal_timings]\nbatch=latest_delivered\nviews={:#?}\n",
@@ -653,7 +756,7 @@ pub(super) fn portal_dump_section(
     if let Some(scene) = scene {
         out.push_str(&format!(
             "\n[portal_sky]\nworld_count={}\nsky_worlds={:?}\n",
-            merged.map_or(1, |merged| merged.worlds.len()),
+            merged.map_or(1, |merged| merged.scene.worlds.len()),
             scene.sky_worlds
         ));
         out.push_str(&format!("view_visibility={:#?}\n", scene.portal_visibility));

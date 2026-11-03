@@ -48,7 +48,7 @@ pub async fn load_prepared_match_with_atlas(
     if let Some(error) = atlas_refusal {
         return MatchLoadOutcome::Refused(error);
     }
-    for (_, path) in &atlas_zones {
+    for (_, _, path) in &atlas_zones {
         image_trees.adopt_zone(path);
     }
     image_trees.retain(|ns| families.enabled(ns.as_str()));
@@ -193,8 +193,12 @@ pub async fn load_prepared_match_with_atlas(
                 &progress,
             ) {
                 Ok(walks) => walks,
+                Err(_) if progress.is_canceled() => return MatchLoadOutcome::Canceled,
                 Err(error) => return MatchLoadOutcome::Refused(error),
             };
+            if progress.is_canceled() {
+                return MatchLoadOutcome::Canceled;
+            }
             (
                 selected.load_world(
                     &path,
@@ -244,12 +248,12 @@ pub async fn load_prepared_match_with_atlas(
     report.append(&mut common_report);
     report.extend(image_trees.report_lines());
 
-    if facts.team_settings.allies.is_none() && facts.team_settings.axis.is_none() {
-        if let Some(name) = facts.t5_teamset.as_ref() {
-            if let Some(icons) = teamsets.get(name) {
-                facts.team_settings = icons.clone();
-            }
-        }
+    if facts.team_settings.allies.is_none()
+        && facts.team_settings.axis.is_none()
+        && let Some(name) = facts.t5_teamset.as_ref()
+        && let Some(icons) = teamsets.get(name)
+    {
+        facts.team_settings = icons.clone();
     }
     if facts.t5_teamset.is_some() {
         facts.script_sound.attackers = facts
@@ -445,7 +449,7 @@ pub async fn load_prepared_match_with_atlas(
         let before_runtime = common_scene_models.len().saturating_sub(1);
         common_scene_models.insert(before_runtime, scene);
     }
-    if let Err(error) = atlas_worlds::absorb_atlas_worlds(
+    let atlas_worlds = match atlas_worlds::absorb_atlas_worlds(
         &mut world,
         &mut global,
         atlas_walks,
@@ -454,8 +458,9 @@ pub async fn load_prepared_match_with_atlas(
         atlas_trims,
         &mut atlas_report,
     ) {
-        return MatchLoadOutcome::Refused(error);
-    }
+        Ok(worlds) => worlds,
+        Err(error) => return MatchLoadOutcome::Refused(error),
+    };
     report.extend(atlas_report);
     let provisional_map_ids: Vec<usize> = (0..global.materials.len()).collect();
     let mut scene_names = scripts.asset_names();
@@ -848,6 +853,7 @@ pub async fn load_prepared_match_with_atlas(
             products_id: NEXT_PRODUCTS_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         },
         clip: clip.map(Arc::new),
+        atlas_worlds,
         weapons: Arc::new(weapons.publish()),
         fpv_meshes,
         bodies,

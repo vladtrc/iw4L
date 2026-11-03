@@ -91,7 +91,7 @@ impl HostDObjPoseFrame {
         let pose = self
             .by_dobj
             .get(&dobj)
-            .ok_or_else(|| Cow::Borrowed("DObj missing"))?;
+            .ok_or(Cow::Borrowed("DObj missing"))?;
         let count = u8::try_from(pose.bones.len())
             .map_err(|_| Cow::Borrowed("DObj bone count overflow"))?;
         let route = fx_iw4::get_bone_orientation_route(dobj, pose.current_valid, bone, Some(count))

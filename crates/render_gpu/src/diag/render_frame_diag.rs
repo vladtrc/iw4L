@@ -190,6 +190,9 @@ pub(crate) struct RenderFrameSample {
     pub(crate) xmodel_reuse_n: Option<u32>,
     pub(crate) xmodel_material_runs: Option<u32>,
     pub(crate) smodel_index_gaps: Option<u32>,
+    pub(crate) smodel_index_owner: Option<u64>,
+    pub(crate) smodel_index_revision: Option<u64>,
+    pub(crate) smodel_index_words: Option<usize>,
     pub(crate) smodel_material_runs: Option<u32>,
     pub(crate) smodel_material_runs_seq: Option<u32>,
     pub(crate) smodel_material_run_max: Option<u32>,
@@ -603,6 +606,9 @@ pub struct RenderFrameDiag {
     pub xmodel_material_runs: Option<u32>,
 
     pub smodel_index_gaps: Option<u32>,
+    pub smodel_index_owner: Option<u64>,
+    pub smodel_index_revision: Option<u64>,
+    pub smodel_index_words: Option<usize>,
 
     pub smodel_material_runs: Option<u32>,
 
@@ -1440,6 +1446,9 @@ pub fn sample_render_frame_diag(
             diag.xmodel_reuse_n = sample.xmodel_reuse_n;
             diag.xmodel_material_runs = sample.xmodel_material_runs;
             diag.smodel_index_gaps = sample.smodel_index_gaps;
+            diag.smodel_index_owner = sample.smodel_index_owner;
+            diag.smodel_index_revision = sample.smodel_index_revision;
+            diag.smodel_index_words = sample.smodel_index_words;
             diag.smodel_material_runs = sample.smodel_material_runs;
             diag.smodel_material_runs_seq = sample.smodel_material_runs_seq;
             diag.smodel_material_run_max = sample.smodel_material_run_max;
@@ -1554,7 +1563,7 @@ pub fn sample_render_frame_diag(
 
     static FRAMES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if n % RENDER_FRAME_LOG_EVERY == 0 {
+    if n.is_multiple_of(RENDER_FRAME_LOG_EVERY) {
         if !diag.portal_timings.is_empty() {
             diag::info!(
                 World,

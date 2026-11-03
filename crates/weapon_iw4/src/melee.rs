@@ -115,7 +115,7 @@ pub fn melee_weaponstate_blocks(ws: i32) -> bool {
 
 fn hand_blocks_melee(hand: &WeaponHandState) -> bool {
     let ws = hand.weaponstate;
-    if hand.weapon_time != 0 && !matches!(ws, 0x8 | 0x9 | 0xa | 0xb | 0xc) {
+    if hand.weapon_time != 0 && !matches!(ws, 0x8..=0xc) {
         return true;
     }
     (1..=5).contains(&ws)
@@ -213,19 +213,19 @@ pub fn weapon_start_melee(
         if let Some(sec) = secondary.as_mut() {
             sec.weap_anim = sec_anim;
         }
-    } else if let Some(sec) = secondary.as_mut() {
-        if last_weapon_hand != 1 {
-            sec.weap_anim = 0;
-        }
+    } else if let Some(sec) = secondary.as_mut()
+        && last_weapon_hand != 1
+    {
+        sec.weap_anim = 0;
     }
 
     primary.weaponstate = WeaponState::MeleeInit as i32;
-    if last_weapon_hand == 1 {
-        if let Some(sec) = secondary {
-            sec.weaponstate = WeaponState::MeleeInit as i32;
-            sec.weapon_time = primary.weapon_time;
-            sec.weapon_delay = primary.weapon_delay;
-        }
+    if last_weapon_hand == 1
+        && let Some(sec) = secondary
+    {
+        sec.weaponstate = WeaponState::MeleeInit as i32;
+        sec.weapon_time = primary.weapon_time;
+        sec.weapon_delay = primary.weapon_delay;
     }
 }
 

@@ -523,7 +523,7 @@ impl<'a> SunShadowBake<'a> {
             plan.smodel_missing_key = plan.smodel_missing_key.saturating_add(1);
             return None;
         };
-        let Some(lod) = smodel_camera_lod(mesh.lod, placement.origin, placement.scale, eye, &ramp)
+        let Some(lod) = smodel_camera_lod(mesh.lod, placement.origin, placement.scale, eye, ramp)
         else {
             plan.smodel_missing_key = plan.smodel_missing_key.saturating_add(1);
             return None;

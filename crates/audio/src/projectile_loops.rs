@@ -10,6 +10,10 @@ pub(crate) struct ProjectileLoop {
     pub source: DesiredSource,
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn update(
     mut commands: Commands,
     presented: Res<net::PresentedSnapshot>,

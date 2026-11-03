@@ -16,6 +16,10 @@ use crate::anim::fpv_rig::{
     PreparedFpvModel, PreparedFpvRig, compose_clip_tracks,
 };
 
+type FpvLayoutCache = HashMap<(usize, Option<[u32; 6]>), Result<Arc<PreparedFpvModel>, String>>;
+
+type CamoMaterialSwaps = Vec<(u8, Result<Arc<HashMap<usize, SmodelPassMaterial>>, String>)>;
+
 const PREPARE_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(6);
 
 const NO_COLOUR_MAP: &str = "technique samples no colour map";
@@ -52,7 +56,7 @@ struct FpvPreparationJob {
 
     layouts_queue: Vec<(usize, Option<[u32; 6]>)>,
     next_layout: usize,
-    layouts: HashMap<(usize, Option<[u32; 6]>), Result<Arc<PreparedFpvModel>, String>>,
+    layouts: FpvLayoutCache,
 
     next_weapon: u32,
     alternate_queue: Vec<(u32, u32)>,
@@ -261,7 +265,7 @@ impl FpvPreparationJob {
                 self.next_camouflage += 1;
                 let name = tess.catalog().parts().materials[bound].name.as_str();
                 admit_material(
-                    &tess.catalog(),
+                    tess.catalog(),
                     &tess.material_images,
                     bound,
                     name,
@@ -282,7 +286,7 @@ impl FpvPreparationJob {
                 .surfaces_for_lod(0)
                 .map(|surface| {
                     let verdict = admit_surface(
-                        &tess.catalog(),
+                        tess.catalog(),
                         tess.material_images.as_ref(),
                         entry,
                         surface,
@@ -392,12 +396,7 @@ impl FpvPreparationJob {
         rig
     }
 
-    fn camo_swaps(
-        &self,
-        fpv: &FpvMeshCatalog,
-        id: u32,
-        gun: FpvMeshIndex,
-    ) -> Vec<(u8, Result<Arc<HashMap<usize, SmodelPassMaterial>>, String>)> {
+    fn camo_swaps(&self, fpv: &FpvMeshCatalog, id: u32, gun: FpvMeshIndex) -> CamoMaterialSwaps {
         let Some(base) = fpv.get_at(gun.order()) else {
             return Vec::new();
         };
@@ -649,7 +648,7 @@ impl FpvPreparationJob {
                     "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
                     weapon_id = id,
                     role = "FPV material",
-                    name = refusal.to_string()
+                    name = refusal
                 )));
             }
             let melee = match assemblies
@@ -673,7 +672,7 @@ impl FpvPreparationJob {
                     "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
                     weapon_id = id,
                     role = "melee FPV material",
-                    name = refusal.to_string()
+                    name = refusal
                 )));
             }
             let ads = match assemblies
@@ -697,7 +696,7 @@ impl FpvPreparationJob {
                     "FPV dependency unresolved for weapon {weapon_id}: {role} `{name}`",
                     weapon_id = id,
                     role = "ADS FPV material",
-                    name = refusal.to_string()
+                    name = refusal
                 )));
             }
             let jammed = match assemblies
@@ -868,7 +867,7 @@ pub fn prepare_fpv_compositions(inputs: PrepareFpvInputs, mut prepared: ResMut<P
         RuntimeSortedMaterialTable::Ready { .. }
     );
     let owner = FpvPreparationOwner {
-        materials: Arc::clone(&tess.catalog()),
+        materials: Arc::clone(tess.catalog()),
         images: Arc::clone(&tess.material_images),
         weapons: Arc::clone(weapons.registry()),
         meshes: Arc::clone(&fpv_meshes.0),

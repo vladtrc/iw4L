@@ -73,7 +73,7 @@ struct CatalogCompass<'a> {
     enemies: Option<(usize, &'a MenuItem)>,
 }
 
-fn find_owner<'a>(menu: &'a asset_game::MenuDef, owner_draw: i32) -> Option<(usize, &'a MenuItem)> {
+fn find_owner(menu: &asset_game::MenuDef, owner_draw: i32) -> Option<(usize, &MenuItem)> {
     menu.items
         .iter()
         .enumerate()
@@ -883,10 +883,7 @@ pub(crate) fn resolve(
     hud_images: &mut HudImages,
 ) -> Option<DrawableCompass> {
     let compass = compass?;
-    let north_yaw = match compass.north_yaw {
-        Some(authored) => authored,
-        None => 0.0,
-    };
+    let north_yaw = compass.north_yaw.unwrap_or(0.0);
     let Some(image_name) = compass.declaration.image.as_deref() else {
         diag::warn_once!(
             Ui,

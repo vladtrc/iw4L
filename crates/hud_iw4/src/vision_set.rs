@@ -263,9 +263,9 @@ pub fn vision_lerp_float(from: f32, to: f32, mut fraction: f32, style: i32) -> f
 
 #[must_use]
 pub fn vision_lerp_bool(from: bool, to: bool, fraction: f32, style: i32) -> bool {
-    if style < VISION_SET_LERP_BACKFORTH_LINEAR || style > VISION_SET_LERP_BACKFORTH_SMOOTH {
-        to
-    } else if (LERP_HALF_F32 < fraction) == (LERP_HALF_F32 == fraction) {
+    if !(VISION_SET_LERP_BACKFORTH_LINEAR..=VISION_SET_LERP_BACKFORTH_SMOOTH).contains(&style)
+        || (LERP_HALF_F32 < fraction) == (LERP_HALF_F32 == fraction)
+    {
         to
     } else {
         from

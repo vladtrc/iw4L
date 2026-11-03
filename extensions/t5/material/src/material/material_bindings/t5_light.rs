@@ -259,11 +259,11 @@ fn t5_spot_cookie_slide(
     let mut v53 = v63 * cookie0[3];
     let mut v52 = v9 * cookie0[3];
     let mut a_a_mul = mx00 * cookie0[3] + mx20;
-    v53 = mx01 * cookie0[1] + v53;
-    v52 = mx11 * cookie0[1] + v52;
-    a_a_mul = mx21 * cookie0[1] + a_a_mul;
-    mx01 = v53 * cookie0[0] + mx01;
-    mx11 = v52 * cookie0[0] + mx11;
+    v53 += mx01 * cookie0[1];
+    v52 += mx11 * cookie0[1];
+    a_a_mul += mx21 * cookie0[1];
+    mx01 += v53 * cookie0[0];
+    mx11 += v52 * cookie0[0];
     let _mx21 = a_a_mul * cookie0[0] + mx21;
     [mx01 * 0.5, mx11 * 0.5, v53 * 0.5, v52 * 0.5]
 }

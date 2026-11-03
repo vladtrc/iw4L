@@ -340,6 +340,10 @@ fn admitted_vis(vis: &PublishedCellVis) -> AdmittedCellVis<'_> {
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn link_dyn_ent_cells(
     cells: Res<WorldDpvsCells>,
     atpoint: Res<DynAtPointLookup>,
@@ -661,7 +665,7 @@ impl DynEntDrawPublisher<'_, '_> {
         let atlas_changed = atlas.as_ref().is_some_and(|a| a.is_changed());
         let tess_changed = tess.as_ref().is_some_and(|h| h.is_changed());
         let tess = tess.as_deref().expect("checked");
-        let tess_catalog = std::sync::Arc::clone(&tess.catalog());
+        let tess_catalog = std::sync::Arc::clone(tess.catalog());
         let material_generation = tess.catalog().generation_id();
         let catalog_reset = catalog_changed
             || atlas_changed

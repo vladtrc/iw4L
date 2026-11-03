@@ -717,11 +717,12 @@ fn push_nested_body(s: &ZoneStream<'_>, dump: &mut ExpDump<'_>, cache: &Statemen
         buf: &mut buf,
         used: 0,
     };
-    if dump_loaded_statement(s, body, &mut inner, cache, 1, None).is_ok() && inner.used > 0 {
-        if dump_holes(inner.as_str()) == 0 {
-            dump.push(inner.as_str());
-            return;
-        }
+    if dump_loaded_statement(s, body, &mut inner, cache, 1, None).is_ok()
+        && inner.used > 0
+        && dump_holes(inner.as_str()) == 0
+    {
+        dump.push(inner.as_str());
+        return;
     }
     dump.push("fnmiss");
     dump.push("cache");

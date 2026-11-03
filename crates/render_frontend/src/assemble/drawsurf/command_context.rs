@@ -210,9 +210,8 @@ pub fn produce_frame_fog(
     sources.set_constant_rows(CODE_FOG_COLOR_LINEAR, &[float4_bits(linear)]);
     sources.set_constant_rows(CODE_FOG_COLOR_GAMMA, &[float4_bits(gamma)]);
 
-    match fog.sun.as_ref() {
-        Some(sun) => produce_iw4_sun_fog(sources, fog.density(), sun),
-        None => {}
+    if let Some(sun) = fog.sun.as_ref() {
+        produce_iw4_sun_fog(sources, fog.density(), sun)
     }
     if !r_fog_enabled {
         sources.set_constant_rows(CODE_FOG, &[float4_bits([0.0, 1.0, 0.0, 0.0])]);
@@ -453,6 +452,10 @@ pub fn produce_game_time(sources: &mut RuntimeCodeSources, game_time: f32) {
     sources.set_constant_rows(CODE_GAMETIME, &[float4_bits([sin, cos, frac, wrapped])]);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn update_command_context_code_sources(
     mut runtime: ResMut<MaterialFrameInputs>,
     generation: Res<MaterialGeneration>,
@@ -533,10 +536,12 @@ pub(crate) fn update_command_context_code_sources(
 
     dfog.0 = sampled_fog.as_ref().is_some_and(|fog| fog.sun.is_some());
 
-    let mut source = GfxCmdBufSource2d::default();
-    source.render_target_width = prepared.rt_w;
-    source.render_target_height = prepared.rt_h;
-    source.scene_viewport = prepared.scene_viewport;
+    let mut source = GfxCmdBufSource2d {
+        render_target_width: prepared.rt_w,
+        render_target_height: prepared.rt_h,
+        scene_viewport: prepared.scene_viewport,
+        ..GfxCmdBufSource2d::default()
+    };
     let full_vp = hud_iw4::GfxViewport {
         x: 0,
         y: 0,
@@ -601,7 +606,7 @@ pub(crate) fn update_command_context_code_sources(
             mat_frame.material_bindings = Some(asset_material::compile_material_bindings(catalog));
         }
         let fog = sampled_fog.as_ref().unwrap_or(&NO_FRAME_FOG);
-        let inputs = asset_material::MaterialFrameBindingInputs {
+        let root_inputs = asset_material::MaterialFrameBindingInputs {
             eye,
             clip_from_view,
             world_from_view: view.inverse(),
@@ -617,18 +622,15 @@ pub(crate) fn update_command_context_code_sources(
                 .filter(|l| l.light_type == lighting_iw4::GFX_LIGHT_TYPE_DIR)
                 .map(crate::prepare::scene::world_bindings::sun),
         };
+        let inputs =
+            material_inputs_for_world(scene, root_inputs, asset_core::atlas::WorldId(camera_world));
         mat_frame
             .material_bindings
             .as_ref()
             .expect("material bindings compiled")
-            .bind_frame(
-                catalog,
-                &mut mat_frame.code_sources,
-                &inputs,
-                &scene.material_layers,
-            )
+            .bind_frame(catalog, &mut mat_frame.code_sources, &inputs)
             .expect("material binding generation correlated");
-        frame_inputs = Some((inputs, &scene.material_layers));
+        frame_inputs = Some((root_inputs, scene));
     } else {
         mat_frame.material_bindings = None;
     }
@@ -691,9 +693,11 @@ pub(crate) fn update_command_context_code_sources(
                     view_fog.as_ref(),
                     fog_dvars.enabled,
                 );
-                if let (Some((inputs, layers)), Some(bindings)) =
+                if let (Some((inputs, scene)), Some(bindings)) =
                     (frame_inputs, mat_frame.material_bindings.as_ref())
                 {
+                    let physical = asset_core::atlas::WorldId(portal.worlds[world]);
+                    let inputs = material_inputs_for_world(scene, inputs, physical);
                     let inputs = asset_material::MaterialFrameBindingInputs {
                         eye: view_origin,
                         world_from_view: view_from_world.inverse(),
@@ -704,7 +708,7 @@ pub(crate) fn update_command_context_code_sources(
                         ..inputs
                     };
                     bindings
-                        .bind_frame(&generation.catalog, &mut sources, &inputs, layers)
+                        .bind_frame(&generation.catalog, &mut sources, &inputs)
                         .expect("material binding generation correlated");
                 }
                 let exit_plane_world = portal.exit_plane_in(world, eye.to_array());
@@ -726,4 +730,22 @@ pub(crate) fn update_command_context_code_sources(
             });
         mat_frame.world_cameras.push(camera);
     }
+}
+
+fn material_inputs_for_world(
+    scene: &crate::prepare::scene::world::WorldScene,
+    mut inputs: asset_material::MaterialFrameBindingInputs,
+    world: asset_core::atlas::WorldId,
+) -> asset_material::MaterialFrameBindingInputs {
+    if world != asset_core::atlas::WorldId::ROOT {
+        let environment = scene
+            .material_layers
+            .iter()
+            .find(|environment| environment.id == world)
+            .expect("atlas view has a physical world environment");
+        inputs.world = environment.world;
+        inputs.exposure = environment.exposure;
+        inputs.sun = environment.sun;
+    }
+    inputs
 }

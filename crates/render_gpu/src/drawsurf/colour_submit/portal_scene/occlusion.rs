@@ -61,8 +61,8 @@ impl PortalQueryGpu {
             let p = self.pending.swap_remove(index);
             if matches!(outcome, Ok(Ok(()))) {
                 if let Ok(data) = p.batch.readback.slice(..).get_mapped_range() {
-                    for (key, bytes) in p.batch.keys.iter().zip(data.chunks_exact(8)) {
-                        let samples = u64::from_le_bytes(bytes.try_into().unwrap());
+                    for (key, bytes) in p.batch.keys.iter().zip(data.as_chunks::<8>().0.iter()) {
+                        let samples = u64::from_le_bytes(*bytes);
                         resolved += 1;
                         visible += u32::from(samples > 0);
                         p.batch.context.publish(key.clone(), samples);
@@ -80,12 +80,12 @@ impl PortalQueryGpu {
         if keys.is_empty() || self.pending.len() >= 3 {
             return None;
         }
-        if let Some(mut batch) = self.free.pop() {
-            if batch.capacity >= keys.len() {
-                batch.context = context.clone();
-                batch.keys = keys;
-                return Some(batch);
-            }
+        if let Some(mut batch) = self.free.pop()
+            && batch.capacity >= keys.len()
+        {
+            batch.context = context.clone();
+            batch.keys = keys;
+            return Some(batch);
         }
         let bytes = keys.len() as u64 * 8;
         let gpu = device.wgpu_device();

@@ -10,6 +10,12 @@ use render_fx::{HostFxSystem, PreparedFxCatalog, PreparedTracers};
 
 pub(crate) use super::world_gpu::WorldGpuReady;
 
+type TessImageSlices<'a> = (
+    &'a [Option<Handle<Image>>],
+    &'a [Option<crate::assemble::drawsurf::RuntimeLightmapHandles>],
+    &'a [Option<Handle<Image>>],
+);
+
 fn hist_u8(values: impl IntoIterator<Item = u8>) -> String {
     let mut hist = std::collections::BTreeMap::<u8, usize>::new();
     let mut n = 0usize;
@@ -132,13 +138,7 @@ impl WorldSpawnJob {
         gap
     }
 
-    pub(crate) fn tess_image_handles(
-        &self,
-    ) -> (
-        &[Option<Handle<Image>>],
-        &[Option<crate::assemble::drawsurf::RuntimeLightmapHandles>],
-        &[Option<Handle<Image>>],
-    ) {
+    pub(crate) fn tess_image_handles(&self) -> TessImageSlices<'_> {
         self.images.tess_handles()
     }
 
@@ -162,6 +162,10 @@ impl WorldSpawnJob {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn spawn_world(
     mut commands: Commands,
     load: Option<Res<assets::MapLoadProcess>>,
@@ -200,7 +204,7 @@ pub(crate) fn spawn_world(
         let gpu_ready = gpu.as_deref();
         let gpu_done = super::world_gpu::poll(&mut job.gpu_wait, gpu_ready, gap_ms);
         let fpv_done =
-            fpv.settled_for(&tess.catalog()) && model_materials.settled_for(&tess.catalog());
+            fpv.settled_for(tess.catalog()) && model_materials.settled_for(tess.catalog());
         if gpu_done && !fpv_done {
             diag::info!(
                 World,
@@ -324,7 +328,7 @@ pub(crate) fn spawn_world(
         let compile_finished = job.compile.until(&scene.runtime_material_catalog, deadline);
         job.last_work_ms = frame_started.elapsed().as_secs_f32() * 1000.0;
         let gap_ms = job.slice_gap_ms(std::time::Instant::now());
-        if compile_finished || job.last_work_ms >= 20.0 || job.compile.done() % 32 == 0 {
+        if compile_finished || job.last_work_ms >= 20.0 || job.compile.done().is_multiple_of(32) {
             let (wgsl_hit, wgsl_miss, wgsl_io_ms) = crate::assemble::drawsurf::wgsl_cache_stats();
             diag::info!(
                 World,
@@ -520,7 +524,7 @@ pub(crate) fn spawn_world(
             let value = crate::assemble::drawsurf::MapOutdoor {
                 image: scene
                     .outdoor_image
-                    .map(|id| crate::assemble::drawsurf::RuntimeImageId(id)),
+                    .map(crate::assemble::drawsurf::RuntimeImageId),
                 lookup: scene.outdoor_lookup,
             };
             commands.queue(move |world: &mut World| {
@@ -900,6 +904,10 @@ fn finish_world_spawn(scene: &mut WorldScene, job: &mut WorldSpawnJob, commands:
     });
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn check_skin_support(
     support: Option<Res<render_scene::SkinSupport>>,
     scene: Option<ResMut<WorldScene>>,

@@ -121,7 +121,7 @@ pub fn scene_lit_pass_material(
         .ordinal_for_asset_id(authored.order())?;
     let maps = render_scene::runtime_maps(
         Some(authored),
-        &tess.catalog(),
+        tess.catalog(),
         tess.material_images.as_ref(),
     );
     let inv_h = lighting_iw4::model_lighting_inv_image_height(atlas.dims.image_height)?;
@@ -234,7 +234,7 @@ impl ModelMaterialAdmission<'_> {
                 admit_keys(
                     present_keys(&entry.material_keys, &entry.material_edges),
                     &atlas,
-                    &self.tess.catalog(),
+                    self.tess.catalog(),
                     &mut by_key,
                     &mut refused,
                 );
@@ -245,7 +245,7 @@ impl ModelMaterialAdmission<'_> {
                 admit_keys(
                     present_keys(&entry.material_keys, &entry.material_edges),
                     &atlas,
-                    &self.tess.catalog(),
+                    self.tess.catalog(),
                     &mut by_key,
                     &mut refused,
                 );
@@ -320,7 +320,7 @@ impl ModelMaterialAdmission<'_> {
                     }
                     if let Some(material) = crate::authored_lit_xmodel_pass_material(
                         &atlas,
-                        &self.tess.catalog(),
+                        self.tess.catalog(),
                         self.tess.material_images.as_ref(),
                         authored,
                     ) {

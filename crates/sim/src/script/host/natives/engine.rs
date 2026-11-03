@@ -335,7 +335,7 @@ fn array_values(world: &World, value: &Value) -> Result<Vec<Value>, String> {
 }
 
 fn seconds_ms(seconds: f32) -> Result<i64, String> {
-    if !(seconds > 0.0) {
+    if seconds <= 0.0 || seconds.is_nan() {
         return Err("total time must be positive".into());
     }
     Ok((seconds * 1000.0).round().max(1.0) as i64)
@@ -1068,7 +1068,7 @@ fn register_appearance(registry: &mut NativeRegistry) {
             let entity = runtime.entities.get_mut(&id).unwrap();
             entity.brush = Some(brush);
             let presence = entity.presence;
-            drop(runtime);
+
             if let Some(presence) = presence
                 && let Some(row) =
                     crate::frame::FrameWorld::from_world(world).collision_owner_mut(presence)
@@ -1829,7 +1829,7 @@ fn register_match(registry: &mut NativeRegistry) {
             return Err("exitlevel already called".into());
         }
         state.exit_level = true;
-        drop(state);
+
         signal(world, EXIT_LEVEL)
     });
     registry.register(Function, "map_restart", |world, _, args| {

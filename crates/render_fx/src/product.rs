@@ -23,6 +23,10 @@ pub struct FxGeneratedFrame {
     pub world_present: bool,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The frame product is moved once into its consumer and stays inline."
+)]
 pub enum FxFrameOutcome {
     Generated(FxGeneratedFrame),
     Unavailable(FxUnavailableCause),

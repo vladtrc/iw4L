@@ -148,14 +148,14 @@ fn load_material_pass(
             for (offset, byte) in argument.raw.iter_mut().enumerate() {
                 *byte = s.u8_at(a, offset)?;
             }
-            if ty == sz::LITERAL_VERTEX_CONST || ty == sz::LITERAL_PIXEL_CONST {
-                if s.begin_body(a.at(4))? {
-                    let literal = s.alloc_load(4, 16)?;
-                    for (index, word) in argument.literal_words.iter_mut().enumerate() {
-                        *word = s.u32_at(literal, index * 4)?;
-                    }
-                    argument.literal_present = true;
+            if (ty == sz::LITERAL_VERTEX_CONST || ty == sz::LITERAL_PIXEL_CONST)
+                && s.begin_body(a.at(4))?
+            {
+                let literal = s.alloc_load(4, 16)?;
+                for (index, word) in argument.literal_words.iter_mut().enumerate() {
+                    *word = s.u32_at(literal, index * 4)?;
                 }
+                argument.literal_present = true;
             }
             if s.push_technique_argument(argument) {
                 captured = captured.saturating_add(1);

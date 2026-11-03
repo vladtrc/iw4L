@@ -147,12 +147,12 @@ fn sun_flush_owner<'a>(
     let Some(item) = draws.get(draw_index) else {
         return Err(format!("{missing}:OwnerOutOfRange"));
     };
-    let matches_kind = match (kind, &item.kind) {
-        (SunFlushKind::Smodel, RetainedDrawKind::Smodel { .. }) => true,
-        (SunFlushKind::XModel, RetainedDrawKind::XModel { .. }) => true,
-        (SunFlushKind::World, RetainedDrawKind::World { .. }) => true,
-        _ => false,
-    };
+    let matches_kind = matches!(
+        (kind, &item.kind),
+        (SunFlushKind::Smodel, RetainedDrawKind::Smodel { .. })
+            | (SunFlushKind::XModel, RetainedDrawKind::XModel { .. })
+            | (SunFlushKind::World, RetainedDrawKind::World { .. })
+    );
     if !matches_kind {
         return Err(format!("{missing}:WrongKind"));
     }
@@ -191,7 +191,7 @@ fn emit_local_rigid_shadow_flush(
     if hit_count == 0 {
         return Err(format!("{family}DynamicFlushEmpty"));
     }
-    if hit_count % 3 != 0 {
+    if !hit_count.is_multiple_of(3) {
         return Err(format!("{family}DynamicIndexCountNotTriangles"));
     }
     let start = hit_start as usize;
@@ -1676,7 +1676,7 @@ impl ShadowLane<'_> {
                     &packed_fallback
                 }
             };
-            let Some(envelope) = draw_sun_shadow_map_forced(partition, Some(&packed)) else {
+            let Some(envelope) = draw_sun_shadow_map_forced(partition, Some(packed)) else {
                 continue;
             };
             let Some(work) = envelope.work.as_ref() else {
@@ -1826,11 +1826,14 @@ impl ShadowLane<'_> {
                     .or_default() += smodel_span_holes;
             }
             let retry_before = retry_n;
-            for slot_i in 0..static_draws.world[pi].len() {
+            for (slot_i, world_spans_entry) in world_spans[..static_draws.world[pi].len()]
+                .iter()
+                .enumerate()
+            {
                 if static_draws.world[pi][slot_i].is_some() {
                     continue;
                 }
-                let Some((src_start, count)) = world_spans[slot_i] else {
+                let Some((src_start, count)) = *world_spans_entry else {
                     continue;
                 };
                 let flush = work.world_flushes[slot_i];
@@ -1868,11 +1871,14 @@ impl ShadowLane<'_> {
                     }
                 }
             }
-            for slot_i in 0..static_draws.smodel[pi].len() {
+            for (slot_i, smodel_spans_entry) in smodel_spans[..static_draws.smodel[pi].len()]
+                .iter()
+                .enumerate()
+            {
                 if static_draws.smodel[pi][slot_i].is_some() {
                     continue;
                 }
-                let Some(span) = smodel_spans[slot_i] else {
+                let Some(span) = *smodel_spans_entry else {
                     continue;
                 };
                 let owner_start = span.entry_start as usize;
@@ -2255,10 +2261,10 @@ impl ShadowRecorder<'_, '_, '_> {
                 &draws[..live],
                 "iw4_shadowmap_spot_slot",
             );
-            if result.indexed as usize == live {
-                if let Some(content) = slot.content.take() {
-                    cache.push(content);
-                }
+            if result.indexed as usize == live
+                && let Some(content) = slot.content.take()
+            {
+                cache.push(content);
             }
             indexed = indexed.saturating_add(result.indexed);
             record_n.add(result.bindings);

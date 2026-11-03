@@ -188,16 +188,15 @@ pub const fn stream_extent(vertex_type: u8, stream: u8) -> Option<u16> {
     let mut found = false;
     let mut source = 0usize;
     while source < STREAM_SOURCE_COUNT {
-        if let Some(layout) = source_layout(vertex_type, source as u8) {
-            if layout.stream == stream {
-                if let Some(len) = layout.decl_type.byte_len() {
-                    let end = layout.offset as u16 + len as u16;
-                    if end > extent {
-                        extent = end;
-                    }
-                    found = true;
-                }
+        if let Some(layout) = source_layout(vertex_type, source as u8)
+            && layout.stream == stream
+            && let Some(len) = layout.decl_type.byte_len()
+        {
+            let end = layout.offset as u16 + len as u16;
+            if end > extent {
+                extent = end;
             }
+            found = true;
         }
         source += 1;
     }

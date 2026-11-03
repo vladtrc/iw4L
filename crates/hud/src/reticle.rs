@@ -238,9 +238,8 @@ impl ReticleRenderer<'_, '_> {
         );
         let center_handle = center.handle();
         let side_handle = side.handle();
-        match material_gap_cause(&center, &side) {
-            Some(cause) => diag::warn_once!(Ui, "{}", cause),
-            None => (),
+        if let Some(cause) = material_gap_cause(&center, &side) {
+            diag::warn_once!(Ui, "{}", cause)
         }
 
         for (quad, mut node, mut image_node, mut xform) in self.quads.iter_mut() {

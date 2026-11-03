@@ -10,8 +10,8 @@ pub use clip::{
     existing_clip_demo, resolve_playback_path, rewrite_latest_symlink,
 };
 pub use file::{
-    FileTransport, MAGIC, MatchRecordIdentity, RecordReader, RecordWriter, ReplayError,
-    ZONE_FIELD_LEN, demo_path, demo_stem, sanitize_demo_name,
+    FileTransport, MAGIC, MatchRecordIdentity, RECORDING_FORMAT_VERSION, RecordReader,
+    RecordWriter, ReplayError, ZONE_FIELD_LEN, demo_path, demo_stem, sanitize_demo_name,
 };
 pub use plugin::{
     PendingReplayArm, PlaybackControl, ReplayDiagnostics, ReplayPlayback, ReplayPlugin, ReplayPump,

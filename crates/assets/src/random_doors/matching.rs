@@ -3,6 +3,8 @@ use super::compatible;
 use serde_json::Value;
 use std::collections::HashMap;
 
+type MatchingResult = Result<Option<(Vec<usize>, Vec<Pair>)>, String>;
+
 type Pair = (usize, usize);
 type State = (Vec<bool>, Vec<bool>, usize);
 
@@ -11,7 +13,7 @@ pub(super) fn solve(
     worlds: usize,
     pair_costs: &[Vec<f64>],
     seed: u64,
-) -> Result<Option<(Vec<usize>, Vec<Pair>)>, String> {
+) -> MatchingResult {
     if rows.len() > 24 {
         return connected_blossom(rows, worlds, pair_costs, seed);
     }
@@ -50,11 +52,7 @@ pub(super) fn solve(
     )
 }
 
-fn solve_ordered(
-    rows: &[Value],
-    worlds: usize,
-    costs: &[Vec<f64>],
-) -> Result<Option<(Vec<usize>, Vec<Pair>)>, String> {
+fn solve_ordered(rows: &[Value], worlds: usize, costs: &[Vec<f64>]) -> MatchingResult {
     let n = rows.len();
     let allowed: Vec<Vec<bool>> = (0..n)
         .map(|a| {
@@ -196,8 +194,16 @@ impl Search<'_> {
             reached[0] = true;
             loop {
                 let before = reached.clone();
+                #[expect(
+                    clippy::needless_range_loop,
+                    reason = "Graph coordinates identify vertices across adjacency and reachability tables."
+                )]
                 for w in 0..count {
                     if before[w] {
+                        #[expect(
+                            clippy::needless_range_loop,
+                            reason = "Graph coordinates identify vertices across adjacency and reachability tables."
+                        )]
                         for v in 0..count {
                             reached[v] |= self.edges[w][v] > 0;
                         }
@@ -284,7 +290,7 @@ fn connected_blossom(
     worlds: usize,
     costs: &[Vec<f64>],
     seed: u64,
-) -> Result<Option<(Vec<usize>, Vec<Pair>)>, String> {
+) -> MatchingResult {
     fn remaining(rows: &[Value], costs: &[Vec<f64>], used: &[bool]) -> Result<Vec<Pair>, String> {
         let largest = costs
             .iter()

@@ -257,9 +257,7 @@ impl ReliableEventHub {
     }
 
     pub fn queue_mut(&mut self, client: sim::ClientId) -> &mut ReliableEventQueue {
-        self.queues
-            .entry(client)
-            .or_insert_with(ReliableEventQueue::new)
+        self.queues.entry(client).or_default()
     }
 
     pub fn push_event(&mut self, client: sim::ClientId, event: SimEvent) -> u16 {

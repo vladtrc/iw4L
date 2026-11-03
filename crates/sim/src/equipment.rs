@@ -453,10 +453,10 @@ pub(crate) fn phase_offhand(
         }
         let requested = u32::from(cmd.off_hand_index);
 
-        if requested != 0 {
-            if let Some(ps) = world.player_mut(*id) {
-                ps.off_hand_index = requested as i32;
-            }
+        if requested != 0
+            && let Some(ps) = world.player_mut(*id)
+        {
+            ps.off_hand_index = requested as i32;
         }
     }
 }
@@ -504,10 +504,10 @@ pub(crate) fn predict_projectile(
         let end = projectile.origin_at(next);
         match bullet_trace_with_entity_models(
             crate::world_graph::AtlasClip {
-                brushes: &brushes,
-                bsp: &bsp,
-                cmodels: &cmodels,
-                mesh: &mesh,
+                brushes,
+                bsp,
+                cmodels,
+                mesh,
             },
             &players,
             &models,
@@ -806,10 +806,10 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
             atlas
                 .trace_masked(
                     crate::world_graph::AtlasClip {
-                        brushes: &brushes,
-                        bsp: &bsp,
-                        mesh: &mesh,
-                        cmodels: &cmodels,
+                        brushes,
+                        bsp,
+                        mesh,
+                        cmodels,
                     },
                     &players,
                     Some(projectile.owner),
@@ -821,10 +821,10 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         } else {
             bullet_trace_with_entity_models(
                 crate::world_graph::AtlasClip {
-                    brushes: &brushes,
-                    bsp: &bsp,
-                    cmodels: &cmodels,
-                    mesh: &mesh,
+                    brushes,
+                    bsp,
+                    cmodels,
+                    mesh,
                 },
                 &players,
                 &script_models,
@@ -1047,10 +1047,10 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
             fraction,
         } = bullet_trace_with_entity_models(
             crate::world_graph::AtlasClip {
-                brushes: &brushes,
-                bsp: &bsp,
-                cmodels: &cmodels,
-                mesh: &mesh,
+                brushes,
+                bsp,
+                cmodels,
+                mesh,
             },
             &players,
             &script_models,
@@ -1124,7 +1124,7 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
         TickOutcome::Fly => {
             let traveled = vec3_length([end[0] - start[0], end[1] - start[1], end[2] - start[2]]);
             projectile.origin = end;
-            projectile.travel_distance = projectile.travel_distance + traveled;
+            projectile.travel_distance += traveled;
             projectile.velocity = projectile.velocity_at(time);
             if let Some(row) = world.projectile_mut_by_number(entnum) {
                 *row = projectile;
@@ -1135,7 +1135,7 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
             let (end, normal, collider, fraction) = hit.expect("contact");
             let traveled = vec3_length([end[0] - start[0], end[1] - start[1], end[2] - start[2]]);
             projectile.origin = contact_origin.unwrap_or(end);
-            projectile.travel_distance = projectile.travel_distance + traveled;
+            projectile.travel_distance += traveled;
             let armed = projectile.is_armed(facts.projectile_activate_dist);
             let (surface_flags, hit_surf) = match collider {
                 Some(
@@ -1168,29 +1168,28 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
                         ColliderId::EntityDObjBone { owner, .. }
                         | ColliderId::EntityLinkedBrush { owner, .. },
                     ) = collider
+                        && let Some(target) = owner.script_model()
                     {
-                        if let Some(target) = owner.script_model() {
-                            let bone = match collider {
-                                Some(ColliderId::EntityDObjBone { bone, .. }) => {
-                                    Some(usize::from(bone))
-                                }
-                                _ => None,
-                            };
-                            entity_hits.push((
-                                DamageSource::Projectile(projectile.id),
-                                crate::script::EntityHit {
-                                    target,
-                                    amount: facts.impact_damage.max(0),
-                                    attacker: Some(projectile.owner),
-                                    means: "",
-                                    weapon: projectile.weapon,
-                                    point: end,
-                                    dir: projectile.velocity,
-                                    bone,
-                                    flags: 0,
-                                },
-                            ));
-                        }
+                        let bone = match collider {
+                            Some(ColliderId::EntityDObjBone { bone, .. }) => {
+                                Some(usize::from(bone))
+                            }
+                            _ => None,
+                        };
+                        entity_hits.push((
+                            DamageSource::Projectile(projectile.id),
+                            crate::script::EntityHit {
+                                target,
+                                amount: facts.impact_damage.max(0),
+                                attacker: Some(projectile.owner),
+                                means: "",
+                                weapon: projectile.weapon,
+                                point: end,
+                                dir: projectile.velocity,
+                                bone,
+                                flags: 0,
+                            },
+                        ));
                     }
                     impacts.push(ProjectileImpact {
                         id: projectile.id,

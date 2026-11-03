@@ -67,34 +67,35 @@ impl FpvHands {
         weapon_ns: FamilyId,
     ) -> Self {
         if let Some(kit) = kit {
-            if let Some(name) = kit.arms.as_deref() {
-                if catalog.contains(map_ns, name) {
-                    return Self::FromKit {
-                        namespace: map_ns,
-                        name: name.to_owned(),
-                    };
-                }
+            if let Some(name) = kit.arms.as_deref()
+                && catalog.contains(map_ns, name)
+            {
+                return Self::FromKit {
+                    namespace: map_ns,
+                    name: name.to_owned(),
+                };
             }
             let arm_names: Vec<&str> = catalog
                 .names_in(map_ns)
                 .filter(|n| crate::is_arms_model(n))
                 .collect();
-            if let Some(name) = crate::arms_for_body(&kit.body, &arm_names) {
-                if catalog.contains(map_ns, &name) {
-                    return Self::FromKit {
-                        namespace: map_ns,
-                        name,
-                    };
-                }
-            }
-        }
-        if let Some(name) = weapon_hand {
-            if weapon_ns == map_ns && catalog.contains(weapon_ns, name) {
-                return Self::FromWeaponDef {
-                    namespace: weapon_ns,
-                    name: name.to_owned(),
+            if let Some(name) = crate::arms_for_body(&kit.body, &arm_names)
+                && catalog.contains(map_ns, &name)
+            {
+                return Self::FromKit {
+                    namespace: map_ns,
+                    name,
                 };
             }
+        }
+        if let Some(name) = weapon_hand
+            && weapon_ns == map_ns
+            && catalog.contains(weapon_ns, name)
+        {
+            return Self::FromWeaponDef {
+                namespace: weapon_ns,
+                name: name.to_owned(),
+            };
         }
         Self::Unresolved
     }
@@ -188,23 +189,12 @@ pub struct FpvMeshCatalog {
     pub map_namespace: Option<FamilyId>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct FpvMeshBuild {
     catalog: FpvMeshCatalog,
     capture_zone: crate::ZoneOwner,
     strings: ScriptStrings,
     capture_ns: Option<FamilyId>,
-}
-
-impl Default for FpvMeshBuild {
-    fn default() -> Self {
-        Self {
-            catalog: FpvMeshCatalog::default(),
-            capture_zone: crate::ZoneOwner::default(),
-            strings: ScriptStrings::default(),
-            capture_ns: None,
-        }
-    }
 }
 
 impl std::ops::Deref for FpvMeshBuild {

@@ -5,6 +5,8 @@ use crate::attachment::read_attachment_facts;
 use crate::size as sz;
 use crate::zone::{AttachmentGeometry, Ptr, Result, XFILE_BLOCK_VIRTUAL, ZonePtr, ZoneStream};
 
+type LoadAdsOverlayOutput = Result<([Option<Ptr>; 4], f32, f32, i32, bool)>;
+
 pub(super) fn load_attachment(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink) -> Result<()> {
     s.walk_stage = "attachment";
     let p = s.alloc_load(4, s.layout(sz::WEAPON_ATTACHMENT, 264))?;
@@ -149,7 +151,7 @@ fn load_ads_overlay(
     s: &mut ZoneStream<'_>,
     links: &mut dyn AssetLinkSink,
     att: Ptr,
-) -> Result<([Option<Ptr>; 4], f32, f32, i32, bool)> {
+) -> LoadAdsOverlayOutput {
     let slot = att.at(s.layout(sz::ATTACH_ADS_OVERLAY_OFF, 176));
     let offs = [
         sz::ADS_OVERLAY_SHADER_OFF,

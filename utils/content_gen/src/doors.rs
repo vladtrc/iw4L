@@ -382,14 +382,10 @@ pub fn random_door_catalog(
 fn validate_door(door: &Door, original: &asset_world::ClipCollision) -> Result<(), String> {
     let mut endpoint = door.json();
     endpoint["world"] = json!(0);
-    let recipe = assets::MergedMap {
-        name: "door-clearance".into(),
-        path: Default::default(),
-        worlds: vec![door.zone.clone()],
-        recipe: json!({"portals":[{"a":endpoint,"b":endpoint}]}),
-    };
+    let replacements: Vec<_> = assets::parse_portal_replacement(&endpoint, 1)?
+        .into_iter()
+        .collect();
     let mut clip = original.clone();
-    let replacements = recipe.door_replacements()?;
     // The synthetic pair repeats the endpoint; apply its replacement once.
     asset_world::PortalDoorReplacement::apply_all_collision(
         &replacements.into_iter().take(1).collect::<Vec<_>>(),

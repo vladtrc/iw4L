@@ -139,12 +139,10 @@ pub fn spawn_candidate_indices_for(
 ) -> Vec<usize> {
     if kind.is_team() && (client_state_team == TEAM_AXIS || client_state_team == TEAM_ALLIES) {
         let axis = client_state_team == TEAM_AXIS;
-        if use_start_spawns {
-            if let Some(start) = kind.team_start_classname(axis) {
-                let idx = filter_classname(spawns, |c| c == start);
-                if !idx.is_empty() {
-                    return idx;
-                }
+        if use_start_spawns && let Some(start) = kind.team_start_classname(axis) {
+            let idx = filter_classname(spawns, |c| c == start);
+            if !idx.is_empty() {
+                return idx;
             }
         }
         let grid = kind.team_grid_classnames(axis);

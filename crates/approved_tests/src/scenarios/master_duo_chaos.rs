@@ -9,14 +9,18 @@ use std::{
 use serde_json::{Value, json};
 
 pub const NAME: &str = "master_duo_chaos";
-const HOST_SETUP: &str = "wait world; spawn 0; force_match_start; mark ready";
-const CLIENT_SETUP: &str = "wait world; spawn 0; mark ready";
+const HOST_SETUP: &str =
+    "wait world; spawn intervention; wait spawn; force_match_start; mark ready";
+const CLIENT_SETUP: &str = "wait world; spawn intervention; wait spawn; mark ready";
 const MOVEMENT: &str = "mark movement.begin; hold +forward; hold +moveright; hold +left; wait 4s; release all; mark movement.end";
 const HOST_CHAOS: &str = "move -1066 1391 7 174 85; bot tp 2 -1066 1391 127 174 85; bot tp 3 -1073 1362 80 174 85; bot tp 4 519 -44 16 61 85; bot tp 5 528 -14 16 61 85; bot tp 6 62 915 80 180 85; bot tp 7 62 900 80 180 85; bot tp 8 80 915 80 180 85; bot give 2 rpg; bot give 3 rpg; bot give 4 rpg; bot give 5 rpg; bot give 6 rpg; bot give 7 rpg; bot give 8 rpg; bot fire all; mark chaos.begin";
 
+mod boundaries;
+use boundaries::{browser_boundary, scene_boundaries};
+
 type Result<T> = std::result::Result<T, String>;
 
-struct Player {
+pub(super) struct Player {
     child: Child,
     directory: PathBuf,
     role: &'static str,
@@ -141,6 +145,7 @@ fn launch(
     games: &Path,
     descriptor: &Path,
     role: &'static str,
+    map: Option<&str>,
 ) -> Result<Player> {
     let directory = run.join(role);
     fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
@@ -151,6 +156,29 @@ fn launch(
     .map_err(|e| e.to_string())?;
     let artifacts = directory.join("iw4l-artifacts");
     fs::create_dir_all(&artifacts).map_err(|e| e.to_string())?;
+    let profile = artifacts.join("profile/classes.txt");
+    if !profile.exists() {
+        fs::create_dir_all(artifacts.join("profile")).map_err(|e| e.to_string())?;
+        let slot = [
+            "intervention",
+            "iw4:weapon/cheytac_mp",
+            "fmj,heartbeat",
+            "iw4:weapon/javelin_mp",
+            "",
+            "iw4:weapon/claymore_mp",
+            "iw4:weapon/smoke_grenade_mp",
+            "specialty_bling",
+            "specialty_coldblooded",
+            "specialty_localjammer",
+            "specialty_copycat",
+        ]
+        .join("\t");
+        fs::write(
+            profile,
+            format!("iw4l-classes 1\n{}", format!("{slot}\n").repeat(10)),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     fs::write(
         artifacts.join("community.json"),
         serde_json::to_vec(descriptor).map_err(|e| e.to_string())?,
@@ -163,8 +191,14 @@ fn launch(
             command.env_remove(key);
         }
     }
+    if let Some(map) = map {
+        command
+            .args(["map", map])
+            .env("IW4L_MASTER_HOST_NAME", role);
+    } else {
+        command.arg("menu");
+    }
     let child = command
-        .arg("menu")
         .current_dir(cwd)
         .env("IW4L_GAMES", games)
         .env("IW4L_ARTIFACTS_DIR", &artifacts)
@@ -192,7 +226,7 @@ fn launch(
     })
 }
 
-pub fn run(root: &Path, source: &Path) -> Result<bool> {
+pub fn run(root: &Path, source: &Path, master_binary: &Path, scene: Option<&Path>) -> Result<bool> {
     if cfg!(windows) {
         return Err("master_duo_chaos currently requires Linux".into());
     }
@@ -200,21 +234,6 @@ pub fn run(root: &Path, source: &Path) -> Result<bool> {
         .0
         .canonicalize()
         .map_err(|e| e.to_string())?;
-    let descriptor = games.join("community-dev.iw4l-server");
-    let bytes =
-        fs::read_to_string(&descriptor).map_err(|e| format!("{}: {e}", descriptor.display()))?;
-    let community: community::Community = toml::from_str(&bytes).map_err(|e| e.to_string())?;
-    let dev_host = community
-        .master
-        .address
-        .rsplit_once(':')
-        .map(|(host, _)| host)
-        .unwrap_or("");
-    if !community.master.address.ends_with(":4434")
-        || (community.master.server_name != "iw4l-dev" && community.master.server_name != dev_host)
-    {
-        return Err("scenario requires the dev master (port 4434, TLS name iw4l-dev or the descriptor host)".into());
-    }
     let source = source.canonicalize().map_err(|e| e.to_string())?;
     let run = root.join("iw4l-artifacts/approved-tests").join(format!(
         "{}-{NAME}-{}",
@@ -227,24 +246,54 @@ pub fn run(root: &Path, source: &Path) -> Result<bool> {
     fs::hard_link(&source, &binary)
         .or_else(|_| fs::copy(&source, &binary).map(drop))
         .map_err(|e| e.to_string())?;
-    fs::write(run.join("community-dev.iw4l-server"), &bytes).map_err(|e| e.to_string())?;
+    let private_games = run.join("games");
+    fs::create_dir(&private_games).map_err(|e| e.to_string())?;
+    let trees =
+        asset_transport::NamespaceTrees::discover(&asset_transport::GamesRoot(games.clone()));
+    for (family, tree) in trees.present() {
+        let family_root = games.join(family.as_str());
+        let source = if family_root.is_dir() {
+            family_root.as_path()
+        } else {
+            tree.main
+                .as_deref()
+                .and_then(Path::parent)
+                .ok_or("game tree lacks a content root")?
+        };
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(source, private_games.join(family.as_str()));
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_dir(source, private_games.join(family.as_str()));
+        linked.map_err(|e| e.to_string())?;
+    }
+    let games = private_games;
+    let mut master = super::master_fixture::Master::start(master_binary, &run.join("master"))?;
+    let descriptor = master.descriptor.clone();
     let mut manifest = json!({"scenario": NAME, "result": "running", "cwd": cwd,
         "binary": binary, "build": crate::report::build_facts(root, &source),
-        "community": descriptor, "master": community.master.address, "map": "iw4:mp_boneyard",
+        "master_build": crate::report::build_facts(root, master_binary),
+        "community": descriptor, "map": "iw4:mp_boneyard", "scene_source": scene,
         "processes": 2, "bots": 7, "cache": "cold", "gameplay_seconds": 20, "samples": []});
-    if let Some((host, _)) = community.master.address.rsplit_once(':') {
-        let route = Command::new("ip")
-            .args(["route", "get", host])
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !route.status.success() {
-            return Err("cannot observe route to dev master".into());
-        }
-        manifest["network_route"] = String::from_utf8_lossy(&route.stdout).trim().into();
-    }
     crate::report::write(&run, &manifest)?;
     println!("run: {}", run.display());
-    let outcome = execute(&binary, &cwd, &run, &games, &descriptor, &mut manifest);
+    let outcome = (|| {
+        manifest["large_rooms"] = master.large_rooms()?;
+        browser_boundary(&binary, &cwd, &run, &games, &descriptor, &mut manifest)?;
+        master.close_large_rooms()?;
+        execute(&binary, &cwd, &run, &games, &descriptor, &mut manifest)?;
+        if let Some(scene) = scene {
+            scene_boundaries(
+                &binary,
+                &cwd,
+                &run,
+                &games,
+                &descriptor,
+                scene,
+                &mut manifest,
+            )?;
+        }
+        Ok::<(), String>(())
+    })();
     manifest["result"] = if outcome.is_ok() { "passed" } else { "failed" }.into();
     if let Err(error) = &outcome {
         manifest["failure"] = error.clone().into();
@@ -262,14 +311,14 @@ fn execute(
     descriptor: &Path,
     manifest: &mut Value,
 ) -> Result<()> {
-    let mut host = launch(binary, cwd, run, games, descriptor, "host")?;
+    let mut host = launch(binary, cwd, run, games, descriptor, "host", None)?;
     host.send(
         "wait progression; unlock all; set ui_mapname iw4:mp_boneyard; set ui_gametype dm; ui_create_lobby; ui_lobby_privacy",
     )?;
     let status = host.wait(|s, _| field(s, "state") == Some("hosting"))?;
     let room = field(&status, "room").ok_or("missing room ID")?.to_owned();
     manifest["room"] = room.clone().into();
-    let mut client = launch(binary, cwd, run, games, descriptor, "client")?;
+    let mut client = launch(binary, cwd, run, games, descriptor, "client", None)?;
     client.send(&format!(
         "wait progression; unlock all; set ui_mapname iw4:mp_boneyard; set ui_gametype dm; ui_join_lobby_id {room}"
     ))?;

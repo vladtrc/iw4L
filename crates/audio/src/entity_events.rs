@@ -422,10 +422,10 @@ pub(crate) fn bind_notetrack_sounds(
         }
         return;
     };
-    if table.owns(&bank.0, &weapons.registry()) {
+    if table.owns(&bank.0, weapons.registry()) {
         return;
     }
-    *table = NotetrackSoundTable::bind(&bank.0, &weapons.registry());
+    *table = NotetrackSoundTable::bind(&bank.0, weapons.registry());
 }
 
 pub(crate) fn play_viewmodel_notetrack_messages(
@@ -440,7 +440,7 @@ pub(crate) fn play_viewmodel_notetrack_messages(
     let bound_bank = bank
         .as_deref()
         .zip(weapons.as_deref())
-        .filter(|(bank, weapons)| table.owns(&bank.0, &weapons.registry()))
+        .filter(|(bank, weapons)| table.owns(&bank.0, weapons.registry()))
         .map(|(bank, _)| Arc::clone(&bank.0));
     for batch in notes.read() {
         if batch.client != presentation.local.0

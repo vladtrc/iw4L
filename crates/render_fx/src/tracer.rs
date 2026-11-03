@@ -14,6 +14,8 @@ use fx_iw4::{
 
 use crate::host::CombatFxDump;
 
+type TracerShotHistory = HashMap<(Option<sim::FireCause>, u32, u32, u16), (i32, u16, Option<bool>)>;
+
 #[derive(Resource, Default)]
 pub struct PreparedTracers(pub TracerDefinitions);
 
@@ -47,7 +49,7 @@ pub struct TracerSegment {
 pub struct TracerDrawGate {
     counts: HashMap<u32, u8>,
 
-    shots: HashMap<(Option<sim::FireCause>, u32, u32, u16), (i32, u16, Option<bool>)>,
+    shots: TracerShotHistory,
 }
 
 impl TracerDrawGate {

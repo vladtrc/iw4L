@@ -113,4 +113,16 @@ names for availability, not independent content versions. Signon compares the
 map/weapon/class content hashes in `MatchDescriptor` and refuses mismatches.
 A room may therefore be listed before an incompatible build is refused at
 connect. Revisit per-family digests and earlier lobby diagnostics when a game
-repo first ships independently; protocol11 remains unchanged for lockstep releases.
+repo first ships independently.
+
+## Browser pagination
+
+Master protocol 12 limits each room-list page by both the 16 KiB control-frame
+budget and 128 advertisements. `ListRooms.after` starts after the supplied
+`AdvertId`; `RoomList.next` supplies the next cursor, or is absent on the last
+page. Both the game browser and `iw4l-master list` collect every page.
+
+Advertisements are ordered by ID. Pages describe the live room list rather
+than a frozen snapshot: rooms inserted before the cursor appear on the next
+refresh, and closed rooms disappear immediately. The response generation
+identifies the service state used to build each page.

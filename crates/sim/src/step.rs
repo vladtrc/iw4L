@@ -131,11 +131,11 @@ fn phase_animated_map_models(world: &mut FrameWorld, tick: Tick, msec: i32) {
         if dobj.play_anim.is_some() {
             dobj.advance_script_model_play_anim(dt);
         }
-        if let Some(id) = capabilities.owner.script_model() {
-            if let Some((_, apos)) = mover_apos.iter().find(|(mover_id, _)| *mover_id == id) {
-                dobj.apply_trajectory_apos_at(*apos, at_time);
-                continue;
-            }
+        if let Some(id) = capabilities.owner.script_model()
+            && let Some((_, apos)) = mover_apos.iter().find(|(mover_id, _)| *mover_id == id)
+        {
+            dobj.apply_trajectory_apos_at(*apos, at_time);
+            continue;
         }
         if dobj.apos.is_some() {
             dobj.apply_apos_at(at_time);
@@ -341,13 +341,13 @@ fn run_players_system(ecs: &mut World) {
                 .and_then(|atlas| atlas.worlds.get(atlas_world.checked_sub(1)?));
             let backend = match beyond {
                 None => PlayerCollision {
-                    brushes: &brushes,
-                    bsp: &bsp,
-                    mesh: &mesh,
+                    brushes,
+                    bsp,
+                    mesh,
                     glass_damage: &glass_damage,
                     bodies: &bodies,
                     self_entnum: id.0 as u16,
-                    cmodels: &cmodel_models,
+                    cmodels: cmodel_models,
                     linked_brushes: &linked_brushes,
                     model_brushes: &model_brushes,
                     offset: [0.0; 3],
@@ -430,10 +430,10 @@ fn run_players_system(ecs: &mut World) {
                                 }
                             } else {
                                 PlayerCollision {
-                                    brushes: &brushes,
-                                    bsp: &bsp,
-                                    mesh: &mesh,
-                                    cmodels: &cmodel_models,
+                                    brushes,
+                                    bsp,
+                                    mesh,
+                                    cmodels: cmodel_models,
                                     linked_brushes: &linked_brushes,
                                     model_brushes: &model_brushes,
                                     glass_damage: &glass_damage,
@@ -602,7 +602,7 @@ fn run_players_system(ecs: &mut World) {
     if allow_move {
         phase_stuck_in_client(&mut world);
     }
-    drop(world);
+
     let mut request = ecs.resource_mut::<StepRequest>();
     if allow_move {
         request.input.cmds = consumed;
@@ -728,7 +728,7 @@ fn publish_snapshot_system(ecs: &mut World) {
     world.refresh_portal_availability();
     let snapshot = world.snapshot(tick);
     emit_snapshot_events(&world, &snapshot);
-    drop(world);
+
     let mut world = frame_world(ecs);
     let weapon_script_names = world.weapon_script_names();
     let pending_final_kill = world.take_pending_final_kill();
@@ -739,7 +739,7 @@ fn publish_snapshot_system(ecs: &mut World) {
         script_audio: world.take_pending_script_audio(),
         kicks: Vec::new(),
     };
-    drop(world);
+
     let script_seats = crate::script::script_seats(ecs);
     let mut runtime = ecs.resource_mut::<crate::script::RoundScript>();
     let script_exit_level = std::mem::take(&mut runtime.exit_level);
@@ -747,7 +747,7 @@ fn publish_snapshot_system(ecs: &mut World) {
         .into_iter()
         .map(|(client, reason)| (ClientId(client), reason))
         .collect();
-    drop(runtime);
+
     let mut request = ecs.resource_mut::<StepRequest>();
     request.output = Some(TickResult {
         input: request.input.clone(),
@@ -969,11 +969,7 @@ fn apply_action(world: &mut FrameWorld, tick: Tick, id: ClientId, action: &Clien
             let Ok(text) = core::str::from_utf8(&text[..end]) else {
                 return false;
             };
-            if crate::chat::send(world, id, team_only, text) {
-                true
-            } else {
-                false
-            }
+            crate::chat::send(world, id, team_only, text)
         }
         ClientAction::UseCopycat | ClientAction::SpawnClient => false,
         ClientAction::ActionSlot { slot } => {
@@ -982,7 +978,7 @@ fn apply_action(world: &mut FrameWorld, tick: Tick, id: ClientId, action: &Clien
             true
         }
         ClientAction::SelectClass { class_id, loadout } => {
-            return apply_select_class(world, id, class_id, loadout);
+            apply_select_class(world, id, class_id, loadout)
         }
         ClientAction::GiveWeapon { weapon, model } => {
             if !world.bootstrap_ref().allow_debug_actions {
@@ -1025,7 +1021,7 @@ fn apply_action(world: &mut FrameWorld, tick: Tick, id: ClientId, action: &Clien
             if !world.bootstrap_ref().allow_debug_actions {
                 return false;
             }
-            return apply_configuration_change(world, id, from, to);
+            apply_configuration_change(world, id, from, to)
         }
         ClientAction::ForceSpawn { pick } => {
             if !world.bootstrap_ref().allow_debug_actions {
@@ -1051,11 +1047,7 @@ fn apply_action(world: &mut FrameWorld, tick: Tick, id: ClientId, action: &Clien
             true
         }
         ClientAction::SetProfile { profile, .. } => {
-            if crate::script::set_profile(world.ecs(), id.0, profile) {
-                true
-            } else {
-                false
-            }
+            crate::script::set_profile(world.ecs(), id.0, profile)
         }
         ClientAction::GiveKillstreak { name } => {
             if !world.bootstrap_ref().allow_debug_actions
@@ -1066,11 +1058,7 @@ fn apply_action(world: &mut FrameWorld, tick: Tick, id: ClientId, action: &Clien
                 return false;
             }
             let name = crate::menu_response_text(&name);
-            if crate::script::give_killstreak(world.ecs(), id.0, name) {
-                true
-            } else {
-                false
-            }
+            crate::script::give_killstreak(world.ecs(), id.0, name)
         }
         ClientAction::ForceDeath => {
             if !world.bootstrap_ref().allow_debug_actions
@@ -1099,9 +1087,7 @@ fn apply_action(world: &mut FrameWorld, tick: Tick, id: ClientId, action: &Clien
 
             true
         }
-        ClientAction::Move { origin, angles } => {
-            return apply_debug_move(world, id, origin, angles);
-        }
+        ClientAction::Move { origin, angles } => apply_debug_move(world, id, origin, angles),
         ClientAction::BeginScriptMoverRotateVelocity { speed } => {
             if !world.bootstrap_ref().allow_debug_actions || !speed.is_finite() {
                 return false;
@@ -1151,9 +1137,7 @@ fn apply_action(world: &mut FrameWorld, tick: Tick, id: ClientId, action: &Clien
 
             true
         }
-        ClientAction::DebugDamage { amount } => {
-            return apply_debug_damage(world, tick, id, amount);
-        }
+        ClientAction::DebugDamage { amount } => apply_debug_damage(world, tick, id, amount),
     }
 }
 
@@ -1411,14 +1395,14 @@ fn apply_configuration_change(world: &mut FrameWorld, id: ClientId, from: u32, t
     next.weapon_primary = to;
     next.last_weapon_hand = weapon_iw4::num_hands_for_held(&next.weapons, &next.weapon_data, to);
     if old_ammo_key != new_ammo_key {
-        for row in next.ammo.chunks_exact_mut(8) {
+        for row in next.ammo.as_chunks_mut::<8>().0 {
             if row[..4] == old_ammo_key.to_le_bytes() {
                 row.fill(0);
             }
         }
     }
     if old_clip_key != new_clip_key {
-        for row in next.ammoclip.chunks_exact_mut(12) {
+        for row in next.ammoclip.as_chunks_mut::<12>().0 {
             if row[..4] == old_clip_key.to_le_bytes() {
                 row.fill(0);
             }
@@ -1481,14 +1465,14 @@ fn apply_configuration_change(world: &mut FrameWorld, id: ClientId, from: u32, t
                     false,
                 );
                 if old_key != new_key {
-                    for row in next.ammo.chunks_exact_mut(8) {
+                    for row in next.ammo.as_chunks_mut::<8>().0 {
                         if row[..4] == old_key.to_le_bytes() {
                             row.fill(0);
                         }
                     }
                 }
                 if old_clip != new_clip {
-                    for row in next.ammoclip.chunks_exact_mut(12) {
+                    for row in next.ammoclip.as_chunks_mut::<12>().0 {
                         if row[..4] == old_clip.to_le_bytes() {
                             row.fill(0);
                         }
@@ -1615,16 +1599,15 @@ fn apply_give_weapon(world: &mut FrameWorld, id: ClientId, weapon: u32) -> bool 
         next.weapon
     };
     let mut replaced = false;
-    if !next.weapons.contains(&(weapon as i32)) {
-        if let Some(slot) = next
+    if !next.weapons.contains(&(weapon as i32))
+        && let Some(slot) = next
             .weapons
             .iter()
             .position(|&w| w != 0 && w == outgoing as i32)
-        {
-            next.weapons[slot] = weapon as i32;
-            next.weapon_data[slot * 5..slot * 5 + 5].fill(0);
-            replaced = true;
-        }
+    {
+        next.weapons[slot] = weapon as i32;
+        next.weapon_data[slot * 5..slot * 5 + 5].fill(0);
+        replaced = true;
     }
     if replaced {
         let outgoing_facts = world
@@ -1774,13 +1757,10 @@ fn answer_custom_class(
     if !menu.eq_ignore_ascii_case("changeclass") {
         return None;
     }
-    let Some(slot) = response
+    let slot = response
         .strip_prefix("custom")
         .and_then(|n| n.parse::<u32>().ok())
-        .and_then(|n| n.checked_sub(1))
-    else {
-        return None;
-    };
+        .and_then(|n| n.checked_sub(1))?;
     let Some(def) = crate::script::personal_class(world.ecs(), id.0, crate::ClassId(slot)) else {
         return Some(false);
     };

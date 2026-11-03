@@ -20,6 +20,10 @@ pub(crate) struct SunEffectsCameraTrack {
 
 const CAMERA_CUT_ORIGIN: f32 = 512.0;
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn publish_sun_effects_frame(
     mut published: ResMut<SunEffectsFrameInput>,
     mut track: ResMut<SunEffectsCameraTrack>,

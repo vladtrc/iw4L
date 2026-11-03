@@ -603,9 +603,17 @@ fn run_map(
     playback: Option<ReplayPlayback>,
     cheats: sim::HostCheats,
 ) {
-    let merged = assets::MergedMap::find(&artifacts, &zone_arg)
-        .transpose()
-        .unwrap_or_else(|error| fatal(&error));
+    let authority = matches!(role, Role::Listen | Role::Dedicated)
+        && std::env::var("IW4L_MASTER_JOIN")
+            .ok()
+            .is_none_or(|value| value.trim().is_empty());
+    let merged = if authority {
+        assets::MergedMap::select(&artifacts, &zone_arg)
+    } else {
+        assets::MergedMap::find(&artifacts, &zone_arg)
+    }
+    .transpose()
+    .unwrap_or_else(|error| fatal(&error));
     let zone_arg = merged
         .as_ref()
         .map_or(zone_arg, |merged| merged.zone().to_owned());
@@ -657,18 +665,23 @@ fn run_map(
             .require_map(&format!("{}:{zone}", game.as_str()))
             .unwrap_or_else(|error| fatal(&error));
     }
-    for world in merged.iter().flat_map(|merged| &merged.worlds) {
+    for world in merged.iter().flat_map(|merged| &merged.scene.worlds) {
         families
             .require_map(world)
             .unwrap_or_else(|error| fatal(&error));
     }
-    let master_map = game.map_or_else(
-        || zone.clone(),
-        |game| match game {
-            asset_core::FamilyId::IW4 => zone.clone(),
-            _ => format!("{}:{zone}", game.as_str()),
-        },
-    );
+    let master_map = merged
+        .as_ref()
+        .map(|merged| merged.recording_name().to_owned())
+        .unwrap_or_else(|| {
+            game.map_or_else(
+                || zone.clone(),
+                |game| match game {
+                    asset_core::FamilyId::IW4 => zone.clone(),
+                    _ => format!("{}:{zone}", game.as_str()),
+                },
+            )
+        });
     let requires = families.0.clone();
 
     let master_intent = if role == Role::Replay {

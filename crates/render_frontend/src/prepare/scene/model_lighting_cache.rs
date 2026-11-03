@@ -20,6 +20,8 @@ pub use render_scene::{
     ResolvedModelLighting, ResolvedModelLightingTable,
 };
 
+type LightingShOutput = (u32, std::sync::Arc<Vec<Option<[[f32; 4]; 3]>>>);
+
 #[derive(Resource)]
 pub struct WorldModelLightingCache {
     pub handle: u16,
@@ -332,7 +334,7 @@ impl WorldModelLightingCache {
     }
 
     /// Light-grid SH per cache slot, with the handle base that maps a handle to its slot.
-    pub fn lighting_sh(&self) -> (u32, std::sync::Arc<Vec<Option<[[f32; 4]; 3]>>>) {
+    pub fn lighting_sh(&self) -> LightingShOutput {
         (self.base_index, std::sync::Arc::clone(&self.lighting_sh))
     }
 

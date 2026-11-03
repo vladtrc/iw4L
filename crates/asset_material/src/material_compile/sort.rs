@@ -2,6 +2,19 @@ use core::cmp::Ordering;
 use render_material::{CatalogBuildError, MaterialAssetId, SortedMaterialOrdinal};
 use std::collections::BTreeMap;
 
+type BuildSortedMaterialTableOutput = Result<
+    (
+        Vec<MaterialAssetId>,
+        Vec<Option<SortedMaterialOrdinal>>,
+        u32,
+        u32,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ),
+    CatalogBuildError,
+>;
+
 #[derive(Clone, Debug)]
 struct ComparatorPassKey {
     pixel_shader_name: String,
@@ -441,18 +454,7 @@ fn skip_tech_label(counts: &BTreeMap<String, u32>) -> Option<String> {
 
 pub(super) fn build_sorted_material_table(
     source: &crate::MaterialDefinitions,
-) -> Result<
-    (
-        Vec<MaterialAssetId>,
-        Vec<Option<SortedMaterialOrdinal>>,
-        u32,
-        u32,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ),
-    CatalogBuildError,
-> {
+) -> BuildSortedMaterialTableOutput {
     let mut records = Vec::new();
     let mut skipped_n = 0u32;
     let mut slot_gap_n = 0u32;

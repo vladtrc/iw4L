@@ -259,8 +259,8 @@ pub(crate) fn trace_scene(
             },
             &|_| !ignore_glass,
         );
-        for i in 0..3 {
-            hit.endpos[i] += offset[i];
+        for (i, offset_entry) in offset[..3].iter().enumerate() {
+            hit.endpos[i] += *offset_entry;
         }
         return hit;
     }

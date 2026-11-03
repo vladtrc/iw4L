@@ -667,10 +667,10 @@ pub(crate) fn script_mover_by_number(world: &World, number: i32) -> Option<Scrip
 
 pub(crate) fn script_mover_by_id(world: &World, id: ScriptModelId) -> Option<ScriptMoverGentity> {
     for number in script_mover_numbers_sorted(world) {
-        if let Some(mover) = script_mover_by_number(world, number) {
-            if mover.id == id {
-                return Some(mover);
-            }
+        if let Some(mover) = script_mover_by_number(world, number)
+            && mover.id == id
+        {
+            return Some(mover);
         }
     }
     None
@@ -731,10 +731,10 @@ fn bind_number(world: &mut World, number: i32, payload: Entity) {
 }
 
 fn unbind_number(world: &mut World, number: i32) {
-    if let Ok(n) = usize::try_from(number) {
-        if let Some(slot) = payload_index_mut(world).by_number.get_mut(n) {
-            *slot = None;
-        }
+    if let Ok(n) = usize::try_from(number)
+        && let Some(slot) = payload_index_mut(world).by_number.get_mut(n)
+    {
+        *slot = None;
     }
 }
 

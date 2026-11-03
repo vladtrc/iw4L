@@ -90,7 +90,8 @@ impl<'a> VisibleScene<'a> {
                     .packed_indices
                     .get(start as usize..(start + count) as usize)
                     .ok_or("invalid BSP render indices")?
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
                 {
                     let mut out = [Vec3::ZERO; 3];
                     for (at, &index) in out.iter_mut().zip(tri) {
@@ -157,7 +158,7 @@ impl<'a> VisibleScene<'a> {
                     .indices()
                     .map(|v| v.iter().collect::<Vec<_>>())
                     .unwrap_or_else(|| (0..vertices.len()).collect());
-                for tri in indices.chunks_exact(3) {
+                for tri in indices.as_chunks::<3>().0 {
                     let mut out = [Vec3::ZERO; 3];
                     for (at, &i) in out.iter_mut().zip(tri) {
                         *at = world(Vec3::from_array(
@@ -183,13 +184,9 @@ impl<'a> VisibleScene<'a> {
             .clone();
         let mut end = serde_json::json!({"id":format!("{}#{}",door.zone,door.index),"replace":door.replacement});
         end["world"] = serde_json::json!(0);
-        let recipe = assets::MergedMap {
-            name: "visible-door-measure".into(),
-            path: Default::default(),
-            worlds: vec![door.zone.clone()],
-            recipe: serde_json::json!({"portals":[{"a":end,"b":end}]}),
-        };
-        let replacements = recipe.door_replacements()?;
+        let replacements: Vec<_> = assets::parse_portal_replacement(&end, 1)?
+            .into_iter()
+            .collect();
         asset_world::PortalDoorReplacement::apply_all_collision(
             &replacements.into_iter().take(1).collect::<Vec<_>>(),
             &mut native,
@@ -505,11 +502,9 @@ impl<'a> VisibleScene<'a> {
                 continue;
             };
             candidate.width_high = ((r - l - 0.25) * 10.).floor() / 10.;
-            if flight {
-                if let Err(error) = super::validate_corridor(&clip, &candidate) {
-                    last_error = error;
-                    continue;
-                }
+            if flight && let Err(error) = super::validate_corridor(&clip, &candidate) {
+                last_error = error;
+                continue;
             }
             checked.push((lo, hi, bottom, top));
             attempts += 1;
@@ -555,7 +550,7 @@ fn ray_triangle_hits(triangles: &[[Vec3; 3]], start: Vec3, end: Vec3) -> Vec<f32
                 return None;
             }
             let f = ac.dot(cross) / det;
-            (f >= 0. && f <= 1.).then_some(f * length)
+            (0. ..=1.).contains(&f).then_some(f * length)
         })
         .collect();
     hits.sort_by(f32::total_cmp);

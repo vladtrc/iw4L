@@ -647,12 +647,12 @@ impl SoundCatalog {
             return Some(out);
         }
 
-        if bare == "$default" {
-            if let Some(curve) = self.curve_with_knots(namespace, SND_CURVE_DEFAULT_ASSET_NAME) {
-                let mut out = curve.clone();
-                out.name = name.to_owned();
-                return Some(out);
-            }
+        if bare == "$default"
+            && let Some(curve) = self.curve_with_knots(namespace, SND_CURVE_DEFAULT_ASSET_NAME)
+        {
+            let mut out = curve.clone();
+            out.name = name.to_owned();
+            return Some(out);
         }
         None
     }

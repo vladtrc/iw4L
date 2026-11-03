@@ -6,6 +6,8 @@ use crate::gentity::ScriptMoverGentity;
 use crate::script::{Arc, BTreeMap, RoundScript, Value};
 use bevy_ecs::prelude::World;
 
+type SpeakingModels = Vec<(ScriptModelId, Arc<str>, [f32; 3], Option<u32>)>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Shown {
     origin: [f32; 3],
@@ -518,7 +520,7 @@ fn publish_loop_sounds(world: &mut World) {
         .iter()
         .filter_map(|(object, e)| Some((*object, e.presence, e.loop_sound.clone()?, e.number)))
         .collect();
-    let placed: Vec<(ScriptModelId, Arc<str>, [f32; 3], Option<u32>)> = speaking
+    let placed: SpeakingModels = speaking
         .into_iter()
         .map(|(object, presence, alias, number)| {
             let owner = presence.unwrap_or_else(|| {

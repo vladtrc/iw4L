@@ -14,8 +14,6 @@ use dpvs_iw4::Bounds;
 
 use crate::{DpvsWorldData, SurfaceCastsSunShadow, WorldDraw, WorldShadowGeometry};
 
-/// The distance along x between atlas worlds; `sim::world_graph::ATLAS_SLAB`.
-
 /// Exact authored geometry replaced by a portal. Indices remain stable: render
 /// instances become empty slots and collision brushes keep their BSP indices.
 #[derive(Clone, Debug)]
@@ -412,10 +410,8 @@ impl WorldDraw {
         self.brush_model_bounds
             .extend(extra.brush_model_bounds.iter().copied());
         let lightmap_n = self.lightmap.as_ref().map_or(0, Vec::len);
-        let extra_lightmaps = match std::mem::replace(&mut extra.lightmap, Ok(Vec::new())) {
-            Ok(pages) => pages,
-            Err(_) => Vec::new(),
-        };
+        let extra_lightmaps =
+            std::mem::replace(&mut extra.lightmap, Ok(Vec::new())).unwrap_or_else(|_| Vec::new());
         let lightmap_base = u8_base("lightmaps", lightmap_n, extra_lightmaps.len())?;
         let probe_base = u8_base(
             "reflection probes",
@@ -442,10 +438,10 @@ impl WorldDraw {
                 crate::WorldVertexPayload::Captured { rows: more, .. },
             ) => {
                 for mut row in more {
-                    for axis in 0..3 {
+                    for (axis, shift_entry) in shift[..3].iter().enumerate() {
                         let at = axis * 4;
-                        let value =
-                            f32::from_le_bytes(row[at..at + 4].try_into().unwrap()) + shift[axis];
+                        let value = f32::from_le_bytes(row[at..at + 4].try_into().unwrap())
+                            + (*shift_entry);
                         row[at..at + 4].copy_from_slice(&value.to_le_bytes());
                     }
                     rows.push(row);

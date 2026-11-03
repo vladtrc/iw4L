@@ -12,6 +12,8 @@ use hud_iw4::{
 };
 use playerstate_iw4::ENTITYNUM_NONE;
 
+type HudDefaultInitializers = &'static [(&'static str, fn() -> Value)];
+
 const FONTS: &[&str] = &[
     "default",
     "bigfixed",
@@ -62,7 +64,7 @@ const VERT_ALIGN_T5: &[(&str, &str)] = &[
     ("user_bottom", "bottom_adjustable"),
 ];
 
-const DEFAULTS: &[(&str, fn() -> Value)] = &[
+const DEFAULTS: HudDefaultInitializers = &[
     ("x", || Value::Float(0.0)),
     ("y", || Value::Float(0.0)),
     ("z", || Value::Float(0.0)),

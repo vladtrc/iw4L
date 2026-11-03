@@ -33,8 +33,8 @@ pub fn xmodel_lod_for_dist(num_lods: u8, lod_dist: [f32; 4], dist: f32) -> Optio
         return Some(0);
     }
     let n = usize::from(num_lods).min(4);
-    for lod in 0..n {
-        let d = lod_dist[lod];
+    for (lod, lod_dist_entry) in lod_dist[..n].iter().enumerate() {
+        let d = *lod_dist_entry;
         if d == 0.0 || d > dist {
             return Some(lod as u8);
         }
@@ -497,7 +497,7 @@ fn capture_model_skel_iw4(
     let mut lod_surf_span = [(0u16, 0u16); 4];
     let mut any_surf = false;
 
-    for lod in 0..4 {
+    for (lod, lod_surf_span_entry) in lod_surf_span[..4].iter_mut().enumerate() {
         let Some(surfaces) = geometry.lod_xsurfaces[lod] else {
             let count = usize::from(geometry.lod_numsurfs[lod]);
             if count == 0 {
@@ -552,7 +552,7 @@ fn capture_model_skel_iw4(
                     materials?.material_index(handles.at(handle_slot * stream.pointer_bytes()))
                 }));
             }
-            lod_surf_span[lod] = (u16::try_from(start_surface).ok()?, source_count);
+            (*lod_surf_span_entry) = (u16::try_from(start_surface).ok()?, source_count);
             any_surf = true;
             continue;
         };
@@ -591,7 +591,9 @@ fn capture_model_skel_iw4(
                 geometry.num_bones,
             )?;
 
-            for vertex_index in 0..vertex_count {
+            for (vertex_index, surface_skins_entry) in
+                surface_skins[..vertex_count].iter().enumerate()
+            {
                 let vertex = vertices.at(vertex_index * sz::GFX_PACKED_VERTEX);
                 packed_vertices.push(copy_packed_vertex_iw4(stream, vertex)?);
                 positions.push([
@@ -600,7 +602,7 @@ fn capture_model_skel_iw4(
                     stream.f32_at(vertex, 8).ok()?,
                 ]);
 
-                let skin = surface_skins[vertex_index];
+                let skin = *surface_skins_entry;
                 if skin.is_rigid() {
                     rigid_verts += 1;
                 } else {
@@ -630,7 +632,7 @@ fn capture_model_skel_iw4(
             });
         }
         let n = surface_vertex_ranges.len().saturating_sub(start);
-        lod_surf_span[lod] = (u16::try_from(start).ok()?, u16::try_from(n).ok()?);
+        (*lod_surf_span_entry) = (u16::try_from(start).ok()?, u16::try_from(n).ok()?);
         any_surf = any_surf || n > 0;
     }
     if !any_surf {
@@ -882,7 +884,7 @@ fn decode_surface_skin(
 ) -> Option<Vec<VertSkin>> {
     let mut skins = vec![VertSkin::default(); vertex_count];
     let bone_at = |raw: u16| -> Option<u8> {
-        if raw % BONE_STRIDE != 0 {
+        if !raw.is_multiple_of(BONE_STRIDE) {
             return None;
         }
         let bone = raw / BONE_STRIDE;
@@ -891,26 +893,26 @@ fn decode_surface_skin(
             .flatten()
     };
 
-    if vert_list_count > 0 {
-        if let Ok(ZonePtr::Offset(list_ptr)) = stream.ptr_at(surface, stream.layout(36, 56)) {
-            let list = stream.resolve_alias(list_ptr);
-            let mut vertex = 0usize;
-            for i in 0..vert_list_count {
-                let entry = list.at(i * stream.layout(sz::XRIGID_VERT_LIST, 16));
-                let bone_offset = stream.u16_at(entry, 0).ok()?;
-                let run = stream.u16_at(entry, 2).ok()? as usize;
-                let bone = bone_at(bone_offset)?;
-                for _ in 0..run {
-                    if vertex >= vertex_count {
-                        break;
-                    }
-                    skins[vertex] = VertSkin::rigid(bone);
-                    vertex += 1;
+    if vert_list_count > 0
+        && let Ok(ZonePtr::Offset(list_ptr)) = stream.ptr_at(surface, stream.layout(36, 56))
+    {
+        let list = stream.resolve_alias(list_ptr);
+        let mut vertex = 0usize;
+        for i in 0..vert_list_count {
+            let entry = list.at(i * stream.layout(sz::XRIGID_VERT_LIST, 16));
+            let bone_offset = stream.u16_at(entry, 0).ok()?;
+            let run = stream.u16_at(entry, 2).ok()? as usize;
+            let bone = bone_at(bone_offset)?;
+            for _ in 0..run {
+                if vertex >= vertex_count {
+                    break;
                 }
+                skins[vertex] = VertSkin::rigid(bone);
+                vertex += 1;
             }
-            if vertex == vertex_count {
-                return Some(skins);
-            }
+        }
+        if vertex == vertex_count {
+            return Some(skins);
         }
     }
 

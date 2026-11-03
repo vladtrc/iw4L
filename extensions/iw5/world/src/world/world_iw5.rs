@@ -638,7 +638,7 @@ fn decode_lightmap_images(
     primary: GfxImageGeometry,
     image: GfxImageGeometry,
 ) -> Result<WorldLightmap, WorldLightmapGap> {
-    if image.width == 0 || image.height < 2 || image.height % 2 != 0 || image.depth != 1 {
+    if image.width == 0 || image.height < 2 || !image.height.is_multiple_of(2) || image.depth != 1 {
         return Err(WorldLightmapGap::InvalidDimensions {
             width: image.width,
             height: image.height,

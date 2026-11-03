@@ -722,153 +722,149 @@ fn extract_t5_dpvs(
             .map_err(|_| WorldMeshError::NoGeometry)?
             .max(0) as usize;
 
-        if aabb_count > 0 {
-            if let ZonePtr::Offset(tree) = s
+        if aabb_count > 0
+            && let ZonePtr::Offset(tree) = s
                 .ptr_at(cell, T5_CELL_AABB_TREES)
                 .map_err(|_| WorldMeshError::NoGeometry)?
-            {
-                out.cell_roots[i] = SurfRange {
-                    start: s
-                        .u16_at(tree, T5_AABB_START_SURF)
-                        .map_err(|_| WorldMeshError::NoGeometry)?,
-                    count: s
-                        .u16_at(tree, T5_AABB_SURFACE_COUNT)
-                        .map_err(|_| WorldMeshError::NoGeometry)?,
+        {
+            out.cell_roots[i] = SurfRange {
+                start: s
+                    .u16_at(tree, T5_AABB_START_SURF)
+                    .map_err(|_| WorldMeshError::NoGeometry)?,
+                count: s
+                    .u16_at(tree, T5_AABB_SURFACE_COUNT)
+                    .map_err(|_| WorldMeshError::NoGeometry)?,
+            };
+            let mut nodes = Vec::with_capacity(aabb_count);
+            let mut smodel_indices: Vec<u16> = Vec::with_capacity(aabb_count);
+            for j in 0..aabb_count {
+                let n = tree.at(j * T5_GFX_AABB_TREE);
+                let t5_children = s
+                    .i32_at(n, T5_AABB_CHILDREN_OFFSET)
+                    .map_err(|_| WorldMeshError::NoGeometry)?;
+
+                let children_offset = if t5_children > 0 {
+                    ((t5_children as usize) / T5_GFX_AABB_TREE * AABB_NODE_STRIDE) as i32
+                } else {
+                    t5_children
                 };
-                let mut nodes = Vec::with_capacity(aabb_count);
-                let mut smodel_indices: Vec<u16> = Vec::with_capacity(aabb_count);
-                for j in 0..aabb_count {
-                    let n = tree.at(j * T5_GFX_AABB_TREE);
-                    let t5_children = s
-                        .i32_at(n, T5_AABB_CHILDREN_OFFSET)
-                        .map_err(|_| WorldMeshError::NoGeometry)?;
-
-                    let children_offset = if t5_children > 0 {
-                        ((t5_children as usize) / T5_GFX_AABB_TREE * AABB_NODE_STRIDE) as i32
-                    } else {
-                        t5_children
-                    };
-                    let smodel_count = s
-                        .u16_at(n, T5_AABB_SMODEL_COUNT)
-                        .map_err(|_| WorldMeshError::NoGeometry)?
-                        as usize;
-                    let smodel_index_start = smodel_indices.len() as u32;
-                    let mut smodel_index_count = 0u16;
-                    if let ZonePtr::Offset(indexes) = s
-                        .ptr_at(n, T5_AABB_SMODEL_INDEXES)
-                        .map_err(|_| WorldMeshError::NoGeometry)?
-                    {
-                        for k in 0..smodel_count {
-                            smodel_indices.push(
-                                s.u16_at(indexes, k * 2)
-                                    .map_err(|_| WorldMeshError::NoGeometry)?,
-                            );
-                            smodel_index_count += 1;
-                        }
+                let smodel_count =
+                    s.u16_at(n, T5_AABB_SMODEL_COUNT)
+                        .map_err(|_| WorldMeshError::NoGeometry)? as usize;
+                let smodel_index_start = smodel_indices.len() as u32;
+                let mut smodel_index_count = 0u16;
+                if let ZonePtr::Offset(indexes) = s
+                    .ptr_at(n, T5_AABB_SMODEL_INDEXES)
+                    .map_err(|_| WorldMeshError::NoGeometry)?
+                {
+                    for k in 0..smodel_count {
+                        smodel_indices.push(
+                            s.u16_at(indexes, k * 2)
+                                .map_err(|_| WorldMeshError::NoGeometry)?,
+                        );
+                        smodel_index_count += 1;
                     }
-                    nodes.push(AabbNodeView {
-                        bounds: read_t5_aabb_bounds(s, n)?,
-                        child_count: s
-                            .u16_at(n, T5_AABB_CHILD_COUNT)
-                            .map_err(|_| WorldMeshError::NoGeometry)?,
-                        children_offset,
-                        start_surf: s
-                            .u16_at(n, T5_AABB_START_SURF)
-                            .map_err(|_| WorldMeshError::NoGeometry)?,
-                        surface_count: s
-                            .u16_at(n, T5_AABB_SURFACE_COUNT)
-                            .map_err(|_| WorldMeshError::NoGeometry)?,
-
-                        start_surf_no_decal: 0,
-                        surface_count_no_decal: 0,
-                        smodel_index_start,
-                        smodel_index_count,
-                    });
                 }
-                out.aabb_trees[i] = nodes;
-                out.aabb_smodel_indices[i] = smodel_indices;
+                nodes.push(AabbNodeView {
+                    bounds: read_t5_aabb_bounds(s, n)?,
+                    child_count: s
+                        .u16_at(n, T5_AABB_CHILD_COUNT)
+                        .map_err(|_| WorldMeshError::NoGeometry)?,
+                    children_offset,
+                    start_surf: s
+                        .u16_at(n, T5_AABB_START_SURF)
+                        .map_err(|_| WorldMeshError::NoGeometry)?,
+                    surface_count: s
+                        .u16_at(n, T5_AABB_SURFACE_COUNT)
+                        .map_err(|_| WorldMeshError::NoGeometry)?,
+
+                    start_surf_no_decal: 0,
+                    surface_count_no_decal: 0,
+                    smodel_index_start,
+                    smodel_index_count,
+                });
             }
+            out.aabb_trees[i] = nodes;
+            out.aabb_smodel_indices[i] = smodel_indices;
         }
 
         let mut cell_portals = Vec::with_capacity(portal_count);
-        if portal_count > 0 {
-            if let ZonePtr::Offset(arr) = s
+        if portal_count > 0
+            && let ZonePtr::Offset(arr) = s
                 .ptr_at(cell, T5_CELL_PORTALS)
                 .map_err(|_| WorldMeshError::NoGeometry)?
-            {
-                for j in 0..portal_count {
-                    let portal = arr.at(j * T5_GFX_PORTAL);
-                    let plane = [
-                        s.f32_at(portal, T5_PORTAL_PLANE)
-                            .map_err(|_| WorldMeshError::NoGeometry)?,
-                        s.f32_at(portal, T5_PORTAL_PLANE + 4)
-                            .map_err(|_| WorldMeshError::NoGeometry)?,
-                        s.f32_at(portal, T5_PORTAL_PLANE + 8)
-                            .map_err(|_| WorldMeshError::NoGeometry)?,
-                        s.f32_at(portal, T5_PORTAL_PLANE + 12)
-                            .map_err(|_| WorldMeshError::NoGeometry)?,
-                    ];
-                    let neighbor = match s
-                        .ptr_at(portal, T5_PORTAL_CELL)
-                        .map_err(|_| WorldMeshError::NoGeometry)?
+        {
+            for j in 0..portal_count {
+                let portal = arr.at(j * T5_GFX_PORTAL);
+                let plane = [
+                    s.f32_at(portal, T5_PORTAL_PLANE)
+                        .map_err(|_| WorldMeshError::NoGeometry)?,
+                    s.f32_at(portal, T5_PORTAL_PLANE + 4)
+                        .map_err(|_| WorldMeshError::NoGeometry)?,
+                    s.f32_at(portal, T5_PORTAL_PLANE + 8)
+                        .map_err(|_| WorldMeshError::NoGeometry)?,
+                    s.f32_at(portal, T5_PORTAL_PLANE + 12)
+                        .map_err(|_| WorldMeshError::NoGeometry)?,
+                ];
+                let neighbor = match s
+                    .ptr_at(portal, T5_PORTAL_CELL)
+                    .map_err(|_| WorldMeshError::NoGeometry)?
+                {
+                    ZonePtr::Offset(neighbor_cell)
+                        if neighbor_cell.block == cells_ptr.block
+                            && neighbor_cell.offset >= cells_ptr.offset =>
                     {
-                        ZonePtr::Offset(neighbor_cell)
-                            if neighbor_cell.block == cells_ptr.block
-                                && neighbor_cell.offset >= cells_ptr.offset =>
-                        {
-                            let delta = (neighbor_cell.offset - cells_ptr.offset) as usize;
-                            if delta % T5_GFX_CELL == 0 {
-                                (delta / T5_GFX_CELL) as u16
-                            } else {
-                                u16::MAX
-                            }
-                        }
-                        _ => u16::MAX,
-                    };
-                    let vertex_count = s
-                        .u8_at(portal, T5_PORTAL_VERT_COUNT)
-                        .map_err(|_| WorldMeshError::NoGeometry)?
-                        as usize;
-                    let vert_start = out.portal_verts.len();
-                    if let ZonePtr::Offset(verts) = s
-                        .ptr_at(portal, T5_PORTAL_VERTS)
-                        .map_err(|_| WorldMeshError::NoGeometry)?
-                    {
-                        for k in 0..vertex_count {
-                            let v = verts.at(k * 12);
-                            out.portal_verts.push([
-                                s.f32_at(v, 0).map_err(|_| WorldMeshError::NoGeometry)?,
-                                s.f32_at(v, 4).map_err(|_| WorldMeshError::NoGeometry)?,
-                                s.f32_at(v, 8).map_err(|_| WorldMeshError::NoGeometry)?,
-                            ]);
+                        let delta = (neighbor_cell.offset - cells_ptr.offset) as usize;
+                        if delta.is_multiple_of(T5_GFX_CELL) {
+                            (delta / T5_GFX_CELL) as u16
+                        } else {
+                            u16::MAX
                         }
                     }
-                    let hull_axis = [
-                        [
-                            s.f32_at(portal, T5_PORTAL_HULL_AXIS)
-                                .map_err(|_| WorldMeshError::NoGeometry)?,
-                            s.f32_at(portal, T5_PORTAL_HULL_AXIS + 4)
-                                .map_err(|_| WorldMeshError::NoGeometry)?,
-                            s.f32_at(portal, T5_PORTAL_HULL_AXIS + 8)
-                                .map_err(|_| WorldMeshError::NoGeometry)?,
-                        ],
-                        [
-                            s.f32_at(portal, T5_PORTAL_HULL_AXIS + 12)
-                                .map_err(|_| WorldMeshError::NoGeometry)?,
-                            s.f32_at(portal, T5_PORTAL_HULL_AXIS + 16)
-                                .map_err(|_| WorldMeshError::NoGeometry)?,
-                            s.f32_at(portal, T5_PORTAL_HULL_AXIS + 20)
-                                .map_err(|_| WorldMeshError::NoGeometry)?,
-                        ],
-                    ];
-                    cell_portals.push(OwnedPortal {
-                        plane,
-                        neighbor,
-                        vert_start,
-                        vert_count: out.portal_verts.len() - vert_start,
-                        hull_axis: Some(hull_axis),
-                    });
+                    _ => u16::MAX,
+                };
+                let vertex_count =
+                    s.u8_at(portal, T5_PORTAL_VERT_COUNT)
+                        .map_err(|_| WorldMeshError::NoGeometry)? as usize;
+                let vert_start = out.portal_verts.len();
+                if let ZonePtr::Offset(verts) = s
+                    .ptr_at(portal, T5_PORTAL_VERTS)
+                    .map_err(|_| WorldMeshError::NoGeometry)?
+                {
+                    for k in 0..vertex_count {
+                        let v = verts.at(k * 12);
+                        out.portal_verts.push([
+                            s.f32_at(v, 0).map_err(|_| WorldMeshError::NoGeometry)?,
+                            s.f32_at(v, 4).map_err(|_| WorldMeshError::NoGeometry)?,
+                            s.f32_at(v, 8).map_err(|_| WorldMeshError::NoGeometry)?,
+                        ]);
+                    }
                 }
+                let hull_axis = [
+                    [
+                        s.f32_at(portal, T5_PORTAL_HULL_AXIS)
+                            .map_err(|_| WorldMeshError::NoGeometry)?,
+                        s.f32_at(portal, T5_PORTAL_HULL_AXIS + 4)
+                            .map_err(|_| WorldMeshError::NoGeometry)?,
+                        s.f32_at(portal, T5_PORTAL_HULL_AXIS + 8)
+                            .map_err(|_| WorldMeshError::NoGeometry)?,
+                    ],
+                    [
+                        s.f32_at(portal, T5_PORTAL_HULL_AXIS + 12)
+                            .map_err(|_| WorldMeshError::NoGeometry)?,
+                        s.f32_at(portal, T5_PORTAL_HULL_AXIS + 16)
+                            .map_err(|_| WorldMeshError::NoGeometry)?,
+                        s.f32_at(portal, T5_PORTAL_HULL_AXIS + 20)
+                            .map_err(|_| WorldMeshError::NoGeometry)?,
+                    ],
+                ];
+                cell_portals.push(OwnedPortal {
+                    plane,
+                    neighbor,
+                    vert_start,
+                    vert_count: out.portal_verts.len() - vert_start,
+                    hull_axis: Some(hull_axis),
+                });
             }
         }
         out.portals_per_cell.push(cell_portals);
@@ -1162,7 +1158,9 @@ fn decode_t5_lightmap(
     primary_image.sampler = ImageSampler::linear();
 
     let luma: Vec<u8> = rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|px| {
             ((u16::from(px[0]) * 77 + u16::from(px[1]) * 150 + u16::from(px[2]) * 29) / 256) as u8
         })

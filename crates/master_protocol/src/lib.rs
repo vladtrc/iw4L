@@ -4,8 +4,8 @@ use core::{fmt, str::FromStr};
 
 pub mod budget;
 
-pub const PROTOCOL_VERSION: u16 = 11;
-pub const ALPN: &[u8] = b"iw4l-master/11";
+pub const PROTOCOL_VERSION: u16 = 12;
+pub const ALPN: &[u8] = b"iw4l-master/12";
 pub const MAX_CONTROL_BYTES: usize = 16 * 1024;
 pub const MAX_OPAQUE_PAYLOAD: usize = 1100;
 
@@ -373,7 +373,7 @@ impl RoomView {
     }
 
     pub fn contains(&self, member_id: MemberId) -> bool {
-        self.members.iter().any(|id| *id == member_id)
+        self.members.contains(&member_id)
     }
 }
 
@@ -443,7 +443,9 @@ pub enum RequestBody {
         epoch: u32,
     },
     CloseRoom,
-    ListRooms,
+    ListRooms {
+        after: Option<AdvertId>,
+    },
     HostWorldReady {
         room_id: AdvertId,
         epoch: u32,
@@ -591,6 +593,7 @@ pub enum ResponseBody {
     RoomList {
         generation: u64,
         adverts: Vec<Advert>,
+        next: Option<AdvertId>,
     },
     Ack,
     Error(ServiceError),
@@ -924,7 +927,10 @@ fn encode_request_body(body: &RequestBody) -> Result<Vec<u8>, ProtocolError> {
             out.u32(*epoch);
         }
         RequestBody::CloseRoom => out.u8(TAG_CLOSE_ROOM),
-        RequestBody::ListRooms => out.u8(TAG_LIST_ROOMS),
+        RequestBody::ListRooms { after } => {
+            out.u8(TAG_LIST_ROOMS);
+            write_advert_cursor(&mut out, *after);
+        }
         RequestBody::HostWorldReady {
             room_id,
             epoch,
@@ -1048,7 +1054,9 @@ fn decode_request_body(body: &mut Reader<'_>) -> Result<RequestBody, ProtocolErr
             epoch: body.u32()?,
         },
         TAG_CLOSE_ROOM => RequestBody::CloseRoom,
-        TAG_LIST_ROOMS => RequestBody::ListRooms,
+        TAG_LIST_ROOMS => RequestBody::ListRooms {
+            after: read_advert_cursor(body)?,
+        },
         TAG_HOST_WORLD_READY => RequestBody::HostWorldReady {
             room_id: AdvertId(body.array()?),
             epoch: body.u32()?,
@@ -1085,6 +1093,77 @@ fn decode_request_body(body: &mut Reader<'_>) -> Result<RequestBody, ProtocolErr
     })
 }
 
+fn write_advert_cursor(out: &mut Writer, cursor: Option<AdvertId>) {
+    out.u8(u8::from(cursor.is_some()));
+    if let Some(id) = cursor {
+        out.bytes(&id.0);
+    }
+}
+
+fn read_advert_cursor(input: &mut Reader<'_>) -> Result<Option<AdvertId>, ProtocolError> {
+    if bool_byte(input.u8()?)? {
+        Ok(Some(AdvertId(input.array()?)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn encode_advert(advert: &Advert, out: &mut Writer) -> Result<(), ProtocolError> {
+    out.bytes(&advert.id.0);
+    out.string(&advert.name, MAX_ADVERT_NAME_BYTES)?;
+    out.string(&advert.map, MAX_MAP_BYTES)?;
+    out.string(&advert.mode, MAX_MODE_BYTES)?;
+    out.u8(advert.players);
+    out.u8(advert.max_players);
+    out.u8(u8::from(advert.locked));
+    out.u8(u8::from(advert.in_match));
+    advert.requires.write(out);
+    advert.available.write(out);
+    out.u8(u8::from(advert.password_protected));
+    out.u64(advert.generation);
+    Ok(())
+}
+
+impl ResponseBody {
+    /// Advertisements must be in ascending ID order, strictly after the request cursor.
+    pub fn room_list_page(
+        generation: u64,
+        adverts: impl IntoIterator<Item = Advert>,
+    ) -> Result<Self, ProtocolError> {
+        let mut page = Self::RoomList {
+            generation,
+            adverts: Vec::new(),
+            next: Some(AdvertId::default()),
+        };
+        let mut size = HEADER_BYTES + encode_response_body(&page)?.len();
+        let Self::RoomList {
+            adverts: entries,
+            next,
+            ..
+        } = &mut page
+        else {
+            unreachable!();
+        };
+        for advert in adverts {
+            let mut encoded = Writer::default();
+            encode_advert(&advert, &mut encoded)?;
+            if entries.len() == MAX_LIST_ADVERTS || size + encoded.0.len() > MAX_CONTROL_BYTES {
+                *next = Some(
+                    entries
+                        .last()
+                        .ok_or(ProtocolError::LengthExceeded(size + encoded.0.len()))?
+                        .id,
+                );
+                return Ok(page);
+            }
+            size += encoded.0.len();
+            entries.push(advert);
+        }
+        *next = None;
+        Ok(page)
+    }
+}
+
 fn encode_response_body(body: &ResponseBody) -> Result<Vec<u8>, ProtocolError> {
     let mut out = Writer::default();
     match body {
@@ -1116,26 +1195,17 @@ fn encode_response_body(body: &ResponseBody) -> Result<Vec<u8>, ProtocolError> {
         ResponseBody::RoomList {
             generation,
             adverts,
+            next,
         } => {
             if adverts.len() > MAX_LIST_ADVERTS {
                 return Err(ProtocolError::LengthExceeded(adverts.len()));
             }
             out.u8(TAG_LIST_ROOMS);
             out.u64(*generation);
+            write_advert_cursor(&mut out, *next);
             out.u16(adverts.len() as u16);
             for advert in adverts {
-                out.bytes(&advert.id.0);
-                out.string(&advert.name, MAX_ADVERT_NAME_BYTES)?;
-                out.string(&advert.map, MAX_MAP_BYTES)?;
-                out.string(&advert.mode, MAX_MODE_BYTES)?;
-                out.u8(advert.players);
-                out.u8(advert.max_players);
-                out.u8(u8::from(advert.locked));
-                out.u8(u8::from(advert.in_match));
-                advert.requires.write(&mut out);
-                advert.available.write(&mut out);
-                out.u8(u8::from(advert.password_protected));
-                out.u64(advert.generation);
+                encode_advert(advert, &mut out)?;
             }
         }
         ResponseBody::Ack => out.u8(TAG_HOST_WORLD_READY),
@@ -1171,6 +1241,7 @@ fn decode_response_body(body: &mut Reader<'_>) -> Result<ResponseBody, ProtocolE
         },
         TAG_LIST_ROOMS => {
             let generation = body.u64()?;
+            let next = read_advert_cursor(body)?;
             let count = body.u16()? as usize;
             if count > MAX_LIST_ADVERTS {
                 return Err(ProtocolError::LengthExceeded(count));
@@ -1195,6 +1266,7 @@ fn decode_response_body(body: &mut Reader<'_>) -> Result<ResponseBody, ProtocolE
             ResponseBody::RoomList {
                 generation,
                 adverts,
+                next,
             }
         }
         TAG_HOST_WORLD_READY => ResponseBody::Ack,

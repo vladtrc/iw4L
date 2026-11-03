@@ -193,10 +193,19 @@ impl StartDecision {
 #[derive(Resource, Default, Debug)]
 pub struct StartDecisions {
     entries: VecDeque<StartDecision>,
+    pressure_refusals: u64,
 }
 
 impl StartDecisions {
     pub fn record(&mut self, decision: StartDecision) {
+        if matches!(
+            decision.outcome,
+            StartOutcome::Failed(StartFailure::CueRefused(
+                crate::CueFailure::QueueFull | crate::CueFailure::PendingBudget
+            ))
+        ) {
+            self.pressure_refusals = self.pressure_refusals.saturating_add(1);
+        }
         if self.entries.len() == START_DECISION_CAP {
             self.entries.pop_front();
         }
@@ -209,6 +218,10 @@ impl StartDecisions {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    pub fn pressure_refusals(&self) -> u64 {
+        self.pressure_refusals
     }
 
     pub fn lines(&self) -> impl Iterator<Item = String> + '_ {

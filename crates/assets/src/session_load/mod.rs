@@ -25,7 +25,7 @@ pub use asset_world::WorldDrawPolicy;
 
 mod atlas_worlds;
 pub use atlas_worlds::AtlasLoad;
-pub(crate) use atlas_worlds::atlas_load;
+pub use atlas_worlds::atlas_load;
 mod common_cache;
 mod common_tables;
 use common_tables::CommonTables;
@@ -98,6 +98,12 @@ fn set_thread_cpus(cpus: &[usize]) {
 #[cfg(not(target_os = "linux"))]
 fn set_thread_cpus(_cpus: &[usize]) {}
 
+pub struct PreparedAtlasWorld {
+    pub id: asset_core::atlas::WorldId,
+    pub zone: String,
+    pub collision: Arc<ClipCollision>,
+}
+
 pub struct PreparedMatch {
     pub ui_images: asset_material::UiImagePublication,
     pub scripts: crate::ScriptSources,
@@ -106,6 +112,7 @@ pub struct PreparedMatch {
     pub fx: asset_game::FxDefinitions,
     pub materials: crate::MatchMaterials,
     pub clip: Option<Arc<ClipCollision>>,
+    pub atlas_worlds: Vec<PreparedAtlasWorld>,
     pub weapons: Arc<WeaponRegistry>,
     pub fpv_meshes: Arc<FpvMeshCatalog>,
     pub bodies: Arc<BodyMeshCatalog>,

@@ -9,6 +9,8 @@ mod lane_capability;
 pub mod loading_screen;
 mod map_load_process;
 mod merged_map;
+mod scene_recipe;
+pub use scene_recipe::{SceneEndpoint, ScenePortal, SceneRecipe, parse_portal_replacement};
 mod random_doors;
 pub use merged_map::{LoadingWorld, MergedMap};
 pub use random_doors::{
@@ -44,7 +46,7 @@ pub use loading_screen::{LoadingPreviewSource, LoadingScreen};
 pub use map_load_process::MapLoadProcess;
 pub use match_load::{
     MapLoadApproval, MatchLoadAccepted, MatchLoadBusy, MatchLoadDispatch, MatchLoadRequest,
-    PreparedMatchReady, PreparedMatchSound,
+    PreparedMatchSound,
 };
 pub use plugin::AssetPlugin;
 pub use prepared::{
@@ -54,9 +56,9 @@ pub use prepared::{
     PreparedWorldWeapons, PreparedXAnims, PreparedXModelWalkCensus, SessionCompass,
 };
 pub use session_load::{
-    MatchLoadOutcome, MatchMaterialSeed, PreparedMatch, ShellCommon, apply_match_material_map,
-    load_match_material_catalog, load_match_material_seed, load_pool, load_prepared_match,
-    load_shell_common, load_workers, publish_process_cpus, use_process_cpus,
+    MatchLoadOutcome, MatchMaterialSeed, PreparedAtlasWorld, PreparedMatch, ShellCommon,
+    apply_match_material_map, load_match_material_catalog, load_match_material_seed, load_pool,
+    load_prepared_match, load_shell_common, load_workers, publish_process_cpus, use_process_cpus,
 };
 pub use zone_lane::*;
 

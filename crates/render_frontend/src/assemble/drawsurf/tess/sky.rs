@@ -108,8 +108,8 @@ pub fn build_sky_model_draw_plan(
     );
     let mut revisions = SourceRevisions::default();
     revisions.set_topology_from(
-        &geometry.indices(),
-        &geometry.surface_ranges(),
+        geometry.indices(),
+        geometry.surface_ranges(),
         geometry.decoded_vertices().len(),
     );
     revisions.bump_surfaces();

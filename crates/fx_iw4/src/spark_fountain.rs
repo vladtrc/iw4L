@@ -78,7 +78,7 @@ pub fn spark_fountain_slot_for_handle(handle: u16) -> Option<usize> {
         return None;
     }
     let off = handle as usize;
-    if off % FX_SPARK_FOUNTAIN_CLUSTER_STRIDE != 0 {
+    if !off.is_multiple_of(FX_SPARK_FOUNTAIN_CLUSTER_STRIDE) {
         return None;
     }
     let slot = off / FX_SPARK_FOUNTAIN_CLUSTER_STRIDE;
@@ -352,7 +352,7 @@ pub fn spark_fountain_trace_until_miss_or_hit(
 }
 
 pub fn spark_fountain_boost(boost_time: f32, boost_factor: f32, age: f32) -> (f32, f32) {
-    if !(boost_time > 0.0) {
+    if boost_time <= 0.0 || boost_time.is_nan() {
         return (age, 1.0);
     }
     let k = FX_SPARK_FOUNTAIN_BOOST_HALF_PI / boost_time;
@@ -370,7 +370,7 @@ pub fn spark_fountain_boost(boost_time: f32, boost_factor: f32, age: f32) -> (f3
 }
 
 pub fn spark_fountain_wrap_loop_time(t: f32, loop_time: f32) -> f32 {
-    if !(loop_time > 0.0) {
+    if loop_time <= 0.0 || loop_time.is_nan() {
         return t;
     }
     let mut out = t;

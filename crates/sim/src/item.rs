@@ -446,14 +446,13 @@ fn blocked_fall(
 }
 
 pub(crate) fn think_item_move(world: &mut FrameWorld, time_ms: i32, number: i32) {
-    if let Ok(entity) = world.entity_kernel().current_ref(number) {
-        if world
+    if let Ok(entity) = world.entity_kernel().current_ref(number)
+        && world
             .entity_kernel()
             .resolve(entity)
             .is_ok_and(|view| view.relations.parent.is_some())
-        {
-            return;
-        }
+    {
+        return;
     }
     let Some(item) = world.dropped_item_by_number(number) else {
         return;

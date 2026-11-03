@@ -159,40 +159,40 @@ impl WeaponBuild {
             }
         }
         for entry in &mut entries {
-            if entry.gun_xmodel.is_none() {
-                if let Some(key) = entry.weap_def {
-                    entry.gun_xmodel = gun_by_def.get(&key).cloned();
-                }
+            if entry.gun_xmodel.is_none()
+                && let Some(key) = entry.weap_def
+            {
+                entry.gun_xmodel = gun_by_def.get(&key).cloned();
             }
-            if entry.hand_xmodel.is_none() {
-                if let Some(key) = entry.weap_def {
-                    entry.hand_xmodel = hand_by_def.get(&key).cloned();
-                }
+            if entry.hand_xmodel.is_none()
+                && let Some(key) = entry.weap_def
+            {
+                entry.hand_xmodel = hand_by_def.get(&key).cloned();
             }
-            if entry.world_model.is_none() {
-                if let Some(key) = entry.weap_def {
-                    entry.world_model = world_by_def.get(&key).cloned();
-                }
+            if entry.world_model.is_none()
+                && let Some(key) = entry.weap_def
+            {
+                entry.world_model = world_by_def.get(&key).cloned();
             }
             if entry.camo_models.is_empty()
                 && let Some(shared) = entry.weap_def.and_then(|key| camo_by_def.get(&key))
             {
                 entry.camo_models = shared.clone();
             }
-            if entry.projectile_model.is_none() {
-                if let Some(key) = entry.weap_def {
-                    entry.projectile_model = projectile_by_def.get(&key).cloned();
-                }
+            if entry.projectile_model.is_none()
+                && let Some(key) = entry.weap_def
+            {
+                entry.projectile_model = projectile_by_def.get(&key).cloned();
             }
-            if entry.knife_xmodel.is_none() {
-                if let Some(key) = entry.weap_def {
-                    entry.knife_xmodel = knife_by_def.get(&key).cloned();
-                }
+            if entry.knife_xmodel.is_none()
+                && let Some(key) = entry.weap_def
+            {
+                entry.knife_xmodel = knife_by_def.get(&key).cloned();
             }
-            if entry.rocket_model.is_none() {
-                if let Some(key) = entry.weap_def {
-                    entry.rocket_model = rocket_by_def.get(&key).cloned();
-                }
+            if entry.rocket_model.is_none()
+                && let Some(key) = entry.weap_def
+            {
+                entry.rocket_model = rocket_by_def.get(&key).cloned();
             }
             if let Some(key) = entry.weap_def {
                 if let Some(shared) = sounds_by_def.get(&key) {
@@ -204,15 +204,15 @@ impl WeaponBuild {
                 if let Some(&shared) = combat_slots_by_def.get(&key) {
                     merge_combat_slots(&mut entry.combat_slots, &shared);
                 }
-                if xanims_idle(&entry.sz_xanims_right).is_none() {
-                    if let Some(shared) = right_by_def.get(&key) {
-                        entry.sz_xanims_right = shared.clone();
-                    }
+                if xanims_idle(&entry.sz_xanims_right).is_none()
+                    && let Some(shared) = right_by_def.get(&key)
+                {
+                    entry.sz_xanims_right = shared.clone();
                 }
-                if xanims_idle(&entry.sz_xanims_left).is_none() {
-                    if let Some(shared) = left_by_def.get(&key) {
-                        entry.sz_xanims_left = shared.clone();
-                    }
+                if xanims_idle(&entry.sz_xanims_left).is_none()
+                    && let Some(shared) = left_by_def.get(&key)
+                {
+                    entry.sz_xanims_left = shared.clone();
                 }
             }
         }

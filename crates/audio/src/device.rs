@@ -169,7 +169,7 @@ fn build<T: SizedSample + FromSample<f32>>(
     let mut primed = false;
     let errors = shared.clone();
     device.build_output_stream(
-        config.clone(),
+        *config,
         move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
             shared.device_callbacks.fetch_add(1, Ordering::Release);
             if shared.capture.armed.load(Ordering::Acquire) {

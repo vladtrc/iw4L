@@ -196,11 +196,7 @@ pub fn solve(
             if zone == &route.zones[0] && !route.enter.source["replace"].is_null() {
                 let mut endpoint = route.enter.source.clone();
                 endpoint["world"] = json!(0);
-                let scene = assets::MergedMap {
-                    name: route.name.clone(), path: Default::default(), worlds: route.zones.clone(),
-                    recipe: json!({"portals":[{"a":endpoint,"b":endpoint}]}),
-                };
-                let replacements = scene.door_replacements()?.into_iter().take(1).collect::<Vec<_>>();
+                let replacements: Vec<_> = assets::parse_portal_replacement(&endpoint, route.zones.len())?.into_iter().collect();
                 let mut opened = Arc::unwrap_or_clone(search_clip);
                 asset_world::PortalDoorReplacement::apply_all_collision(&replacements, &mut opened)?;
                 search_clip = Arc::new(opened);
@@ -345,10 +341,11 @@ pub fn solve(
         for x in (lo[0] as i32..hi[0] as i32).step_by(256) {
             for y in (lo[1] as i32..hi[1] as i32).step_by(256) {
                 let point = [x as f32, y as f32, hi[2] - BOUNDS_SKY + 128.0];
-                if let Some((floor, normal)) = solver.trace(point, sub(point, [0.0, 0.0, 1024.0])) {
-                    if normal[2] > 0.9 && solver.stands(add(floor, [0.0, 0.0, 1.0])) {
-                        targets.push(Some(add(floor, [0.0, 0.0, 40.0])));
-                    }
+                if let Some((floor, normal)) = solver.trace(point, sub(point, [0.0, 0.0, 1024.0]))
+                    && normal[2] > 0.9
+                    && solver.stands(add(floor, [0.0, 0.0, 1.0]))
+                {
+                    targets.push(Some(add(floor, [0.0, 0.0, 40.0])));
                 }
             }
         }
@@ -811,6 +808,9 @@ fn route_atlas(route: &Route, solver: &Solver, flight: &Flight) -> Atlas {
     Atlas {
         portal_thickness: Vec::new(),
         portal_clearance: Vec::new(),
+        root_zone: Default::default(),
+        versions: Default::default(),
+        dvars: Default::default(),
         worlds: solver.others.clone(),
         portals: vec![
             portal(&route.enter, &route.middle[x], flip_x),
@@ -1037,6 +1037,9 @@ impl Solver {
         Atlas {
             portal_thickness: Vec::new(),
             portal_clearance: Vec::new(),
+            root_zone: Default::default(),
+            versions: Default::default(),
+            dvars: Default::default(),
             worlds: self.others.clone(),
             portals,
         }
@@ -1046,6 +1049,9 @@ impl Solver {
         let atlas = Atlas {
             portal_thickness: Vec::new(),
             portal_clearance: Vec::new(),
+            root_zone: Default::default(),
+            versions: Default::default(),
+            dvars: Default::default(),
             worlds: self.others.clone(),
             portals: Vec::new(),
         };
@@ -1853,13 +1859,11 @@ fn write_outputs(
             map["dvars"][key] = json!(value.to_string());
         }
     }
-    let scene = assets::MergedMap {
-        name: route.name.clone(),
-        path: artifacts.join("maps").join(format!("{}.json", route.name)),
-        worlds: route.zones.clone(),
-        recipe: map.clone(),
-    };
-    assets::validate_scene_version(&scene.recipe)?;
+    let scene = assets::MergedMap::from_recipe(
+        route.name.clone(),
+        artifacts.join("maps").join(format!("{}.json", route.name)),
+        map.clone(),
+    )?;
     let worlds = solver
         .native_clips
         .iter()

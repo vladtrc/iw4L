@@ -121,7 +121,7 @@ impl ExprHost for WeaponbarExprHost<'_> {
                     .ok()
                     .and_then(|i| ps.action_slot_type.get(i))
             })
-            .is_some_and(|kind| !matches!(kind, 0 | 1 | 2))
+            .is_some_and(|kind| !matches!(kind, 0..=2))
         {
             return Err(ExprError::Host("nightvision action slot not hosted"));
         }
@@ -640,19 +640,19 @@ fn weapon_lock_view(
         .filter(|lock| lock.weapon == ps.weapon && ps.health > 0)
         .unwrap_or_else(sim::WeaponLock::default);
     let mut screen_pos = [0.0; 2];
-    if lock.flags & 3 != 0 {
-        if let Some(Projection::Perspective(projection)) = projection {
-            let eye = Vec3::from_array(ps.origin) + Vec3::Z * ps.view_height_current;
-            let delta = Vec3::from_array(lock.target) - eye;
-            let (forward, right, up) = math_iw4::angle_vectors(ps.viewangles);
-            let depth = delta.dot(Vec3::from_array(forward));
-            if depth > 0.0 {
-                let scale = surface.height() * 0.5 / ((projection.fov * 0.5).tan() * depth);
-                screen_pos = [
-                    surface.width() * 0.5 + delta.dot(Vec3::from_array(right)) * scale,
-                    surface.height() * 0.5 - delta.dot(Vec3::from_array(up)) * scale,
-                ];
-            }
+    if lock.flags & 3 != 0
+        && let Some(Projection::Perspective(projection)) = projection
+    {
+        let eye = Vec3::from_array(ps.origin) + Vec3::Z * ps.view_height_current;
+        let delta = Vec3::from_array(lock.target) - eye;
+        let (forward, right, up) = math_iw4::angle_vectors(ps.viewangles);
+        let depth = delta.dot(Vec3::from_array(forward));
+        if depth > 0.0 {
+            let scale = surface.height() * 0.5 / ((projection.fov * 0.5).tan() * depth);
+            screen_pos = [
+                surface.width() * 0.5 + delta.dot(Vec3::from_array(right)) * scale,
+                surface.height() * 0.5 - delta.dot(Vec3::from_array(up)) * scale,
+            ];
         }
     }
     hud_iw4::WeaponLockView {
@@ -1068,7 +1068,7 @@ fn paint_action_slot(
         .ps
         .action_slot_type
         .get((args.item.owner_draw - 171) as usize)
-        .is_some_and(|kind| !matches!(kind, 0 | 1 | 2))
+        .is_some_and(|kind| !matches!(kind, 0..=2))
     {
         return OwnerDrawPaint::Gap(ChromeGapKind::OwnerDraw);
     }

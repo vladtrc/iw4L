@@ -136,13 +136,12 @@ pub fn item_get_text_placement_y(align_y: i32, y0: f32, container_h: f32, self_h
 pub fn next_letter(chars: &mut core::iter::Peekable<core::str::Chars<'_>>) -> Option<u32> {
     loop {
         let c = chars.next()?;
-        if c == '^' {
-            if let Some(n) = chars.peek().copied() {
-                if n.is_ascii_digit() {
-                    chars.next();
-                    continue;
-                }
-            }
+        if c == '^'
+            && let Some(n) = chars.peek().copied()
+            && n.is_ascii_digit()
+        {
+            chars.next();
+            continue;
         }
         return Some(c as u32);
     }

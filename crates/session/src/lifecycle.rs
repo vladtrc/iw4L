@@ -631,6 +631,7 @@ fn run_udp_peer_lobby_return(
 struct MasterMatchFollower<'w, 's> {
     commands: Commands<'w, 's>,
     offers: ResMut<'w, net::MasterMatchStart>,
+    merged: Option<Res<'w, assets::MergedMap>>,
     bridge: Option<Res<'w, net::MasterBridge>>,
     swap: ResMut<'w, SessionSwapRequest>,
     role: ResMut<'w, RuntimeRole>,
@@ -645,7 +646,7 @@ impl MasterMatchFollower<'_, '_> {
         has_world: Res<State<frame::MatchScope>>,
         busy: Option<Res<assets::MatchLoadBusy>>,
         request: Option<Res<assets::MatchLoadRequest>>,
-        ready: Option<Res<assets::PreparedMatchReady>>,
+        ready: Option<Res<crate::match_load::PreparedMatchReady>>,
     ) {
         if let Some(offer) = self.offers.take() {
             *self.pending = Some((offer, false));
@@ -666,7 +667,13 @@ impl MasterMatchFollower<'_, '_> {
         if (*has_world.get() == frame::MatchScope::Live)
             && live.as_ref().is_some_and(|live| {
                 live.match_key == offer.match_key
-                    || (host && live.match_key.is_none() && identity.zone == offer.map)
+                    || (host
+                        && live.match_key.is_none()
+                        && self
+                            .merged
+                            .as_ref()
+                            .map_or(identity.zone.as_str(), |merged| merged.recording_name())
+                            == offer.map)
             })
         {
             *self.pending = None;
@@ -723,7 +730,7 @@ fn follow_master_match(
     has_world: Res<State<frame::MatchScope>>,
     busy: Option<Res<assets::MatchLoadBusy>>,
     request: Option<Res<assets::MatchLoadRequest>>,
-    ready: Option<Res<assets::PreparedMatchReady>>,
+    ready: Option<Res<crate::match_load::PreparedMatchReady>>,
 ) {
     follower.follow(identity, live, has_world, busy, request, ready);
 }

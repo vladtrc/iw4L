@@ -363,7 +363,7 @@ impl PelletFxPresentation<'_, '_> {
         });
         let mut play_impact = |products| {
             if normal == [0.0, 0.0, 0.0] {
-                sync_combat_dump(&mut impact.cursor, &mut impact.combat);
+                sync_combat_dump(&impact.cursor, &mut impact.combat);
                 return FireFxOutcome::NotApplicable("no_hit_normal");
             }
             let Some(impact_type) = weapons
@@ -372,7 +372,7 @@ impl PelletFxPresentation<'_, '_> {
             else {
                 impact.cursor.impact_miss_table = impact.cursor.impact_miss_table.saturating_add(1);
                 impact.combat.last_impact_miss_why = Some("no_weapon".into());
-                sync_combat_dump(&mut impact.cursor, &mut impact.combat);
+                sync_combat_dump(&impact.cursor, &mut impact.combat);
                 return FireFxOutcome::DependencyRefused("weapon");
             };
             let previous_mark_entity = impact.host.0.spawn_mark_entity;
@@ -395,7 +395,7 @@ impl PelletFxPresentation<'_, '_> {
         {
             impact.cursor.pellet_played = impact.cursor.pellet_played.saturating_add(1);
         }
-        sync_combat_dump(&mut impact.cursor, &mut impact.combat);
+        sync_combat_dump(&impact.cursor, &mut impact.combat);
     }
 }
 

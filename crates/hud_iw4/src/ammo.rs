@@ -200,7 +200,7 @@ pub fn low_ammo_warning_outer_gate(pm_type: i32, e_flags: u32, weapon: u32) -> b
 
 #[must_use]
 pub fn weaponstate_skips_low_ammo_warning(weaponstate: i32) -> bool {
-    matches!(weaponstate, 8 | 9 | 10 | 11 | 12)
+    matches!(weaponstate, 8..=12)
 }
 
 #[must_use]

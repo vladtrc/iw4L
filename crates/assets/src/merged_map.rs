@@ -24,9 +24,8 @@ use serde_json::Value;
 pub struct MergedMap {
     pub name: String,
     pub path: PathBuf,
-    /// The zones of every world, world 0 first.
-    pub worlds: Vec<String>,
-    pub recipe: Value,
+    pub scene: crate::SceneRecipe,
+    source: Value,
 }
 
 pub fn validate_scene_version(recipe: &Value) -> Result<(), String> {
@@ -64,365 +63,148 @@ pub fn validate_scene_version(recipe: &Value) -> Result<(), String> {
     if portals.len() > 255 {
         return Err("scene exceeds 255 portals".into());
     }
-    for portal in portals {
-        if !portal["flip"].is_boolean() {
-            return Err("portal flip must be explicit".into());
-        }
-        for side in ["a", "b"] {
-            let end = &portal[side];
-            if end["world"]
-                .as_u64()
-                .is_none_or(|id| id >= worlds.len() as u64)
-            {
-                return Err(format!("portal {side} references an unavailable world"));
-            }
-            let base = parse_door_vec(end, "base").ok_or("invalid portal base")?;
-            let normal = parse_door_vec(end, "normal").ok_or("invalid portal normal")?;
-            let length = normal.iter().map(|v| v * v).sum::<f32>();
-            if base.iter().chain(normal.iter()).any(|v| !v.is_finite())
-                || (length - 1.0).abs() > 0.001
-                || normal[2].abs() > 0.001
-            {
-                return Err("portal needs finite geometry and a horizontal unit normal".into());
-            }
-            if !end["two_sided"].is_boolean()
-                || ["width", "height", "thickness"].iter().any(|key| {
-                    end[key]
-                        .as_f64()
-                        .is_none_or(|v| !v.is_finite() || v <= 0.0 || !(v as f32).is_finite())
-                })
-            {
-                return Err(
-                    "portal needs explicit sidedness and positive dimensions/thickness".into(),
-                );
-            }
-        }
-    }
     Ok(())
 }
 
-fn parse_door_vec(value: &Value, key: &str) -> Option<[f32; 3]> {
-    let a = value[key].as_array()?;
-    Some([
-        a.first()?.as_f64()? as f32,
-        a.get(1)?.as_f64()? as f32,
-        a.get(2)?.as_f64()? as f32,
-    ])
-}
-
 impl MergedMap {
-    /// The merged map `name` names, `None` when there is no such recipe.
     pub fn find(artifacts: &Path, name: &str) -> Option<Result<Self, String>> {
-        let name = name.trim().to_ascii_lowercase();
-        if name.is_empty() || name.contains(['/', '\\', ':', '.']) {
-            return None;
-        }
+        let name = scene_name(name)?;
         let path = artifacts.join("maps").join(format!("{name}.json"));
-        if !path.is_file() {
-            return None;
+        if path.is_file() {
+            return Some(Self::read(name, path));
         }
-        Some(Self::read(name, path))
+        let (template, seed, digest) = seeded_name(&name)?;
+        let source_path = artifacts.join("maps").join(format!("{template}.json"));
+        Some((|| {
+            let source = read_recipe(&source_path)?;
+            if template_digest(&source)? != digest {
+                return Err("scene template or generator differs from the authority".into());
+            }
+            Self::realize(name.clone(), path.clone(), source, seed, digest)
+        })())
     }
 
-    fn read(name: String, mut path: PathBuf) -> Result<Self, String> {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
-        let mut recipe: Value =
-            serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-        validate_scene_version(&recipe)?;
-        if recipe["template"].as_str() == Some("random-door") {
-            if recipe["trim_clearance_version"] != 4 {
-                return Err(format!(
-                    "{}: incompatible door catalog; regenerate the visible-geometry catalog (version 4)",
-                    path.display()
-                ));
+    pub fn select(artifacts: &Path, name: &str) -> Option<Result<Self, String>> {
+        let name = scene_name(name)?;
+        let path = artifacts.join("maps").join(format!("{name}.json"));
+        if !path.is_file() {
+            return Self::find(artifacts, &name);
+        }
+        Some((|| {
+            let source = read_recipe(&path)?;
+            if source["template"].as_str() != Some("random-door") {
+                return Self::from_recipe(name, path, source);
             }
             use std::hash::{BuildHasher, Hasher};
             let seed = std::collections::hash_map::RandomState::new()
                 .build_hasher()
                 .finish();
-            crate::shuffle_random_doors(&mut recipe, seed)?;
-            recipe.as_object_mut().unwrap().remove("template");
-            path = path.with_file_name(format!("random-door-{seed:016x}.json"));
-            // Freeze this run for demos. Reloading the template shuffles again;
-            // replay loads this exact recipe rather than a different layout.
-            std::fs::write(
-                &path,
-                serde_json::to_vec_pretty(&recipe).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-            diag::info!(
-                World,
-                "random-door: seed={seed:016x} portals={} snapshot={}",
-                recipe["portals"].as_array().map_or(0, Vec::len),
-                path.display()
-            );
-        }
-        if recipe["portals"].as_array().is_some_and(|p| !p.is_empty())
-            && recipe["aperture_version"] != 4
+            let digest = template_digest(&source)?;
+            let frozen = format!("{name}-{seed:016x}-{digest:016x}");
+            if frozen.len() > 64 {
+                return Err("scene template name exceeds the shared map-key budget".into());
+            }
+            let target = path.with_file_name(format!("{frozen}.json"));
+            Self::realize(frozen, target, source, seed, digest)
+        })())
+    }
+
+    pub fn select_name(artifacts: &Path, name: &str) -> Result<String, String> {
+        Ok(Self::select(artifacts, name).transpose()?.map_or_else(
+            || name.to_owned(),
+            |scene| scene.recording_name().to_owned(),
+        ))
+    }
+
+    fn realize(
+        name: String,
+        path: PathBuf,
+        mut source: Value,
+        seed: u64,
+        digest: u64,
+    ) -> Result<Self, String> {
+        if source["template"].as_str() != Some("random-door")
+            || source["trim_clearance_version"] != 4
         {
-            return Err(format!(
-                "{}: incompatible random-door aperture layout; regenerate with measured visible apertures (version 4)",
-                path.display()
-            ));
+            return Err("scene requires a random-door template with door catalog version 4".into());
         }
-        let name = recipe["display_name"].as_str().unwrap_or(&name).to_owned();
-        let worlds: Vec<String> = recipe["worlds"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|zone| zone.as_str().map(str::to_owned))
-            .collect::<Option<_>>()
-            .ok_or_else(|| format!("{}: a world is not a zone name", path.display()))?;
-        if worlds.is_empty() {
-            return Err(format!("{}: no worlds", path.display()));
-        }
-        let map = Self {
-            name,
-            path,
-            worlds,
-            recipe,
-        };
-        map.door_trims()?;
+        crate::shuffle_random_doors(&mut source, seed)?;
+        source
+            .as_object_mut()
+            .ok_or("invalid scene template")?
+            .remove("template");
+        source["template_digest"] = serde_json::json!(digest);
+        let map = Self::from_recipe(name, path, source)?;
+        map.save_frozen()?;
+        diag::info!(
+            World,
+            "random-door: seed={seed:016x} portals={} snapshot={}",
+            map.scene.portals.len(),
+            map.path.display()
+        );
         Ok(map)
     }
 
-    pub fn door_trims(&self) -> Result<Vec<asset_world::PortalDoorTrim>, String> {
-        if self.recipe.get("portals").is_none() {
-            return Ok(Vec::new());
-        }
-        let pairs = self.recipe["portals"]
-            .as_array()
-            .ok_or("visible aperture layout has no pairs")?;
-        if pairs.is_empty() {
-            return Ok(Vec::new());
-        }
-        if self.recipe["aperture_version"] != 4 {
-            return Err("incompatible aperture layout: regenerate version 4".into());
-        }
-        let mut out = Vec::new();
-        for pair in pairs {
-            let a_sides = pair["a"]["two_sided"]
-                .as_bool()
-                .ok_or("missing native a sidedness")?;
-            let b_sides = pair["b"]["two_sided"]
-                .as_bool()
-                .ok_or("missing native b sidedness")?;
-            if !a_sides && !b_sides && pair["flip"] != true {
-                return Err(
-                    "one-sided endpoints have no valid route without a flipped pairing".into(),
-                );
-            }
-            let width = pair["shared_aperture"]["width"]
-                .as_f64()
-                .ok_or("missing shared aperture width")? as f32;
-            let height = pair["shared_aperture"]["height"]
-                .as_f64()
-                .ok_or("missing shared aperture height")? as f32;
-            for end in [&pair["a"], &pair["b"]] {
-                let number = |key: &str| {
-                    end[key]
-                        .as_f64()
-                        .map(|v| v as f32)
-                        .ok_or_else(|| format!("invalid door {key}"))
-                };
-                let size = |key: &str| -> Result<[f32; 2], String> {
-                    let v = end[key]
-                        .as_array()
-                        .filter(|a| a.len() == 2)
-                        .ok_or_else(|| format!("missing {key}"))?;
-                    Ok([
-                        v[0].as_f64().ok_or("invalid size")? as f32,
-                        v[1].as_f64().ok_or("invalid size")? as f32,
-                    ])
-                };
-                if end["geometry_version"] != 4 {
-                    return Err("missing measured door geometry version 4".into());
-                }
-                let original = size("original_size")?;
-                let opening_size = size("opening_size")?;
-                let opening_base =
-                    parse_door_vec(end, "opening_base").ok_or("missing visible opening base")?;
-                let thickness = end["trim"]["thickness"]
-                    .as_f64()
-                    .ok_or("missing trim thickness")? as f32;
-                let world = end["world"].as_u64().ok_or("missing door world")? as usize;
-                let normal = parse_door_vec(end, "normal").ok_or("missing door normal")?;
-                let base = parse_door_vec(end, "base").ok_or("missing threshold base")?;
-                let tangent = [-normal[1], normal[0], 0.];
-                let delta = std::array::from_fn::<_, 3, _>(|i| base[i] - opening_base[i]);
-                let across = delta.iter().zip(tangent).map(|(a, b)| a * b).sum::<f32>();
-                let plane = delta.iter().zip(normal).map(|(a, b)| a * b).sum::<f32>();
-                let bottom = delta[2];
-                let left = opening_size[0] * 0.5 + across - width * 0.5;
-                let right = opening_size[0] * 0.5 - across - width * 0.5;
-                let top = opening_size[1] - bottom - height;
-                if world >= self.worlds.len()
-                    || width < 30.0
-                    || height < 70.0
-                    || thickness <= 0.0
-                    || thickness > 128.0
-                    || number("width")? != width
-                    || number("height")? != height
-                    || original[0] < width
-                    || original[1] < height
-                    || original[0] - width > crate::MAX_DOOR_WIDTH_TRIM as f32 + 0.001
-                    || original[1] - height > crate::MAX_DOOR_HEIGHT_TRIM as f32 + 0.001
-                    || left < -0.001
-                    || right < -0.001
-                    || bottom < -0.001
-                    || bottom > 18.01
-                    || top < -0.001
-                    || plane.abs() > 0.01
-                    || !original
-                        .iter()
-                        .chain(opening_size.iter())
-                        .chain([width, height, thickness].iter())
-                        .chain(normal.iter())
-                        .chain(base.iter())
-                        .chain(opening_base.iter())
-                        .all(|v| v.is_finite())
-                    || ((normal[0] * normal[0] + normal[1] * normal[1]).sqrt() - 1.).abs() > 0.005
-                    || normal[2].abs() > 0.001
-                {
-                    return Err("invalid measured shared aperture dimensions".into());
-                }
-                for (key, want) in [
-                    ("left", left),
-                    ("right", right),
-                    ("top", top),
-                    ("bottom", bottom),
-                ] {
-                    if end["trim"][key]
-                        .as_f64()
-                        .is_none_or(|v| (v as f32 - want).abs() > 0.002)
-                    {
-                        return Err(format!("inconsistent doorway trim {key}"));
-                    }
-                }
-                let door_id = end["id"].as_str().ok_or("missing doorway id")?.to_owned();
-                diag::info!(
-                    World,
-                    "door pair end={door_id} world={world} aperture={width}x{height} threshold={bottom} trim=({left},{right},{top},{bottom}) thickness={thickness}"
-                );
-                out.push(asset_world::PortalDoorTrim {
-                    clearance: match &end["clearance"] {
-                        Value::Null => asset_world::PortalClearance::Walk,
-                        Value::String(value) if value == "walk" => {
-                            asset_world::PortalClearance::Walk
-                        }
-                        Value::String(value) if value == "flight" => {
-                            asset_world::PortalClearance::Flight
-                        }
-                        value => return Err(format!("invalid portal clearance {value}")),
-                    },
-                    two_sided: end["two_sided"]
-                        .as_bool()
-                        .ok_or("missing native door sidedness")?,
-                    world,
-                    door_id,
-                    opening_base,
-                    opening_size,
-                    thickness,
-                    aperture: asset_world::AtlasDoorway {
-                        world,
-                        base,
-                        normal,
-                        width,
-                        height,
-                    },
-                });
-            }
-        }
-        Ok(out)
+    fn read(name: String, path: PathBuf) -> Result<Self, String> {
+        Self::from_recipe(name, path.clone(), read_recipe(&path)?)
     }
 
-    pub fn door_replacements(&self) -> Result<Vec<asset_world::PortalDoorReplacement>, String> {
-        let mut out = Vec::new();
-        for endpoint in self.recipe["portals"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .flat_map(|pair| [&pair["a"], &pair["b"]])
-        {
-            let Some(replace) = endpoint.get("replace").filter(|value| value.is_object()) else {
-                continue;
-            };
-            let invalid = || {
-                format!(
-                    "{}: invalid replacement for {}",
-                    self.path.display(),
-                    endpoint["id"]
-                )
-            };
-            let indices = |key: &str| -> Result<Vec<usize>, String> {
-                replace[key]
-                    .as_array()
-                    .ok_or_else(invalid)?
-                    .iter()
-                    .map(|v| {
-                        v.as_u64()
-                            .and_then(|v| usize::try_from(v).ok())
-                            .ok_or_else(invalid)
-                    })
-                    .collect()
-            };
-            let origin = replace["model_origin"]
-                .as_array()
-                .filter(|a| a.len() == 3)
-                .ok_or_else(invalid)?;
-            let mut model_origin = [0.0; 3];
-            for i in 0..3 {
-                model_origin[i] = origin[i].as_f64().ok_or_else(invalid)? as f32;
+    fn save_frozen(&self) -> Result<(), String> {
+        if self.path.exists() {
+            if read_recipe(&self.path)? != self.source {
+                return Err(format!(
+                    "{} conflicts with realized scene",
+                    self.path.display()
+                ));
             }
-            let leaf = asset_world::AtlasDoorway {
-                world: endpoint["world"].as_u64().ok_or_else(invalid)? as usize,
-                base: parse_door_vec(replace, "leaf_base").ok_or_else(invalid)?,
-                normal: parse_door_vec(replace, "leaf_normal").ok_or_else(invalid)?,
-                width: replace["leaf_size"][0].as_f64().ok_or_else(invalid)? as f32,
-                height: replace["leaf_size"][1].as_f64().ok_or_else(invalid)? as f32,
-            };
-            if leaf.world >= self.worlds.len()
-                || !model_origin
-                    .iter()
-                    .chain(leaf.base.iter())
-                    .chain(leaf.normal.iter())
-                    .chain([leaf.width, leaf.height].iter())
-                    .all(|v| v.is_finite())
-                || leaf.width <= 0.0
-                || leaf.height <= 0.0
-                || ((leaf.normal[0] * leaf.normal[0] + leaf.normal[1] * leaf.normal[1]).sqrt()
-                    - 1.0)
-                    .abs()
-                    > 0.005
-                || leaf.normal[2].abs() > 0.001
-            {
-                return Err(invalid());
-            }
-            out.push(asset_world::PortalDoorReplacement {
-                world: endpoint["world"].as_u64().ok_or_else(invalid)? as usize,
-                door_id: endpoint["id"].as_str().ok_or_else(invalid)?.to_owned(),
-                render_instance: replace["render_instance"].as_u64().ok_or_else(invalid)? as usize,
-                model_name: replace["model_name"]
-                    .as_str()
-                    .ok_or_else(invalid)?
-                    .to_owned(),
-                model_origin,
-                clip_models: indices("clip_models")?
-                    .into_iter()
-                    .map(|i| u32::try_from(i).map_err(|_| invalid()))
-                    .collect::<Result<_, _>>()?,
-                clip_brushes: indices("clip_brushes")?,
-                leaf,
-            });
+            return Ok(());
         }
-        Ok(out)
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temporary = self
+            .path
+            .with_extension(format!("json.tmp-{}-{next}", std::process::id()));
+        let result = (|| {
+            std::fs::write(
+                &temporary,
+                serde_json::to_vec_pretty(&self.source).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            std::fs::rename(&temporary, &self.path).map_err(|e| e.to_string())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(temporary);
+        }
+        result
+    }
+
+    pub fn from_recipe(name: String, path: PathBuf, source: Value) -> Result<Self, String> {
+        let scene = crate::SceneRecipe::parse(&source)?;
+        if let Some((_, seed, digest)) = seeded_name(&name)
+            && (scene.versions.seed != Some(seed)
+                || scene.versions.template_digest != Some(digest)
+                || scene.versions.generator_algorithm != "random-door"
+                || scene.versions.generator_version != crate::random_doors::GENERATOR_VERSION)
+        {
+            return Err("frozen scene does not match its shared key or generator".into());
+        }
+        let name = source["display_name"].as_str().unwrap_or(&name).to_owned();
+        Ok(Self {
+            name,
+            path,
+            scene,
+            source,
+        })
+    }
+
+    pub fn recording_recipe(&self) -> &Value {
+        &self.source
     }
 
     /// Keep the exact map mechanism beside each portable demo/clip.
     pub fn save_recording_layout(&self, demo: &Path, zone: &str) -> Result<(), String> {
         let path = demo.with_extension("layout.json");
-        let package = serde_json::json!({"schema":1,"zone":zone,"recipe":self.recipe});
+        let package = serde_json::json!({"schema":1,"zone":zone,"recipe":self.source});
         std::fs::write(
             &path,
             serde_json::to_vec_pretty(&package).map_err(|e| e.to_string())?,
@@ -503,7 +285,7 @@ impl MergedMap {
 
     /// The match's own map: world 0.
     pub fn zone(&self) -> &str {
-        &self.worlds[0]
+        &self.scene.worlds[0]
     }
 }
 
@@ -519,7 +301,8 @@ pub struct LoadingWorld {
 impl MergedMap {
     /// Every world's loading title and zone file, world 0 first.
     pub fn loading_worlds(&self, games: &asset_transport::GamesRoot) -> Vec<LoadingWorld> {
-        self.worlds
+        self.scene
+            .worlds
             .iter()
             .map(|world| {
                 let found = asset_transport::find_zone_file(games, world).ok();
@@ -539,4 +322,37 @@ impl MergedMap {
             })
             .collect()
     }
+}
+
+fn scene_name(name: &str) -> Option<String> {
+    let name = name.trim().to_ascii_lowercase();
+    (!name.is_empty() && !name.contains(['/', '\\', ':', '.'])).then_some(name)
+}
+
+fn seeded_name(name: &str) -> Option<(&str, u64, u64)> {
+    let (prefix, digest) = name.rsplit_once('-')?;
+    let (template, seed) = prefix.rsplit_once('-')?;
+    if template.is_empty() || seed.len() != 16 || digest.len() != 16 {
+        return None;
+    }
+    Some((
+        template,
+        u64::from_str_radix(seed, 16).ok()?,
+        u64::from_str_radix(digest, 16).ok()?,
+    ))
+}
+
+fn read_recipe(path: &Path) -> Result<Value, String> {
+    serde_json::from_slice(
+        &std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?,
+    )
+    .map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn template_digest(source: &Value) -> Result<u64, String> {
+    let bytes = serde_json::to_vec(source).map_err(|e| e.to_string())?;
+    Ok(crate::fnv1a64_more(
+        crate::fnv1a64(&crate::random_doors::GENERATOR_VERSION.to_le_bytes()),
+        &bytes,
+    ))
 }

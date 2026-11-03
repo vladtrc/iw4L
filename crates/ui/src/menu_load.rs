@@ -16,6 +16,14 @@ use crate::loading::{
 use crate::menu::MenuMapList;
 use frame::{AppScreen, LaunchIdentity, LaunchReport, MapLoadApproved};
 
+type ResolveZoneOutput = (
+    String,
+    Result<std::path::PathBuf, String>,
+    Result<std::path::PathBuf, String>,
+    Option<String>,
+    String,
+);
+
 fn launch_report(
     zone: String,
     common_mp: Result<std::path::PathBuf, String>,
@@ -33,16 +41,7 @@ fn launch_report(
     }
 }
 
-fn resolve_zone(
-    games: &asset_transport::GamesRoot,
-    requested: &str,
-) -> (
-    String,
-    Result<std::path::PathBuf, String>,
-    Result<std::path::PathBuf, String>,
-    Option<String>,
-    String,
-) {
+fn resolve_zone(games: &asset_transport::GamesRoot, requested: &str) -> ResolveZoneOutput {
     let found = find_zone_file(games, requested);
     let zone_alias = found.as_ref().ok().and_then(|z| z.alias_note.clone());
     let requested_lc = requested.trim().to_ascii_lowercase();
@@ -197,6 +196,10 @@ pub(crate) fn begin_load_from_session(
     overlay.begin(approved, mode, loading, request, transition);
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn restore_menu_on_return(
     mut commands: Commands,
     mut returned: MessageReader<StateTransitionEvent<frame::MatchScope>>,
@@ -215,10 +218,10 @@ pub(crate) fn restore_menu_on_return(
     menu_screen.show(AppScreen::MainMenu);
 
     dismiss_loading_overlay(&mut commands, chrome.iter(), overlay_cams.iter(), false);
-    if maps.0.is_empty() {
-        if let Some(identity) = identity {
-            maps.0 = list_mp_map_packs(&asset_transport::GamesRoot(identity.games_root.clone()));
-        }
+    if maps.0.is_empty()
+        && let Some(identity) = identity
+    {
+        maps.0 = list_mp_map_packs(&asset_transport::GamesRoot(identity.games_root.clone()));
     }
     diag::info!(Ui, "session: main menu enabled");
     diag::lifecycle_boundary("menu_interactive", "");
@@ -227,6 +230,10 @@ pub(crate) fn restore_menu_on_return(
 #[derive(Resource)]
 struct MenuStringsPrepare(Task<Option<LocalizeCatalog>>);
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn start_menu_strings_prepare(
     loc: Res<LocalizeCatalog>,
     running: Option<Res<MenuStringsPrepare>>,
@@ -235,15 +242,18 @@ fn start_menu_strings_prepare(
         Option<Res<assets::MatchLoadBusy>>,
         Option<Res<MatchLoadRequest>>,
         Option<Res<assets::MatchLoadAccepted>>,
-        Option<Res<assets::PreparedMatchReady>>,
     ),
+    scope: Res<State<frame::MatchScope>>,
     mut commands: Commands,
 ) {
     if !loc.is_empty() || running.is_some() {
         return;
     }
-    let (busy, request, accepted, ready) = loading;
-    if busy.is_some_and(|busy| busy.0) || request.is_some() || accepted.is_some() || ready.is_some()
+    let (busy, request, accepted) = loading;
+    if busy.is_some_and(|busy| busy.0)
+        || request.is_some()
+        || accepted.is_some()
+        || *scope.get() == frame::MatchScope::Loading
     {
         return;
     }

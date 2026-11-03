@@ -47,3 +47,29 @@ collision checks, but do not require a walkable floor on the far side.
 Endpoint `clearance: "flight"` validates a swept projectile corridor at load;
 `clearance: "walk"` and omitted clearance require the normal player exit.
 Both modes preserve surrounding collision and native visibility sidedness.
+
+`assets::SceneRecipe` validates realized endpoints once for collision, rendering
+and simulation. Assets approve the request and walk each world once, retaining
+render products, collision and environment under its physical WorldId. The
+session's original background load task then trims collision, validates exits
+and builds sim/killcam atlas products before publishing PreparedMatchReady.
+Installation moves that prepared atlas into live owners; it performs no atlas
+load, trim, validation or conversion. Cancellation uses the request's progress
+handle throughout preparation. Match map fingerprints include all worlds' collision geometry,
+portal geometry, sidedness, flip, thickness, clearance, scene dvars and schema /
+generator versions. Immutable geometry is hashed once when `SimContent` is
+published.
+
+Starting a random-door template selects its seed at the authority and freezes
+`<template>-<seed16>-<template-digest16>.json`. That key is advertised to peers.
+A client without the frozen file reconstructs it from the same installed
+`<template>.json`, seed and generator; a different template or generator is
+refused. Clients never select another seed while resolving a shared key.
+Portable recordings carry the frozen recipe and do not need the template.
+Template names must fit within the 64-byte shared map key after its two hex
+fields are appended (at most 30 bytes for the template name).
+
+Recording format 1 has a separate game-protocol field and stores the complete
+64-byte map key plus its terminator. Recordings with the earlier header layout
+are rejected by the format check; they are not reinterpreted as truncated scene
+names. Scene recordings retain their frozen `.layout.json` sidecar.

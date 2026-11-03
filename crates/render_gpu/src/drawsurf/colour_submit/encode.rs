@@ -320,11 +320,11 @@ fn record_colour_run<'a>(
                 pass.set_vertex_buffer(2, effect.slice(..));
             }
             result.bindings.state = result.bindings.state.saturating_add(2);
-            if draw.tess == ExactTessBind::World {
-                if let Some(layer) = input.geometry.world_layer {
-                    pass.set_vertex_buffer(1, layer.slice(..));
-                    result.bindings.state = result.bindings.state.saturating_add(1);
-                }
+            if draw.tess == ExactTessBind::World
+                && let Some(layer) = input.geometry.world_layer
+            {
+                pass.set_vertex_buffer(1, layer.slice(..));
+                result.bindings.state = result.bindings.state.saturating_add(1);
             }
             let index_format = if matches!(
                 draw.tess,

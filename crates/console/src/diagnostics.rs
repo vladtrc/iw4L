@@ -40,7 +40,7 @@ fn drain_pending_console_lines(
             .as_ref()
             .is_some_and(|s| matches!(**s, AppScreen::MainMenu))
     {
-        pending.0.extend(startup.lines.drain(..));
+        pending.0.append(&mut startup.lines);
     }
     for line in pending.0.drain(..) {
         queue.push_line(&line);

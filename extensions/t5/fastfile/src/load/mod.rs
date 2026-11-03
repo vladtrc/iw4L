@@ -251,10 +251,10 @@ pub fn load_asset_at_observed(
             {
                 links.remember_material_name(slot, insert_slot, name);
             }
-            if ty == AssetType::XModel {
-                if let Some(name) = s.latest_xmodel().and_then(|g| g.name) {
-                    links.remember_xmodel_name(slot, insert_slot, name);
-                }
+            if ty == AssetType::XModel
+                && let Some(name) = s.latest_xmodel().and_then(|g| g.name)
+            {
+                links.remember_xmodel_name(slot, insert_slot, name);
             }
             links.loaded(s, ty, slot, insert_slot)?;
             Ok(true)

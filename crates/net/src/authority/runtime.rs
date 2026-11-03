@@ -405,8 +405,8 @@ impl AuthorityCommandReceiver<'_> {
         if let (Some(ack), Some(local)) = (loopback_ack, local) {
             self.reliable.ack(local.0, ack.0);
         }
-        if let Some(mut hub) = hub {
-            if let Err(e) = hub.ingress(
+        if let Some(mut hub) = hub
+            && let Err(e) = hub.ingress(
                 &mut self.cmd_inbox,
                 &mut self.action_inbox,
                 Some(&mut self.reliable),
@@ -417,9 +417,9 @@ impl AuthorityCommandReceiver<'_> {
                         .map(|bridge| bridge.state().identity().match_key())
                         .unwrap_or(frame::MatchKey::NONE),
                 )),
-            ) {
-                diag::warn!(Net, "udp ingress: {e}");
-            }
+            )
+        {
+            diag::warn!(Net, "udp ingress: {e}");
         }
     }
 }
@@ -740,8 +740,8 @@ impl FanoutTransports<'_> {
         queues: &mut FanoutQueues<'_>,
         reliable: &crate::ReliableEventHub,
     ) {
-        if let Some(hub) = self.hub.as_mut() {
-            if let Err(e) = hub.fanout_with_seats(
+        if let Some(hub) = self.hub.as_mut()
+            && let Err(e) = hub.fanout_with_seats(
                 snapshot,
                 acks,
                 for_peer,
@@ -752,11 +752,11 @@ impl FanoutTransports<'_> {
                 },
                 Some(reliable),
                 false,
-            ) {
-                let line = format!("udp fanout: {e}");
-                diag::info!(Net, "{line}");
-                self.diag.line = Some(line);
-            }
+            )
+        {
+            let line = format!("udp fanout: {e}");
+            diag::info!(Net, "{line}");
+            self.diag.line = Some(line);
         }
     }
 }

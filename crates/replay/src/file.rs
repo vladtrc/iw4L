@@ -8,15 +8,27 @@ use sim::RNG_DOMAIN_SCHEME;
 
 pub const MAGIC: [u8; 8] = *b"IW4LDEMO";
 
-pub const ZONE_FIELD_LEN: usize = 32;
+pub const RECORDING_FORMAT_VERSION: u32 = 1;
+pub const ZONE_FIELD_LEN: usize = 65;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MatchRecordIdentity {
     pub rng_scheme: u32,
     pub root_seed: u64,
     pub content_digest: u64,
 
     pub zone: [u8; ZONE_FIELD_LEN],
+}
+
+impl Default for MatchRecordIdentity {
+    fn default() -> Self {
+        Self {
+            rng_scheme: 0,
+            root_seed: 0,
+            content_digest: 0,
+            zone: [0; ZONE_FIELD_LEN],
+        }
+    }
 }
 
 impl MatchRecordIdentity {
@@ -89,6 +101,7 @@ pub enum ReplayError {
     Magic { found: [u8; 8] },
 
     Version { found: u32, expected: u32 },
+    FormatVersion { found: u32, expected: u32 },
     Wire(WireError),
 }
 
@@ -102,6 +115,9 @@ impl core::fmt::Display for ReplayError {
                 String::from_utf8_lossy(found),
                 String::from_utf8_lossy(&MAGIC)
             ),
+            ReplayError::FormatVersion { found, expected } => {
+                write!(f, "recording format {found}, expected {expected}")
+            }
             ReplayError::Version { found, expected } => write!(
                 f,
                 "recording is protocol {found}, this build speaks {expected}; \
@@ -185,6 +201,7 @@ impl RecordWriter {
         }
         let mut file = BufWriter::new(File::create(path)?);
         file.write_all(&MAGIC)?;
+        file.write_all(&RECORDING_FORMAT_VERSION.to_le_bytes())?;
         file.write_all(&PROTOCOL_VERSION.to_le_bytes())?;
         let scheme = if identity.rng_scheme == 0 {
             RNG_DOMAIN_SCHEME
@@ -249,6 +266,15 @@ impl RecordReader {
         if magic != MAGIC {
             return Err(ReplayError::Magic { found: magic });
         }
+        let mut format_version = [0u8; 4];
+        file.read_exact(&mut format_version)?;
+        let format_version = u32::from_le_bytes(format_version);
+        if format_version != RECORDING_FORMAT_VERSION {
+            return Err(ReplayError::FormatVersion {
+                found: format_version,
+                expected: RECORDING_FORMAT_VERSION,
+            });
+        }
         let mut version = [0u8; 4];
         file.read_exact(&mut version)?;
         let version = u32::from_le_bytes(version);
@@ -267,8 +293,10 @@ impl RecordReader {
         let mut zone = [0u8; ZONE_FIELD_LEN];
         file.read_exact(&mut zone)?;
         if !looks_like_zone_field(&zone) {
-            file.seek(SeekFrom::Current(-(ZONE_FIELD_LEN as i64)))?;
-            zone = [0u8; ZONE_FIELD_LEN];
+            return Err(ReplayError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid recording map key",
+            )));
         }
         let identity = MatchRecordIdentity {
             rng_scheme: u32::from_le_bytes(scheme),

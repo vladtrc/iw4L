@@ -913,15 +913,14 @@ impl MaterialRunExecutor {
                     tech_type,
                     vertex_type,
                 )
-                .map(|execution| {
+                .inspect(|execution| {
                     shells.insert(
                         shell_key,
                         ShellEntry {
                             shell: Arc::clone(execution.shell_arc()),
-                            need: overlay_need_from_execution(&execution),
+                            need: overlay_need_from_execution(execution),
                         },
                     );
-                    execution
                 })
             }
         };

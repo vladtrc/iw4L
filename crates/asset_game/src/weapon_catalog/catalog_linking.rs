@@ -39,97 +39,82 @@ impl WeaponCatalog {
             Some((name, image))
         };
         for entry in &mut self.entries {
-            if let Some(slot) = entry.reticle_center_slot {
-                if let Some((name, image)) = names_of(slot) {
-                    entry.reticle.center_material = Some(name);
-                    entry.reticle.center_image = image;
+            if let Some(slot) = entry.reticle_center_slot
+                && let Some((name, image)) = names_of(slot)
+            {
+                entry.reticle.center_material = Some(name);
+                entry.reticle.center_image = image;
+            }
+            if entry.reticle.center_image.is_none()
+                && let Some(name) = entry.reticle.center_material.as_deref()
+                && let Some(index) = materials.material_index_by_ns(ns, name)
+                && let Some(material) = materials.materials.get(index.order())
+            {
+                entry.reticle.center_image = materials.hud_image_name(material).map(str::to_owned);
+            }
+            if let Some(slot) = entry.reticle_side_slot
+                && let Some((name, image)) = names_of(slot)
+            {
+                entry.reticle.side_material = Some(name);
+                entry.reticle.side_image = image;
+            }
+            if entry.reticle.side_image.is_none()
+                && let Some(name) = entry.reticle.side_material.as_deref()
+                && let Some(index) = materials.material_index_by_ns(ns, name)
+                && let Some(material) = materials.materials.get(index.order())
+            {
+                entry.reticle.side_image = materials.hud_image_name(material).map(str::to_owned);
+            }
+            if let Some(slot) = entry.overlay_material_slot
+                && let Some((name, image)) = names_of(slot)
+            {
+                entry.overlay_material = Some(name);
+                entry.overlay_image = image;
+            }
+            if entry.overlay_image.is_none()
+                && let Some(name) = entry.overlay_material.as_deref()
+                && let Some(index) = materials.material_index_by_ns(ns, name)
+                && let Some(material) = materials.materials.get(index.order())
+            {
+                entry.overlay_image = materials.hud_image_name(material).map(str::to_owned);
+            }
+            if let Some(slot) = entry.pickup_icon_slot
+                && let Some((name, image)) = names_of(slot)
+            {
+                entry.pickup_icon = Some(name);
+                entry.pickup_icon_image = image;
+            }
+            if let Some(slot) = entry.hud_icon_slot
+                && let Some((name, image)) = names_of(slot)
+            {
+                entry.hud_icon = Some(name);
+                if entry.hud_icon_image.is_none() {
+                    entry.hud_icon_image = image;
                 }
             }
-            if entry.reticle.center_image.is_none() {
-                if let Some(name) = entry.reticle.center_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.reticle.center_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
+            if entry.hud_icon_image.is_none()
+                && let Some(name) = entry.hud_icon.as_deref()
+                && let Some(index) = materials.material_index_by_ns(ns, name)
+                && let Some(material) = materials.materials.get(index.order())
+            {
+                entry.hud_icon_image = materials.hud_image_name(material).map(str::to_owned);
+            }
+            if let Some(slot) = entry.kill_icon_slot
+                && let Some((name, image)) = names_of(slot)
+            {
+                if entry.kill_icon.is_none() {
+                    entry.kill_icon = Some(name);
+                }
+                if entry.kill_icon_image.is_none() {
+                    entry.kill_icon_image = image;
                 }
             }
-            if let Some(slot) = entry.reticle_side_slot {
-                if let Some((name, image)) = names_of(slot) {
-                    entry.reticle.side_material = Some(name);
-                    entry.reticle.side_image = image;
-                }
-            }
-            if entry.reticle.side_image.is_none() {
-                if let Some(name) = entry.reticle.side_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.reticle.side_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if let Some(slot) = entry.overlay_material_slot {
-                if let Some((name, image)) = names_of(slot) {
-                    entry.overlay_material = Some(name);
-                    entry.overlay_image = image;
-                }
-            }
-            if entry.overlay_image.is_none() {
-                if let Some(name) = entry.overlay_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.overlay_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if let Some(slot) = entry.pickup_icon_slot {
-                if let Some((name, image)) = names_of(slot) {
-                    entry.pickup_icon = Some(name);
-                    entry.pickup_icon_image = image;
-                }
-            }
-            if let Some(slot) = entry.hud_icon_slot {
-                if let Some((name, image)) = names_of(slot) {
-                    entry.hud_icon = Some(name);
-                    if entry.hud_icon_image.is_none() {
-                        entry.hud_icon_image = image;
-                    }
-                }
-            }
-            if entry.hud_icon_image.is_none() {
-                if let Some(name) = entry.hud_icon.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.hud_icon_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
-            }
-            if let Some(slot) = entry.kill_icon_slot {
-                if let Some((name, image)) = names_of(slot) {
-                    if entry.kill_icon.is_none() {
-                        entry.kill_icon = Some(name);
-                    }
-                    if entry.kill_icon_image.is_none() {
-                        entry.kill_icon_image = image;
-                    }
-                }
-            }
-            if entry.kill_icon_image.is_none() {
-                if let Some(name) = entry.kill_icon.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.kill_icon_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
+            if entry.kill_icon_image.is_none()
+                && let Some(name) = entry.kill_icon.as_deref()
+                && let Some(index) = materials.material_index_by_ns(ns, name)
+                && let Some(material) = materials.materials.get(index.order())
+            {
+                entry.kill_icon_image = materials.hud_image_name(material).map(str::to_owned);
             }
             if let Some(name) = entry.dpad_icon.as_deref()
                 && let Some(index) = materials.material_index_by_ns(ns, name)
@@ -182,55 +167,40 @@ impl WeaponCatalog {
             .capture_ns
             .expect("asset capture requires an explicit family");
         for entry in &mut self.entries {
-            if entry.reticle.center_image.is_none() {
-                if let Some(name) = entry.reticle.center_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.reticle.center_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
+            if entry.reticle.center_image.is_none()
+                && let Some(name) = entry.reticle.center_material.as_deref()
+                && let Some(index) = materials.material_index_by_ns(ns, name)
+                && let Some(material) = materials.materials.get(index.order())
+            {
+                entry.reticle.center_image = materials.hud_image_name(material).map(str::to_owned);
             }
-            if entry.reticle.side_image.is_none() {
-                if let Some(name) = entry.reticle.side_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.reticle.side_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
+            if entry.reticle.side_image.is_none()
+                && let Some(name) = entry.reticle.side_material.as_deref()
+                && let Some(index) = materials.material_index_by_ns(ns, name)
+                && let Some(material) = materials.materials.get(index.order())
+            {
+                entry.reticle.side_image = materials.hud_image_name(material).map(str::to_owned);
             }
-            if entry.overlay_image.is_none() {
-                if let Some(name) = entry.overlay_material.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.overlay_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
+            if entry.overlay_image.is_none()
+                && let Some(name) = entry.overlay_material.as_deref()
+                && let Some(index) = materials.material_index_by_ns(ns, name)
+                && let Some(material) = materials.materials.get(index.order())
+            {
+                entry.overlay_image = materials.hud_image_name(material).map(str::to_owned);
             }
-            if entry.hud_icon_image.is_none() {
-                if let Some(name) = entry.hud_icon.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.hud_icon_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
+            if entry.hud_icon_image.is_none()
+                && let Some(name) = entry.hud_icon.as_deref()
+                && let Some(index) = materials.material_index_by_ns(ns, name)
+                && let Some(material) = materials.materials.get(index.order())
+            {
+                entry.hud_icon_image = materials.hud_image_name(material).map(str::to_owned);
             }
-            if entry.kill_icon_image.is_none() {
-                if let Some(name) = entry.kill_icon.as_deref() {
-                    if let Some(index) = materials.material_index_by_ns(ns, name) {
-                        if let Some(material) = materials.materials.get(index.order()) {
-                            entry.kill_icon_image =
-                                materials.hud_image_name(material).map(str::to_owned);
-                        }
-                    }
-                }
+            if entry.kill_icon_image.is_none()
+                && let Some(name) = entry.kill_icon.as_deref()
+                && let Some(index) = materials.material_index_by_ns(ns, name)
+                && let Some(material) = materials.materials.get(index.order())
+            {
+                entry.kill_icon_image = materials.hud_image_name(material).map(str::to_owned);
             }
             if let Some(name) = entry.dpad_icon.as_deref()
                 && let Some(index) = materials.material_index_by_ns(ns, name)

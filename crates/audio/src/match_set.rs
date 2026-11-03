@@ -140,7 +140,7 @@ impl MatchSoundCatalogs<'_> {
             aliases += request_weapon_aliases(
                 clips,
                 &self.bank.0,
-                &self.weapons.registry(),
+                self.weapons.registry(),
                 weapon,
                 &mut set,
             );

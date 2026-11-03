@@ -55,7 +55,7 @@ pub struct XAnimCatalog {
     decoded: Mutex<Vec<Option<Arc<AnimClip>>>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct XAnimBuild {
     catalog: XAnimCatalog,
     capture_zone: ZoneOwner,
@@ -72,18 +72,6 @@ impl Default for XAnimCatalog {
             order: Vec::new(),
             zones: Vec::new(),
             decoded: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl Default for XAnimBuild {
-    fn default() -> Self {
-        Self {
-            catalog: XAnimCatalog::default(),
-            capture_zone: ZoneOwner::default(),
-            capture_ns: None,
-            capture_gaps: 0,
-            strings: ScriptStrings::default(),
         }
     }
 }
@@ -429,7 +417,9 @@ fn copy_u16(s: &ZoneStream<'_>, ptr: Option<Ptr>, count: usize) -> Vec<u16> {
         return Vec::new();
     };
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect()
 }
@@ -442,7 +432,9 @@ fn copy_u32(s: &ZoneStream<'_>, ptr: Option<Ptr>, count: usize) -> Vec<u32> {
         return Vec::new();
     };
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }

@@ -60,10 +60,10 @@ impl SplashExprHost<'_> {
         } else {
             cell
         };
-        if let Some(table) = self.localize {
-            if let Some(text) = table.text(key) {
-                return text.to_owned();
-            }
+        if let Some(table) = self.localize
+            && let Some(text) = table.text(key)
+        {
+            return text.to_owned();
         }
 
         String::from(key)
@@ -316,11 +316,12 @@ impl SplashDisplay<'_, '_> {
             milliseconds() as i32
         };
         expire_slots(&mut self.slots, now_ms);
-        if self.pending.key.is_none() && !self.slots.slots.iter().any(|s| s.live()) {
-            if let Some((key, optional)) = self.pending.queued.pop_front() {
-                self.pending.key = Some(key);
-                self.pending.optional_number = optional;
-            }
+        if self.pending.key.is_none()
+            && !self.slots.slots.iter().any(|s| s.live())
+            && let Some((key, optional)) = self.pending.queued.pop_front()
+        {
+            self.pending.key = Some(key);
+            self.pending.optional_number = optional;
         }
         let table = catalog
             .as_ref()

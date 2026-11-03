@@ -50,12 +50,23 @@ pub(crate) struct CueLease {
     loop_version: u64,
     looping: bool,
     clock: Arc<CancelClock>,
+    source: Option<crate::sources::SourceValidity>,
 }
 
 impl CueLease {
     pub(crate) fn cancelled(&self) -> bool {
-        self.clock.all.load(Ordering::Acquire) != self.version
+        self.source
+            .as_ref()
+            .is_some_and(crate::sources::SourceValidity::cancelled)
+            || self.clock.all.load(Ordering::Acquire) != self.version
             || (self.looping && self.clock.loops.load(Ordering::Acquire) != self.loop_version)
+    }
+
+    pub(crate) fn with_source(&self, source: crate::sources::SourceValidity) -> Self {
+        Self {
+            source: Some(source),
+            ..self.clone()
+        }
     }
 
     fn set_looping(&mut self, looping: bool) {
@@ -86,6 +97,7 @@ impl CueCancellation {
                 version: clock.all.load(Ordering::Acquire),
                 loop_version: clock.loops.load(Ordering::Acquire),
                 looping: false,
+                source: None,
                 clock,
             });
         }
@@ -99,6 +111,7 @@ impl CueCancellation {
             version: 0,
             loop_version: 0,
             looping: false,
+            source: None,
             clock,
         })
     }
@@ -177,7 +190,7 @@ pub(crate) struct CueWork {
     pub request: CueSubmission,
     pub resolved: Option<ResolvedCue>,
     secondary: Option<(String, StartOutcome)>,
-    pub source: Option<(crate::sources::SourceKey, u64)>,
+    pub source: Option<crate::sources::SourceId>,
     ancestry: Vec<usize>,
 }
 
@@ -191,6 +204,10 @@ pub(crate) struct CueStart {
     pub lease: CueLease,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Control transfers one short-lived cue result without a per-layer allocation."
+)]
 pub(crate) enum CueStep {
     Waiting,
     Finished,

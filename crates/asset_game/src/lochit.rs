@@ -19,10 +19,7 @@ pub fn parse_lochit_info_string(text: &str) -> Result<[f32; HITLOC_COUNT], Lochi
         .ok_or(LochitTableError::MissingMagic)?;
     let mut table = LOCATION_DAMAGE_IDENTITY;
     let mut parts = rest.split('\\').filter(|part| !part.is_empty());
-    loop {
-        let Some(key) = parts.next() else {
-            break;
-        };
+    while let Some(key) = parts.next() {
         let Some(value) = parts.next() else {
             return Err(LochitTableError::OddPair);
         };

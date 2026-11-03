@@ -14,9 +14,6 @@ use render_material::sm3_abi::{
 use render_material::stage::RuntimeShaderStage;
 use render_material::vertex_decl::RuntimeVertexDecl;
 
-/// x: model-lighting texel scale; y: weight of the reflection-probe alpha
-/// (T6 probes store rgb / alpha, probes from other maps keep no scale there).
-
 // D3D11 binds at most 14 constant buffers, so no shader reads buffer 14.
 const SAMPLE_DECODE_ROW: ConstantRow = ConstantRow { buffer: 14, row: 0 };
 
@@ -209,7 +206,7 @@ pub fn build_dxbc_pass_abi(
                 }
                 _ => None,
             })
-            .or_else(|| match (slot.texture, custom_sampler_flags) {
+            .or(match (slot.texture, custom_sampler_flags) {
                 (REFLECTION_PROBE_TEXTURE, flags) if flags & REFLECTION_PROBE_FLAG != 0 => {
                     Some(SamplerSource::SurfaceReflectionProbe)
                 }

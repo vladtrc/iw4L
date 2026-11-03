@@ -255,10 +255,10 @@ fn reveal_shown_movers(out: &mut Snapshot, viewer: ClientId) {
                 .retain(|(owner, _)| owner.script_model() != Some(mover.id));
             continue;
         }
-        let hidden = mover.state.clone();
+        let hidden = mover.state;
         mover.state.e_flags &= !entity_iw4::CG_SCRIPT_MOVER_NODRAW;
         for es in meta.entities.iter_mut().filter(|es| **es == hidden) {
-            *es = mover.state.clone();
+            *es = mover.state;
         }
     }
 }

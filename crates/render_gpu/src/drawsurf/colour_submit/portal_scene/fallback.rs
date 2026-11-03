@@ -418,15 +418,15 @@ impl PortalFallbackGpu {
             .capture
             .entry(ms)
             .or_insert_with(|| capture_pipeline(device, ms));
-        if self.entries.len() >= MAX_ENTRIES && !self.entries.contains_key(&aperture.key) {
-            if let Some(key) = self
+        if self.entries.len() >= MAX_ENTRIES
+            && !self.entries.contains_key(&aperture.key)
+            && let Some(key) = self
                 .entries
                 .iter()
                 .min_by_key(|(_, e)| e.camera.frame)
                 .map(|(k, _)| k.clone())
-            {
-                self.entries.remove(&key);
-            }
+        {
+            self.entries.remove(&key);
         }
         let size = [
             aperture.rect[2].min(256).div_ceil(32) * 32,

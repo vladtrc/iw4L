@@ -394,20 +394,20 @@ pub fn calculate_weapon_movement_bob_waveform(inputs: WeaponBobWaveformInputs) -
     let bob = (f32::from(inputs.bob_cycle) / 255.0) * PI;
     let cycle = TAU + bob + bob + TAU + WEAPON_BOB_LAG * PI;
     let speed = WEAPON_BOB_AMPLITUDE_BASE * inputs.xyspeed;
-    let pitch = calc_weapon_bob_vertical(
+    let pitch = -calc_weapon_bob_vertical(
         cycle,
         speed,
         inputs.view_height_target,
         inputs.pm_flags,
         inputs.weapon_pos_frac,
-    ) * -1.0;
-    let yaw = calc_weapon_bob_horizontal(
+    );
+    let yaw = -calc_weapon_bob_horizontal(
         cycle,
         speed,
         inputs.view_height_target,
         inputs.pm_flags,
         inputs.weapon_pos_frac,
-    ) * -1.0;
+    );
     let mut roll = calc_weapon_bob_horizontal(
         cycle - WEAPON_BOB_UP_PHASE,
         WEAPON_BOB_AMPLITUDE_ROLL * speed,

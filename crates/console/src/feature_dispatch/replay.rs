@@ -16,6 +16,11 @@ use super::state_dump::{
     audio_dump_section, persist_bytes_atomic, portal_dump_section, state_dump_body,
 };
 
+#[expect(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn route_replay_commands(
     mut events: MessageReader<ConsoleCommand>,
     mut output: (

@@ -14,7 +14,8 @@ pub struct SmodelCacheGpu {
     ib: Option<Buffer>,
 
     dynamic_ib: Option<Buffer>,
-    uploaded_revision: Option<u64>,
+    uploaded_layout: Option<(frame::WorldProducts, u64)>,
+    uploaded_index_words: usize,
 }
 
 impl SmodelCacheGpu {
@@ -61,16 +62,22 @@ impl SmodelCacheGpu {
         &mut self,
         queue: &RenderQueue,
         indices: &[u16],
+        world_products: frame::WorldProducts,
         layout_revision: u64,
     ) -> bool {
-        if self.uploaded_revision == Some(layout_revision) && layout_revision != 0 {
+        if layout_revision != 0
+            && self.uploaded_layout.is_some_and(|(owner, revision)| {
+                owner.same_as(world_products) && revision == layout_revision
+            })
+        {
             return true;
         }
         let Some(ib) = self.dynamic_ib.as_ref() else {
             return false;
         };
         if indices.is_empty() {
-            self.uploaded_revision = Some(layout_revision);
+            self.uploaded_layout = Some((world_products, layout_revision));
+            self.uploaded_index_words = 0;
             return false;
         }
         let bytes = bytemuck::cast_slice(indices);
@@ -79,8 +86,14 @@ impl SmodelCacheGpu {
             return false;
         }
         write_buffer_padded(queue, ib, bytes);
-        self.uploaded_revision = Some(layout_revision);
+        self.uploaded_index_words = indices.len();
+        self.uploaded_layout = Some((world_products, layout_revision));
         false
+    }
+
+    pub fn index_upload(&self) -> Option<(frame::WorldProducts, u64, usize)> {
+        self.uploaded_layout
+            .map(|(owner, revision)| (owner, revision, self.uploaded_index_words))
     }
 
     pub fn bank_byte_range(cache_index: u16) -> Option<(u64, u64)> {

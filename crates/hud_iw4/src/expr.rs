@@ -528,7 +528,7 @@ fn parse_seq(toks: &[&str], mut i: usize) -> Result<(Vec<Entry>, usize), ExprErr
                     return Err(ExprError::TruncatedDump);
                 }
                 let mut bytes = Vec::new();
-                for pair in hex.as_bytes().chunks_exact(2) {
+                for pair in hex.as_bytes().as_chunks::<2>().0 {
                     let digits =
                         core::str::from_utf8(pair).map_err(|_| ExprError::TruncatedDump)?;
                     bytes.push(
@@ -1054,15 +1054,15 @@ fn run_op(
 }
 
 fn logic_op(op: i32, a: Operand, b: Operand) -> Result<Operand, ExprError> {
-    if matches!(op, OP_EQUALS | OP_NOTEQUAL) {
-        if let (Operand::Str(x), Operand::Str(y)) = (&a, &b) {
-            let eq = x.eq_ignore_ascii_case(y);
-            return Ok(Operand::Int(i32::from(if op == OP_EQUALS {
-                eq
-            } else {
-                !eq
-            })));
-        }
+    if matches!(op, OP_EQUALS | OP_NOTEQUAL)
+        && let (Operand::Str(x), Operand::Str(y)) = (&a, &b)
+    {
+        let eq = x.eq_ignore_ascii_case(y);
+        return Ok(Operand::Int(i32::from(if op == OP_EQUALS {
+            eq
+        } else {
+            !eq
+        })));
     }
     let ia = source_int(&a);
     let ib = source_int(&b);

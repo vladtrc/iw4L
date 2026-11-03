@@ -574,7 +574,7 @@ impl SmodelDestinationWriter<'_> {
                 let one = self.expand(
                     source,
                     Some(lighting_iw4::SmodelSurfPath::Cached),
-                    custom_skip.as_mut().map(|set| &mut **set),
+                    custom_skip.as_deref_mut(),
                 );
                 stats.emitted = stats.emitted.saturating_add(one.emitted);
                 stats.skipped_custom = stats.skipped_custom.saturating_add(one.skipped_custom);
@@ -607,11 +607,7 @@ impl SmodelDestinationWriter<'_> {
                 stats.emitted = stats.emitted.saturating_add(one.emitted);
                 stats.skipped_custom = stats.skipped_custom.saturating_add(one.skipped_custom);
             }
-            note_custom_only_skip(
-                stats,
-                first.placement,
-                custom_skip.as_mut().map(|set| &mut **set),
-            );
+            note_custom_only_skip(stats, first.placement, custom_skip.as_deref_mut());
             return stats;
         }
         for &source in sources {
@@ -632,11 +628,7 @@ impl SmodelDestinationWriter<'_> {
                 one.emitted = one.emitted.saturating_add(pushed.emitted);
                 one.skipped_custom = one.skipped_custom.saturating_add(pushed.skipped_custom);
             }
-            note_custom_only_skip(
-                one,
-                source.placement,
-                custom_skip.as_mut().map(|set| &mut **set),
-            );
+            note_custom_only_skip(one, source.placement, custom_skip.as_deref_mut());
             stats.emitted = stats.emitted.saturating_add(one.emitted);
             stats.skipped_custom = stats.skipped_custom.saturating_add(one.skipped_custom);
         }
@@ -678,11 +670,8 @@ impl SmodelDestinationWriter<'_> {
                     continue;
                 }
                 if bucket.source != lighting_iw4::SmodelSurfPath::Cached {
-                    let stats = self.expand(
-                        source,
-                        Some(bucket.source),
-                        custom_skip.as_mut().map(|set| &mut **set),
-                    );
+                    let stats =
+                        self.expand(source, Some(bucket.source), custom_skip.as_deref_mut());
                     result.skipped_custom =
                         result.skipped_custom.saturating_add(stats.skipped_custom);
                     i += 1;
@@ -714,7 +703,7 @@ impl SmodelDestinationWriter<'_> {
                     &rest[..n],
                     cache,
                     pretess,
-                    custom_skip.as_mut().map(|set| &mut **set),
+                    custom_skip.as_deref_mut(),
                 );
                 result.skipped_custom = result.skipped_custom.saturating_add(stats.skipped_custom);
                 i += n;

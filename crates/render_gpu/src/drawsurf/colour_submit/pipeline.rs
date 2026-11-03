@@ -69,6 +69,10 @@ pub(super) fn init_or_update_pipeline(
     pipeline.rebuild_index();
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(super) fn kick_extracted_colour_pipelines(
     frame: Option<Res<PublishedRenderFrame>>,
     views: Query<(&ViewTarget, Option<&Msaa>), (With<Camera3d>, With<ViewUpscalingPipeline>)>,
@@ -98,6 +102,10 @@ pub(super) fn kick_extracted_colour_pipelines(
     registry.flush(&device);
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(super) fn kick_admitted_pipelines(
     extracted: Option<ExtractedColourRefs<'_>>,
     views: &Query<(&ViewTarget, Option<&Msaa>), (With<Camera3d>, With<ViewUpscalingPipeline>)>,

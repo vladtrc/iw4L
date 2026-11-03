@@ -114,7 +114,7 @@ fn same_material_catalog(
     owned: &Arc<RuntimeMaterialCatalog>,
     current: Option<&render_scene::TessMaterials>,
 ) -> bool {
-    current.is_some_and(|current| Arc::ptr_eq(owned, &current.catalog()))
+    current.is_some_and(|current| Arc::ptr_eq(owned, current.catalog()))
 }
 
 #[derive(Resource, Default, Clone, Debug, PartialEq)]
@@ -213,6 +213,10 @@ pub struct SpawnPendingFpvInputs<'w> {
     local: Res<'w, LocalPresentClient>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub fn spawn_pending_fpv(
     mut commands: Commands,
     mut pending: ResMut<PendingFpvSpawn>,
@@ -419,6 +423,10 @@ fn fpv_occupy_submission(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub fn occupy_fpv_scene(
     mut submissions: MessageWriter<AnimDObjSceneSubmission>,
     presented: Res<PresentedSnapshot>,
@@ -500,6 +508,10 @@ pub fn occupy_fpv_scene(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub fn tick_fpv_viewmodel(
     time: Res<Time>,
     (presented, local): (Res<PresentedSnapshot>, Res<LocalPresentClient>),
@@ -522,19 +534,19 @@ pub fn tick_fpv_viewmodel(
     pending_notes.batch = None;
     bolts.clear();
     *product = FpvPoseProduct::default();
-    if let Some(ps) = presented.viewweapon_player(local.0) {
-        if !presented_is_third_person(
+    if let Some(ps) = presented.viewweapon_player(local.0)
+        && !presented_is_third_person(
             &presented,
             local.0,
             view.in_killcam(),
             settings.third_person,
-        ) {
-            product.drawgun = viewweapon_drawgun_value(
-                ps,
-                table,
-                kick.as_ref().map(|k| k.b_position_to_ads).unwrap_or(true),
-            );
-        }
+        )
+    {
+        product.drawgun = viewweapon_drawgun_value(
+            ps,
+            table,
+            kick.as_ref().map(|k| k.b_position_to_ads).unwrap_or(true),
+        );
     }
     let Some(session) = session_vm.0.as_mut() else {
         product.kind = FpvPoseKind::Hide;
@@ -829,6 +841,10 @@ pub fn tick_fpv_viewmodel(
 
 /// Write this frame's vertices into the buffer the rig published, and nothing
 /// else: indices, surface ranges, materials and draws belong to the composition.
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn skin_fpv_geometry(
     product: Res<FpvPoseProduct>,
     session_vm: Option<Res<SessionViewmodel>>,
@@ -1008,6 +1024,10 @@ pub struct FpvPlacement<'w, 's> {
     kick: ResMut<'w, SessionViewKick>,
     cg_gun: Res<'w, GunOffset>,
     aim: ResMut<'w, ViewweaponAim>,
+    #[expect(
+        clippy::type_complexity,
+        reason = "Bevy system parameters keep scheduler resource access explicit."
+    )]
     roots: Query<
         'w,
         's,

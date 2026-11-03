@@ -274,9 +274,9 @@ fn decode_slots(text: &str) -> Option<Vec<ClassSlotState>> {
         slots.push(ClassSlotState {
             name: (*name).to_owned(),
             primary: (*primary).to_owned(),
-            primary_attachments: attachments(*primary_attachments),
+            primary_attachments: attachments(primary_attachments),
             secondary: (*secondary).to_owned(),
-            secondary_attachments: attachments(*secondary_attachments),
+            secondary_attachments: attachments(secondary_attachments),
             lethal: (*lethal).to_owned(),
             tactical: (*tactical).to_owned(),
             perk1: (*perk1).to_owned(),

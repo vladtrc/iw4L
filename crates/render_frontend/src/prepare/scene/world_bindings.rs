@@ -18,6 +18,7 @@ pub(super) fn prepare(
 
 /// An atlas layer's inputs, made as its map's own would be were it the match's.
 pub(super) fn layer(
+    id: asset_core::atlas::WorldId,
     lighting: &asset_world::AtlasLayerLighting,
 ) -> asset_material::MaterialLayerBindingInputs {
     let sun = lighting
@@ -35,6 +36,7 @@ pub(super) fn layer(
                 .map(|light| self::sun(&super::world::map_dir_primary_light(light)))
         });
     asset_material::MaterialLayerBindingInputs {
+        id,
         world: prepare(
             lighting.source_namespace,
             lighting
@@ -44,7 +46,6 @@ pub(super) fn layer(
             lighting.sky_dynamic_intensity,
         ),
         exposure: lighting.t5_sun_parse_exposure,
-        fog: lighting.exp_fog.as_ref().map(fog),
         sun,
     }
 }

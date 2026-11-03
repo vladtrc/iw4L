@@ -185,7 +185,10 @@ impl Plugin for ConsolePlugin {
                         )
                             .chain(),
                         crate::feature_dispatch::route_capture_commands,
-                        crate::feature_dispatch::route_state_dump_commands,
+                        (
+                            crate::feature_dispatch::route_state_dump_commands,
+                            crate::feature_dispatch::route_sound_commands.in_set(frame::InMatch),
+                        ),
                         crate::feature_dispatch::route_hitvol_commands,
                         crate::feature_dispatch::route_input_program.in_set(frame::InMatch),
                         crate::feature_dispatch::route_debug_feature_commands
@@ -359,6 +362,10 @@ struct UiControlCapture<'w> {
     overlay: Res<'w, frame::UiOverlayInput>,
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn publish_client_action_input(
     mut input: KeyboardMouseInput,
     binds: Res<KeyBinds>,
@@ -1904,6 +1911,11 @@ fn abort_script_on_wait_timeout(
     console.echo(msg, capacity);
 }
 
+#[expect(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn dispatch_console_command(
     time: Res<Time>,
     registry: Res<ConsoleRegistry>,

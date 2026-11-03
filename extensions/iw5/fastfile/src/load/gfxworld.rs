@@ -338,7 +338,7 @@ fn load_gfxworld_draw(
     let lightmap_array = s.layout(sz::GFX_LIGHTMAP_ARRAY, 16);
     if let Some(a) = s.plain_array(p, s.layout(0x20, 64), 4, lightmap_array, lightmap_count)? {
         let retain = lightmap_count.min(MAX_LIGHTMAP_PAGES);
-        for i in 0..lightmap_count {
+        for (i, lightmaps_entry) in lightmaps[..lightmap_count].iter_mut().enumerate() {
             let lightmap = a.at(i * lightmap_array);
             let serial = s.image_serial();
             asset_ptr_at(s, links, AssetType::Image, lightmap.at(0))?;
@@ -355,7 +355,7 @@ fn load_gfxworld_draw(
                 None
             };
             if i < retain {
-                lightmaps[i] = GfxLightmapPair { primary, secondary };
+                (*lightmaps_entry) = GfxLightmapPair { primary, secondary };
             }
         }
     }

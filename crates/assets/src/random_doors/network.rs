@@ -54,14 +54,26 @@ pub(super) fn refine(
         let mut pressure = 0.0;
         for &(a, b) in pairs {
             for (entered, exit) in [(a, b), (b, a)] {
+                #[expect(
+                    clippy::needless_range_loop,
+                    reason = "Graph coordinates identify vertices across adjacency and reachability tables."
+                )]
                 for side in 0..2 {
                     if !active(entered, side) {
                         continue;
                     }
+                    #[expect(
+                        clippy::needless_range_loop,
+                        reason = "Graph coordinates identify vertices across adjacency and reachability tables."
+                    )]
                     for other in 0..n {
                         if other == a || other == b {
                             continue;
                         }
+                        #[expect(
+                            clippy::needless_range_loop,
+                            reason = "Graph coordinates identify vertices across adjacency and reachability tables."
+                        )]
                         for other_side in 0..2 {
                             if active(other, other_side) {
                                 pressure +=

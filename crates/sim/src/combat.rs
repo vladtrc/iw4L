@@ -18,6 +18,13 @@ use weapon_iw4::{
     PLAYER_MELEE_RANGE_DEFAULT, PLAYER_MELEE_WIDTH_DEFAULT, fire_weapon_kind,
 };
 
+type HitDumpOutput = (
+    Option<[f32; 3]>,
+    Option<[f32; 3]>,
+    Option<u32>,
+    Option<String>,
+);
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AcceptedShot {
     pub shot_id: ShotId,
@@ -1100,15 +1107,7 @@ fn entity_collision_epoch(
         .map(|row| row.epoch)
 }
 
-fn hit_dump(
-    terminal: Option<ColliderId>,
-    rows: &[EntityCollisionTraceGeom],
-) -> (
-    Option<[f32; 3]>,
-    Option<[f32; 3]>,
-    Option<u32>,
-    Option<String>,
-) {
+fn hit_dump(terminal: Option<ColliderId>, rows: &[EntityCollisionTraceGeom]) -> HitDumpOutput {
     let Some(ColliderId::EntityDObjBone { owner, bone, .. }) = terminal else {
         return (None, None, None, None);
     };
@@ -1403,9 +1402,9 @@ fn trace_emission_world(
             distance_before
                 + glam::Vec3::from_array(segment.end).distance(glam::Vec3::from_array(em.origin)),
         );
-        for i in 0..3 {
-            segment.start[i] += offset[i];
-            segment.end[i] += offset[i];
+        for (i, offset_entry) in offset[..3].iter().enumerate() {
+            segment.start[i] += *offset_entry;
+            segment.end[i] += *offset_entry;
         }
     }
     (segments, terminal)

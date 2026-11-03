@@ -529,10 +529,10 @@ pub fn load_asset_at_observed(
             let (load, insert_slot) = s.begin_body_with_insert(slot)?;
             debug_assert!(load);
             load_asset_body_observed(s, ty, links)?;
-            if ty == AssetType::XModel {
-                if let Some(name) = s.xmodel().and_then(|g| g.name) {
-                    links.remember_xmodel_name(slot, insert_slot, name);
-                }
+            if ty == AssetType::XModel
+                && let Some(name) = s.xmodel().and_then(|g| g.name)
+            {
+                links.remember_xmodel_name(slot, insert_slot, name);
             }
             links.loaded(s, ty, slot, insert_slot)?;
             Ok(true)

@@ -42,7 +42,7 @@ pub fn cached_lighting_vertex_buffers(
             VertexBufferLayout {
                 array_stride: SMODEL_PRETESS_VERTEX as u64,
                 step_mode: VertexStepMode::Vertex,
-                attributes: attributes.into(),
+                attributes,
             }
         })
         .collect()

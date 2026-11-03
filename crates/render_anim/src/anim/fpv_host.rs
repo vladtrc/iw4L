@@ -65,16 +65,16 @@ impl FpvBoltTargets {
     }
 }
 
+#[derive(Default)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "The frame pose is moved once into its consumer and stays inline."
+)]
 pub enum FpvPoseKind {
+    #[default]
     Hide,
     Refuse(std::borrow::Cow<'static, str>),
     Posed(FpvPosedFrame),
-}
-
-impl Default for FpvPoseKind {
-    fn default() -> Self {
-        Self::Hide
-    }
 }
 
 /// What one frame asked of the rig: bones per hand, and the lens the right hand

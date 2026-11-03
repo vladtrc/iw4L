@@ -1283,7 +1283,7 @@ fn smodel_pretess_submit_refusal(
         .checked_add(range.count)
         .and_then(|end| usize::try_from(end).ok());
     if range.count == 0
-        || range.count % 3 != 0
+        || !range.count.is_multiple_of(3)
         || end.is_none_or(|end| end > extracted.world.smodel_pretess_indices.len())
     {
         return Err(GpuSubmitRefusal::SmodelCacheIndicesMissing { cache_index });
@@ -1523,7 +1523,7 @@ impl DrawRefusalCensus {
 
 fn material_refusal_class(cause: &MaterialRefusal) -> &'static str {
     match cause {
-        MaterialRefusal::SortedMaterialTableMissing { .. } => "SortedMaterialTableMissing",
+        MaterialRefusal::SortedMaterialTableMissing => "SortedMaterialTableMissing",
         MaterialRefusal::SortedMaterialOrdinalOutOfRange { .. } => {
             "SortedMaterialOrdinalOutOfRange"
         }
@@ -1572,7 +1572,7 @@ pub fn dump_sorted_material_names(catalog: &RuntimeMaterialCatalog) -> Vec<Strin
                     .unwrap_or_else(|| format!("id{}", id.0))
             })
             .collect(),
-        RuntimeSortedMaterialTable::Missing { .. } | RuntimeSortedMaterialTable::BuildFailed(_) => {
+        RuntimeSortedMaterialTable::Missing | RuntimeSortedMaterialTable::BuildFailed(_) => {
             Vec::new()
         }
     }
@@ -2156,7 +2156,7 @@ struct WorldPackedRowMeta {
 
 impl WorldPackedSurf<'_> {
     fn world_surf(&self) -> Option<u16> {
-        self.world_surf.or_else(|| match self.item.kind {
+        self.world_surf.or(match self.item.kind {
             RetainedDrawKind::World { surf, .. } => Some(surf),
             _ => None,
         })

@@ -1656,10 +1656,10 @@ impl AssetLinkSink for MenuSink {
         let Some(body) = self.script_set_stack.pop() else {
             return;
         };
-        if let Some(slot) = insert_slot {
-            if let Some(scripts) = self.script_sets.get(&ptr_key(body)).cloned() {
-                self.script_sets.insert(ptr_key(slot), scripts);
-            }
+        if let Some(slot) = insert_slot
+            && let Some(scripts) = self.script_sets.get(&ptr_key(body)).cloned()
+        {
+            self.script_sets.insert(ptr_key(slot), scripts);
         }
     }
 
@@ -1726,7 +1726,7 @@ impl AssetLinkSink for MenuSink {
 
     fn capture_font(&mut self, rec: &FontCapture<'_>) -> fastfile_iw4::Result<()> {
         let mut glyphs = Vec::new();
-        for chunk in rec.glyphs.chunks_exact(sz::GLYPH) {
+        for chunk in rec.glyphs.as_chunks::<{ sz::GLYPH }>().0.iter() {
             let mut row = [0u8; sz::GLYPH];
             row.copy_from_slice(chunk);
             glyphs.push(GlyphCapture::from_row(&row));

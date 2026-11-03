@@ -1,3 +1,5 @@
+type AlternateFpvCache = HashMap<(u32, u32), [Option<Result<crate::FpvSideAssemblies, String>>; 2]>;
+
 use crate::{
     NotetrackConvention, WeaponAttachments, WeaponBodyFacts, WeaponCamouflageChoice,
     WeaponCombatFx, WeaponKickFacts, WeaponReticleAssets, WeaponSoundAliases, WeaponSoundSlot,
@@ -530,7 +532,7 @@ pub struct WeaponRegistry {
     families: crate::WeaponFamilies,
     completion_names: Vec<String>,
 
-    alternate_fpv: HashMap<(u32, u32), [Option<Result<crate::FpvSideAssemblies, String>>; 2]>,
+    alternate_fpv: AlternateFpvCache,
     fpv_clip_tracks: Arc<crate::FpvClipTracks>,
 
     vehicle_turrets: HashMap<String, String>,
@@ -1100,11 +1102,11 @@ impl WeaponBuild {
             attachment_view_ads_models: row.attachment_view_ads_models.clone(),
             hide_tags: row.hide_tags.clone(),
             prepared_attachments: row.prepared_attachments.clone(),
-            alternate_index: row.alternate_index.clone(),
-            indexed_name: row.indexed_name.clone(),
-            namespace: row.namespace.clone(),
+            alternate_index: row.alternate_index,
+            indexed_name: row.indexed_name,
+            namespace: row.namespace,
             alternate_weapon: row.alternate_weapon.clone(),
-            facts: row.facts.clone(),
+            facts: row.facts,
             attachment_assets: row.attachment_assets.clone(),
             native_capture: row.native_capture.clone(),
             attachment_view_models: row.attachment_view_models.clone(),
@@ -1112,13 +1114,13 @@ impl WeaponBuild {
             reticle: row.reticle.clone(),
             overlay_material: row.overlay_material.clone(),
             overlay_image: row.overlay_image.clone(),
-            overlay_material_from_slot: row.overlay_material_from_slot.clone(),
+            overlay_material_from_slot: row.overlay_material_from_slot,
             projectile_model: row.projectile_model.clone(),
             combat_fx: row.combat_fx.clone(),
             proj_trail: row.proj_trail.clone(),
-            proj_trail_from_slot: row.proj_trail_from_slot.clone(),
+            proj_trail_from_slot: row.proj_trail_from_slot,
             proj_ignition: row.proj_ignition.clone(),
-            proj_ignition_from_slot: row.proj_ignition_from_slot.clone(),
+            proj_ignition_from_slot: row.proj_ignition_from_slot,
             sounds: row.sounds.clone(),
             sz_xanims: row.sz_xanims.clone(),
         })

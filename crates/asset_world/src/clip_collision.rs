@@ -4,6 +4,8 @@ use std::sync::Arc;
 use asset_iw4::size as sz;
 use fastfile_iw4::{ClipMapGeometry, Ptr, ZonePtr, ZoneStream};
 
+type CollectAabbLeavesIw4Output = Result<(Vec<(u16, i32)>, Vec<(u8, i32)>), ClipCollisionError>;
+
 #[derive(Clone, Debug)]
 pub struct ClipBrush {
     pub planes: Vec<[f32; 4]>,
@@ -262,7 +264,7 @@ impl ClipCollision {
         let invalid = || ClipCollisionError::InvalidSemantics("mesh arrays");
         let mesh = &self.mesh;
         let triangles = mesh.tri_count();
-        if mesh.tri_indices.len() % 3 != 0 {
+        if !mesh.tri_indices.len().is_multiple_of(3) {
             return Err(ClipCollisionError::InvalidSemantics("triangle triplets"));
         }
         if mesh.verts.iter().any(|vertex| !finite(vertex)) {
@@ -380,8 +382,13 @@ impl ClipCollision {
                     return Err(invalid());
                 }
             } else {
-                for child in node.u as usize..node.u as usize + node.child_count as usize {
-                    indegree[child] += 1;
+                for (_child, indegree_entry) in indegree
+                    [..node.u as usize + node.child_count as usize]
+                    .iter_mut()
+                    .enumerate()
+                    .skip(node.u as usize)
+                {
+                    (*indegree_entry) += 1;
                 }
             }
         }
@@ -395,9 +402,14 @@ impl ClipCollision {
             visited += 1;
             let node = &mesh.aabb_trees[index];
             if node.child_count != 0 {
-                for child in node.u as usize..node.u as usize + node.child_count as usize {
-                    indegree[child] -= 1;
-                    if indegree[child] == 0 {
+                for (child, indegree_entry) in indegree
+                    [..node.u as usize + node.child_count as usize]
+                    .iter_mut()
+                    .enumerate()
+                    .skip(node.u as usize)
+                {
+                    (*indegree_entry) -= 1;
+                    if (*indegree_entry) == 0 {
                         roots.push_back(child);
                     }
                 }
@@ -561,8 +573,8 @@ pub fn build_clip_collision(
         planes.push([0.0, 0.0, -1.0, -mins[2]]);
 
         let mut axial_mat = [0u16; 6];
-        for i in 0..6 {
-            axial_mat[i] = s
+        for (i, axial_mat_entry) in axial_mat[..6].iter_mut().enumerate() {
+            (*axial_mat_entry) = s
                 .u16_at(brush, s.layout(12, 24) + i * 2)
                 .map_err(|_| ClipCollisionError::Truncated)?;
         }
@@ -822,10 +834,7 @@ fn extract_clip_materials_iw4(
     Ok(out)
 }
 
-fn collect_aabb_leaves_iw4(
-    s: &ZoneStream<'_>,
-    g: ClipMapGeometry,
-) -> Result<(Vec<(u16, i32)>, Vec<(u8, i32)>), ClipCollisionError> {
+fn collect_aabb_leaves_iw4(s: &ZoneStream<'_>, g: ClipMapGeometry) -> CollectAabbLeavesIw4Output {
     let mut partitions = vec![(0u8, 0i32); g.partition_count];
     if let Some(parts) = g.collision_partitions {
         for (i, slot) in partitions.iter_mut().enumerate() {
@@ -890,10 +899,10 @@ fn extract_cmodels(
             .i32_at(cm, 64)
             .map_err(|_| ClipCollisionError::Truncated)?;
         let first_len = out.leafbrushes.len();
-        if lb_index >= 0 {
-            if let Some(lb_base) = lb_nodes {
-                append_leafbrush_node(s, lb_base, lb_index as usize, &mut out.leafbrushes)?;
-            }
+        if lb_index >= 0
+            && let Some(lb_base) = lb_nodes
+        {
+            append_leafbrush_node(s, lb_base, lb_index as usize, &mut out.leafbrushes)?;
         }
         let (first, num) = leafbrush_range(first_len, out.leafbrushes.len())?;
         out.cmodels.push(ClipCmodel {
@@ -942,7 +951,15 @@ fn read_placed_static_model(
         s.f32_at(sm, s.layout(12, 16)).ok()?,
     ];
     let mut inv_scaled_axis = [[0.0_f32; 3]; 3];
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "Matrix elimination uses coupled row and column indices."
+    )]
     for row in 0..3 {
+        #[expect(
+            clippy::needless_range_loop,
+            reason = "Matrix elimination uses coupled row and column indices."
+        )]
         for col in 0..3 {
             inv_scaled_axis[row][col] = s
                 .f32_at(sm, s.layout(0x10, 20) + (row * 3 + col) * 4)
@@ -1087,10 +1104,10 @@ fn extract_bsp_tables(
             .i32_at(leaf, 36)
             .map_err(|_| ClipCollisionError::Truncated)?;
         let first_len = out.leafbrushes.len();
-        if lb_index >= 0 {
-            if let Some(lb_base) = lb_nodes {
-                append_leafbrush_node(s, lb_base, lb_index as usize, &mut out.leafbrushes)?;
-            }
+        if lb_index >= 0
+            && let Some(lb_base) = lb_nodes
+        {
+            append_leafbrush_node(s, lb_base, lb_index as usize, &mut out.leafbrushes)?;
         }
         let (first, num) = leafbrush_range(first_len, out.leafbrushes.len())?;
         let first_coll_aabb_index = s

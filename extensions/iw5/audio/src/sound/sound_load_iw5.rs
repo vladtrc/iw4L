@@ -657,14 +657,14 @@ pub fn load_sound_catalog_iw5(path: &Path) -> Result<SoundCatalog, String> {
         walked: 0,
         stopped_at: None,
     };
-    if let Err(e) = load_zone(&mut stream, &mut sink) {
-        if let Some((idx, name)) = sink.stopped_at {
-            diag::info!(
-                Zone,
-                "iw5 sound catalog: stopped at asset {idx} ({name}) after {} walked: {e}",
-                sink.walked
-            );
-        }
+    if let Err(e) = load_zone(&mut stream, &mut sink)
+        && let Some((idx, name)) = sink.stopped_at
+    {
+        diag::info!(
+            Zone,
+            "iw5 sound catalog: stopped at asset {idx} ({name}) after {} walked: {e}",
+            sink.walked
+        );
     }
     Ok(sink.capture.finish())
 }

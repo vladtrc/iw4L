@@ -51,10 +51,10 @@ impl VertexColorStats {
         if rgba[3] == 0 {
             self.alpha_zero += 1;
         }
-        for i in 0..4 {
-            self.min_rgba[i] = self.min_rgba[i].min(rgba[i]);
-            self.max_rgba[i] = self.max_rgba[i].max(rgba[i]);
-            self.sum_rgba[i] += u64::from(rgba[i]);
+        for (i, rgba_entry) in rgba[..4].iter().enumerate() {
+            self.min_rgba[i] = self.min_rgba[i].min(*rgba_entry);
+            self.max_rgba[i] = self.max_rgba[i].max(*rgba_entry);
+            self.sum_rgba[i] += u64::from(*rgba_entry);
         }
     }
 
@@ -507,10 +507,7 @@ impl MapXModelSceneCatalog {
 
     /// Retains scene captures owned by the selected map family.
     pub fn retain_family(&mut self, family: asset_core::FamilyId) {
-        let names = self.assets.iter().filter_map(|(key, asset)| {
-            matches!(asset, MapXModelSceneAsset::Captured { family: owner, .. } if *owner == family)
-                .then(|| key.0.clone())
-        }).collect();
+        let names = self.assets.iter().filter(|&(_key, asset)| matches!(asset, MapXModelSceneAsset::Captured { family: owner, .. } if *owner == family)).map(|(key, _asset)| key.0.clone()).collect();
         self.retain_names(&names);
     }
 
@@ -925,7 +922,7 @@ pub fn build_xmodel_mesh(
     let mut total_vertices = 0usize;
     let mut total_triangles = 0usize;
     let mut any = false;
-    for lod in 0..4 {
+    for (lod, lod_surfaces_entry) in lod_surfaces[..4].iter_mut().enumerate() {
         let Some(surfaces) = geometry.lod_xsurfaces[lod] else {
             continue;
         };
@@ -945,7 +942,7 @@ pub fn build_xmodel_mesh(
         any = any || !draws.is_empty();
         total_vertices += verts;
         total_triangles += tris;
-        lod_surfaces[lod] = draws;
+        (*lod_surfaces_entry) = draws;
     }
     if !any {
         return Err(ModelMeshError::MissingSurfaces);

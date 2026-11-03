@@ -840,11 +840,11 @@ impl WeaponRegistry {
             .iter()
             .enumerate()
             .skip(1)
-            .filter_map(|(id, row)| {
-                (normalize_weapon_name(&row.native_script_name) == row.name
-                    && row.native_script_name != gsc_weapon_script_name(&row.name))
-                .then(|| (row.native_script_name.clone(), id as u32))
+            .filter(|&(_id, row)| {
+                normalize_weapon_name(&row.native_script_name) == row.name
+                    && row.native_script_name != gsc_weapon_script_name(&row.name)
             })
+            .map(|(id, row)| (row.native_script_name.clone(), id as u32))
     }
 
     pub fn configuration_supported(&self, id: u32) -> bool {

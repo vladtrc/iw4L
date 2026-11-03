@@ -77,26 +77,24 @@ pub fn compose(
         row.reticle = reticle.clone();
         row.facts.i_reticle_side_size = reticle.side_size;
     }
-    if alternate {
-        if let Some(projectile) = iw5_first_block(assets, |asset| asset.projectile) {
-            row.facts.explosion_radius = projectile.explosion_radius;
-            row.facts.explosion_inner_damage = projectile.explosion_inner_damage;
-            row.facts.explosion_outer_damage = projectile.explosion_outer_damage;
-            row.facts.projectile_speed = projectile.speed;
-            row.facts.projectile_speed_up = projectile.speed_up;
-            row.facts.projectile_activate_dist = projectile.activate_distance;
-            row.facts.projectile_explosion_type = projectile.explosion_type;
-            row.facts.proj_impact_explode = projectile.impact_explode;
-            let asset = assets.iter().find(|asset| asset.projectile.is_some())?;
-            row.projectile_model = asset.projectile_model.clone();
-            row.combat_fx.explosion_hint = asset.projectile_explosion_fx.clone();
-            row.proj_trail = asset.projectile_trail_fx.clone();
-            row.proj_trail_from_slot = row.proj_trail.is_some();
-            row.proj_ignition = asset.projectile_ignition_fx.clone();
-            row.proj_ignition_from_slot = row.proj_ignition.is_some();
-            row.sounds.proj_explosion = asset.projectile_explosion_sound.clone();
-            row.sounds.proj_ignition_sound = asset.projectile_ignition_sound.clone();
-        }
+    if alternate && let Some(projectile) = iw5_first_block(assets, |asset| asset.projectile) {
+        row.facts.explosion_radius = projectile.explosion_radius;
+        row.facts.explosion_inner_damage = projectile.explosion_inner_damage;
+        row.facts.explosion_outer_damage = projectile.explosion_outer_damage;
+        row.facts.projectile_speed = projectile.speed;
+        row.facts.projectile_speed_up = projectile.speed_up;
+        row.facts.projectile_activate_dist = projectile.activate_distance;
+        row.facts.projectile_explosion_type = projectile.explosion_type;
+        row.facts.proj_impact_explode = projectile.impact_explode;
+        let asset = assets.iter().find(|asset| asset.projectile.is_some())?;
+        row.projectile_model = asset.projectile_model.clone();
+        row.combat_fx.explosion_hint = asset.projectile_explosion_fx.clone();
+        row.proj_trail = asset.projectile_trail_fx.clone();
+        row.proj_trail_from_slot = row.proj_trail.is_some();
+        row.proj_ignition = asset.projectile_ignition_fx.clone();
+        row.proj_ignition_from_slot = row.proj_ignition.is_some();
+        row.sounds.proj_explosion = asset.projectile_explosion_sound.clone();
+        row.sounds.proj_ignition_sound = asset.projectile_ignition_sound.clone();
     }
 
     if scope.is_some() || alternate {
@@ -109,20 +107,19 @@ pub fn compose(
         row.facts.ads_overlay_width = 0.0;
         row.facts.ads_overlay_height = 0.0;
     }
-    if let Some(scope) = assets.iter().find(|asset| asset.overlay.is_some()) {
-        if let Some(overlay) = scope
+    if let Some(scope) = assets.iter().find(|asset| asset.overlay.is_some())
+        && let Some(overlay) = scope
             .overlay
             .as_deref()
             .filter(|name| !name.is_empty() && overlay_name_is_hud_iris(name))
-        {
-            row.overlay_material = Some(overlay.to_owned());
-            row.overlay_image = None;
-            row.overlay_material_from_slot = true;
-            row.facts.overlay_reticle = scope.overlay_reticle;
-            row.facts.thermal_scope = scope.thermal;
-            row.facts.ads_overlay_width = scope.width;
-            row.facts.ads_overlay_height = scope.height;
-        }
+    {
+        row.overlay_material = Some(overlay.to_owned());
+        row.overlay_image = None;
+        row.overlay_material_from_slot = true;
+        row.facts.overlay_reticle = scope.overlay_reticle;
+        row.facts.thermal_scope = scope.thermal;
+        row.facts.ads_overlay_width = scope.width;
+        row.facts.ads_overlay_height = scope.height;
     }
 
     let mut anim_types: Vec<u32> = base
@@ -153,12 +150,11 @@ pub fn compose(
         } else {
             chosen.anim_time_ms
         };
-        if time > 0
-            || (alternate && slot == weap_anim::RELOAD_EMPTY && chosen.altmode_anim.is_some())
+        if (time > 0
+            || (alternate && slot == weap_anim::RELOAD_EMPTY && chosen.altmode_anim.is_some()))
+            && let Some(timer) = iw5_anim_timer(&mut row.facts, slot)
         {
-            if let Some(timer) = iw5_anim_timer(&mut row.facts, slot) {
-                *timer = time;
-            }
+            *timer = time;
         }
     }
 

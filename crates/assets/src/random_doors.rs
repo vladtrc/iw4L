@@ -1,4 +1,6 @@
 //! Random door pairings with a connected backbone through every selected map.
+type MinimumCostMatchingOutput = Option<(Option<usize>, Vec<(usize, usize)>)>;
+
 use serde_json::{Value, json};
 mod matching;
 mod network;
@@ -7,6 +9,8 @@ mod visibility;
 /// Maximum total dimension removed when fitting two native openings.
 pub const MAX_DOOR_WIDTH_TRIM: f64 = 20.0;
 pub const MAX_DOOR_HEIGHT_TRIM: f64 = 28.0;
+
+pub(crate) const GENERATOR_VERSION: u64 = 1;
 
 pub fn shuffle_random_doors(recipe: &mut Value, seed: u64) -> Result<(), String> {
     let count = recipe["worlds"]
@@ -105,6 +109,7 @@ pub fn shuffle_random_doors(recipe: &mut Value, seed: u64) -> Result<(), String>
                 "shared_aperture":{"width":width,"height":height}, "flip":true})
         })
         .collect();
+    recipe["generator"] = json!({"algorithm":"random-door", "version":GENERATOR_VERSION});
     recipe["aperture_version"] = json!(4);
     recipe["portals"] = json!(portals);
     recipe["seed"] = json!(seed);
@@ -266,7 +271,7 @@ fn minimum_cost_matching(
     rows: &[Value],
     worlds: usize,
     pair_costs: &[Vec<f64>],
-) -> Option<(Option<usize>, Vec<(usize, usize)>)> {
+) -> MinimumCostMatchingOutput {
     type Choice = (f64, usize, usize);
     fn solve(
         mask: u64,

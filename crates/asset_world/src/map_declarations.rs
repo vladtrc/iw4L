@@ -59,7 +59,7 @@ impl MapDeclarations {
     }
 
     fn capture_destructible_anims(&mut self, literals: &[String]) {
-        if literals.len() < 2 || literals.len() % 2 != 0 {
+        if literals.len() < 2 || !literals.len().is_multiple_of(2) {
             return;
         }
         let pairs: Vec<(&String, &String)> = literals

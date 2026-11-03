@@ -140,10 +140,9 @@ pub fn drive_class_select_screen(
     if signon.phase.is_failed() {
         if let Some(loading) = loading.as_deref_mut()
             && let SignonPhase::Failed(reason) = &signon.phase
+            && loading.failure().is_none()
         {
-            if loading.failure().is_none() {
-                loading.fail(reason.to_string());
-            }
+            loading.fail(reason.to_string());
         }
         if let Some(load) = load.as_deref_mut() {
             load.fail();

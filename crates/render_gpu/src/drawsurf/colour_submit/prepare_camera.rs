@@ -39,6 +39,10 @@ fn run_colour_lanes(camera: CameraLane<'_>, shadow: ShadowLane<'_>) {
     });
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(super) fn prepare_colour_lanes(
     views: Query<
         (
@@ -521,8 +525,15 @@ pub(super) fn prepare_camera_colour(lane: CameraLane<'_>) {
         let smodel_ib_skip = smodel_cache_gpu.write_dynamic_indices(
             queue,
             extracted.world.smodel_pretess_indices.as_slice(),
+            extracted.world.world_products,
             extracted.world.smodel_index_layout_revision,
         );
+        if census_on {
+            let upload = smodel_cache_gpu.index_upload();
+            census.frame.smodel_index_owner = upload.and_then(|(owner, _, _)| owner.0);
+            census.frame.smodel_index_revision = upload.map(|(_, revision, _)| revision);
+            census.frame.smodel_index_words = upload.map(|(_, _, words)| words);
+        }
         perf::counter!(
             "smodel_ib_skip",
             "iw4l.render",

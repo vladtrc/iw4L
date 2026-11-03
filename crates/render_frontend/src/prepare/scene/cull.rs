@@ -412,6 +412,10 @@ impl PortalCullFrame<'_> {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub fn apply_dpvs_cull(
     mut scene: ResMut<WorldScene>,
     portal_controls: Res<render_scene::PortalRenderControls>,
@@ -856,7 +860,7 @@ pub fn apply_dpvs_cull(
         stats.eye_cell_unresolved = stats.eye_cell_unresolved.saturating_add(1);
     }
     stats.visible_cells = vis.count_ones();
-    drop(vis);
+
     stats.cell_vis.clone_from(&words);
     stats.cell_vis_count = cell_count;
     stats.cell_vis_all = eye_cell.is_none() && !portaled;
@@ -1228,7 +1232,7 @@ pub(crate) fn add_world_surfaces_frustum_only(
             &mut draw_msb[..],
         );
         for cell in 0..dpvs.cell_count {
-            if !msb_get(&draw_msb, cell) {
+            if !msb_get(draw_msb, cell) {
                 continue;
             }
             add_one_cell_frustum_only(dpvs, cell, frustum, &mut vis_data, &mut stats);

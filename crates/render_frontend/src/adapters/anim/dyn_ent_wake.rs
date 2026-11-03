@@ -16,6 +16,8 @@ use assets::{BoundWeapons, PreparedWeapons};
 use net::{ClientPredictionState, EntityEventSound, EntityExplosion, EntityPhysicsSphere};
 use render_fx::{EntityMarks, HostFxSystem, PreparedFxCatalog};
 
+type WakeCellBoundsOutput = Option<((i32, i32, i32), (i32, i32, i32))>;
+
 pub const DYNENT_BULLET_FORCE: f32 = 1000.0;
 
 pub const DYNENT_EXPLODE_FORCE: f32 = 12500.0;
@@ -67,7 +69,7 @@ fn wake_cell(v: f32) -> Option<i32> {
         .then(|| (v / DYNENT_WAKE_CELL_SIZE).floor() as i32)
 }
 
-fn wake_cell_bounds(mins: Vec3, maxs: Vec3) -> Option<((i32, i32, i32), (i32, i32, i32))> {
+fn wake_cell_bounds(mins: Vec3, maxs: Vec3) -> WakeCellBoundsOutput {
     if !mins.is_finite() || !maxs.is_finite() {
         return None;
     }
@@ -474,8 +476,8 @@ impl DynEntTarget<'_> {
         let Some(scale) = falloff.at_distance(dist) else {
             return false;
         };
-        if let Some(preset) = can_wake(inst) {
-            if let Some(impulse) = explosion_impulse(
+        if let Some(preset) = can_wake(inst)
+            && let Some(impulse) = explosion_impulse(
                 origin,
                 transform.translation,
                 falloff,
@@ -483,9 +485,9 @@ impl DynEntTarget<'_> {
                 explicit,
                 false,
                 dvars,
-            ) {
-                impulses.write(DynEntPhysImpulse { entity, impulse });
-            }
+            )
+        {
+            impulses.write(DynEntPhysImpulse { entity, impulse });
         }
         if !is_destroyable(inst.ty) {
             return false;
@@ -856,7 +858,7 @@ pub(crate) fn on_entity_event_sound(
     let start = Vec3::from_array(payload.origin2);
     let end = Vec3::from_array(payload.origin);
     let catalog = catalog.as_deref();
-    let mut host = host.as_deref_mut();
+    let host = host.as_deref_mut();
     let fx = fx.as_deref();
     let scene = scene.as_deref();
     let marks = entity_marks.as_ref();
@@ -865,7 +867,6 @@ pub(crate) fn on_entity_event_sound(
     };
     let damage = weapon_hit_damage(weapons.as_ref(), payload.weapon);
     let phys = phys.as_mut();
-    let host = host.as_deref_mut();
     if let Some(mut target) = direct.apply(start, end, damage, &mut instances, &mut impulses) {
         target.kill(phys, host, fx, scene, marks);
     }

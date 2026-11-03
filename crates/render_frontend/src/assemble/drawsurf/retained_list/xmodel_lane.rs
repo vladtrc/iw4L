@@ -159,6 +159,11 @@ fn sort_xmodel_lane(items: &mut [RetainedDrawItem], sources: &mut [u32], order: 
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn rebuild_xmodel_draw_lane(
     plans: (
         Option<Res<crate::assemble::drawsurf::tess::xmodel::FpvDrawPlan>>,

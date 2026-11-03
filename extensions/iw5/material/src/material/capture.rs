@@ -279,15 +279,15 @@ impl NativeMaterialCatalog for MaterialCatalog {
             (geometry.occupancy != 0)
                 .then(|| self.capture_owned_technique_graph_iw5(geometry, graph))
         });
-        if let Some(graph) = s.latest_technique_graph() {
-            if graph.rows_truncated != 0 || graph.arguments_truncated != 0 {
-                diag::warn!(
-                    Zone,
-                    "IW5 technique graph truncated for {name}: rows_truncated={} arguments_truncated={}",
-                    graph.rows_truncated,
-                    graph.arguments_truncated
-                );
-            }
+        if let Some(graph) = s.latest_technique_graph()
+            && (graph.rows_truncated != 0 || graph.arguments_truncated != 0)
+        {
+            diag::warn!(
+                Zone,
+                "IW5 technique graph truncated for {name}: rows_truncated={} arguments_truncated={}",
+                graph.rows_truncated,
+                graph.arguments_truncated
+            );
         }
 
         Some(self.take_techset_slot(TechniqueSetFacts {
@@ -315,7 +315,11 @@ impl NativeMaterialCatalog for MaterialCatalog {
             &geometry.technique_flags_by_slot,
         );
         let mut slots = Vec::with_capacity(asset_iw4::size::TECHNIQUE_SLOT_COUNT);
-        for iw4_slot in 0..asset_iw4::size::TECHNIQUE_SLOT_COUNT {
+        for (iw4_slot, flags_by_slot_entry) in flags_by_slot
+            [..asset_iw4::size::TECHNIQUE_SLOT_COUNT]
+            .iter()
+            .enumerate()
+        {
             if slots_bits & (1u64 << iw4_slot) == 0 {
                 slots.push(None);
                 continue;
@@ -392,7 +396,7 @@ impl NativeMaterialCatalog for MaterialCatalog {
             let technique = if scanned {
                 Some(OwnedTechnique {
                     source_selection: None,
-                    flags: flags_by_slot[iw4_slot],
+                    flags: (*flags_by_slot_entry),
                     passes,
                     body_scanned: true,
                 })
@@ -401,11 +405,11 @@ impl NativeMaterialCatalog for MaterialCatalog {
                     .and_then(|slot| geometry.technique_body_by_slot.get(slot).copied().flatten())
                     .and_then(|body| self.links().technique(link_address(body)))
             };
-            if let (Some(slot), Some(technique)) = (iw5_slot, &technique) {
-                if let Some(body) = geometry.technique_body_by_slot.get(slot).copied().flatten() {
-                    self.links_mut()
-                        .remember_technique(link_address(body), technique.clone());
-                }
+            if let (Some(slot), Some(technique)) = (iw5_slot, &technique)
+                && let Some(body) = geometry.technique_body_by_slot.get(slot).copied().flatten()
+            {
+                self.links_mut()
+                    .remember_technique(link_address(body), technique.clone());
             }
             slots.push(technique);
         }

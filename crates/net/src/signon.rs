@@ -51,25 +51,29 @@ impl core::fmt::Display for SignonFailReason {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum SignonPhase {
+    #[default]
     Local,
 
-    CheckingMatch { epoch: MatchEpoch },
+    CheckingMatch {
+        epoch: MatchEpoch,
+    },
 
-    LoadingMap { epoch: MatchEpoch },
+    LoadingMap {
+        epoch: MatchEpoch,
+    },
 
-    Syncing { epoch: MatchEpoch },
+    Syncing {
+        epoch: MatchEpoch,
+    },
 
-    Active { epoch: MatchEpoch, client: ClientId },
+    Active {
+        epoch: MatchEpoch,
+        client: ClientId,
+    },
     Failed(SignonFailReason),
     Cancelled,
-}
-
-impl Default for SignonPhase {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 impl SignonPhase {

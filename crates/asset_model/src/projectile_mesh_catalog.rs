@@ -142,11 +142,11 @@ impl ProjectileMeshBuild {
 
     pub fn absorb(&mut self, mut other: Self) {
         for key in std::mem::take(&mut other.catalog.order) {
-            if !self.catalog.entries.contains_key(&key) {
-                if let Some(entry) = other.catalog.entries.remove(&key) {
-                    self.catalog.order.push(key.clone());
-                    self.catalog.entries.insert(key, entry);
-                }
+            if !self.catalog.entries.contains_key(&key)
+                && let Some(entry) = other.catalog.entries.remove(&key)
+            {
+                self.catalog.order.push(key.clone());
+                self.catalog.entries.insert(key, entry);
             }
         }
     }

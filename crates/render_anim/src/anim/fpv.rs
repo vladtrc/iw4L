@@ -438,39 +438,39 @@ pub fn tick_equipped_fpv_with_extra_events(
         .or(present.last_ads_frac)
         .unwrap_or(0.0);
     equipped.controller.apply_ads_overlay_frame(ads_frac);
-    if let (Some(left), Some(sample)) = (equipped.left.as_mut(), sample) {
-        if sample.last_weapon_hand == 1 {
-            left.set_predicted_perks(sample.perks0, sample.perks1);
-            match present.observe_weap_anim_secondary_edge(sample.weap_anim_secondary) {
-                WeapAnimEdge::Unchanged => {}
-                WeapAnimEdge::Idle => {
-                    if !left.apply_idle_weap_anim(sample.left_clip_ammo == Some(0)) {
-                        present.last_weap_anim_secondary = None;
-                    }
-                }
-                WeapAnimEdge::ForceIdle => {
-                    left.apply_force_idle_weap_anim(sample.left_clip_ammo == Some(0));
-                }
-                WeapAnimEdge::Dispatch(slot) => {
-                    report_dispatch_slot(slot, left.dispatch_sz_xanim_index(slot));
+    if let (Some(left), Some(sample)) = (equipped.left.as_mut(), sample)
+        && sample.last_weapon_hand == 1
+    {
+        left.set_predicted_perks(sample.perks0, sample.perks1);
+        match present.observe_weap_anim_secondary_edge(sample.weap_anim_secondary) {
+            WeapAnimEdge::Unchanged => {}
+            WeapAnimEdge::Idle => {
+                if !left.apply_idle_weap_anim(sample.left_clip_ammo == Some(0)) {
+                    present.last_weap_anim_secondary = None;
                 }
             }
-            let advance = left.advance(dt_secs);
-            notetracks
-                .records
-                .extend(
-                    advance
-                        .notifications
-                        .into_iter()
-                        .map(|notification| FpvNotetrack {
-                            hand: 1,
-                            notification,
-                        }),
-                );
-            notetracks.discarded = notetracks.discarded.saturating_add(advance.discarded);
-
-            left.apply_ads_overlay_frame(0.0);
+            WeapAnimEdge::ForceIdle => {
+                left.apply_force_idle_weap_anim(sample.left_clip_ammo == Some(0));
+            }
+            WeapAnimEdge::Dispatch(slot) => {
+                report_dispatch_slot(slot, left.dispatch_sz_xanim_index(slot));
+            }
         }
+        let advance = left.advance(dt_secs);
+        notetracks
+            .records
+            .extend(
+                advance
+                    .notifications
+                    .into_iter()
+                    .map(|notification| FpvNotetrack {
+                        hand: 1,
+                        notification,
+                    }),
+            );
+        notetracks.discarded = notetracks.discarded.saturating_add(advance.discarded);
+
+        left.apply_ads_overlay_frame(0.0);
     }
     (sample_pose(&equipped.controller), notetracks)
 }

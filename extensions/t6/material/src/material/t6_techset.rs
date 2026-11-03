@@ -609,9 +609,7 @@ fn sampler_argument(
     }
     let name = texture_name(reflection, slot.texture).unwrap_or("");
     let lower = name.to_ascii_lowercase();
-    let code = if lower.contains("reflectionprobe") {
-        return None;
-    } else if lower.contains("lightmapsampler") {
+    let code = if lower.contains("reflectionprobe") || lower.contains("lightmapsampler") {
         return None;
     } else if lower.contains("modellighting") {
         "MODEL_LIGHTING"

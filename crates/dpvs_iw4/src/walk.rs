@@ -396,28 +396,26 @@ impl WalkScratch {
                 let slot = usize::from(node.slot);
                 (self.queue[slot], Some(slot))
             };
-            if recycle.is_some() {
-                if item.hull_axis.is_some() {
-                    if !finalize_queued_hull_clip(&mut item, eye, near, far, bevels) {
-                        stats.hull_fail += 1;
-                        if let Some(slot) = recycle {
-                            free_hull_slot(self, slot);
-                        }
-                        continue;
+            if recycle.is_some() && item.hull_axis.is_some() {
+                if !finalize_queued_hull_clip(&mut item, eye, near, far, bevels) {
+                    stats.hull_fail += 1;
+                    if let Some(slot) = recycle {
+                        free_hull_slot(self, slot);
                     }
-                    if usize::from(item.hull.count) >= 11 && bevels.is_none() {
-                        stats.child_clip_bevel_unread += 1;
-                    }
+                    continue;
+                }
+                if usize::from(item.hull.count) >= 11 && bevels.is_none() {
+                    stats.child_clip_bevel_unread += 1;
                 }
             }
             let cell = usize::from(item.cell);
             if !out.get(cell) {
                 out.set(cell);
                 stats.cells_visited += 1;
-                if let Some(slots) = cell_clips.as_mut() {
-                    if let Some(slot) = slots.get_mut(cell) {
-                        record_cell_clip(&item, clip_planes, slot);
-                    }
+                if let Some(slots) = cell_clips.as_mut()
+                    && let Some(slot) = slots.get_mut(cell)
+                {
+                    record_cell_clip(&item, clip_planes, slot);
                 }
             }
             if let Some(visit) = on_visit.as_mut() {

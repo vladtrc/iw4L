@@ -11,6 +11,10 @@ use crate::occupancy::fpv_present::{
 };
 use weapon_iw4::get_viewmodel_weapon_index;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub fn sync_fpv_to_held_weapon(
     mut commands: Commands,
     presented: Res<PresentedSnapshot>,
@@ -100,16 +104,14 @@ pub fn sync_fpv_to_held_weapon(
         held_life.0 = None;
         return;
     };
-    if started_local {
-        if session_vm.0.is_some() || pending_fpv.0.is_some() || settled.0.is_some() {
-            clear_fpv(
-                &mut commands,
-                &mut pending_fpv,
-                &mut session_vm,
-                &mut settled,
-                &existing_fpv,
-            );
-        }
+    if started_local && (session_vm.0.is_some() || pending_fpv.0.is_some() || settled.0.is_some()) {
+        clear_fpv(
+            &mut commands,
+            &mut pending_fpv,
+            &mut session_vm,
+            &mut settled,
+            &existing_fpv,
+        );
     }
     let held = prepared
         .table()

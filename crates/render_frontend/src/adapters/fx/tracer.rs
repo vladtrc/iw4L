@@ -81,7 +81,7 @@ pub(crate) fn present_tracer_beams(
                     &beam.tess,
                     view_pos,
                     view_fwd,
-                    clip_pair.map(|(c, i)| (c, i)),
+                    clip_pair,
                     &mut vert_buf,
                     &mut idx_buf,
                 ) else {
@@ -111,7 +111,7 @@ pub(crate) fn present_tracer_beams(
                 }
                 let base = vert_used;
                 let mut index_ok = true;
-                for tri in idx_buf[..ni].chunks_exact(3) {
+                for tri in idx_buf[..ni].as_chunks::<3>().0 {
                     let three = [
                         base.saturating_add(u32::from(tri[0])),
                         base.saturating_add(u32::from(tri[1])),

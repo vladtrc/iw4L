@@ -123,10 +123,10 @@ pub(crate) fn free_all_trails_for_effect(host: &mut FxSystemHost, effect_slot: u
         let next = host.trails[trail_slot].next_trail_handle;
         let freed_samples = free_trail_elems_on_trail(host, trail_slot);
 
-        if freed_samples > 0 {
-            if let Some(effect) = host.effect_at_mut(effect_slot) {
-                effect.status = effect.status.wrapping_sub(freed_samples);
-            }
+        if freed_samples > 0
+            && let Some(effect) = host.effect_at_mut(effect_slot)
+        {
+            effect.status = effect.status.wrapping_sub(freed_samples);
         }
         free_trail_slot_only(host, trail_slot);
         handle = next;
@@ -248,12 +248,12 @@ pub fn stop_effect_non_recursive(host: &mut FxSystemHost, effect_slot: usize) {
         let end = host.first_new_effect;
         while cursor != end {
             let handle = host.handle_at_ring(cursor as u32);
-            if handle != self_handle {
-                if let Some(other) = host.slot_index_for_handle(handle) {
-                    let owner = host.effect_at(other).map(|e| e.own_handle);
-                    if owner == Some(self_handle) {
-                        stop_effect_non_recursive(host, other);
-                    }
+            if handle != self_handle
+                && let Some(other) = host.slot_index_for_handle(handle)
+            {
+                let owner = host.effect_at(other).map(|e| e.own_handle);
+                if owner == Some(self_handle) {
+                    stop_effect_non_recursive(host, other);
                 }
             }
             cursor = cursor.wrapping_add(1);
@@ -528,10 +528,10 @@ fn spawn_elem(
         sort_order: elem_def.sort_order,
         spark_cloud_handle: FX_SPARK_CLOUD_HANDLE_NONE,
     };
-    if prev_head != FX_ELEM_HANDLE_NONE {
-        if let Some(prev_slot) = elem_slot_for_handle(prev_head) {
-            host.elems[prev_slot].prev_elem_handle = handle;
-        }
+    if prev_head != FX_ELEM_HANDLE_NONE
+        && let Some(prev_slot) = elem_slot_for_handle(prev_head)
+    {
+        host.elems[prev_slot].prev_elem_handle = handle;
     }
 
     if elem_def.elem_type == FX_ELEM_TYPE_SPARK_CLOUD {
@@ -603,25 +603,25 @@ pub(crate) fn free_elem(host: &mut FxSystemHost, handle: u16) {
     let class = host.elems[elem_slot].class_index as usize;
 
     if prev == FX_ELEM_HANDLE_NONE {
-        if let Some(effect) = host.effect_at_mut(effect_slot) {
-            if class < 3 && effect.first_elem_handle[class] == handle {
-                effect.first_elem_handle[class] = next;
-            }
+        if let Some(effect) = host.effect_at_mut(effect_slot)
+            && class < 3
+            && effect.first_elem_handle[class] == handle
+        {
+            effect.first_elem_handle[class] = next;
         }
     } else if let Some(prev_slot) = elem_slot_for_handle(prev) {
         host.elems[prev_slot].next_elem_handle = next;
     }
-    if next != FX_ELEM_HANDLE_NONE {
-        if let Some(next_slot) = elem_slot_for_handle(next) {
-            host.elems[next_slot].prev_elem_handle = prev;
-        }
+    if next != FX_ELEM_HANDLE_NONE
+        && let Some(next_slot) = elem_slot_for_handle(next)
+    {
+        host.elems[next_slot].prev_elem_handle = prev;
     }
-    if class == 0 {
-        if let Some(effect) = host.effect_at_mut(effect_slot) {
-            if effect.first_sorted_elem_handle == handle {
-                effect.first_sorted_elem_handle = next;
-            }
-        }
+    if class == 0
+        && let Some(effect) = host.effect_at_mut(effect_slot)
+        && effect.first_sorted_elem_handle == handle
+    {
+        effect.first_sorted_elem_handle = next;
     }
 
     free_elem_slot_only(host, elem_slot);

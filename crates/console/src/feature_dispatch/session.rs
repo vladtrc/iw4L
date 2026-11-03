@@ -7,6 +7,9 @@ use super::echo::ConsoleEcho;
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct SessionCommandTarget<'w> {
     scope: Res<'w, State<frame::MatchScope>>,
+    identity: Res<'w, frame::LaunchIdentity>,
+    role: Res<'w, frame::RuntimeRole>,
+    merged: Option<Res<'w, assets::MergedMap>>,
     playback: Option<Res<'w, ::replay::ReplayPlayback>>,
     bridge: Option<Res<'w, net::MasterBridge>>,
     manifest: Option<Res<'w, ::session::SessionContentManifest>>,
@@ -14,6 +17,11 @@ pub(crate) struct SessionCommandTarget<'w> {
 
 impl SessionCommandTarget<'_> {
     fn restart_zone(&self) -> Option<String> {
+        if *self.scope.get() == frame::MatchScope::Live
+            && let Some(merged) = &self.merged
+        {
+            return Some(merged.recording_name().into());
+        }
         self.manifest
             .as_ref()
             .and_then(|manifest| match &manifest.map {
@@ -78,7 +86,13 @@ pub(crate) fn route_session_commands(
                 }
             }
             "map" => match cmd.args.as_slice() {
-                [zone] => match transition.request_zone(zone.clone()) {
+                [zone] => match (if target.role.runs_authority() {
+                    assets::MergedMap::select_name(&target.identity.artifacts, zone)
+                } else {
+                    Ok(zone.clone())
+                })
+                .and_then(|zone| transition.request_zone(zone))
+                {
                     Ok(()) => echo.write(format!("map: requested `{zone}`")),
                     Err(error) => {
                         dispatch.release();

@@ -7,6 +7,8 @@ use crate::asset_type::AssetType;
 use crate::size as sz;
 use crate::zone::{Ptr, Result, WeaponGeometry, XFILE_BLOCK_VIRTUAL, ZonePtr, ZoneStream};
 
+type LoadWeaponDefOutput = Result<(Ptr, Option<Ptr>, Option<Ptr>, Option<Ptr>, Option<Ptr>)>;
+
 pub(super) fn load_weapon(s: &mut ZoneStream<'_>, links: &mut dyn AssetLinkSink) -> Result<()> {
     s.walk_stage = "weapon";
     let p = s.alloc_load(4, s.layout(sz::WEAPON_COMPLETE, 288))?;
@@ -352,7 +354,7 @@ fn load_weapon_def(
     links: &mut dyn AssetLinkSink,
     ai_knots: usize,
     player_knots: usize,
-) -> Result<(Ptr, Option<Ptr>, Option<Ptr>, Option<Ptr>, Option<Ptr>)> {
+) -> LoadWeaponDefOutput {
     s.walk_stage = "weapon.def";
     let width = s.pointer_bytes();
     let p = s.alloc_load(4, s.layout(sz::WEAPON_DEF, 2496))?;
@@ -622,10 +624,8 @@ fn follow_xmodel_ptr(
     slot: Ptr,
 ) -> Result<Option<Ptr>> {
     let loaded = load_asset_at_observed(s, AssetType::XModel, slot, links)?;
-    if loaded {
-        if let Some(name) = s.latest_xmodel().and_then(|g| g.name) {
-            return Ok(Some(name));
-        }
+    if loaded && let Some(name) = s.latest_xmodel().and_then(|g| g.name) {
+        return Ok(Some(name));
     }
     Ok(links
         .xmodel_name_ptr(slot)

@@ -14,12 +14,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use master_protocol::{
-    ALPN, AdmissionFailure, Advert, AdvertId, ControlFrame, ControlHello, ControlRequest,
-    ControlResponse, EndpointRole, MAX_BOOTSTRAP_STREAM_BYTES, MAX_CONCURRENT_BOOTSTRAP,
-    MAX_LIST_ADVERTS, MAX_RELAY_UNI_STREAMS, MemberId, PeerEvent, RelayDatagram, RequestBody,
-    ResponseBody, RoomPhase, RoomView, SESSION_IDLE, SESSION_KEEP_ALIVE, ServiceError,
-    SessionCloseReason, StatusResponse, decode_relay, decode_relay_stream, decode_stream_payload,
-    encode_relay, encode_relay_stream, encode_stream_frame, stream_frame_len,
+    ALPN, AdmissionFailure, AdvertId, ControlFrame, ControlHello, ControlRequest, ControlResponse,
+    EndpointRole, MAX_BOOTSTRAP_STREAM_BYTES, MAX_CONCURRENT_BOOTSTRAP, MAX_RELAY_UNI_STREAMS,
+    MemberId, PeerEvent, RelayDatagram, RequestBody, ResponseBody, RoomPhase, RoomView,
+    SESSION_IDLE, SESSION_KEEP_ALIVE, ServiceError, SessionCloseReason, StatusResponse,
+    decode_relay, decode_relay_stream, decode_stream_payload, encode_relay, encode_relay_stream,
+    encode_stream_frame, stream_frame_len,
 };
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -33,7 +33,7 @@ const MAX_ROOMS: usize = 10_000;
 const CONTROL_PRIORITY: i32 = 0;
 
 struct QueuedControl {
-    frame: ControlFrame,
+    encoded: Vec<u8>,
     deadline: tokio::time::Instant,
     _bytes: tokio::sync::OwnedSemaphorePermit,
 }
@@ -44,25 +44,31 @@ struct ControlSender {
     bytes: Arc<Semaphore>,
 }
 
+enum ControlSendError {
+    InvalidFrame(master_protocol::ProtocolError),
+    Unavailable,
+}
+
 impl ControlSender {
-    fn try_send(&self, frame: ControlFrame) -> Result<()> {
-        let len = encode_stream_frame(&frame)?.len();
+    fn try_send(&self, frame: ControlFrame) -> std::result::Result<(), ControlSendError> {
+        let encoded = encode_stream_frame(&frame).map_err(ControlSendError::InvalidFrame)?;
+        let len = encoded.len();
         let bytes = self
             .bytes
             .clone()
             .try_acquire_many_owned(len as u32)
-            .map_err(|_| "control byte budget exhausted")?;
+            .map_err(|_| ControlSendError::Unavailable)?;
         self.tx
-            .try_send(QueuedControl::new(frame, bytes))
-            .map_err(|_| "control queue exhausted")?;
+            .try_send(QueuedControl::new(encoded, bytes))
+            .map_err(|_| ControlSendError::Unavailable)?;
         Ok(())
     }
 }
 
 impl QueuedControl {
-    fn new(frame: ControlFrame, bytes: tokio::sync::OwnedSemaphorePermit) -> Self {
+    fn new(encoded: Vec<u8>, bytes: tokio::sync::OwnedSemaphorePermit) -> Self {
         Self {
-            frame,
+            encoded,
             deadline: tokio::time::Instant::now() + limits::values().queue_age,
             _bytes: bytes,
         }
@@ -743,7 +749,7 @@ async fn run_connection(
     children.spawn(async move {
         let result = async {
             while let Some(frame) = control_rx.recv().await {
-                tokio::time::timeout_at(frame.deadline, write_frame(&mut send, &frame.frame))
+                tokio::time::timeout_at(frame.deadline, send.write_all(&frame.encoded))
                     .await
                     .map_err(|_| "control queue/write deadline")??;
             }
@@ -836,7 +842,10 @@ async fn dispatch_publishes(state: &Mutex<ServiceState>, publishes: Vec<(u64, Co
             };
             match peer.control_tx.try_send(frame) {
                 Ok(()) => {}
-                Err(_) => {
+                Err(ControlSendError::InvalidFrame(error)) => {
+                    let _ = writeln!(std::io::stderr(), "invalid server control frame: {error}");
+                }
+                Err(ControlSendError::Unavailable) => {
                     failed.push(connection_id);
                     peer.connection
                         .close(0_u8.into(), b"control delivery failed");
@@ -938,21 +947,22 @@ async fn handle_request(
             ),
             Err(error) => (ResponseBody::Error(error), Vec::new()),
         },
-        RequestBody::ListRooms => {
-            let mut adverts: Vec<Advert> = state
+        RequestBody::ListRooms { after } => {
+            let mut rooms: Vec<_> = state
                 .rooms
                 .values()
-                .map(|room| room.view.advert())
+                .filter(|room| after.is_none_or(|id| room.view.room_id > id))
                 .collect();
-            adverts.sort_by_key(|advert| advert.id);
-            adverts.truncate(MAX_LIST_ADVERTS);
-            (
-                ResponseBody::RoomList {
-                    generation: state.generation,
-                    adverts,
-                },
-                Vec::new(),
+            rooms.sort_by_key(|room| room.view.room_id);
+            let page = ResponseBody::room_list_page(
+                state.generation,
+                rooms.into_iter().map(|room| room.view.advert()),
             )
+            .unwrap_or_else(|error| {
+                let _ = writeln!(std::io::stderr(), "cannot build room list: {error}");
+                ResponseBody::Error(ServiceError::Malformed)
+            });
+            (page, Vec::new())
         }
         RequestBody::HostWorldReady {
             room_id,
@@ -1512,13 +1522,14 @@ async fn relay_datagram(
 
 async fn status(target: &ClientTarget) -> Result<()> {
     let (_endpoint, connection) = connect_client(target).await?;
+    let (mut send, mut recv) = open_control(&connection, EndpointRole::Cli).await?;
     let response = rpc(
-        &connection,
+        &mut send,
+        &mut recv,
         ControlRequest {
             request_id: 1,
             body: RequestBody::Status,
         },
-        EndpointRole::Cli,
     )
     .await?;
     match response.body {
@@ -1539,40 +1550,58 @@ async fn status(target: &ClientTarget) -> Result<()> {
 
 async fn list(target: &ClientTarget) -> Result<()> {
     let (_endpoint, connection) = connect_client(target).await?;
-    let response = rpc(
-        &connection,
-        ControlRequest {
-            request_id: 1,
-            body: RequestBody::ListRooms,
-        },
-        EndpointRole::Cli,
-    )
-    .await?;
-    match response.body {
-        ResponseBody::RoomList {
-            generation,
-            adverts,
-        } => {
-            let mut output = std::io::stdout().lock();
-            writeln!(output, "generation={generation} adverts={}", adverts.len())?;
-            for advert in adverts {
-                writeln!(
-                    output,
-                    "{}\t{}/{}\t{}\t{}\tlocked={}\tin_match={}\tgen={}\trequires={}\t{}",
-                    advert.id,
-                    advert.players,
-                    advert.max_players,
-                    advert.map,
-                    advert.mode,
-                    u8::from(advert.locked),
-                    u8::from(advert.in_match),
-                    advert.generation,
-                    advert.requires.iter().collect::<Vec<_>>().join(","),
-                    advert.name
-                )?;
+    let (mut send, mut recv) = open_control(&connection, EndpointRole::Cli).await?;
+    let mut after = None;
+    let mut request_id = 0;
+    let mut all_adverts = Vec::new();
+    let generation = loop {
+        request_id += 1;
+        let response = rpc(
+            &mut send,
+            &mut recv,
+            ControlRequest {
+                request_id,
+                body: RequestBody::ListRooms { after },
+            },
+        )
+        .await?;
+        match response.body {
+            ResponseBody::RoomList {
+                generation,
+                adverts,
+                next,
+            } => {
+                all_adverts.extend(adverts);
+                match next {
+                    Some(id) if after.is_none_or(|previous| id > previous) => after = Some(id),
+                    Some(_) => return Err("room list cursor did not advance".into()),
+                    None => break generation,
+                }
             }
+            body => return Err(format!("unexpected List response: {body:?}").into()),
         }
-        body => return Err(format!("unexpected List response: {body:?}").into()),
+    };
+    let mut output = std::io::stdout().lock();
+    writeln!(
+        output,
+        "generation={generation} adverts={}",
+        all_adverts.len()
+    )?;
+    for advert in all_adverts {
+        writeln!(
+            output,
+            "{}\t{}/{}\t{}\t{}\tlocked={}\tin_match={}\tgen={}\trequires={}\t{}",
+            advert.id,
+            advert.players,
+            advert.max_players,
+            advert.map,
+            advert.mode,
+            u8::from(advert.locked),
+            u8::from(advert.in_match),
+            advert.generation,
+            advert.requires.iter().collect::<Vec<_>>().join(","),
+            advert.name
+        )?;
     }
     connection.close(0_u8.into(), b"list complete");
     Ok(())
@@ -1605,13 +1634,11 @@ async fn connect_client(target: &ClientTarget) -> Result<(quinn::Endpoint, quinn
     Ok((endpoint, connection))
 }
 
-async fn rpc(
+async fn open_control(
     connection: &quinn::Connection,
-    request: ControlRequest,
     role: EndpointRole,
-) -> Result<ControlResponse> {
-    let request_id = request.request_id;
-    let (mut send, mut recv) = connection.open_bi().await?;
+) -> Result<(quinn::SendStream, quinn::RecvStream)> {
+    let (mut send, recv) = connection.open_bi().await?;
     send.set_priority(CONTROL_PRIORITY)?;
     write_frame(
         &mut send,
@@ -1624,9 +1651,18 @@ async fn rpc(
         }),
     )
     .await?;
-    write_frame(&mut send, &ControlFrame::Request(request)).await?;
+    Ok((send, recv))
+}
+
+async fn rpc(
+    send: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+    request: ControlRequest,
+) -> Result<ControlResponse> {
+    let request_id = request.request_id;
+    write_frame(send, &ControlFrame::Request(request)).await?;
     loop {
-        match read_frame(&mut recv).await? {
+        match read_frame(recv).await? {
             ControlFrame::Response(response) if response.request_id == request_id => {
                 return Ok(response);
             }

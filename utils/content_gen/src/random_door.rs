@@ -98,14 +98,10 @@ fn annotate_trim_clearance(
                 let base = vector("base")?;
                 let normal = vector("normal")?;
                 let thickness = row["thickness"].as_f64().ok_or("door has no thickness")? as f32;
-                let recipe = assets::MergedMap {
-                    name: "trim-clearance".into(),
-                    path: Default::default(),
-                    worlds: vec!["probe".into()],
-                    recipe: json!({"portals":[{"a":endpoint,"b":endpoint}]}),
-                };
+                let replacements: Vec<_> = assets::parse_portal_replacement(&endpoint, 1)?
+                    .into_iter()
+                    .collect();
                 let mut clip = (*clips[world]).clone();
-                let replacements = recipe.door_replacements()?;
                 asset_world::PortalDoorReplacement::apply_all_collision(
                     &replacements.into_iter().take(1).collect::<Vec<_>>(),
                     &mut clip,

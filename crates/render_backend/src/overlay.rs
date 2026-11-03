@@ -227,14 +227,14 @@ pub fn overlay_particle_cloud_tess_code_constants(
             &code_transpose_matrix_row4(projection),
         );
     }
-    if let Some(outdoor) = outdoor {
-        if let Some(image) = outdoor.image {
-            let _ = sources.set_texture_with_image(
-                CODE_TEXTURE_OUTDOOR,
-                CODE_TEXTURE_OUTDOOR_SAMPLER,
-                image,
-            );
-        }
+    if let Some(outdoor) = outdoor
+        && let Some(image) = outdoor.image
+    {
+        let _ = sources.set_texture_with_image(
+            CODE_TEXTURE_OUTDOOR,
+            CODE_TEXTURE_OUTDOOR_SAMPLER,
+            image,
+        );
     }
     for (slot, cloud) in clouds.iter().enumerate() {
         let world_from_local = particle_cloud_world_from_local(cloud);

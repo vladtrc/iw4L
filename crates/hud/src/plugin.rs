@@ -427,6 +427,10 @@ fn hud_surfaces_open(
     *pass = HudTessPass::default();
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn flush_hud_tess(
     mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,
@@ -618,6 +622,10 @@ fn flush_scoreboard_tess(
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn flush_hud_elems_tess(
     mut writer: gpu_list::HudTessWriter,
     mut pass: ResMut<HudTessPass>,

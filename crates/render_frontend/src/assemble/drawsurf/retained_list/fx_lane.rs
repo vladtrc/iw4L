@@ -342,6 +342,10 @@ impl MarkLightingSource<'_, '_> {
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn rebuild_fx_draw_lane(
     plans: (
         Option<Res<FxCodeMeshPlan>>,

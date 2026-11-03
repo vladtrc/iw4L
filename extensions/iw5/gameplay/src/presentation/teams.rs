@@ -82,10 +82,10 @@ impl ext_iw5_fastfile::AssetLinkSink for Iw5TeamIconSink {
         data: &[u8],
         zlib: bool,
     ) -> ext_iw5_fastfile::Result<()> {
-        if is_basemaps_arena_name(name) {
-            if let Some(text) = asset_world::decode_rawfile_text(data, zlib) {
-                self.arena_text = Some(text);
-            }
+        if is_basemaps_arena_name(name)
+            && let Some(text) = asset_world::decode_rawfile_text(data, zlib)
+        {
+            self.arena_text = Some(text);
         }
         Ok(())
     }

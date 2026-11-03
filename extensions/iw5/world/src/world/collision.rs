@@ -162,8 +162,8 @@ pub fn build_iw5_clip_collision(
         planes.push([0.0, 0.0, -1.0, -mins[2]]);
 
         let mut axial_mat = [0u16; 6];
-        for i in 0..6 {
-            axial_mat[i] = s
+        for (i, axial_mat_entry) in axial_mat[..6].iter_mut().enumerate() {
+            (*axial_mat_entry) = s
                 .u16_at(brush, s.layout(12, 24) + i * 2)
                 .map_err(|_| ClipCollisionError::Truncated)?;
         }
@@ -266,10 +266,10 @@ fn extract_iw5_bsp_tables(
             .i32_at(leaf, 36)
             .map_err(|_| ClipCollisionError::Truncated)?;
         let first_len = out.leafbrushes.len();
-        if lb_index >= 0 {
-            if let Some(lb_base) = lb_nodes {
-                append_iw5_leafbrush_node(s, lb_base, lb_index as usize, &mut out.leafbrushes)?;
-            }
+        if lb_index >= 0
+            && let Some(lb_base) = lb_nodes
+        {
+            append_iw5_leafbrush_node(s, lb_base, lb_index as usize, &mut out.leafbrushes)?;
         }
         let (first, num) = leafbrush_range(first_len, out.leafbrushes.len())?;
         let first_coll_aabb_index = s
@@ -614,14 +614,12 @@ fn extract_iw5_cmodels(
             .i32_at(cm, s.layout(0x44, 76))
             .map_err(|_| ClipCollisionError::Truncated)?;
         let first_len = out.leafbrushes.len();
-        if lb_index >= 0 {
-            if let Some(lb_base) = lb_nodes {
-                if append_iw5_leafbrush_node(s, lb_base, lb_index as usize, &mut out.leafbrushes)
-                    .is_err()
-                {
-                    out.leafbrushes.truncate(first_len);
-                }
-            }
+        if lb_index >= 0
+            && let Some(lb_base) = lb_nodes
+            && append_iw5_leafbrush_node(s, lb_base, lb_index as usize, &mut out.leafbrushes)
+                .is_err()
+        {
+            out.leafbrushes.truncate(first_len);
         }
         let (first, num) = leafbrush_range(first_len, out.leafbrushes.len())?;
         out.cmodels.push(ClipCmodel {
@@ -674,7 +672,15 @@ fn read_iw5_placed_static_model(
     ];
     let axis_off = s.layout(0x10, 20);
     let mut inv_scaled_axis = [[0.0_f32; 3]; 3];
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "Matrix elimination uses coupled row and column indices."
+    )]
     for row in 0..3 {
+        #[expect(
+            clippy::needless_range_loop,
+            reason = "Matrix elimination uses coupled row and column indices."
+        )]
         for col in 0..3 {
             inv_scaled_axis[row][col] = s.f32_at(sm, axis_off + (row * 3 + col) * 4).ok()?;
         }

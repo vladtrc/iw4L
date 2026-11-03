@@ -193,7 +193,7 @@ pub fn context_for_player(
             let mut allow = f.ads_allow_facts();
 
             allow.clip_index = weapon_iw4::clip_table_key(allow.clip_index, weapon);
-            weapon_iw4::is_ads_allowed(&ps, &allow, &ps.ammoclip, ps.last_weapon_hand.min(1) as u8)
+            weapon_iw4::is_ads_allowed(ps, &allow, &ps.ammoclip, ps.last_weapon_hand.min(1) as u8)
         }
     });
     let overlay_reticle = facts.map(|f| f.overlay_reticle).unwrap_or(0);

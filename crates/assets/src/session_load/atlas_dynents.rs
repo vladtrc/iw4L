@@ -168,8 +168,8 @@ pub(super) fn absorb(
             model.model = MapXModelAssetKey::atlas(world, &model.model).0;
         }
         instance.transform.translation += Vec3::from_array(shift);
-        for i in 0..3 {
-            instance.lighting_origin[i] += shift[i];
+        for (i, shift_entry) in shift[..3].iter().enumerate() {
+            instance.lighting_origin[i] += *shift_entry;
         }
         diag::info!(
             World,
@@ -184,8 +184,8 @@ pub(super) fn absorb(
     for def in &mut extra.dyn_ents.models {
         let native = def.index;
         def.index = rebased(native, model_base, "dyn_ent model")?;
-        for i in 0..3 {
-            def.origin[i] += shift[i];
+        for (i, shift_entry) in shift[..3].iter().enumerate() {
+            def.origin[i] += *shift_entry;
         }
         if let Some(name) = def.xmodel.as_mut() {
             *name = MapXModelAssetKey::atlas(world, name).0;
@@ -205,8 +205,8 @@ pub(super) fn absorb(
             def.brush_model = rebased(def.brush_model, brush_base, "brush model")?;
         }
         // physics_brush_model is a local clip owner, retained in its world's clip.
-        for i in 0..3 {
-            def.origin[i] += shift[i];
+        for (i, shift_entry) in shift[..3].iter().enumerate() {
+            def.origin[i] += *shift_entry;
         }
         diag::info!(
             World,

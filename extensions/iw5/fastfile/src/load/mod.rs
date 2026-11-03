@@ -248,10 +248,10 @@ pub fn load_asset_at_durable_slot(
             {
                 links.remember_material_name(slot, insert_slot, name);
             }
-            if ty == AssetType::XModel {
-                if let Some(name) = s.latest_xmodel().and_then(|g| g.name) {
-                    links.remember_xmodel_name(slot, insert_slot, name);
-                }
+            if ty == AssetType::XModel
+                && let Some(name) = s.latest_xmodel().and_then(|g| g.name)
+            {
+                links.remember_xmodel_name(slot, insert_slot, name);
             }
             if ty == AssetType::XModelSurfs {
                 let surfaces = s.take_latest_xmodel_surfs_array();

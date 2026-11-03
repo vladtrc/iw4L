@@ -223,7 +223,7 @@ impl CommonWalkSink {
 
 impl AssetSink for ZoneWalkSink {
     fn set_script_strings(&mut self, strings: ScriptStrings) {
-        self.fx_models.set_strings(strings.clone());
+        self.fx_models.set_strings(strings);
         self.script_strings = strings;
         self.bodies.set_strings(strings);
         self.fpv_meshes.set_strings(strings);
@@ -459,7 +459,7 @@ impl AssetSink for CommonWalkSink {
 
     fn set_script_strings(&mut self, strings: ScriptStrings) {
         self.script_strings = strings;
-        self.fx_models.set_strings(strings.clone());
+        self.fx_models.set_strings(strings);
         self.fpv_meshes.set_strings(strings);
         self.world_weapons.set_strings(strings);
         self.projectile_meshes.set_strings(strings);
@@ -565,10 +565,10 @@ impl AssetLinkSink for CommonWalkSink {
         if ty == AssetType::Tracer {
             self.tracers.note_alias(slot, target);
         }
-        if ty == AssetType::XModel {
-            if let Some(&name) = self.xmodel_names.get(&target) {
-                self.xmodel_names.insert(slot, name);
-            }
+        if ty == AssetType::XModel
+            && let Some(&name) = self.xmodel_names.get(&target)
+        {
+            self.xmodel_names.insert(slot, name);
         }
         Ok(())
     }
@@ -963,15 +963,14 @@ fn tracer_material_name(
         return Some(name);
     }
     let body = s.resolve_alias(target);
-    if body != target {
-        if let Some(name) = materials
+    if body != target
+        && let Some(name) = materials
             .material_index(body)
             .and_then(|i| materials.materials.get(i.get()))
             .map(|m| m.name.to_string())
             .filter(|n| !n.is_empty())
-        {
-            return Some(name);
-        }
+    {
+        return Some(name);
     }
     read_material_name_at_body(s, body)
 }

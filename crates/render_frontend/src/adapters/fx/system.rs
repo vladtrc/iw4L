@@ -231,10 +231,10 @@ fn present_tracker_light(
         .then_some((local.0, meta.life_sequence, weapon))
     });
     if owner != light.owner {
-        if light.owner.is_some() {
-            if let Some((dobj, bone)) = light.bolt {
-                host.0.stop_bolted(EFFECT, dobj, bone);
-            }
+        if light.owner.is_some()
+            && let Some((dobj, bone)) = light.bolt
+        {
+            host.0.stop_bolted(EFFECT, dobj, bone);
         }
         light.owner = owner;
         light.bolt = None;
@@ -702,6 +702,10 @@ fn generate_fx_transaction(
     generator.generate(cam_q, fx_world, &mut lasers, &marks)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn commit_fx_transaction(
     In(transaction): In<FxFrameTransaction>,
     mut host: ResMut<HostFxSystem>,
@@ -758,7 +762,7 @@ fn commit_fx_transaction(
         verts_gaps,
         mark_mesh,
         post_lights,
-        mut tracers,
+        tracers,
         cam_tf,
         frustum_planes,
         clip_from_world,
@@ -971,7 +975,7 @@ fn commit_fx_transaction(
                 let base = vert_used;
 
                 let mut index_ok = true;
-                for chunk in mesh.index_pairs.chunks_exact(3) {
+                for chunk in mesh.index_pairs.as_chunks::<3>().0 {
                     let pairs = [chunk[0], chunk[1], chunk[2]];
                     let tris = fx_iw4::trail_index_quad_tris(pairs);
                     let mut six = [0u32; 6];
@@ -1012,7 +1016,7 @@ fn commit_fx_transaction(
     }
 
     present_tracer_beams(
-        &mut tracers,
+        &tracers,
         &cam_tf,
         clip_from_world,
         tan_half_fov,
@@ -2023,6 +2027,10 @@ fn sprite_transform(sprite: &FxSpriteInstance, cam: &Transform) -> Transform {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn publish_weapon_fire(
     fire: On<net::EntityWeaponFire>,
     mut pending: MessageWriter<WeaponFireFx>,
@@ -2180,6 +2188,10 @@ fn publish_weapon_fire(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn drain_weapon_fire_fx(
     mut pending: MessageReader<WeaponFireFx>,
     identities: Query<&CEntity>,
@@ -2375,6 +2387,10 @@ fn drain_weapon_fire_fx(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn eject_brass(
     brass: On<net::EntityEjectBrass>,
     identities: Query<&CEntity>,
@@ -2462,6 +2478,10 @@ fn eject_brass(
     sync_combat_dump(&cursor, &mut combat);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn tick_missile_present_state(
     occupancy: Option<Res<crate::adapters::anim::missile::MissileOccupancy>>,
     weapons: Option<Res<assets::PreparedWeapons>>,
@@ -2558,26 +2578,25 @@ fn tick_missile_present_state(
             && weapons
                 .authored_weapon_sound(row.weapon, asset_game::WeaponSoundSlot::ProjIgnition)
                 .is_some()
-        {
-            if let Some(alias) = sound_bank.as_deref().and_then(|bank| {
+            && let Some(alias) = sound_bank.as_deref().and_then(|bank| {
                 weapons.weapon_sound_alias(
                     row.weapon,
                     asset_game::WeaponSoundSlot::ProjIgnition,
                     &bank.0,
                 )
-            }) && let Some(sound_namespace) =
+            })
+            && let Some(sound_namespace) =
                 weapons.component_namespace_of(row.weapon, asset_game::WeaponComponent::Sound)
-                && let Some(sounds) = sounds.as_deref_mut()
-            {
-                sounds.write(audio::WeaponSound {
-                    event: None,
-                    namespace: sound_namespace,
-                    alias: alias.to_owned(),
-                    origin_inches: Some(row.origin),
-                    snd_ent: Some(entnum),
-                });
-                state.ignition_played = true;
-            }
+            && let Some(sounds) = sounds.as_deref_mut()
+        {
+            sounds.write(audio::WeaponSound {
+                event: None,
+                namespace: sound_namespace,
+                alias: alias.to_owned(),
+                origin_inches: Some(row.origin),
+                snd_ent: Some(entnum),
+            });
+            state.ignition_played = true;
         }
 
         if owned.is_none() {
@@ -3199,6 +3218,10 @@ fn drain_pellet_fx(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn melee_blood(
     hit: On<net::EntityMeleeBlood>,
     identities: Query<&CEntity>,

@@ -283,7 +283,7 @@ impl WorldObjectState {
         } else {
             radius
         };
-        if !(r > 0.0) {
+        if r <= 0.0 || r.is_nan() {
             return;
         }
         let panes: Vec<(GlassPieceId, GlassPaneBasis)> = self.glass_panes.clone();
@@ -467,10 +467,7 @@ impl WorldObjectState {
     }
 
     fn glass_piece(&self, id: GlassPieceId) -> ServerGlassPiece {
-        match lookup_value(&self.glass_pieces, id) {
-            Some(piece) => piece,
-            None => ServerGlassPiece::default(),
-        }
+        lookup_value(&self.glass_pieces, id).unwrap_or_else(ServerGlassPiece::default)
     }
 
     fn glass_native_meta(&self, id: GlassPieceId) -> GlassNativeMeta {
@@ -527,5 +524,5 @@ fn remove_key<K: Copy + PartialEq, V>(table: &mut Vec<(K, V)>, id: K) {
 }
 
 fn sort_pairs<K: Copy + Ord, V>(table: &mut [(K, V)]) {
-    table.sort_by(|(a, _), (b, _)| a.cmp(b));
+    table.sort_by_key(|(a, _)| *a);
 }

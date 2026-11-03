@@ -7,6 +7,12 @@ use crate::assemble::drawsurf::RuntimeLightmapHandles;
 
 use super::world::WorldScene;
 
+type TessImageSlices<'a> = (
+    &'a [Option<Handle<Image>>],
+    &'a [Option<RuntimeLightmapHandles>],
+    &'a [Option<Handle<Image>>],
+);
+
 pub(crate) const IMAGE_BYTES_PER_OVERLAY_FRAME: u64 = 32 * 1024 * 1024;
 pub(crate) const MAX_IMAGE_BYTES_PER_SLICE: u64 = 128 * 1024 * 1024;
 pub(crate) const IMAGES_PER_OVERLAY_FRAME: u32 = 16;
@@ -108,10 +114,10 @@ fn paint_probe_debug(image: &mut Image, mode: ProbeDebug) {
     for level in 0..levels {
         let side = (size >> level).max(1) as usize;
         let level_bytes = side * side * 4;
-        for face in 0..6usize {
+        for probe_face_colour in PROBE_FACE_COLOURS[..6usize].iter() {
             let colour = match mode {
                 ProbeDebug::Flat(colour) => colour,
-                ProbeDebug::Faces => PROBE_FACE_COLOURS[face],
+                ProbeDebug::Faces => *probe_face_colour,
 
                 ProbeDebug::Mips { shift } if (level as usize) < PROBE_MIP_COLOURS.len() => {
                     let len = PROBE_MIP_COLOURS.len();
@@ -119,7 +125,7 @@ fn paint_probe_debug(image: &mut Image, mode: ProbeDebug) {
                 }
                 ProbeDebug::Mips { .. } => [128, 128, 128, 255],
             };
-            for texel in data[offset..offset + level_bytes].chunks_exact_mut(4) {
+            for texel in data[offset..offset + level_bytes].as_chunks_mut::<4>().0 {
                 texel.copy_from_slice(&colour);
             }
             offset += level_bytes;
@@ -243,13 +249,7 @@ impl WorldImageUpload {
         self.done < self.total
     }
 
-    pub fn tess_handles(
-        &self,
-    ) -> (
-        &[Option<Handle<Image>>],
-        &[Option<RuntimeLightmapHandles>],
-        &[Option<Handle<Image>>],
-    ) {
+    pub fn tess_handles(&self) -> TessImageSlices<'_> {
         (
             &self.exact_handles,
             &self.lightmap_handles,

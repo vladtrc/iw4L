@@ -46,7 +46,7 @@ pub fn skin_model_filtered(
     let blended = blend_skel_vertices_inner::<true>(
         skel,
         bone_to_local,
-        |surface| surface_is_visible(surface),
+        &surface_is_visible,
         surface_rigid,
         lod,
     );
@@ -90,12 +90,16 @@ fn blend_skel_vertices_inner<const DECODED: bool>(
 ) -> BlendedSkel {
     let (active_vert, rigid_vert) =
         vertex_stream_masks(skel, lod, surface_is_visible, surface_rigid);
-    let mut positions = DECODED
-        .then(|| skel.positions.to_vec())
-        .unwrap_or(Vec::new());
-    let mut normals = DECODED
-        .then(|| skel.normals().collect::<Vec<_>>())
-        .unwrap_or(Vec::new());
+    let mut positions = if DECODED {
+        skel.positions.to_vec()
+    } else {
+        Vec::new()
+    };
+    let mut normals = if DECODED {
+        skel.normals().collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let mut posed_packed =
         (skel.packed_vertices.len() == skel.positions.len()).then(|| skel.packed_vertices.to_vec());
     let max_bone = skel
@@ -470,8 +474,8 @@ pub(crate) fn packed_skin_shape(
             let source = surface.src_first_vertex + local;
             let vertex = &mut vertices[surface.dest_first_vertex + local];
             if let Some(row) = skel.packed_vertices.get(source) {
-                for (word, bytes) in vertex.packed.iter_mut().zip(row.chunks_exact(4)) {
-                    *word = u32::from_le_bytes(bytes.try_into().unwrap());
+                for (word, bytes) in vertex.packed.iter_mut().zip(row.as_chunks::<4>().0.iter()) {
+                    *word = u32::from_le_bytes(*bytes);
                 }
             }
             if !active.get(source).copied().unwrap_or(false) {

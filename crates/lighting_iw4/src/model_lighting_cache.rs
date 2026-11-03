@@ -203,26 +203,26 @@ impl<'a> ModelLightingCacheGlob<'a> {
         origin: [f32; 3],
         allow_moved_reuse: bool,
     ) -> ModelLightingCacheAlloc {
-        if let Some(slot) = model_lighting_cache_slot(self.base_index, current_handle) {
-            if slot < self.xmodel_entry_limit {
-                let same = self.origins[slot as usize] == origin;
-                let word = (slot >> 5) as usize;
-                let mask = model_lighting_cache_bit_mask(slot);
-                if same {
-                    self.free_frames.curr[word] &= !mask;
-                    return ModelLightingCacheAlloc::Reused {
-                        handle: current_handle,
-                        info: self.lighting_info[slot as usize],
-                    };
-                }
-                if allow_moved_reuse {
-                    self.free_frames.curr[word] &= !mask;
-                    self.origins[slot as usize] = origin;
-                    return ModelLightingCacheAlloc::Assigned {
-                        handle: current_handle,
-                        slot,
-                    };
-                }
+        if let Some(slot) = model_lighting_cache_slot(self.base_index, current_handle)
+            && slot < self.xmodel_entry_limit
+        {
+            let same = self.origins[slot as usize] == origin;
+            let word = (slot >> 5) as usize;
+            let mask = model_lighting_cache_bit_mask(slot);
+            if same {
+                self.free_frames.curr[word] &= !mask;
+                return ModelLightingCacheAlloc::Reused {
+                    handle: current_handle,
+                    info: self.lighting_info[slot as usize],
+                };
+            }
+            if allow_moved_reuse {
+                self.free_frames.curr[word] &= !mask;
+                self.origins[slot as usize] = origin;
+                return ModelLightingCacheAlloc::Assigned {
+                    handle: current_handle,
+                    slot,
+                };
             }
         }
 

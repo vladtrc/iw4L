@@ -187,7 +187,7 @@ impl CapturedAlias {
     pub fn loaded_present_name(&self) -> Option<&str> {
         self.loaded
             .is_bound()
-            .then(|| self.loaded_name.as_deref())
+            .then_some(self.loaded_name.as_deref())
             .flatten()
             .filter(|name| !name.is_empty())
     }

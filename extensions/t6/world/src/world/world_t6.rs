@@ -4,6 +4,8 @@ use asset_world::{SurfaceCastsSunShadow, WorldMeshStats, world_capture_from_cast
 use ext_t6_fastfile::{LoadedAsset, Ptr, ZoneLoad};
 use std::collections::HashMap;
 
+type StaticModelVertexLightingOutput = Result<Vec<Option<[Vec<[u8; 4]>; 4]>>, String>;
+
 pub struct Reader<'a>(pub &'a ZoneLoad);
 impl<'a> Reader<'a> {
     pub fn bytes(&self, p: Ptr, len: usize) -> Result<&'a [u8], String> {
@@ -569,7 +571,7 @@ pub fn build_clip_collision(load: &ZoneLoad) -> Result<asset_world::ClipCollisio
                 return Err(format!("T6 collision static model {index} is unresolved"));
             };
             let key = std::ptr::from_ref(model_asset);
-            if !models.contains_key(&key) {
+            if let std::collections::hash_map::Entry::Vacant(e) = models.entry(key) {
                 let model = crate::model::model_skel_t6::T6Model::new(load, model_asset)
                     .ok_or("T6 collision model missing")?;
                 let (coll_lod, contents, surfaces) =
@@ -597,7 +599,7 @@ pub fn build_clip_collision(load: &ZoneLoad) -> Result<asset_world::ClipCollisio
                         })
                         .collect(),
                 };
-                models.insert(key, (model.name().unwrap_or("").to_owned(), coll));
+                e.insert((model.name().unwrap_or("").to_owned(), coll));
             }
             let (name, coll) = &models[&key];
             let mins = r.xyz(row.at(60))?;
@@ -1026,7 +1028,7 @@ pub fn static_model_placements(
 pub fn static_model_vertex_lighting(
     load: &ZoneLoad,
     world: &LoadedAsset,
-) -> Result<Vec<Option<[Vec<[u8; 4]>; 4]>>, String> {
+) -> StaticModelVertexLightingOutput {
     let r = Reader(load);
     let count = Reader::word(&world.header, 784)?;
     if count == 0 {
@@ -1042,7 +1044,9 @@ pub fn static_model_vertex_lighting(
                 if let (Ok(p), true) = (Reader::ptr(info, 0), n > 0) {
                     *colors = r
                         .bytes(p, n * 4)?
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|c| [c[0], c[1], c[2], c[3]])
                         .collect();
                 }

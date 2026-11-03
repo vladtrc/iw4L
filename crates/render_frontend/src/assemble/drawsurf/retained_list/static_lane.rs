@@ -23,6 +23,14 @@ use render_frame::{BspCameraLane, RetainedDrawItem, RetainedDrawKind};
 use std::sync::Arc;
 use std::time::Instant;
 
+type StaticDrawSlices<'a> = (
+    &'a [RetainedDrawItem],
+    &'a [RetainedDrawItem],
+    &'a [RetainedDrawItem],
+    &'a [RetainedDrawItem],
+    &'a [u16],
+);
+
 const fn bsp_lane(kind: asset_world::CameraRangeKind) -> BspCameraLane {
     match kind {
         asset_world::CameraRangeKind::LitOpaque => BspCameraLane::LitOpaque,
@@ -123,15 +131,7 @@ pub struct StaticDrawLane {
 }
 
 impl StaticDrawLane {
-    pub(crate) fn draws(
-        &self,
-    ) -> (
-        &[RetainedDrawItem],
-        &[RetainedDrawItem],
-        &[RetainedDrawItem],
-        &[RetainedDrawItem],
-        &[u16],
-    ) {
+    pub(crate) fn draws(&self) -> StaticDrawSlices<'_> {
         (
             &self.static_items,
             &self.colour,
@@ -225,7 +225,7 @@ fn collect_smodel_lod_picks(
             lighting,
             smc_cache,
             eyes.at(placement.origin),
-            &lod_args,
+            lod_args,
         ) {
             walk.picks.push(pick);
         }
@@ -260,7 +260,7 @@ fn smodel_descriptor_pick(
             .and_then(|slot| lighting.and_then(|l| l.packed_lighting_for_slot(slot)))
     });
     let mesh = plan.meshes.get(placement.mesh)?;
-    let lod = smodel_camera_lod(mesh.lod, placement.origin, placement.scale, eye, &lod_args)?;
+    let lod = smodel_camera_lod(mesh.lod, placement.origin, placement.scale, eye, lod_args)?;
     let lod_surfs = mesh
         .surfaces_by_lod
         .get(usize::from(lod))
@@ -584,6 +584,10 @@ fn restore_held_smodel_census(dst: &mut RetainedRebuildCensus, src: &RetainedReb
     dst.smodel_bucket_context_refused_n = src.smodel_bucket_context_refused_n;
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn rebuild_static_draw_lane(
     mut list: ResMut<StaticDrawLane>,
     world_list: Res<DrawSurfList>,

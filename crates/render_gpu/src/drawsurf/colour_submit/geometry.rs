@@ -318,15 +318,15 @@ pub(super) fn upload_exact_geometry(
         geometry.fx_revision = source.fx_revision;
         geometry.fx_vertex_count = source.fx_vertices.len();
         geometry.fx_index_count = source.fx_indices.len();
-        if !source.fx_vertices.is_empty() && !source.fx_indices.is_empty() {
-            if let (Some(vb), Some(ib)) = (geometry.fx_vertex.as_ref(), geometry.fx_index.as_ref())
-            {
-                queue.write_buffer(vb, 0, bytemuck::cast_slice(source.fx_vertices.as_slice()));
-                queue.write_buffer(ib, 0, bytemuck::cast_slice(source.fx_indices.as_slice()));
-                geometry
-                    .fx_surface_ranges
-                    .clone_from(&*source.fx_surface_ranges);
-            }
+        if !source.fx_vertices.is_empty()
+            && !source.fx_indices.is_empty()
+            && let (Some(vb), Some(ib)) = (geometry.fx_vertex.as_ref(), geometry.fx_index.as_ref())
+        {
+            queue.write_buffer(vb, 0, bytemuck::cast_slice(source.fx_vertices.as_slice()));
+            queue.write_buffer(ib, 0, bytemuck::cast_slice(source.fx_indices.as_slice()));
+            geometry
+                .fx_surface_ranges
+                .clone_from(&*source.fx_surface_ranges);
         }
     }
     ensure_neutral_vertex_lighting(geometry, device);

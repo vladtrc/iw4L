@@ -155,13 +155,12 @@ pub fn advance_remote_tree(
             && slot.namespace == body.namespace
         {
             for (index, state) in slot.runtime.states().iter().enumerate() {
-                if state.weight > 0.0 || state.goal_weight > 0.0 {
-                    if let Some(clip) = slot
+                if (state.weight > 0.0 || state.goal_weight > 0.0)
+                    && let Some(clip) = slot
                         .runtime
                         .leaf_clip(xmodel_runtime::XAnimNodeId(index as u16))
-                    {
-                        bound.insert(index as u16, clip);
-                    }
+                {
+                    bound.insert(index as u16, clip);
                 }
             }
         }

@@ -79,7 +79,7 @@ pub fn trail_slot_for_handle(handle: u16) -> Option<usize> {
         return None;
     }
     let byte = (handle as u32) << 2;
-    if byte % FX_TRAIL_RUNTIME_STRIDE as u32 != 0 {
+    if !byte.is_multiple_of(FX_TRAIL_RUNTIME_STRIDE as u32) {
         return None;
     }
     let slot = (byte / FX_TRAIL_RUNTIME_STRIDE as u32) as usize;
@@ -92,7 +92,7 @@ pub fn trail_elem_slot_for_handle(handle: u16) -> Option<usize> {
         return None;
     }
     let byte = (handle as u32) << 2;
-    if byte % FX_TRAIL_ELEM_RUNTIME_STRIDE as u32 != 0 {
+    if !byte.is_multiple_of(FX_TRAIL_ELEM_RUNTIME_STRIDE as u32) {
         return None;
     }
     let slot = (byte / FX_TRAIL_ELEM_RUNTIME_STRIDE as u32) as usize;
@@ -888,34 +888,32 @@ pub fn apply_partial_last_trail_spawn_dist(
                 cur = next_elem;
             }
         }
-        if looping {
-            if let Some(elem_slot) =
+        if looping
+            && let Some(elem_slot) =
                 trail_elem_slot_for_handle(host.trails[trail_slot].last_elem_handle)
-            {
-                if let Some(elem) = host.trail_elems.get_mut(elem_slot).filter(|e| e.occupied) {
-                    elem.spawn_dist = spawn_dist;
-                    if let Some(elem_def) = elem_def {
-                        let seed = trail_random_seed(random_seed, elem.sequence as i8);
-                        elem.origin = spawn_origin_world(
-                            origin,
-                            axis,
-                            elem_def.spawn_origin,
-                            elem_def.flags,
-                            fx_iw4::FxSpawnOffset {
-                                radius: [
-                                    elem_def.spawn_offset_radius_base,
-                                    elem_def.spawn_offset_radius_amp,
-                                ],
-                                height: [
-                                    elem_def.spawn_offset_height_base,
-                                    elem_def.spawn_offset_height_amp,
-                                ],
-                            },
-                            seed,
-                        );
-                        elem.basis = compress_basis_from_axis(axis);
-                    }
-                }
+            && let Some(elem) = host.trail_elems.get_mut(elem_slot).filter(|e| e.occupied)
+        {
+            elem.spawn_dist = spawn_dist;
+            if let Some(elem_def) = elem_def {
+                let seed = trail_random_seed(random_seed, elem.sequence as i8);
+                elem.origin = spawn_origin_world(
+                    origin,
+                    axis,
+                    elem_def.spawn_origin,
+                    elem_def.flags,
+                    fx_iw4::FxSpawnOffset {
+                        radius: [
+                            elem_def.spawn_offset_radius_base,
+                            elem_def.spawn_offset_radius_amp,
+                        ],
+                        height: [
+                            elem_def.spawn_offset_height_base,
+                            elem_def.spawn_offset_height_amp,
+                        ],
+                    },
+                    seed,
+                );
+                elem.basis = compress_basis_from_axis(axis);
             }
         }
         handle = next_trail;

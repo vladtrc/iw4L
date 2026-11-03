@@ -214,6 +214,11 @@ pub fn tick_session_view_kick(
     );
 }
 
+#[expect(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub fn sync_camera_from_presented(
     camera_entities: (
         ResMut<super::killcam::KillcamCamera>,
@@ -562,19 +567,18 @@ fn stamp_and_land_origin_z(
     if kick.have_land_prev
         && kick.last_ground_entity == ENTITYNUM_NONE
         && ground_entity != ENTITYNUM_NONE
-    {
-        if let Some(fall) = crash_land_fall_height(
+        && let Some(fall) = crash_land_fall_height(
             gravity,
             kick.last_origin[2],
             origin[2],
             kick.last_velocity[2],
-        ) {
-            let dip = crash_land_view_dip(fall);
-            if dip > 0 {
-                kick.land_change = -(dip as f32);
-                kick.land_time = cg_time;
-                kick.land_view_dip = dip;
-            }
+        )
+    {
+        let dip = crash_land_view_dip(fall);
+        if dip > 0 {
+            kick.land_change = -(dip as f32);
+            kick.land_time = cg_time;
+            kick.land_view_dip = dip;
         }
     }
     kick.last_origin = origin;

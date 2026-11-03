@@ -1342,45 +1342,56 @@ async fn browse(
     .await?;
     let mut request_id = 0_u64;
     loop {
-        request_id += 1;
         state.lock().expect("master browser state poisoned").loading = true;
-        write_frame(
-            &mut send,
-            &ControlFrame::Request(ControlRequest {
-                request_id,
-                body: RequestBody::ListRooms,
-            }),
-        )
-        .await?;
-        let response_deadline = tokio::time::Instant::now() + limits::values().response;
-        let (generation, adverts) = loop {
-            let frame = tokio::select! {
-                _ = cancel.cancelled() => return Ok(()),
-                _ = tokio::time::sleep_until(response_deadline) => return Err("room list response deadline".into()),
-                frame = read_frame(&mut recv) => frame?,
-            };
-            match frame {
-                ControlFrame::Response(ControlResponse {
-                    request_id: id,
-                    body:
-                        ResponseBody::RoomList {
-                            generation,
-                            adverts,
-                        },
-                }) if id == request_id => break (generation, adverts),
-                ControlFrame::Response(ControlResponse {
-                    request_id: id,
-                    body: ResponseBody::Error(error),
-                }) if id == request_id => return Err(error.into()),
-                ControlFrame::Response(_)
-                | ControlFrame::RoomView(_)
-                | ControlFrame::Closed { .. }
-                | ControlFrame::PeerEvent(_)
-                | ControlFrame::Hello(_)
-                | ControlFrame::Relay(_) => {}
-                other => {
-                    return Err(format!("unexpected browser frame {other:?}").into());
+        let mut after = None;
+        let mut all_adverts = Vec::new();
+        let generation = loop {
+            request_id += 1;
+            write_frame(
+                &mut send,
+                &ControlFrame::Request(ControlRequest {
+                    request_id,
+                    body: RequestBody::ListRooms { after },
+                }),
+            )
+            .await?;
+            let response_deadline = tokio::time::Instant::now() + limits::values().response;
+            let (generation, adverts, next) = loop {
+                let frame = tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep_until(response_deadline) => return Err("room list response deadline".into()),
+                    frame = read_frame(&mut recv) => frame?,
+                };
+                match frame {
+                    ControlFrame::Response(ControlResponse {
+                        request_id: id,
+                        body:
+                            ResponseBody::RoomList {
+                                generation,
+                                adverts,
+                                next,
+                            },
+                    }) if id == request_id => break (generation, adverts, next),
+                    ControlFrame::Response(ControlResponse {
+                        request_id: id,
+                        body: ResponseBody::Error(error),
+                    }) if id == request_id => return Err(error.into()),
+                    ControlFrame::Response(_)
+                    | ControlFrame::RoomView(_)
+                    | ControlFrame::Closed { .. }
+                    | ControlFrame::PeerEvent(_)
+                    | ControlFrame::Hello(_)
+                    | ControlFrame::Relay(_) => {}
+                    other => {
+                        return Err(format!("unexpected browser frame {other:?}").into());
+                    }
                 }
+            };
+            all_adverts.extend(adverts);
+            match next {
+                Some(id) if after.is_none_or(|previous| id > previous) => after = Some(id),
+                Some(_) => return Err("room list cursor did not advance".into()),
+                None => break generation,
             }
         };
         {
@@ -1389,7 +1400,7 @@ async fn browse(
             current.ping_ms = Some(connection.rtt().as_millis().max(1) as u64);
             current.generation = generation;
             let have = current.have.clone();
-            current.adverts = adverts
+            current.adverts = all_adverts
                 .into_iter()
                 .map(|advert| MasterAdvert {
                     id: advert.id,
@@ -1668,7 +1679,6 @@ fn open_hosted_epoch_when_world_is_live(
     intent: Res<MasterLaunchIntent>,
     admission: Res<crate::ClientAdmission>,
     has_world: Option<Res<State<frame::MatchScope>>>,
-    launch: Option<Res<frame::LaunchIdentity>>,
     hold: Option<Res<crate::AuthorityLoadHold>>,
     mut sent: ResMut<HostedWorldStart>,
 ) {
@@ -1698,10 +1708,7 @@ fn open_hosted_epoch_when_world_is_live(
     else {
         return;
     };
-    let Some(launch) = launch else {
-        return;
-    };
-    bridge.start_hosted_match(launch.zone.clone(), config.mode.clone());
+    bridge.start_hosted_match(config.map.clone(), config.mode.clone());
     sent.0 = Some(key);
 }
 

@@ -460,18 +460,19 @@ impl FxMarksSystemHost {
                 break;
             };
             let n = remaining_tri.min(group.tri_count);
-            if let Some(ctx) = cur_context {
-                if !mark_contexts_equal(&ctx, &group.context) && batch_index_count != 0 {
-                    let _ = add_mark_mesh_draw_surf(&mut mesh.budget, batch_index_count);
-                    mesh.surfs.push(GfxMarkMeshSurf {
-                        index_start: batch_index_start,
-                        index_count: batch_index_count,
-                        mark_slot,
-                        context: ctx,
-                    });
-                    batch_index_start = mesh.indices.len() as u32;
-                    batch_index_count = 0;
-                }
+            if let Some(ctx) = cur_context
+                && !mark_contexts_equal(&ctx, &group.context)
+                && batch_index_count != 0
+            {
+                let _ = add_mark_mesh_draw_surf(&mut mesh.budget, batch_index_count);
+                mesh.surfs.push(GfxMarkMeshSurf {
+                    index_start: batch_index_start,
+                    index_count: batch_index_count,
+                    mark_slot,
+                    context: ctx,
+                });
+                batch_index_start = mesh.indices.len() as u32;
+                batch_index_count = 0;
             }
             cur_context = Some(group.context);
             for t in 0..n {

@@ -50,6 +50,10 @@ impl Plugin for RenderGpuPlugin {
     }
 }
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn extract_display_encoded_formats(
     cameras: bevy::render::Extract<
         Query<

@@ -756,10 +756,10 @@ fn collect_clip_keys(
         let Ok(bound) = bank.bind_published_alias(index, vi) else {
             continue;
         };
-        if let Ok(Some(key)) = clip_key_for_sound(bound) {
-            if seen_key.insert(key.clone()) {
-                out.push(key);
-            }
+        if let Ok(Some(key)) = clip_key_for_sound(bound)
+            && seen_key.insert(key.clone())
+        {
+            out.push(key);
         }
         if let Some(secondary) = bank
             .playback_policy(index, vi)

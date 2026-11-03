@@ -22,39 +22,14 @@ pub struct AtlasWorld {
 
 pub use asset_core::atlas::PortalDoor as AtlasDoor;
 
-/// Two doors that are one: whatever crosses one comes out of the other.
-/// `flip` sends motion along `a.normal` out against `b.normal`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct AtlasPortal {
-    pub a: AtlasDoor,
-    pub b: AtlasDoor,
-    pub flip: bool,
-}
-
-impl AtlasPortal {
-    /// The yaw in radians that turns `a`'s side onto `b`'s.
-    pub fn yaw(&self) -> f32 {
-        let target = if self.flip {
-            [-self.b.normal[0], -self.b.normal[1]]
-        } else {
-            [self.b.normal[0], self.b.normal[1]]
-        };
-        target[1].atan2(target[0]) - self.a.normal[1].atan2(self.a.normal[0])
-    }
-
-    /// The doors seen from one side: `(entered, exit, yaw)`.
-    pub fn oriented(&self, from_a: bool) -> (AtlasDoor, AtlasDoor, f32) {
-        if from_a {
-            (self.a, self.b, self.yaw())
-        } else {
-            (self.b, self.a, -self.yaw())
-        }
-    }
-}
+pub use asset_core::atlas::PortalPair as AtlasPortal;
 
 /// The atlas beyond the match's own map: extra worlds and the portals.
 #[derive(Clone, Debug, Default)]
 pub struct Atlas {
+    pub root_zone: String,
+    pub versions: asset_core::atlas::SceneVersions,
+    pub dvars: std::collections::BTreeMap<String, String>,
     /// Worlds 1.. of the atlas; world 0 is the match's map.
     pub worlds: Vec<std::sync::Arc<AtlasWorld>>,
     pub portals: Vec<AtlasPortal>,
@@ -218,7 +193,6 @@ impl Atlas {
 
     /// Validate the carried hull and the remaining movement before committing
     /// any world, velocity or view-angle change. Shared by authority/prediction.
-
     pub(crate) fn carry_player_checked_with_availability(
         &self,
         ps: &mut playerstate_iw4::PlayerState,

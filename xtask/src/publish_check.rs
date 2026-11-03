@@ -350,8 +350,7 @@ fn address_in_name(lower: &str) -> bool {
 fn gsc_citation(lower: &str) -> bool {
     let Some(at) = lower.find(".gsc@sha256:") else {
         return lower.find(".gsc#l").is_some_and(|at| {
-            lower[at + ".gsc#l".len()..]
-                .as_bytes()
+            lower.as_bytes()[at + ".gsc#l".len()..]
                 .first()
                 .is_some_and(u8::is_ascii_digit)
         });

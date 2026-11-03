@@ -19,7 +19,7 @@ impl EventAudience {
             Self::All => true,
             Self::AllExcept(excluded) => *excluded != id,
             Self::Client(c) => *c == id,
-            Self::Clients(cs) => cs.iter().any(|c| *c == id),
+            Self::Clients(cs) => cs.contains(&id),
         }
     }
 

@@ -260,7 +260,7 @@ pub fn sort_pass_args(pass: &mut RuntimePass) {
         return;
     }
     let sort_tier = |slice: &mut [RuntimeArgumentBinding]| {
-        slice.sort_by(|a, b| a.runtime_sort_key().cmp(&b.runtime_sort_key()));
+        slice.sort_by_key(|a| a.runtime_sort_key());
     };
     sort_tier(&mut pass.arguments[..prim]);
     sort_tier(&mut pass.arguments[prim..prim + obj]);
@@ -458,8 +458,9 @@ impl RuntimeMaterial {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub enum RuntimeSortedMaterialTable {
+    #[default]
     Missing,
     BuildFailed(CatalogBuildError),
     Ready {
@@ -504,12 +505,6 @@ impl RuntimeSortedMaterialTable {
             Self::Ready { slot_gap_n, .. } => Some(i64::from(*slot_gap_n)),
             Self::BuildFailed(_) | Self::Missing { .. } => None,
         }
-    }
-}
-
-impl Default for RuntimeSortedMaterialTable {
-    fn default() -> Self {
-        Self::Missing
     }
 }
 

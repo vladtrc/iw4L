@@ -107,6 +107,8 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.lints.clippy]
+# clippy.toml requires explicit fallbacks, so do not suggest its banned method.
+unwrap_or_default = "allow"
 excessive_precision = "allow"
 approx_constant = "allow"
 assertions_on_constants = "deny"

@@ -168,8 +168,8 @@ pub(crate) fn flashbang(
         "flashbang",
         vec![
             Value::Vector(origin),
-            Value::Float(amount_distance.into()),
-            Value::Float(amount_angle.into()),
+            Value::Float(amount_distance),
+            Value::Float(amount_angle),
             attacker,
         ],
     );
@@ -1197,7 +1197,7 @@ pub(crate) fn disconnect_player(world: &mut World, client: u32) {
         .filter(|(_, e)| e.audience == super::entities::HudAudience::Client(client))
         .map(|(id, _)| *id)
         .collect();
-    drop(runtime);
+
     for id in owned {
         super::hud::destroy(world, id);
     }
@@ -1572,8 +1572,8 @@ pub(crate) fn unlink_player(world: &mut World, client: u32) {
         if let Some(link) = link.filter(|link| link.view == LinkView::WeaponDelta) {
             ps.link_flags &= !playerstate_iw4::LINK_FLAGS_WEAPON_VIEW_ONLY;
             if let Some(view) = link.restore_view {
-                for i in 0..3 {
-                    ps.delta_angles[i] += angle_delta(view[i], ps.viewangles[i]);
+                for (i, view_entry) in view[..3].iter().enumerate() {
+                    ps.delta_angles[i] += angle_delta(*view_entry, ps.viewangles[i]);
                 }
                 ps.viewangles = view;
             }
@@ -1676,8 +1676,8 @@ pub(crate) fn apply_player_links(world: &mut World) {
             _ => {}
         }
         if let Some(ps) = frame.player_mut(id) {
-            for i in 0..3 {
-                ps.delta_angles[i] += angle_delta(view[i], ps.viewangles[i]);
+            for (i, view_entry) in view[..3].iter().enumerate() {
+                ps.delta_angles[i] += angle_delta(*view_entry, ps.viewangles[i]);
             }
             ps.viewangles = view;
             if link.view == LinkView::WeaponDelta {

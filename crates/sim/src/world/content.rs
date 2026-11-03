@@ -94,9 +94,14 @@ impl PlayerKitCollision {
 #[derive(Debug)]
 pub struct SimContent {
     data: ContentData,
+    geometry_digest: u64,
 }
 
 impl SimContent {
+    pub(crate) fn geometry_digest(&self) -> u64 {
+        self.geometry_digest
+    }
+
     pub fn map(&self) -> &Arc<asset_core::MapContentDefinition> {
         &self.data.map
     }
@@ -268,7 +273,12 @@ impl SimContentBuilder {
 
     pub fn finish(mut self) -> Arc<SimContent> {
         self.data.clip_mesh.rebuild_smodel_grid();
-        Arc::new(SimContent { data: self.data })
+        let mut content = SimContent {
+            data: self.data,
+            geometry_digest: 0,
+        };
+        content.geometry_digest = crate::content::scene_geometry_digest(&content);
+        Arc::new(content)
     }
 
     pub fn set_script_model_anims(

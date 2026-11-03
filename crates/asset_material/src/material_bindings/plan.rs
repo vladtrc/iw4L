@@ -16,11 +16,10 @@ pub enum FrameStep {
         angular_speed: f64,
     },
 }
-pub(super) fn prepare(requested: &[u16]) -> Vec<(asset_core::FamilyId, Vec<FrameStep>)> {
+pub(super) fn prepare(requested: &[u16]) -> Vec<FrameStep> {
     super::material_binding_families()
         .iter()
-        .map(|(id, family)| (id, (family.prepare_frame)(requested)))
-        .filter(|(_, steps)| !steps.is_empty())
+        .flat_map(|(_, family)| (family.prepare_frame)(requested))
         .collect()
 }
 impl FrameStep {

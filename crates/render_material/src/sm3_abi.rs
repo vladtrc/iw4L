@@ -476,10 +476,10 @@ fn read_registers(program: &Sm3ProgramIr, file: Sm3RegisterFile) -> BTreeSet<Sm3
 fn program_defined_constants(program: &Sm3ProgramIr) -> BTreeSet<u16> {
     let mut defined = BTreeSet::new();
     for instruction in &program.instructions {
-        if let Sm3InstructionBody::FloatDefinition { destination, .. } = &instruction.body {
-            if destination.register.file == Sm3RegisterFile::FloatConstant {
-                defined.insert(destination.register.index);
-            }
+        if let Sm3InstructionBody::FloatDefinition { destination, .. } = &instruction.body
+            && destination.register.file == Sm3RegisterFile::FloatConstant
+        {
+            defined.insert(destination.register.index);
         }
     }
     defined
@@ -720,10 +720,10 @@ fn used_samplers(program: &Sm3ProgramIr) -> BTreeSet<u16> {
                     }
                 }
             }
-            Sm3InstructionBody::Declaration { destination, .. } => {
-                if destination.register.file == Sm3RegisterFile::Sampler {
-                    samplers.insert(destination.register.index);
-                }
+            Sm3InstructionBody::Declaration { destination, .. }
+                if destination.register.file == Sm3RegisterFile::Sampler =>
+            {
+                samplers.insert(destination.register.index);
             }
             _ => {}
         }

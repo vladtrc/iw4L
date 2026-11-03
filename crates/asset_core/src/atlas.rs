@@ -111,3 +111,44 @@ pub struct PortalDoor {
     pub width: f32,
     pub height: f32,
 }
+
+/// Two doors that are one: whatever crosses one comes out of the other.
+/// `flip` sends motion along `a.normal` out against `b.normal`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PortalPair {
+    pub a: PortalDoor,
+    pub b: PortalDoor,
+    pub flip: bool,
+}
+
+impl PortalPair {
+    /// The yaw in radians that turns `a`'s side onto `b`'s.
+    pub fn yaw(&self) -> f32 {
+        let target = if self.flip {
+            [-self.b.normal[0], -self.b.normal[1]]
+        } else {
+            [self.b.normal[0], self.b.normal[1]]
+        };
+        target[1].atan2(target[0]) - self.a.normal[1].atan2(self.a.normal[0])
+    }
+
+    /// The doors seen from one side: `(entered, exit, yaw)`.
+    pub fn oriented(&self, from_a: bool) -> (PortalDoor, PortalDoor, f32) {
+        if from_a {
+            (self.a, self.b, self.yaw())
+        } else {
+            (self.b, self.a, -self.yaw())
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SceneVersions {
+    pub schema: u64,
+    pub aperture: u64,
+    pub trim_clearance: u64,
+    pub generator_algorithm: String,
+    pub generator_version: u64,
+    pub seed: Option<u64>,
+    pub template_digest: Option<u64>,
+}

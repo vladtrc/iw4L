@@ -504,11 +504,5 @@ fn lerp_gfx_color(a: u32, b: u32, t: f32) -> u32 {
 
 #[inline]
 fn sat(x: f32) -> f32 {
-    if x < 0.0 {
-        0.0
-    } else if x > 1.0 {
-        1.0
-    } else {
-        x
-    }
+    x.clamp(0.0, 1.0)
 }

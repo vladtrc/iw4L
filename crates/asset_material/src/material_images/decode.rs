@@ -600,7 +600,7 @@ fn decode_pixels(
                 .get(..needed)
                 .ok_or_else(|| "truncated RGB8".to_owned())?;
             let mut out = Vec::with_capacity(width as usize * height as usize * 4);
-            for pixel in source.chunks_exact(3) {
+            for pixel in source.as_chunks::<3>().0 {
                 out.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
             }
             out
@@ -626,7 +626,7 @@ fn decode_pixels(
                 .get(..needed)
                 .ok_or_else(|| "truncated LA8".to_owned())?;
             let mut out = Vec::with_capacity(width as usize * height as usize * 4);
-            for pixel in source.chunks_exact(2) {
+            for pixel in source.as_chunks::<2>().0 {
                 out.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
             }
             out
@@ -651,7 +651,7 @@ pub(super) fn take_rgba(
         .get(..needed)
         .ok_or_else(|| "truncated RGBA8".to_owned())?
         .to_vec();
-    for pixel in out.chunks_exact_mut(4) {
+    for pixel in out.as_chunks_mut::<4>().0 {
         if bgra {
             pixel.swap(0, 2);
         }

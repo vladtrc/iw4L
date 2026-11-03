@@ -56,6 +56,7 @@ mod script_mix;
 mod script_music;
 
 mod admission;
+mod control;
 mod cue;
 mod pending;
 pub use cue::CueFailure;

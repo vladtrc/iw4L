@@ -18,6 +18,7 @@ mod input_program;
 mod process;
 mod replay;
 mod session;
+mod sound;
 mod state_dump;
 mod ui;
 
@@ -29,9 +30,14 @@ pub(crate) use input_program::route_input_program;
 pub(crate) use process::{exit_process, request_exit};
 pub(crate) use replay::route_replay_commands;
 pub(crate) use session::route_session_commands;
+pub(crate) use sound::route_sound_commands;
 pub(crate) use state_dump::route_state_dump_commands;
 pub(crate) use ui::route_ui_commands;
 
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 pub(crate) fn route_debug_feature_commands(
     mut events: MessageReader<ConsoleCommand>,
     mut output: (
@@ -227,6 +233,10 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
             "input_program load <path> | dump <path> | status — exclusive authority command tape (cheats; ownership until map reload)",
         ),
         ("help", "help — list registered commands"),
+        (
+            "sound",
+            "sound [family:]alias [count] — play a match alias through normal admission (up to 8192 requests)",
+        ),
         ("say", "say <message> — public chat"),
         ("say_team", "say_team <message> — team chat"),
         ("chatmodepublic", "chatmodepublic — open public chat"),

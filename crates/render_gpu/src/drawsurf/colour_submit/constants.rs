@@ -1,3 +1,5 @@
+type ConstantPackCache = HashMap<(usize, usize), (u32, Arc<PassConstantBuffers>, Arc<[u32]>, u32)>;
+
 const PLACED_ARENA_MARK: u32 = 1 << 31;
 
 use super::as_u32;
@@ -122,7 +124,7 @@ fn aligned_backing_span(start: usize, end: usize, backing_len: usize) -> Option<
     let end = end.min(backing_len);
     let start = start / 4 * 4;
     let end = end.next_multiple_of(4).min(backing_len);
-    if start >= end || (end - start) % 4 != 0 {
+    if start >= end || !(end - start).is_multiple_of(4) {
         return None;
     }
     Some((start, end))
@@ -321,7 +323,7 @@ pub(super) struct ArenaPack {
 
     identity_reserved: usize,
 
-    seen: HashMap<(usize, usize), (u32, Arc<PassConstantBuffers>, Arc<[u32]>, u32)>,
+    seen: ConstantPackCache,
     placed: Vec<u8>,
 
     placed_seen: HashMap<PlacedPackKey, PlacedSpan>,

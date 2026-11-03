@@ -555,8 +555,11 @@ impl<'a> XModelProducers<'a> {
             merged,
             &mut packed,
             &mut packed_ok,
-            bodies.draws().iter().filter_map(|d| {
-                scene_ent_admitted(scene, d.scene_entnum).then(|| {
+            bodies
+                .draws()
+                .iter()
+                .filter(|&d| scene_ent_admitted(scene, d.scene_entnum))
+                .map(|d| {
                     let object_id = next_body_object;
                     next_body_object = next_body_object.saturating_add(1);
                     XModelSurfaceDraw {
@@ -578,14 +581,13 @@ impl<'a> XModelProducers<'a> {
                         // every player caster in both partitions.
                         caster_bound: None,
                     }
-                })
-            }),
+                }),
         ) {
             admitted |= ADMIT_BODY;
         }
 
-        if fpv_scene_colour(fpv, scene) {
-            if (XModelGeometrySource {
+        if fpv_scene_colour(fpv, scene)
+            && (XModelGeometrySource {
                 decoded_n: fpv.decoded_n(),
                 indices: fpv.indices(),
                 surface_ranges: fpv.surface_ranges(),
@@ -612,9 +614,9 @@ impl<'a> XModelProducers<'a> {
                     body_client: None,
                     caster_bound: None,
                 }),
-            ) {
-                admitted |= ADMIT_FPV;
-            }
+            )
+        {
+            admitted |= ADMIT_FPV;
         }
 
         if (XModelGeometrySource {
@@ -708,8 +710,8 @@ impl<'a> XModelProducers<'a> {
         ) {
             admitted |= ADMIT_DYNENT;
         }
-        if let Some((sky, eye, view)) = sky {
-            if (XModelGeometrySource {
+        if let Some((sky, eye, view)) = sky
+            && (XModelGeometrySource {
                 decoded_n: sky.geometry.decoded_vertices().len(),
                 indices: sky.geometry.indices(),
                 surface_ranges: sky.geometry.surface_ranges(),
@@ -721,9 +723,9 @@ impl<'a> XModelProducers<'a> {
                 &mut packed,
                 &mut packed_ok,
                 sky.draws_at(eye, view),
-            ) {
-                admitted |= ADMIT_SKY;
-            }
+            )
+        {
+            admitted |= ADMIT_SKY;
         }
         let append_ms = append_started.elapsed().as_secs_f32() * 1000.0;
         let packed_started = Instant::now();
@@ -848,8 +850,11 @@ impl<'a> XModelProducers<'a> {
             &mut range_base,
             bodies.surface_ranges().len(),
             bodies.materials(),
-            bodies.draws().iter().filter_map(|d| {
-                scene_ent_admitted(scene, d.scene_entnum).then(|| {
+            bodies
+                .draws()
+                .iter()
+                .filter(|&d| scene_ent_admitted(scene, d.scene_entnum))
+                .map(|d| {
                     let object_id = next_body_object;
                     next_body_object = next_body_object.saturating_add(1);
                     XModelSurfaceDraw {
@@ -870,8 +875,7 @@ impl<'a> XModelProducers<'a> {
                         // every player caster in both partitions.
                         caster_bound: None,
                     }
-                })
-            }),
+                }),
         );
         if fpv_scene_colour(fpv, scene) {
             append_concat_owner_draws(
@@ -1253,10 +1257,8 @@ impl XModelGeometrySource<'_> {
                 };
                 if *slot == UNMAPPED {
                     *slot = vert_base.saturating_add(new_verts);
-                    if *packed_ok {
-                        if let Some(rows) = source_rows {
-                            packed.push(rows[old]);
-                        }
+                    if *packed_ok && let Some(rows) = source_rows {
+                        packed.push(rows[old]);
                     }
                     new_verts = new_verts.saturating_add(1);
                 }
