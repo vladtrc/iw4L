@@ -2,7 +2,6 @@ use render_anim::geometry::install_retained_packed;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
-use std::time::Instant;
 
 use bevy::prelude::*;
 
@@ -14,7 +13,7 @@ pub use render_anim::{
     ItemDrawPlan, ItemOwnerDraw, MissileDrawPlan, MissileOwnerDraw, RemoteBodyDrawPlan,
     RemoteBodySurfaceDraw, ScriptModelAssetDraw, ScriptModelDrawPlan, ScriptModelOwnerDraw,
     XMODEL_OBJECT_ID_BODY_BASE, XMODEL_OBJECT_ID_DYNENT_BASE, XMODEL_OBJECT_ID_ITEM_BASE,
-    XMODEL_OBJECT_ID_MISSILE_BASE,
+    XMODEL_OBJECT_ID_MISSILE_BASE, XMODEL_PACKED_EMPTY_PLAN, XMODEL_PACKED_UNAVAILABLE,
 };
 pub use render_anim::{
     BodyPackedSession, append_dynent_asset, append_dynent_surfaces, append_item_surfaces,
@@ -63,19 +62,6 @@ pub struct XModelDrawPlan {
     concat_layout: bool,
     last_admitted: u8,
 }
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct XModelMergeStamps {
-    pub append_ms: f32,
-
-    pub packed_ms: f32,
-
-    pub concatenated: bool,
-}
-
-pub const XMODEL_PACKED_UNAVAILABLE: &str =
-    "xmodel merge GfxPackedVertex missing or count-mismatched; decoded float is not packed VB";
-pub const XMODEL_PACKED_EMPTY_PLAN: &str = "xmodel plan has no vertices";
 
 impl XModelDrawPlan {
     pub fn clear(&mut self) {
@@ -450,7 +436,7 @@ impl<'a> XModelProducers<'a> {
             Vec3,
             Option<&'a render_frame::PortalView>,
         )>,
-    ) -> XModelMergeStamps {
+    ) {
         let Self {
             fpv,
             bodies,
@@ -463,18 +449,13 @@ impl<'a> XModelProducers<'a> {
         let stamp = self.merge_stamp(scene, sky);
         if merged.last_input == Some(stamp) {
             publish_skin_jobs(merged, fpv, bodies);
-            return XModelMergeStamps {
-                concatenated: false,
-                ..XModelMergeStamps::default()
-            };
+            return;
         }
         if merged.last_topology == Some(stamp.topology) && merged.concat_layout {
             let prev = merged.last_input;
             let vertices_changed = prev.is_none_or(|p| p.vertices != stamp.vertices);
             let draws_changed = prev.is_none_or(|p| concat_draws_changed(p, &stamp));
-            let mut packed_ms = 0.0;
             if vertices_changed {
-                let packed_started = Instant::now();
                 let prev_packed = merged.packed_share.take();
                 let mut packed = merged.packed_banks.take_write();
                 let mut packed_ok = true;
@@ -494,18 +475,13 @@ impl<'a> XModelProducers<'a> {
                     XMODEL_PACKED_UNAVAILABLE,
                 );
                 publish_packed_payload(merged, prev_packed, payload, key);
-                packed_ms = packed_started.elapsed().as_secs_f32() * 1000.0;
             }
             if draws_changed {
                 self.refresh_draws(merged, scene, sky);
             }
             merged.last_input = Some(stamp);
             publish_skin_jobs(merged, fpv, bodies);
-            return XModelMergeStamps {
-                concatenated: true,
-                packed_ms,
-                append_ms: 0.0,
-            };
+            return;
         }
         let prev_packed = merged.packed_share.take();
         let prev_index = merged.index_share.take();
@@ -532,7 +508,6 @@ impl<'a> XModelProducers<'a> {
         );
         let mut packed_ok = true;
         let mut admitted = 0u8;
-        let append_started = Instant::now();
         let mut next_body_object = XMODEL_OBJECT_ID_BODY_BASE;
         let (fx_draws, fx_object_id_exhausted) = dense_fx_object_ids(
             fx_models.draws(),
@@ -727,8 +702,6 @@ impl<'a> XModelProducers<'a> {
         {
             admitted |= ADMIT_SKY;
         }
-        let append_ms = append_started.elapsed().as_secs_f32() * 1000.0;
-        let packed_started = Instant::now();
         merged.last_admitted = admitted;
         let key =
             packed_ok.then(|| PackedContentKey::new(&stamp, merged.last_admitted, packed.len()));
@@ -745,12 +718,6 @@ impl<'a> XModelProducers<'a> {
         merged.last_input = Some(stamp);
         merged.last_topology = Some(stamp.topology);
         publish_skin_jobs(merged, fpv, bodies);
-        let packed_ms = packed_started.elapsed().as_secs_f32() * 1000.0;
-        XModelMergeStamps {
-            append_ms,
-            packed_ms,
-            concatenated: true,
-        }
     }
 
     fn packed_owners(

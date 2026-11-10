@@ -39,6 +39,8 @@ pub async fn load_prepared_match_with_atlas(
         image_trees.adopt_zone(path);
     }
     let atlas_worlds::AtlasLoad {
+        space: atlas_space,
+        regions: atlas_regions,
         zones: atlas_zones,
         doors: atlas_doors,
         replacements: atlas_replacements,
@@ -188,6 +190,7 @@ pub async fn load_prepared_match_with_atlas(
             let shared_surfaces = map_payloads.take_surfaces(game);
             atlas_walks = match atlas_worlds::walk_atlas_worlds(
                 atlas_zones,
+                &atlas_regions,
                 &material_seed,
                 &common_film_visions,
                 &progress,
@@ -453,9 +456,12 @@ pub async fn load_prepared_match_with_atlas(
         &mut world,
         &mut global,
         atlas_walks,
-        atlas_doors,
-        atlas_replacements,
-        atlas_trims,
+        atlas_worlds::AtlasGeometry {
+            space: atlas_space,
+            doors: atlas_doors,
+            replacements: atlas_replacements,
+            trims: atlas_trims,
+        },
         &mut atlas_report,
     ) {
         Ok(worlds) => worlds,

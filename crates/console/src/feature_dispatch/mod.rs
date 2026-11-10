@@ -11,6 +11,7 @@ use sim::{ClientAction, ClientId};
 use crate::{ConsoleCommand, ConsoleDispatch, ConsoleLine, ConsoleSettings, ConsoleState};
 
 mod capture;
+mod clip_inputs;
 mod echo;
 mod film;
 mod hitvol;
@@ -51,15 +52,15 @@ pub(crate) fn route_debug_feature_commands(
         ResMut<BotTpQueue>,
         ResMut<BotFireQueue>,
     ),
-    (weapons, mut inbox, roster): (
+    (weapons, mut inbox, mut roster): (
         Option<Res<assets::PreparedWeapons>>,
         Option<ResMut<ClientActionInbox>>,
-        Option<Res<BotRoster>>,
+        Option<ResMut<BotRoster>>,
     ),
-    (mut hurt, mut pending_splash, authority): (
+    (mut hurt, mut pending_splash, mut authority): (
         ResMut<PendingViewHurt>,
         ResMut<PendingSplash>,
-        Option<Res<net::AuthorityWorld>>,
+        Option<ResMut<net::AuthorityWorld>>,
     ),
 ) {
     let (console, settings, line) = &mut output;
@@ -82,6 +83,17 @@ pub(crate) fn route_debug_feature_commands(
                 Ok(BotVerb::Add(n)) => {
                     bot_add.push(n);
                     echo(format!("bot: queued add {n}"), console, line);
+                }
+                Ok(BotVerb::Kick(id)) => {
+                    if let (Some(roster), Some(authority)) = (roster.as_mut(), authority.as_mut())
+                        && roster.is_bot(id)
+                    {
+                        roster.bots.retain(|bot| bot.id != id);
+                        authority.0.retire_client(id);
+                        echo(format!("bot: disconnected {}", id.0), console, line);
+                    } else {
+                        echo("bot kick: no such local bot".into(), console, line);
+                    }
                 }
                 Ok(BotVerb::Dummy(n)) => {
                     bot_add.push_dummy(n);
@@ -324,7 +336,7 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         ),
         (
             "bot",
-            "bot add [N] | dummy [N] [enemy|friendly] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z>",
+            "bot add [N] | kick <id> | dummy [N] [enemy|friendly] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z>",
         ),
         (
             "menu",
@@ -346,11 +358,12 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
     }
 }
 
-pub(crate) const BOT_USAGE: &str = "usage: bot add [N] | dummy [N] [enemy|friendly] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
+pub(crate) const BOT_USAGE: &str = "usage: bot add [N] | kick <id> | dummy [N] [enemy|friendly] | hold [on|off] | give <id> <weapon> [att...] [camo=<name>] | fire [all|<id>] | tp all|<id> above <h> | tp all|<id> <x> <y> <z> [yaw] [pitch]";
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum BotVerb {
     Add(u32),
+    Kick(ClientId),
     Dummy(u32),
     DummySide(u32, bots::BotSide),
     Hold(bool),
@@ -366,6 +379,10 @@ pub(crate) enum BotVerb {
 pub(crate) fn parse_bot_args(args: &[String]) -> Result<BotVerb, String> {
     let sub = args.first().map(String::as_str).unwrap_or("");
     match sub {
+        "kick" if args.len() == 2 => args[1]
+            .parse::<u32>()
+            .map(|id| BotVerb::Kick(ClientId(id)))
+            .map_err(|_| "usage: bot kick <id>".into()),
         "add" => {
             let n = args
                 .get(1)

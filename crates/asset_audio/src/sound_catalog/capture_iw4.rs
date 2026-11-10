@@ -9,13 +9,6 @@ pub(super) fn zone_ptr_kind(p: Option<ZonePtr>) -> Option<&'static str> {
     })
 }
 
-pub(super) fn zone_ptr_label(p: Option<ZonePtr>) -> Option<String> {
-    match p? {
-        ZonePtr::Offset(q) => Some(format!("{}:{}", q.block, q.offset)),
-        _ => None,
-    }
-}
-
 pub(super) fn file_key(p: Ptr) -> (u8, u32) {
     (p.block, p.offset)
 }
@@ -375,79 +368,67 @@ impl AssetLinkSink for SoundCatalog {
         let mut aliases = Vec::with_capacity(count);
         for i in 0..count {
             let row = arr.at(i * s.layout(sz::SND_ALIAS, 136));
-            let alias_name =
-                name_at(s, row, s.layout(SND_ALIAS_ALIAS_NAME, 0)).unwrap_or(String::new());
-            let subtitle = optional_name(s, row, s.layout(SND_ALIAS_SUBTITLE, 8));
             let secondary = optional_name(s, row, s.layout(SND_ALIAS_SECONDARY, 16));
             let chain = optional_name(s, row, s.layout(SND_ALIAS_CHAIN, 24));
             let mixer_group = optional_name(s, row, s.layout(SND_ALIAS_MIXER_GROUP, 32));
-            let (
-                loaded_name,
-                streamed,
-                file_type,
-                file_exists,
-                file_name,
-                file_u,
-                file_u_ptr,
-                file_u_deref,
-            ) = match s.ptr_at(row, s.layout(SND_ALIAS_SOUND_FILE, 40)).ok() {
-                Some(ZonePtr::Offset(p)) => {
-                    let file = s.resolve_alias(p);
-                    let key = file_key(file);
-                    let loaded = self.file_to_loaded.get(&key).cloned();
-                    let streamed = self.file_to_streamed.get(&key).cloned();
-                    let inspected = inspect_sound_file(s, file);
-                    let u = s.ptr_at(file, s.layout(4, 8)).ok();
-                    let loaded = loaded.or_else(|| match u {
-                        Some(ZonePtr::Offset(q)) => self.loaded_name_for_offset(s, q),
-                        _ => None,
-                    });
-                    let file_u_deref = match u {
-                        Some(ZonePtr::Offset(q)) => Self::offset_deref_kind(s, q),
-                        _ => None,
-                    };
+            let (loaded_name, streamed, file_type, file_exists, file_name, file_u, file_u_deref) =
+                match s.ptr_at(row, s.layout(SND_ALIAS_SOUND_FILE, 40)).ok() {
+                    Some(ZonePtr::Offset(p)) => {
+                        let file = s.resolve_alias(p);
+                        let key = file_key(file);
+                        let loaded = self.file_to_loaded.get(&key).cloned();
+                        let streamed = self.file_to_streamed.get(&key).cloned();
+                        let inspected = inspect_sound_file(s, file);
+                        let u = s.ptr_at(file, s.layout(4, 8)).ok();
+                        let loaded = loaded.or_else(|| match u {
+                            Some(ZonePtr::Offset(q)) => self.loaded_name_for_offset(s, q),
+                            _ => None,
+                        });
+                        let file_u_deref = match u {
+                            Some(ZonePtr::Offset(q)) => Self::offset_deref_kind(s, q),
+                            _ => None,
+                        };
 
-                    let loaded = if file_u_deref == Some("following")
-                        || file_u_deref == Some("insert")
-                        || matches!(u, Some(ZonePtr::Following) | Some(ZonePtr::Insert))
-                    {
-                        loaded
-                    } else {
-                        loaded.or(inspected.loaded_name)
-                    };
-                    let streamed = streamed.or(inspected.streamed);
-                    let file_name = loaded.clone().or(inspected.file_name.clone()).or_else(|| {
-                        streamed.as_ref().map(|(dir, name)| {
-                            if dir.is_empty() {
-                                name.clone()
-                            } else {
-                                format!("{dir}/{name}")
-                            }
-                        })
-                    });
-                    (
-                        loaded,
-                        streamed,
-                        inspected.file_type,
-                        inspected.file_exists,
-                        file_name,
-                        zone_ptr_kind(u),
-                        zone_ptr_label(u),
-                        file_u_deref,
-                    )
-                }
-                Some(ZonePtr::Null) => (None, None, None, None, None, Some("null"), None, None),
-                _ => (
-                    None,
-                    None,
-                    Some(0),
-                    None,
-                    None,
-                    zone_ptr_kind(s.ptr_at(row, s.layout(SND_ALIAS_SOUND_FILE, 40)).ok()),
-                    zone_ptr_label(s.ptr_at(row, s.layout(SND_ALIAS_SOUND_FILE, 40)).ok()),
-                    None,
-                ),
-            };
+                        let loaded = if file_u_deref == Some("following")
+                            || file_u_deref == Some("insert")
+                            || matches!(u, Some(ZonePtr::Following) | Some(ZonePtr::Insert))
+                        {
+                            loaded
+                        } else {
+                            loaded.or(inspected.loaded_name)
+                        };
+                        let streamed = streamed.or(inspected.streamed);
+                        let file_name =
+                            loaded.clone().or(inspected.file_name.clone()).or_else(|| {
+                                streamed.as_ref().map(|(dir, name)| {
+                                    if dir.is_empty() {
+                                        name.clone()
+                                    } else {
+                                        format!("{dir}/{name}")
+                                    }
+                                })
+                            });
+                        (
+                            loaded,
+                            streamed,
+                            inspected.file_type,
+                            inspected.file_exists,
+                            file_name,
+                            zone_ptr_kind(u),
+                            file_u_deref,
+                        )
+                    }
+                    Some(ZonePtr::Null) => (None, None, None, None, None, Some("null"), None),
+                    _ => (
+                        None,
+                        None,
+                        Some(0),
+                        None,
+                        None,
+                        zone_ptr_kind(s.ptr_at(row, s.layout(SND_ALIAS_SOUND_FILE, 40)).ok()),
+                        None,
+                    ),
+                };
             let flags = s.u32_at(row, s.layout(SND_ALIAS_FLAGS, 80)).ok();
             if flags.is_none() {
                 self.alias_flags_missing += 1;
@@ -462,8 +443,6 @@ impl AssetLinkSink for SoundCatalog {
                 loaded_name.as_deref(),
             );
             aliases.push(CapturedAlias {
-                alias_name,
-                subtitle,
                 secondary,
                 chain,
                 mixer_group,
@@ -474,9 +453,6 @@ impl AssetLinkSink for SoundCatalog {
                 file_type,
                 file_exists,
                 file_name,
-                file_u,
-                file_u_ptr,
-                file_u_deref,
                 sequence: s.i32_at(row, s.layout(SND_ALIAS_SEQUENCE, 48)).unwrap_or(0),
                 vol_min: s
                     .f32_at(row, s.layout(SND_ALIAS_VOL_MIN, 52))
@@ -497,9 +473,6 @@ impl AssetLinkSink for SoundCatalog {
                 dist_max: s
                     .f32_at(row, s.layout(SND_ALIAS_DIST_MAX, 72))
                     .unwrap_or(0.0),
-                velocity_min: s
-                    .f32_at(row, s.layout(SND_ALIAS_VELOCITY_MIN, 76))
-                    .unwrap_or(0.0),
                 flags,
                 looping: flags
                     .map(SndAliasFlags::from_word)
@@ -507,18 +480,9 @@ impl AssetLinkSink for SoundCatalog {
                 channel_id: flags
                     .map(SndAliasFlags::from_word)
                     .map(SndAliasFlags::channel),
-                slave_percentage: s
-                    .f32_at(row, s.layout(SND_ALIAS_SLAVE_PERCENTAGE, 84))
-                    .unwrap_or(0.0),
                 probability: s
                     .f32_at(row, s.layout(SND_ALIAS_PROBABILITY, 88))
                     .unwrap_or(1.0),
-                lfe_percentage: s
-                    .f32_at(row, s.layout(SND_ALIAS_LFE_PERCENTAGE, 92))
-                    .unwrap_or(0.0),
-                center_percentage: s
-                    .f32_at(row, s.layout(SND_ALIAS_CENTER_PERCENTAGE, 96))
-                    .unwrap_or(0.0),
                 start_delay: s
                     .i32_at(row, s.layout(SND_ALIAS_START_DELAY, 100))
                     .unwrap_or(0),
@@ -526,15 +490,6 @@ impl AssetLinkSink for SoundCatalog {
                 distance_curve_names: None,
                 near_falloff: None,
                 voice_priority: None,
-                envelop_min: s
-                    .f32_at(row, s.layout(SND_ALIAS_ENVELOP_MIN, 112))
-                    .unwrap_or(0.0),
-                envelop_max: s
-                    .f32_at(row, s.layout(SND_ALIAS_ENVELOP_MAX, 116))
-                    .unwrap_or(0.0),
-                envelop_percentage: s
-                    .f32_at(row, s.layout(SND_ALIAS_ENVELOP_PERCENTAGE, 120))
-                    .unwrap_or(0.0),
                 speaker_map: speaker_map_name(s, row),
                 stereo_speaker_gains: stereo_speaker_gains(s, row),
                 surround_pan: None,

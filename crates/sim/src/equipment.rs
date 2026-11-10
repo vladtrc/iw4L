@@ -800,53 +800,27 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
             break TraceOutcome::Miss { end };
         }
         let glass_pairs = world.world_objects().glass_damage_pairs();
-        let outcome = if let Some(atlas) = flight_atlas.as_ref()
-            && crate::world_graph::world_at(trace_start) > 0
-        {
-            atlas
-                .trace_masked(
-                    crate::world_graph::AtlasClip {
-                        brushes,
-                        bsp,
-                        mesh,
-                        cmodels,
-                    },
-                    &players,
-                    Some(projectile.owner),
-                    trace_start,
-                    end,
-                    mask,
+        let outcome = trace_projectile_segment(
+            &content,
+            &players,
+            &script_models,
+            &BulletTraceQuery {
+                start: trace_start,
+                end,
+                mask,
+                ignore: Some(projectile.owner),
+                ignore_hit: None,
+                ignore_model: None,
+            },
+            &|piece| {
+                crate::world_objects::glass_piece_is_solid(
+                    glass_pairs
+                        .iter()
+                        .find(|(id, _)| *id == u32::from(piece))
+                        .map_or(0, |(_, d)| *d),
                 )
-                .1
-        } else {
-            bullet_trace_with_entity_models(
-                crate::world_graph::AtlasClip {
-                    brushes,
-                    bsp,
-                    cmodels,
-                    mesh,
-                },
-                &players,
-                &script_models,
-                &BulletTraceQuery {
-                    start: trace_start,
-                    end,
-                    mask,
-                    ignore: Some(projectile.owner),
-                    ignore_hit: None,
-                    ignore_model: None,
-                },
-                &|piece| {
-                    crate::world_objects::glass_piece_is_solid(
-                        glass_pairs
-                            .iter()
-                            .find(|(id, _)| *id == u32::from(piece))
-                            .map(|(_, d)| *d)
-                            .unwrap_or(0),
-                    )
-                },
-            )
-        };
+            },
+        );
         let outcome = if mask & 1 != 0
             && let Some(atlas) = flight_atlas.as_ref()
         {
@@ -1045,13 +1019,8 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
             normal,
             collider,
             fraction,
-        } = bullet_trace_with_entity_models(
-            crate::world_graph::AtlasClip {
-                brushes,
-                bsp,
-                cmodels,
-                mesh,
-            },
+        } = trace_projectile_segment(
+            &content,
             &players,
             &script_models,
             &BulletTraceQuery {
@@ -1238,7 +1207,12 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
                             hitloc,
                         }) = collider
                     {
-                        let point = projectile.origin;
+                        let (point, angles) = native_pose_for_player(
+                            world,
+                            client,
+                            projectile.origin,
+                            projectile.apos.tr_base,
+                        );
                         let bones = world
                             .player_attachment_bones(client, life, world.player(client))
                             .unwrap_or(Vec::new());
@@ -1256,9 +1230,7 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
                             .map(|bone| {
                                 let (offset, angles) =
                                     crate::missile_guidance::bone_attachment_local(
-                                        bone,
-                                        point,
-                                        projectile.apos.tr_base,
+                                        bone, point, angles,
                                     );
                                 crate::MissileTarget::PlayerBone {
                                     client,
@@ -1613,7 +1585,9 @@ pub(crate) fn think_projectile(world: &mut FrameWorld, tick: Tick, entnum: i32) 
             weapon: projectile.weapon,
             amount: facts.impact_damage.max(0),
             killcam_entity_start_time: projectile_birth_ms(&projectile),
-            inflictor_origin: Some(projectile.origin),
+            inflictor_origin: Some(
+                native_pose_for_player(world, target, projectile.origin, [0.0; 3]).0,
+            ),
             hitloc: 0,
         };
         let _ = crate::damage::apply_damage_attempt(world, tick, &intent);
@@ -1730,6 +1704,75 @@ fn push_grenade_bounce(
             ..Default::default()
         },
     );
+}
+
+fn trace_projectile_segment(
+    content: &crate::SimContent,
+    players: &[crate::PlayerCollisionPose],
+    models: &[EntityCollisionTraceGeom],
+    query: &BulletTraceQuery,
+    glass: &dyn Fn(u16) -> bool,
+) -> TraceOutcome {
+    let base = content.root_clip();
+    if let Some(atlas) = content.atlas() {
+        if matches!(atlas.space, asset_core::world_frame::SceneSpace::Shared(_)) {
+            return crate::bullet_collision::SharedBulletTrace {
+                atlas,
+                base,
+                players,
+                models,
+                shooter_world: crate::world_graph::world_at(query.start),
+                rifle: false,
+            }
+            .trace(query, glass);
+        }
+        if crate::world_graph::world_at(query.start) > 0 {
+            return atlas
+                .trace_masked(
+                    base,
+                    players,
+                    query.ignore,
+                    query.start,
+                    query.end,
+                    query.mask,
+                )
+                .1;
+        }
+    }
+    bullet_trace_with_entity_models(base, players, models, query, glass)
+}
+
+fn native_pose_for_player(
+    world: &FrameWorld,
+    client: ClientId,
+    point: [f32; 3],
+    angles: [f32; 3],
+) -> ([f32; 3], [f32; 3]) {
+    let Some(ps) = world.player(client) else {
+        return (point, angles);
+    };
+    let content = world.content();
+    let Some(atlas) = content.atlas() else {
+        return (point, angles);
+    };
+    let asset_core::world_frame::SceneSpace::Shared(frames) = &atlas.space else {
+        return (point, angles);
+    };
+    let from = crate::world_graph::world_at(point);
+    let to = crate::world_graph::world_at(ps.origin);
+    if from == to {
+        return (point, angles);
+    };
+    let offset = crate::world_graph::world_offset(from);
+    let scene = frames[from].point_to_scene(std::array::from_fn(|i| point[i] - offset[i]));
+    let local = frames[to].point_to_local(scene);
+    let offset = crate::world_graph::world_offset(to);
+    let axis = math_iw4::angles_to_axis(angles)
+        .map(|v| frames[to].vector_to_local(frames[from].vector_to_scene(v)));
+    (
+        std::array::from_fn(|i| local[i] + offset[i]),
+        math_iw4::axis_to_angles(axis),
+    )
 }
 
 fn player_attachment(

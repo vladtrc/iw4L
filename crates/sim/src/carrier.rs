@@ -182,16 +182,60 @@ impl SimWorld {
             .ecs
             .remove_resource::<crate::input_program::InputProgramRun>()
         {
+            // Ownership outlives capture, so a forgotten tape cannot grow logs forever.
+            let duration = std::iter::once(&run)
+                .chain(&run.actors)
+                .filter_map(|actor| actor.program.samples.last().map(|cmd| cmd.server_time))
+                .max()
+                .unwrap_or(0);
+            if run.start_tick.is_some_and(|start| {
+                i64::from(tick.0.saturating_sub(start.0)) * 50 > i64::from(duration) + 120_000
+            }) {
+                run.failure
+                    .get_or_insert("input program capture exceeded 120 seconds of postroll".into());
+            }
             let life = self
                 .client_meta(run.program.client)
                 .map(|meta| meta.life_sequence);
-            let mut resolved = run.input(tick, input, msec, life);
+            let lifecycle = self
+                .client_meta(run.program.client)
+                .map(|meta| meta.lifecycle);
+            let player = self.player(run.program.client).copied();
+            let alternate = |mapped: u16, selected: u16| {
+                self.combat_facts_for(u32::from(mapped))
+                    .is_some_and(|facts| facts.alternate_weapon == u32::from(selected))
+            };
+            let mut resolved = run.input(
+                tick,
+                input,
+                msec,
+                crate::input_program::InputActorState {
+                    life,
+                    lifecycle,
+                    player: player.as_ref(),
+                },
+                alternate,
+            );
             if run.failure.is_none() {
                 for actor in &mut run.actors {
                     let life = self
                         .client_meta(actor.program.client)
                         .map(|meta| meta.life_sequence);
-                    resolved = actor.input(tick, &resolved, msec, life);
+                    let lifecycle = self
+                        .client_meta(actor.program.client)
+                        .map(|meta| meta.lifecycle);
+                    let player = self.player(actor.program.client).copied();
+                    resolved = actor.input(
+                        tick,
+                        &resolved,
+                        msec,
+                        crate::input_program::InputActorState {
+                            life,
+                            lifecycle,
+                            player: player.as_ref(),
+                        },
+                        alternate,
+                    );
                     if let Some(error) = &actor.failure {
                         run.failure = Some(format!("actor {}: {error}", actor.program.client.0));
                         break;
@@ -210,7 +254,90 @@ impl SimWorld {
         } else {
             input.clone()
         };
-        crate::step::run_frame(&mut self.ecs, tick, &resolved, msec)
+        let result = crate::step::run_frame(&mut self.ecs, tick, &resolved, msec)?;
+        if self
+            .input_program()
+            .is_none_or(|run| run.start_tick.is_none() || run.failure.is_some())
+        {
+            return Ok(result);
+        }
+        let final_seats = self.script_seats();
+        let ended = matches!(self.ecs.resource_mut::<crate::script::RoundScript>().object_field(0,"gameended"), crate::script::Value::Int(n) if n!=0);
+        let score_limit = self
+            .ecs
+            .resource::<crate::script::MatchScript>()
+            .dvars
+            .get("ui_scorelimit")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(result.snapshot.meta.score_limit);
+        let scores = result
+            .snapshot
+            .meta
+            .clients
+            .iter()
+            .map(|(id, m)| (*id, m.score, m.kills, m.deaths))
+            .collect();
+        let match_state = crate::input_program::InputMatchState {
+            tick,
+            ended,
+            score_limit,
+            scores,
+        };
+        if let Some(mut run) = self
+            .ecs
+            .get_resource_mut::<crate::input_program::InputProgramRun>()
+            && run.start_tick.is_some()
+        {
+            if result
+                .snapshot
+                .meta
+                .script_dvars(run.program.client)
+                .int("iw4l_ui_scores")
+                .unwrap_or(0)
+                != 0
+                && let Some((_, ps)) = result
+                    .snapshot
+                    .players
+                    .iter()
+                    .find(|(id, _)| *id == run.program.client)
+            {
+                run.scoreboard_samples.push((tick, ps.origin));
+            }
+            if run.match_states.last().is_none_or(|last| {
+                last.ended != match_state.ended
+                    || last.score_limit != match_state.score_limit
+                    || last.scores != match_state.scores
+            }) {
+                run.match_states.push(match_state);
+            }
+            let seats: Vec<_> = final_seats
+                .iter()
+                .filter(|(_, seat)| seat.final_kill)
+                .map(|(client, seat)| (*client, seat.spectator_client, seat.length_ms))
+                .collect();
+            crate::input_program::observe_final_killcams(&mut run.final_killcams, tick, &seats);
+            run.events.extend(
+                result
+                    .snapshot
+                    .meta
+                    .journal
+                    .iter()
+                    .filter(|record| record.tick == tick)
+                    .cloned(),
+            );
+            let last_seq = run.pickups.last().map_or(0, |(_, pickup)| pickup.seq);
+            run.pickups.extend(
+                result
+                    .snapshot
+                    .meta
+                    .item_pickups
+                    .iter()
+                    .copied()
+                    .filter(|pickup| pickup.seq > last_seq)
+                    .map(|pickup| (tick, pickup)),
+            );
+        }
+        Ok(result)
     }
 
     pub fn visit_projectiles(&self, visit: impl FnMut(&crate::ProjectileState)) {
@@ -364,6 +491,128 @@ impl SimWorld {
 
     pub fn player(&self, id: ClientId) -> Option<&PlayerState> {
         player_ref(&self.ecs, id)
+    }
+
+    pub fn prepare_input_actor(
+        &mut self,
+        id: ClientId,
+        p: &crate::input_program::InputActorPreparation,
+    ) -> Result<(), String> {
+        if self.input_program().is_some() || !self.cheats_enabled() || !self.is_running() {
+            return Err(
+                "cast preparation needs an active cheat authority before input programs".into(),
+            );
+        }
+        if !(0..=69).contains(&p.rank)
+            || !(0..=10).contains(&p.prestige)
+            || p.name.is_empty()
+            || p.name.len() > 15
+            || p.name.bytes().any(|b| b < 32)
+            || p.score < 0
+            || p.kills < 0
+            || p.deaths < 0
+        {
+            return Err("invalid cast identity or scoreboard".into());
+        }
+        if self
+            .client_meta(id)
+            .is_none_or(|m| m.lifecycle != crate::ClientLifecycle::Alive)
+        {
+            return Err("cast actor must be alive".into());
+        }
+        if let Some(streak) = &p.streak {
+            if streak.count > p.kills {
+                return Err("live streak cannot exceed total kills".into());
+            }
+            crate::script::host::players::validate_streak(&self.ecs, streak)?;
+        }
+        crate::script::host::players::prepare_card(&mut self.ecs, id.0, p.title, p.icon)?;
+        crate::script::host::players::prepare_round_stats(
+            &mut self.ecs,
+            id.0,
+            p.score,
+            p.kills,
+            p.deaths,
+        )?;
+        if let Some(streak) = &p.streak {
+            self.ecs
+                .get_resource_or_init::<crate::input_program::PendingInputStreaks>()
+                .0
+                .insert(id, streak.clone());
+        }
+        let mut frame = self.frame();
+        let meta = frame.client_meta_mut(id);
+        meta.name = entity_iw4::pack_client_state_name(&p.name);
+        meta.rank = p.rank;
+        meta.prestige = p.prestige;
+        meta.score = p.score;
+        meta.kills = p.kills;
+        meta.deaths = p.deaths;
+        Ok(())
+    }
+
+    pub fn input_actor_streak(&self, id: ClientId) -> crate::input_program::InputStreakState {
+        crate::script::host::players::streak_state(&self.ecs, id.0)
+    }
+
+    pub fn prepare_input_team_scores(&mut self, allies: i32, axis: i32) -> Result<(), String> {
+        if self.input_program().is_some()
+            || !self.cheats_enabled()
+            || !self.is_running()
+            || !matches!(
+                self.phase(),
+                crate::MatchPhase::Warmup | crate::MatchPhase::Playing
+            )
+        {
+            return Err(
+                "score preparation needs an active cheat authority before input programs".into(),
+            );
+        }
+        if !self.game_mode_kind().is_team() {
+            return Err("score preparation requires a team mode".into());
+        }
+        let limit = self
+            .ecs
+            .get_resource::<crate::script::MatchScript>()
+            .and_then(|script| script.dvars.get("ui_scorelimit"))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(self.bootstrap_ref().score_limit);
+        if [allies, axis]
+            .iter()
+            .any(|&score| score < 0 || (limit > 0 && score >= limit))
+        {
+            return Err(
+                "prepared team scores must be nonnegative and below the score limit".into(),
+            );
+        }
+        crate::script::host::objectives::prepare_team_scores(&mut self.ecs, allies, axis)?;
+        self.objectives.scores = [0, axis, allies];
+        Ok(())
+    }
+
+    pub fn prepare_input_actor_health(&mut self, id: ClientId, health: i32) -> Result<(), String> {
+        if self.input_program().is_some() {
+            return Err("actor health must be prepared before installing input programs".into());
+        }
+        let mut frame = self.frame();
+        if !frame.cheats_enabled() || !frame.is_running() {
+            return Err("actor preparation needs an active authority with cheats".into());
+        }
+        if !(1..=100_000).contains(&health) {
+            return Err("actor health must be 1..100000".into());
+        }
+        if frame
+            .client_meta(id)
+            .is_none_or(|meta| meta.lifecycle != crate::ClientLifecycle::Alive)
+            || frame.player(id).is_none()
+        {
+            return Err("actor must be prepared alive".into());
+        }
+        frame.client_meta_mut(id).max_health = health;
+        let ps = frame.player_mut(id).expect("validated actor");
+        ps.max_health = health;
+        ps.health = health;
+        Ok(())
     }
 
     pub fn visit_players(&self, visit: impl FnMut(ClientId, &PlayerState)) {

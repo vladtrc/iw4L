@@ -197,7 +197,10 @@ pub(crate) fn update_killcam_skip(
     };
     let game_ended = i32::from(hud.final_kill);
 
-    let scores_open = i32::from(actions.as_ref().is_some_and(|a| a.client.kb.scores.active));
+    let scores_open = i32::from(
+        crate::scoreboard::recorded_hold(snapshot, presentation.client_id())
+            || actions.as_ref().is_some_and(|a| a.client.kb.scores.active),
+    );
 
     if !surface.is_ready() {
         renderer.hide();

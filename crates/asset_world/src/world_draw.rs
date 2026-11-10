@@ -295,6 +295,7 @@ impl WorldVertexPayload {
 
 #[derive(Clone, Debug)]
 pub struct WorldDraw {
+    pub space: asset_core::world_frame::SceneSpace,
     pub batches: Vec<WorldBatch>,
 
     pub sky_model: Option<crate::model_mesh::ModelMesh>,
@@ -682,6 +683,15 @@ pub fn build_world_draw(
     geometry: GfxWorldGeometry,
     materials: MaterialCatalog,
 ) -> Result<(WorldDraw, MaterialCatalog), WorldMeshError> {
+    build_world_draw_region(s, geometry, materials, None)
+}
+
+pub fn build_world_draw_region(
+    s: &ZoneStream<'_>,
+    geometry: GfxWorldGeometry,
+    materials: MaterialCatalog,
+    region: Option<crate::WorldRegion>,
+) -> Result<(WorldDraw, MaterialCatalog), WorldMeshError> {
     let (Some(vertices), Some(indices)) = (geometry.vertices, geometry.indices) else {
         return Err(WorldMeshError::NoGeometry);
     };
@@ -689,17 +699,62 @@ pub fn build_world_draw(
         return Err(WorldMeshError::NoGeometry);
     };
 
-    let mut packed_vertices = Vec::with_capacity(geometry.vertex_count);
-    let mut positions = Vec::with_capacity(geometry.vertex_count);
-    let mut normals = Vec::with_capacity(geometry.vertex_count);
-    let mut tangents = Vec::with_capacity(geometry.vertex_count);
-    let mut colors = Vec::with_capacity(geometry.vertex_count);
-    let mut texture_uvs = Vec::with_capacity(geometry.vertex_count);
-    let mut lightmap_uvs = Vec::with_capacity(geometry.vertex_count);
+    let triangle_mask = region
+        .map(|region| region.triangles(s, geometry))
+        .transpose()?;
+    let mut selected = triangle_mask
+        .as_ref()
+        .map(|rows| {
+            rows.iter()
+                .map(|row| row.iter().any(|keep| *keep))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![true; geometry.surface_count]);
+    let mut used_vertices = vec![region.is_none(); geometry.vertex_count];
+    if let Some(mask) = &triangle_mask {
+        for (i, keep) in selected.iter_mut().enumerate() {
+            let surface = surfaces.at(i * s.layout(sz::GFX_SURFACE, 32));
+            let material = materials.material_index(surface.at(sz::gfx_surface::MATERIAL));
+            if material
+                .and_then(|i| materials.materials.get(i.get()))
+                .is_some_and(|m| surface_pass(Some(m)).sky)
+            {
+                *keep = false;
+            }
+            if !*keep {
+                continue;
+            }
+            let first = s.u32_at(surface, sz::gfx_surface::FIRST_VERTEX)? as usize;
+            let base = s.u32_at(surface, sz::gfx_surface::BASE_INDEX)? as usize;
+            for (triangle, keep) in mask[i].iter().enumerate() {
+                if !keep {
+                    continue;
+                }
+                for corner in 0..3 {
+                    let index =
+                        first + s.u16_at(indices, (base + triangle * 3 + corner) * 2)? as usize;
+                    used_vertices[index] = true;
+                }
+            }
+        }
+    }
+    let selected_vertex_count = used_vertices.iter().filter(|v| **v).count();
+    let mut vertex_remap = vec![0u32; geometry.vertex_count];
+    let mut packed_vertices = Vec::with_capacity(selected_vertex_count);
+    let mut positions = Vec::with_capacity(selected_vertex_count);
+    let mut normals = Vec::with_capacity(selected_vertex_count);
+    let mut tangents = Vec::with_capacity(selected_vertex_count);
+    let mut colors = Vec::with_capacity(selected_vertex_count);
+    let mut texture_uvs = Vec::with_capacity(selected_vertex_count);
+    let mut lightmap_uvs = Vec::with_capacity(selected_vertex_count);
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
 
     for i in 0..geometry.vertex_count {
+        if !used_vertices[i] {
+            continue;
+        }
+        vertex_remap[i] = positions.len() as u32;
         let v = vertices.at(i * sz::GFX_WORLD_VERTEX);
         let mut packed = [0u8; sz::GFX_WORLD_VERTEX];
         for (offset, byte) in packed.iter_mut().enumerate() {
@@ -736,14 +791,14 @@ pub fn build_world_draw(
     let mut unrouted_surfaces = 0usize;
     let mut undecided_state_bits_surfaces = 0usize;
 
-    for i in 0..geometry.surface_count {
+    for (i, &keep) in selected.iter().enumerate() {
         let surface = surfaces.at(i * s.layout(sz::GFX_SURFACE, 32));
-        let first_vertex = s.u32_at(surface, 4)? as usize;
-        let vertex_count = s.u16_at(surface, 8)? as usize;
-        let tri_count = s.u16_at(surface, 10)? as usize;
-        let base_index = s.u32_at(surface, 12)? as usize;
+        let first_vertex = s.u32_at(surface, sz::gfx_surface::FIRST_VERTEX)? as usize;
+        let vertex_count = s.u16_at(surface, sz::gfx_surface::VERTEX_COUNT)? as usize;
+        let tri_count = s.u16_at(surface, sz::gfx_surface::TRI_COUNT)? as usize;
+        let base_index = s.u32_at(surface, sz::gfx_surface::BASE_INDEX)? as usize;
         let lightmap_index = s.u8_at(surface, s.layout(20, 24))? as usize;
-        let material = materials.material_index(surface.at(16));
+        let material = materials.material_index(surface.at(sz::gfx_surface::MATERIAL));
         let authored = material.and_then(|index| materials.materials.get(index.get()));
         let pass = crate::world_draw::surface_pass(authored);
         let is_sky = pass.sky;
@@ -761,7 +816,7 @@ pub fn build_world_draw(
         surface_primary_lights.push(s.u8_at(surface, s.layout(22, 26))?);
         surface_reflection_probes.push(s.u8_at(surface, s.layout(21, 25))?);
         surface_draw_fields.push(SurfaceDrawFields {
-            first_vertex: first_vertex as u32,
+            first_vertex: vertex_remap.get(first_vertex).copied().unwrap_or(0),
             tri_count: tri_count as u16,
             base_index: base_index as u32,
             lightmap_index: lightmap_index.min(255) as u8,
@@ -778,37 +833,47 @@ pub fn build_world_draw(
         }
         let range_start = packed_indices.len() as u32;
 
-        if is_shadowcaster {
+        let count = if is_shadowcaster || !keep {
             skipped_shadowcaster_surfaces += 1;
-            surface_index_ranges.push((range_start, 0));
-            continue;
-        }
-
-        if first_vertex + vertex_count > geometry.vertex_count
+            0
+        } else if first_vertex + vertex_count > geometry.vertex_count
             || base_index + tri_count * 3 > geometry.index_count
         {
             skipped_surfaces += 1;
-            surface_index_ranges.push((range_start, 0));
-            continue;
-        }
-
-        let mut ok = true;
-        for t in 0..tri_count * 3 {
-            let local = s.u16_at(indices, (base_index + t) * 2)? as usize;
-            let absolute = first_vertex + local;
-            if absolute >= geometry.vertex_count {
-                skipped_surfaces += 1;
-                ok = false;
-                break;
-            }
-            packed_indices.push(absolute as u32);
-        }
-        let count = if ok {
-            packed_indices.len() as u32 - range_start
-        } else {
-            packed_indices.truncate(range_start as usize);
             0
+        } else {
+            let mut ok = true;
+            for t in 0..tri_count * 3 {
+                if triangle_mask.as_ref().is_some_and(|rows| !rows[i][t / 3]) {
+                    continue;
+                }
+                let local = s.u16_at(indices, (base_index + t) * 2)? as usize;
+                let absolute = first_vertex + local;
+                if absolute >= geometry.vertex_count {
+                    skipped_surfaces += 1;
+                    ok = false;
+                    break;
+                }
+                packed_indices.push(vertex_remap[absolute]);
+            }
+            if ok {
+                packed_indices.len() as u32 - range_start
+            } else {
+                packed_indices.truncate(range_start as usize);
+                0
+            }
         };
+        if region.is_some() {
+            let fields = &mut surface_draw_fields[i];
+            fields.base_index = range_start;
+            fields.tri_count = (count / 3) as u16;
+            fields.first_vertex = packed_indices
+                [range_start as usize..(range_start + count) as usize]
+                .iter()
+                .copied()
+                .min()
+                .unwrap_or(0);
+        }
         surface_index_ranges.push((range_start, count));
     }
 
@@ -827,7 +892,13 @@ pub fn build_world_draw(
         bounds: geometry.bounds.map(|bits| bits.map(f32::from_bits)),
     };
 
-    let lightmap = decode_lightmaps(s, geometry);
+    let needed_lightmaps: std::collections::HashSet<_> = selected
+        .iter()
+        .enumerate()
+        .filter(|(_, keep)| **keep)
+        .map(|(i, _)| surface_lightmap_indices[i] as usize)
+        .collect();
+    let lightmap = decode_lightmaps(s, geometry, region.map(|_| &needed_lightmaps));
     let surface_lightmapped: Vec<bool> = match &lightmap {
         Ok(pages) => authored_lightmapped
             .into_iter()
@@ -877,6 +948,7 @@ pub fn build_world_draw(
 
     Ok((
         WorldDraw {
+            space: Default::default(),
             sky_model: None,
             batches,
             lightmap,
@@ -1092,20 +1164,20 @@ fn decode_brush_models(
     for i in 0..geometry.model_count {
         let model = models.at(i * sz::GFX_BRUSH_MODEL);
         surfs.push(GfxBrushModelSurfs {
-            surface_count: s.u16_at(model, 52)?,
-            start_surf: s.u16_at(model, 54)?,
-            surface_count_no_decal: s.u16_at(model, 56)?,
+            surface_count: s.u16_at(model, sz::gfx_brush_model::SURFACE_COUNT)?,
+            start_surf: s.u16_at(model, sz::gfx_brush_model::START_SURF)?,
+            surface_count_no_decal: s.u16_at(model, sz::gfx_brush_model::SURFACE_COUNT_NO_DECAL)?,
         });
         bounds.push(GfxBrushModelBounds {
             mid: [
-                s.f32_at(model, 24)?,
-                s.f32_at(model, 28)?,
-                s.f32_at(model, 32)?,
+                s.f32_at(model, sz::gfx_brush_model::BOUNDS_MID)?,
+                s.f32_at(model, sz::gfx_brush_model::BOUNDS_MID + 4)?,
+                s.f32_at(model, sz::gfx_brush_model::BOUNDS_MID + 8)?,
             ],
             half: [
-                s.f32_at(model, 36)?,
-                s.f32_at(model, 40)?,
-                s.f32_at(model, 44)?,
+                s.f32_at(model, sz::gfx_brush_model::BOUNDS_HALF)?,
+                s.f32_at(model, sz::gfx_brush_model::BOUNDS_HALF + 4)?,
+                s.f32_at(model, sz::gfx_brush_model::BOUNDS_HALF + 8)?,
             ],
         });
     }
@@ -1147,6 +1219,7 @@ pub fn brush_model_vertex_centroid(
 fn decode_lightmaps(
     s: &ZoneStream<'_>,
     geometry: GfxWorldGeometry,
+    needed: Option<&std::collections::HashSet<usize>>,
 ) -> Result<Vec<Option<WorldLightmap>>, WorldLightmapGap> {
     if geometry.lightmap_count == 0 {
         return Err(WorldLightmapGap::Missing);
@@ -1158,6 +1231,10 @@ fn decode_lightmaps(
     let mut decoded = 0usize;
     let mut last_err = None;
     for i in 0..retain {
+        if needed.is_some_and(|needed| !needed.contains(&i)) {
+            pages.push(None);
+            continue;
+        }
         let pair = geometry.lightmaps[i];
         match decode_lightmap_pair(s, pair.primary, pair.secondary) {
             Ok(page) => {

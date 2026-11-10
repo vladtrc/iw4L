@@ -17,6 +17,7 @@ pub struct PlayAlias {
 
 #[derive(Message, Clone, Debug)]
 pub enum AliasCommand {
+    PlayMusic(PlayAlias),
     Play(PlayAlias),
     PlayPitched {
         sound: PlayAlias,

@@ -368,6 +368,7 @@ pub struct WeaponSelect {
 
     pub last_primary: u32,
     pub mapped_index: u32,
+    pub pickup_seq: u32,
 }
 
 pub fn follow_held_weapon_select(
@@ -1341,6 +1342,24 @@ impl ClientCommandSampler<'_> {
         }
         follow_held_weapon_select(&mut self.select, ps_weapon, life_sequence, times.game_msec);
         if let Some(ps) = ps
+            && let Some(snapshot) = source.snapshot()
+            && let Some(pickup) = snapshot
+                .meta
+                .item_pickups
+                .iter()
+                .filter(|item| {
+                    item.seq > self.select.pickup_seq
+                        && item.picker == source.client_id().0 as i32
+                        && ps.weapons.contains(&(item.weapon as i32))
+                })
+                .max_by_key(|item| item.seq)
+        {
+            self.select.pickup_seq = pickup.seq;
+            self.select.index = pickup.weapon;
+            self.select.mapped_index = pickup.weapon;
+            self.select.time = times.game_msec;
+        }
+        if let Some(ps) = ps
             && self.select.index == ps.weapon
         {
             self.select.mapped_index = if level
@@ -1846,6 +1865,7 @@ pub struct LocalCommandPrediction<'w> {
     actions: ResMut<'w, ClientActionInput>,
     gate: Res<'w, AuthorityInputGate>,
     pending: ResMut<'w, PendingClientSends>,
+    capture: ResMut<'w, crate::LocalCommandCapture>,
     proxy: Res<'w, RemoteProxyState>,
     cls: Res<'w, ClientRealtime>,
     cg_clock: Res<'w, FrameClock>,
@@ -1876,6 +1896,8 @@ impl LocalCommandPrediction<'_> {
         );
         if let Some((seq, cmd)) = generated {
             self.actions.consume_edges();
+            self.capture
+                .push(self.prediction.0.local(), seq, cmd, sample);
             self.pending.push(seq, cmd, sample);
         }
     }
@@ -2449,6 +2471,7 @@ pub fn register_client_runtime(app: &mut App) {
         .scoped_message::<AcceptedImpact>(frame::Timeline::Live)
         .scoped_message::<ImpactReconstruction>(frame::Timeline::Live)
         .scoped::<PendingClientSends>(frame::MatchScope::Live)
+        .scoped::<crate::LocalCommandCapture>(frame::MatchScope::Live)
         .init_resource::<ClientCmdTemplate>()
         .scoped::<WeaponSelect>(frame::MatchScope::Live)
         .init_resource::<LocationCursor>()

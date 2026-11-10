@@ -9,6 +9,7 @@ use render_frontend::adapters::anim::killcam::AtlasClips;
 pub(crate) struct PreparedAtlas {
     pub atlas: Arc<sim::world_graph::Atlas>,
     pub clips: AtlasClips,
+    pub compasses: std::collections::BTreeMap<asset_core::atlas::WorldId, assets::SessionCompass>,
 }
 
 pub(crate) fn prepare_atlas(
@@ -23,9 +24,10 @@ pub(crate) fn prepare_atlas(
         }
         return Ok(None);
     };
-    if worlds.len() + 1 != merged.scene.worlds.len() {
+    if worlds.len() + 1 != merged.scene().worlds.len() {
         return Err("atlas prepared world count differs from the scene".into());
     }
+    merged.scene().validate()?;
     let _span = perf::span!("atlas_prepare", "iw4l.sim");
     let path = merged.path.display();
     if let Some(clip) = base_clip.take() {
@@ -36,35 +38,54 @@ pub(crate) fn prepare_atlas(
     }
     let mut atlas = sim::world_graph::Atlas {
         root_zone: merged.zone().into(),
-        versions: merged.scene.versions.clone(),
-        dvars: merged.scene.dvars.clone(),
+        space: merged.scene().space.clone(),
+        versions: merged.scene().versions.clone(),
+        dvars: merged.scene().dvars.clone(),
         portals: merged
-            .scene
+            .scene()
             .portals
             .iter()
             .map(|portal| portal.pair())
             .collect(),
         portal_clearance: merged
-            .scene
+            .scene()
             .portals
             .iter()
             .map(|portal| portal.ends.each_ref().map(|end| end.trim.clearance))
             .collect(),
         portal_thickness: merged
-            .scene
+            .scene()
             .portals
             .iter()
             .map(|portal| portal.ends.each_ref().map(|end| end.thickness))
             .collect(),
         ..Default::default()
     };
+    let root = if let Some(clip) = base_clip.as_deref() {
+        let (brushes, bsp, mesh, cmodels) = crate::sim_clip_map(clip);
+        sim::world_graph::AtlasWorld {
+            zone: merged.scene().worlds[0].clone(),
+            brushes,
+            bsp,
+            mesh,
+            cmodels,
+        }
+    } else {
+        sim::world_graph::AtlasWorld {
+            zone: merged.scene().worlds[0].clone(),
+            ..Default::default()
+        }
+    };
+    atlas.worlds.push(Arc::new(root));
     let mut clips = vec![None];
+    let mut compasses = std::collections::BTreeMap::new();
     for prepared in worlds {
+        compasses.insert(prepared.id, prepared.compass);
         if progress.is_canceled() {
             return Err("atlas preparation canceled".into());
         }
-        let world_id = atlas.worlds.len() + 1;
-        if prepared.id.index() != world_id || merged.scene.worlds[world_id] != prepared.zone {
+        let world_id = atlas.worlds.len();
+        if prepared.id.index() != world_id || merged.scene().worlds[world_id] != prepared.zone {
             return Err(format!(
                 "atlas prepared world {world_id} differs from the scene"
             ));
@@ -84,18 +105,10 @@ pub(crate) fn prepare_atlas(
     }
     let door = |door: &sim::world_graph::AtlasDoor| *door;
     let atlas = Arc::new(atlas);
-    let flight = base_clip.as_deref().map(|clip| {
-        let (brushes, bsp, mesh, cmodels) = crate::sim_clip_map(clip);
-        let base = Arc::new(sim::world_graph::AtlasWorld {
-            zone: merged.scene.worlds[0].clone(),
-            brushes,
-            bsp,
-            mesh,
-            cmodels,
-        });
+    let flight = base_clip.is_some().then(|| {
         let rules = sim::projectile_flight::ProjectileFlightRules::default()
-            .with_dvars(|key| merged.scene.dvars.get(key)?.parse().ok());
-        (atlas.clone(), base, rules)
+            .with_dvars(|key| merged.scene().dvars.get(key)?.parse().ok());
+        (atlas.clone(), atlas.worlds[0].clone(), rules)
     });
     let killcam = AtlasClips {
         flight,
@@ -113,12 +126,13 @@ pub(crate) fn prepare_atlas(
     diag::info!(
         World,
         "atlas: {} worlds, {} portals from {path}",
-        atlas.worlds.len() + 1,
+        atlas.worlds.len(),
         atlas.portals.len()
     );
     Ok(Some(PreparedAtlas {
         atlas,
         clips: killcam,
+        compasses,
     }))
 }
 
@@ -139,21 +153,35 @@ pub fn replace_clip(
     world: usize,
 ) -> Result<Arc<asset_world::ClipCollision>, String> {
     let replacements: Vec<_> = merged
-        .scene
+        .scene()
         .replacements()
         .filter(|&r| r.world == world)
         .cloned()
         .collect();
     let trims: Vec<_> = merged
-        .scene
+        .scene()
         .trims()
         .filter(|&t| t.world == world)
         .cloned()
         .collect();
-    if replacements.is_empty() && trims.is_empty() {
+    let openings: Vec<_> = merged
+        .scene()
+        .playerclip_openings
+        .iter()
+        .filter(|opening| opening.world == world)
+        .collect();
+    if replacements.is_empty() && trims.is_empty() && openings.is_empty() {
         return Ok(clip);
     }
     let mut clip = Arc::unwrap_or_clone(clip);
+    for opening in openings {
+        let changed = clip.clear_playerclip_opening(opening.region);
+        diag::info!(
+            World,
+            "scene collision world={world}: bounded playerclip opening {:?} changed {changed} brush flags; geometry and floors retained",
+            opening.region
+        );
+    }
     asset_world::PortalDoorReplacement::apply_all_collision(&replacements, &mut clip)?;
     for trim in &trims {
         trim.apply_collision(&mut clip)?;

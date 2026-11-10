@@ -42,6 +42,7 @@ pub struct DynEntModelEntity;
 pub struct PublishedCellView {
     pub view: usize,
     pub world: usize,
+    pub shared: bool,
     pub eye: [f32; 3],
     pub words: Vec<u32>,
     pub cell_count: usize,

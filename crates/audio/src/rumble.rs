@@ -318,7 +318,7 @@ struct RumblePlayer<'w, 's> {
 impl RumblePlayer<'_, '_> {
     fn update(
         mut self,
-        entities: Query<(&net::CEntity, &Transform)>,
+        entities: Query<(&net::CEntity, &net::CEntityRuntime)>,
         bank: Option<Res<crate::SoundBank>>,
         presented: Res<PresentedSnapshot>,
         local: Res<LocalPresentClient>,
@@ -438,7 +438,7 @@ impl RumblePlayer<'_, '_> {
                     entities
                         .iter()
                         .find(|(identity, _)| i32::from(identity.number()) == number)
-                        .map(|(_, transform)| crate::space::transform_inches(transform.translation))
+                        .map(|(_, runtime)| runtime.origin)
                 });
                 current.strong_motor *= gain;
                 current.weak_motor *= gain;
@@ -469,7 +469,7 @@ impl RumblePlayer<'_, '_> {
 
 fn update(
     player: RumblePlayer,
-    entities: Query<(&net::CEntity, &Transform)>,
+    entities: Query<(&net::CEntity, &net::CEntityRuntime)>,
     bank: Option<Res<crate::SoundBank>>,
     presented: Res<PresentedSnapshot>,
     local: Res<LocalPresentClient>,

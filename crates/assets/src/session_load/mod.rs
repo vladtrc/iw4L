@@ -102,6 +102,7 @@ pub struct PreparedAtlasWorld {
     pub id: asset_core::atlas::WorldId,
     pub zone: String,
     pub collision: Arc<ClipCollision>,
+    pub compass: crate::SessionCompass,
 }
 
 pub struct PreparedMatch {

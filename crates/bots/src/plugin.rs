@@ -521,8 +521,7 @@ fn refresh_nav(world: &SimWorld, nav: &mut BotNav, load: Option<&assets::MapLoad
         assets::load_pool().spawn(async move {
             let mut graph = navigation_for(&collision, bounds, &seeds, digest);
             if let Some(atlas) = &atlas {
-                for (index, world) in atlas.worlds.iter().enumerate() {
-                    let world_id = index + 1;
+                for (world_id, world) in atlas.worlds.iter().enumerate().skip(1) {
                     let offset = sim::world_graph::world_offset(world_id);
                     let door_seeds: Vec<_> = atlas
                         .portals

@@ -61,6 +61,7 @@ pub(crate) fn spawn_compass(root: &mut ChildSpawnerCommands) {
 }
 
 pub(crate) struct DrawableCompass {
+    pub(crate) namespace: asset_core::FamilyId,
     pub(crate) image_name: String,
     pub(crate) bounds: CompassMapBounds,
     max_range: f32,
@@ -360,7 +361,10 @@ impl CompassRenderer<'_> {
             self.hide();
             return;
         };
-        let Some(drawable) = resolve(self.compass.as_deref(), &mut self.hud_images) else {
+        let Some(drawable) = resolve(
+            self.compass.as_deref().and_then(|c| c.at(ps.origin)),
+            &mut self.hud_images,
+        ) else {
             self.hide();
             return;
         };
@@ -451,9 +455,7 @@ impl CompassRenderer<'_> {
             &surface,
             items.map,
             &drawable.image_name,
-            self.hud_images
-                .map_namespace()
-                .expect("drawable compass family"),
+            drawable.namespace,
             uv,
             map_rotation,
             radar,
@@ -467,9 +469,7 @@ impl CompassRenderer<'_> {
             jam_fade,
         );
 
-        let Some(map_ns) = self.hud_images.map_namespace() else {
-            return;
-        };
+        let map_ns = drawable.namespace;
         if self
             .hud_images
             .get(map_ns, &drawable.image_name, &mut self.images)
@@ -891,7 +891,7 @@ pub(crate) fn resolve(
         );
         return None;
     };
-    let map_ns = hud_images.map_namespace()?;
+    let map_ns = compass.namespace.or_else(|| hud_images.map_namespace())?;
     hud_images.ensure_rgba(map_ns, image_name);
     if hud_images.rgba(map_ns, image_name).is_none() {
         diag::warn_once!(
@@ -912,6 +912,7 @@ pub(crate) fn resolve(
         return None;
     };
     Some(DrawableCompass {
+        namespace: map_ns,
         image_name: image_name.to_owned(),
         bounds,
         max_range: match compass.declaration.max_range {

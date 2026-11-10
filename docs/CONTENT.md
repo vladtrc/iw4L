@@ -7,6 +7,7 @@ provides `iw4l-content`. The game runtime does not depend on either package.
 cargo build --profile play -p content_tool
 set -a; . ./.env; set +a
  target/play/iw4l-content inspect-doors iw4:mp_terminal
+ target/play/iw4l-content inspect-layout iw4:mp_nightshift
  target/play/iw4l-content inspect-projectile-openings iw5:mp_seatown
  target/play/iw4l-content connect-maps iw4:mp_terminal t5:mp_nuked
  target/play/iw4l-content solve-shot route.json
@@ -34,6 +35,13 @@ renaming settings cannot reconstruct missing geometry.
 implements the flight step shared by the solver, match and killcam.
 A normal map has no extra worlds or portals. A scene may connect two locations
 of its single world by assigning both endpoint world indices to zero.
+
+In a shared scene, players, dropped items and flying projectiles retain a native
+world basis. Item sweeps and Use sight traces map their endpoints and hulls into
+the scene and return contact normals in that native basis. Projectile contact
+uses the same placed-world/body union as hitscan, so a knife can hit an actor
+with another gravity direction. Embedded-player attachments convert the contact
+pose into the victim's native bone basis.
 
 `launch: {feet, owner_velocity, eye_height}` fixes a shot search to a measured
 in-flight release pose. Such scenes require an input program; their `shot.cmds`
@@ -73,3 +81,32 @@ Recording format 1 has a separate game-protocol field and stores the complete
 64-byte map key plus its terminator. Recordings with the earlier header layout
 are rejected by the format check; they are not reinterpreted as truncated scene
 names. Scene recordings retain their frozen `.layout.json` sidecar.
+
+`inspect-layout` writes native static-model placements, ladder collision planes and DPVS opening vertices under `<artifacts>/content/layouts/`. These are authoring facts for scene blocking, not validated movement routes.
+
+DPVS openings provide planes and bounds for authoring; they are visibility partitions, so their dimensions alone do not prove a walkable doorway. Validate the resulting scene and check an actual crossing.
+
+Additional IW4 worlds can select a native-space fragment with `regions`, an array aligned with `worlds`. Use `null` for full worlds; a fragment is `{"min":[x,y,z],"max":[x,y,z]}` with finite, strictly increasing bounds. Root-world fragments and unsupported family selectors are refused. Example:
+
+```json
+"worlds": ["iw4:mp_nightshift", "t5:mp_firingrange", "iw4:mp_quarry"],
+"regions": [null, null, {"min":[-5500,-1200,-400],"max":[-3750,650,1100]}]
+```
+
+The IW4 loader walks the original sequential fastfile, defers XModel preparation until selected placements are known, builds only intersecting triangles and their referenced vertices, and requests selected material/lightmap images. Unselected texture edges are removed before the later merged-image pass. Collision brushes are intersected with the region; triangle partitions and placed models are compacted conservatively. Native flags (including ladders and triangle walkability) are preserved. Intersecting surfaces/models can extend beyond the bounds; selection does not manufacture missing faces or seal cut walls. Keep a margin around the desired building. Source fastfile decompression and metadata traversal still cover the source file; the retained scene and GPU geometry do not contain the full selected map.
+
+`iw4l-content probe-floor <zone> <points.json>` drops a player box 8192 units down from each native `[x, y, z]` point against player-solid collision and exports the landing to `content/layouts/<zone>-floors.json`.
+
+`iw4l-content probe-sweep <zone> <queries.json>` exports native collision sweeps to `content/layouts/<zone>-sweeps.json`. Queries are an array of objects with `start`, `end` and optional `mins`/`maxs` (default player box). Each sweep compares the player-solid, solid-only and playerclip-only masks, with and without placed static-model collision. This is a read-only authoring diagnostic; it does not modify the scene or collision.
+
+`playerclip_openings` optionally authors bounded movement openings: `[{"world":0,"min":[x,y,z],"max":[x,y,z]}]`, in that world's native coordinates. Only the normalized PLAYERCLIP bit on intersecting brush proxies is cleared before scene installation. Brush planes, BSP, SOLID contents, triangle meshes, models and ladder flags are retained. Place the volume above the walking floor and inside the intended opening; player-only floor proxies outside it remain active. Ordinary maps have no openings. Frozen recording recipes preserve them, and collision fingerprints include the changed contents. Broad map-wide PLAYERCLIP removal is refused because that flag can also support grating floors.
+
+Map authoring uses Rust tooling and may keep editable recipes in YAML. Compile a
+YAML recipe with `cargo run -p content_tool -- recipe-build scene.yml scene.json`;
+this applies the native scene schema validator. The runtime map catalog and frozen
+recording layouts remain JSON. Use `validate scene.json` for the additional game
+collision checks. Generic actor timeline utilities use the same Cargo
+workspace; see [SCENARIOS.md](SCENARIOS.md).
+
+Scene ownership, input forwarding and the headless execution design are specified
+in [SCENE-CONTRACT.md](SCENE-CONTRACT.md).

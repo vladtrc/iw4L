@@ -350,6 +350,10 @@ impl PortalCullFrame<'_> {
         opening: usize,
         pvs: &render_scene::LockPvsView,
     ) -> bool {
+        if view.shared {
+            // Native room connectivity cannot occlude an overlapping map.
+            return true;
+        }
         let cache = &mut self.cells;
         let scratch = &mut *self.scratch;
         let aperture = view.openings[opening];
@@ -448,6 +452,8 @@ pub fn apply_dpvs_cull(
     *published_vis = render_scene::PublishedCellVis::default();
     scene.portal_visibility.clear();
     scene.portal_view = None;
+    let shared = matches!(scene.space, asset_core::world_frame::SceneSpace::Shared(_));
+    let portal_space = scene.space.clone();
     let portaled = !scene.portal_pairs.is_empty();
     let generation = scene.products_id;
     let portal_description = portaled.then(|| {
@@ -512,6 +518,8 @@ pub fn apply_dpvs_cull(
                 pairs: &pairs,
                 world_count: count,
                 surfaces,
+                space: Some(&portal_space),
+                camera_world: shared.then_some(prepared.physical_world),
             },
             render_frame::PortalCamera {
                 eye,
@@ -600,13 +608,17 @@ pub fn apply_dpvs_cull(
         f64::from(portal_counts[4])
     );
     let dpvs = &cull.dpvs;
-    if dpvs.cell_count == 0 {
+    if dpvs.cell_count == 0 && !shared {
         return;
     }
 
     stats.frustum_planes.clone_from(&pvs.frustum_planes);
 
-    let camera_world = portal_view.as_ref().map_or(0, |view| view.camera_world);
+    let camera_world = portal_view
+        .as_ref()
+        .map_or(if shared { prepared.physical_world } else { 0 }, |view| {
+            view.camera_world
+        });
     let camera_dpvs = if camera_world == 0 {
         dpvs
     } else {
@@ -623,12 +635,24 @@ pub fn apply_dpvs_cull(
     }
     .cell_for_point(eye);
     let single_cell = single_cell_from_env();
-    let mut words = vec![0u32; words_for_bits(cell_count.max(1))];
+    let mut words = vec![
+        0u32;
+        words_for_bits(if shared {
+            dpvs.cell_count.max(1)
+        } else {
+            cell_count.max(1)
+        })
+    ];
     let mut vis = VisBits::new(&mut words);
 
     let mut walk_stats = dpvs_iw4::WalkStats::default();
     if !portaled {
         match eye_cell {
+            _ if shared => {
+                for cell in 0..dpvs.cell_count {
+                    vis.set(cell);
+                }
+            }
             Some(cell) if single_cell => vis.set(cell),
 
             Some(cell) => {
@@ -685,6 +709,30 @@ pub fn apply_dpvs_cull(
             },
             &mut aabb_stats,
         );
+    }
+
+    if shared {
+        // Native BSP portal walks describe each map's enclosed rooms, not
+        // visibility between overlapping maps. Cull all cells in one frustum.
+        for layer in &cull.atlas_layers {
+            let start = layer.surface_base;
+            let end = start + layer.surface_count;
+            if let (Some(surfaces), Some(smodels)) = (
+                cull.surface_vis.get_mut(start..end),
+                cull.smodel_vis.get_mut(layer.smodel_base..),
+            ) {
+                admit_visible_cells(
+                    &layer.dpvs,
+                    |_| true,
+                    &pvs.frustum_planes,
+                    &mut DpvsVisData {
+                        surface_vis: surfaces,
+                        smodel_vis: smodels,
+                    },
+                    &mut aabb_stats,
+                );
+            }
+        }
     }
 
     let mut planes_without_far = pvs.frustum_planes.clone();
@@ -861,12 +909,14 @@ pub fn apply_dpvs_cull(
     }
     stats.visible_cells = vis.count_ones();
 
+    // Root-sized bitsets cannot index the cells of another world.
+    let vis_all = !portaled && (shared || eye_cell.is_none());
     stats.cell_vis.clone_from(&words);
     stats.cell_vis_count = cell_count;
-    stats.cell_vis_all = eye_cell.is_none() && !portaled;
+    stats.cell_vis_all = vis_all;
     cull.cell_vis_world = camera_world;
     cull.cell_vis.clone_from(&words);
-    cull.cell_vis_all = eye_cell.is_none() && !portaled;
+    cull.cell_vis_all = vis_all;
     let views = portal_visibility
         .iter()
         .map(|report| {
@@ -887,6 +937,7 @@ pub fn apply_dpvs_cull(
             render_scene::PublishedCellView {
                 view: report.view,
                 world: report.world,
+                shared,
                 eye: report.eye,
                 words,
                 cell_count: dpvs.cell_count,
@@ -900,7 +951,7 @@ pub fn apply_dpvs_cull(
         views,
         words: words.clone(),
         cell_count,
-        vis_all: eye_cell.is_none() && !portaled,
+        vis_all,
     };
     stats.portals_frustum_skipped = walk_stats.skip_clip;
     stats.child_planes_unported = walk_stats.child_planes_unported;
@@ -1016,6 +1067,81 @@ impl PortalCullFrame<'_> {
         vis_data: &mut DpvsVisData<'_>,
         aabb_stats: &mut AabbCullStats,
     ) -> (Vec<PortalVisibility>, Vec<usize>) {
+        if view.shared {
+            // Native room walks cannot establish visibility between overlapping maps.
+            let mut reports = Vec::new();
+            for index in 0..view.worlds.len() {
+                if !view.is_selected(index) || view.moves[index].is_none() {
+                    continue;
+                }
+                let Some(planes) =
+                    view.clip_planes_in(index, pvs.eye.to_array(), &pvs.frustum_planes)
+                else {
+                    continue;
+                };
+                let mut surfaces = vec![0; vis_data.surface_vis.len()];
+                let mut smodels = vec![0; vis_data.smodel_vis.len()];
+                let mut admit = |dpvs: &WorldDpvs,
+                                 surface_base: usize,
+                                 surface_end: usize,
+                                 smodel_base: usize| {
+                    let mut local = DpvsVisData {
+                        surface_vis: &mut surfaces[surface_base..surface_end],
+                        smodel_vis: &mut smodels[smodel_base..],
+                    };
+                    admit_visible_cells(dpvs, |_| true, &planes, &mut local, aabb_stats);
+                    let mut sky_planes = planes.clone();
+                    if sky_planes.len() > 1 {
+                        sky_planes.remove(1);
+                    }
+                    add_sky_surfaces_dpvs(
+                        &dpvs.sky_start_surfs,
+                        &dpvs.surface_bounds,
+                        &sky_planes,
+                        local.surface_vis,
+                    );
+                };
+                admit(host, 0, vis_data.surface_vis.len(), 0);
+                for layer in layers {
+                    admit(
+                        &layer.dpvs,
+                        layer.surface_base,
+                        layer.surface_base + layer.surface_count,
+                        layer.smodel_base,
+                    );
+                }
+                for (out, &value) in vis_data.surface_vis.iter_mut().zip(&surfaces) {
+                    *out |= value;
+                }
+                for (out, &value) in vis_data.smodel_vis.iter_mut().zip(&smodels) {
+                    *out |= value;
+                }
+                let eye = view
+                    .eye_in(index, pvs.eye.to_array())
+                    .unwrap_or(pvs.eye.to_array());
+                reports.push(PortalVisibility {
+                    view: index,
+                    depth: view.view_depth(index).unwrap_or(0),
+                    max_range: None,
+                    world: view.worlds[index],
+                    eye,
+                    seed: eye,
+                    cell: None,
+                    planes,
+                    visible_cells: (0..host.cell_count).collect(),
+                    visible_surfaces: surfaces.iter().filter(|&&v| v != 0).count(),
+                    visible_smodels: smodels.iter().filter(|&&v| v != 0).count(),
+                });
+                view.visibility[index] = Some(render_frame::portal::PortalDrawVisibility {
+                    surface_base: 0,
+                    surfaces: surfaces.into(),
+                    smodel_base: 0,
+                    smodels: smodels.into(),
+                    bmodels: Default::default(),
+                });
+            }
+            return (reports, (0..host.cell_count).collect());
+        }
         let surface_vis = &mut *vis_data.surface_vis;
         let smodel_vis = &mut *vis_data.smodel_vis;
         let scratch = &mut *self.scratch;

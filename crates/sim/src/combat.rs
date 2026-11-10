@@ -1322,7 +1322,14 @@ fn trace_emission_world(
     let world = content
         .atlas()
         .map_or(0, |_| crate::world_graph::world_at(em.origin));
-    let offset = crate::world_graph::world_offset(world);
+    let shared = content
+        .atlas()
+        .is_some_and(|a| matches!(a.space, asset_core::world_frame::SceneSpace::Shared(_)));
+    let offset = if shared {
+        [0.0; 3]
+    } else {
+        crate::world_graph::world_offset(world)
+    };
     let local_players: Vec<_> = players
         .iter()
         .filter(|p| content.atlas().is_none() || crate::world_graph::world_at(p.origin) == world)
@@ -1335,7 +1342,7 @@ fn trace_emission_world(
     let em = &local;
     let beyond = content
         .atlas()
-        .and_then(|atlas| world.checked_sub(1).and_then(|i| atlas.worlds.get(i)));
+        .and_then(|atlas| atlas.worlds.get(world).filter(|_| world != 0));
     let (brushes, bsp, cmodels, mesh) = match beyond {
         Some(map) => (&map.brushes[..], &map.bsp, &map.cmodels, &map.mesh),
         None => (
@@ -1345,6 +1352,7 @@ fn trace_emission_world(
             content.clip_mesh(),
         ),
     };
+    let all_entities = entities;
     let entities = if world == 0 { entities } else { &[] };
     let glass_damage = RefCell::new(glass_pairs.iter().copied().collect::<HashMap<u32, u16>>());
     let glass_seen = RefCell::new(Vec::<u32>::new());
@@ -1365,38 +1373,59 @@ fn trace_emission_world(
         let cur = map.entry(pane).or_insert(0);
         *cur = glass_add_damage(*cur, scaled);
     };
-    let (mut segments, terminal) = bullet_trace_segments_filtered(
-        crate::world_graph::AtlasClip {
-            brushes,
-            bsp,
-            cmodels,
-            mesh,
-        },
-        &local_players,
-        entities,
-        &BulletTraceQuery {
-            start: em.origin,
-            end,
-            mask: MASK_BULLET_WORLD,
-            ignore: Some(em.attacker),
-            ignore_hit: None,
-            ignore_model: None,
-        },
-        pen,
-        &content.weapons().pen_table,
-        crate::bullet_collision::GlassTrace {
-            is_solid: &|piece| {
-                glass_piece_is_solid(
-                    glass_damage
-                        .borrow()
-                        .get(&(u32::from(piece)))
-                        .copied()
-                        .unwrap_or(0),
-                )
+    let query = BulletTraceQuery {
+        start: em.origin,
+        end,
+        mask: MASK_BULLET_WORLD,
+        ignore: Some(em.attacker),
+        ignore_hit: None,
+        ignore_model: None,
+    };
+    let is_solid = |piece| {
+        glass_piece_is_solid(
+            glass_damage
+                .borrow()
+                .get(&u32::from(piece))
+                .copied()
+                .unwrap_or(0),
+        )
+    };
+    let glass = crate::bullet_collision::GlassTrace {
+        is_solid: &is_solid,
+        on_hit: Some(&on_glass_hit),
+    };
+    let (mut segments, terminal) = if shared {
+        let scene = crate::bullet_collision::SharedBulletTrace {
+            atlas: content.atlas().expect("shared scene has atlas"),
+            base: content.root_clip(),
+            players,
+            models: all_entities,
+            shooter_world: world,
+            rifle: pen.rifle_bullet,
+        };
+        crate::bullet_collision::bullet_segments_with_trace(
+            &query,
+            pen,
+            &content.weapons().pen_table,
+            glass,
+            &|q| scene.trace(q, glass.is_solid),
+        )
+    } else {
+        bullet_trace_segments_filtered(
+            crate::world_graph::AtlasClip {
+                brushes,
+                bsp,
+                cmodels,
+                mesh,
             },
-            on_hit: Some(&on_glass_hit),
-        },
-    );
+            &local_players,
+            entities,
+            &query,
+            pen,
+            &content.weapons().pen_table,
+            glass,
+        )
+    };
     for segment in &mut segments {
         segment.travel_distance = Some(
             distance_before

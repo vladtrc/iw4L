@@ -188,7 +188,7 @@ pub struct PortalVisibility {
 pub struct WorldAtlasLayer {
     pub world: usize,
     pub bmodel_bounds: Vec<(u16, Bounds)>,
-    pub shift: [f32; 3],
+    pub frame: asset_core::world_frame::WorldFrame,
     pub surface_base: usize,
     pub surface_count: usize,
     pub smodel_base: usize,
@@ -211,6 +211,7 @@ pub const SMODEL_LIGHTING_MAX_CLIENT_VIEWS: u32 = 1;
 
 #[derive(Resource, Default)]
 pub struct WorldScene {
+    pub space: asset_core::world_frame::SceneSpace,
     pub readiness: frame::WorldReadiness,
     /// The sky models to draw around the eye, the match's first; the world
     /// of each is in `sky_worlds`.
@@ -780,6 +781,7 @@ impl WorldScene {
             material_layers: Vec::new(),
             world_fogs: Vec::new(),
             world_bounds_by_world: Vec::new(),
+            space: Default::default(),
             portal_pairs: Vec::new(),
             portal_worlds: 1,
             portal_visibility: Vec::new(),
@@ -898,6 +900,7 @@ impl WorldScene {
             material_layers: Vec::new(),
             world_fogs: Vec::new(),
             world_bounds_by_world: Vec::new(),
+            space: Default::default(),
             portal_pairs: Vec::new(),
             portal_worlds: 1,
             portal_visibility: Vec::new(),
@@ -1475,6 +1478,7 @@ pub fn world_scene_from_draw(
         Err(_) => Vec::new(),
     };
 
+    let scene_space = draw.space.clone();
     let mut dpvs = world_dpvs(draw.dpvs);
     let material_layers: Vec<_> = draw
         .atlas_layers
@@ -1539,7 +1543,7 @@ pub fn world_scene_from_draw(
         .map(|layer| WorldAtlasLayer {
             world: layer.world,
             bmodel_bounds: layer.bmodel_bounds,
-            shift: layer.shift,
+            frame: layer.frame,
             surface_base: layer.surface_base as usize,
             surface_count: layer.surface_count as usize,
             smodel_base: layer.smodel_base as usize,
@@ -1823,6 +1827,7 @@ pub fn world_scene_from_draw(
     scene.material_layers = material_layers;
     scene.world_fogs = world_fogs;
     scene.world_bounds_by_world = world_bounds_by_world;
+    scene.space = scene_space;
     scene.portal_pairs = portal_pairs;
     scene.portal_worlds = portal_worlds;
     scene.portal_surfaces = portal_surfaces;

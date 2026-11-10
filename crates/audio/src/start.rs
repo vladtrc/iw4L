@@ -43,9 +43,8 @@ impl SoundClass {
     pub fn scope(self) -> crate::backend::AudioScope {
         match self {
             Self::Ui => crate::backend::AudioScope::Menu,
-            Self::Weapon | Self::World | Self::Music | Self::Ambience => {
-                crate::backend::AudioScope::Match
-            }
+            Self::Music => crate::backend::AudioScope::MatchMusic,
+            Self::Weapon | Self::World | Self::Ambience => crate::backend::AudioScope::Match,
         }
     }
 }

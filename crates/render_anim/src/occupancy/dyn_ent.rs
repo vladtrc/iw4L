@@ -14,7 +14,7 @@ use crate::occupancy::dyn_ent_phys;
 use crate::occupancy::script_model::{DObjLodView, pose_script_dobj_with_materials};
 use crate::{
     DynEntDrawPlan, DynEntOwnerDraw, XMODEL_OBJECT_ID_DYNENT_BASE, append_dynent_asset,
-    stamp_plan_geometry, topology_fingerprint,
+    stamp_plan_geometry,
 };
 use anim_iw4::DOBJ_RADIUS_PARENT_ROOT;
 use render_scene::{
@@ -446,20 +446,34 @@ fn link_dyn_ent_cells(
     }
 }
 
+pub(super) fn scene_pose(
+    level: Option<&net::ClientLevel>,
+    transform: &Transform,
+) -> (usize, Transform) {
+    let space = level
+        .and_then(|level| level.content.atlas())
+        .map(|atlas| &atlas.space);
+    let sim = asset_core::world_frame::SimPoint::from_slab(transform.translation.to_array());
+    (
+        sim.world().index(),
+        render_scene::place_simulation_transform(space, *transform),
+    )
+}
+
 fn portal_dyn_ent_visible(
     vis: &PublishedCellVis,
     membership: &DynEntCellBits,
     cells: &WorldDpvsCells,
     id: u32,
+    world: usize,
     origin: [f32; 3],
     radius: f32,
 ) -> Option<bool> {
     if vis.views.is_empty() {
         return None;
     }
-    let world = sim::world_graph::world_at(origin);
     Some(vis.views.iter().any(|view| {
-        if view.world != world {
+        if !view.shared && view.world != world {
             return false;
         }
         let local = AdmittedCellVis {
@@ -480,15 +494,15 @@ fn portal_dyn_ent_visible(
 
 pub(super) fn portal_lod_eye(
     vis: &PublishedCellVis,
+    world: usize,
     origin: [f32; 3],
     camera_eye: Option<[f32; 3]>,
 ) -> Option<[f32; 3]> {
-    let world = sim::world_graph::world_at(origin);
     let distance =
         |eye: [f32; 3]| (Vec3::from_array(eye) - Vec3::from_array(origin)).length_squared();
     vis.views
         .iter()
-        .filter(|view| view.world == world)
+        .filter(|view| view.shared || view.world == world)
         .min_by(|a, b| distance(a.eye).total_cmp(&distance(b.eye)))
         .map(|view| view.eye)
         .or(camera_eye)
@@ -500,6 +514,7 @@ fn cull_dyn_ent_cell_models(
     cell_vis: Res<PublishedCellVis>,
     membership: Res<DynEntCellBits>,
     cells: Res<WorldDpvsCells>,
+    level: Option<Res<net::ClientLevel>>,
     mut instances: Query<
         (&WorldDynEntInstance, &Transform, &mut Visibility),
         With<DynEntModelEntity>,
@@ -513,13 +528,15 @@ fn cull_dyn_ent_cell_models(
             *visibility = Visibility::Hidden;
             continue;
         }
-        let origin = transform.translation.to_array();
+        let (world, placed) = scene_pose(level.as_deref(), transform);
+        let origin = placed.translation.to_array();
         let radius = xmodel_radius(catalog, &inst.current_model);
         let culled = !portal_dyn_ent_visible(
             &cell_vis,
             &membership,
             &cells,
             u32::from(inst.index),
+            world,
             origin,
             radius,
         )
@@ -535,6 +552,10 @@ fn cull_dyn_ent_cell_models(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Bevy system parameters keep scheduler resource access explicit."
+)]
 fn pose_dyn_ents(
     cell_vis: Res<PublishedCellVis>,
     catalog: Option<Res<asset_world::MapXModelSceneCatalog>>,
@@ -543,6 +564,7 @@ fn pose_dyn_ents(
     lod_skinned: Res<render_scene::LodRampSkinnedDvar>,
     prepared: Res<crate::anim::model_materials::PreparedModelMaterials>,
     mut product: ResMut<DynEntPoseProduct>,
+    level: Option<Res<net::ClientLevel>>,
 ) {
     product.owners.clear();
     if catalog.as_ref().is_some_and(|c| c.is_changed()) {
@@ -562,13 +584,12 @@ fn pose_dyn_ents(
             continue;
         }
 
-        let eye = portal_lod_eye(&cell_vis, transform.translation.to_array(), camera_eye);
+        let (world, placed) = scene_pose(level.as_deref(), transform);
+        let eye = portal_lod_eye(&cell_vis, world, placed.translation.to_array(), camera_eye);
         let camera_hidden = *visibility == Visibility::Hidden;
         // Foreign offscreen objects neither draw in a view nor cast into the
         // root sun map (R2). Keep hidden camera-world objects for sun casters.
-        if camera_hidden
-            && sim::world_graph::world_at(transform.translation.to_array()) != cell_vis.world
-        {
+        if camera_hidden && world != cell_vis.world {
             continue;
         }
         let skel = match catalog.get(&inst.current_model) {
@@ -628,7 +649,7 @@ fn pose_dyn_ents(
             entity,
             asset_index,
             model: inst.current_model.0.clone(),
-            world_from_local: transform.to_matrix(),
+            world_from_local: placed.to_matrix(),
             lighting_origin: inst.lighting_origin,
             camera_hidden,
             radius: skel.radius,
@@ -758,11 +779,7 @@ impl DynEntDrawPublisher<'_, '_> {
             }
         }
         if !self.draws.is_empty() {
-            let topology = topology_fingerprint(
-                &self.plan.indices,
-                &self.plan.surface_ranges,
-                self.plan.vertices.len(),
-            );
+            let topology = self.plan.rows.topology();
             let rev = self.plan.revision;
             self.plan.revision = stamp_plan_geometry(&mut self.plan.revisions, rev, topology);
         }

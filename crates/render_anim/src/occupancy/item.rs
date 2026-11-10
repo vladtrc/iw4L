@@ -6,7 +6,7 @@ use crate::anim::xmodel_pose::PosedModelSurface;
 use crate::occupancy::script_model::pose_script_dobj_with_materials;
 use crate::{
     ItemAssetDraw, ItemDrawPlan, ItemOwnerDraw, XMODEL_OBJECT_ID_ITEM_BASE, append_item_surfaces,
-    lighting_box_half, stamp_plan_geometry, topology_fingerprint,
+    lighting_box_half, stamp_plan_geometry,
 };
 use anim_iw4::DOBJ_RADIUS_PARENT_ROOT;
 use entity_iw4::{ET_ITEM, Trajectory, evaluate_trajectory};
@@ -148,6 +148,7 @@ fn local_has_scavenger_perk(
 
 #[derive(bevy::ecs::system::SystemParam)]
 struct ItemSceneProducer<'w> {
+    level: Option<Res<'w, net::ClientLevel>>,
     compositions: ResMut<'w, PreparedItemCompositions>,
     occupancy: ResMut<'w, ItemOccupancy>,
     scene_skels: ResMut<'w, AnimDObjSceneSkels>,
@@ -222,7 +223,6 @@ impl ItemSceneProducer<'_> {
                 )
             }));
             let origin = evaluate_origin(es, at_time);
-            let lighting_origin = item_lighting_origin(origin);
             let apos = Trajectory {
                 tr_time: es.apos_tr_time,
                 tr_type: es.apos_tr_type,
@@ -231,6 +231,16 @@ impl ItemSceneProducer<'_> {
                 tr_base: es.apos_tr_base,
             };
             let angles = evaluate_trajectory(&apos, at_time);
+            let lighting_origin = item_lighting_origin(origin);
+            let pose = render_scene::place_simulation_pose(
+                self.level
+                    .as_ref()
+                    .and_then(|level| level.content.atlas())
+                    .map(|atlas| &atlas.space),
+                origin,
+                angles,
+            );
+            let (origin, angles) = (pose.origin, pose.angles);
             let entnum = u32::try_from(es.number).unwrap_or(0);
             self.scene_submissions.write(AnimDObjSceneSubmission {
                 render_fx_flags: 0,
@@ -510,11 +520,7 @@ impl ItemDrawPublisher<'_, '_> {
             });
         }
         if !self.draws.is_empty() {
-            let topology = topology_fingerprint(
-                &self.plan.indices,
-                &self.plan.surface_ranges,
-                self.plan.vertices.len(),
-            );
+            let topology = self.plan.rows.topology();
             let rev = self.plan.revision;
             self.plan.revision = stamp_plan_geometry(&mut self.plan.revisions, rev, topology);
         }

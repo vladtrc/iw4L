@@ -83,6 +83,7 @@ pub struct PortalView {
     /// Native DPVS membership for each unfolded view, produced by scene culling.
     pub visibility: Vec<Option<PortalDrawVisibility>>,
     physical_worlds: usize,
+    pub shared: bool,
     parents: Vec<Option<(usize, usize)>>,
 }
 
@@ -168,18 +169,26 @@ fn array(v: DVec3) -> [f32; 3] {
     [v.x as f32, v.y as f32, v.z as f32]
 }
 
-/// The move that takes the drawn coordinates of `entered`'s world onto
-/// `exit`'s, `entered` landing on `exit` turned by `yaw`.
-fn carry(entered: &PortalDoor, exit: &PortalDoor, yaw: f64) -> DMat4 {
-    DMat4::from_translation(slab(exit.world.index()) + vec(exit.base))
-        * DMat4::from_rotation_z(yaw)
-        * DMat4::from_translation(-(slab(entered.world.index()) + vec(entered.base)))
-}
-
 pub struct PortalAtlas<'a> {
     pub pairs: &'a [PortalPair],
     pub world_count: usize,
     pub surfaces: std::sync::Arc<[PortalSurfaces]>,
+    pub space: Option<&'a asset_core::world_frame::SceneSpace>,
+    /// Required for overlapping placements: a scene point has no unique owner.
+    pub camera_world: Option<usize>,
+}
+
+fn placement(space: Option<&asset_core::world_frame::SceneSpace>, world: usize) -> DMat4 {
+    let frame = space.and_then(|s| s.frame(WorldId(world)).ok());
+    match frame {
+        Some(frame) => DMat4::from_cols(
+            vec(frame.vector_to_scene([1., 0., 0.])).extend(0.),
+            vec(frame.vector_to_scene([0., 1., 0.])).extend(0.),
+            vec(frame.vector_to_scene([0., 0., 1.])).extend(0.),
+            vec(frame.point_to_scene([0.; 3])).extend(1.),
+        ),
+        None => DMat4::from_translation(slab(world)),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -211,10 +220,12 @@ impl PortalView {
         occlusion: Option<crate::portal_occlusion::PortalOcclusionFrame>,
         visible: &mut dyn FnMut(&Self, usize) -> bool,
     ) -> Self {
-        let camera_world = WorldLayout
-            .world_at(camera.eye)
-            .0
-            .min(atlas.world_count.saturating_sub(1));
+        let camera_world = atlas.camera_world.unwrap_or_else(|| {
+            WorldLayout
+                .world_at(camera.eye)
+                .0
+                .min(atlas.world_count.saturating_sub(1))
+        });
         let camera_only = settings.only == Some(usize::MAX) || settings.only == Some(camera_world);
         let depth = if camera_only {
             0
@@ -249,10 +260,15 @@ impl PortalView {
             pairs,
             world_count,
             surfaces,
+            space,
+            camera_world: owner,
         } = atlas;
-        let camera_world = WorldLayout
-            .world_at(eye)
-            .0
+        let shared = matches!(space, Some(asset_core::world_frame::SceneSpace::Shared(_)));
+        let frames: Vec<_> = (0..world_count)
+            .map(|world| placement(space, world))
+            .collect();
+        let camera_world = owner
+            .unwrap_or_else(|| WorldLayout.world_at(eye).0)
             .min(world_count.saturating_sub(1));
         let mut moves = vec![None; world_count];
         moves[camera_world] = Some(DMat4::IDENTITY);
@@ -284,14 +300,16 @@ impl PortalView {
                         .into_iter()
                         .enumerate()
                 {
-                    if near.world.index() != world
+                    if (!shared && near.world.index() != world)
                         || far.world.index() >= world_count
                         || moves.len() >= 255
                     {
                         continue;
                     }
 
-                    let local_eye = here.inverse().transform_point3(vec(eye)) - slab(world);
+                    let near_frame = frames[near.world.index()];
+                    let far_frame = frames[far.world.index()];
+                    let local_eye = (here * near_frame).inverse().transform_point3(vec(eye));
                     let front = (local_eye - vec(near.base)).dot(vec(near.normal)) > 0.0;
                     if !asset_core::atlas::portal_side_allowed(
                         near.two_sided,
@@ -303,9 +321,8 @@ impl PortalView {
                     }
                     // A nested door outside an ancestor aperture cannot contribute
                     // any pixels. Do this before unfolding another whole world.
-                    let center = here.transform_point3(
-                        slab(world) + vec(near.base) + DVec3::Z * f64::from(near.height) * 0.5,
-                    );
+                    let center = (here * near_frame)
+                        .transform_point3(vec(near.base) + DVec3::Z * f64::from(near.height) * 0.5);
                     let radius = (near.width.hypot(near.height) * 0.5) as f64;
                     if !route_sphere_visible(
                         camera_world,
@@ -321,9 +338,9 @@ impl PortalView {
                     let normal = vec(near.normal);
                     let across = DVec3::new(-normal.y, normal.x, 0.0).normalize_or_zero();
                     let mut opening = PortalOpening {
-                        base: array(here.transform_point3(slab(world) + vec(near.base))),
-                        across: array(here.transform_vector3(across)),
-                        up: array(here.transform_vector3(DVec3::Z)),
+                        base: array((here * near_frame).transform_point3(vec(near.base))),
+                        across: array((here * near_frame).transform_vector3(across)),
+                        up: array((here * near_frame).transform_vector3(DVec3::Z)),
                         width: near.width,
                         height: near.height,
                         worlds: [view, 0],
@@ -344,7 +361,12 @@ impl PortalView {
                     } else {
                         None
                     };
-                    let moved = here * carry(far, near, far_onto_near);
+                    let moved = here
+                        * near_frame
+                        * DMat4::from_translation(vec(near.base))
+                        * DMat4::from_rotation_z(far_onto_near)
+                        * DMat4::from_translation(-vec(far.base))
+                        * far_frame.inverse();
                     // Keep one route per aperture, even if two routes have the
                     // same transform: their ancestor masks and visibility differ.
                     let next = if moves[far.world.index()].is_none() {
@@ -394,6 +416,7 @@ impl PortalView {
             blocked_exits: blocked_exits.into(),
             worlds,
             physical_worlds: world_count,
+            shared,
             parents,
         };
         if let Some((_, vp, settings)) = render {
@@ -548,7 +571,9 @@ impl PortalView {
         self.worlds
             .iter()
             .enumerate()
-            .filter(|(i, w)| **w == world && self.moves[*i].is_some() && self.is_selected(*i))
+            .filter(|(i, w)| {
+                (self.shared || **w == world) && self.moves[*i].is_some() && self.is_selected(*i)
+            })
             .map(|(i, _)| (i + 1) as u8)
             .collect()
     }
@@ -565,6 +590,9 @@ impl PortalView {
 
     /// Only the camera world's geometry belongs in its dynamic sun map.
     pub fn camera_sun_caster(&self, kind: &crate::RetainedDrawKind) -> bool {
+        if self.shared {
+            return true;
+        }
         let tag = match *kind {
             crate::RetainedDrawKind::World { surf, .. } => self.surface_tag(u32::from(surf)),
             crate::RetainedDrawKind::Smodel {
@@ -711,7 +739,10 @@ impl PortalView {
             .iter()
             .enumerate()
             .filter_map(|(view, &physical)| {
-                if physical != world || !self.is_selected(view) {
+                if (!self.shared && physical != world)
+                    || !self.is_selected(view)
+                    || self.moves[view].is_none()
+                {
                     return None;
                 }
                 let center = self.seen_in(view, center)?;
@@ -734,6 +765,9 @@ impl PortalView {
     /// The draw tag of a model placed at `origin`: the world of its slab
     /// plus one.
     pub fn point_tag(&self, origin: [f32; 3]) -> u8 {
+        if self.shared {
+            return self.camera_world as u8 + 1;
+        }
         let last = self.physical_worlds.saturating_sub(1);
         WorldLayout.world_at(origin).0.min(last) as u8 + 1
     }

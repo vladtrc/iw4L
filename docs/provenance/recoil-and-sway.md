@@ -7,7 +7,9 @@ velocity once per frame. Output is limit*tanh(x/limit); physical state is never
 clipped or snapped. Bursts add, cancellation is linear, and settling is exponential.
 
 IW4L policy uses camera peak time 80 ms and model peak time 60 ms. Authored camera
-ranges become peak amplitudes at scale 0.020; authored gun ranges at 0.015.
+ranges become peak amplitudes at scale 0.040; authored gun ranges at 0.030.
+Authored ranges are impulse inputs, not camera degrees;
+removing the conversion would saturate the camera limit on every sniper shot.
 Camera output limit is 8 degrees; gun limits use the weapon-authored pitch/yaw
 caps. Hip and ADS ranges and reduced-shot percentages blend continuously.
 The gameplay recoil percentage multiplies amplitudes; a double-barrel event uses

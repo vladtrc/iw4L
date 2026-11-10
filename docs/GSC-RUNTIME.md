@@ -238,6 +238,9 @@ is linear over real time: its phase is recovered from the integrated game clock
 so snapshots and late joins share the same transition. Bevy frame quantization
 and its time clamp still apply. Raw input timing and connection clocks use real
 time. Removing the match's time policy restores normal speed.
+Killcam snapshots retain the current server time policy while replaying the
+archived world. Their slow-motion transition stays on the live server clock,
+so recorded final killcams preserve the script's pacing during playback.
 
 `PhysicsExplosionSphere(origin, outerRadius, innerRadius, magnitude)` applies an
 outward impulse with an upward bias, full strength inside the inner radius and

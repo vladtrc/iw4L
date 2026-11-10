@@ -16,9 +16,8 @@ use asset_core::FamilyId;
 use asset_material::decode_material_color_maps;
 use asset_transport::{LoadProgress, StageId, ZoneImage, ZoneMemory};
 use asset_world::{
-    WorldDrawPolicy, build_clip_collision, build_world_draw, census_entity_string_keys,
-    dm_spawn_points, intermission_view, map_ents_entity_string, minimap_corners,
-    worldspawn_north_yaw,
+    WorldDrawPolicy, build_clip_collision, census_entity_string_keys, dm_spawn_points,
+    intermission_view, map_ents_entity_string, minimap_corners, worldspawn_north_yaw,
 };
 
 pub struct Iw4Lane;
@@ -50,16 +49,9 @@ impl Iw4Lane {
     ];
 }
 
-impl ZoneLane for Iw4Lane {
-    fn game(&self) -> FamilyId {
-        Self::GAME
-    }
-
-    fn capabilities(&self) -> &'static [(PreparedCapability, LaneStatus)] {
-        Self::CAPABILITIES
-    }
-
-    fn load_world(
+impl Iw4Lane {
+    #[allow(clippy::too_many_arguments)]
+    fn load_world_selected(
         &self,
         path: &Path,
         image: &ZoneImage,
@@ -67,6 +59,7 @@ impl ZoneLane for Iw4Lane {
         shared_surfaces: asset_model::SharedXModelSurfaces,
         material_seed: asset_material::MaterialCatalog,
         common_film_visions: &crate::FilmVisionCatalog,
+        region: Option<asset_world::WorldRegion>,
     ) -> LoadedWorld {
         let mut report = Vec::new();
         let stage = progress.begin_scoped(StageId::MapAssets, "header", None);
@@ -113,6 +106,7 @@ impl ZoneLane for Iw4Lane {
         let mut sink =
             ZoneWalkSink::with_stage(progress.begin_scoped(StageId::MapAssets, "walk", None));
         let seeded_techsets = material_seed.technique_set_facts().to_vec();
+        sink.region_only = region.is_some();
         sink.seed_materials(material_seed);
         sink.map_xmodels.shared_surfaces = shared_surfaces;
         sink.set_capture_zone(asset_core::ZoneOwner::from_zone_path(path));
@@ -142,6 +136,28 @@ impl ZoneLane for Iw4Lane {
         if let Some(stage) = sink.stage.take() {
             stage.finish_from(&walked);
         }
+        let (region_keys, smodel_mask) = match region {
+            Some(region) => {
+                let result = stream
+                    .gfx_world()
+                    .ok_or_else(|| "region world has no GfxWorld".to_owned())
+                    .and_then(|geometry| {
+                        super::region::compile_models(&mut sink, &stream, geometry, region)
+                    });
+                match result {
+                    Ok((keys, mask)) => (Some(keys), Some(mask)),
+                    Err(error) => {
+                        return LoadedWorld::with_gap(
+                            WorldDrawPolicy::iw4(),
+                            PreparedCapability::PreparedWorld,
+                            error,
+                            None,
+                        );
+                    }
+                }
+            }
+            None => (None, None),
+        };
         let light_def_table = sink.light_def_table;
         let light_def_bodies = sink.light_def_bodies;
         let mut materials = std::mem::take(&mut sink.materials);
@@ -278,6 +294,7 @@ impl ZoneLane for Iw4Lane {
                     image_stage,
                     fx_material_keys,
                     glass_names,
+                    region_keys,
                 )
             });
 
@@ -357,6 +374,47 @@ impl ZoneLane for Iw4Lane {
             };
             clip_stage.done();
         });
+        if let Some(region) = region {
+            if let Some(clip) = clip.as_mut() {
+                let before = (
+                    clip.brushes.len(),
+                    clip.mesh.tri_count(),
+                    clip.static_models.len(),
+                );
+                if let Err(error) =
+                    asset_world::crop_collision(clip, region, asset_core::FamilyId::IW4)
+                {
+                    return LoadedWorld::with_gap(
+                        WorldDrawPolicy::iw4(),
+                        PreparedCapability::CollisionSpawns,
+                        error,
+                        None,
+                    );
+                }
+                report.push(format!(
+                    "world region collision: brushes={}/{} triangles={}/{} smodels={}/{}",
+                    clip.brushes.len(),
+                    before.0,
+                    clip.mesh.tri_count(),
+                    before.1,
+                    clip.static_models.len(),
+                    before.2
+                ));
+            }
+            let after = clip.as_ref().map(|clip| {
+                (
+                    clip.brushes.len(),
+                    clip.mesh.tri_count(),
+                    clip.static_models.len(),
+                )
+            });
+            report.push(format!(
+                "world region: native bounds={:?}..{:?}, retained collision={after:?}",
+                region.min, region.max
+            ));
+            dyn_ents.models.retain(|row| region.contains(row.origin));
+            dyn_ents.brushes.retain(|row| region.contains(row.origin));
+        }
         report.extend(image_report.into_iter().flatten());
         report.extend(clip_report);
         let map_content = std::sync::Arc::new(asset_world::build_map_content(
@@ -447,7 +505,8 @@ impl ZoneLane for Iw4Lane {
             };
         };
 
-        let world_draw = build_world_draw(&stream, geometry, materials);
+        let world_draw =
+            asset_world::world_draw::build_world_draw_region(&stream, geometry, materials, region);
         report.push(format!(
             "GfxLightDef map zone: table={light_def_table} bodies={light_def_bodies} recorded={}",
             stream.light_defs().len()
@@ -455,8 +514,40 @@ impl ZoneLane for Iw4Lane {
         stage.finish_from(&world_draw);
         match world_draw {
             Ok((draw, map_materials)) => {
+                if region.is_some() {
+                    report.push(format!(
+                        "world region render: vertices={}/{} triangles={}/{} surfaces={}/{}",
+                        draw.positions.len(),
+                        geometry.vertex_count,
+                        draw.packed_indices.len() / 3,
+                        geometry.index_count / 3,
+                        draw.surface_index_ranges
+                            .iter()
+                            .filter(|(_, count)| *count != 0)
+                            .count(),
+                        geometry.surface_count
+                    ));
+                }
                 let stage = progress.begin_scoped(StageId::MapAssets, "models", None);
-                let map_models = super::build_static_model_draw(&stream, geometry, map_xmodels);
+                let mut map_models = super::build_static_model_draw(&stream, geometry, map_xmodels);
+                if let Some(region) = region {
+                    for (instance, keep) in map_models
+                        .static_draw
+                        .placements
+                        .iter_mut()
+                        .zip(smodel_mask.iter().flatten())
+                    {
+                        if !keep {
+                            *instance = None;
+                        }
+                    }
+                    map_models.script_instances.retain(|instance| {
+                        region.contains(instance.transform.translation.to_array())
+                    });
+                    map_models
+                        .script_brush_models
+                        .retain(|instance| region.contains(instance.origin));
+                }
                 {
                     let n = draw.primary_lights.len();
                     let dir = draw
@@ -735,6 +826,56 @@ impl ZoneLane for Iw4Lane {
                 }
             }
         }
+    }
+}
+
+impl ZoneLane for Iw4Lane {
+    fn game(&self) -> FamilyId {
+        Self::GAME
+    }
+
+    fn capabilities(&self) -> &'static [(PreparedCapability, LaneStatus)] {
+        Self::CAPABILITIES
+    }
+
+    fn load_world(
+        &self,
+        path: &Path,
+        image: &ZoneImage,
+        progress: &LoadProgress,
+        shared_surfaces: asset_model::SharedXModelSurfaces,
+        material_seed: asset_material::MaterialCatalog,
+        common_film_visions: &crate::FilmVisionCatalog,
+    ) -> LoadedWorld {
+        self.load_world_selected(
+            path,
+            image,
+            progress,
+            shared_surfaces,
+            material_seed,
+            common_film_visions,
+            None,
+        )
+    }
+
+    fn load_world_region(
+        &self,
+        path: &Path,
+        image: &ZoneImage,
+        progress: &LoadProgress,
+        material_seed: asset_material::MaterialCatalog,
+        common_film_visions: &crate::FilmVisionCatalog,
+        region: asset_world::WorldRegion,
+    ) -> LoadedWorld {
+        self.load_world_selected(
+            path,
+            image,
+            progress,
+            Default::default(),
+            material_seed,
+            common_film_visions,
+            Some(region),
+        )
     }
 
     fn load_common_mp(
@@ -1251,24 +1392,51 @@ fn decode_map_material_images(
     stage: asset_transport::progress::StageHandle,
     fx_material_keys: Vec<asset_core::MaterialKey>,
     glass_names: Vec<String>,
+    region_keys: Option<Vec<asset_core::MaterialKey>>,
 ) -> Vec<String> {
     let mut report = Vec::new();
     let mut trees = asset_transport::NamespaceTrees::default();
     trees.adopt_zone(path);
-    match decode_material_color_maps(&trees, catalog, &stage, crate::session_load::load_pool()) {
-        Ok(stats) => {
-            report.push(format!(
+    if let Some(keys) = region_keys {
+        let keep: std::collections::HashSet<_> = keys
+            .iter()
+            .chain(&fx_material_keys)
+            .map(|key| asset_core::AssetRef::bare_name(&key.name).to_owned())
+            .chain(glass_names.iter().cloned())
+            .collect();
+        let mut dropped = 0;
+        for material in &mut catalog.materials {
+            if !keep.contains(material.name.as_str()) {
+                dropped += usize::from(!material.textures.is_empty());
+                material.textures.clear();
+            }
+        }
+        // The merged-image pass runs later. Remove unwanted texture edges now
+        // so it cannot re-request the rest of this map after atlas absorption.
+        report.push(format!(
+            "world region: removed {dropped} unselected material texture sets before merged decode"
+        ));
+        match asset_material::material_images::decode_images_for_keys(&trees, catalog, keys, &stage, crate::session_load::load_pool()) {
+            Ok(count) => report.push(format!("world region: selected material images decoded={count}; unselected material images not requested")),
+            Err(error) => report.push(format!("world region image gap: {error}")),
+        }
+    } else {
+        match decode_material_color_maps(&trees, catalog, &stage, crate::session_load::load_pool())
+        {
+            Ok(stats) => {
+                report.push(format!(
                 "IWD color/normal maps: {}/{} decoded, {} missing, {} unsupported from {} archives",
                 stats.decoded, stats.requested, stats.missing, stats.unsupported, stats.archives
             ));
-            if let Some(gap) = stats.first_gap {
-                report.push(format!("IWD material-map gap: {gap}"));
+                if let Some(gap) = stats.first_gap {
+                    report.push(format!("IWD material-map gap: {gap}"));
+                }
+                if let Some(gap) = stats.first_unsupported {
+                    report.push(format!("IWD material-map unsupported: {gap}"));
+                }
             }
-            if let Some(gap) = stats.first_unsupported {
-                report.push(format!("IWD material-map unsupported: {gap}"));
-            }
+            Err(error) => report.push(format!("IWD material-map gap: {error}")),
         }
-        Err(error) => report.push(format!("IWD material-map gap: {error}")),
     }
     let mut keys = fx_material_keys;
     keys.extend(glass_names.iter().map(|name| asset_core::MaterialKey {

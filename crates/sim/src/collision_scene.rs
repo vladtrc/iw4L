@@ -162,18 +162,15 @@ impl CollisionScene {
         maxs: [f32; 3],
         mask: u32,
     ) -> trace_iw4::Trace {
-        crate::world::clip_trace(
-            self.content.clip_brushes(),
-            self.content.clip_bsp(),
-            self.content.clip_mesh(),
-            &clipmap_iw4::TraceExtents {
+        SceneCollision::of(&self.content, &self.world_objects).trace_static(
+            movement_iw4::GroundTraceInput {
                 start,
                 end,
                 mins,
                 maxs,
-                mask,
+                tracemask: mask,
             },
-            &|piece| self.world_objects.glass_is_solid(piece as u32),
+            false,
         )
     }
 }
@@ -222,6 +219,215 @@ pub(crate) fn model_movement_brushes(
     brushes
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum SceneCollision<'a> {
+    Portal {
+        content: &'a SimContent,
+        objects: &'a WorldObjectState,
+    },
+    Shared {
+        content: &'a SimContent,
+        objects: &'a WorldObjectState,
+        frames: &'a [asset_core::world_frame::WorldFrame],
+    },
+}
+
+impl<'a> SceneCollision<'a> {
+    pub(crate) fn of(content: &'a SimContent, objects: &'a WorldObjectState) -> Self {
+        match content.atlas().map(|atlas| &atlas.space) {
+            Some(asset_core::world_frame::SceneSpace::Shared(frames)) => Self::Shared {
+                content,
+                objects,
+                frames,
+            },
+            _ => Self::Portal { content, objects },
+        }
+    }
+
+    pub(crate) fn is_shared(self) -> bool {
+        matches!(self, Self::Shared { .. })
+    }
+
+    fn skips_dynamic(self, start: [f32; 3]) -> bool {
+        matches!(self, Self::Portal { .. })
+            && asset_core::world_frame::SimPoint::from_slab(start)
+                .world()
+                .index()
+                != 0
+    }
+
+    fn trace_static(
+        self,
+        input: movement_iw4::GroundTraceInput,
+        ignore_glass: bool,
+    ) -> trace_iw4::Trace {
+        match self {
+            Self::Shared {
+                content,
+                objects,
+                frames,
+            } => trace_shared_geometry(content, objects, frames, input, ignore_glass),
+            Self::Portal { content, objects } => {
+                let world = asset_core::world_frame::SimPoint::from_slab(input.start)
+                    .world()
+                    .index();
+                let clip = content
+                    .world_clip(world)
+                    .unwrap_or_else(|| content.root_clip());
+                let offset = crate::world_graph::world_offset(world);
+                let local = |p: [f32; 3]| std::array::from_fn(|i| p[i] - offset[i]);
+                let mut hit = clip_trace(
+                    clip.brushes,
+                    clip.bsp,
+                    clip.mesh,
+                    &clipmap_iw4::TraceExtents {
+                        start: local(input.start),
+                        end: local(input.end),
+                        mins: input.mins,
+                        maxs: input.maxs,
+                        mask: input.tracemask,
+                    },
+                    &|piece| !ignore_glass && (world != 0 || objects.glass_is_solid(piece as u32)),
+                );
+                for (i, axis) in offset.iter().enumerate() {
+                    hit.endpos[i] += *axis;
+                }
+                hit
+            }
+        }
+    }
+}
+
+pub(crate) fn trace_shared_geometry(
+    content: &SimContent,
+    world_objects: &WorldObjectState,
+    frames: &[asset_core::world_frame::WorldFrame],
+    input: movement_iw4::GroundTraceInput,
+    ignore_glass: bool,
+) -> trace_iw4::Trace {
+    let atlas = content.atlas().expect("shared geometry requires atlas");
+    assert_eq!(frames.len(), atlas.worlds.len());
+    let mut best = trace_iw4::Trace {
+        fraction: 1.0,
+        endpos: input.end,
+        ..Default::default()
+    };
+    for (world, &frame) in frames.iter().enumerate() {
+        let clip = content.world_clip(world).expect("placement has a world");
+        let (mins, maxs) = frame.box_to_local(input.mins, input.maxs);
+        let mut hit = clip_trace(
+            clip.brushes,
+            clip.bsp,
+            clip.mesh,
+            &clipmap_iw4::TraceExtents {
+                start: frame.point_to_local(input.start),
+                end: frame.point_to_local(input.end),
+                mins,
+                maxs,
+                mask: input.tracemask,
+            },
+            &|piece| !ignore_glass && (world != 0 || world_objects.glass_is_solid(piece as u32)),
+        );
+        hit.endpos = frame.point_to_scene(hit.endpos);
+        hit.normal = frame.vector_to_scene(hit.normal);
+        // Solid flags describe the union even when a different world supplied
+        // the nearest surface. Keep stable world order for equal fractions.
+        let startsolid = best.startsolid | hit.startsolid;
+        let allsolid = best.allsolid | hit.allsolid;
+        if hit.fraction < best.fraction || (hit.allsolid != 0 && best.allsolid == 0) {
+            best = hit;
+        }
+        best.startsolid = startsolid;
+        best.allsolid = allsolid;
+    }
+    best
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct NativePlacement {
+    world: asset_core::atlas::WorldId,
+    frame: asset_core::world_frame::WorldFrame,
+}
+
+impl NativePlacement {
+    pub(crate) fn of(
+        frames: &[asset_core::world_frame::WorldFrame],
+        world: asset_core::atlas::WorldId,
+    ) -> Option<Self> {
+        Some(Self {
+            world,
+            frame: *frames.get(world.index())?,
+        })
+    }
+
+    fn to_scene(self, point: [f32; 3]) -> [f32; 3] {
+        self.frame.point_to_scene(
+            asset_core::world_frame::SimPoint::new(self.world, point)
+                .to_local()
+                .xyz(),
+        )
+    }
+
+    pub(crate) fn input_to_scene(
+        self,
+        input: movement_iw4::GroundTraceInput,
+    ) -> movement_iw4::GroundTraceInput {
+        let mid = std::array::from_fn(|i| (input.mins[i] + input.maxs[i]) * 0.5);
+        let half = std::array::from_fn(|i| (input.maxs[i] - input.mins[i]) * 0.5);
+        let (_, half) = self.frame.bounds_to_scene([0.0; 3], half);
+        let mid = self.frame.vector_to_scene(mid);
+        movement_iw4::GroundTraceInput {
+            start: self.to_scene(input.start),
+            end: self.to_scene(input.end),
+            mins: std::array::from_fn(|i| mid[i] - half[i]),
+            maxs: std::array::from_fn(|i| mid[i] + half[i]),
+            ..input
+        }
+    }
+
+    pub(crate) fn hit_to_native(self, mut hit: trace_iw4::Trace) -> trace_iw4::Trace {
+        hit.normal = self.frame.vector_to_local(hit.normal);
+        hit.endpos = asset_core::world_frame::LocalPoint::new(
+            self.world,
+            self.frame.point_to_local(hit.endpos),
+        )
+        .to_sim()
+        .xyz();
+        hit
+    }
+}
+
+pub(crate) fn trace_native_scene(
+    content: &SimContent,
+    world_objects: &WorldObjectState,
+    capabilities: &[EntityCollisionCapabilities],
+    input: movement_iw4::GroundTraceInput,
+    ignore_glass: bool,
+    exclude: Option<crate::AuthorityModelOwner>,
+) -> trace_iw4::Trace {
+    let scene = |input| {
+        trace_scene(
+            content,
+            world_objects,
+            capabilities,
+            input,
+            ignore_glass,
+            exclude,
+        )
+    };
+    let placement = match SceneCollision::of(content, world_objects) {
+        SceneCollision::Shared { frames, .. } => NativePlacement::of(
+            frames,
+            asset_core::world_frame::SimPoint::from_slab(input.start).world(),
+        ),
+        SceneCollision::Portal { .. } => None,
+    };
+    match placement {
+        Some(placement) => placement.hit_to_native(scene(placement.input_to_scene(input))),
+        None => scene(input),
+    }
+}
+
 pub(crate) fn trace_scene(
     content: &SimContent,
     world_objects: &WorldObjectState,
@@ -230,53 +436,13 @@ pub(crate) fn trace_scene(
     ignore_glass: bool,
     exclude: Option<crate::AuthorityModelOwner>,
 ) -> trace_iw4::Trace {
+    let space = SceneCollision::of(content, world_objects);
+    let world_hit = space.trace_static(input, ignore_glass);
+    if space.skips_dynamic(input.start) {
+        return world_hit;
+    }
     let clip_brushes = content.clip_brushes();
     let clip_bsp = content.clip_bsp();
-    let clip_mesh = content.clip_mesh();
-    let movement_iw4::GroundTraceInput {
-        start,
-        end,
-        mins,
-        maxs,
-        tracemask: mask,
-    } = input;
-    if let Some(atlas) = content.atlas()
-        && let Some(index) = crate::world_graph::world_at(start).checked_sub(1)
-        && let Some(world) = atlas.worlds.get(index)
-    {
-        let offset = crate::world_graph::world_offset(index + 1);
-        let local = |p: [f32; 3]| std::array::from_fn(|i| p[i] - offset[i]);
-        let mut hit = clip_trace(
-            &world.brushes,
-            &world.bsp,
-            &world.mesh,
-            &clipmap_iw4::TraceExtents {
-                start: local(start),
-                end: local(end),
-                mins,
-                maxs,
-                mask,
-            },
-            &|_| !ignore_glass,
-        );
-        for (i, offset_entry) in offset[..3].iter().enumerate() {
-            hit.endpos[i] += *offset_entry;
-        }
-        return hit;
-    }
-    let world_hit = clip_trace(
-        clip_brushes,
-        clip_bsp,
-        clip_mesh,
-        &clipmap_iw4::TraceExtents {
-            start,
-            end,
-            mins,
-            maxs,
-            mask,
-        },
-        &|piece| !ignore_glass && world_objects.glass_is_solid(piece as u32),
-    );
     let linked = capabilities
         .iter()
         .filter(|c| Some(c.owner) != exclude)
@@ -287,13 +453,7 @@ pub(crate) fn trace_scene(
         &clip_bsp.leafbrushes,
         clip_brushes,
         linked,
-        movement_iw4::GroundTraceInput {
-            start,
-            end,
-            mins,
-            maxs,
-            tracemask: mask,
-        },
+        input,
     );
     clip_move_to_model_brushes(
         hit,
@@ -316,35 +476,18 @@ impl PlayerCollisionScene<'_> {
         self_entnum: u16,
         origin: [f32; 3],
     ) -> crate::bg::player_collision::PlayerCollision<'a> {
-        let content = &self.scene.content;
-        if let Some(atlas) = content.atlas()
-            && let Some(index) = crate::world_graph::world_at(origin).checked_sub(1)
-            && let Some(world) = atlas.worlds.get(index)
-        {
-            return crate::bg::player_collision::PlayerCollision {
-                brushes: &world.brushes,
-                bsp: &world.bsp,
-                mesh: &world.mesh,
-                glass_damage: &[],
-                bodies,
-                self_entnum,
-                cmodels: &world.cmodels.models,
-                linked_brushes: &[],
-                model_brushes: &[],
-                offset: crate::world_graph::world_offset(index + 1),
-            };
-        }
-        crate::bg::player_collision::PlayerCollision {
-            brushes: content.clip_brushes(),
-            bsp: content.clip_bsp(),
-            mesh: content.clip_mesh(),
+        let dynamics = crate::bg::player_collision::RootDynamics {
             glass_damage: &self.glass,
+            linked: &self.linked,
+            models: &self.models,
+        };
+        crate::bg::player_collision::PlayerCollision::for_scene(
+            &self.scene.content,
+            &self.scene.world_objects,
+            origin,
+            dynamics,
             bodies,
             self_entnum,
-            cmodels: &content.clip_cmodels().models,
-            linked_brushes: &self.linked,
-            model_brushes: &self.models,
-            offset: [0.0; 3],
-        }
+        )
     }
 }

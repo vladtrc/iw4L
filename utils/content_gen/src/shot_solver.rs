@@ -803,15 +803,22 @@ fn portal(a: &RouteDoor, b: &RouteDoor, flip: bool) -> AtlasPortal {
     AtlasPortal { a, b, flip }
 }
 
+fn atlas_worlds(base: &Arc<AtlasWorld>, others: &[Arc<AtlasWorld>]) -> Vec<Arc<AtlasWorld>> {
+    std::iter::once(base.clone())
+        .chain(others.iter().cloned())
+        .collect()
+}
+
 fn route_atlas(route: &Route, solver: &Solver, flight: &Flight) -> Atlas {
     let (x, flip_x) = flight.choice.x.expect("x chosen");
     Atlas {
+        space: Default::default(),
         portal_thickness: Vec::new(),
         portal_clearance: Vec::new(),
         root_zone: Default::default(),
         versions: Default::default(),
         dvars: Default::default(),
-        worlds: solver.others.clone(),
+        worlds: atlas_worlds(&solver.base, &solver.others),
         portals: vec![
             portal(&route.enter, &route.middle[x], flip_x),
             portal(
@@ -1004,6 +1011,7 @@ impl Solver {
             return false;
         };
         let collision = PlayerCollision {
+            shared: None,
             brushes: &world.brushes,
             bsp: &world.bsp,
             mesh: &world.mesh,
@@ -1035,24 +1043,26 @@ impl Solver {
 
     fn atlas(&self, portals: Vec<AtlasPortal>) -> Atlas {
         Atlas {
+            space: Default::default(),
             portal_thickness: Vec::new(),
             portal_clearance: Vec::new(),
             root_zone: Default::default(),
             versions: Default::default(),
             dvars: Default::default(),
-            worlds: self.others.clone(),
+            worlds: atlas_worlds(&self.base, &self.others),
             portals,
         }
     }
 
     fn trace(&self, start: [f32; 3], end: [f32; 3]) -> Option<([f32; 3], [f32; 3])> {
         let atlas = Atlas {
+            space: Default::default(),
             portal_thickness: Vec::new(),
             portal_clearance: Vec::new(),
             root_zone: Default::default(),
             versions: Default::default(),
             dvars: Default::default(),
-            worlds: self.others.clone(),
+            worlds: atlas_worlds(&self.base, &self.others),
             portals: Vec::new(),
         };
         match atlas.trace(self.clip(), &[], None, start, end).1 {
@@ -1884,7 +1894,7 @@ fn write_outputs(
     prepared_solver.base = worlds[0].clone();
     prepared_solver.others = worlds[1..].to_vec();
     let mut prepared_atlas = atlas.clone();
-    prepared_atlas.worlds = prepared_solver.others.clone();
+    prepared_atlas.worlds = atlas_worlds(&prepared_solver.base, &prepared_solver.others);
     let prepared_check = prepared_solver
         .replay(&prepared_atlas, flight)
         .ok_or("shot diverges after applying the runtime scene collision")?;

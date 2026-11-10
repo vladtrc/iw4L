@@ -65,6 +65,9 @@ impl PortalView {
             slice_plane: None,
             aperture: None,
         };
+        if self.shared {
+            return vec![original];
+        }
         if object_id == 1 || object_id == u16::MAX {
             return vec![original];
         }

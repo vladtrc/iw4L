@@ -62,11 +62,11 @@ impl SceneViewStamp<'_> {
         fog: SceneViewFog,
         depthhack: Res<RZnearDepthhackDvar>,
         subwindow: Res<RSubwindowDvar>,
-        hosts: Query<&Transform, With<FlyCamera>>,
+        hosts: Query<(&Transform, &render_scene::CameraWorld), With<FlyCamera>>,
         mut lenses: Query<(&Transform, &Projection, &mut Camera), With<FpvLens>>,
     ) {
         *self.view = PreparedSceneView::default();
-        let Ok(parent) = hosts.single() else {
+        let Ok((parent, camera_world)) = hosts.single() else {
             return;
         };
         let Ok((child, projection, mut camera)) = lenses.single_mut() else {
@@ -137,6 +137,7 @@ impl SceneViewStamp<'_> {
                 viewport: scene_viewport,
             },
         );
+        self.view.physical_world = camera_world.0;
         self.lock_pvs.apply_after_stamp(&self.view);
 
         let (rigid, skinned) = &mut self.lod_parms;
@@ -154,7 +155,7 @@ pub(crate) fn stamp_prepared_scene_view(
     fog: SceneViewFog,
     depthhack: Res<RZnearDepthhackDvar>,
     subwindow: Res<RSubwindowDvar>,
-    hosts: Query<&Transform, With<FlyCamera>>,
+    hosts: Query<(&Transform, &render_scene::CameraWorld), With<FlyCamera>>,
     lenses: Query<(&Transform, &Projection, &mut Camera), With<FpvLens>>,
 ) {
     stamp.stamp(znear, fog, depthhack, subwindow, hosts, lenses);

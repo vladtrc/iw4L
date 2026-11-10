@@ -27,9 +27,10 @@ game. Keep them this short: nobody opens a long file twice.
 | [`WEAPONS.md`](WEAPONS.md) | weapon configuration resolution, published consumer projections, host rules and registry lifetimes | changing attachments, combat or FPV preparation |
 | [`ANIM.md`](ANIM.md) | three floors: `anim_iw4` (facts and curves), `xmodel_runtime` (tree and pose), who picks the clip (`sim` / `render_frontend/adapters/anim/`) | viewmodel, skeleton, bone hits |
 | [`MAP-LOAD.md`](MAP-LOAD.md) | map load: the `session` → `assets` → install transaction, the `load_prepared_match` walk, the lane by `FamilyId`, the artifact cache | a zone won't load, an asset went missing, "why didn't the match come up" |
-| [`ENTITIES.md`](ENTITIES.md) | the `TickInput → sim::step → Snapshot` funnel, the `entity_iw4` taxonomy (`EntityState` / `Centity` / `ET_*` / trajectories), what sits where in `sim` | gameplay, networking, replay |
+| [`ENTITIES.md`](ENTITIES.md) | authoritative frame publication, the `entity_iw4` taxonomy (`EntityState` / `Centity` / `ET_*` / trajectories), what sits where in `sim` | gameplay, networking, replay |
 | [`INPUT-PROGRAM.md`](INPUT-PROGRAM.md) | exclusive authority command tapes, timing and receipts | scripting reproducible local takes |
-| [`SIM-STEP.md`](SIM-STEP.md) | `sim::step`: the authority's one `TickInput` → `Snapshot` funnel; the client predicts without a world; what makes a step deterministic | touching the step or prediction |
+| [`SCENARIOS.md`](SCENARIOS.md) | generic Rust/YAML compilation and authority receipt checks | authoring multi-actor scenes |
+| [`SIM-STEP.md`](SIM-STEP.md) | authoritative frame inputs, phase order and publication; separate client prediction; timing and reproducibility limits | touching the step or prediction |
 | [`SKILL.md`](SKILL.md) | local Elo ratings, account persistence and migration | changing skill updates or account synchronization |
 | [`GSC-RUNTIME.md`](GSC-RUNTIME.md) | GSC → executable IR → Bevy runtime; args, arrays and tables still share one `Runtime` | implementing gameplay or script execution |
 | [`POSTFX.md`](POSTFX.md) | authored map-family film, bloom and highlight profiles; remaining effects | comparing game-family presentation |
@@ -38,3 +39,7 @@ game. Keep them this short: nobody opens a long file twice.
 | [`BOTS.md`](BOTS.md) | host AI: the per-tick pipeline, what a probe that never ran may not claim, the shared query budget, resumable routes, fighting from a position | bot decisions, bot movement, "why is it standing there" |
 
 Build composition: [EXTENSIONS.md](EXTENSIONS.md). Scene authoring: [CONTENT.md](CONTENT.md).
+
+[Scene and simulation contracts](SCENE-CONTRACT.md): recipe ownership, coordinate
+domains and layer boundaries. [Input producers](INPUT-BOUNDARY.md).
+[External Rust/headless API](HEADLESS.md).

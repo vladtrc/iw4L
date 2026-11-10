@@ -5,7 +5,7 @@ use weapon_iw4::WeaponCombatFacts;
 mod scene;
 pub(crate) use scene::digest as scene_geometry_digest;
 
-pub const CONTENT_DIGEST_SCHEME: u64 = 22;
+pub const CONTENT_DIGEST_SCHEME: u64 = 23;
 
 #[derive(Clone, Copy)]
 struct Digest(u64);

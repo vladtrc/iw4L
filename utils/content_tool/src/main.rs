@@ -1,6 +1,6 @@
 use std::path::Path;
 
-const USAGE: &str = "usage: iw4l-content solve-shot [--replace-victim] <route.json>\n       iw4l-content connect-maps [--seed N] <zone>...\n       iw4l-content inspect-doors <zone>...\n       iw4l-content inspect-projectile-openings <zone>...\n       iw4l-content validate <scene.json>\n       iw4l-content migrate <old.json> <new.json>";
+const USAGE: &str = "usage: iw4l-content solve-shot [--replace-victim] <route.json>\n       iw4l-content connect-maps [--seed N] <zone>...\n       iw4l-content inspect-doors <zone>...\n       iw4l-content inspect-layout <zone>...\n       iw4l-content inspect-projectile-openings <zone>...\n       iw4l-content recipe-build <scene.yml> <scene.json>\n       iw4l-content weapon-bindings <zone> <output.json>\n       iw4l-content trace-map <zone> <queries.yml> <output.json>\n       iw4l-content probe-floor <zone> <points.json>\n       iw4l-content probe-sweep <zone> <queries.json>\n       iw4l-content validate <scene.json>\n       iw4l-content migrate <old.json> <new.json>";
 
 fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
@@ -26,9 +26,18 @@ fn run() -> Result<(), String> {
     if command == "migrate" && rest.len() == 2 {
         return content_gen::migrate(Path::new(&rest[0]), Path::new(&rest[1]));
     }
+    if command == "recipe-build" && rest.len() == 2 {
+        return content_gen::compile_recipe(Path::new(&rest[0]), Path::new(&rest[1]));
+    }
     let games = asset_transport::games_root()?;
     desktop::link_steam_games(&games);
     match command.as_str() {
+        "trace-map" if rest.len() == 3 => {
+            content_gen::trace_map(&games, &rest[0], Path::new(&rest[1]), Path::new(&rest[2]))
+        }
+        "weapon-bindings" if rest.len() == 2 => {
+            content_gen::weapon_bindings(&games, &rest[0], Path::new(&rest[1]))
+        }
         "solve-shot" => {
             let (replace, path) = match rest.as_slice() {
                 [path] => (false, path),
@@ -55,6 +64,18 @@ fn run() -> Result<(), String> {
         }
         "inspect-doors" if !rest.is_empty() => {
             content_gen::doors::run_doors(games, artifacts, rest)
+        }
+        "inspect-layout" if !rest.is_empty() => {
+            for zone in rest {
+                content_gen::authoring::inspect_layout(&games, &artifacts, &zone)?;
+            }
+            Ok(())
+        }
+        "probe-floor" if rest.len() == 2 => {
+            content_gen::authoring::probe_floor(&games, &artifacts, &rest[0], Path::new(&rest[1]))
+        }
+        "probe-sweep" if rest.len() == 2 => {
+            content_gen::authoring::probe_sweep(&games, &artifacts, &rest[0], Path::new(&rest[1]))
         }
         "validate" if rest.len() == 1 => content_gen::validate(&games, Path::new(&rest[0])),
         _ => Err(USAGE.into()),

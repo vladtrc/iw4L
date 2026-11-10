@@ -232,6 +232,7 @@ fn submit_presented_audio(
 }
 
 fn release_audio(runtime: Res<AudioRuntime>) {
+    runtime.stop_scope(AudioScope::MatchMusic);
     runtime.set_media_service(None);
     runtime.set_event_context(None);
     runtime.set_cue_mix(None);
@@ -249,7 +250,10 @@ fn listener_snapshot(
     let origin_inches = crate::transform_inches(pose.translation);
     let portals = level
         .and_then(|level| level.content.atlas())
-        .filter(|atlas| !atlas.portals.is_empty())
+        .filter(|atlas| {
+            !atlas.portals.is_empty()
+                || matches!(atlas.space, asset_core::world_frame::SceneSpace::Shared(_))
+        })
         .map(|atlas| {
             std::sync::Arc::new(crate::portal_space::PortalSpace::new(
                 atlas,

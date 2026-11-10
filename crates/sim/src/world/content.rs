@@ -168,6 +168,20 @@ impl SimContent {
     pub fn atlas(&self) -> Option<&Arc<crate::world_graph::Atlas>> {
         self.data.atlas.as_ref()
     }
+    pub fn root_clip(&self) -> crate::world_graph::AtlasClip<'_> {
+        crate::world_graph::AtlasClip {
+            brushes: self.clip_brushes(),
+            bsp: self.clip_bsp(),
+            mesh: self.clip_mesh(),
+            cmodels: self.clip_cmodels(),
+        }
+    }
+    pub fn world_clip(&self, world: usize) -> Option<crate::world_graph::AtlasClip<'_>> {
+        match world {
+            0 => Some(self.root_clip()),
+            n => Some(self.atlas()?.worlds.get(n)?.clip()),
+        }
+    }
 }
 
 #[derive(Debug)]

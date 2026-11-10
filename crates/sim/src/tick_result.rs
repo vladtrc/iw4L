@@ -13,6 +13,7 @@ pub struct TickEffects {
 
 #[derive(Clone, Debug)]
 pub struct TickResult {
+    pub accepted_shots: Vec<crate::combat::AcceptedShot>,
     pub input: TickInput,
     pub snapshot: Snapshot,
     pub effects: TickEffects,

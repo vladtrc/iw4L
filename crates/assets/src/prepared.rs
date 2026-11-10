@@ -156,11 +156,24 @@ pub struct PreparedLocalizedStrings(pub asset_game::LocalizeCatalog);
 
 #[derive(Clone, Debug, Default, Resource)]
 pub struct SessionCompass {
+    pub namespace: Option<asset_core::FamilyId>,
+    pub worlds: std::collections::BTreeMap<asset_core::atlas::WorldId, SessionCompass>,
     pub corners: Option<asset_world::MinimapCorners>,
 
     pub north_yaw: Option<f32>,
 
     pub declaration: asset_world::MapCompassDeclaration,
+}
+
+impl SessionCompass {
+    pub fn at(&self, origin: [f32; 3]) -> Option<&Self> {
+        let world = asset_core::atlas::WorldLayout.world_at(origin);
+        if world == asset_core::atlas::WorldId::ROOT {
+            Some(self)
+        } else {
+            self.worlds.get(&world)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Resource, PartialEq, Eq)]

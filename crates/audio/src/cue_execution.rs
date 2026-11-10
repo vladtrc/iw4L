@@ -141,7 +141,7 @@ impl CueCancellation {
             let Some(clock) = clock.upgrade() else {
                 return false;
             };
-            if key.scope == AudioScope::Match
+            if key.scope != AudioScope::Menu
                 && namespace.is_none_or(|namespace| namespace == key.namespace)
                 && alias.is_none_or(|alias| alias == key.alias)
                 && emitter.is_none_or(|emitter| emitter == key.emitter)

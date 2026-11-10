@@ -1,6 +1,6 @@
-# World entities and the funnel
+# World entities and the authority frame
 
-## There is one funnel
+## Authoritative publication
 
 ```text
 human ─┐
@@ -11,8 +11,9 @@ pub fn step(world: &mut SimWorld, tick: Tick, input: &TickInput,
 ```
 
 Only the authority steps the world; the client predicts its player without one.
-`msec` is the step length; time enters **only** as an argument. The shape of
-the funnel is [`SIM-STEP.md`](SIM-STEP.md), the code `crates/sim/src/lib.rs`.
+`msec` is the world step length; player commands carry their own timestamps.
+The frame interface and its boundaries are described in
+[`SIM-STEP.md`](SIM-STEP.md); the entry point is `crates/sim/src/carrier.rs`.
 
 ## What can be an entity at all — fixed by the data (`entity_iw4`)
 

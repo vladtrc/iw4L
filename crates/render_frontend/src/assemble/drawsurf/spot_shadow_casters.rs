@@ -827,7 +827,7 @@ pub fn fill_spot_shadow_caster_plan(
         let xmodel_ranges = xmodel.map(|p| p.range_rows()).unwrap_or(&[]);
         let pack_draws = items
             .iter()
-            .map(super::retained_list::pack_draw)
+            .map(crate::assemble::pack::PackDraw::from)
             .collect::<Vec<_>>();
         let packed = pack_spot_shadow_frontend(
             &pack_draws,

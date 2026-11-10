@@ -28,13 +28,8 @@ pub const POSTFX_TECH_TYPE: u8 = 4;
 pub const POSTFX_VERTEX_TYPE: u8 = 0;
 pub const CODE_TEXTURE_RESOLVED_SCENE: u32 = 10;
 pub const RESOLVED_SCENE_SAMPLER: u8 = 0x62;
-pub const CODE_COLOR_BIAS: u16 = 46;
-pub const CODE_COLOR_TINT_BASE: u16 = 47;
-pub const CODE_COLOR_TINT_DELTA: u16 = 48;
-pub const CODE_COLOR_TINT_QUADRATIC_DELTA: u16 = 49;
 
 const STANDARD_FILM_STATE: [u32; 2] = [0x1812_8812, 0xe00e_0002];
-const FILM_DESAT_MIN: f32 = 1.0 / 4096.0;
 
 pub const GLOW_SETUP_MATERIAL: &str = "glow_consistent_setup_color2";
 
@@ -165,88 +160,11 @@ pub fn film_sources(
             1.0 / height as f32,
         ])],
     );
-    let authored = vision.unwrap_or_else(asset_world::FilmVision::default);
-    let vision = if authored.enable {
-        authored
-    } else {
-        asset_world::FilmVision::default()
-    };
-    let desaturation = vision.desaturation.max(FILM_DESAT_MIN);
-    let mut contrast = vision.contrast;
-    let mut offset = vision.brightness + 0.5 - 0.5 * contrast;
-    if vision.invert {
-        contrast = -contrast;
-        offset += 1.0;
-    }
-    let base = vision.dark_tint.map(|value| value * contrast);
-    let delta: [f32; 3] = std::array::from_fn(|channel| {
-        2.0 * contrast * (vision.medium_tint[channel] - vision.dark_tint[channel])
-    });
-    let quadratic: [f32; 3] = std::array::from_fn(|channel| {
-        contrast
-            * (vision.light_tint[channel] - 2.0 * vision.medium_tint[channel]
-                + vision.dark_tint[channel])
-    });
-    sources.set_constant_rows(
-        CODE_COLOR_BIAS,
-        &[float4_bits([
-            offset,
-            offset,
-            offset,
-            1.0 / desaturation - 1.0,
-        ])],
-    );
-    sources.set_constant_rows(
-        CODE_COLOR_TINT_BASE,
-        &[float4_bits([
-            base[0],
-            base[1],
-            base[2],
-            vision.desaturation_dark,
-        ])],
-    );
-    sources.set_constant_rows(
-        CODE_COLOR_TINT_DELTA,
-        &[float4_bits([
-            delta[0],
-            delta[1],
-            delta[2],
-            vision.desaturation - vision.desaturation_dark,
-        ])],
-    );
-    sources.set_constant_rows(
-        CODE_COLOR_TINT_QUADRATIC_DELTA,
-        &[float4_bits([quadratic[0], quadratic[1], quadratic[2], 0.0])],
-    );
-    apply_glow_consts(&mut sources, authored);
+    render_scene::film::set_film_vision(&mut sources, vision);
     sources
         .set_texture(CODE_TEXTURE_RESOLVED_SCENE, RESOLVED_SCENE_SAMPLER)
         .map_err(|cause| format!("postfx code source: {cause:?}"))?;
     Ok(sources)
-}
-
-fn apply_glow_consts(sources: &mut RuntimeCodeSources, authored: asset_world::FilmVision) {
-    let bits = |row: [f32; 4]| row.map(f32::to_bits);
-    match lighting_iw4::set_glow_info(
-        authored.glow_bloom_cutoff,
-        authored.glow_bloom_desaturation,
-        authored.glow_bloom_intensity,
-    ) {
-        Some(consts) => {
-            sources.set_constant_rows(
-                lighting_iw4::CONST_SRC_CODE_GLOW_SETUP,
-                &[bits(consts.setup)],
-            );
-            sources.set_constant_rows(
-                lighting_iw4::CONST_SRC_CODE_GLOW_APPLY,
-                &[bits(consts.apply)],
-            );
-        }
-        None => {
-            sources.set_constant_rows(lighting_iw4::CONST_SRC_CODE_GLOW_SETUP, &[[0; 4]]);
-            sources.set_constant_rows(lighting_iw4::CONST_SRC_CODE_GLOW_APPLY, &[[0; 4]]);
-        }
-    }
 }
 
 fn build_postfx_material(

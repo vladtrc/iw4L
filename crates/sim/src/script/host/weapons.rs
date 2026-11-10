@@ -376,7 +376,7 @@ fn settle_items(world: &mut World) {
             })
             .collect()
     };
-    let pickups = FrameWorld::from_world(world).item_pickups_mut().clone();
+    let pickups = FrameWorld::from_world(world).unpublished_pickups();
     for pickup in pickups {
         let Some((object, _, classname)) = items
             .iter()
@@ -402,6 +402,7 @@ fn settle_items(world: &mut World) {
             raise(world, receiver.clone(), "trigger", vec![player, swapped]);
         }
     }
+    FrameWorld::from_world(world).mark_pickups_raised();
     // Retire only after every pickup is raised: a death between two triggers on one
     // item ends the script thread still waiting on it.
     let retired = world.resource_mut::<RoundScript>().take_retired_items();

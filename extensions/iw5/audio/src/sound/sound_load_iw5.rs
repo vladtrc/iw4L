@@ -266,83 +266,63 @@ impl AssetLinkSink for Iw5SoundCapture {
 
 impl Iw5SoundCapture {
     fn capture_alias_row(&self, s: &ZoneStream<'_>, row: Ptr) -> CapturedAlias {
-        let alias_name =
-            name_at(s, row, s.layout(sz::SND_ALIAS_ALIAS_NAME_OFF, 0)).unwrap_or(String::new());
-        let (
-            loaded_name,
-            streamed,
-            file_type,
-            file_exists,
-            file_name,
-            file_u,
-            file_u_ptr,
-            file_u_deref,
-        ) = match s
-            .ptr_at(row, s.layout(sz::SND_ALIAS_SOUND_FILE_OFF, 40))
-            .ok()
-        {
-            Some(ZonePtr::Offset(p)) => {
-                let file = s.resolve_alias(p);
-                let key = file_key(file);
-                let loaded = self.file_to_loaded.get(&key).cloned();
-                let streamed = self.file_to_streamed.get(&key).cloned();
-                let inspected = inspect_sound_file(s, file);
-                let u = s.ptr_at(file, s.layout(4, 8)).ok();
-                let loaded = loaded.or_else(|| match u {
-                    Some(ZonePtr::Offset(q)) => {
-                        self.loaded_by_ptr.get(&file_key(q)).cloned().or_else(|| {
-                            self.loaded_by_ptr
-                                .get(&file_key(s.resolve_alias(q)))
-                                .cloned()
-                        })
-                    }
-                    _ => None,
-                });
-                let file_u_deref = match u {
-                    Some(ZonePtr::Offset(q)) => offset_deref_kind(s, q),
-                    _ => None,
-                };
-                let loaded = if file_u_deref == Some("following")
-                    || file_u_deref == Some("insert")
-                    || matches!(u, Some(ZonePtr::Following) | Some(ZonePtr::Insert))
-                {
-                    loaded
-                } else {
-                    loaded.or(inspected.loaded_name.clone())
-                };
-                let streamed = streamed.or(inspected.streamed);
-                let file_name = loaded.clone().or(inspected.file_name.clone()).or_else(|| {
-                    streamed.as_ref().map(|(dir, name)| {
-                        if dir.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{dir}/{name}")
+        let (loaded_name, streamed, file_type, file_exists, file_name, file_u, file_u_deref) =
+            match s
+                .ptr_at(row, s.layout(sz::SND_ALIAS_SOUND_FILE_OFF, 40))
+                .ok()
+            {
+                Some(ZonePtr::Offset(p)) => {
+                    let file = s.resolve_alias(p);
+                    let key = file_key(file);
+                    let loaded = self.file_to_loaded.get(&key).cloned();
+                    let streamed = self.file_to_streamed.get(&key).cloned();
+                    let inspected = inspect_sound_file(s, file);
+                    let u = s.ptr_at(file, s.layout(4, 8)).ok();
+                    let loaded = loaded.or_else(|| match u {
+                        Some(ZonePtr::Offset(q)) => {
+                            self.loaded_by_ptr.get(&file_key(q)).cloned().or_else(|| {
+                                self.loaded_by_ptr
+                                    .get(&file_key(s.resolve_alias(q)))
+                                    .cloned()
+                            })
                         }
-                    })
-                });
-                (
-                    loaded,
-                    streamed,
-                    inspected.file_type,
-                    inspected.file_exists,
-                    file_name,
-                    zone_ptr_kind(u),
-                    zone_ptr_label(u),
-                    file_u_deref,
-                )
-            }
-            Some(ZonePtr::Null) => (None, None, None, None, None, Some("null"), None, None),
-            other => (
-                None,
-                None,
-                Some(0),
-                None,
-                None,
-                zone_ptr_kind(other),
-                zone_ptr_label(other),
-                None,
-            ),
-        };
+                        _ => None,
+                    });
+                    let file_u_deref = match u {
+                        Some(ZonePtr::Offset(q)) => offset_deref_kind(s, q),
+                        _ => None,
+                    };
+                    let loaded = if file_u_deref == Some("following")
+                        || file_u_deref == Some("insert")
+                        || matches!(u, Some(ZonePtr::Following) | Some(ZonePtr::Insert))
+                    {
+                        loaded
+                    } else {
+                        loaded.or(inspected.loaded_name.clone())
+                    };
+                    let streamed = streamed.or(inspected.streamed);
+                    let file_name = loaded.clone().or(inspected.file_name.clone()).or_else(|| {
+                        streamed.as_ref().map(|(dir, name)| {
+                            if dir.is_empty() {
+                                name.clone()
+                            } else {
+                                format!("{dir}/{name}")
+                            }
+                        })
+                    });
+                    (
+                        loaded,
+                        streamed,
+                        inspected.file_type,
+                        inspected.file_exists,
+                        file_name,
+                        zone_ptr_kind(u),
+                        file_u_deref,
+                    )
+                }
+                Some(ZonePtr::Null) => (None, None, None, None, None, Some("null"), None),
+                other => (None, None, Some(0), None, None, zone_ptr_kind(other), None),
+            };
         let sound_file = s
             .ptr_at(row, s.layout(sz::SND_ALIAS_SOUND_FILE_OFF, 40))
             .ok();
@@ -378,8 +358,6 @@ impl Iw5SoundCapture {
                 }
             });
         CapturedAlias {
-            alias_name,
-            subtitle: optional_name(s, row, s.layout(sz::SND_ALIAS_SUBTITLE_OFF, 8)),
             secondary: optional_name(s, row, s.layout(sz::SND_ALIAS_SECONDARY_OFF, 16)),
             chain: optional_name(s, row, s.layout(sz::SND_ALIAS_CHAIN_OFF, 24)),
             mixer_group: optional_name(s, row, s.layout(sz::SND_ALIAS_MIXER_GROUP_OFF, 32)),
@@ -390,9 +368,6 @@ impl Iw5SoundCapture {
             file_type,
             file_exists,
             file_name,
-            file_u,
-            file_u_ptr,
-            file_u_deref,
             sequence: s
                 .i32_at(row, s.layout(sz::SND_ALIAS_SEQUENCE_OFF, 48))
                 .unwrap_or(0),
@@ -417,9 +392,6 @@ impl Iw5SoundCapture {
             dist_max: s
                 .f32_at(row, s.layout(sz::SND_ALIAS_DIST_MAX_OFF, 76))
                 .unwrap_or(0.0),
-            velocity_min: s
-                .f32_at(row, s.layout(sz::SND_ALIAS_VELOCITY_MIN_OFF, 80))
-                .unwrap_or(0.0),
             flags: s.u32_at(row, s.layout(sz::SND_ALIAS_FLAGS_OFF, 84)).ok(),
             looping: s
                 .u32_at(row, s.layout(sz::SND_ALIAS_FLAGS_OFF, 84))
@@ -429,18 +401,9 @@ impl Iw5SoundCapture {
                 .u32_at(row, s.layout(sz::SND_ALIAS_FLAGS_OFF, 84))
                 .ok()
                 .map(|flags| (flags >> 9) & 0x3f),
-            slave_percentage: s
-                .f32_at(row, s.layout(sz::SND_ALIAS_SLAVE_PERCENTAGE_OFF, 96))
-                .unwrap_or(0.0),
             probability: s
                 .f32_at(row, s.layout(sz::SND_ALIAS_PROBABILITY_OFF, 100))
                 .unwrap_or(1.0),
-            lfe_percentage: s
-                .f32_at(row, s.layout(sz::SND_ALIAS_LFE_PERCENTAGE_OFF, 104))
-                .unwrap_or(0.0),
-            center_percentage: s
-                .f32_at(row, s.layout(sz::SND_ALIAS_CENTER_PERCENTAGE_OFF, 108))
-                .unwrap_or(0.0),
             start_delay: s
                 .i32_at(row, s.layout(sz::SND_ALIAS_START_DELAY_OFF, 112))
                 .unwrap_or(0),
@@ -448,15 +411,6 @@ impl Iw5SoundCapture {
             distance_curve_names: None,
             near_falloff: None,
             voice_priority: None,
-            envelop_min: s
-                .f32_at(row, s.layout(sz::SND_ALIAS_ENVELOP_MIN_OFF, 128))
-                .unwrap_or(0.0),
-            envelop_max: s
-                .f32_at(row, s.layout(sz::SND_ALIAS_ENVELOP_MAX_OFF, 132))
-                .unwrap_or(0.0),
-            envelop_percentage: s
-                .f32_at(row, s.layout(sz::SND_ALIAS_ENVELOP_PERCENTAGE_OFF, 136))
-                .unwrap_or(0.0),
             speaker_map: speaker_map_name(s, row),
             stereo_speaker_gains: stereo_speaker_gains(s, row),
             surround_pan: None,
@@ -621,13 +575,6 @@ fn zone_ptr_kind(p: Option<ZonePtr>) -> Option<&'static str> {
         ZonePtr::Following => "following",
         ZonePtr::Insert => "insert",
     })
-}
-
-fn zone_ptr_label(p: Option<ZonePtr>) -> Option<String> {
-    match p? {
-        ZonePtr::Offset(q) => Some(format!("{}:{}", q.block, q.offset)),
-        _ => None,
-    }
 }
 
 fn offset_deref_kind(s: &ZoneStream<'_>, p: Ptr) -> Option<&'static str> {

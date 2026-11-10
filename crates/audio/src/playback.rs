@@ -170,10 +170,10 @@ fn apply_svc_local_sound(
     mut play: MessageWriter<crate::AliasCommand>,
 ) {
     for cmd in cmds.read() {
-        let Some((namespace, alias)) = adopted
+        let Some((namespace, alias, music)) = adopted
             .sound_alias_name(cmd.index)
-            .map(|alias| announcer.route(alias))
-            .map(|(namespace, alias)| (namespace, alias.to_owned()))
+            .map(|alias| (announcer.route(alias), announcer.is_music(alias)))
+            .map(|((namespace, alias), music)| (namespace, alias.to_owned(), music))
         else {
             diag::warn!(
                 Audio,
@@ -197,14 +197,19 @@ fn apply_svc_local_sound(
                 snd_ent: Some(SND_ENT_LOCAL),
             });
         } else {
-            play.write(crate::AliasCommand::Play(PlayAlias {
+            let sound = PlayAlias {
                 event: None,
                 namespace,
                 alias,
                 fallback: None,
                 origin_inches: None,
                 snd_ent: Some(SND_ENT_LOCAL),
-            }));
+            };
+            play.write(if music {
+                AliasCommand::PlayMusic(sound)
+            } else {
+                AliasCommand::Play(sound)
+            });
         }
     }
 }
@@ -228,13 +233,14 @@ fn play_alias_messages(
     local: Res<net::LocalPresentClient>,
 ) {
     for command in events.read() {
-        let (event, pitch_scale) = match command {
+        let (event, pitch_scale, class) = match command {
             AliasCommand::StopEntity { snd_ent } => {
                 runtime.stop_emitter_cues(*snd_ent);
                 continue;
             }
-            AliasCommand::Play(event) => (event, 1.0),
-            AliasCommand::PlayPitched { sound, pitch } => (sound, *pitch),
+            AliasCommand::Play(event) => (event, 1.0, SoundClass::World),
+            AliasCommand::PlayMusic(event) => (event, 1.0, SoundClass::Music),
+            AliasCommand::PlayPitched { sound, pitch } => (sound, *pitch, SoundClass::World),
             AliasCommand::Stop {
                 namespace,
                 alias,
@@ -264,7 +270,7 @@ fn play_alias_messages(
                 bound: None,
                 origin_inches: event.origin_inches,
                 emitter: sound_entity(event.snd_ent, local.0),
-                class: SoundClass::World,
+                class,
                 pitch_scale,
                 volume_scale: 1.0,
                 fallbacks: event.fallback.iter().cloned().collect(),

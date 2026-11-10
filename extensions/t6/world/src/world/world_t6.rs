@@ -233,6 +233,7 @@ pub fn build_world_draw(
         ..Default::default()
     };
     Ok(WorldDraw {
+        space: Default::default(),
         batches,
         sky_model: None,
         lightmap: Err(WorldLightmapGap::Missing),

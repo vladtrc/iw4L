@@ -251,6 +251,250 @@ fn profile_data(world: &World, profile: crate::PlayerProfile) -> Option<Vec<(Vec
     Some(data)
 }
 
+pub(crate) fn prepare_card(
+    world: &mut World,
+    client: u32,
+    title: u32,
+    icon: u32,
+) -> Result<(), String> {
+    let tables = &world.resource::<RoundScript>().tables;
+    let title_name = super::tables::table(tables, "mp/cardTitleTable.csv")
+        .and_then(|table| table.cell(title as usize, 0))
+        .filter(|s| !s.is_empty())
+        .ok_or("unknown title row")?
+        .to_owned();
+    let icon_name = super::tables::table(tables, "mp/cardIconTable.csv")
+        .and_then(|table| table.cell(icon as usize, 0))
+        .filter(|s| !s.is_empty())
+        .ok_or("unknown icon row")?
+        .to_owned();
+    super::natives::player::write_class_data(
+        world,
+        client,
+        &[
+            (vec![Value::string("cardTitle")], Value::string(&title_name)),
+            (vec![Value::string("cardIcon")], Value::string(&icon_name)),
+        ],
+    )?;
+    let mut frame = FrameWorld::from_world(world);
+    let meta = frame.client_meta_mut(ClientId(client));
+    meta.player_card_title = title;
+    meta.player_card_icon = icon;
+    Ok(())
+}
+
+pub(crate) fn prepare_round_stats(
+    world: &mut World,
+    client: u32,
+    score: i32,
+    kills: i32,
+    deaths: i32,
+) -> Result<(), String> {
+    let mut runtime = world.resource_mut::<RoundScript>();
+    let object = runtime
+        .players
+        .get(&client)
+        .ok_or("missing script player")?
+        .object;
+    let Value::Array(pers) = runtime.object_field(object, "pers") else {
+        return Err("missing player pers".into());
+    };
+    let previous_kills = match runtime
+        .arrays
+        .get(&pers)
+        .and_then(|values| values.get(&crate::script::ArrayKey::String("kills".into())))
+    {
+        Some(Value::Int(value)) => *value,
+        _ => return Err("missing player kill history".into()),
+    };
+    let Value::Int(round_kills) = runtime.object_field(0, "numkills") else {
+        return Err("missing round kill history".into());
+    };
+    let round_kills = round_kills
+        .checked_sub(previous_kills)
+        .and_then(|value| value.checked_add(kills))
+        .filter(|value| *value >= 0)
+        .ok_or("invalid prepared round kill history")?;
+    let pers = runtime.arrays.get_mut(&pers).ok_or("invalid player pers")?;
+    for (name, value) in [("score", score), ("kills", kills), ("deaths", deaths)] {
+        pers.insert(
+            crate::script::ArrayKey::String(name.into()),
+            Value::Int(value),
+        );
+    }
+    runtime.set_object_field(0, "numkills", Value::Int(round_kills));
+    Ok(())
+}
+
+pub(crate) fn validate_streak(
+    world: &World,
+    prep: &crate::input_program::InputStreakPreparation,
+) -> Result<(), String> {
+    if !(0..=25).contains(&prep.count) || prep.owned.len() > 3 {
+        return Err("invalid prepared streak count or inventory".into());
+    }
+    let tables = &world.resource::<RoundScript>().tables;
+    let table =
+        super::tables::table(tables, "mp/killstreakTable.csv").ok_or("missing killstreak table")?;
+    let cost = |name: &str| -> Option<i32> {
+        table
+            .cell(super::tables::table_search(table, 1, name)?, 4)?
+            .parse()
+            .ok()
+    };
+    let mut costs = Vec::new();
+    for name in &prep.loadout {
+        let n = cost(name)
+            .filter(|n| (1..=25).contains(n))
+            .ok_or("unknown streak loadout")?;
+        if costs.contains(&n) {
+            return Err("duplicate streak cost".into());
+        }
+        costs.push(n);
+    }
+    if prep.last_earned.as_ref().is_some_and(|name| {
+        !prep.loadout.contains(name) || cost(name).is_none_or(|n| n > prep.count)
+    }) || prep.owned.iter().any(|name| cost(name).is_none())
+    {
+        return Err("invalid last earned or owned streak".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_streak_preparations(world: &mut World) {
+    let Some(pending) = world.remove_resource::<crate::input_program::PendingInputStreaks>() else {
+        return;
+    };
+    for (client, prep) in pending.0 {
+        if let Err(error) = prepare_streak(world, client.0, &prep) {
+            let fault = Fault::at(
+                &Location {
+                    module: "<input preparation>".into(),
+                    function: "streak".into(),
+                    line: 0,
+                    column: 0,
+                },
+                error,
+            );
+            world.resource_mut::<RoundScript>().fault = Some(fault);
+            return;
+        }
+    }
+}
+
+fn prepare_streak(
+    world: &mut World,
+    client: u32,
+    prep: &crate::input_program::InputStreakPreparation,
+) -> Result<(), String> {
+    let me = player_object(world, client);
+    let Value::Object(object) = me else {
+        return Err("missing script player".into());
+    };
+    super::natives::player::write_class_data(
+        world,
+        client,
+        &prep
+            .loadout
+            .iter()
+            .enumerate()
+            .map(|(slot, name)| {
+                (
+                    vec![Value::string("killstreaks"), Value::Int(slot as i32)],
+                    Value::string(name),
+                )
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    let now = now_ms(world);
+    run_now(
+        world,
+        "maps/mp/gametypes/_class::setkillstreaks",
+        me,
+        prep.loadout.iter().map(|s| Value::string(s)).collect(),
+        now,
+    )
+    .map_err(|e| format!("{e:?}"))?;
+    {
+        let mut runtime = world.resource_mut::<RoundScript>();
+        let Value::Array(pers) = runtime.object_field(object, "pers") else {
+            return Err("missing player pers".into());
+        };
+        let pers = runtime.arrays.get_mut(&pers).ok_or("invalid player pers")?;
+        pers.insert(
+            crate::script::ArrayKey::String("cur_kill_streak".into()),
+            Value::Int(prep.count),
+        );
+        pers.insert(
+            crate::script::ArrayKey::String("lastEarnedStreak".into()),
+            prep.last_earned
+                .as_deref()
+                .map_or(Value::Undefined, Value::string),
+        );
+    }
+    for name in &prep.owned {
+        if !give_killstreak(world, client, name) {
+            return Err(format!("could not prepare owned streak {name}"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn streak_state(world: &World, client: u32) -> crate::input_program::InputStreakState {
+    let runtime = world.resource::<RoundScript>();
+    let read_field = |object: u64, name: &str| {
+        let name = name.to_ascii_lowercase();
+        runtime
+            .program
+            .as_ref()
+            .and_then(|p| p.symbol_ids.get(name.as_str()))
+            .or_else(|| runtime.dynamic_symbols.get(name.as_str()))
+            .and_then(|id| runtime.objects.get(&object)?.get(id))
+            .cloned()
+            .unwrap_or(Value::Undefined)
+    };
+    let Some(slot) = runtime.players.get(&client) else {
+        return Default::default();
+    };
+    let Value::Array(pers) = read_field(slot.object, "pers") else {
+        return Default::default();
+    };
+    let Some(pers) = runtime.arrays.get(&pers) else {
+        return Default::default();
+    };
+    let field = |name: &str| {
+        pers.get(&crate::script::ArrayKey::String(name.into()))
+            .cloned()
+            .unwrap_or(Value::Undefined)
+    };
+    let mut state = crate::input_program::InputStreakState {
+        count: match field("cur_kill_streak") {
+            Value::Int(n) => n,
+            _ => 0,
+        },
+        last_earned: match field("lastEarnedStreak") {
+            Value::String(s) => Some(s.to_string()),
+            _ => None,
+        },
+        owned: Vec::new(),
+    };
+    if let Value::Array(streaks) = field("killstreaks") {
+        for reward in runtime
+            .arrays
+            .get(&streaks)
+            .into_iter()
+            .flat_map(|a| a.values())
+        {
+            if let Value::Object(object) = reward
+                && let Value::String(name) = read_field(*object, "streakName")
+            {
+                state.owned.push(name.to_string());
+            }
+        }
+    }
+    state
+}
+
 pub(crate) fn set_profile(world: &mut World, client: u32, profile: crate::PlayerProfile) -> bool {
     if FrameWorld::from_world(world)
         .client_meta(ClientId(client))

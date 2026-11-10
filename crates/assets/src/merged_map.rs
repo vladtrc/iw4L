@@ -24,7 +24,7 @@ use serde_json::Value;
 pub struct MergedMap {
     pub name: String,
     pub path: PathBuf,
-    pub scene: crate::SceneRecipe,
+    scene: crate::SceneRecipe,
     source: Value,
 }
 
@@ -67,6 +67,10 @@ pub fn validate_scene_version(recipe: &Value) -> Result<(), String> {
 }
 
 impl MergedMap {
+    pub fn scene(&self) -> &crate::SceneRecipe {
+        &self.scene
+    }
+
     pub fn find(artifacts: &Path, name: &str) -> Option<Result<Self, String>> {
         let name = scene_name(name)?;
         let path = artifacts.join("maps").join(format!("{name}.json"));
@@ -176,6 +180,12 @@ impl MergedMap {
             let _ = std::fs::remove_file(temporary);
         }
         result
+    }
+
+    pub fn from_scene(name: String, scene: crate::SceneRecipe) -> Result<Self, String> {
+        let name = scene_name(&name).ok_or("invalid scene name")?;
+        let source = scene.to_value()?;
+        Self::from_recipe(name.clone(), PathBuf::from(format!("{name}.json")), source)
     }
 
     pub fn from_recipe(name: String, path: PathBuf, source: Value) -> Result<Self, String> {

@@ -598,9 +598,8 @@ pub(crate) fn publish_sun_shadow_frame(
             .unwrap_or(lighting_iw4::SM_SUN_ENABLE_DEFAULT);
     let next = if enabled {
         scene.as_deref().and_then(|scene| {
-            let world = asset_core::atlas::WorldLayout
-                .world_at(prepared.eye.to_array())
-                .0
+            let world = prepared
+                .physical_world
                 .min(scene.portal_worlds.saturating_sub(1));
             let bounds = scene
                 .world_bounds_by_world

@@ -1019,6 +1019,7 @@ pub fn publish_fpv_dobj_pose(
 
 #[derive(SystemParam)]
 pub struct FpvPlacement<'w, 's> {
+    level: Option<Res<'w, net::ClientLevel>>,
     clock: Res<'w, FrameClock>,
     prepared: Res<'w, PreparedFpv>,
     kick: ResMut<'w, SessionViewKick>,
@@ -1228,6 +1229,21 @@ impl FpvPlacement<'_, '_> {
         ];
         let pose_quat =
             scene_quat_from_viewmodel_axes(contrib.angles, self.kick.refdef_view_angles);
+        let space = self
+            .level
+            .as_deref()
+            .and_then(|level| level.content.atlas())
+            .map(|atlas| &atlas.space);
+        let scene_pose = render_scene::place_simulation_transform(
+            space,
+            Transform {
+                translation: Vec3::from_array(pose_origin),
+                rotation: Quat::from_array(pose_quat),
+                ..Default::default()
+            },
+        );
+        let pose_origin = scene_pose.translation.to_array();
+        let pose_quat = scene_pose.rotation.to_array();
         self.gfx_scene.scene.store_pose_origin_quat(
             SCENE_VIEWMODEL_ENTNUM,
             pose_origin,

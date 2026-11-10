@@ -474,6 +474,7 @@ pub fn build_t5_world_draw(
 
     Ok((
         WorldDraw {
+            space: Default::default(),
             sky_model: None,
             t5_sun_light,
             batches,

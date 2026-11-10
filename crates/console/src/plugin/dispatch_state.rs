@@ -61,6 +61,7 @@ pub(super) const WAIT_TIMEOUT_SECS: f32 = 120.0;
 pub enum WaitKind {
     Seconds(f32),
     Ticks(u32),
+    Take(i32),
     World,
     Progression,
     Spawn,
@@ -70,6 +71,7 @@ pub enum WaitKind {
     Weapon(u32),
     Move(WaitMovePose),
     Playing,
+    FinalKillcam,
     Alive(sim::ClientId, sim::LifeSequence),
     SessionWorld,
     SessionTorn,
@@ -80,6 +82,7 @@ impl WaitKind {
         match self {
             Self::Seconds(_) => "wait",
             Self::Ticks(_) => "wait ticks",
+            Self::Take(_) => "wait take",
             Self::World | Self::SessionWorld => "wait world",
             Self::Progression => "wait progression",
             Self::Spawn => "wait spawn",
@@ -89,6 +92,7 @@ impl WaitKind {
             Self::Weapon(_) => "wait weapon",
             Self::Move(_) => "wait move",
             Self::Playing => "wait playing",
+            Self::FinalKillcam => "wait finalkillcam",
             Self::Alive(..) => "force_spawn",
         }
     }
@@ -96,6 +100,13 @@ impl WaitKind {
 
 pub(crate) fn parse_wait_args(args: &[String]) -> WaitKind {
     match args.first().map(String::as_str) {
+        Some(s) if s.eq_ignore_ascii_case("take") => WaitKind::Take(
+            args.get(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0)
+                .clamp(0, 120_000),
+        ),
+        Some(s) if s.eq_ignore_ascii_case("finalkillcam") => WaitKind::FinalKillcam,
         Some(s) if s.eq_ignore_ascii_case("progression") => WaitKind::Progression,
         Some(s) if s.eq_ignore_ascii_case("world") => WaitKind::World,
         Some(s) if s.eq_ignore_ascii_case("spawn") => WaitKind::Spawn,

@@ -138,6 +138,7 @@ pub fn missile_lighting_atlas<'a>(
 
 #[derive(bevy::ecs::system::SystemParam)]
 struct MissileSceneProducer<'w, 's> {
+    level: Option<Res<'w, net::ClientLevel>>,
     occupancy: ResMut<'w, MissileOccupancy>,
     scene_skels: ResMut<'w, AnimDObjSceneSkels>,
     scene_submissions: MessageWriter<'w, AnimDObjSceneSubmission>,
@@ -227,8 +228,17 @@ impl MissileSceneProducer<'_, '_> {
                 Some(projectile) => snapshot.projectile_origin_at(projectile, at_time),
                 None => motion.origin_at(at_time),
             };
-            let lighting_origin = missile_lighting_origin(origin);
             let angles = entity_iw4::evaluate_trajectory(&motion.apos, at_time);
+            let lighting_origin = missile_lighting_origin(origin);
+            let pose = render_scene::place_simulation_pose(
+                self.level
+                    .as_ref()
+                    .and_then(|level| level.content.atlas())
+                    .map(|atlas| &atlas.space),
+                origin,
+                angles,
+            );
+            let (origin, angles) = (pose.origin, pose.angles);
             let entnum = entnum.map(u32::from);
             if let Some(entnum) = entnum {
                 self.scene_submissions.write(AnimDObjSceneSubmission {

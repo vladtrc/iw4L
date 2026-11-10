@@ -18,6 +18,7 @@ const RETIRED: u8 = 2;
 pub enum AudioScope {
     Menu,
     Match,
+    MatchMusic,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

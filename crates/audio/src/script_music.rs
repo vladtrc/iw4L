@@ -85,7 +85,7 @@ pub(crate) fn update_script_music(
 }
 
 pub(crate) fn register(app: &mut App) {
-    app.scoped::<ScriptMusicPlayback>(frame::Timeline::Live)
+    app.scoped::<ScriptMusicPlayback>(frame::MatchScope::Live)
         .add_systems(
             Update,
             update_script_music

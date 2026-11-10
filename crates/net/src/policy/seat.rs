@@ -334,6 +334,9 @@ fn overlay_archived_world(
     out.meta.hud_materials = live.meta.hud_materials.clone();
     // Server info is a configstring: a killcam replays the world, not it.
     out.meta.objectives.server_info = live.meta.objectives.server_info.clone();
+    // Playback pacing follows the live authority even when its archived view
+    // predates the slow-motion transition.
+    out.meta.objectives.slow_motion = live.meta.objectives.slow_motion;
 
     let archived_viewer = archived
         .players

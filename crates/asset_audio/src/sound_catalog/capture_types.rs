@@ -84,10 +84,6 @@ pub struct CapturedSndCurve {
 
 #[derive(Clone, Debug, Default)]
 pub struct CapturedAlias {
-    pub alias_name: String,
-
-    pub subtitle: Option<String>,
-
     pub secondary: Option<String>,
 
     pub chain: Option<String>,
@@ -107,12 +103,6 @@ pub struct CapturedAlias {
 
     pub file_name: Option<String>,
 
-    pub file_u: Option<&'static str>,
-
-    pub file_u_ptr: Option<String>,
-
-    pub file_u_deref: Option<&'static str>,
-
     pub sequence: i32,
 
     pub vol_min: f32,
@@ -124,20 +114,12 @@ pub struct CapturedAlias {
     pub dist_min: f32,
     pub dist_max: f32,
 
-    pub velocity_min: f32,
-
     pub flags: Option<u32>,
     pub channel_id: Option<u32>,
 
     pub looping: Option<bool>,
 
-    pub slave_percentage: f32,
-
     pub probability: f32,
-
-    pub lfe_percentage: f32,
-
-    pub center_percentage: f32,
 
     pub start_delay: i32,
 
@@ -148,10 +130,6 @@ pub struct CapturedAlias {
     pub near_falloff: Option<CapturedSndCurve>,
 
     pub voice_priority: Option<VoicePriority>,
-
-    pub envelop_min: f32,
-    pub envelop_max: f32,
-    pub envelop_percentage: f32,
 
     pub speaker_map: Option<String>,
 

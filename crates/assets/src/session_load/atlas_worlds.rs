@@ -2,8 +2,6 @@
 //! match and drawn with it (`asset_world::AtlasLayer`).
 //!
 //! Each world 1.. is walked by its own lane, its materials absorbed into the
-//! match's pool and its draw appended to the match's world at its slab,
-//! `world · ATLAS_SLAB` along x.
 
 use super::*;
 use crate::merged_map::MergedMap;
@@ -12,6 +10,8 @@ use crate::merged_map::MergedMap;
 /// and the doors between the worlds.
 #[derive(Default)]
 pub struct AtlasLoad {
+    pub(crate) space: crate::SceneSpace,
+    pub(crate) regions: Vec<Option<asset_world::WorldRegion>>,
     pub(crate) zones: Vec<(asset_core::atlas::WorldId, String, PathBuf)>,
     pub(crate) doors: Vec<asset_world::AtlasDoorPair>,
     pub(crate) replacements: Vec<asset_world::PortalDoorReplacement>,
@@ -28,6 +28,12 @@ pub fn atlas_load(
     let Some(merged) = merged else {
         return AtlasLoad::default();
     };
+    if let Err(error) = merged.scene().validate() {
+        return AtlasLoad {
+            refusal: Some(error),
+            ..Default::default()
+        };
+    }
     let Some(games) = games else {
         return AtlasLoad {
             refusal: Some(format!(
@@ -38,7 +44,7 @@ pub fn atlas_load(
         };
     };
     let mut zones = Vec::new();
-    for (index, zone) in merged.scene.worlds.iter().enumerate().skip(1) {
+    for (index, zone) in merged.scene().worlds.iter().enumerate().skip(1) {
         match asset_transport::find_zone_file(games, zone) {
             Ok(found) => zones.push((asset_core::atlas::WorldId(index), zone.clone(), found.path)),
             Err(error) => {
@@ -56,12 +62,14 @@ pub fn atlas_load(
         merged.path.display()
     );
     AtlasLoad {
-        trims: merged.scene.trims().cloned().collect(),
-        replacements: merged.scene.replacements().cloned().collect(),
+        space: merged.scene().space.clone(),
+        regions: merged.scene().regions.clone(),
+        trims: merged.scene().trims().cloned().collect(),
+        replacements: merged.scene().replacements().cloned().collect(),
         refusal: None,
         zones,
         doors: merged
-            .scene
+            .scene()
             .portals
             .iter()
             .map(|portal| {
@@ -87,6 +95,7 @@ pub(super) struct AtlasWorldWalk {
 
 pub(super) fn walk_atlas_worlds(
     zones: Vec<(asset_core::atlas::WorldId, String, PathBuf)>,
+    regions: &[Option<asset_world::WorldRegion>],
     material_seed: &MaterialCatalog,
     film_visions: &crate::FilmVisionCatalog,
     progress: &LoadProgress,
@@ -104,14 +113,35 @@ pub(super) fn walk_atlas_worlds(
                 image.game.as_str()
             )
         })?;
-        let loaded = selected.load_world(
-            &path,
-            &image,
-            progress,
-            Default::default(),
-            material_seed.clone(),
-            film_visions,
-        );
+        let loaded = match regions.get(world.index()).copied().flatten() {
+            Some(region) => selected.load_world_region(
+                &path,
+                &image,
+                progress,
+                material_seed.clone(),
+                film_visions,
+                region,
+            ),
+            None => selected.load_world(
+                &path,
+                &image,
+                progress,
+                Default::default(),
+                material_seed.clone(),
+                film_visions,
+            ),
+        };
+        if loaded.collision.is_none() {
+            let reasons = loaded
+                .gaps
+                .iter()
+                .map(|gap| gap.reason.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!(
+                "atlas world {world}: {zone}: missing collision: {reasons}"
+            ));
+        }
         walks.push(AtlasWorldWalk {
             world,
             zone,
@@ -124,15 +154,27 @@ pub(super) fn walk_atlas_worlds(
 
 /// Absorbs each walk's materials into `global` and appends its world to
 /// `host`'s at its slab.
+pub(super) struct AtlasGeometry {
+    pub space: crate::SceneSpace,
+    pub doors: Vec<asset_world::AtlasDoorPair>,
+    pub replacements: Vec<asset_world::PortalDoorReplacement>,
+    pub trims: Vec<asset_world::PortalDoorTrim>,
+}
+
 pub(super) fn absorb_atlas_worlds(
     host: &mut PreparedWorld,
     global: &mut MaterialCatalog,
     walks: Vec<AtlasWorldWalk>,
-    doors: Vec<asset_world::AtlasDoorPair>,
-    replacements: Vec<asset_world::PortalDoorReplacement>,
-    trims: Vec<asset_world::PortalDoorTrim>,
+    geometry: AtlasGeometry,
     report: &mut Vec<String>,
 ) -> Result<Vec<PreparedAtlasWorld>, String> {
+    let AtlasGeometry {
+        space,
+        doors,
+        replacements,
+        trims,
+    } = geometry;
+    space.validate(walks.len() + 1, doors.len())?;
     let mut prepared = Vec::with_capacity(walks.len());
     hide_door_leaves(host, 0, &replacements, report);
     apply_door_trims(host, 0, &trims, report)?;
@@ -148,6 +190,7 @@ pub(super) fn absorb_atlas_worlds(
             mut materials,
             collision,
             report: world_report,
+            facts,
             ..
         } = loaded;
         let collision =
@@ -164,24 +207,39 @@ pub(super) fn absorb_atlas_worlds(
                 .insert(zone.to_string_lossy().into_owned());
         }
         let linked = global.absorb_asset_population_host_materials_win(materials);
-        let shift = asset_core::atlas::WorldLayout.origin(world);
-        append_atlas_world(host, world.index(), extra, shift, &linked)
+        let frame = space.frame(world)?;
+        append_atlas_world(host, world.index(), extra, frame, &linked)
             .map_err(|error| format!("atlas world {world}: {}: {error}", path.display()))?;
         let line = format!(
-            "atlas world {world}: {} drawn at x+{} (materials linked={})",
+            "atlas world {world}: {} drawn with frame {:?} (materials linked={})",
             path.display(),
-            shift[0],
+            frame,
             linked.len()
         );
         diag::info!(World, "{line}");
         report.push(line);
         prepared.push(PreparedAtlasWorld {
             id: world,
+            compass: crate::SessionCompass {
+                namespace: zone
+                    .split_once(':')
+                    .and_then(|(family, _)| asset_core::FamilyId::parse(family)),
+                corners: facts.minimap_corners.map(|mut corners| {
+                    let origin = asset_core::atlas::WorldLayout.origin(world);
+                    corners.a[0] += origin[0];
+                    corners.b[0] += origin[0];
+                    corners
+                }),
+                north_yaw: facts.north_yaw,
+                declaration: facts.compass,
+                ..Default::default()
+            },
             zone,
             collision: Arc::new(collision),
         });
     }
     if let Some(draw) = host.draw.as_mut() {
+        draw.space = space;
         draw.atlas_doors = doors;
     }
     Ok(prepared)
@@ -214,7 +272,7 @@ fn append_atlas_world(
     host: &mut PreparedWorld,
     world: usize,
     mut extra: PreparedWorld,
-    shift: [f32; 3],
+    frame: asset_core::world_frame::WorldFrame,
     linked: &[usize],
 ) -> Result<(), String> {
     let brush_base = host
@@ -224,14 +282,14 @@ fn append_atlas_world(
         .brush_models
         .len();
     let imported =
-        super::atlas_dynents::absorb(host, &mut extra, world, shift, linked, brush_base)?;
+        super::atlas_dynents::absorb(host, &mut extra, world, frame, linked, brush_base)?;
     let (Some(draw), Some(extra_draw)) = (host.draw.as_mut(), extra.draw) else {
         return Err("a world has no draw".into());
     };
     let probe_base = draw.reflection_probes.len() as u8;
     let light_base = draw.primary_lights.len() as u8;
     let smodel_base = host.static_model_instances.len();
-    draw.append_atlas_layer(world, extra_draw, shift, linked, smodel_base)
+    draw.append_atlas_layer(world, extra_draw, frame, linked, smodel_base)
         .map_err(|error| error.to_string())?;
     if let Some(layer) = draw.atlas_layers.last_mut() {
         layer.bmodel_poses = imported.poses;
@@ -239,11 +297,12 @@ fn append_atlas_world(
         layer.lighting.source_namespace = extra.source_namespace;
         layer.lighting.light_grid_codec = extra.light_grid.as_ref().map(|grid| grid.codec);
         layer.lighting.exp_fog = extra.exp_fog;
-        layer.lighting.world_bounds = extra.world_bounds.map(|mut bounds| {
-            for i in 0..3 {
-                bounds[i] += shift[i];
-            }
-            bounds
+        layer.lighting.world_bounds = extra.world_bounds.map(|bounds| {
+            let (mid, half) = frame.bounds_to_scene(
+                [bounds[0], bounds[1], bounds[2]],
+                [bounds[3], bounds[4], bounds[5]],
+            );
+            [mid[0], mid[1], mid[2], half[0], half[1], half[2]]
         });
         layer.light_grid = extra.light_grid;
     }
@@ -260,13 +319,13 @@ fn append_atlas_world(
         }
         host.static_model_meshes.push(mesh);
     }
-    let moved = |p: [f32; 3]| [p[0] + shift[0], p[1] + shift[1], p[2] + shift[2]];
+    let carry = super::atlas_dynents::frame_pose(frame);
+    let rotation = bevy::math::Quat::from_mat4(&carry);
     host.static_model_instances
         .extend(extra.static_model_instances.into_iter().map(|placement| {
             placement.map(|mut placement| {
                 placement.mesh += mesh_base;
-                placement.transform.translation += bevy::math::Vec3::from(shift);
-                placement.origin = moved(placement.origin);
+                place_static_model_pose(&mut placement, frame, carry, rotation);
                 placement.reflection_probe_index =
                     placement.reflection_probe_index.saturating_add(probe_base);
                 placement.primary_light_index =
@@ -277,10 +336,23 @@ fn append_atlas_world(
     host.smodel_lighting_samples
         .extend(extra.smodel_lighting_samples.into_iter().map(|mut sample| {
             sample.authored_slot += smodel_base;
-            sample.lighting_origin = moved(sample.lighting_origin);
+            sample.lighting_origin = frame.point_to_scene(sample.lighting_origin);
             sample
         }));
     Ok(())
+}
+
+fn place_static_model_pose(
+    placement: &mut asset_world::StaticModelPlacement,
+    frame: asset_core::world_frame::WorldFrame,
+    carry: bevy::math::Mat4,
+    rotation: bevy::math::Quat,
+) {
+    placement.transform.translation = carry.transform_point3(placement.transform.translation);
+    placement.transform.rotation = rotation * placement.transform.rotation;
+    placement.origin = frame.point_to_scene(placement.origin);
+    // Static-model skinning consumes the captured basis, not Transform.rotation.
+    placement.axis = placement.axis.map(|axis| frame.vector_to_scene(axis));
 }
 
 fn hide_door_leaves(

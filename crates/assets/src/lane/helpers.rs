@@ -21,6 +21,28 @@ impl MapXModelCatalog {
             self.note_failed_mesh();
             return;
         };
+        self.capture_geometry(
+            stream,
+            materials,
+            slot,
+            insert_slot,
+            strings,
+            phys_presets,
+            geometry,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn capture_geometry(
+        &mut self,
+        stream: &ZoneStream<'_>,
+        materials: &MaterialCatalog,
+        slot: Ptr,
+        insert_slot: Option<Ptr>,
+        strings: &fastfile_iw4::ScriptStrings,
+        phys_presets: &asset_world::PhysPresetCatalog,
+        geometry: fastfile_iw4::XModelGeometry,
+    ) {
         let slot_live = geometry.phys_preset.is_some();
         let named = geometry
             .phys_preset

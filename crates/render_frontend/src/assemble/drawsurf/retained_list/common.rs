@@ -1,65 +1,6 @@
-use crate::assemble::pack::{PackDraw, PackKind};
 use dpvs_iw4::GfxDrawSurf;
 use dpvs_iw4::material_sort_key_row;
 use render_frame::{RetainedDrawItem, RetainedDrawKind};
-
-pub(crate) fn pack_draw(draw: &RetainedDrawItem) -> PackDraw {
-    let kind = match draw.kind {
-        RetainedDrawKind::World {
-            surf, run, run_off, ..
-        } => PackKind::World { surf, run, run_off },
-        RetainedDrawKind::Smodel {
-            surface,
-            lighting_handle,
-            stream: Some(lighting_iw4::SmodelSurfPath::Rigid),
-            ..
-        } => PackKind::SmodelRigid {
-            surface,
-            lighting_handle,
-        },
-        RetainedDrawKind::Smodel {
-            surface,
-            lighting_handle,
-            stream: Some(lighting_iw4::SmodelSurfPath::Skinned),
-            ..
-        } => PackKind::SmodelSkinned {
-            surface,
-            lighting_handle,
-        },
-        RetainedDrawKind::Smodel {
-            lighting_handle,
-            stream: Some(lighting_iw4::SmodelSurfPath::Pretess),
-            pretess: Some(dest),
-            ..
-        } => PackKind::SmodelPretess {
-            lighting_handle,
-            dest,
-        },
-        RetainedDrawKind::Smodel {
-            lighting_handle,
-            stream: Some(lighting_iw4::SmodelSurfPath::Cached),
-            pretess: Some(dest),
-            ..
-        } => PackKind::SmodelCached {
-            lighting_handle,
-            dest,
-        },
-        RetainedDrawKind::XModel {
-            surface,
-            lighting_handle,
-            ..
-        } => PackKind::XModel {
-            surface,
-            lighting_handle,
-        },
-        _ => PackKind::Skip,
-    };
-    PackDraw {
-        key: draw.key,
-        material_rank: draw.material_rank,
-        kind,
-    }
-}
 
 pub(super) fn with_catalog(
     key: u64,

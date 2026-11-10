@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use asset_core::FamilyId;
 use bevy::prelude::Resource;
@@ -84,9 +84,12 @@ const TEAM_MUSIC: [&str; 5] = [
 const IW4_LINE: &str = "1mc_";
 
 #[derive(Resource, Default)]
-pub(crate) struct AnnouncerRoutes(HashMap<String, (FamilyId, String)>);
+pub(crate) struct AnnouncerRoutes(HashMap<String, (FamilyId, String)>, HashSet<String>);
 
 impl AnnouncerRoutes {
+    pub(crate) fn is_music(&self, alias: &str) -> bool {
+        self.1.contains(alias)
+    }
     pub(crate) fn route<'a>(&'a self, alias: &'a str) -> (FamilyId, &'a str) {
         self.0
             .get(alias)
@@ -104,13 +107,18 @@ impl AnnouncerRoutes {
         native: Option<&asset_game::MapTeamSettings>,
         aliases: &[String],
     ) -> Self {
+        let music = iw4
+            .into_iter()
+            .flatten()
+            .flat_map(|prefix| TEAM_MUSIC.map(|line| format!("{prefix}{line}")))
+            .collect();
         let Some(route_line) =
             asset_game::team_family(namespace).and_then(|policy| policy.announcer)
         else {
-            return Self::default();
+            return Self(HashMap::new(), music);
         };
         let Some(native) = native else {
-            return Self::default();
+            return Self(HashMap::new(), music);
         };
         let teams: Vec<(&str, Option<&str>, &asset_game::TeamMusic)> = iw4
             .into_iter()
@@ -141,6 +149,6 @@ impl AnnouncerRoutes {
                 })
             })
             .collect();
-        Self(routes)
+        Self(routes, music)
     }
 }

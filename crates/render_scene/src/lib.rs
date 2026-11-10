@@ -5,6 +5,7 @@ pub use skin_support::SkinSupport;
 pub mod camera;
 pub mod dpvs_cells;
 pub mod dyn_atpoint;
+pub mod film;
 pub mod frustum;
 pub mod gfx_scene;
 pub mod host;
@@ -18,7 +19,8 @@ pub mod world_instances;
 pub mod xmodel_draw;
 
 pub use camera::{
-    CameraView, FlyCamera, FpvLens, SimCamera, WorldCameraPose, transform_from_iw_view,
+    CameraView, CameraWorld, FlyCamera, FpvLens, SimCamera, WorldCameraPose, place_simulation_pose,
+    place_simulation_transform, transform_from_iw_view,
 };
 pub use dpvs_cells::{DynEntModelEntity, PublishedCellView, PublishedCellVis, WorldDpvsCells};
 pub use dyn_atpoint::DynAtPointLookup;

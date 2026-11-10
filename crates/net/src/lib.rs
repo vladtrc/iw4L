@@ -1,3 +1,4 @@
+pub use client::command_capture::{CapturedCommand, LocalCommandCapture};
 pub use client::level::{ClientCollision, ClientLevel};
 mod local_account;
 pub use local_account::{AccountSaveReceipt, LocalAccount};
@@ -159,4 +160,6 @@ pub use transport::wire::{WireError, WireReader, WireWriter};
 
 pub use svc_script_audio::SvcScriptAudio;
 
-pub const PROTOCOL_VERSION: u32 = 125;
+pub const PROTOCOL_VERSION: u32 = 126;
+
+pub use transport::meta_wire::encode_actions;

@@ -2,7 +2,7 @@ use crate::tess::{
     DYNAMIC_INDEX_BUFFER_CAPACITY, GfxDrawPrimArgs, GfxDynamicIndexBuffer, IndexDataAppend,
     copy_u32_indices_into_ring,
 };
-use crate::{ShadowDrawListWork, SmodelRigidFlush, TrianglesListFlush, XModelRigidFlush};
+use crate::{SmodelRigidFlush, TrianglesListFlush, XModelRigidFlush};
 
 pub struct ModelIndexStream {
     ring: GfxDynamicIndexBuffer,
@@ -70,32 +70,9 @@ impl ModelIndexStream {
     }
 }
 
-pub const D3DPT_TRIANGLELIST: u32 = 4;
-
 pub const SMODEL_RIGID_DIP_VERTEX_COUNT: u32 = 0x2100;
 
 pub const XMODEL_RIGID_DIP_VERTEX_COUNT: u32 = 0x1800;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct D3dDrawIndexedPrimitive {
-    pub primitive_type: u32,
-    pub base_vertex_index: i32,
-    pub min_vertex_index: u32,
-    pub num_vertices: u32,
-    pub start_index: u32,
-    pub primitive_count: u32,
-}
-
-pub fn draw_indexed_primitive(args: GfxDrawPrimArgs) -> D3dDrawIndexedPrimitive {
-    D3dDrawIndexedPrimitive {
-        primitive_type: D3DPT_TRIANGLELIST,
-        base_vertex_index: 0,
-        min_vertex_index: 0,
-        num_vertices: args.vertex_count,
-        start_index: args.base_index,
-        primitive_count: args.tri_count,
-    }
-}
 
 pub fn prim_args_u32_index_span(args: GfxDrawPrimArgs) -> (u32, u32) {
     (args.base_index, args.tri_count.saturating_mul(3))
@@ -177,47 +154,4 @@ pub fn set_index_data_xmodel_flush(
     let (epoch, append) =
         set_index_data_source_copy(stream, source, flush.index_byte_offset, flush.tri_count)?;
     Ok((epoch, append, prim_args_from_xmodel_flush(flush, append)))
-}
-
-pub fn draw_indexed_from_shadow_work(work: &ShadowDrawListWork) -> Vec<D3dDrawIndexedPrimitive> {
-    let mut ring = GfxDynamicIndexBuffer {
-        cur_index_count: 0,
-        capacity: DYNAMIC_INDEX_BUFFER_CAPACITY,
-    };
-    let mut out = Vec::with_capacity(
-        work.world_flushes.len()
-            + work.xmodel_flushes.len()
-            + work.smodel_flushes.len()
-            + work.smodel_pretess_flushes.len()
-            + work.smodel_cached_flushes.len(),
-    );
-    for flush in &work.world_flushes {
-        out.push(draw_indexed_primitive(prim_args_from_world_flush(*flush)));
-    }
-    for flush in &work.xmodel_flushes {
-        let append = ring.set_index_data(flush.tri_count);
-        out.push(draw_indexed_primitive(prim_args_from_xmodel_flush(
-            *flush, append,
-        )));
-    }
-    for flush in &work.smodel_flushes {
-        let append = ring.set_index_data(flush.tri_count);
-        out.push(draw_indexed_primitive(prim_args_from_smodel_flush(
-            *flush, append,
-        )));
-    }
-    for flush in &work.smodel_pretess_flushes {
-        out.push(draw_indexed_primitive(GfxDrawPrimArgs {
-            vertex_count: lighting_iw4::SMC_BANK_VERTS,
-            tri_count: flush.tri_count,
-            base_index: flush.index_byte_offset / 2,
-        }));
-    }
-    for flush in &work.smodel_cached_flushes {
-        let append = ring.set_index_data(flush.tri_count);
-        out.push(draw_indexed_primitive(prim_args_from_smodel_flush(
-            *flush, append,
-        )));
-    }
-    out
 }

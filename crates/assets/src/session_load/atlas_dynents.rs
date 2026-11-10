@@ -1,6 +1,16 @@
 use crate::PreparedWorld;
+use asset_core::world_frame::WorldFrame;
 use asset_world::{DynEntDef, MapXModelAssetKey};
 use bevy::math::{Mat4, Quat, Vec3};
+
+pub(super) fn frame_pose(frame: WorldFrame) -> Mat4 {
+    Mat4::from_cols(
+        Vec3::from_array(frame.vector_to_scene([1.0, 0.0, 0.0])).extend(0.0),
+        Vec3::from_array(frame.vector_to_scene([0.0, 1.0, 0.0])).extend(0.0),
+        Vec3::from_array(frame.vector_to_scene([0.0, 0.0, 1.0])).extend(0.0),
+        Vec3::from_array(frame.point_to_scene([0.0; 3])).extend(1.0),
+    )
+}
 
 fn next_id(rows: &[DynEntDef]) -> usize {
     rows.iter()
@@ -36,17 +46,16 @@ fn quat_pose(origin: [f32; 3], quat: [f32; 4]) -> Mat4 {
 fn carried_brush(
     native: Mat4,
     local: asset_world::GfxBrushModelBounds,
-    shift: [f32; 3],
+    frame: WorldFrame,
 ) -> (Mat4, dpvs_iw4::Bounds) {
-    let offset = Vec3::from_array(shift);
-    let carry = Mat4::from_translation(offset);
+    let carry = frame_pose(frame);
     let xf = carry * native;
     let half = Vec3::from_array(local.half);
     let world_half = xf.x_axis.truncate().abs() * half.x
         + xf.y_axis.truncate().abs() * half.y
         + xf.z_axis.truncate().abs() * half.z;
     (
-        xf * Mat4::from_translation(-offset),
+        xf * carry.inverse(),
         dpvs_iw4::Bounds::from_mid_half(
             xf.transform_point3(Vec3::from_array(local.mid)).to_array(),
             world_half.to_array(),
@@ -83,10 +92,12 @@ pub(super) fn absorb(
     host: &mut PreparedWorld,
     extra: &mut PreparedWorld,
     world: usize,
-    shift: [f32; 3],
+    frame: WorldFrame,
     materials: &[usize],
     brush_base: usize,
 ) -> Result<Imported, String> {
+    let carry = frame_pose(frame);
+    let rotation = Quat::from_mat4(&carry);
     let model_base = next_id(&host.dyn_ents.models);
     let brush_id_base = next_id(&host.dyn_ents.brushes);
     let model_n = extra.draw.as_ref().map_or(0, |d| d.brush_models.len());
@@ -132,7 +143,7 @@ pub(super) fn absorb(
             .as_ref()
             .and_then(|d| d.brush_model_bounds.get(i))
             .ok_or("atlas brush model has no bounds")?;
-        let (pose, bounds) = carried_brush(p, *local, shift);
+        let (pose, bounds) = carried_brush(p, *local, frame);
         carried_poses.push((usize::from(model), pose));
         carried_bounds.push((model, bounds));
     }
@@ -167,10 +178,9 @@ pub(super) fn absorb(
         for model in &mut instance.dobj_state.composition.models {
             model.model = MapXModelAssetKey::atlas(world, &model.model).0;
         }
-        instance.transform.translation += Vec3::from_array(shift);
-        for (i, shift_entry) in shift[..3].iter().enumerate() {
-            instance.lighting_origin[i] += *shift_entry;
-        }
+        instance.transform.translation = carry.transform_point3(instance.transform.translation);
+        instance.transform.rotation = rotation * instance.transform.rotation;
+        instance.lighting_origin = frame.point_to_scene(instance.lighting_origin);
         diag::info!(
             World,
             "atlas script model world={world} native_id={native} id={} model={:?} origin={:?}",
@@ -184,9 +194,15 @@ pub(super) fn absorb(
     for def in &mut extra.dyn_ents.models {
         let native = def.index;
         def.index = rebased(native, model_base, "dyn_ent model")?;
-        for (i, shift_entry) in shift[..3].iter().enumerate() {
-            def.origin[i] += *shift_entry;
-        }
+        def.origin = frame.point_to_scene(def.origin);
+        let native_rotation = Quat::from_array(def.quat);
+        def.quat = (rotation
+            * if native_rotation.length_squared() > 1e-12 {
+                native_rotation.normalize()
+            } else {
+                Quat::IDENTITY
+            })
+        .to_array();
         if let Some(name) = def.xmodel.as_mut() {
             *name = MapXModelAssetKey::atlas(world, name).0;
         }
@@ -205,9 +221,15 @@ pub(super) fn absorb(
             def.brush_model = rebased(def.brush_model, brush_base, "brush model")?;
         }
         // physics_brush_model is a local clip owner, retained in its world's clip.
-        for (i, shift_entry) in shift[..3].iter().enumerate() {
-            def.origin[i] += *shift_entry;
-        }
+        def.origin = frame.point_to_scene(def.origin);
+        let native_rotation = Quat::from_array(def.quat);
+        def.quat = (rotation
+            * if native_rotation.length_squared() > 1e-12 {
+                native_rotation.normalize()
+            } else {
+                Quat::IDENTITY
+            })
+        .to_array();
         diag::info!(
             World,
             "atlas dynent brush world={world} native_id={native} id={} brush_model={} origin={:?}",

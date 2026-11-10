@@ -392,6 +392,67 @@ pub fn game_root_for_zone(zone_ff: &Path) -> Result<PathBuf, String> {
     ))
 }
 
+pub struct LocalizedZones {
+    dir: PathBuf,
+    prefix: String,
+}
+
+impl LocalizedZones {
+    pub fn find(anchor: &Path, language: Option<&str>, game: FamilyId) -> Result<Self, String> {
+        let root = game_root_for_zone(anchor)?.join("zone");
+        let mut choices: Vec<_> = files_under(vec![root])
+            .filter_map(Result::ok)
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|name| name.ends_with("_code_post_gfx_mp.ff"))
+                    && zone_game_for_path(path) == Some(game)
+            })
+            .collect();
+        choices.sort();
+        let preferred = choices.iter().position(|path| {
+            path.parent()
+                .and_then(Path::file_name)
+                .and_then(|s| s.to_str())
+                .zip(language)
+                .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+        });
+        let chosen = match preferred {
+            Some(index) => &choices[index],
+            None if choices.len() == 1 => &choices[0],
+            _ => {
+                return Err(format!(
+                    "{} language archive selection is ambiguous or missing: {} candidates",
+                    game.as_str().to_uppercase(),
+                    choices.len()
+                ));
+            }
+        };
+        let name = chosen
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or("language archive name")?;
+        let prefix = name
+            .strip_suffix("code_post_gfx_mp.ff")
+            .ok_or("language prefix")?;
+        let dir = chosen.parent().ok_or("language directory")?;
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            prefix: prefix.to_owned(),
+        })
+    }
+
+    pub fn zone(&self, stem: &str) -> Option<ZoneFile> {
+        let zone_name = format!("{}{stem}", self.prefix);
+        let path = self.dir.join(format!("{zone_name}.ff"));
+        path.is_file().then_some(ZoneFile {
+            path,
+            zone_name,
+            alias_note: None,
+        })
+    }
+}
+
 pub fn games_root_report(root: &GamesRoot) -> String {
     let roots = search_roots(&root.0);
     let mut line = format!("games root: {}", root.0.display());
@@ -572,10 +633,20 @@ fn map_pack_folder(zone_ff: &Path) -> String {
         .unwrap_or_else(|| "BASE".to_owned())
 }
 
+static ARTIFACTS_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn install_artifacts_root(path: PathBuf) -> Result<(), &'static str> {
+    ARTIFACTS_ROOT
+        .set(path)
+        .map_err(|_| "artifact root already installed")
+}
+
 pub fn ensure_artifacts_dir() -> Result<PathBuf, String> {
-    let dir = std::env::var_os("IW4L_ARTIFACTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("iw4l-artifacts"));
+    let dir = ARTIFACTS_ROOT.get().cloned().unwrap_or_else(|| {
+        std::env::var_os("IW4L_ARTIFACTS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("iw4l-artifacts"))
+    });
     std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     Ok(dir)
 }

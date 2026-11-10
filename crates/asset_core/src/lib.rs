@@ -1,5 +1,6 @@
 pub mod atlas;
 mod game_folder;
+pub mod world_frame;
 pub use game_folder::*;
 pub mod map_content;
 pub use map_content::{GlassContent, GlassDefinition, GlassPaneBasis, MapContentDefinition};

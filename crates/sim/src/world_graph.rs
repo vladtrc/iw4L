@@ -27,10 +27,10 @@ pub use asset_core::atlas::PortalPair as AtlasPortal;
 /// The atlas beyond the match's own map: extra worlds and the portals.
 #[derive(Clone, Debug, Default)]
 pub struct Atlas {
+    pub space: asset_core::world_frame::SceneSpace,
     pub root_zone: String,
     pub versions: asset_core::atlas::SceneVersions,
     pub dvars: std::collections::BTreeMap<String, String>,
-    /// Worlds 1.. of the atlas; world 0 is the match's map.
     pub worlds: Vec<std::sync::Arc<AtlasWorld>>,
     pub portals: Vec<AtlasPortal>,
     /// Authored wall thickness [a, b], present for interactive merged maps.
@@ -45,6 +45,17 @@ pub struct AtlasClip<'a> {
     pub bsp: &'a SimClipBsp,
     pub mesh: &'a SimClipMesh,
     pub cmodels: &'a SimClipCmodels,
+}
+
+impl AtlasWorld {
+    pub fn clip(&self) -> AtlasClip<'_> {
+        AtlasClip {
+            brushes: &self.brushes,
+            bsp: &self.bsp,
+            mesh: &self.mesh,
+            cmodels: &self.cmodels,
+        }
+    }
 }
 
 /// The offset of world `world` in the shared coordinates.
@@ -133,23 +144,15 @@ impl Atlas {
         let local: Vec<PlayerCollisionPose>;
         let (clip, players) = match world {
             0 => (base, players),
-            n => match self.worlds.get(n - 1) {
-                Some(w) => (
-                    AtlasClip {
-                        brushes: &w.brushes,
-                        bsp: &w.bsp,
-                        mesh: &w.mesh,
-                        cmodels: &w.cmodels,
-                    },
-                    {
-                        local = players
-                            .iter()
-                            .filter(|pose| world_at(pose.origin) == n)
-                            .map(|pose| shifted(pose, offset))
-                            .collect();
-                        &local[..]
-                    },
-                ),
+            n => match self.worlds.get(n) {
+                Some(w) => (w.clip(), {
+                    local = players
+                        .iter()
+                        .filter(|pose| world_at(pose.origin) == n)
+                        .map(|pose| shifted(pose, offset))
+                        .collect();
+                    &local[..]
+                }),
                 None => return (world, TraceOutcome::Miss { end }),
             },
         };

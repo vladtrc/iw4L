@@ -65,8 +65,17 @@ use asset_model::{BodyMeshBuild, FpvMeshBuild, SoldierKit, WorldWeaponBuild, sol
 use asset_transport::StageHandle;
 use asset_world::{ModelKind, build_xmodel_mesh, model_kind};
 
+pub(super) struct DeferredModel {
+    pub geometry: fastfile_iw4::XModelGeometry,
+    pub slot: Ptr,
+    pub insert_slot: Option<Ptr>,
+}
+
 #[derive(Default)]
 pub(crate) struct ZoneWalkSink {
+    pub(super) region_only: bool,
+    pub(super) deferred_models: Vec<DeferredModel>,
+    pub(super) deferred_aliases: Vec<(Ptr, Ptr)>,
     pub scripts: crate::ScriptSources,
     pub walked: usize,
     pub stage: Option<StageHandle>,
@@ -79,7 +88,7 @@ pub(crate) struct ZoneWalkSink {
     pub map_xmodels: MapXModelCatalog,
     pub phys_presets: asset_world::PhysPresetCatalog,
     pub fx_glass_def_materials: Vec<(String, String)>,
-    script_strings: ScriptStrings,
+    pub(super) script_strings: ScriptStrings,
     pub bodies: BodyMeshBuild,
     pub fpv_meshes: FpvMeshBuild,
     pub xanims: XAnimBuild,
@@ -281,7 +290,15 @@ impl AssetLinkSink for ZoneWalkSink {
         if ty == AssetType::Tracer {
             self.tracers.note_loaded(slot, insert_slot);
         }
-        if ty == AssetType::XModel {
+        if ty == AssetType::XModel && self.region_only {
+            if let Some(geometry) = stream.xmodel() {
+                self.deferred_models.push(DeferredModel {
+                    geometry,
+                    slot,
+                    insert_slot,
+                });
+            }
+        } else if ty == AssetType::XModel {
             self.map_xmodels.capture(
                 stream,
                 &self.materials,
@@ -314,6 +331,9 @@ impl AssetLinkSink for ZoneWalkSink {
             self.tracers.note_alias(slot, target);
         }
         if ty == AssetType::XModel {
+            if self.region_only {
+                self.deferred_aliases.push((slot, target));
+            }
             self.map_xmodels.alias(slot, target);
             self.xmodel_coll.alias(slot, target);
             if let Some(&name) = self.xmodel_names.get(&target) {

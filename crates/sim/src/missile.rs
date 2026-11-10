@@ -289,6 +289,13 @@ fn fire_missile(
         attached_to: None,
         cause: shot.fire_cause,
     };
+    if let Some(mut run) = world
+        .ecs()
+        .get_resource_mut::<crate::input_program::InputProgramRun>()
+        && let Some(actor) = run.actor_mut(shot.attacker)
+    {
+        actor.launches.push(projectile);
+    }
     world.push_projectile(projectile);
     Some(projectile)
 }

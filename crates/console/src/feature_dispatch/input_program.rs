@@ -42,6 +42,46 @@ pub(crate) fn route_input_program(
                 .collect::<Vec<_>>()
                 .as_slice()
             {
+                ["prepare_actor", client, path] => {
+                    if *role != frame::RuntimeRole::Listen {
+                        return Err("actor preparation requires a listen host".into());
+                    }
+                    let client = sim::ClientId(client.parse::<u32>().map_err(|e| e.to_string())?);
+                    let value: Value = serde_json::from_str(&std::fs::read_to_string(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+                    reject_unknown(&value, &["name", "rank", "prestige", "title", "icon", "score", "kills", "deaths", "streak"])?;
+                    let p = sim::input_program::InputActorPreparation {
+                        name: value["name"].as_str().ok_or("missing actor name")?.to_owned(),
+                        rank: integer(&value,"rank")?.try_into().map_err(|_| "invalid rank")?,
+                        prestige: integer(&value,"prestige")?.try_into().map_err(|_| "invalid prestige")?,
+                        title: integer(&value,"title")?.try_into().map_err(|_| "invalid title")?,
+                        icon: integer(&value,"icon")?.try_into().map_err(|_| "invalid icon")?,
+                        score: integer(&value,"score")?.try_into().map_err(|_| "invalid score")?,
+                        kills: integer(&value,"kills")?.try_into().map_err(|_| "invalid kills")?,
+                        deaths: integer(&value,"deaths")?.try_into().map_err(|_| "invalid deaths")?,
+                        streak: parse_streak(&value["streak"])? ,
+                    };
+                    world.prepare_input_actor(client, &p)?;
+                    Ok(format!("input actor {} prepared", client.0))
+                }
+                ["prepare_team_scores", allies, axis] => {
+                    if *role != frame::RuntimeRole::Listen {
+                        return Err("score preparation requires a listen host".into());
+                    }
+                    world.prepare_input_team_scores(
+                        allies.parse::<i32>().map_err(|e| e.to_string())?,
+                        axis.parse::<i32>().map_err(|e| e.to_string())?,
+                    )?;
+                    Ok(format!("input team scores prepared: allies={allies} axis={axis}"))
+                }
+                ["prepare_health", client, health] => {
+                    if *role != frame::RuntimeRole::Listen {
+                        return Err("actor preparation requires a listen host".into());
+                    }
+                    let client = sim::ClientId(client.parse::<u32>().map_err(|e| e.to_string())?);
+                    let health = health.parse::<i32>().map_err(|e| e.to_string())?;
+                    world.prepare_input_actor_health(client, health)?;
+                    Ok(format!("input actor {} prepared with {health} health", client.0))
+                }
                 ["load", path] => {
                     if *role != frame::RuntimeRole::Listen {
                         return Err("input programs currently require a listen host".into());
@@ -72,7 +112,7 @@ pub(crate) fn route_input_program(
                     .map_err(|e| e.to_string())?;
                     Ok(format!("input program receipts: {path}"))
                 }
-                _ => Err("usage: input_program load <path> | dump <path> | status".into()),
+                _ => Err("usage: input_program prepare_actor <client> <json> | prepare_team_scores <allies> <axis> | prepare_health <client> <health> | load <path> | dump <path> | status".into()),
             }
         })();
         echo.write(result.unwrap_or_else(|e| format!("input_program: {e}")));
@@ -98,13 +138,19 @@ fn actor_report(
     let samples: Vec<_> = run.receipts.iter().map(|r| json!({
                         "tick": r.tick.0, "sequence": r.command.sequence.map(|seq| seq.0),
                         "bytes": r.command.command.canonical_bytes().as_slice(),
+                        "source_bytes": r.source_command.command.canonical_bytes().as_slice(),
                         "server_time": r.player.command_time, "origin": r.player.origin,
+                        "world": sim::world_graph::world_at(r.player.origin),
                         "velocity": r.player.velocity, "angles": r.player.viewangles,
                         "ground_entity": r.player.ground_entity_num, "weapon": r.player.weapon,
                         "weapon_state": r.player.weaponstate_primary,
                         "weapon_anim": r.player.weap_anim, "weapon_time": r.player.weapon_time,
                         "weapon_delay": r.player.weapon_delay, "pm_flags": r.player.pm_flags,
-                        "view_height": r.player.view_height_current, "off_hand_index": r.player.off_hand_index
+                        "health": r.player.health, "inventory": r.player.weapons,
+                        "weapon_data": r.player.weapon_data.as_slice(),
+                        "ads_frac": r.player.f_weapon_pos_frac,
+                        "view_height": r.player.view_height_current, "off_hand_index": r.player.off_hand_index,
+                        "cursor_hint":r.player.cursor_hint,"cursor_hint_entity":r.player.cursor_hint_ent_index
                     })).collect();
     let shots: Vec<_> = run.shots.iter().map(|shot| json!({
                         "id": shot.shot_id.0, "weapon": shot.weapon, "origin": shot.origin,
@@ -138,6 +184,27 @@ fn actor_report(
                         "shots": shots, "launches": launches, "shot_verdicts": verdicts,
                         "issued": run.issued, "total": run.program.samples.len(), "receipts": samples });
     let mut report = report;
+    let meta = &run.initial_meta;
+    report["initial_match"] = json!({"score":meta.score,"kills":meta.kills,"deaths":meta.deaths,
+        "rank":meta.rank,"prestige":meta.prestige,"title":meta.player_card_title,"icon":meta.player_card_icon,
+        "name":String::from_utf8_lossy(&meta.name).trim_end_matches('\0')});
+    let streak = world.input_actor_streak(run.program.client);
+    report["final_streak"] =
+        json!({"count":streak.count,"last_earned":streak.last_earned,"owned":streak.owned});
+    let streak = &run.initial_streak;
+    report["initial_streak"] =
+        json!({"count":streak.count,"last_earned":streak.last_earned,"owned":streak.owned});
+    report["match_states"] = json!(run.match_states.iter().map(|state|json!({"tick":state.tick.0,"ended":state.ended,
+        "score_limit":state.score_limit,"scores":state.scores.iter().map(|(id,score,kills,deaths)|json!({"client":id.0,"score":score,"kills":kills,"deaths":deaths})).collect::<Vec<_>>() })).collect::<Vec<_>>());
+    report["scoreboard_window_ms"] = json!(run.program.scoreboard_window_ms);
+    report["scoreboard_samples"] = json!(
+        run.scoreboard_samples
+            .iter()
+            .map(|(tick, origin)| json!({"tick":tick.0,"origin":origin}))
+            .collect::<Vec<_>>()
+    );
+    report["final_killcams"] = json!(run.final_killcams.iter().map(|cam|
+        json!({"start_tick":cam.start.0,"last_tick":cam.last.0,"closed_tick":cam.closed.map(|t|t.0),"client":cam.client.0,"target":cam.target,"length_ms":cam.length_ms})).collect::<Vec<_>>());
     report["shot_scenes"] = json!(run.shot_scenes.iter().map(|sample| json!({
         "tick": sample.tick.0, "shot": sample.shot.0,
         "targets": sample.targets.iter().map(|target| json!({
@@ -163,6 +230,74 @@ fn actor_report(
     );
     report["actor_team"] = json!(world.client_state_team(run.program.client));
     report["client"] = json!(run.program.client.0);
+    report["projectile_impacts"] = json!(
+        world
+            .projectile_impact_log()
+            .iter()
+            .filter(
+                |(tick, impact)| run.start_tick.is_some_and(|start| *tick >= start)
+                    && impact.owner == run.program.client
+            )
+            .map(
+                |(tick, impact)| json!({"tick":tick.0,"id":impact.id.0,"weapon":impact.weapon,
+            "origin":impact.origin,"geometry":format!("{:?}",impact.geometry),
+            "terminal":format!("{:?}",impact.terminal),"amount":impact.amount})
+            )
+            .collect::<Vec<_>>()
+    );
+    report["death_tick"] = json!(run.death_tick.map(|t| t.0));
+    report["future_weapons"] = json!(run.program.future_weapons);
+    report["weapon_facts"] = json!(run.initial_player.weapons.iter().copied()
+        .filter(|&id|id>0).map(|id|id as u32)
+        .chain(run.program.future_weapons.iter().map(|&id|u32::from(id)))
+        .filter_map(|id|world.weapon_combat_facts(id).map(|f|json!({
+            "id":id,"damage":f.damage,"min_damage":f.min_damage,"location_damage_mult":f.location_damage,
+            "fire_ms":f.fire_time_ms,"fire_delay_ms":f.fire_delay_ms,
+            "drop_ms":f.drop_time_ms,"raise_ms":f.raise_time_ms,"first_raise_ms":f.first_raise_time_ms,
+            "reload_ms":f.reload_time_ms,"reload_add_ms":f.reload_add_time_ms,
+            "rechamber_ms":f.rechamber_time_ms,"bolt_delay_ms":f.rechamber_bolt_delay_ms,
+            "bolt_action":f.bolt_action,"clip_size":f.clip_size
+        }))).collect::<Vec<_>>());
+    report["missile_facts"] = json!(
+        run.initial_player
+            .weapons
+            .iter()
+            .copied()
+            .filter(|&id| id > 0)
+            .filter_map(|id| world
+                .content()
+                .missile_launch_facts(id as u32)
+                .map(|f| json!({
+                    "id":id,"speed":f.projectile_speed,"guidance":f.missile_guidance
+                })))
+            .collect::<Vec<_>>()
+    );
+    report["events"] = json!(run.events.iter().map(|record| {
+        let data = match record.event {
+            sim::SimEvent::Died { victim, attacker, weapon, source, .. } =>
+                json!({"kind":"died", "victim":victim.0, "attacker":attacker.map(|a|a.0), "weapon":weapon, "source":format!("{source:?}")}),
+            sim::SimEvent::ScoreChanged { client, score, kills, deaths } =>
+                json!({"kind":"score", "client":client.0, "score":score, "kills":kills, "deaths":deaths}),
+            sim::SimEvent::MatchEnded { reason } => json!({"kind":"match_ended", "reason":format!("{reason:?}")}),
+            _ => json!({"kind":"other", "event":format!("{:?}",record.event)}),
+        };
+        json!({"tick":record.tick.0, "sequence":record.sequence.0, "data":data})
+    }).collect::<Vec<_>>());
+    report["pickups"] = json!(
+        run.pickups
+            .iter()
+            .map(|(tick, item)| json!({
+                "tick":tick.0, "picker":item.picker, "weapon":item.weapon,
+                "from_entnum":item.from_entnum, "swapped_entnum":item.swapped_entnum,
+                "clip_r":item.clip_r, "clip_l":item.clip_l, "stock":item.stock,
+            }))
+            .collect::<Vec<_>>()
+    );
+    let snapshot = world.snapshot(sim::Tick(0));
+    report["final_match"] = json!({"phase":format!("{:?}",snapshot.meta.phase),
+        "mode":format!("{:?}",snapshot.meta.kind), "score_limit":snapshot.meta.score_limit,
+        "scores":snapshot.meta.clients.iter().map(|(id,meta)| json!({"client":id.0,
+            "kills":meta.kills,"deaths":meta.deaths,"score":meta.score})).collect::<Vec<_>>()});
     report["schema_version"] = json!(if run.actors.is_empty() { 1 } else { 2 });
     report["ensemble_sha256"] = json!(
         run.ensemble_digest()
@@ -177,6 +312,50 @@ fn actor_report(
             .collect::<Vec<_>>()
     );
     report
+}
+
+fn parse_streak(
+    value: &Value,
+) -> Result<Option<sim::input_program::InputStreakPreparation>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    reject_unknown(value, &["count", "loadout", "last_earned", "owned"])?;
+    let strings = |key: &str| -> Result<Vec<String>, String> {
+        value[key]
+            .as_array()
+            .ok_or_else(|| format!("missing array {key}"))?
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("invalid {key}"))
+            })
+            .collect()
+    };
+    Ok(Some(sim::input_program::InputStreakPreparation {
+        count: integer(value, "count")?
+            .try_into()
+            .map_err(|_| "invalid streak count")?,
+        loadout: strings("loadout")?
+            .try_into()
+            .map_err(|_| "three streaks required")?,
+        last_earned: if value["last_earned"].is_null() {
+            None
+        } else {
+            Some(
+                value["last_earned"]
+                    .as_str()
+                    .ok_or("invalid last earned streak")?
+                    .to_owned(),
+            )
+        },
+        owned: if value.get("owned").is_some() {
+            strings("owned")?
+        } else {
+            vec![]
+        },
+    }))
 }
 
 fn integer(value: &Value, key: &str) -> Result<i64, String> {
@@ -199,6 +378,9 @@ fn parse_program(
             "first_sequence",
             "samples",
             "actors",
+            "future_weapons",
+            "stop_on_death",
+            "scoreboard_window_ms",
         ],
     )?;
     let version = integer(&value, "schema_version")?;
@@ -213,7 +395,15 @@ fn parse_program(
             for actor in rows {
                 reject_unknown(
                     actor,
-                    &["client", "quantum_ms", "first_sequence", "samples"],
+                    &[
+                        "client",
+                        "quantum_ms",
+                        "first_sequence",
+                        "samples",
+                        "future_weapons",
+                        "stop_on_death",
+                        "scoreboard_window_ms",
+                    ],
                 )?;
                 let id = u32::try_from(integer(actor, "client")?).map_err(|e| e.to_string())?;
                 actors.push(parse_actor(actor, sim::ClientId(id))?);
@@ -245,6 +435,7 @@ fn parse_actor(value: &Value, client: sim::ClientId) -> Result<InputProgram, Str
                 "off_hand_index",
                 "forwardmove",
                 "rightmove",
+                "remote_control",
             ],
         )?;
         let mut cmd = net::idle_usercmd(0);
@@ -257,6 +448,16 @@ fn parse_actor(value: &Value, client: sim::ClientId) -> Result<InputProgram, Str
             u16::try_from(integer(row, "off_hand_index")?).map_err(|e| e.to_string())?;
         cmd.forwardmove = i8::try_from(integer(row, "forwardmove")?).map_err(|e| e.to_string())?;
         cmd.rightmove = i8::try_from(integer(row, "rightmove")?).map_err(|e| e.to_string())?;
+        if let Some(remote) = row.get("remote_control") {
+            let values = remote
+                .as_array()
+                .filter(|a| a.len() == 2)
+                .ok_or("remote_control must contain two bytes")?;
+            for (out, value) in cmd.remote_control.iter_mut().zip(values) {
+                *out = u8::try_from(value.as_u64().ok_or("invalid remote control byte")?)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
         let angles = row
             .get("angles")
             .and_then(Value::as_array)
@@ -269,10 +470,46 @@ fn parse_actor(value: &Value, client: sim::ClientId) -> Result<InputProgram, Str
         samples.push(cmd);
     }
     Ok(InputProgram {
+        scoreboard_window_ms: value
+            .get("scoreboard_window_ms")
+            .filter(|v| !v.is_null())
+            .map(|v| {
+                let a = v
+                    .as_array()
+                    .filter(|a| a.len() == 2)
+                    .ok_or("scoreboard_window_ms needs two integers")?;
+                Ok::<_, String>([
+                    i32::try_from(a[0].as_i64().ok_or("invalid scoreboard start")?)
+                        .map_err(|e| e.to_string())?,
+                    i32::try_from(a[1].as_i64().ok_or("invalid scoreboard end")?)
+                        .map_err(|e| e.to_string())?,
+                ])
+            })
+            .transpose()?,
         client,
         quantum_ms,
         first_sequence: sim::CommandSequence(first_sequence),
         samples,
+        future_weapons: value
+            .get("future_weapons")
+            .map(|rows| {
+                rows.as_array()
+                    .ok_or_else(|| "future_weapons must be an array".to_owned())?
+                    .iter()
+                    .map(|row| {
+                        row.as_u64()
+                            .and_then(|v| u16::try_from(v).ok())
+                            .ok_or_else(|| "invalid future weapon".to_owned())
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_else(Vec::new),
+        stop_on_death: value
+            .get("stop_on_death")
+            .map(|v| v.as_bool().ok_or("stop_on_death must be a boolean"))
+            .transpose()?
+            .unwrap_or(false),
     })
 }
 

@@ -801,6 +801,7 @@ impl WeaponHudDisplay<'_> {
         let north_yaw = self
             .compass
             .as_ref()
+            .and_then(|c| c.at(ps.origin))
             .and_then(|c| c.north_yaw)
             .unwrap_or(0.0);
         let owner_state = OwnerDrawState {
@@ -864,6 +865,9 @@ impl WeaponHudDisplay<'_> {
             "remote_chopper_overlay_hd",
             "ac130_hud_hd",
         ] {
+            if name == "dpad_hd" && host.in_killcam {
+                continue;
+            }
             let Some(menu) = catalog.get(name) else {
                 continue;
             };

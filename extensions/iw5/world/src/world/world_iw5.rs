@@ -257,6 +257,7 @@ pub fn build_iw5_world_draw(
     });
     Ok((
         WorldDraw {
+            space: Default::default(),
             sky_model: None,
             batches,
             lightmap,

@@ -81,7 +81,7 @@ fn approve_map_load(
         let selection = selection.and_then(|families| {
             match &merged {
                 Some(merged) => merged
-                    .scene
+                    .scene()
                     .worlds
                     .iter()
                     .try_for_each(|zone| families.require_map(zone))?,

@@ -341,10 +341,12 @@ impl ScriptMenuRuntime<'_, '_> {
             }),
             teams: self.teams.as_ref().map(|t| &t.0),
             scores_open: in_game
-                && input
+                && (snapshot.is_some_and(|s| {
+                    crate::scoreboard::recorded_hold(s, presentation.client_id())
+                }) || input
                     .actions
                     .as_ref()
-                    .is_some_and(|a| a.client.kb.scores.active),
+                    .is_some_and(|a| a.client.kb.scores.active)),
             classes: input.classes.as_deref(),
             weapons: input.weapons.as_ref().map(|w| w.registry().as_ref()),
             emp_jammed: in_game

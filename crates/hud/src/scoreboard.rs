@@ -298,11 +298,20 @@ fn team_presentation(
 
 // Only intermission opens the scoreboard; the ended phase alone would cover the final killcam.
 pub(crate) fn displayed(down: bool, snap: &Snapshot, local: sim::ClientId) -> bool {
-    down || snap.meta.phase == MatchPhase::PostGame
+    down || recorded_hold(snap, local)
+        || snap.meta.phase == MatchPhase::PostGame
         || snap
             .meta
             .for_client(local)
             .is_some_and(|m| m.lifecycle == ClientLifecycle::Intermission)
+}
+
+pub(crate) fn recorded_hold(snap: &Snapshot, local: sim::ClientId) -> bool {
+    snap.meta
+        .script_dvars(local)
+        .int("iw4l_ui_scores")
+        .unwrap_or(0)
+        != 0
 }
 
 #[derive(bevy::ecs::system::SystemParam)]

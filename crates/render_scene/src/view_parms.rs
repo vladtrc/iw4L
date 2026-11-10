@@ -46,6 +46,7 @@ pub fn host_clip_from_view(fov: f32, aspect: f32, near: f32) -> Mat4 {
 
 #[derive(Resource, Clone, Debug)]
 pub struct PreparedSceneView {
+    pub physical_world: usize,
     pub ready: bool,
     pub eye: Vec3,
 
@@ -214,6 +215,7 @@ impl RLockPvs {
 impl Default for PreparedSceneView {
     fn default() -> Self {
         Self {
+            physical_world: 0,
             ready: false,
             eye: Vec3::ZERO,
             forward: Vec3::NEG_Z,
@@ -309,6 +311,7 @@ pub fn prepare_scene_view(
         hud_iw4::set_view_parms_matrices(eye.to_array(), axis, tan_half_x, tan_half_y, dpvs_z_near)
             .map(|(vp, inv)| dpvs_iw4::portal_bevels_from_d3d_row_major(&vp, &inv));
     PreparedSceneView {
+        physical_world: 0,
         ready: true,
         eye,
         forward,

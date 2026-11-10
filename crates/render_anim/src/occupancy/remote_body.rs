@@ -479,7 +479,7 @@ fn occupy_remote_scene_ents(
             render_fx_flags: 0,
             has_tree: true,
             origin,
-            lighting_origin: origin,
+            lighting_origin: runtime.origin,
             radius,
             entnum,
             quat: Some(quat),
@@ -491,15 +491,30 @@ fn occupy_remote_scene_ents(
     }
 }
 
+#[derive(bevy::ecs::system::SystemParam)]
+struct RemoteBodyResources<'w> {
+    bodies: Option<Res<'w, PreparedBodies>>,
+    soldiers: Option<Res<'w, asset_game::SoldierPresentations>>,
+    level: Option<Res<'w, net::ClientLevel>>,
+}
+
 fn sync_remote_bodies(
     mut commands: Commands,
     presentation: net::LocalPresentation,
     subject: Option<Res<ViewSubject>>,
     settings: Res<frame::GameSettings>,
-    bodies: Option<Res<PreparedBodies>>,
-    soldiers: Option<Res<asset_game::SoldierPresentations>>,
+    resources: RemoteBodyResources,
     existing: Query<(Entity, &CEntity, &CEntityRuntime, Option<&RemotePlayer>)>,
 ) {
+    let RemoteBodyResources {
+        bodies,
+        soldiers,
+        level,
+    } = resources;
+    let space = level
+        .as_deref()
+        .and_then(|level| level.content.atlas())
+        .map(|atlas| &atlas.space);
     let Some(bodies) = bodies else {
         return;
     };
@@ -583,6 +598,7 @@ fn sync_remote_bodies(
             rotation: Quat::from_rotation_z(yaw.to_radians()),
             scale: Vec3::ONE,
         };
+        let pose = render_scene::place_simulation_transform(space, pose);
         let marker = RemotePlayer {
             ffa_team,
             client_state_team,

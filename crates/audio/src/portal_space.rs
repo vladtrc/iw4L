@@ -12,6 +12,7 @@ struct Arrival {
 pub(crate) struct PortalSpace {
     world: WorldId,
     arrivals: Vec<Arrival>,
+    frames: Option<Vec<asset_core::world_frame::WorldFrame>>,
 }
 
 fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -22,23 +23,42 @@ fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
         .sqrt()
 }
 
-fn centre(door: AtlasDoor) -> [f32; 3] {
+fn centre(door: AtlasDoor, frames: Option<&[asset_core::world_frame::WorldFrame]>) -> [f32; 3] {
+    if let Some(frame) = frames.and_then(|frames| frames.get(door.world.index())) {
+        return frame.point_to_scene([
+            door.base[0],
+            door.base[1],
+            door.base[2] + door.height * 0.5,
+        ]);
+    }
     let offset = WorldLayout.origin(door.world);
     std::array::from_fn(|axis| {
         door.base[axis] + offset[axis] + if axis == 2 { door.height * 0.5 } else { 0.0 }
     })
 }
 
-fn front(door: AtlasDoor, point: [f32; 3]) -> bool {
-    let centre = centre(door);
+fn front(
+    door: AtlasDoor,
+    point: [f32; 3],
+    frames: Option<&[asset_core::world_frame::WorldFrame]>,
+) -> bool {
+    let centre = centre(door, frames);
+    let normal = frames
+        .and_then(|frames| frames.get(door.world.index()))
+        .map_or(door.normal, |frame| frame.vector_to_scene(door.normal));
     (0..3)
-        .map(|axis| (point[axis] - centre[axis]) * door.normal[axis])
+        .map(|axis| (point[axis] - centre[axis]) * normal[axis])
         .sum::<f32>()
         >= 0.0
 }
 
 impl PortalSpace {
     pub(crate) fn new(atlas: &Atlas, blocked: &[[bool; 2]], listener: [f32; 3]) -> Self {
+        let frames = match &atlas.space {
+            asset_core::world_frame::SceneSpace::Shared(frames) => Some(frames.clone()),
+            _ => None,
+        };
+        let shared = frames.is_some();
         let world = WorldLayout.world_at(listener);
         let mut arrivals = vec![None; atlas.portals.len() * 2];
         let mut pending = vec![(world, listener, 0.0_f32, None, None)];
@@ -60,17 +80,17 @@ impl PortalSpace {
                 }
                 for from_a in [true, false] {
                     let (entered, exit, _) = portal.oriented(from_a);
-                    if entered.world != world
+                    if (!shared && entered.world != world)
                         || !asset_core::atlas::portal_side_allowed(
                             entered.two_sided,
                             exit.two_sided,
                             portal.flip,
-                            front(entered, point),
+                            front(entered, point, frames.as_deref()),
                         )
                     {
                         continue;
                     }
-                    let entry = centre(entered);
+                    let entry = centre(entered, frames.as_deref());
                     let distance = travelled + distance(point, entry);
                     let key = index * 2 + usize::from(from_a);
                     if !distance.is_finite() || distance >= best[key] {
@@ -84,10 +104,16 @@ impl PortalSpace {
                         if length > 0.001 {
                             offset.map(|v| v / length)
                         } else {
-                            entered.normal.map(|v| -v)
+                            frames
+                                .as_ref()
+                                .and_then(|frames| frames.get(entered.world.index()))
+                                .map_or(entered.normal, |frame| {
+                                    frame.vector_to_scene(entered.normal)
+                                })
+                                .map(|v| -v)
                         }
                     });
-                    let position = centre(exit);
+                    let position = centre(exit, frames.as_deref());
                     arrivals[key] = Some(Arrival {
                         door: exit,
                         position,
@@ -101,15 +127,26 @@ impl PortalSpace {
         Self {
             world,
             arrivals: arrivals.into_iter().flatten().collect(),
+            frames,
         }
     }
 
     pub(crate) fn position(&self, listener: [f32; 3], source: [f32; 3]) -> Option<[f32; 3]> {
         let world = WorldLayout.world_at(source);
-        let mut best = (world == self.world).then_some((distance(listener, source), source));
+        let source = self
+            .frames
+            .as_ref()
+            .and_then(|frames| frames.get(world.index()))
+            .map_or(source, |frame| {
+                frame.point_to_scene(std::array::from_fn(|i| {
+                    source[i] - WorldLayout.origin(world)[i]
+                }))
+            });
+        let mut best = (self.frames.is_some() || world == self.world)
+            .then_some((distance(listener, source), source));
         for arrival in &self.arrivals {
-            if arrival.door.world != world
-                || (!arrival.door.two_sided && !front(arrival.door, source))
+            if (self.frames.is_none() && arrival.door.world != world)
+                || (!arrival.door.two_sided && !front(arrival.door, source, self.frames.as_deref()))
             {
                 continue;
             }

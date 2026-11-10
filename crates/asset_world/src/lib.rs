@@ -1,3 +1,7 @@
+mod region_collision;
+pub use region_collision::crop_collision;
+mod region;
+pub use region::WorldRegion;
 mod atlas_layer;
 mod portal_trim;
 pub use portal_trim::{GeneratedSurfaceCells, PortalClearance, PortalDoorTrim, PortalTrimBox};

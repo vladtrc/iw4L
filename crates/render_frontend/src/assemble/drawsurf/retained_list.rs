@@ -4,7 +4,7 @@ mod smodel;
 mod static_lane;
 mod xmodel_lane;
 use common::{merge_presorted_retained, with_catalog};
-pub(crate) use common::{mix_draw_membership, pack_draw, retained_draw_order_tie};
+pub(crate) use common::{mix_draw_membership, retained_draw_order_tie};
 pub use fx_lane::FxDrawLane;
 pub(crate) use fx_lane::rebuild_fx_draw_lane;
 use smodel::{
@@ -33,9 +33,6 @@ pub struct SunShadowCasterPlan {
     pub generation_id: super::MaterialGenerationId,
     pub items: Vec<RetainedDrawItem>,
 
-    pub surface_vis_sun: [Vec<u8>; 2],
-
-    pub smodel_vis_sun: [Vec<u8>; 2],
     pub world_eligible: u32,
     pub world_missing_key: u32,
     pub smodel_eligible: u32,

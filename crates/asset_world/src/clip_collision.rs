@@ -94,6 +94,16 @@ impl XModelCollCatalog {
         let Some(g) = stream.xmodel() else {
             return;
         };
+        self.insert_geometry(stream, slot, insert_slot, g);
+    }
+
+    pub fn insert_geometry(
+        &mut self,
+        stream: &ZoneStream<'_>,
+        slot: Ptr,
+        insert_slot: Option<Ptr>,
+        g: fastfile_iw4::XModelGeometry,
+    ) {
         let name = g
             .name
             .and_then(|p| stream.cstr(p).ok())
@@ -179,6 +189,34 @@ impl clipmap_iw4::BrushView for ClipBrush {
 }
 
 impl ClipCollision {
+    pub fn clear_playerclip_opening(&mut self, region: crate::WorldRegion) -> usize {
+        const PLAYERCLIP: u32 = 0x10000;
+        let mut changed = 0;
+        for brush in &mut self.brushes {
+            if brush.contents & PLAYERCLIP == 0 {
+                continue;
+            }
+            let disjoint = brush.planes.iter().any(|plane| {
+                let low: f32 = (0..3)
+                    .map(|axis| {
+                        plane[axis]
+                            * if plane[axis] >= 0. {
+                                region.min[axis]
+                            } else {
+                                region.max[axis]
+                            }
+                    })
+                    .sum();
+                low > plane[3] + 0.125
+            });
+            if !disjoint {
+                brush.contents &= !PLAYERCLIP;
+                changed += 1;
+            }
+        }
+        changed
+    }
+
     pub fn validate(&mut self, family: asset_core::FamilyId) -> Result<(), ClipCollisionError> {
         self.coverage = CollisionCoverage::Unvalidated;
         let invalid = || ClipCollisionError::InvalidSemantics("BSP node graph");

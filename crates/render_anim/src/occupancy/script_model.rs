@@ -87,6 +87,7 @@ struct ScriptModelPoseLocals<'w, 's> {
     sun_casters: Res<'w, render_scene::PreparedSunShadowFrame>,
     cell_vis: Res<'w, render_scene::PublishedCellVis>,
     native_cells: Res<'w, render_scene::WorldDpvsCells>,
+    level: Option<Res<'w, net::ClientLevel>>,
 }
 
 #[derive(SystemParam)]
@@ -601,6 +602,7 @@ fn pose_script_models(
         sun_casters,
         cell_vis,
         native_cells,
+        level,
     } = locals;
     live_assets.clear();
     live_ids.clear();
@@ -664,18 +666,18 @@ fn pose_script_models(
             }
             continue;
         };
-        let origin = transform.translation.to_array();
+        let (world, placed) = crate::occupancy::dyn_ent::scene_pose(level.as_deref(), transform);
+        let origin = placed.translation.to_array();
         let radius = skels
             .first()
             .and_then(|skel| skel.radius)
             .unwrap_or(1.0)
             .max(1.0);
         let caster_bound = render_scene::XModelCasterBound { origin, radius };
-        let world = sim::world_graph::world_at(origin);
         let visible_in_view = portal_views.then(|| {
             native_cells.for_world(world).is_some_and(|cells| {
                 cell_vis.views.iter().any(|view| {
-                    view.world == world
+                    (view.shared || view.world == world)
                         && view.admits_bounds(
                             cells,
                             dpvs_iw4::Bounds::from_mid_half(origin, [radius; 3]),
@@ -695,7 +697,7 @@ fn pose_script_models(
             continue;
         }
 
-        let eye = crate::occupancy::dyn_ent::portal_lod_eye(&cell_vis, origin, eye);
+        let eye = crate::occupancy::dyn_ent::portal_lod_eye(&cell_vis, world, origin, eye);
         if lod_culled(&skels, origin, eye, &skinned_ramp) {
             if let Some(id) = focused_owner_id {
                 focus.refuse(id, &owner.current_model.0, "lod_culled");
@@ -802,7 +804,7 @@ fn pose_script_models(
             asset_index,
             focused_owner_id,
             model: owner.current_model.clone(),
-            world_from_local: transform.to_matrix(),
+            world_from_local: placed.to_matrix(),
             entnum,
             camera_hidden: visible_in_view.map_or_else(
                 || walk_hidden || sphere_behind_frustum(origin, radius, &planes),

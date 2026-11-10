@@ -665,7 +665,7 @@ fn run_map(
             .require_map(&format!("{}:{zone}", game.as_str()))
             .unwrap_or_else(|error| fatal(&error));
     }
-    for world in merged.iter().flat_map(|merged| &merged.scene.worlds) {
+    for world in merged.iter().flat_map(|merged| &merged.scene().worlds) {
         families
             .require_map(world)
             .unwrap_or_else(|error| fatal(&error));

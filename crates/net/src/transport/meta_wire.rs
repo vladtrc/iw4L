@@ -1201,6 +1201,7 @@ wire_struct!(DroppedItemAmmo {
 });
 
 wire_struct!(ItemPickupRecord {
+    seq,
     picker,
     weapon,
     from_entnum,

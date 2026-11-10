@@ -166,6 +166,31 @@ pub trait ZoneLane: Send + Sync {
         common_film_visions: &FilmVisionCatalog,
     ) -> LoadedWorld;
 
+    fn load_world_region(
+        &self,
+        path: &Path,
+        image: &ZoneImage,
+        progress: &LoadProgress,
+        material_seed: asset_material::MaterialCatalog,
+        common_film_visions: &FilmVisionCatalog,
+        region: asset_world::WorldRegion,
+    ) -> LoadedWorld {
+        let _ = (
+            path,
+            image,
+            progress,
+            material_seed,
+            common_film_visions,
+            region,
+        );
+        LoadedWorld::with_gap(
+            WorldDrawPolicy::iw4(),
+            PreparedCapability::PreparedWorld,
+            format!("{} does not support region loading", self.game().as_str()),
+            None,
+        )
+    }
+
     fn load_common_mp(
         &self,
         path: &Path,

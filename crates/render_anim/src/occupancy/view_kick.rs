@@ -228,13 +228,14 @@ pub fn sync_camera_from_presented(
     clock: Res<FrameClock>,
     presentation: net::LocalPresentation,
     sim_cam: Res<SimCamera>,
+    level: Option<Res<net::ClientLevel>>,
     settings: Res<frame::GameSettings>,
     mut kick: ResMut<SessionViewKick>,
     mut hurt: ResMut<PendingViewHurt>,
     weapons: Option<Res<PreparedWeapons>>,
     mut actions: Option<ResMut<ClientActionInput>>,
     mut q: Query<
-        &mut Transform,
+        (&mut Transform, &mut render_scene::CameraWorld),
         (
             With<FlyCamera>,
             Without<RemotePlayer>,
@@ -249,11 +250,18 @@ pub fn sync_camera_from_presented(
     ),
     mut missile_view: ResMut<RemoteMissileView>,
 ) {
+    let space = level
+        .as_deref()
+        .and_then(|level| level.content.atlas())
+        .map(|atlas| &atlas.space);
     let (mut killcam, entity_slots, identities) = camera_entities;
     kick.killcam_focus_distance = None;
     if let Some(view) = sim_cam.view_override {
-        for mut transform in &mut q {
+        for (mut transform, mut camera_world) in &mut q {
             *transform = view.transform;
+            camera_world.0 = asset_core::atlas::WorldLayout
+                .world_at(view.transform.translation.to_array())
+                .index();
         }
         for mut projection in &mut lenses {
             if let Projection::Perspective(perspective) = &mut *projection {
@@ -275,6 +283,18 @@ pub fn sync_camera_from_presented(
     if !sim_cam.enabled {
         return;
     }
+    let mut place_camera = |pose: WorldCameraPose| {
+        let eye = render_scene::place_simulation_transform(space, transform_from_iw_view(pose));
+        let world = space.map_or_else(
+            || asset_core::atlas::WorldLayout.world_at(pose.origin),
+            |space| space.simulation_owner(pose.origin),
+        );
+        for (mut transform, mut camera_world) in &mut q {
+            camera_world.0 = world.index();
+            transform.translation = eye.translation;
+            transform.rotation = eye.rotation;
+        }
+    };
     let Some(ps) = presentation.presented.player(presentation.client_id()) else {
         return;
     };
@@ -292,11 +312,7 @@ pub fn sync_camera_from_presented(
             .map(|identity| identity.generation()),
     ) {
         let pose = earthquake_pose(pose, &presentation.presented, clock.time());
-        let eye = transform_from_iw_view(pose);
-        for mut transform in &mut q {
-            transform.translation = eye.translation;
-            transform.rotation = eye.rotation;
-        }
+        place_camera(pose);
         for mut projection in &mut lenses {
             if let Projection::Perspective(perspective) = &mut *projection {
                 perspective.fov = horizontal_to_vertical_fov_deg(fov).to_radians();
@@ -315,11 +331,7 @@ pub fn sync_camera_from_presented(
         death_cam_clip.0.as_deref(),
     ) {
         let pose = earthquake_pose(pose, &presentation.presented, clock.time());
-        let eye = transform_from_iw_view(pose);
-        for mut transform in &mut q {
-            transform.translation = eye.translation;
-            transform.rotation = eye.rotation;
-        }
+        place_camera(pose);
         let horiz = MISSILE_CAM_FOV;
         if let Some(actions) = actions.as_deref_mut() {
             actions.fov_scale = zoom_sensitivity(horiz) * actions.shellshock_look_scale;
@@ -351,11 +363,7 @@ pub fn sync_camera_from_presented(
             return;
         };
         let pose = earthquake_pose(pose, &presentation.presented, clock.time());
-        let eye = transform_from_iw_view(pose);
-        for mut transform in &mut q {
-            transform.translation = eye.translation;
-            transform.rotation = eye.rotation;
-        }
+        place_camera(pose);
         kick.refdef_vieworg = pose.origin;
         kick.refdef_view_angles = pose.angles;
         let horiz = fpv_horizontal_fov(
@@ -469,11 +477,7 @@ pub fn sync_camera_from_presented(
     );
     kick.refdef_vieworg = pose.origin;
     kick.refdef_view_angles = pose.angles;
-    let eye = transform_from_iw_view(pose);
-    for mut transform in &mut q {
-        transform.translation = eye.translation;
-        transform.rotation = eye.rotation;
-    }
+    place_camera(pose);
 
     if ps.f_weapon_pos_frac > kick.last_weapon_pos_frac {
         kick.b_position_to_ads = true;

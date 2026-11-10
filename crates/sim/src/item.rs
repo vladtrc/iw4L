@@ -12,7 +12,7 @@ use weapon_iw4::{
 
 use crate::bullet_collision::{MASK_PLAYER_SOLID, PLAYER_MAXS, PLAYER_MINS};
 use crate::gentity::init_item_state;
-use crate::world::{ClientId, Tick, give_weapon_to_ps_akimbo, gsc_give_weapon_is_akimbo};
+use crate::world::{ClientId, Tick, gsc_give_weapon_is_akimbo};
 use crate::{ClientLifecycle, ItemPickupRecord};
 
 pub const G_MAX_DROPPED_WEAPONS: usize = 16;
@@ -103,9 +103,10 @@ fn may_drop_weapon(world: &FrameWorld, ps: &PlayerState, weapon: u32) -> bool {
 
 fn take_player_weapon(ps: &mut PlayerState, weapon: u32) {
     let want = weapon as i32;
-    for slot in &mut ps.weapons {
+    for (index, slot) in ps.weapons.iter_mut().enumerate() {
         if *slot == want {
             *slot = 0;
+            ps.weapon_data[index * 5..index * 5 + 5].fill(0);
         }
     }
     if ps.weapon == weapon || ps.weapon_primary == weapon {
@@ -341,14 +342,23 @@ fn launch_dropped_from_ps(
         tr_delta: [0.0; 3],
         tr_base: dropped_angles(world, weapon, ps.viewangles[1]),
     };
-    push_dropped_item(
+    let number = push_dropped_item(
         world,
         weapon,
         DropPlacement::Falling { pos, apos },
         owner,
         ammo,
         scavenger,
-    )
+    );
+    preserve_dropped_model(world, number, ps, weapon);
+    number
+}
+
+fn preserve_dropped_model(world: &mut FrameWorld, number: i32, ps: &PlayerState, weapon: u32) {
+    if let Some(item) = world.dropped_item_mut_by_number(number) {
+        item.state.weapon_model =
+            weapon_iw4::weapon_model_for_held(&ps.weapons, &ps.weapon_data, weapon);
+    }
 }
 
 fn dropped_angles(world: &FrameWorld, weapon: u32, yaw: f32) -> [f32; 3] {
@@ -644,6 +654,11 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
     };
     let picker_pm_type = ps.pm_type;
     let already_has = player_weapons_find_slot(&ps.weapons, weapon as i32) >= 0;
+    let current = current_primary_weapon(world, &ps);
+    let swaps = !already_has && current != 0 && primary_count(world, &ps) >= 2;
+    if !already_has && !swaps && !ps.weapons.contains(&0) {
+        return;
+    }
     let (taken, left) = if already_has {
         let WeaponAmmo {
             stock: have_stock, ..
@@ -682,8 +697,7 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
             *slot = next;
         }
     } else {
-        let current = current_primary_weapon(world, &ps);
-        if current != 0 && primary_count(world, &ps) >= 2 {
+        if swaps {
             swapped_entnum = drop_current_primary_at(
                 world,
                 walker,
@@ -693,28 +707,27 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
             );
         }
         if let Some(mut next) = world.player(walker).copied() {
-            give_weapon_to_ps_akimbo(&mut next, weapon, akimbo);
-
-            if let Some(facts) = world.combat_facts_for(weapon) {
-                let hand = weapon_iw4::spawn_weapon_hand(weapon, &facts, true);
-                crate::combat::raise_given_weapon(&mut next, weapon, &hand);
-                next.weaponstate_primary = hand.weaponstate;
-                next.weapon_time = hand.weapon_time;
-                next.weapon_delay = hand.weapon_delay;
-                next.weap_anim = hand.weap_anim;
-                next.weaponstate_secondary = hand.weaponstate;
-                next.weapon_time_secondary = hand.weapon_time;
-                next.weapon_delay_secondary = hand.weapon_delay;
-                next.weap_anim_secondary = hand.weap_anim;
-            }
+            // Acquisition and selection are distinct. The client selects a
+            // pickup it can cancel; an empty-handed picker is switched here.
+            crate::world::inventory_add_weapon(&mut next, weapon, akimbo);
+            weapon_iw4::set_weapon_model_for_held(
+                &next.weapons,
+                &mut next.weapon_data,
+                weapon,
+                item.state.weapon_model,
+            );
             WeaponAmmo {
                 clip_r: item.clip_r,
                 clip_l: item.clip_l,
                 stock: item.stock,
             }
             .apply_to_player(world, &mut next, weapon);
+            let empty_handed = next.weapon == 0;
             if let Some(slot) = world.player_mut(walker) {
                 *slot = next;
+            }
+            if empty_handed {
+                crate::script_player::switch_to_weapon(world, walker, weapon);
             }
         }
     }
@@ -729,7 +742,7 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
         meta.weapon_carry
             .sync_pickup_ammo(&next, weapon, clip, stock);
     }
-    if !already_has {
+    if !already_has && next.weapon == 0 {
         let meta = world.client_meta_mut(walker);
         meta.weapon_carry.set_quick_reload_ready(weapon, true);
         meta.weapon_carry.weapon_shot_count = 0;
@@ -739,7 +752,7 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
         meta.weapon_carry.rechamber_pending_secondary = false;
         meta.weapon_carry.pending_brass = [None; 2];
     }
-    world.item_pickups_mut().push(ItemPickupRecord {
+    world.record_item_pickup(ItemPickupRecord {
         picker: walker.0 as i32,
         weapon,
         from_entnum: item.state.number,
@@ -748,6 +761,7 @@ fn grab_number(world: &mut FrameWorld, walker: ClientId, number: i32) {
         stock: if already_has { taken } else { item.stock },
         swapped_entnum,
         picker_pm_type,
+        ..Default::default()
     });
     let tick = Tick((world.entity_kernel().level_time_ms() / 50) as u32);
     world.push_entity_event(
@@ -780,7 +794,7 @@ fn grab_scavenger(world: &mut FrameWorld, walker: ClientId, number: i32) {
     let picker_pm_type = ps.pm_type;
     let weapon = u32::try_from(item.state.index).unwrap_or(0);
     world.despawn_dropped_item(number);
-    world.item_pickups_mut().push(ItemPickupRecord {
+    world.record_item_pickup(ItemPickupRecord {
         picker: walker.0 as i32,
         weapon,
         from_entnum: item.state.number,
@@ -789,6 +803,7 @@ fn grab_scavenger(world: &mut FrameWorld, walker: ClientId, number: i32) {
         stock: 0,
         swapped_entnum: ENTITYNUM_NONE,
         picker_pm_type,
+        ..Default::default()
     });
     perf::instant!("pickup", "iw4l.sim", |ctx| {
         ctx.arg("picker_pm_type", i64::from(picker_pm_type));
@@ -815,6 +830,7 @@ fn drop_current_primary_at(
         ammo,
         false,
     );
+    preserve_dropped_model(world, entnum, &ps, weapon);
     if entnum == ENTITYNUM_NONE {
         return ENTITYNUM_NONE;
     }
@@ -926,7 +942,7 @@ fn grab_projectile(world: &mut FrameWorld, walker: ClientId, number: i32, tick: 
     meta.weapon_carry.set_ammo(weapon, clip, stock);
     meta.weapon_carry.mirror_held_ammo(ps.weapon);
     world.despawn_projectile(number);
-    world.item_pickups_mut().push(ItemPickupRecord {
+    world.record_item_pickup(ItemPickupRecord {
         picker: walker.0 as i32,
         weapon,
         from_entnum: number,
@@ -935,6 +951,7 @@ fn grab_projectile(world: &mut FrameWorld, walker: ClientId, number: i32, tick: 
         stock: stock - old_stock,
         swapped_entnum: ENTITYNUM_NONE,
         picker_pm_type: ps.pm_type,
+        ..Default::default()
     });
     let event = if world
         .equipment_facts_for(weapon)
@@ -1001,7 +1018,7 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
             0.0
         };
         if world
-            .trace_world(eye, center, [0.0; 3], [0.0; 3], 0x11)
+            .trace_clip(eye, center, [0.0; 3], [0.0; 3], 0x11)
             .fraction
             < 1.0
         {
@@ -1033,7 +1050,7 @@ fn selected_item(world: &FrameWorld, walker: ClientId, ps: &PlayerState) -> Opti
         let distance = delta.iter().map(|v| v * v).sum::<f32>().sqrt();
         if distance > 160.0
             || world
-                .trace_world(eye, projectile.origin, [0.0; 3], [0.0; 3], 0x11)
+                .trace_clip(eye, projectile.origin, [0.0; 3], [0.0; 3], 0x11)
                 .fraction
                 < 1.0
         {

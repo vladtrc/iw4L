@@ -2032,6 +2032,23 @@ fn dispatch_console_command(
                     .is_some_and(|world| world.0.phase() == sim::MatchPhase::Playing),
                 "match Playing",
             ),
+            WaitKind::FinalKillcam => (
+                authority.as_ref().is_some_and(|world| {
+                    world.0.input_program().is_some_and(|run| {
+                        run.final_killcams.iter().any(|cam| {
+                            cam.client == run.program.client
+                                && cam.target == run.program.client.0 as i32
+                                && cam.closed.is_some()
+                                && cam.last.0 > cam.start.0
+                        })
+                    }) && !world
+                        .0
+                        .script_seats()
+                        .iter()
+                        .any(|(_, seat)| seat.final_kill)
+                }),
+                "native final killcam completed",
+            ),
             WaitKind::Alive(client, life) => (
                 authority
                     .as_ref()
@@ -2046,6 +2063,17 @@ fn dispatch_console_command(
                     .as_ref()
                     .is_some_and(|clock| clock.tick.wrapping_sub(*until) < u32::MAX / 2),
                 "authority tick reached",
+            ),
+            WaitKind::Take(ms) => (
+                authority
+                    .as_ref()
+                    .and_then(|world| world.0.input_program())
+                    .and_then(|run| run.start_tick)
+                    .zip(clock.as_ref())
+                    .is_some_and(|(start, clock)| {
+                        u64::from(clock.tick.saturating_sub(start.0)) * 50 >= *ms as u64
+                    }),
+                "input program time reached",
             ),
             WaitKind::SessionWorld | WaitKind::SessionTorn => {
                 (false, "session transaction completed")

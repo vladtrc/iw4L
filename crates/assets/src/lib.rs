@@ -10,7 +10,10 @@ pub mod loading_screen;
 mod map_load_process;
 mod merged_map;
 mod scene_recipe;
-pub use scene_recipe::{SceneEndpoint, ScenePortal, SceneRecipe, parse_portal_replacement};
+pub use scene_recipe::{
+    SceneEndpoint, ScenePlayerclipOpening, ScenePortal, SceneRecipe, SceneSpace,
+    parse_portal_replacement,
+};
 mod random_doors;
 pub use merged_map::{LoadingWorld, MergedMap};
 pub use random_doors::{

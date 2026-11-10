@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ::replay::{
-    CLIP_DEMO_FILE, CLIP_DUMP_FILE, CLIP_MANIFEST_FILE, CLIP_MS, ClipRing, MatchRecordIdentity,
-    Recording, ReplaySession,
+    CLIP_DEMO_FILE, CLIP_DUMP_FILE, CLIP_MANIFEST_FILE, ClipRing, MatchRecordIdentity, Recording,
+    ReplaySession,
 };
 use bevy::prelude::*;
 use frame::{LaunchIdentity, RuntimeRole};
@@ -49,6 +49,7 @@ pub(crate) fn route_replay_commands(
         Option<Res<net::ClientLevel>>,
         Option<Res<AuthorityClock>>,
         Option<Res<PresentedSnapshot>>,
+        Option<Res<net::LocalCommandCapture>>,
     ),
     mut commands: Commands,
     portal: (
@@ -67,7 +68,7 @@ pub(crate) fn route_replay_commands(
         console.echo(msg, capacity);
     };
     let (theater, map_transition, dispatch) = &mut lifecycle;
-    let (ring, role, level, clip_clock, clip_presented) = clip;
+    let (ring, role, level, clip_clock, clip_presented, clip_inputs) = clip;
 
     for cmd in events.read() {
         match cmd.name.as_str() {
@@ -287,7 +288,7 @@ pub(crate) fn route_replay_commands(
                     *role,
                     authority.as_deref().filter(|_| role.runs_authority()),
                     level,
-                    ring.as_ref(),
+                    (ring.as_ref(), clip_inputs.as_deref()),
                     |captured_unix_ns| {
                         state_dump_body(
                             identity,
@@ -299,29 +300,7 @@ pub(crate) fn route_replay_commands(
                         )
                     },
                 ) {
-                    Ok(saved) => {
-                        echo(
-                            format!(
-                                "clip: {}  {:.2}s ({} ticks) of {}s",
-                                saved.id,
-                                saved.duration_ms as f32 / 1000.0,
-                                saved.ticks,
-                                CLIP_MS / 1000
-                            ),
-                            console,
-                            line,
-                        );
-                        echo(
-                            format!("clip: demo → {}", saved.demo_path.display()),
-                            console,
-                            line,
-                        );
-                        echo(
-                            format!("clip: dump → {}", saved.dump_path.display()),
-                            console,
-                            line,
-                        );
-                    }
+                    Ok(id) => echo(format!("clip: {id}"), console, line),
                     Err(error) => echo(format!("clip: {error}"), console, line),
                 }
             }
@@ -384,14 +363,6 @@ fn parse_clip_args(args: &[String]) -> Result<(), String> {
     }
 }
 
-struct SavedClip {
-    id: String,
-    ticks: u64,
-    duration_ms: u32,
-    demo_path: PathBuf,
-    dump_path: PathBuf,
-}
-
 fn allocate_clip_dir(artifacts: &Path) -> Result<(String, PathBuf), String> {
     for _ in 0..8 {
         let id = ::replay::new_ulid().map_err(|error| error.to_string())?;
@@ -412,9 +383,9 @@ fn save_clip_package(
     role: RuntimeRole,
     world: Option<&AuthorityWorld>,
     level: &net::ClientLevel,
-    ring: &ClipRing,
+    (ring, inputs): (&ClipRing, Option<&net::LocalCommandCapture>),
     capture_dump: impl FnOnce(u128) -> String,
-) -> Result<SavedClip, String> {
+) -> Result<String, String> {
     let recording_zone = merged.map_or(identity.zone.as_str(), |merged| merged.recording_name());
     let (id, dir) = allocate_clip_dir(&identity.artifacts)?;
     let captured_unix_ns = SystemTime::now()
@@ -440,6 +411,10 @@ fn save_clip_package(
         let (ticks, _) = recording.stop().map_err(|error| error.to_string())?;
         let body = capture_dump(captured_unix_ns);
         persist_bytes_atomic(&dump_path, &body)?;
+        persist_bytes_atomic(
+            &dir.join(super::clip_inputs::FILE_NAME),
+            &super::clip_inputs::export(ring, inputs)?,
+        )?;
         let mut manifest = ::replay::clip_manifest(
             &id,
             ticks,
@@ -453,19 +428,14 @@ fn save_clip_package(
             "received"
         };
         manifest.push_str(&format!(
-            "source = {source:?}\nrole = {:?}\n",
-            identity.role_label
+            "source = {source:?}\nrole = {:?}\nusercmds = {:?}\n",
+            identity.role_label,
+            super::clip_inputs::FILE_NAME
         ));
         persist_bytes_atomic(&dir.join(CLIP_MANIFEST_FILE), &manifest)?;
         ::replay::rewrite_latest_symlink(&identity.artifacts, &id)
             .map_err(|error| error.to_string())?;
-        Ok(SavedClip {
-            id,
-            ticks,
-            duration_ms: ring.duration_ms(),
-            demo_path,
-            dump_path,
-        })
+        Ok(id)
     })();
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&dir);

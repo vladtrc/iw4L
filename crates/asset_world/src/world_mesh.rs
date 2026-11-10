@@ -163,10 +163,10 @@ pub fn build_world_mesh(
         Some(surfaces) => {
             for i in 0..geometry.surface_count {
                 let surface = surfaces.at(i * s.layout(sz::GFX_SURFACE, 32));
-                let first_vertex = s.u32_at(surface, 4)? as usize;
-                let vertex_count = s.u16_at(surface, 8)? as usize;
-                let tri_count = s.u16_at(surface, 10)? as usize;
-                let base_index = s.u32_at(surface, 12)? as usize;
+                let first_vertex = s.u32_at(surface, sz::gfx_surface::FIRST_VERTEX)? as usize;
+                let vertex_count = s.u16_at(surface, sz::gfx_surface::VERTEX_COUNT)? as usize;
+                let tri_count = s.u16_at(surface, sz::gfx_surface::TRI_COUNT)? as usize;
+                let base_index = s.u32_at(surface, sz::gfx_surface::BASE_INDEX)? as usize;
 
                 if first_vertex + vertex_count > geometry.vertex_count
                     || base_index + tri_count * 3 > geometry.index_count

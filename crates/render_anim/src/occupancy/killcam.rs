@@ -87,6 +87,8 @@ impl<'a> KillcamWorld<'a> {
                     pairs: &atlas.doors,
                     world_count: atlas.clips.len(),
                     surfaces: Default::default(),
+                    space: None,
+                    camera_world: None,
                 },
                 origin.to_array(),
             )

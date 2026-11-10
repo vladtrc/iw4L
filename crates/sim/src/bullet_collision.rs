@@ -1525,26 +1525,130 @@ pub(crate) fn bullet_trace_segments_filtered(
     table: &PenetrationDepthTable,
     glass: GlassTrace<'_>,
 ) -> (Vec<BulletTraceSegment>, Option<ColliderId>) {
+    let trace = |q: &BulletTraceQuery| {
+        bullet_trace_filtered(
+            clip,
+            players,
+            script_models,
+            q,
+            glass.is_solid,
+            pen.rifle_bullet,
+        )
+    };
+    bullet_segments_with_trace(query, pen, table, glass, &trace)
+}
+
+pub(crate) struct SharedBulletTrace<'a> {
+    pub atlas: &'a crate::world_graph::Atlas,
+    pub base: AtlasClip<'a>,
+    pub players: &'a [PlayerCollisionPose],
+    pub models: &'a [EntityCollisionTraceGeom],
+    pub shooter_world: usize,
+    pub rifle: bool,
+}
+
+impl SharedBulletTrace<'_> {
+    pub fn trace(&self, query: &BulletTraceQuery, glass: &dyn Fn(u16) -> bool) -> TraceOutcome {
+        let asset_core::world_frame::SceneSpace::Shared(frames) = &self.atlas.space else {
+            panic!("shared trace requires placements")
+        };
+        let shooter = frames[self.shooter_world];
+        let offset = crate::world_graph::world_offset(self.shooter_world);
+        let to_scene =
+            |p: [f32; 3]| shooter.point_to_scene(std::array::from_fn(|i| p[i] - offset[i]));
+        let start = to_scene(query.start);
+        let end = to_scene(query.end);
+        let mut best = TraceOutcome::Miss { end: query.end };
+        let mut nearest = 1.0;
+        for (world, &frame) in frames.iter().enumerate() {
+            let clip = if world == 0 {
+                self.base
+            } else {
+                self.atlas.worlds[world].clip()
+            };
+            let players: Vec<_> = self
+                .players
+                .iter()
+                .filter(|p| crate::world_graph::world_at(p.origin) == world)
+                .map(|p| crate::world_graph::shifted(p, crate::world_graph::world_offset(world)))
+                .collect();
+            let q = BulletTraceQuery {
+                start: frame.point_to_local(start),
+                end: frame.point_to_local(end),
+                ..*query
+            };
+            let outcome = bullet_trace_filtered(
+                clip,
+                &players,
+                if world == 0 { self.models } else { &[] },
+                &q,
+                &|piece| world != 0 || glass(piece),
+                self.rifle,
+            );
+            let point = |p| {
+                let p = shooter.point_to_local(frame.point_to_scene(p));
+                std::array::from_fn(|i| p[i] + offset[i])
+            };
+            // Glass damage storage currently belongs to the root map. Other
+            // maps' panes remain solid until their damage gets world identity.
+            let map_collider = |c| match c {
+                ColliderId::World {
+                    surface_flags,
+                    contents,
+                    ..
+                } if world != 0 => ColliderId::World {
+                    surface_flags,
+                    contents,
+                    glass_encoded: 0,
+                },
+                other => other,
+            };
+            match outcome {
+                TraceOutcome::Hit {
+                    fraction,
+                    end,
+                    normal,
+                    collider,
+                } if fraction < nearest => {
+                    nearest = fraction;
+                    best = TraceOutcome::Hit {
+                        fraction,
+                        end: point(end),
+                        normal: shooter.vector_to_local(frame.vector_to_scene(normal)),
+                        collider: map_collider(collider),
+                    };
+                }
+                TraceOutcome::StartSolid { collider, end } => {
+                    return TraceOutcome::StartSolid {
+                        collider: collider.map(map_collider),
+                        end: point(end),
+                    };
+                }
+                invalid @ TraceOutcome::Invalid { .. } => return invalid,
+                _ => {}
+            }
+        }
+        best
+    }
+}
+
+pub(crate) fn bullet_segments_with_trace(
+    query: &BulletTraceQuery,
+    pen: BulletPenFacts,
+    table: &PenetrationDepthTable,
+    glass: GlassTrace<'_>,
+    trace: &dyn Fn(&BulletTraceQuery) -> TraceOutcome,
+) -> (Vec<BulletTraceSegment>, Option<ColliderId>) {
     if !is_finite_vec3(query.start) || !is_finite_vec3(query.end) {
         return (Vec::new(), None);
     }
-    let dir = [
-        query.end[0] - query.start[0],
-        query.end[1] - query.start[1],
-        query.end[2] - query.start[2],
-    ];
-    let max_len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+    let dir = std::array::from_fn::<_, 3, _>(|i| query.end[i] - query.start[i]);
+    let max_len = dir.iter().map(|v| v * v).sum::<f32>().sqrt();
     if max_len <= 0.0 {
         return (Vec::new(), None);
     }
-    let ray_dir = [dir[0] / max_len, dir[1] / max_len, dir[2] / max_len];
-    let world = TraceWorld {
-        clip,
-        players,
-        script_models,
-        glass,
-        rifle_bullet: pen.rifle_bullet,
-    };
+    let ray_dir = dir.map(|v| v / max_len);
+    let world = TraceWorld { trace, glass };
     if pen.pen_gate(true) {
         fire_penetrate(&world, query, ray_dir, pen, table)
     } else {
@@ -1559,11 +1663,7 @@ pub(crate) struct GlassTrace<'a> {
 }
 
 struct TraceWorld<'a> {
-    rifle_bullet: bool,
-    clip: AtlasClip<'a>,
-    players: &'a [PlayerCollisionPose],
-    script_models: &'a [EntityCollisionTraceGeom],
-
+    trace: &'a dyn Fn(&BulletTraceQuery) -> TraceOutcome,
     glass: GlassTrace<'a>,
 }
 
@@ -1869,14 +1969,7 @@ fn fire_penetrate(
             ignore_hit: rev_ignore,
             ignore_model: query.ignore_model,
         };
-        let rev = bullet_trace_filtered(
-            world.clip,
-            world.players,
-            world.script_models,
-            &rev_q,
-            world.glass.is_solid,
-            world.rifle_bullet,
-        );
+        let rev = (world.trace)(&rev_q);
         let (rev_hit_pos, rev_surf, rev_hit) = match rev {
             TraceOutcome::Hit { end, collider, .. } => (Some(end), depth_surf(collider, 0), true),
             TraceOutcome::StartSolid { end, collider, .. } => {
@@ -1989,21 +2082,11 @@ fn trace_from(
     start: [f32; 3],
     ignore_hit: Option<ClientId>,
 ) -> TraceOutcome {
-    bullet_trace_filtered(
-        world.clip,
-        world.players,
-        world.script_models,
-        &BulletTraceQuery {
-            start,
-            end: query.end,
-            mask: query.mask,
-            ignore: query.ignore,
-            ignore_hit,
-            ignore_model: query.ignore_model,
-        },
-        world.glass.is_solid,
-        world.rifle_bullet,
-    )
+    (world.trace)(&BulletTraceQuery {
+        start,
+        ignore_hit,
+        ..*query
+    })
 }
 
 #[derive(Clone, Copy)]

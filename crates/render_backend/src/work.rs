@@ -42,9 +42,6 @@ pub struct ShadowDrawListWork {
     pub smodel_skinned_flushes: Vec<SmodelRigidFlush>,
 
     pub smodel_skinned_unconsumed: u32,
-    pub world_work_calls: u32,
-    pub xmodel_work_calls: u32,
-    pub smodel_work_calls: u32,
 
     pub ended: bool,
 
@@ -63,12 +60,10 @@ struct WorldListWorker<'a> {
     cur: usize,
     flushes: &'a mut Vec<TrianglesListFlush>,
     emit: Option<&'a RefCell<Vec<PackedEmit>>>,
-    calls: u32,
 }
 
 impl DrawSurfListWorker for WorldListWorker<'_> {
     fn work(&mut self, _ctx: &mut GfxCmdBufContext) -> bool {
-        self.calls += 1;
         if self.cur >= self.entries.len() {
             return false;
         }
@@ -113,12 +108,10 @@ struct SmodelListWorker<'a> {
     flushes: &'a mut Vec<SmodelRigidFlush>,
     emit: Option<&'a RefCell<Vec<PackedEmit>>>,
     kind: PackedListKind,
-    calls: u32,
 }
 
 impl DrawSurfListWorker for SmodelListWorker<'_> {
     fn work(&mut self, _ctx: &mut GfxCmdBufContext) -> bool {
-        self.calls += 1;
         if self.cur >= self.entries.len() {
             return false;
         }
@@ -158,12 +151,10 @@ struct XModelListWorker<'a> {
     cur: usize,
     flushes: &'a mut Vec<XModelRigidFlush>,
     emit: Option<&'a RefCell<Vec<PackedEmit>>>,
-    calls: u32,
 }
 
 impl DrawSurfListWorker for XModelListWorker<'_> {
     fn work(&mut self, _ctx: &mut GfxCmdBufContext) -> bool {
-        self.calls += 1;
         if self.cur >= self.entries.len() {
             return false;
         }
@@ -327,7 +318,6 @@ fn run_packed_work(
         cur: 0,
         flushes: &mut world_flushes,
         emit,
-        calls: 0,
     };
     let xmodel = XModelListWorker {
         entries: &packed.xmodel,
@@ -335,7 +325,6 @@ fn run_packed_work(
         cur: 0,
         flushes: &mut xmodel_flushes,
         emit,
-        calls: 0,
     };
     let smodel = SmodelListWorker {
         entries: &packed.smodel,
@@ -344,7 +333,6 @@ fn run_packed_work(
         flushes: &mut smodel_flushes,
         emit,
         kind: PackedListKind::Smodel,
-        calls: 0,
     };
     let pretess = SmodelListWorker {
         entries: &packed.smodel_pretess,
@@ -353,7 +341,6 @@ fn run_packed_work(
         flushes: &mut smodel_pretess_flushes,
         emit,
         kind: PackedListKind::Pretess,
-        calls: 0,
     };
     let cached = SmodelListWorker {
         entries: &packed.smodel_cached,
@@ -362,7 +349,6 @@ fn run_packed_work(
         flushes: &mut smodel_cached_flushes,
         emit,
         kind: PackedListKind::Cached,
-        calls: 0,
     };
     let mut smodel_skinned_flushes = Vec::new();
     let skinned = SmodelListWorker {
@@ -372,7 +358,6 @@ fn run_packed_work(
         flushes: &mut smodel_skinned_flushes,
         emit,
         kind: PackedListKind::SmodelSkinned,
-        calls: 0,
     };
     let mut workers = DrawListWorkers {
         world,
@@ -383,9 +368,6 @@ fn run_packed_work(
         skinned,
     };
     workers.dispatch_registered(&list, &mut ctx, sorted);
-    let world_work_calls = workers.world.calls;
-    let xmodel_work_calls = workers.xmodel.calls;
-    let smodel_work_calls = workers.smodel.calls;
     let smodel_skinned_unconsumed = 0u32;
     let end = if sorted {
         let mut cmd = GfxCmdBufDepthState {
@@ -407,9 +389,6 @@ fn run_packed_work(
         smodel_pretess_flushes,
         smodel_skinned_flushes,
         smodel_skinned_unconsumed,
-        world_work_calls,
-        xmodel_work_calls,
-        smodel_work_calls,
         ended: true,
         end_restore_n: end.restore_n,
         end_depth_range_type: end.depth_range_type,

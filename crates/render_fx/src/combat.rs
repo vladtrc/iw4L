@@ -202,6 +202,7 @@ struct ImpactFxPresentation<'w> {
 
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct PelletFxPresentation<'w, 's> {
+    level: Option<Res<'w, net::ClientLevel>>,
     world_bolts: Query<'w, 's, &'static render_anim::RemoteFxBolts>,
     fpv_bolts: Res<'w, render_anim::FpvBoltTargets>,
     slots: Res<'w, CEntitySlots>,
@@ -230,6 +231,14 @@ impl PelletFxPresentation<'_, '_> {
         target: Option<u16>,
         scene: Option<&dyn FxScene>,
     ) {
+        let mut placed = *record;
+        if let Some(atlas) = self.level.as_ref().and_then(|level| level.content.atlas()) {
+            let world = asset_core::atlas::WorldLayout.world_at(record.start);
+            placed.start = atlas.space.simulation_point_in(world, record.start);
+            placed.end = atlas.space.simulation_point_in(world, record.end);
+            placed.normal = atlas.space.simulation_vector(record.start, record.normal);
+        }
+        let record = &placed;
         // Deduplicated events still publish the mutable presentation resources as changed.
         self.occurrences.set_changed();
         self.tracer_world.set_changed();
@@ -239,6 +248,7 @@ impl PelletFxPresentation<'_, '_> {
         self.impact.cursor.set_changed();
         self.impact.combat.set_changed();
         let Self {
+            level: _,
             world_bolts,
             fpv_bolts,
             slots,

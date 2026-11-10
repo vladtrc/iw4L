@@ -523,7 +523,10 @@ pub(crate) fn update_command_context_code_sources(
     } else {
         world_fogs[0] = host_fog;
     }
-    let camera_world = mat_frame.portal.as_ref().map_or(0, |p| p.camera_world);
+    let camera_world = mat_frame
+        .portal
+        .as_ref()
+        .map_or(prepared.physical_world, |p| p.camera_world);
     let sampled_fog = world_fogs.get(camera_world).copied().flatten();
     mat_frame.world_fog_colors = world_fogs
         .iter()

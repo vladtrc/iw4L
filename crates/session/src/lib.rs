@@ -38,3 +38,5 @@ pub use startup::{PendingConsoleLines, StartupCommands};
 
 mod scope_control;
 pub use scope_control::ScopeControl;
+
+pub use match_apply::{PreparedSimulation, SimulationOptions, prepare_simulation};

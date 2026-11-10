@@ -61,7 +61,7 @@ This builds the optimized `play` profile and starts a local match with three bot
 | Assets | Native FastFile readers convert game data into a shared intermediate representation. |
 | Shaders | Retail Direct3D 9 Shader Model 3 bytecode is translated to WGSL. |
 | Rendering | World geometry, models and effects feed one sorted draw-surface list. |
-| Simulation | Server authority, client prediction and replay share one simulation step over explicit Bevy ECS state. |
+| Simulation | Explicit server frame over Bevy ECS state; client prediction replays player commands using shared movement and weapon primitives. |
 | Networking | Custom UDP traffic; a QUIC master provides browsing and relaying. The host simulates the match. |
 
 ## Where to go next

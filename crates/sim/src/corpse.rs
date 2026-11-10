@@ -279,9 +279,9 @@ pub(crate) fn phase_run_corpse_move(world: &mut FrameWorld, time_ms: i32) {
         let stepped = step_corpse(slot, anim_delta, time_ms, |start, end, mask| {
             let content = frame.content();
             let map = crate::world_graph::world_at(start);
-            let beyond = map
-                .checked_sub(1)
-                .and_then(|i| content.atlas()?.worlds.get(i));
+            let beyond = content
+                .atlas()
+                .and_then(|atlas| atlas.worlds.get(map).filter(|_| map != 0));
             match beyond {
                 None => frame.trace_clip(start, end, PLAYER_MINS, PLAYER_MAXS, mask),
                 Some(clip) => trace_atlas_corpse(clip, map, start, end, mask),
@@ -302,18 +302,13 @@ fn trace_atlas_corpse(
 ) -> trace_iw4::Trace {
     // A corpse keeps moving in the map where the player died, just as
     // the living player's capsule does. Base-map clip is in another slab.
-    let backend = crate::bg::player_collision::PlayerCollision {
-        brushes: &clip.brushes,
-        bsp: &clip.bsp,
-        mesh: &clip.mesh,
-        glass_damage: &[],
-        bodies: &[],
-        self_entnum: u16::MAX,
-        cmodels: &clip.cmodels.models,
-        linked_brushes: &[],
-        model_brushes: &[],
-        offset: crate::world_graph::world_offset(map),
-    };
+    let backend = crate::bg::player_collision::PlayerCollision::world(
+        clip.clip(),
+        map,
+        Default::default(),
+        &[],
+        u16::MAX,
+    );
     movement_iw4::CollisionBackend::trace(
         &backend,
         movement_iw4::GroundTraceInput {

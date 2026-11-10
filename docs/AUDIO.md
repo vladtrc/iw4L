@@ -33,7 +33,11 @@ T5 layers activate at resolution; others wait for primary preparation. Layers sh
 deadlines, cancellation and lifetime, with independent pitch/failure. Unknown looping
 uses named one-shot compatibility. [CUES.md](CUES.md) details binding and decode contracts.
 Killcam worlds retain the live sound registry for round-result commands. Replay
-timeline changes retire event cues; music and local announcements keep playing.
+timeline changes retire world/event cues. Music uses a separate match lifetime,
+so a victory theme continues into final killcam and stops on match release or
+an explicit music/alias stop. Faction themes sent through `playLocalSound` are
+classified from the registered team music aliases before cross-family routing;
+ordinary local sound aliases retain the world cue lifetime.
 
 Weapon publication compiles thermal scopes, cue namespaces, melee precedence,
 knife substitution and breath aliases. Prediction identifies fire occurrences;

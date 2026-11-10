@@ -279,7 +279,7 @@ impl AudioRuntime {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .as_ref()
-            .filter(|_| scope == AudioScope::Match)
+            .filter(|_| scope != AudioScope::Menu)
             .cloned();
         Some(Arc::new(SourceCue {
             bank,
@@ -371,7 +371,7 @@ impl AudioRuntime {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .as_ref()
-            .filter(|_| class.scope() == AudioScope::Match)
+            .filter(|_| class.scope() != AudioScope::Menu)
             .cloned();
         let media = self.media_for_bank(&bank);
         let state = crate::cue::CueState::new();

@@ -7,6 +7,32 @@ use bevy_ecs::prelude::World;
 use gamemode_iw4::Team;
 
 const MAX_OBJECTIVES: i32 = 32;
+
+pub(crate) fn prepare_team_scores(world: &mut World, allies: i32, axis: i32) -> Result<(), String> {
+    let mut runtime = world
+        .get_resource_mut::<RoundScript>()
+        .ok_or("score preparation requires an active match script")?;
+    if matches!(runtime.object_field(0, "gameended"), Value::Int(value) if value != 0) {
+        return Err("score preparation requires a match that has not ended".into());
+    }
+    let Value::Array(scores) = runtime.object_field(1, "teamScores") else {
+        return Err("score preparation requires initialized script team scores".into());
+    };
+    let scores = runtime
+        .arrays
+        .get_mut(&scores)
+        .ok_or("invalid script team scores")?;
+    for (team, score) in [("allies", allies), ("axis", axis)] {
+        scores.insert(
+            crate::script::ArrayKey::String(team.into()),
+            Value::Int(score),
+        );
+    }
+    runtime.engine.team_scores.insert("allies".into(), allies);
+    runtime.engine.team_scores.insert("axis".into(), axis);
+    Ok(())
+}
+
 const ENGINE_SERVER_INFO: &[&str] = &[
     "ui_bomb_timer",
     "mapname",

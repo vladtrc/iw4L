@@ -756,7 +756,7 @@ pub(super) fn portal_dump_section(
     if let Some(scene) = scene {
         out.push_str(&format!(
             "\n[portal_sky]\nworld_count={}\nsky_worlds={:?}\n",
-            merged.map_or(1, |merged| merged.scene.worlds.len()),
+            merged.map_or(1, |merged| merged.scene().worlds.len()),
             scene.sky_worlds
         ));
         out.push_str(&format!("view_visibility={:#?}\n", scene.portal_visibility));

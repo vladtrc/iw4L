@@ -352,8 +352,10 @@ impl TargetmapRenderer<'_> {
             self.hide();
             return;
         };
-        let Some(drawable) = crate::compass::resolve(compass.as_deref(), &mut self.hud_images)
-        else {
+        let Some(drawable) = crate::compass::resolve(
+            compass.as_deref().and_then(|c| c.at(ps.origin)),
+            &mut self.hud_images,
+        ) else {
             self.hide();
             return;
         };
@@ -365,9 +367,7 @@ impl TargetmapRenderer<'_> {
             kind: snapshot.meta.kind,
             localize: self.strings.as_ref().map(|s| &s.0),
         };
-        let Some(map_namespace) = self.hud_images.map_namespace() else {
-            return;
-        };
+        let map_namespace = drawable.namespace;
         let scene = Scene {
             compass: &drawable,
             map_namespace,

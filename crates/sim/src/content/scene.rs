@@ -123,10 +123,24 @@ pub(crate) fn digest(content: &SimContent) -> u64 {
         return h.finish();
     };
     h.bool(true);
-    floats(
-        &mut h,
-        &asset_core::atlas::WorldLayout.origin(asset_core::atlas::WorldId(1)),
-    );
+    match &atlas.space {
+        asset_core::world_frame::SceneSpace::PortalAtlas => {
+            h.byte(0);
+            floats(
+                &mut h,
+                &asset_core::atlas::WorldLayout.origin(asset_core::atlas::WorldId(1)),
+            );
+        }
+        asset_core::world_frame::SceneSpace::Shared(frames) => {
+            h.byte(1);
+            sequence(&mut h, frames, |h, frame| {
+                floats(h, &frame.point_to_scene([0.0; 3]));
+                for axis in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+                    floats(h, &frame.vector_to_scene(axis));
+                }
+            });
+        }
+    }
     h.bytes(atlas.root_zone.as_bytes());
     let versions = &atlas.versions;
     h.u64(versions.schema);
@@ -147,7 +161,7 @@ pub(crate) fn digest(content: &SimContent) -> u64 {
         h.bytes(key.as_bytes());
         h.bytes(value.as_bytes());
     }
-    sequence(&mut h, &atlas.worlds, |h, world| {
+    sequence(&mut h, atlas.worlds.get(1..).unwrap_or(&[]), |h, world| {
         h.bytes(world.zone.as_bytes());
         clip(h, &world.brushes, &world.bsp, &world.mesh, &world.cmodels);
     });

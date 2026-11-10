@@ -225,6 +225,8 @@ pub struct SimState {
     use_start_spawns: bool,
 
     item_pickups: Vec<crate::ItemPickupRecord>,
+    item_pickup_seq: u32,
+    raised_pickup_seq: u32,
 }
 
 impl Default for SimState {
@@ -293,6 +295,8 @@ impl Default for SimState {
             objectives: crate::ObjectiveMatch::default(),
             use_start_spawns: gamemode_iw4::USE_START_SPAWNS_AT_START,
             item_pickups: Vec::new(),
+            item_pickup_seq: 0,
+            raised_pickup_seq: 0,
         };
         world.recompute_content_digest();
         world
@@ -1371,7 +1375,7 @@ impl SimState {
         ignore_glass: bool,
         exclude: Option<crate::AuthorityModelOwner>,
     ) -> trace_iw4::Trace {
-        crate::collision_scene::trace_scene(
+        crate::collision_scene::trace_native_scene(
             &self.content,
             &self.world_objects,
             &self.entity_collision_capabilities,
@@ -2052,12 +2056,7 @@ impl SimState {
                 .unwrap_or(&default)
         });
         crate::bullet_collision::bullet_trace_with_entity_models(
-            crate::world_graph::AtlasClip {
-                brushes: self.content.clip_brushes(),
-                bsp: self.content.clip_bsp(),
-                cmodels: self.content.clip_cmodels(),
-                mesh: self.content.clip_mesh(),
-            },
+            self.content.root_clip(),
             players,
             &geoms,
             &query,
@@ -2081,12 +2080,7 @@ impl SimState {
             .latest_poses()
             .map(|(_, p)| p)
             .unwrap_or(&[]);
-        let base = crate::world_graph::AtlasClip {
-            brushes: self.content.clip_brushes(),
-            bsp: self.content.clip_bsp(),
-            mesh: self.content.clip_mesh(),
-            cmodels: self.content.clip_cmodels(),
-        };
+        let base = self.content.root_clip();
         let (mut start, mut end) = (query.start, query.end);
         for _ in 0..16 {
             let crossing = atlas.crossing(start, end);
@@ -2248,8 +2242,22 @@ impl SimState {
             .retain(|k, _| live.contains(k));
     }
 
-    pub(crate) fn item_pickups_mut(&mut self) -> &mut Vec<crate::ItemPickupRecord> {
-        &mut self.item_pickups
+    pub(crate) fn record_item_pickup(&mut self, mut record: crate::ItemPickupRecord) {
+        self.item_pickup_seq = self.item_pickup_seq.wrapping_add(1);
+        record.seq = self.item_pickup_seq;
+        self.item_pickups.push(record);
+    }
+
+    pub(crate) fn unpublished_pickups(&self) -> Vec<crate::ItemPickupRecord> {
+        self.item_pickups
+            .iter()
+            .copied()
+            .filter(|pickup| pickup.seq > self.raised_pickup_seq)
+            .collect()
+    }
+
+    pub(crate) fn mark_pickups_raised(&mut self) {
+        self.raised_pickup_seq = self.item_pickup_seq;
     }
 
     pub(crate) fn client_meta_mut(&mut self, id: ClientId) -> &mut ClientMatchState {
@@ -2712,7 +2720,11 @@ impl SimState {
 
     pub(crate) fn clear_tick_events(&mut self, tick: Tick) {
         self.events.clear_tick(tick);
-        self.item_pickups.clear();
+        const ITEM_PICKUP_RETAIN: usize = 32;
+        if self.item_pickups.len() > ITEM_PICKUP_RETAIN {
+            let drop = self.item_pickups.len() - ITEM_PICKUP_RETAIN;
+            self.item_pickups.drain(..drop);
+        }
         self.shot_collision_verdicts.clear();
         self.projectile_impacts.clear();
     }
@@ -2972,9 +2984,10 @@ pub(crate) fn inventory_add_weapon(ps: &mut PlayerState, weapon: u32, akimbo: bo
     }
     let want = weapon as i32;
     if !ps.weapons.contains(&want)
-        && let Some(slot) = ps.weapons.iter_mut().find(|slot| **slot == 0)
+        && let Some(index) = ps.weapons.iter().position(|&slot| slot == 0)
     {
-        *slot = want;
+        ps.weapons[index] = want;
+        ps.weapon_data[index * 5..index * 5 + 5].fill(0);
     }
     weapon_iw4::latch_weapon_dual_wield(&ps.weapons, &mut ps.weapon_data, weapon, akimbo);
 }

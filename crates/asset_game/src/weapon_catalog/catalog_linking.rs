@@ -45,38 +45,17 @@ impl WeaponCatalog {
                 entry.reticle.center_material = Some(name);
                 entry.reticle.center_image = image;
             }
-            if entry.reticle.center_image.is_none()
-                && let Some(name) = entry.reticle.center_material.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.reticle.center_image = materials.hud_image_name(material).map(str::to_owned);
-            }
             if let Some(slot) = entry.reticle_side_slot
                 && let Some((name, image)) = names_of(slot)
             {
                 entry.reticle.side_material = Some(name);
                 entry.reticle.side_image = image;
             }
-            if entry.reticle.side_image.is_none()
-                && let Some(name) = entry.reticle.side_material.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.reticle.side_image = materials.hud_image_name(material).map(str::to_owned);
-            }
             if let Some(slot) = entry.overlay_material_slot
                 && let Some((name, image)) = names_of(slot)
             {
                 entry.overlay_material = Some(name);
                 entry.overlay_image = image;
-            }
-            if entry.overlay_image.is_none()
-                && let Some(name) = entry.overlay_material.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.overlay_image = materials.hud_image_name(material).map(str::to_owned);
             }
             if let Some(slot) = entry.pickup_icon_slot
                 && let Some((name, image)) = names_of(slot)
@@ -92,13 +71,6 @@ impl WeaponCatalog {
                     entry.hud_icon_image = image;
                 }
             }
-            if entry.hud_icon_image.is_none()
-                && let Some(name) = entry.hud_icon.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.hud_icon_image = materials.hud_image_name(material).map(str::to_owned);
-            }
             if let Some(slot) = entry.kill_icon_slot
                 && let Some((name, image)) = names_of(slot)
             {
@@ -109,56 +81,7 @@ impl WeaponCatalog {
                     entry.kill_icon_image = image;
                 }
             }
-            if entry.kill_icon_image.is_none()
-                && let Some(name) = entry.kill_icon.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.kill_icon_image = materials.hud_image_name(material).map(str::to_owned);
-            }
-            if let Some(name) = entry.dpad_icon.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.dpad_icon_image = materials.hud_image_name(material).map(str::to_owned);
-                entry.dpad_icon_atlas = material.texture_atlas;
-            }
-            entry.reticle.center_edge = material_hint_edge(
-                entry.reticle.center_material.as_deref(),
-                ns,
-                entry.reticle.center_authored,
-                materials,
-            );
-            entry.reticle.side_edge = material_hint_edge(
-                entry.reticle.side_material.as_deref(),
-                ns,
-                entry.reticle.side_authored,
-                materials,
-            );
-            entry.hud_material_edges.overlay = material_hint_edge(
-                entry.overlay_material.as_deref(),
-                ns,
-                entry.overlay_material_slot.is_some(),
-                materials,
-            );
-            entry.hud_material_edges.hud_icon = material_hint_edge(
-                entry.hud_icon.as_deref(),
-                ns,
-                entry.hud_icon_slot.is_some(),
-                materials,
-            );
-            entry.hud_material_edges.pickup_icon = material_hint_edge(
-                entry.pickup_icon.as_deref(),
-                ns,
-                entry.pickup_icon_slot.is_some(),
-                materials,
-            );
-            entry.hud_material_edges.kill_icon = material_hint_edge(
-                entry.kill_icon.as_deref(),
-                ns,
-                entry.kill_icon_slot.is_some(),
-                materials,
-            );
+            link_hud_materials(entry, ns, materials);
         }
     }
 
@@ -167,84 +90,7 @@ impl WeaponCatalog {
             .capture_ns
             .expect("asset capture requires an explicit family");
         for entry in &mut self.entries {
-            if entry.reticle.center_image.is_none()
-                && let Some(name) = entry.reticle.center_material.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.reticle.center_image = materials.hud_image_name(material).map(str::to_owned);
-            }
-            if entry.reticle.side_image.is_none()
-                && let Some(name) = entry.reticle.side_material.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.reticle.side_image = materials.hud_image_name(material).map(str::to_owned);
-            }
-            if entry.overlay_image.is_none()
-                && let Some(name) = entry.overlay_material.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.overlay_image = materials.hud_image_name(material).map(str::to_owned);
-            }
-            if entry.hud_icon_image.is_none()
-                && let Some(name) = entry.hud_icon.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.hud_icon_image = materials.hud_image_name(material).map(str::to_owned);
-            }
-            if entry.kill_icon_image.is_none()
-                && let Some(name) = entry.kill_icon.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.kill_icon_image = materials.hud_image_name(material).map(str::to_owned);
-            }
-            if let Some(name) = entry.dpad_icon.as_deref()
-                && let Some(index) = materials.material_index_by_ns(ns, name)
-                && let Some(material) = materials.materials.get(index.order())
-            {
-                entry.dpad_icon_image = materials.hud_image_name(material).map(str::to_owned);
-                entry.dpad_icon_atlas = material.texture_atlas;
-            }
-            entry.reticle.center_edge = material_hint_edge(
-                entry.reticle.center_material.as_deref(),
-                ns,
-                entry.reticle.center_authored,
-                materials,
-            );
-            entry.reticle.side_edge = material_hint_edge(
-                entry.reticle.side_material.as_deref(),
-                ns,
-                entry.reticle.side_authored,
-                materials,
-            );
-            entry.hud_material_edges.overlay = material_hint_edge(
-                entry.overlay_material.as_deref(),
-                ns,
-                entry.overlay_material_slot.is_some(),
-                materials,
-            );
-            entry.hud_material_edges.hud_icon = material_hint_edge(
-                entry.hud_icon.as_deref(),
-                ns,
-                entry.hud_icon_slot.is_some(),
-                materials,
-            );
-            entry.hud_material_edges.pickup_icon = material_hint_edge(
-                entry.pickup_icon.as_deref(),
-                ns,
-                entry.pickup_icon_slot.is_some(),
-                materials,
-            );
-            entry.hud_material_edges.kill_icon = material_hint_edge(
-                entry.kill_icon.as_deref(),
-                ns,
-                entry.kill_icon_slot.is_some(),
-                materials,
-            );
+            link_hud_materials(entry, ns, materials);
         }
     }
 
@@ -359,6 +205,57 @@ impl WeaponCatalog {
             })
             .collect()
     }
+}
+
+fn link_hud_materials(
+    entry: &mut CatalogWeapon,
+    ns: crate::FamilyId,
+    materials: &crate::MaterialDefinitions,
+) {
+    let material = |name: Option<&str>| {
+        let index = materials.material_index_by_ns(ns, name?)?;
+        materials.materials.get(index.order())
+    };
+    let image = |name: Option<&str>| {
+        material(name)
+            .and_then(|m| materials.hud_image_name(m))
+            .map(str::to_owned)
+    };
+    if entry.reticle.center_image.is_none() {
+        entry.reticle.center_image = image(entry.reticle.center_material.as_deref());
+    }
+    if entry.reticle.side_image.is_none() {
+        entry.reticle.side_image = image(entry.reticle.side_material.as_deref());
+    }
+    if entry.overlay_image.is_none() {
+        entry.overlay_image = image(entry.overlay_material.as_deref());
+    }
+    if entry.hud_icon_image.is_none() {
+        entry.hud_icon_image = image(entry.hud_icon.as_deref());
+    }
+    if entry.kill_icon_image.is_none() {
+        entry.kill_icon_image = image(entry.kill_icon.as_deref());
+    }
+    if let Some(m) = material(entry.dpad_icon.as_deref()) {
+        entry.dpad_icon_image = materials.hud_image_name(m).map(str::to_owned);
+        entry.dpad_icon_atlas = m.texture_atlas;
+    }
+    let edge = |hint: &Option<String>, authored: bool| {
+        material_hint_edge(hint.as_deref(), ns, authored, materials)
+    };
+    entry.reticle.center_edge = edge(
+        &entry.reticle.center_material,
+        entry.reticle.center_authored,
+    );
+    entry.reticle.side_edge = edge(&entry.reticle.side_material, entry.reticle.side_authored);
+    let edges = &mut entry.hud_material_edges;
+    edges.overlay = edge(
+        &entry.overlay_material,
+        entry.overlay_material_slot.is_some(),
+    );
+    edges.hud_icon = edge(&entry.hud_icon, entry.hud_icon_slot.is_some());
+    edges.pickup_icon = edge(&entry.pickup_icon, entry.pickup_icon_slot.is_some());
+    edges.kill_icon = edge(&entry.kill_icon, entry.kill_icon_slot.is_some());
 }
 
 pub(super) fn material_hint_edge(

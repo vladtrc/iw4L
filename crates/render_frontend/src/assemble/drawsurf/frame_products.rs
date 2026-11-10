@@ -1642,7 +1642,7 @@ pub(crate) fn execute_sun_product(
                 scope.spawn(async {
                     let packed_draws = draws[..near_n]
                         .iter()
-                        .map(super::retained_list::pack_draw)
+                        .map(crate::assemble::pack::PackDraw::from)
                         .collect::<Vec<_>>();
                     crate::pack_sun_shadow_frontend(
                         &packed_draws,
@@ -1656,7 +1656,7 @@ pub(crate) fn execute_sun_product(
                 scope.spawn(async {
                     let packed_draws = draws[near_n..]
                         .iter()
-                        .map(super::retained_list::pack_draw)
+                        .map(crate::assemble::pack::PackDraw::from)
                         .collect::<Vec<_>>();
                     crate::pack_sun_shadow_frontend(
                         &packed_draws,

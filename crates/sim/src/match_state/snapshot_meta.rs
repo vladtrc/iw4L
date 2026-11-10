@@ -138,6 +138,7 @@ pub struct DroppedItemAmmo {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ItemPickupRecord {
+    pub seq: u32,
     pub picker: i32,
     pub weapon: u32,
     pub from_entnum: i32,

@@ -355,7 +355,7 @@ fn brush_view_admission(
             .iter()
             .filter_map(|(&model, &(world, bounds))| {
                 (model != 0
-                    && world == view.world
+                    && (view.shared || world == view.world)
                     && native
                         .for_world(world)
                         .is_some_and(|cells| view.admits_bounds(cells, bounds)))

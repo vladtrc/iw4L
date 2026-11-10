@@ -223,7 +223,7 @@ pub struct AtlasLayer {
     pub world: usize,
     pub bmodel_poses: Vec<(usize, Mat4)>,
     pub bmodel_bounds: Vec<(u16, Bounds)>,
-    pub shift: [f32; 3],
+    pub frame: asset_core::world_frame::WorldFrame,
     /// The layer's surface `s` is the merged surface `surface_base + s`.
     pub surface_base: u32,
     pub surface_count: u32,
@@ -300,21 +300,6 @@ impl std::fmt::Display for AtlasLayerError {
 
 impl std::error::Error for AtlasLayerError {}
 
-fn moved(p: [f32; 3], shift: [f32; 3]) -> [f32; 3] {
-    [p[0] + shift[0], p[1] + shift[1], p[2] + shift[2]]
-}
-
-fn moved_bounds(bounds: Bounds, shift: [f32; 3]) -> Bounds {
-    if bounds.is_cleared() {
-        return bounds;
-    }
-    Bounds::from_mid_half(moved(bounds.mid(), shift), bounds.half())
-}
-
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
 fn u8_base(what: &'static str, base: usize, extra: usize) -> Result<u8, AtlasLayerError> {
     let count = base + extra;
     if count > 255 {
@@ -323,32 +308,68 @@ fn u8_base(what: &'static str, base: usize, extra: usize) -> Result<u8, AtlasLay
     Ok(base as u8)
 }
 
+fn place_world_vertex(
+    row: &mut [u8; asset_iw4::size::GFX_WORLD_VERTEX],
+    frame: asset_core::world_frame::WorldFrame,
+) {
+    let rotates = !frame.rotation_is_identity();
+    let position = std::array::from_fn(|axis| {
+        let at = axis * 4;
+        f32::from_le_bytes(row[at..at + 4].try_into().unwrap())
+    });
+    for (axis, value) in frame.point_to_scene(position).into_iter().enumerate() {
+        row[axis * 4..axis * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    if rotates {
+        for offset in [36, 40] {
+            let packed = u32::from_le_bytes(row[offset..offset + 4].try_into().unwrap());
+            let vector = asset_model::unpack_unit_vec(packed);
+            let packed = asset_model::pack_unit_vec(frame.vector_to_scene(vector));
+            row[offset..offset + 4].copy_from_slice(&packed.to_le_bytes());
+        }
+    }
+}
+
 impl DpvsWorldData {
-    /// The same cells `shift` away.
-    fn moved(mut self, shift: [f32; 3]) -> Self {
+    pub fn placed(mut self, frame: asset_core::world_frame::WorldFrame) -> Self {
+        let bounds = |bounds: Bounds| {
+            if bounds.is_cleared() {
+                return bounds;
+            }
+            let (mid, half) = frame.bounds_to_scene(bounds.mid(), bounds.half());
+            Bounds::from_mid_half(mid, half)
+        };
         for plane in &mut self.planes {
-            plane.dist += dot(plane.normal, shift);
+            (plane.normal, plane.dist) = frame.plane_to_scene(plane.normal, plane.dist);
+            // The axial shortcut is valid only for a positive unit axis.
+            plane.r#type = (0..3)
+                .find(|&i| plane.normal == std::array::from_fn(|j| if i == j { 1.0 } else { 0.0 }))
+                .map_or(3, |i| i as u8);
         }
         for tree in &mut self.aabb_trees {
             for node in tree {
-                node.bounds = moved_bounds(node.bounds, shift);
+                node.bounds = bounds(node.bounds);
             }
         }
-        for bounds in self
+        for box_bounds in self
             .surface_bounds
             .iter_mut()
             .chain(self.smodel_bounds.iter_mut())
         {
-            *bounds = moved_bounds(*bounds, shift);
+            *box_bounds = bounds(*box_bounds);
         }
         for vert in &mut self.portal_verts {
-            *vert = moved(*vert, shift);
+            *vert = frame.point_to_scene(*vert);
         }
         for cell in &mut self.portals_per_cell {
             for portal in cell {
                 let normal = [portal.plane[0], portal.plane[1], portal.plane[2]];
                 // Portal planes use n·p + d, unlike the BSP CPlane distance above.
-                portal.plane[3] -= dot(normal, shift);
+                let (normal, dist) = frame.plane_to_scene(normal, -portal.plane[3]);
+                portal.plane = [normal[0], normal[1], normal[2], -dist];
+                if let Some(axes) = &mut portal.hull_axis {
+                    *axes = axes.map(|axis| frame.vector_to_scene(axis));
+                }
             }
         }
         self
@@ -356,7 +377,6 @@ impl DpvsWorldData {
 }
 
 impl WorldDraw {
-    /// Appends `extra`, atlas world `world`, moved by `shift`.
     ///
     /// `materials` takes `extra`'s walk-local material slots to the match's;
     /// `smodel_base` is where `extra`'s static models start in the match's.
@@ -364,7 +384,7 @@ impl WorldDraw {
         &mut self,
         world: usize,
         mut extra: WorldDraw,
-        shift: [f32; 3],
+        frame: asset_core::world_frame::WorldFrame,
         materials: &[usize],
         smodel_base: usize,
     ) -> Result<(), AtlasLayerError> {
@@ -438,12 +458,7 @@ impl WorldDraw {
                 crate::WorldVertexPayload::Captured { rows: more, .. },
             ) => {
                 for mut row in more {
-                    for (axis, shift_entry) in shift[..3].iter().enumerate() {
-                        let at = axis * 4;
-                        let value = f32::from_le_bytes(row[at..at + 4].try_into().unwrap())
-                            + (*shift_entry);
-                        row[at..at + 4].copy_from_slice(&value.to_le_bytes());
-                    }
+                    place_world_vertex(&mut row, frame);
                     rows.push(row);
                 }
             }
@@ -500,9 +515,13 @@ impl WorldDraw {
             );
 
         self.positions
-            .extend(extra.positions.iter().map(|&p| moved(p, shift)));
-        self.normals.extend(extra.normals);
-        self.tangents.extend(extra.tangents);
+            .extend(extra.positions.iter().map(|&p| frame.point_to_scene(p)));
+        self.normals
+            .extend(extra.normals.into_iter().map(|n| frame.vector_to_scene(n)));
+        self.tangents.extend(extra.tangents.into_iter().map(|t| {
+            let v = frame.vector_to_scene([t[0], t[1], t[2]]);
+            [v[0], v[1], v[2], t[3]]
+        }));
         self.colors.extend(extra.colors);
         self.texture_uvs.extend(extra.texture_uvs);
         self.lightmap_uvs.extend(extra.lightmap_uvs);
@@ -547,7 +566,22 @@ impl WorldDraw {
                 batch.mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
             {
                 for p in positions {
-                    *p = moved(*p, shift);
+                    *p = frame.point_to_scene(*p);
+                }
+            }
+            if let Some(VertexAttributeValues::Float32x3(normals)) =
+                batch.mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL)
+            {
+                for normal in normals {
+                    *normal = frame.vector_to_scene(*normal);
+                }
+            }
+            if let Some(VertexAttributeValues::Float32x4(tangents)) =
+                batch.mesh.attribute_mut(Mesh::ATTRIBUTE_TANGENT)
+            {
+                for tangent in tangents {
+                    let v = frame.vector_to_scene([tangent[0], tangent[1], tangent[2]]);
+                    *tangent = [v[0], v[1], v[2], tangent[3]];
                 }
             }
             batch.material = material(batch.material);
@@ -583,6 +617,13 @@ impl WorldDraw {
             .packed_draw_surfs
             .extend(extra.capture.packed_draw_surfs);
 
+        if let Some(sun) = &mut extra.t5_sun_light {
+            sun.direction = frame.vector_to_scene(sun.direction);
+        }
+        for light in &mut extra.primary_lights {
+            light.origin = frame.point_to_scene(light.origin);
+            light.direction = frame.vector_to_scene(light.direction);
+        }
         let lighting = AtlasLayerLighting {
             t5_sun_parse_exposure: extra.t5_sun_parse_exposure,
             t6_exposure: extra.t6_exposure,
@@ -595,8 +636,7 @@ impl WorldDraw {
                 .cloned(),
             ..Default::default()
         };
-        for mut light in extra.primary_lights {
-            light.origin = moved(light.origin, shift);
+        for light in extra.primary_lights {
             self.primary_lights.push(light);
         }
         self.light_defs.extend(extra.light_defs);
@@ -609,7 +649,7 @@ impl WorldDraw {
         }
 
         for mut probe in extra.reflection_probes {
-            probe.origin = moved(probe.origin, shift);
+            probe.origin = frame.point_to_scene(probe.origin);
             // A walk-local image slot of the other zone means nothing here;
             // the decoded cube rides in `PreparedWorld::reflection_probe_images`.
             probe.image = None;
@@ -629,7 +669,7 @@ impl WorldDraw {
         self.stats.skipped_surfaces += extra.stats.skipped_surfaces;
         self.stats.sky_surfaces += extra.stats.sky_surfaces;
 
-        let mut dpvs = extra.dpvs.moved(shift);
+        let mut dpvs = extra.dpvs.placed(frame);
         for cell in &mut dpvs.cell_reflection_probes {
             for probe in cell {
                 *probe = probe.saturating_add(probe_base);
@@ -639,7 +679,7 @@ impl WorldDraw {
             world,
             bmodel_poses: Vec::new(),
             bmodel_bounds: Vec::new(),
-            shift,
+            frame,
             surface_base: surface_base as u32,
             surface_count: surface_count as u32,
             smodel_base: smodel_base as u32,

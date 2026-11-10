@@ -97,7 +97,22 @@ pub(crate) fn contacts(
     input: GroundTraceInput,
     out: &mut ContactBuffer,
 ) -> Coverage {
-    match gather(scene, input, out) {
+    let Some(cap) = capsule(input, false) else {
+        return Coverage::Unsupported;
+    };
+    contacts_with_capsule(scene, input, cap, out)
+}
+
+pub(crate) fn contacts_with_capsule(
+    scene: &RecoveryScene<'_>,
+    input: GroundTraceInput,
+    cap: Capsule,
+    out: &mut ContactBuffer,
+) -> Coverage {
+    if !cap.valid() {
+        return Coverage::Unsupported;
+    }
+    match gather(scene, input, cap, out) {
         Ok(()) => Coverage::Complete,
         Err(status) => status,
     }
@@ -106,9 +121,9 @@ pub(crate) fn contacts(
 fn gather(
     scene: &RecoveryScene<'_>,
     input: GroundTraceInput,
+    cap: Capsule,
     out: &mut ContactBuffer,
 ) -> Result<(), Coverage> {
-    let cap = capsule(input, false).ok_or(Coverage::Unsupported)?;
     let map = clipmap_iw4::ClipMapRef {
         nodes: &scene.bsp.nodes,
         leaves: &scene.bsp.leaves,

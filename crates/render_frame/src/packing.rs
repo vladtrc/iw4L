@@ -47,6 +47,66 @@ pub struct PackDraw {
     pub kind: PackKind,
 }
 
+impl From<&crate::RetainedDrawItem> for PackDraw {
+    fn from(draw: &crate::RetainedDrawItem) -> Self {
+        let kind = match draw.kind {
+            crate::RetainedDrawKind::World {
+                surf, run, run_off, ..
+            } => PackKind::World { surf, run, run_off },
+            crate::RetainedDrawKind::Smodel {
+                surface,
+                lighting_handle,
+                stream: Some(lighting_iw4::SmodelSurfPath::Rigid),
+                ..
+            } => PackKind::SmodelRigid {
+                surface,
+                lighting_handle,
+            },
+            crate::RetainedDrawKind::Smodel {
+                surface,
+                lighting_handle,
+                stream: Some(lighting_iw4::SmodelSurfPath::Skinned),
+                ..
+            } => PackKind::SmodelSkinned {
+                surface,
+                lighting_handle,
+            },
+            crate::RetainedDrawKind::Smodel {
+                lighting_handle,
+                stream: Some(lighting_iw4::SmodelSurfPath::Pretess),
+                pretess: Some(dest),
+                ..
+            } => PackKind::SmodelPretess {
+                lighting_handle,
+                dest,
+            },
+            crate::RetainedDrawKind::Smodel {
+                lighting_handle,
+                stream: Some(lighting_iw4::SmodelSurfPath::Cached),
+                pretess: Some(dest),
+                ..
+            } => PackKind::SmodelCached {
+                lighting_handle,
+                dest,
+            },
+            crate::RetainedDrawKind::XModel {
+                surface,
+                lighting_handle,
+                ..
+            } => PackKind::XModel {
+                surface,
+                lighting_handle,
+            },
+            _ => PackKind::Skip,
+        };
+        Self {
+            key: draw.key,
+            material_rank: draw.material_rank,
+            kind,
+        }
+    }
+}
+
 pub fn pack_sun_shadow_frontend(
     draws: &[PackDraw],
     world_run_surfs: &[u16],

@@ -1,4 +1,4 @@
-use crate::bg::player_collision::{PlayerBodyClip, PlayerCollision};
+use crate::bg::player_collision::{PlayerBodyClip, PlayerCollision, RootDynamics};
 use crate::frame::FrameWorld;
 
 use bevy_ecs::prelude::{Resource, World};
@@ -23,6 +23,7 @@ pub(crate) struct StepRequest {
     pub(crate) tick: Tick,
     pub(crate) input: TickInput,
     msec: i32,
+    accepted_shots: Vec<crate::combat::AcceptedShot>,
 
     output: Option<TickResult>,
 }
@@ -42,10 +43,12 @@ pub(crate) fn run_frame(
         tick,
         input: input.clone(),
         msec: msec.clamp(1, 200),
+        accepted_shots: Vec::new(),
 
         output: None,
     });
     advance_time_system(ecs);
+    crate::script::host::players::apply_streak_preparations(ecs);
     expire_transient_events_system(ecs);
     crate::script::apply_disconnects(ecs);
     crate::script::advance_mechanics(ecs);
@@ -63,6 +66,7 @@ pub(crate) fn run_frame(
         crate::script::sync_engine_events(ecs);
         finalize_system(ecs);
         crate::script::host::natives::iw4::deliver_local_presentation_dvars(ecs);
+        apply_input_scoreboard(ecs);
         publish_snapshot_system(ecs);
     }
     let request = ecs
@@ -74,6 +78,40 @@ pub(crate) fn run_frame(
     Ok(request
         .output
         .expect("simulation frame did not publish a snapshot"))
+}
+
+fn apply_input_scoreboard(ecs: &mut World) {
+    let tick = ecs.resource::<StepRequest>().tick;
+    let Some(run) = ecs.get_resource::<crate::input_program::InputProgramRun>() else {
+        return;
+    };
+    let windows: Vec<_> = std::iter::once(run)
+        .chain(&run.actors)
+        .filter_map(|actor| {
+            Some((
+                actor.program.client,
+                actor.program.scoreboard_window_ms?,
+                actor.start_tick?,
+            ))
+        })
+        .collect();
+    let mut frame = frame_world(ecs);
+    for (client, [start, end], first) in windows {
+        let elapsed = i64::from(tick.0 - first.0 + 1) * 50;
+        let down = (i64::from(start)..i64::from(end)).contains(&elapsed);
+        if frame.client_meta(client).is_none() {
+            continue;
+        }
+        let dvars = &mut frame.client_meta_mut(client).client_dvars;
+        let value = if down { "1" } else { "0" };
+        if let Some((_, current)) = dvars.iter_mut().find(|(key, _)| key == "iw4l_ui_scores") {
+            if current != value {
+                *current = value.into();
+            }
+        } else {
+            dvars.push(("iw4l_ui_scores".into(), value.into()));
+        }
+    }
 }
 
 fn frame_world(world: &mut World) -> FrameWorld<'_> {
@@ -254,12 +292,6 @@ fn run_players_system(ecs: &mut World) {
 
     let allow_move = matches!(world.phase(), MatchPhase::Playing | MatchPhase::Warmup);
     let content = world.content();
-    let cmodel_models = &content.clip_cmodels().models;
-    let (brushes, bsp, mesh) = (
-        content.clip_brushes(),
-        content.clip_bsp(),
-        content.clip_mesh(),
-    );
     let original_buttons = world.old_buttons_mut().clone();
     let original_angles = world.old_cmd_angles_mut().clone();
     let mut consumed = Vec::new();
@@ -335,36 +367,26 @@ fn run_players_system(ecs: &mut World) {
                 .collect();
             let bodies = alive_body_clips(&world);
             let glass_damage = world.world_objects().glass_damage_pairs();
-            let atlas_world = crate::world_graph::world_at(ps.origin);
-            let beyond = content
-                .atlas()
-                .and_then(|atlas| atlas.worlds.get(atlas_world.checked_sub(1)?));
-            let backend = match beyond {
-                None => PlayerCollision {
-                    brushes,
-                    bsp,
-                    mesh,
-                    glass_damage: &glass_damage,
-                    bodies: &bodies,
-                    self_entnum: id.0 as u16,
-                    cmodels: cmodel_models,
-                    linked_brushes: &linked_brushes,
-                    model_brushes: &model_brushes,
-                    offset: [0.0; 3],
-                },
-                Some(beyond) => PlayerCollision {
-                    brushes: &beyond.brushes,
-                    bsp: &beyond.bsp,
-                    mesh: &beyond.mesh,
-                    glass_damage: &[],
-                    bodies: &bodies,
-                    self_entnum: id.0 as u16,
-                    cmodels: &beyond.cmodels.models,
-                    linked_brushes: &[],
-                    model_brushes: &[],
-                    offset: crate::world_graph::world_offset(atlas_world),
-                },
+            let dynamics = RootDynamics {
+                glass_damage: &glass_damage,
+                linked: &linked_brushes,
+                models: &model_brushes,
             };
+            let objects = if content.atlas().is_some_and(|atlas| {
+                matches!(atlas.space, asset_core::world_frame::SceneSpace::Shared(_))
+            }) {
+                world.world_objects().clone()
+            } else {
+                crate::world_objects::WorldObjectState::default()
+            };
+            let backend = PlayerCollision::for_scene(
+                &content,
+                &objects,
+                ps.origin,
+                dynamics,
+                &bodies,
+                id.0 as u16,
+            );
             let script = world.player_anim_script();
             let mantle = world.xanims();
             let crate::bg::player_step::PlayerMoveOutput {
@@ -410,37 +432,14 @@ fn run_players_system(ecs: &mut World) {
                         linked_bounds,
                         &portal_blocked_exits,
                         |input| {
-                            let exit_backend = if let Some(exit) =
-                                crate::world_graph::world_at(input.start)
-                                    .checked_sub(1)
-                                    .and_then(|index| atlas.worlds.get(index))
-                            {
-                                PlayerCollision {
-                                    brushes: &exit.brushes,
-                                    bsp: &exit.bsp,
-                                    mesh: &exit.mesh,
-                                    cmodels: &exit.cmodels.models,
-                                    linked_brushes: &[],
-                                    model_brushes: &[],
-                                    glass_damage: &[],
-                                    offset: crate::world_graph::world_offset(
-                                        crate::world_graph::world_at(input.start),
-                                    ),
-                                    ..backend
-                                }
-                            } else {
-                                PlayerCollision {
-                                    brushes,
-                                    bsp,
-                                    mesh,
-                                    cmodels: cmodel_models,
-                                    linked_brushes: &linked_brushes,
-                                    model_brushes: &model_brushes,
-                                    glass_damage: &glass_damage,
-                                    offset: [0.0; 3],
-                                    ..backend
-                                }
-                            };
+                            let exit_backend = PlayerCollision::for_scene(
+                                &content,
+                                &objects,
+                                input.start,
+                                dynamics,
+                                backend.bodies,
+                                backend.self_entnum,
+                            );
                             movement_iw4::CollisionBackend::trace(&exit_backend, input)
                         },
                     )
@@ -509,6 +508,11 @@ fn run_players_system(ecs: &mut World) {
             );
 
             for shot in shots {
+                world
+                    .ecs()
+                    .resource_mut::<StepRequest>()
+                    .accepted_shots
+                    .push(shot);
                 if let Some(mut run) = world
                     .ecs()
                     .get_resource_mut::<crate::input_program::InputProgramRun>()
@@ -582,6 +586,7 @@ fn run_players_system(ecs: &mut World) {
             {
                 actor.receipts.push(crate::input_program::InputReceipt {
                     tick,
+                    source_command: *command,
                     command: applied,
                     player,
                 });
@@ -749,7 +754,9 @@ fn publish_snapshot_system(ecs: &mut World) {
         .collect();
 
     let mut request = ecs.resource_mut::<StepRequest>();
+    let accepted_shots = std::mem::take(&mut request.accepted_shots);
     request.output = Some(TickResult {
+        accepted_shots,
         input: request.input.clone(),
         snapshot,
         effects,
@@ -2009,18 +2016,19 @@ pub(crate) fn script_slide(
     let mut bodies = alive_body_clips(&frame);
     bodies.retain(|body| !excluded_clients.contains(&body.entnum));
     let glass_damage = frame.world_objects().glass_damage_pairs();
-    let backend = PlayerCollision {
-        brushes: content.clip_brushes(),
-        bsp: content.clip_bsp(),
-        mesh: content.clip_mesh(),
+    let dynamics = RootDynamics {
         glass_damage: &glass_damage,
-        bodies: &bodies,
-        self_entnum: playerstate_iw4::ENTITYNUM_NONE as u16,
-        cmodels: &content.clip_cmodels().models,
-        linked_brushes: &linked_brushes,
-        model_brushes: &model_brushes,
-        offset: [0.0; 3],
+        linked: &linked_brushes,
+        models: &model_brushes,
     };
+    let backend = PlayerCollision::for_scene(
+        &content,
+        frame.world_objects(),
+        origin,
+        dynamics,
+        &bodies,
+        playerstate_iw4::ENTITYNUM_NONE as u16,
+    );
     slide.advance(origin, &backend, mask)
 }
 
@@ -2053,18 +2061,19 @@ pub(crate) fn script_mantle(
     let model_brushes = world.model_movement_brushes();
     let bodies = alive_body_clips(world);
     let glass_damage = world.world_objects().glass_damage_pairs();
-    let mut backend = PlayerCollision {
-        brushes: content.clip_brushes(),
-        bsp: content.clip_bsp(),
-        mesh: content.clip_mesh(),
+    let dynamics = RootDynamics {
         glass_damage: &glass_damage,
-        bodies: &bodies,
-        self_entnum: id.0 as u16,
-        cmodels: &content.clip_cmodels().models,
-        linked_brushes: &linked_brushes,
-        model_brushes: &model_brushes,
-        offset: [0.0; 3],
+        linked: &linked_brushes,
+        models: &model_brushes,
     };
+    let mut backend = PlayerCollision::for_scene(
+        &content,
+        world.world_objects(),
+        ps.origin,
+        dynamics,
+        &bodies,
+        id.0 as u16,
+    );
     let forward = math_iw4::angle_vectors(ps.viewangles).0;
     let mantle = world.xanims();
     let available = movement_iw4::mantle::check(

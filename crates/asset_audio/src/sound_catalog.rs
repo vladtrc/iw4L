@@ -13,15 +13,12 @@ use std::collections::HashMap;
 
 use asset_iw4::size as sz;
 use asset_iw4::snd_alias::{
-    SND_ALIAS_ALIAS_NAME, SND_ALIAS_CENTER_PERCENTAGE, SND_ALIAS_CHAIN, SND_ALIAS_DIST_MAX,
-    SND_ALIAS_DIST_MIN, SND_ALIAS_ENVELOP_MAX, SND_ALIAS_ENVELOP_MIN, SND_ALIAS_ENVELOP_PERCENTAGE,
-    SND_ALIAS_FLAGS, SND_ALIAS_LFE_PERCENTAGE, SND_ALIAS_MIXER_GROUP, SND_ALIAS_PITCH_MAX,
-    SND_ALIAS_PITCH_MIN, SND_ALIAS_PROBABILITY, SND_ALIAS_SECONDARY, SND_ALIAS_SEQUENCE,
-    SND_ALIAS_SLAVE_PERCENTAGE, SND_ALIAS_SOUND_FILE, SND_ALIAS_SPEAKER_MAP, SND_ALIAS_START_DELAY,
-    SND_ALIAS_SUBTITLE, SND_ALIAS_VELOCITY_MIN, SND_ALIAS_VOL_MAX, SND_ALIAS_VOL_MIN,
-    SND_ALIAS_VOLUME_FALLOFF_CURVE, SND_CURVE_DEFAULT_ASSET_NAME, SND_CURVE_KNOT_COUNT,
-    SND_CURVE_KNOT_STRIDE, SND_CURVE_KNOTS, SND_CURVE_MAX_KNOTS, SND_ENTCHANNEL_FILE,
-    SndAliasFlags,
+    SND_ALIAS_CHAIN, SND_ALIAS_DIST_MAX, SND_ALIAS_DIST_MIN, SND_ALIAS_FLAGS,
+    SND_ALIAS_MIXER_GROUP, SND_ALIAS_PITCH_MAX, SND_ALIAS_PITCH_MIN, SND_ALIAS_PROBABILITY,
+    SND_ALIAS_SECONDARY, SND_ALIAS_SEQUENCE, SND_ALIAS_SOUND_FILE, SND_ALIAS_SPEAKER_MAP,
+    SND_ALIAS_START_DELAY, SND_ALIAS_VOL_MAX, SND_ALIAS_VOL_MIN, SND_ALIAS_VOLUME_FALLOFF_CURVE,
+    SND_CURVE_DEFAULT_ASSET_NAME, SND_CURVE_KNOT_COUNT, SND_CURVE_KNOT_STRIDE, SND_CURVE_KNOTS,
+    SND_CURVE_MAX_KNOTS, SND_ENTCHANNEL_FILE, SndAliasFlags,
 };
 use fastfile_iw4::{AssetLinkSink, AssetType, Ptr, Result, ZonePtr, ZoneStream};
 
@@ -127,55 +124,24 @@ impl SoundCatalog {
         self.finalize();
     }
 
-    pub fn absorb_unresolved(&mut self, other: SoundCatalog) {
+    pub fn absorb_unresolved(&mut self, mut other: SoundCatalog) {
         self.playback.clear();
         self.selection_weights.clear();
-        for s in other.sounds {
+        for s in std::mem::take(&mut other.sounds) {
             self.register_sound(s);
         }
-        for l in other.loaded {
+        for l in std::mem::take(&mut other.loaded) {
             self.register_loaded(l);
         }
-        for (key, data) in other.rawfiles {
-            self.rawfiles.entry(key).or_insert(data);
-        }
-        for (namespace, channels) in other.ent_channels {
-            self.ent_channels
-                .entry(namespace)
-                .and_modify(|existing| {
-                    if existing.is_empty() {
-                        *existing = channels.clone();
-                    }
-                })
-                .or_insert(channels);
-        }
-        for (ns, volumes) in other.group_volumes {
-            self.group_volumes.entry(ns).or_insert(volumes);
-        }
-        for (ns, groups) in other.mixer_groups {
-            self.mixer_groups.entry(ns).or_insert(groups);
-        }
-        for (name, curve) in other.curves {
-            match self.curves.get_mut(&name) {
-                Some(existing) if existing.knots.is_empty() && !curve.knots.is_empty() => {
-                    *existing = curve;
-                }
-                None => {
-                    self.curves.insert(name, curve);
-                }
-                Some(_) => {}
-            }
-        }
-        for (k, v) in other.loaded_by_ptr {
+        for (k, v) in std::mem::take(&mut other.loaded_by_ptr) {
             self.loaded_by_ptr.entry(k).or_insert(v);
         }
-        for (k, v) in other.curve_by_ptr {
+        for (k, v) in std::mem::take(&mut other.curve_by_ptr) {
             self.curve_by_ptr.entry(k).or_insert(v);
         }
-        self.capture_gaps += other.capture_gaps;
         self.alias_flags_missing += other.alias_flags_missing;
         self.curve_capture_gaps += other.curve_capture_gaps;
-
+        self.absorb_tables(other);
         self.resolve_ent_channels();
     }
 
@@ -192,15 +158,15 @@ impl SoundCatalog {
         self.finalize();
     }
 
-    pub fn absorb_missing_aliases_unresolved(&mut self, other: SoundCatalog) {
+    pub fn absorb_missing_aliases_unresolved(&mut self, mut other: SoundCatalog) {
         self.playback.clear();
         self.selection_weights.clear();
-        for sound in other.sounds {
+        for sound in std::mem::take(&mut other.sounds) {
             if self.index_in(ns_of(sound.game), &sound.name).is_none() {
                 self.register_sound(sound);
             }
         }
-        for loaded in other.loaded {
+        for loaded in std::mem::take(&mut other.loaded) {
             if self
                 .loaded_index_in(ns_of(loaded.game), &loaded.name)
                 .is_none()
@@ -208,18 +174,18 @@ impl SoundCatalog {
                 self.register_loaded(loaded);
             }
         }
+        self.absorb_tables(other);
+    }
+
+    fn absorb_tables(&mut self, other: SoundCatalog) {
         for (key, data) in other.rawfiles {
             self.rawfiles.entry(key).or_insert(data);
         }
         for (namespace, channels) in other.ent_channels {
-            self.ent_channels
-                .entry(namespace)
-                .and_modify(|existing| {
-                    if existing.is_empty() {
-                        *existing = channels.clone();
-                    }
-                })
-                .or_insert(channels);
+            let existing = self.ent_channels.entry(namespace).or_default();
+            if existing.is_empty() {
+                *existing = channels;
+            }
         }
         for (ns, volumes) in other.group_volumes {
             self.group_volumes.entry(ns).or_insert(volumes);
