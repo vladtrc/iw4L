@@ -98,6 +98,31 @@ pub(crate) fn play_script_seats(
         };
         if seat.archive_ms > 0 {
             follow_archived_focus(archive, &mut session);
+            session.entity_focus = seats
+                .get(*viewer)
+                .filter(|s| s.started_at_ms == started_at_ms)
+                .and_then(|s| s.entity_focus)
+                .filter(|entity| entity.entity_number == focus.kill_cam_entity)
+                .or_else(|| {
+                    let tick = archive.lookup(session.archivetime_ms).tick?;
+                    let frame = archive.frame(tick)?;
+                    (focus.kill_cam_entity != playerstate_iw4::ENTITYNUM_NONE
+                        && (frame
+                            .snapshot
+                            .projectiles
+                            .iter()
+                            .any(|p| p.entnum == focus.kill_cam_entity)
+                            || frame
+                                .snapshot
+                                .meta
+                                .entities
+                                .iter()
+                                .any(|e| e.number == focus.kill_cam_entity)))
+                    .then_some(killcam_iw4::Entity {
+                        entity_number: focus.kill_cam_entity,
+                        birthtime: Some(sim::level_time_ms(tick)),
+                    })
+                });
         }
         seats.arm(*viewer, session);
     }

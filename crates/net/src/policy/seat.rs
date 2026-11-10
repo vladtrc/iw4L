@@ -153,9 +153,13 @@ pub fn sample_killcam_seat(
     let mut remapped = archived;
     rebase_archived_timers(&mut remapped, rebase_ms);
     // The scripted seat names the eventual missile even in the preroll.
-    // Stay in first person until that entity exists in the archived frame.
+    // Keep focus after impact so the camera can hold its last projectile pose.
     let mut focus = session.focus;
     if focus.kill_cam_entity != playerstate_iw4::ENTITYNUM_NONE
+        && !session.entity_focus.is_some_and(|entity| {
+            entity.entity_number == focus.kill_cam_entity
+                && entity.birthtime.is_some_and(|time| time <= frame_base_ms)
+        })
         && !frame
             .snapshot
             .meta
